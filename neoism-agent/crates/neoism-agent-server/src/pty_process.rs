@@ -31,10 +31,6 @@ pub(crate) async fn resize_pty_process(pty_id: &str, size: PtySize) {
     process_registry().resize(pty_id, size).await;
 }
 
-pub(crate) async fn stop_all_pty_processes() {
-    process_registry().stop_all().await;
-}
-
 pub(crate) async fn serve_websocket(
     info: PtyInfo,
     cursor: Option<i64>,
@@ -250,12 +246,6 @@ impl PtyProcessRegistry {
         }
     }
 
-    async fn stop_all(&self) {
-        let processes = self.processes.lock().await.drain().collect::<Vec<_>>();
-        for (_, process) in processes {
-            stop_process(process).await;
-        }
-    }
 }
 
 fn process_registry() -> &'static PtyProcessRegistry {

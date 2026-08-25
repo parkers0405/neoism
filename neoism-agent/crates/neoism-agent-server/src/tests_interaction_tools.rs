@@ -27,10 +27,10 @@ async fn subtask_command_creates_linked_child_session() {
         Id::ascending(IdKind::Event)
     ));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join(".neoism/agents")).unwrap();
-    std::fs::create_dir_all(root.join(".neoism/commands")).unwrap();
+    std::fs::create_dir_all(root.join(".agent/agents")).unwrap();
+    std::fs::create_dir_all(root.join(".agent/commands")).unwrap();
     std::fs::write(
-        root.join(".neoism/agents/reviewer.md"),
+        root.join(".agent/agents/reviewer.md"),
         r#"---
 mode: subagent
 ---
@@ -39,7 +39,7 @@ Review carefully.
     )
     .unwrap();
     std::fs::write(
-        root.join(".neoism/commands/review.md"),
+        root.join(".agent/commands/review.md"),
         r#"---
 agent: reviewer
 subtask: true
@@ -56,7 +56,7 @@ Review $1
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({
                     "model": {
                         "providerId": "neoism",
@@ -73,7 +73,7 @@ Review $1
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/command", parent.id),
+                &format!("/v2/sessions/{}/commands", parent.id),
                 Some(json!({ "command": "review", "arguments": "src/lib.rs" })),
             ))
             .await
@@ -93,23 +93,23 @@ Review $1
             .any(|part| matches!(part, Part::Text(_))),
         "parent agent should continue after subtask completion"
     );
-    let parent_messages: Vec<MessageWithParts> = response_json(
+    let parent_messages: Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", parent.id),
+                &format!("/v2/sessions/{}/messages", parent.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
-    let last_parent_id = match &parent_messages.last().expect("parent messages").info {
+    let last_parent_id = match &parent_messages.items.last().expect("parent messages").info {
         MessageInfo::Assistant(assistant) => assistant.id.clone(),
         MessageInfo::User(_) => panic!("expected last parent message to be assistant"),
     };
     assert_eq!(last_parent_id, response_id);
-    let Some((metadata, output)) = parent_messages.iter().find_map(|message| {
+    let Some((metadata, output)) = parent_messages.items.iter().find_map(|message| {
         message.parts.iter().find_map(|part| {
             let Part::Tool(tool) = part else {
                 return None;
@@ -135,20 +135,20 @@ Review $1
         .expect("task metadata should include child session id")
         .to_string();
 
-    let sessions: Vec<SessionInfo> = response_json(
+    let sessions: Page<SessionInfo> = response_json(
         app.clone()
-            .oneshot(request(Method::GET, "/session", None))
+            .oneshot(request(Method::GET, "/v2/sessions", None))
             .await
             .unwrap(),
     )
     .await;
-    let child = sessions
+    let child = sessions.items
         .iter()
         .find(|session| session.parent_id.as_ref() == Some(&parent.id))
         .expect("child session should be linked to parent");
     assert_eq!(child.id.as_str(), child_id_from_tool.as_str());
     assert_eq!(child.agent.as_deref(), Some("reviewer"));
-    let Part::Subtask(subtask) = &parent_messages[0].parts[0] else {
+    let Part::Subtask(subtask) = &parent_messages.items[0].parts[0] else {
         panic!("expected parent user subtask part")
     };
     assert_eq!(subtask.agent, "reviewer");
@@ -185,7 +185,7 @@ async fn todowrite_tool_updates_session_todos_and_event() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.display()),
+                &format!("/v2/sessions?directory={}", root.display()),
                 Some(json!({
                     "model": {
                         "providerId": "neoism",
@@ -229,7 +229,7 @@ async fn todowrite_tool_updates_session_todos_and_event() {
     let todos: Vec<TodoInfo> = response_json(
         app.oneshot(request(
             Method::GET,
-            &format!("/session/{}/todo", session.id),
+            &format!("/v2/sessions/{}/todos", session.id),
             None,
         ))
         .await
@@ -258,7 +258,7 @@ async fn workflow_permission_asks_are_denied_without_waiting() {
     let mut session: SessionInfo = response_json(
         app.oneshot(request(
             Method::POST,
-            &format!("/session?directory={}", root.display()),
+            &format!("/v2/sessions?directory={}", root.display()),
             None,
         ))
         .await
@@ -344,7 +344,7 @@ async fn question_tool_waits_for_route_reply() {
     let request_id = event.properties["id"].as_str().unwrap().to_string();
     let pending: Vec<QuestionRequestInfo> = response_json(
         app.clone()
-            .oneshot(request(Method::GET, "/question", None))
+            .oneshot(request(Method::GET, "/v2/interactions/questions", None))
             .await
             .unwrap(),
     )
@@ -354,7 +354,7 @@ async fn question_tool_waits_for_route_reply() {
     let ok: bool = response_json(
         app.oneshot(request(
             Method::POST,
-            &format!("/question/{request_id}/reply"),
+            &format!("/v2/interactions/questions/{request_id}/reply"),
             Some(json!({ "answers": [["yes"]] })),
         ))
         .await
@@ -386,7 +386,7 @@ async fn background_task_runs_shell_command_and_result_can_be_collected() {
     let session: SessionInfo = response_json(
         app.oneshot(request(
             Method::POST,
-            &format!("/session?directory={}", root.display()),
+            &format!("/v2/sessions?directory={}", root.display()),
             Some(json!({
                 "model": {
                     "providerId": "neoism",
@@ -498,7 +498,7 @@ async fn task_tool_creates_background_child_session_and_result_can_be_collected(
     let parent: SessionInfo = response_json(
         app.oneshot(request(
             Method::POST,
-            &format!("/session?directory={}", root.display()),
+            &format!("/v2/sessions?directory={}", root.display()),
             Some(json!({
                 "model": {
                     "providerId": "neoism",
@@ -606,7 +606,7 @@ async fn task_tool_resumes_existing_child_session() {
     let parent: SessionInfo = response_json(
         app.oneshot(request(
             Method::POST,
-            &format!("/session?directory={}", root.display()),
+            &format!("/v2/sessions?directory={}", root.display()),
             None,
         ))
         .await
@@ -702,7 +702,7 @@ async fn v2_prompt_accepts_subtask_parts_and_children_page() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.display()),
+                &format!("/v2/sessions?directory={}", root.display()),
                 Some(json!({
                     "model": {
                         "providerId": "neoism",
@@ -727,7 +727,7 @@ async fn v2_prompt_accepts_subtask_parts_and_children_page() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/api/session/{}/prompt", parent.id),
+            &format!("/v2/sessions/{}/prompt", parent.id),
             Some(json!({
                 "delivery": "steer",
                 "parts": [{
@@ -785,7 +785,7 @@ async fn v2_prompt_accepts_subtask_parts_and_children_page() {
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/api/session/{}/children", parent.id),
+                &format!("/v2/sessions/{}/children", parent.id),
                 None,
             ))
             .await
@@ -882,7 +882,7 @@ async fn permission_and_question_replies_publish_events() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/permission/{permission_id}/reply"),
+                &format!("/v2/interactions/permissions/{permission_id}/reply"),
                 Some(json!({ "reply": "once" })),
             ))
             .await
@@ -896,7 +896,7 @@ async fn permission_and_question_replies_publish_events() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/question/{question_id}/reply"),
+                &format!("/v2/interactions/questions/{question_id}/reply"),
                 Some(json!({ "answers": [["yes"]] })),
             ))
             .await
@@ -910,7 +910,7 @@ async fn permission_and_question_replies_publish_events() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/question/{rejected_question_id}/reject"),
+                &format!("/v2/interactions/questions/{rejected_question_id}/reject"),
                 None,
             ))
             .await

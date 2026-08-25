@@ -17,8 +17,8 @@ pub(crate) struct AgentCatalog {
 }
 
 impl AgentCatalog {
-    pub(crate) fn load(directory: &str) -> anyhow::Result<Self> {
-        let loaded = crate::config::load(directory)?;
+    pub(crate) fn load(services: &neoism_agent_service_api::AgentServices, directory: &str) -> anyhow::Result<Self> {
+        let loaded = crate::config::load(services, directory)?;
         Ok(Self::from_config(&loaded.info))
     }
 

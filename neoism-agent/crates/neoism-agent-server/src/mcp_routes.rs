@@ -39,24 +39,28 @@ pub(crate) struct OAuthCallbackQuery {
 }
 
 pub(crate) async fn mcp_status(
+    State(state): State<AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<BTreeMap<String, McpStatus>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(mcp::status(
+    Ok(Json(mcp::status_with_state(
         &directory,
         &mcp_auth::McpAuthStore::from_env(),
+        Some(&state),
     )?))
 }
 
 pub(crate) async fn mcp_catalog(
+    State(state): State<AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<BTreeMap<String, McpCatalogEntry>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(mcp::catalog(
+    Ok(Json(mcp::catalog_with_state(
         &directory,
         &mcp_auth::McpAuthStore::from_env(),
+        Some(&state),
     )?))
 }
 
@@ -74,18 +78,22 @@ pub(crate) async fn mcp_add(
 }
 
 pub(crate) async fn mcp_config_patch(
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
     Json(request): Json<McpConfigPatch>,
 ) -> Result<Json<McpCatalogEntry>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    crate::config::set_mcp_enabled(&directory, &name, request.enabled)
+    let builtin_default = state.services().builtin_mcp(&name)
+        .map(|_| crate::config::builtin_mcp_config(&name));
+    crate::config::set_mcp_enabled_with_default(state.services(), &directory, &name, request.enabled, builtin_default)
+        .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if !request.enabled {
         let _ = mcp::disconnect(&directory, &name).await;
     }
-    mcp::catalog(&directory, &mcp_auth::McpAuthStore::from_env())?
+    mcp::catalog_with_state(&directory, &mcp_auth::McpAuthStore::from_env(), Some(&state))?
         .remove(&name)
         .map(Json)
         .ok_or_else(|| {
@@ -94,19 +102,21 @@ pub(crate) async fn mcp_config_patch(
 }
 
 pub(crate) async fn mcp_auth_start(
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<McpAuthStartResponse>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     Ok(Json(
-        mcp::auth_start(&directory, &name, &mcp_auth::McpAuthStore::from_env())
+        mcp::auth_start(state.services(), &directory, &name, &mcp_auth::McpAuthStore::from_env())
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
 }
 
 pub(crate) async fn mcp_auth_callback(
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
@@ -115,6 +125,7 @@ pub(crate) async fn mcp_auth_callback(
     let directory = resolve_directory(query.directory, &headers);
     Ok(Json(
         mcp::auth_callback(
+            state.services(),
             &directory,
             &name,
             &request.code,
@@ -127,6 +138,7 @@ pub(crate) async fn mcp_auth_callback(
 }
 
 pub(crate) async fn mcp_auth_callback_get(
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<OAuthCallbackQuery>,
     headers: HeaderMap,
@@ -143,6 +155,7 @@ pub(crate) async fn mcp_auth_callback_get(
         })
         .unwrap_or_else(|| resolve_directory(None, &headers));
     mcp::auth_callback(
+        state.services(),
         &directory,
         &name,
         &query.code,
@@ -157,13 +170,14 @@ pub(crate) async fn mcp_auth_callback_get(
 }
 
 pub(crate) async fn mcp_auth_authenticate(
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<McpStatus>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     Ok(Json(
-        mcp::authenticate_status(&directory, &name, &mcp_auth::McpAuthStore::from_env())
+        mcp::authenticate_status(state.services(), &directory, &name, &mcp_auth::McpAuthStore::from_env())
             .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
 }

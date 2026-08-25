@@ -154,6 +154,7 @@ struct Authorization {
 
 #[derive(Debug, Deserialize)]
 struct McpAuthStart {
+    #[serde(rename = "authorizationUrl")]
     authorization_url: String,
 }
 
@@ -227,7 +228,7 @@ async fn auth_login(mut args: AuthLoginArgs) -> Result<(), String> {
     let codex = args.provider.eq_ignore_ascii_case("codex");
     let provider = provider_id(&args.provider).to_string();
     let methods: BTreeMap<String, Vec<AuthMethod>> =
-        get_json(&args.output.server, "/provider/auth").await?;
+        get_json(&args.output.server, "/v2/providers/auth-methods").await?;
     let available = methods
         .get(&provider)
         .ok_or_else(|| format!("unknown provider {provider}"))?;
@@ -251,7 +252,7 @@ async fn auth_login(mut args: AuthLoginArgs) -> Result<(), String> {
                 };
             let saved: bool = put_json(
                 &args.output.server,
-                &format!("/auth/{provider}"),
+                &format!("/v2/providers/{provider}/auth"),
                 &json!({ "type": "api", "key": key }),
             )
             .await?;
@@ -262,12 +263,13 @@ async fn auth_login(mut args: AuthLoginArgs) -> Result<(), String> {
             )
         }
         AuthKind::OAuth => {
-            let authorization: Authorization = post_json(
+            let authorization: Authorization = post_json::<Option<Authorization>>(
                 &args.output.server,
-                &format!("/provider/{provider}/oauth/authorize"),
+                &format!("/v2/providers/{provider}/oauth/authorize"),
                 &json!({ "method": index, "inputs": {} }),
             )
-            .await?;
+            .await?
+            .ok_or_else(|| format!("provider {provider} did not start OAuth authorization"))?;
             println!("{}\n\n{}", authorization.instructions, authorization.url);
             if !args.no_open {
                 if let Err(error) = open_browser(&authorization.url) {
@@ -280,7 +282,7 @@ async fn auth_login(mut args: AuthLoginArgs) -> Result<(), String> {
             eprintln!("\nWaiting for authorization...");
             let saved: bool = post_json(
                 &args.output.server,
-                &format!("/provider/{provider}/oauth/callback"),
+                &format!("/v2/providers/{provider}/oauth/callback"),
                 &json!({ "method": index, "code": args.code }),
             )
             .await?;
@@ -295,11 +297,11 @@ async fn auth_login(mut args: AuthLoginArgs) -> Result<(), String> {
 
 async fn auth_list(output: OutputArgs) -> Result<(), String> {
     let methods: BTreeMap<String, Vec<AuthMethod>> =
-        get_json(&output.server, "/provider/auth").await?;
+        get_json(&output.server, "/v2/providers/auth-methods").await?;
     let mut statuses = BTreeMap::new();
     for provider in methods.keys() {
         let auth: Option<Value> =
-            get_json(&output.server, &format!("/auth/{provider}")).await?;
+            get_json(&output.server, &format!("/v2/providers/{provider}/auth")).await?;
         statuses.insert(provider.clone(), auth_kind(auth.as_ref()));
     }
     if output.json {
@@ -315,7 +317,7 @@ async fn auth_list(output: OutputArgs) -> Result<(), String> {
 async fn auth_status(args: AuthProviderArgs) -> Result<(), String> {
     let provider = provider_id(&args.provider);
     let auth: Option<Value> =
-        get_json(&args.output.server, &format!("/auth/{provider}")).await?;
+        get_json(&args.output.server, &format!("/v2/providers/{provider}/auth")).await?;
     if args.output.json {
         return print_json(&json!({ "provider": provider, "auth": auth }));
     }
@@ -326,7 +328,7 @@ async fn auth_status(args: AuthProviderArgs) -> Result<(), String> {
 async fn auth_logout(args: AuthProviderArgs) -> Result<(), String> {
     let provider = provider_id(&args.provider);
     let removed: bool =
-        delete_json(&args.output.server, &format!("/auth/{provider}")).await?;
+        delete_json(&args.output.server, &format!("/v2/providers/{provider}/auth")).await?;
     print_result(
         &args.output,
         json!({ "provider": provider, "removed": removed }),
@@ -409,22 +411,7 @@ async fn mcp_authenticate(
 }
 
 async fn mcp_status(server: &str) -> Result<BTreeMap<String, McpStatus>, String> {
-    let entries: BTreeMap<String, Value> = get_json(server, "/mcp").await?;
-    Ok(entries
-        .into_iter()
-        .map(|(name, entry)| parse_mcp_status(entry).map(|status| (name, status)))
-        .collect::<Result<_, _>>()?)
-}
-
-fn parse_mcp_status(mut entry: Value) -> Result<McpStatus, String> {
-    if entry.get("status").is_some_and(Value::is_object) {
-        entry = entry
-            .get_mut("status")
-            .map(Value::take)
-            .unwrap_or(Value::Null);
-    }
-    serde_json::from_value(entry)
-        .map_err(|error| format!("invalid MCP status response: {error}"))
+    get_json(server, "/v2/plugins/dev.neoism.mcp").await
 }
 
 async fn mcp_logout(args: McpServerArgs) -> Result<(), String> {
@@ -567,7 +554,10 @@ fn percent_encode(value: &str) -> String {
 }
 
 fn mcp_auth_path(name: &str) -> String {
-    format!("/mcp/{}/auth", percent_encode(name))
+    format!(
+        "/v2/plugins/dev.neoism.mcp/{}/auth",
+        percent_encode(name)
+    )
 }
 
 fn print_result<T: serde::Serialize>(
@@ -662,12 +652,7 @@ fn normalize_server(server: &str) -> String {
 fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
     let message = serde_json::from_str::<Value>(body)
         .ok()
-        .and_then(|value| {
-            value
-                .pointer("/data/message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+        .and_then(|value| value.get("message").and_then(Value::as_str).map(str::to_string))
         .unwrap_or_else(|| body.trim().to_string());
     format!("Neoism returned {status}: {message}")
 }
@@ -686,19 +671,32 @@ mod tests {
 
     #[test]
     fn builds_current_mcp_auth_route() {
-        assert_eq!(mcp_auth_path("webflow"), "/mcp/webflow/auth");
-        assert_eq!(mcp_auth_path("company tools"), "/mcp/company%20tools/auth");
+        assert_eq!(
+            mcp_auth_path("webflow"),
+            "/v2/plugins/dev.neoism.mcp/webflow/auth"
+        );
+        assert_eq!(
+            mcp_auth_path("company tools"),
+            "/v2/plugins/dev.neoism.mcp/company%20tools/auth"
+        );
     }
 
     #[test]
-    fn parses_basic_and_catalog_mcp_status_shapes() {
-        let basic = parse_mcp_status(json!({ "status": "connected" })).unwrap();
-        let catalog = parse_mcp_status(json!({
-            "status": { "status": "needs_auth" },
-            "oauthCapable": true
-        }))
-        .unwrap();
-        assert!(matches!(basic, McpStatus::Connected));
-        assert!(matches!(catalog, McpStatus::NeedsAuth));
+    fn formats_canonical_api_error() {
+        let message = format_http_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"code":"request.invalid","message":"bad input","retryable":false,"details":{}}"#,
+        );
+        assert!(message.ends_with(": bad input"));
+    }
+
+    #[test]
+    fn auth_cli_source_contains_no_deleted_http_routes() {
+        let source = include_str!("auth_cli.rs");
+        for suffix in ["provider", "auth/", "mcp/"] {
+            let legacy = format!("\"/{suffix}");
+            assert!(!source.contains(&legacy), "legacy auth CLI route remains: {legacy}");
+        }
+        assert!(!source.contains(&["/data", "/message"].concat()));
     }
 }

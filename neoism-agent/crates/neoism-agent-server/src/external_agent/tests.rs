@@ -19,15 +19,26 @@ fn resolves_supported_external_agents() {
 
 #[test]
 fn external_acp_configs_use_expected_launchers() {
-    let codex = ExternalRuntime::Codex.acp_config("/tmp");
-    assert_eq!(codex.command, "npx");
+    let services = crate::standard_services();
+    let codex = ExternalRuntime::Codex.acp_config("/tmp", &services);
+    assert_eq!(
+        std::path::Path::new(&codex.command)
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("npx")
+    );
     assert_eq!(
         codex.args,
         vec!["--yes", "@zed-industries/codex-acp@latest"]
     );
 
-    let claude = ExternalRuntime::Claude.acp_config("/tmp");
-    assert_eq!(claude.command, "npx");
+    let claude = ExternalRuntime::Claude.acp_config("/tmp", &services);
+    assert_eq!(
+        std::path::Path::new(&claude.command)
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("npx")
+    );
     assert_eq!(
         claude.args,
         vec!["--yes", "@agentclientprotocol/claude-agent-acp@latest"]

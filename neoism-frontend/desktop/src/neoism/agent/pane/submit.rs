@@ -452,7 +452,13 @@ impl NeoismAgentPane {
         &self,
         query: &str,
     ) -> Vec<NeoismAgentPickerOption> {
-        file_mention_options(&self.file_mention_root(), query, FILE_MENTION_LIMIT)
+        file_mention_options(
+            self.file_mention_search.as_ref(),
+            &self.file_mention_root_pin,
+            &self.file_mention_root(),
+            query,
+            FILE_MENTION_LIMIT,
+        )
     }
 
     pub(crate) fn file_mention_root(&self) -> PathBuf {

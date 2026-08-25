@@ -12,7 +12,9 @@ fn file_mention_options_filter_workspace_trash_dirs() {
         fs::write(root.path().join(ignored).join("main.rs"), "trash").unwrap();
     }
 
-    let options = file_mention_options(root.path(), "main", 20);
+    let search = neoism_agent_server::standard_workspace_search();
+    let pin = Mutex::new(None);
+    let options = file_mention_options(search.as_ref(), &pin, root.path(), "main", 20);
     let values = options
         .into_iter()
         .map(|option| option.value)

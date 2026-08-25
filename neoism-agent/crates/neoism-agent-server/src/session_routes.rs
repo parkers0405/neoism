@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::{
-    config, filter_sessions, message_id_of, model_ref_from_config_with_variant,
+    config, message_id_of, model_ref_from_config_with_variant,
     now_millis, project, resolve_directory, slug, vcs, InstanceQuery,
 };
 
@@ -54,19 +54,6 @@ pub(crate) struct SessionUpdateTime {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ForkSessionRequest {
     message_id: Option<MessageId>,
-}
-
-pub(crate) async fn session_list(
-    State(state): State<AppState>,
-    Query(query): Query<SessionListQuery>,
-    claims: Option<Extension<crate::caller::CallerClaims>>,
-) -> Result<Json<Vec<SessionInfo>>, ApiError> {
-    let mut sessions = state.inner.store.list_sessions().await?;
-    if let Some(Extension(claims)) = claims {
-        sessions.retain(|session| crate::caller::session_tenant(session) == claims.tenant_id);
-    }
-    filter_sessions(&mut sessions, &query);
-    Ok(Json(sessions))
 }
 
 pub(crate) async fn session_create(
@@ -134,7 +121,7 @@ pub(crate) async fn create_session_in_directory(
     }
     let project_context = project::discover(directory);
     let directory = project_context.directory.clone();
-    let loaded_config = config::load(&directory)?;
+    let loaded_config = config::load(state.services(), &directory)?;
     let agents = crate::plugins::agent_catalog(state, &directory)?;
     let is_child = request.parent_id.is_some();
     if let Some(parent_id) = request.parent_id.as_ref() {
@@ -234,6 +221,7 @@ pub(crate) async fn session_delete(
 pub(crate) async fn session_update(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
     Json(update): Json<SessionUpdateRequest>,
 ) -> Result<Json<SessionInfo>, ApiError> {
     let mut info = state
@@ -261,6 +249,13 @@ pub(crate) async fn session_update(
             ));
         }
         let project_context = resolve_session_directory(&info.directory, &directory)?;
+        if claims.as_ref().is_some_and(|Extension(claims)| {
+            !crate::caller::allows_directory(claims, &project_context.directory)
+        }) {
+            return Err(ApiError::forbidden(
+                "The caller is not authorized for this directory",
+            ));
+        }
         info.directory = project_context.directory;
         info.project_id = project_context.info.id;
         info.path = project_context.path;
@@ -291,12 +286,16 @@ pub(crate) async fn session_directory_options(
         .get_session(&session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
+    if !crate::plugins::enabled(state.services(), &info.directory, "dev.neoism.tools.workspace") {
+        return Err(ApiError::not_found("workspace filesystem tools are disabled"));
+    }
     let current = PathBuf::from(info.directory);
     let search_root = directory_search_root(&current);
     let needle = query.query.unwrap_or_default();
     let limit = query.limit.unwrap_or(256).clamp(1, 1_000);
+    let search = state.services().workspace_search.clone();
     let options = tokio::task::spawn_blocking(move || {
-        fff_directory_options(&search_root, &current, &needle, limit)
+        workspace_directory_options(search.as_ref(), &search_root, &current, &needle, limit)
     })
     .await
     .map_err(|error| ApiError::internal(format!("directory search failed: {error}")))??;
@@ -380,7 +379,8 @@ fn directory_search_root(current: &FsPath) -> PathBuf {
         .to_path_buf()
 }
 
-fn fff_directory_options(
+fn workspace_directory_options(
+    search: &dyn neoism_agent_service_api::WorkspaceSearchService,
     root: &FsPath,
     current: &FsPath,
     query: &str,
@@ -398,29 +398,14 @@ fn fff_directory_options(
     if remaining == 0 {
         return Ok(options);
     }
-    let relatives = crate::picker_registry::with_picker(root, |picker| {
-        let parser = fff_search::QueryParser::new(fff_search::DirSearchConfig);
-        let parsed = parser.parse(query);
-        picker
-            .fuzzy_search_directories(
-                &parsed,
-                fff_search::FuzzySearchOptions {
-                    max_threads: 0,
-                    project_path: Some(root),
-                    pagination: fff_search::PaginationArgs {
-                        offset: 0,
-                        limit: remaining,
-                    },
-                    ..Default::default()
-                },
-            )
-            .items
-            .iter()
-            .map(|item| item.relative_path(picker))
-            .collect::<Vec<_>>()
-    })
-    .map_err(|error| ApiError::internal(error.to_string()))?;
-    for relative in relatives {
+    let result = search.search_directories(&neoism_agent_service_api::DirectorySearchRequest {
+        root: root.to_path_buf(),
+        query: query.to_string(),
+        offset: 0,
+        limit: remaining,
+        control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
+    }).map_err(|error| ApiError::internal(error.to_string()))?;
+    for relative in result.paths {
         let relative = relative.trim_end_matches(['/', '\\']);
         if !relative.is_empty() {
             push_directory_option(&mut options, &root.join(relative));
@@ -449,7 +434,7 @@ pub(crate) struct SetPinRequest {
     pub(crate) pinned: Option<bool>,
 }
 
-/// `POST /session/:id/pin` — set, clear, or toggle the session's pinned flag.
+/// Set, clear, or toggle a session's pinned flag.
 ///
 /// Sibling of the goal routes: the flag lives in [`SessionInfo::extra`] and is
 /// persisted into the session store (its `info_json`) so it survives reloads
@@ -476,26 +461,6 @@ pub(crate) async fn session_set_pin(
         json!({ "sessionID": session_id, "info": info }),
     ));
     Ok(Json(info))
-}
-
-pub(crate) async fn session_children(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
-) -> Result<Json<Vec<SessionInfo>>, ApiError> {
-    crate::ensure_session(&state, &session_id).await?;
-    Ok(Json(
-        state
-            .inner
-            .store
-            .list_sessions()
-            .await?
-            .into_iter()
-            .filter(|session| {
-                session.parent_id.as_ref().map(|id| id.as_str())
-                    == Some(session_id.as_str())
-            })
-            .collect(),
-    ))
 }
 
 pub(crate) async fn session_todo_list(
@@ -592,30 +557,6 @@ pub(crate) async fn session_status(
     Json(out)
 }
 
-pub(crate) async fn session_share(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
-) -> Result<Json<SessionInfo>, ApiError> {
-    let mut info = crate::ensure_session(&state, &session_id).await?;
-    info.extra.insert(
-        "share".to_string(),
-        json!({ "url": format!("neoism://session/{}", session_id) }),
-    );
-    info.time.updated = now_millis();
-    state.inner.store.update_session(&info).await?;
-    Ok(Json(info))
-}
-
-pub(crate) async fn session_unshare(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
-) -> Result<Json<SessionInfo>, ApiError> {
-    let mut info = crate::ensure_session(&state, &session_id).await?;
-    info.extra.remove("share");
-    info.time.updated = now_millis();
-    state.inner.store.update_session(&info).await?;
-    Ok(Json(info))
-}
 
 pub(crate) async fn session_diff(
     State(state): State<AppState>,

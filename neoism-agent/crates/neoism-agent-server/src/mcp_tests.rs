@@ -18,6 +18,64 @@ use crate::mcp_auth::McpAuthTokens;
 use super::mcp_runtime::MCP_PROTOCOL_VERSION;
 use super::*;
 
+struct FakeBuiltinMcp;
+
+impl neoism_agent_service_api::BuiltinMcpService for FakeBuiltinMcp {
+    fn id(&self) -> &str { "fake-service" }
+
+    fn tools(&self) -> Vec<neoism_agent_service_api::BuiltinMcpTool> {
+        vec![neoism_agent_service_api::BuiltinMcpTool {
+            name: "fake.call".to_string(),
+            description: Some("Call fake service".to_string()),
+            input_schema: json!({"type":"object"}),
+            annotations: None,
+        }]
+    }
+
+    fn call_tool(&self, _working_directory: &std::path::Path, tool: &str, _arguments: Value) -> Result<neoism_agent_service_api::BuiltinMcpCallResult, neoism_agent_service_api::ServiceError> {
+        if tool != "fake.call" {
+            return Err(neoism_agent_service_api::ServiceError::new("unknown fake tool"));
+        }
+        Ok(neoism_agent_service_api::BuiltinMcpCallResult {
+            content: vec![neoism_agent_service_api::BuiltinMcpContent::Text { text: "fake result".to_string(), annotations: None }],
+            is_error: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn injected_builtin_registry_is_discoverable_while_absent_services_are_uncallable() {
+    let root = temp_dir("builtin-registry");
+    let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let absent = crate::state::AppState::open_database_with_services(
+        root.join("absent.db"),
+        crate::standard_services(),
+    ).await.unwrap();
+    assert!(!configured_servers(root.to_str().unwrap(), Some(&absent)).unwrap().contains_key("fake-service"));
+    let error = tools_with_state(root.to_str().unwrap(), "fake-service", &store, Some(absent)).await.unwrap_err();
+    assert!(error.to_string().contains("not configured"));
+
+    let services = crate::standard_services()
+        .with_builtin_mcp(Arc::new(FakeBuiltinMcp));
+    let state = crate::state::AppState::open_database_with_services(root.join("present.db"), services).await.unwrap();
+    let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state)).unwrap();
+    assert!(matches!(catalog["fake-service"].status, McpStatus::Connected));
+    assert_eq!(tools_with_state(root.to_str().unwrap(), "fake-service", &store, Some(state.clone())).await.unwrap()[0].name, "fake.call");
+    let result = call_tool_with_state(root.to_str().unwrap(), "fake-service", "fake.call", json!({}), &store, Some(state.clone())).await.unwrap();
+    assert_eq!(tool_result_text(&result), "fake result");
+
+    fs::write(
+        root.join(".agent/agent.json"),
+        r#"{"mcp":{"fake-service":{"type":"local","command":["builtin","fake-service"],"enabled":false}}}"#,
+    )
+    .unwrap();
+    let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state)).unwrap();
+    assert!(matches!(catalog["fake-service"].status, McpStatus::Disabled));
+    let error = tools_with_state(root.to_str().unwrap(), "fake-service", &store, Some(state)).await.unwrap_err();
+    assert!(error.to_string().contains("disabled"));
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn status_marks_remote_oauth_without_tokens_as_needs_auth() {
     let store = McpAuthStore::new(temp_auth_path("status"));
@@ -68,7 +126,7 @@ fn env_placeholders_expand_in_mcp_maps() {
 async fn auth_start_builds_authorization_url_and_persists_transient_fields() {
     let root = temp_dir("auth-start");
     fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         r#"{
               "mcp": {
                 "remote": {
@@ -88,7 +146,7 @@ async fn auth_start_builds_authorization_url_and_persists_transient_fields() {
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
     let directory = root.to_str().unwrap();
 
-    let response = auth_start(directory, "remote", &store).await.unwrap();
+    let response = auth_start(&crate::standard_services(), directory, "remote", &store).await.unwrap();
 
     assert!(response
         .authorization_url
@@ -144,7 +202,7 @@ async fn local_stdio_runtime_lists_and_calls_tools() {
     let root = temp_dir("stdio-runtime");
     let server = mock_mcp_server(&root);
     fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         format!(
             r#"{{
                   "mcp": {{
@@ -297,7 +355,7 @@ async fn remote_http_runtime_lists_and_calls_tools_with_headers_and_bearer_token
     });
 
     fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         format!(
             r#"{{
                   "mcp": {{
@@ -404,7 +462,7 @@ async fn remote_tool_failure_keeps_connection_and_catalog() {
             .await;
     });
     fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         format!(
             r#"{{"mcp":{{"remote":{{"type":"remote","url":"{url}","timeout":2000}}}}}}"#
         ),
@@ -463,7 +521,7 @@ async fn remote_http_connect_invalidates_stale_bearer_token_on_unauthorized() {
     });
 
     fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         format!(
             r#"{{
                   "mcp": {{
@@ -526,7 +584,7 @@ async fn expired_refresh_token_is_cleared_and_reports_needs_auth() {
     });
 
     fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         format!(
             r#"{{
                   "mcp": {{
@@ -590,7 +648,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
         Id::ascending(IdKind::Event)
     ));
     let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).unwrap();
+    fs::create_dir_all(path.join(".agent")).unwrap();
     path
 }
 
@@ -687,7 +745,7 @@ fn write_local_mock_config(
     enabled: bool,
 ) {
     fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         format!(
             r#"{{"mcp":{{"mock":{{"type":"local","command":["{}"],"environment":{{"PID_FILE":"{}","RESULT":"{result}"}},"enabled":{enabled},"timeout":2000}}}}}}"#,
             server.display(),

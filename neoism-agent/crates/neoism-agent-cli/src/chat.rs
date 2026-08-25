@@ -416,7 +416,7 @@ async fn follow_stream_switches(
     while let Some(next_session_id) = outcome.switch_session.take() {
         let value = response_json(
             client
-                .get(format!("{server}/session/{next_session_id}"))
+                .get(format!("{server}/v2/sessions/{next_session_id}"))
                 .send()
                 .await?,
         )

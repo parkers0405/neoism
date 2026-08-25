@@ -154,7 +154,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "PATCH",
-            &format!("/session/{session_id}"),
+            &format!("/v2/sessions/{session_id}"),
             Some(&body),
         ) {
             Ok(Some(value)) => {
@@ -187,7 +187,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "GET",
-            &format!("/session/{session_id}/goal"),
+            &format!("/v2/plugins/dev.neoism.goals/{session_id}"),
             None,
         ) {
             Ok(value) => {
@@ -249,7 +249,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "POST",
-            &format!("/session/{session_id}/goal"),
+            &format!("/v2/plugins/dev.neoism.goals/{session_id}"),
             Some(&body),
         ) {
             Ok(value) => {
@@ -269,7 +269,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "DELETE",
-            &format!("/session/{session_id}/goal"),
+            &format!("/v2/plugins/dev.neoism.goals/{session_id}"),
             None,
         ) {
             Ok(value) => {
@@ -314,7 +314,7 @@ impl NeoismAgentPane {
         let current = match api_request_json(
             &self.server,
             "GET",
-            &format!("/session/{session_id}/goal"),
+            &format!("/v2/plugins/dev.neoism.goals/{session_id}"),
             None,
         ) {
             Ok(Some(value)) => value,
@@ -340,7 +340,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "POST",
-            &format!("/session/{session_id}/goal"),
+            &format!("/v2/plugins/dev.neoism.goals/{session_id}"),
             Some(&body),
         ) {
             Ok(value) => {
@@ -386,7 +386,7 @@ impl NeoismAgentPane {
         if let Err(error) = api_request_json(
             &self.server,
             "PATCH",
-            &format!("/session/{session_id}"),
+            &format!("/v2/sessions/{session_id}"),
             Some(&body),
         ) {
             self.system_message("Agent", error);
@@ -405,7 +405,7 @@ impl NeoismAgentPane {
         if let Err(error) = api_request_json(
             &self.server,
             "PATCH",
-            &format!("/session/{session_id}"),
+            &format!("/v2/sessions/{session_id}"),
             Some(&body),
         ) {
             self.system_message("Rename", error);
@@ -445,7 +445,7 @@ impl NeoismAgentPane {
         if let Err(error) = api_request_json(
             &self.server,
             "PATCH",
-            &format!("/session/{session_id}"),
+            &format!("/v2/sessions/{session_id}"),
             Some(&body),
         ) {
             self.system_message("Model", error);
@@ -485,7 +485,7 @@ impl NeoismAgentPane {
         if let Err(error) = api_request_json(
             &self.server,
             "PATCH",
-            &format!("/session/{session_id}"),
+            &format!("/v2/sessions/{session_id}"),
             Some(&body),
         ) {
             self.system_message("Think", error);
@@ -1076,7 +1076,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "DELETE",
-            &format!("/session/{session_id}/background-task/{job_id}"),
+            &format!("/v2/sessions/{session_id}/jobs/{job_id}"),
             None,
         ) {
             Ok(_) => self.system_message("Background task", format!("Stopping {job_id}")),
@@ -1093,19 +1093,19 @@ impl NeoismAgentPane {
             Some("clear") => api_request_json(
                 &self.server,
                 "DELETE",
-                &format!("/session/{session_id}/queue"),
+                &format!("/v2/sessions/{session_id}/queue"),
                 None,
             ),
             Some("pop") => api_request_json(
                 &self.server,
                 "POST",
-                &format!("/session/{session_id}/queue/pop"),
+                &format!("/v2/sessions/{session_id}/queue/pop"),
                 None,
             ),
             _ => api_request_json(
                 &self.server,
                 "GET",
-                &format!("/session/{session_id}/queue"),
+                &format!("/v2/sessions/{session_id}/queue"),
                 None,
             ),
         };
@@ -1119,8 +1119,8 @@ impl NeoismAgentPane {
         let path = self
             .directory
             .as_deref()
-            .map(|dir| format!("/mcp/catalog?directory={}", percent_encode(dir)))
-            .unwrap_or_else(|| "/mcp/catalog".to_string());
+            .map(|dir| format!("/v2/plugins/dev.neoism.mcp/catalog?directory={}", percent_encode(dir)))
+            .unwrap_or_else(|| "/v2/plugins/dev.neoism.mcp/catalog".to_string());
         match api_request_json(&self.server, "GET", &path, None) {
             Ok(value) => {
                 let options =
@@ -1144,7 +1144,7 @@ impl NeoismAgentPane {
             .as_deref()
             .map(|dir| format!("?directory={}", percent_encode(dir)))
             .unwrap_or_default();
-        let path = format!("/mcp/{}/auth{directory}", percent_encode(&name));
+        let path = format!("/v2/plugins/dev.neoism.mcp/{}/auth{directory}", percent_encode(&name));
         let value = match api_request_json(&self.server, "POST", &path, Some(&json!({})))
         {
             Ok(value) => value.unwrap_or(Value::Null),
@@ -1187,27 +1187,27 @@ impl NeoismAgentPane {
         let (method, path, body) = match action {
             "enable" => (
                 "PATCH",
-                format!("/mcp/{}/config{directory}", percent_encode(name)),
+                format!("/v2/plugins/dev.neoism.mcp/{}/config{directory}", percent_encode(name)),
                 Some(json!({ "enabled": true })),
             ),
             "disable" => (
                 "PATCH",
-                format!("/mcp/{}/config{directory}", percent_encode(name)),
+                format!("/v2/plugins/dev.neoism.mcp/{}/config{directory}", percent_encode(name)),
                 Some(json!({ "enabled": false })),
             ),
             "connect" => (
                 "POST",
-                format!("/mcp/{}/connect{directory}", percent_encode(name)),
+                format!("/v2/plugins/dev.neoism.mcp/{}/connect{directory}", percent_encode(name)),
                 Some(json!({})),
             ),
             "disconnect" => (
                 "POST",
-                format!("/mcp/{}/disconnect{directory}", percent_encode(name)),
+                format!("/v2/plugins/dev.neoism.mcp/{}/disconnect{directory}", percent_encode(name)),
                 Some(json!({})),
             ),
             "logout" => (
                 "DELETE",
-                format!("/mcp/{}/auth{directory}", percent_encode(name)),
+                format!("/v2/plugins/dev.neoism.mcp/{}/auth{directory}", percent_encode(name)),
                 None,
             ),
             _ => return,
@@ -1241,7 +1241,7 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn execute_show_permissions_command(&mut self, session_id: String) {
-        match api_request_json(&self.server, "GET", "/permission", None) {
+        match api_request_json(&self.server, "GET", "/v2/interactions/permissions", None) {
             Ok(value) => self.system_message(
                 "Permissions",
                 format_permissions(value.as_ref(), Some(&session_id)),
@@ -1259,7 +1259,7 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn execute_show_questions_command(&mut self, session_id: String) {
-        match api_request_json(&self.server, "GET", "/question", None) {
+        match api_request_json(&self.server, "GET", "/v2/interactions/questions", None) {
             Ok(value) => self.system_message(
                 "Questions",
                 format_questions(value.as_ref(), Some(&session_id)),
@@ -1298,7 +1298,7 @@ impl NeoismAgentPane {
         id: Option<String>,
     ) {
         let id = id.or_else(|| {
-            first_interaction_id(&self.server, "/permission", Some(&session_id))
+            first_interaction_id(&self.server, "/v2/interactions/permissions", Some(&session_id))
                 .ok()
                 .flatten()
         });
@@ -1310,7 +1310,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "POST",
-            &format!("/permission/{id}/reply"),
+            &format!("/v2/interactions/permissions/{id}/reply"),
             Some(&body),
         ) {
             Ok(_) => self.system_message("Permission", format!("{id}: {reply}")),
@@ -1338,7 +1338,7 @@ impl NeoismAgentPane {
         session_id: String,
         answer: String,
     ) {
-        let item = first_interaction_value(&self.server, "/question", Some(&session_id))
+        let item = first_interaction_value(&self.server, "/v2/interactions/questions", Some(&session_id))
             .ok()
             .flatten();
         let Some(item) = item else {
@@ -1353,7 +1353,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "POST",
-            &format!("/question/{id}/reply"),
+            &format!("/v2/interactions/questions/{id}/reply"),
             Some(&body),
         ) {
             Ok(_) => self.system_message("Question", format!("answered {id}")),
@@ -1379,14 +1379,14 @@ impl NeoismAgentPane {
         id_arg: Option<String>,
     ) {
         if let Some(id) = id_arg.or_else(|| {
-            first_interaction_id(&self.server, "/question", Some(&session_id))
+            first_interaction_id(&self.server, "/v2/interactions/questions", Some(&session_id))
                 .ok()
                 .flatten()
         }) {
             match api_request_json(
                 &self.server,
                 "POST",
-                &format!("/question/{id}/reject"),
+                &format!("/v2/interactions/questions/{id}/reject"),
                 None,
             ) {
                 Ok(_) => self.system_message("Question", format!("rejected {id}")),
@@ -1395,7 +1395,7 @@ impl NeoismAgentPane {
             return;
         }
         if let Some(id) =
-            first_interaction_id(&self.server, "/permission", Some(&session_id))
+            first_interaction_id(&self.server, "/v2/interactions/permissions", Some(&session_id))
                 .ok()
                 .flatten()
         {
@@ -1403,7 +1403,7 @@ impl NeoismAgentPane {
             match api_request_json(
                 &self.server,
                 "POST",
-                &format!("/permission/{id}/reply"),
+                &format!("/v2/interactions/permissions/{id}/reply"),
                 Some(&body),
             ) {
                 Ok(_) => self.system_message("Permission", format!("rejected {id}")),
@@ -1438,7 +1438,7 @@ impl NeoismAgentPane {
                     match api_request_json_with_read_timeout(
                         &server,
                         "POST",
-                        &format!("/api/session/{session_id}/compact"),
+                        &format!("/v2/sessions/{session_id}/compact"),
                         None,
                         Duration::from_secs(600),
                     ) {
@@ -1502,7 +1502,7 @@ impl NeoismAgentPane {
                 let update = match api_request_json(
                     &server,
                     "POST",
-                    &format!("/api/session/{thread_session}/{thread_action}"),
+                    &format!("/v2/sessions/{thread_session}/{thread_action}"),
                     None,
                 )
                 .and_then(|_| fetch_session_messages(&server, &thread_session))
@@ -1552,7 +1552,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "POST",
-            &format!("/session/{session_id}/abort"),
+            &format!("/v2/sessions/{session_id}/abort"),
             None,
         ) {
             // Escape already updates the local running state immediately.
@@ -1728,7 +1728,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "POST",
-            &format!("/session/{session_id}/command"),
+            &format!("/v2/sessions/{session_id}/commands"),
             Some(&body),
         ) {
             Ok(_) => {
@@ -1749,8 +1749,8 @@ impl NeoismAgentPane {
         let path = self
             .directory
             .as_deref()
-            .map(|dir| format!("/session?directory={}", percent_encode(dir)))
-            .unwrap_or_else(|| "/session".to_string());
+            .map(|dir| format!("/v2/sessions?directory={}", percent_encode(dir)))
+            .unwrap_or_else(|| "/v2/sessions".to_string());
         let body = json!({
             "parentId": null,
             "title": null,
@@ -1831,7 +1831,7 @@ fn dispatch_prompt_request(
     api_request_json(
         &request.server,
         "POST",
-        &format!("/api/session/{session_id}/prompt"),
+        &format!("/v2/sessions/{session_id}/prompt"),
         Some(&body),
     )?;
     Ok((session_id, event_stream))
@@ -1841,8 +1841,8 @@ fn create_prompt_session(request: &PendingPromptDispatch) -> Result<String, Stri
     let path = request
         .directory
         .as_deref()
-        .map(|directory| format!("/session?directory={}", percent_encode(directory)))
-        .unwrap_or_else(|| "/session".to_string());
+        .map(|directory| format!("/v2/sessions?directory={}", percent_encode(directory)))
+        .unwrap_or_else(|| "/v2/sessions".to_string());
     let body = json!({
         "parentId": null,
         "title": null,

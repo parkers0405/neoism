@@ -258,8 +258,6 @@ pub fn model_context_limit_from_providers_json(
 pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
     let agent = value
         .get("default-agent")
-        .or_else(|| value.get("defaultAgent"))
-        .or_else(|| value.get("default_agent"))
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|s| !s.is_empty());
@@ -270,24 +268,14 @@ pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
         .filter(|s| !s.is_empty());
     let thinking = value
         .get("variant")
-        .or_else(|| value.get("thinking"))
-        .or_else(|| value.get("reasoning"))
-        .or_else(|| value.get("reasoning-effort"))
-        .or_else(|| value.get("reasoningEffort"))
-        .or_else(|| value.get("reasoning_effort"))
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|s| !s.is_empty());
     let input_help_visible = value
         .get("input-hints")
-        .or_else(|| value.get("agent-input-hints"))
-        .or_else(|| value.get("agentInputHints"))
-        .or_else(|| value.get("agent_input_hints"))
         .and_then(Value::as_bool);
     let sidebar_visible = value
         .get("sidebar")
-        .or_else(|| value.get("sidebar-visible"))
-        .or_else(|| value.get("sidebarVisible"))
         .and_then(Value::as_bool);
     ConfigDefaults {
         agent,
@@ -869,11 +857,8 @@ fn assistant_error_message(error: &Value) -> Option<String> {
         return (!text.is_empty()).then(|| text.to_string());
     }
     error
-        .get("data")
-        .and_then(|data| data.get("message"))
+        .get("message")
         .and_then(Value::as_str)
-        .or_else(|| error.get("message").and_then(Value::as_str))
-        .or_else(|| error.get("name").and_then(Value::as_str))
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_string)
@@ -1064,12 +1049,12 @@ mod tests {
     }
 
     #[test]
-    fn config_and_session_json_accept_legacy_key_shapes() {
+    fn config_json_uses_canonical_keys_and_session_migrations_remain() {
         let config = config_defaults_from_json(&json!({
-            "default_agent": "build",
+            "default-agent": "build",
             "model": "openai/gpt-5",
-            "reasoning_effort": "high",
-            "agent_input_hints": false
+            "variant": "high",
+            "input-hints": false
         }));
         assert_eq!(config.agent.as_deref(), Some("build"));
         assert_eq!(config.model.as_deref(), Some("openai/gpt-5"));

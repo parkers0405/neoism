@@ -197,7 +197,7 @@ impl NeoismAgentPane {
             match api_request_json(
                 &self.server,
                 "PUT",
-                &format!("/auth/{}", provider.id),
+                &format!("/v2/providers/{}/auth", provider.id),
                 Some(&body),
             ) {
                 Ok(_) => {
@@ -233,7 +233,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "DELETE",
-            &format!("/auth/{}", provider.id),
+            &format!("/v2/providers/{}/auth", provider.id),
             None,
         ) {
             Ok(_) => {
@@ -264,7 +264,7 @@ impl NeoismAgentPane {
         let value = match api_request_json(
             &self.server,
             "POST",
-            &format!("/provider/{}/oauth/authorize", provider.id),
+            &format!("/v2/providers/{}/oauth/authorize", provider.id),
             Some(&body),
         ) {
             Ok(value) => value.unwrap_or(Value::Null),
@@ -351,7 +351,7 @@ impl NeoismAgentPane {
                     match crate::neoism::agent::api::api_request_json_with_read_timeout(
                         &server,
                         "POST",
-                        &format!("/provider/{provider_id}/oauth/callback"),
+                        &format!("/v2/providers/{provider_id}/oauth/callback"),
                         Some(&body),
                         Duration::from_secs(300),
                     ) {
@@ -412,7 +412,7 @@ impl NeoismAgentPane {
             api_request_json(
                 &self.server,
                 "PUT",
-                &format!("/auth/{}", provider.id),
+                &format!("/v2/providers/{}/auth", provider.id),
                 Some(&body),
             )
             .map(|_| ())
@@ -421,7 +421,7 @@ impl NeoismAgentPane {
             api_request_json(
                 &self.server,
                 "POST",
-                &format!("/provider/{}/oauth/callback", provider.id),
+                    &format!("/v2/providers/{}/oauth/callback", provider.id),
                 Some(&body),
             )
             .map(|_| ())
@@ -454,9 +454,9 @@ impl NeoismAgentPane {
 /// (`/provider/auth`) and fold them into a [`ConnectFlow`].
 fn fetch_connect_flow(server: &str) -> Result<ConnectFlow, String> {
     let providers_value =
-        api_request_json(server, "GET", "/provider", None)?.unwrap_or(Value::Null);
+        api_request_json(server, "GET", "/v2/providers", None)?.unwrap_or(Value::Null);
     let auth_value =
-        api_request_json(server, "GET", "/provider/auth", None)?.unwrap_or(Value::Null);
+        api_request_json(server, "GET", "/v2/providers/auth-methods", None)?.unwrap_or(Value::Null);
 
     let connected: HashSet<String> = providers_value
         .get("connected")

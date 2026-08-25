@@ -19,7 +19,7 @@ use super::super::{
 
 /// Service-level proof that a TCP adapter follows the same persistent-client,
 /// route, cache, health, and reconnect path as stdio adapters. The listener is
-/// deterministic and the adapter is declared entirely through neoism.json;
+/// deterministic and the adapter is declared through `.agent/agent.json`;
 /// neither the service nor client knows anything about Godot.
 #[test]
 fn configured_tcp_adapter_reconnects_without_stale_diagnostic_versions() {
@@ -107,6 +107,7 @@ fn configured_tcp_adapter_reconnects_without_stale_diagnostic_versions() {
 }
 
 fn write_tcp_config(root: &Path, port: u16) {
+    fs::create_dir_all(root.join(".agent")).expect("create Agent config root");
     let config = json!({
         "lsp": {
             "protocol-tcp": {
@@ -129,7 +130,7 @@ fn write_tcp_config(root: &Path, port: u16) {
         }
     });
     fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         serde_json::to_vec_pretty(&config).expect("serialize TCP config"),
     )
     .expect("write TCP config");

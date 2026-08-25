@@ -1,18 +1,17 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::Context;
 use neoism_agent_core::{
-    ArtifactInfo, AuditEntry, EventPayload, Id, IdKind, MessageInfo, MessageWithParts, PermissionRequestInfo,
-    PermissionRule, PromptRequest, PtyInfo, QuestionRequestInfo, SessionInfo,
-    SessionStatus, TodoInfo,
+    ArtifactInfo, AuditEntry, EventPayload, Id, IdKind, MessageInfo, MessageWithParts,
+    PermissionRequestInfo, PermissionRule, PromptRequest, PtyInfo, QuestionRequestInfo,
+    SessionInfo, SessionStatus, TodoInfo,
 };
+use neoism_agent_service_api::AgentServices;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
-use sqlx::{Acquire as _, SqlitePool};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use turso::Value as SqlValue;
 
@@ -27,6 +26,7 @@ pub struct AppState {
 }
 
 pub(crate) struct InnerState {
+    pub(crate) services: AgentServices,
     pub(crate) store: SessionStore,
     pub(crate) artifact_root: PathBuf,
     pub(crate) auth_store: AuthStore,
@@ -119,59 +119,21 @@ pub(crate) enum ProviderOAuthPending {
     },
 }
 
-/// Which engine backs the agent database. Chosen once at startup from
-/// `NEOISM_AGENT_DB_BACKEND` (`turso` default, `sqlite` opt-out): the store is
-/// process-wide state opened before any per-directory config is loaded, so
-/// this cannot live in project config. Turso is the Rust rewrite of SQLite
-/// (MVCC concurrent writes); it has no FTS5 — see `migrate_fts` for how
-/// search degrades there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DbBackend {
-    Sqlite,
-    Turso,
-}
-
-pub(crate) fn db_backend_from_env() -> anyhow::Result<DbBackend> {
-    match std::env::var("NEOISM_AGENT_DB_BACKEND").ok() {
-        None => Ok(DbBackend::Turso),
-        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "" | "turso" => Ok(DbBackend::Turso),
-            "sqlite" => Ok(DbBackend::Sqlite),
-            other => anyhow::bail!(
-                "unknown NEOISM_AGENT_DB_BACKEND value `{other}` (expected \"sqlite\" or \"turso\")"
-            ),
-        },
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct SessionStore {
     db: Db,
-    /// FTS5 only exists in the SQLite backend. When the mirror is
-    /// unavailable, `fts_insert_message` no-ops and `search_messages` falls
-    /// back to a LIKE scan.
-    fts_enabled: Arc<AtomicBool>,
 }
 
-/// The two storage engines behind one set of SQL. Every statement the store
-/// issues must stay inside the dialect both engines support (FTS5 is the one
-/// exception, handled explicitly). Reads may run concurrently, while writes
-/// pass through one process-local gate. SQLite-family engines only have one
-/// durable writer at a time; queueing here avoids making ordinary in-process
-/// contention consume the backend's bounded busy retry budget.
+/// Turso database access shared by the store. Reads may run concurrently,
+/// while writes pass through one process-local gate so ordinary in-process
+/// contention does not consume the backend's bounded busy retry budget.
 #[derive(Clone)]
-enum Db {
-    Sqlite {
-        pool: SqlitePool,
-        write_gate: Arc<Mutex<()>>,
-    },
-    Turso {
-        database: turso::Database,
-        write_gate: Arc<Mutex<()>>,
-    },
+struct Db {
+    database: turso::Database,
+    write_gate: Arc<Mutex<()>>,
 }
 
-/// An engine-agnostic row: column names plus SQLite-typed values.
+/// A database row represented as column names plus libSQL values.
 struct DbRow {
     columns: Arc<Vec<String>>,
     values: Vec<SqlValue>,
@@ -290,51 +252,7 @@ fn event_statements(
     ])
 }
 
-type SqliteQuery<'q> =
-    sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>;
-
-fn bind_value(query: SqliteQuery<'_>, value: SqlValue) -> SqliteQuery<'_> {
-    match value {
-        SqlValue::Null => query.bind(None::<String>),
-        SqlValue::Integer(value) => query.bind(value),
-        SqlValue::Real(value) => query.bind(value),
-        SqlValue::Text(value) => query.bind(value),
-        SqlValue::Blob(value) => query.bind(value),
-    }
-}
-
-fn sqlite_row_to_db_row(row: &SqliteRow) -> anyhow::Result<DbRow> {
-    use sqlx::{Column as _, Row as _, TypeInfo as _, ValueRef as _};
-    let mut columns = Vec::with_capacity(row.len());
-    let mut values = Vec::with_capacity(row.len());
-    for (index, column) in row.columns().iter().enumerate() {
-        columns.push(column.name().to_string());
-        let raw = row.try_get_raw(index)?;
-        let value = if raw.is_null() {
-            SqlValue::Null
-        } else {
-            // Decode by the value's actual storage class, not the column's
-            // declared type: expression columns (COALESCE, snippet, …) only
-            // carry the former.
-            match raw.type_info().name() {
-                "INTEGER" => SqlValue::Integer(row.try_get(index)?),
-                "REAL" => SqlValue::Real(row.try_get(index)?),
-                "BLOB" => SqlValue::Blob(row.try_get(index)?),
-                _ => SqlValue::Text(row.try_get(index)?),
-            }
-        };
-        values.push(value);
-    }
-    Ok(DbRow {
-        columns: Arc::new(columns),
-        values,
-    })
-}
-
-/// Turso returns `Busy` immediately where the sqlx SQLite pool would wait
-/// (its connections carry a 5s busy_timeout), so concurrent writers — e.g.
-/// streamed event appends racing a new session insert — fail outright.
-/// Emulate busy_timeout with a bounded retry so writers queue instead.
+/// Turso returns `Busy` immediately, so concurrent writers need a bounded retry.
 async fn turso_busy_retry<T, F, Fut>(mut op: F) -> Result<T, turso::Error>
 where
     F: FnMut() -> Fut,
@@ -365,32 +283,19 @@ fn turso_error_is_busy(error: &turso::Error) -> bool {
 
 impl Db {
     async fn lock_writer(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        match self {
-            Self::Sqlite { write_gate, .. } | Self::Turso { write_gate, .. } => {
-                write_gate.clone().lock_owned().await
-            }
-        }
+        self.write_gate.clone().lock_owned().await
     }
 
     async fn execute(&self, sql: &str, params: Vec<SqlValue>) -> anyhow::Result<u64> {
         let _writer = self.lock_writer().await;
-        match self {
-            Db::Sqlite { pool, .. } => {
-                let mut query = sqlx::query(sql);
-                for param in params {
-                    query = bind_value(query, param);
-                }
-                Ok(query.execute(pool).await?.rows_affected())
+        Ok(turso_busy_retry(|| {
+            let params = params.clone();
+            async move {
+                let conn = self.database.connect()?;
+                conn.execute(sql, params).await
             }
-            Db::Turso { database, .. } => Ok(turso_busy_retry(|| {
-                let params = params.clone();
-                async move {
-                    let conn = database.connect()?;
-                    conn.execute(sql, params).await
-                }
-            })
-            .await?),
-        }
+        })
+        .await?)
     }
 
     async fn fetch_all(
@@ -398,36 +303,26 @@ impl Db {
         sql: &str,
         params: Vec<SqlValue>,
     ) -> anyhow::Result<Vec<DbRow>> {
-        match self {
-            Db::Sqlite { pool, .. } => {
-                let mut query = sqlx::query(sql);
-                for param in params {
-                    query = bind_value(query, param);
+        Ok(turso_busy_retry(|| {
+            let params = params.clone();
+            async move {
+                let conn = self.database.connect()?;
+                let mut rows = conn.query(sql, params).await?;
+                let columns = Arc::new(rows.column_names());
+                let mut out = Vec::new();
+                while let Some(row) = rows.next().await? {
+                    let values = (0..row.column_count())
+                        .map(|index| row.get_value(index))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    out.push(DbRow {
+                        columns: columns.clone(),
+                        values,
+                    });
                 }
-                let rows = query.fetch_all(pool).await?;
-                rows.iter().map(sqlite_row_to_db_row).collect()
+                Ok(out)
             }
-            Db::Turso { database, .. } => Ok(turso_busy_retry(|| {
-                let params = params.clone();
-                async move {
-                    let conn = database.connect()?;
-                    let mut rows = conn.query(sql, params).await?;
-                    let columns = Arc::new(rows.column_names());
-                    let mut out = Vec::new();
-                    while let Some(row) = rows.next().await? {
-                        let values = (0..row.column_count())
-                            .map(|index| row.get_value(index))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        out.push(DbRow {
-                            columns: columns.clone(),
-                            values,
-                        });
-                    }
-                    Ok(out)
-                }
-            })
-            .await?),
-        }
+        })
+        .await?)
     }
 
     async fn fetch_optional(
@@ -454,46 +349,24 @@ impl Db {
         statements: Vec<(String, Vec<SqlValue>)>,
     ) -> anyhow::Result<Vec<u64>> {
         let _writer = self.lock_writer().await;
-        let results = match self {
-            Db::Sqlite { pool, .. } => {
-                let mut connection = pool.acquire().await?;
-                let mut transaction = connection.begin().await?;
+        let results = turso_busy_retry(|| {
+            let statements = statements.clone();
+            async move {
+                let mut connection = self.database.connect()?;
+                let transaction = connection
+                    .transaction_with_behavior(
+                        turso::transaction::TransactionBehavior::Immediate,
+                    )
+                    .await?;
                 let mut results = Vec::with_capacity(statements.len());
                 for (sql, params) in statements {
-                    let mut query = sqlx::query(&sql);
-                    for param in params {
-                        query = bind_value(query, param);
-                    }
-                    results.push(query.execute(&mut *transaction).await?.rows_affected());
+                    results.push(transaction.execute(&sql, params).await?);
                 }
                 transaction.commit().await?;
-                results
+                Ok(results)
             }
-            Db::Turso { database, .. } => {
-                // Retrying only individual statements is unsafe here: a Busy
-                // can happen while beginning or committing too. A failed
-                // attempt is dropped/rolled back, then the complete atomic
-                // unit is replayed on a fresh immediate transaction.
-                turso_busy_retry(|| {
-                    let statements = statements.clone();
-                    async move {
-                        let mut connection = database.connect()?;
-                        let transaction = connection
-                            .transaction_with_behavior(
-                                turso::transaction::TransactionBehavior::Immediate,
-                            )
-                            .await?;
-                        let mut results = Vec::with_capacity(statements.len());
-                        for (sql, params) in statements {
-                            results.push(transaction.execute(&sql, params).await?);
-                        }
-                        transaction.commit().await?;
-                        Ok(results)
-                    }
-                })
-                .await?
-            }
-        };
+        })
+        .await?;
         Ok(results)
     }
 
@@ -523,23 +396,35 @@ pub(crate) struct AggregateSequence {
 }
 
 impl AppState {
-    pub async fn open_default() -> anyhow::Result<Self> {
+    pub async fn open_default(services: AgentServices) -> anyhow::Result<Self> {
         let store = SessionStore::open_default().await?;
         let artifact_root = PathBuf::from(crate::default_state_dir()).join("artifacts");
-        Self::from_store(store, artifact_root).await
+        Self::from_store(store, artifact_root, services).await
     }
 
-    pub async fn open_database(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
+    pub async fn open_database_with_services(
+        path: impl Into<PathBuf>,
+        services: AgentServices,
+    ) -> anyhow::Result<Self> {
         let path = path.into();
         let artifact_root = path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("artifacts");
         let store = SessionStore::open(path).await?;
-        Self::from_store(store, artifact_root).await
+        Self::from_store(store, artifact_root, services).await
     }
 
-    async fn from_store(store: SessionStore, artifact_root: PathBuf) -> anyhow::Result<Self> {
+    #[cfg(test)]
+    pub(crate) async fn open_database(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
+        Self::open_database_with_services(path, crate::standard_services()).await
+    }
+
+    async fn from_store(
+        store: SessionStore,
+        artifact_root: PathBuf,
+        services: AgentServices,
+    ) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&artifact_root).await?;
         let (events, _) = broadcast::channel(1024);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
@@ -548,8 +433,11 @@ impl AppState {
         let durable_permissions = store.list_pending_permissions().await?;
         let durable_questions = store.list_pending_questions().await?;
         store.interrupt_stale_runs().await?;
+        crate::lsp::configure_services(services.clone());
+        let plugin_host = crate::plugins::build_host(&services)?;
         let state = Self {
             inner: Arc::new(InnerState {
+                services,
                 store,
                 artifact_root,
                 providers: ProviderRegistry::from_env(auth_store.clone()),
@@ -557,7 +445,7 @@ impl AppState {
                 auth_store,
                 provider_catalog: ProviderCatalog::from_env(),
                 provider_oauth: RwLock::new(HashMap::new()),
-                plugin_host: crate::plugins::build_host()?,
+                plugin_host,
                 plugins: PluginRegistry::default(),
                 workspace_runtimes: Default::default(),
                 statuses: RwLock::new(HashMap::new()),
@@ -592,6 +480,12 @@ impl AppState {
                 event_writer,
             }),
         };
+        if let Some(memory) = state.inner.services.memory.as_ref() {
+            memory.set_semantic_index(Some(Arc::new(crate::semantic::AgentSemanticMemoryIndex::new(
+                state.inner.store.clone(),
+                state.inner.semantic.clone(),
+            ))));
+        }
         let durable_store = state.inner.store.clone();
         let durable_events = state.inner.events.clone();
         let durable_plugins = state.inner.plugins.clone();
@@ -614,6 +508,10 @@ impl AppState {
         crate::session_actions::resume_pending_subtask_completions(&state).await;
         crate::workflow::spawn_scheduler(state.clone());
         Ok(state)
+    }
+
+    pub fn services(&self) -> &AgentServices {
+        &self.inner.services
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventPayload> {
@@ -710,14 +608,6 @@ impl AppState {
                 None,
             )
             .await?;
-        if let Err(error) = self
-            .inner
-            .store
-            .fts_insert_message(session_id, message)
-            .await
-        {
-            tracing::warn!(%error, "failed to index atomically committed message");
-        }
         self.publish_committed(event);
         Ok(())
     }
@@ -844,74 +734,32 @@ impl SessionStore {
     }
 
     pub(crate) async fn open_default() -> anyhow::Result<Self> {
-        let backend = db_backend_from_env()?;
         let state_dir = PathBuf::from(crate::default_state_dir());
         std::fs::create_dir_all(&state_dir).with_context(|| {
             format!("failed to create state directory {}", state_dir.display())
         })?;
-        // Turso gets its own default file: it is beta, so it must never
-        // rewrite the SQLite-managed database in place. Switching backends
-        // therefore starts from an empty session history.
-        let filename = match backend {
-            DbBackend::Sqlite => "agent.sqlite3",
-            DbBackend::Turso => "agent.turso.db",
-        };
-        Self::open_with_backend(state_dir.join(filename), backend).await
+        Self::open(state_dir.join("agent.turso.db")).await
     }
 
     pub(crate) async fn open(path: PathBuf) -> anyhow::Result<Self> {
-        Self::open_with_backend(path, db_backend_from_env()?).await
-    }
-
-    pub(crate) async fn open_with_backend(
-        path: PathBuf,
-        backend: DbBackend,
-    ) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create database directory {}", parent.display())
             })?;
         }
 
-        let db = match backend {
-            DbBackend::Sqlite => {
-                let options = SqliteConnectOptions::new()
-                    .filename(&path)
-                    .create_if_missing(true)
-                    .foreign_keys(true)
-                    .busy_timeout(std::time::Duration::from_secs(5))
-                    .pragma("journal_mode", "WAL")
-                    .pragma("synchronous", "NORMAL");
-                let pool = SqlitePoolOptions::new()
-                    .max_connections(5)
-                    .connect_with(options)
-                    .await
-                    .with_context(|| {
-                        format!("failed to open SQLite database {}", path.display())
-                    })?;
-                Db::Sqlite {
-                    pool,
-                    write_gate: Arc::new(Mutex::new(())),
-                }
-            }
-            DbBackend::Turso => {
-                let path = path
-                    .to_str()
-                    .context("turso database path is not valid UTF-8")?;
-                let database = turso::Builder::new_local(path)
-                    .build()
-                    .await
-                    .with_context(|| format!("failed to open turso database {path}"))?;
-                Db::Turso {
-                    database,
-                    write_gate: Arc::new(Mutex::new(())),
-                }
-            }
+        let path = path
+            .to_str()
+            .context("turso database path is not valid UTF-8")?;
+        let database = turso::Builder::new_local(path)
+            .build()
+            .await
+            .with_context(|| format!("failed to open turso database {path}"))?;
+        let db = Db {
+            database,
+            write_gate: Arc::new(Mutex::new(())),
         };
-        let store = Self {
-            db,
-            fts_enabled: Arc::new(AtomicBool::new(false)),
-        };
+        let store = Self { db };
         store.migrate().await?;
         Ok(store)
     }
@@ -1197,16 +1045,12 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
-        self.migrate_fts().await?;
         self.migrate_semantic().await?;
         self.migrate_memory_semantic().await?;
         Ok(())
     }
 
-    /// Vector-embedding mirror of `messages` for semantic search. The table
-    /// exists on both backends (so cleanup DELETEs are portable), but only
-    /// turso has the `vector32`/`vector_distance_cos` functions that write
-    /// and query it — `semantic_search_supported` gates all of that. Rows
+    /// Vector-embedding mirror of `messages` for semantic search. Rows
     /// with a NULL embedding are tombstones for messages with no searchable
     /// text, so the indexer doesn't retry them forever.
     async fn migrate_semantic(&self) -> anyhow::Result<()> {
@@ -1234,7 +1078,7 @@ impl SessionStore {
     }
 
     pub(crate) fn semantic_search_supported(&self) -> bool {
-        matches!(self.db, Db::Turso { .. })
+        true
     }
 
     /// Messages that still need an embedding for `model` — new messages plus
@@ -1361,7 +1205,7 @@ impl SessionStore {
             let Ok(message) = serde_json::from_str::<MessageWithParts>(&json) else {
                 continue;
             };
-            let (role, created, content) = fts_document(&message);
+            let (role, created, content) = search_document(&message);
             let excerpt: String = content.replace('\n', " ").chars().take(200).collect();
             hits.push(SemanticSearchHit {
                 session_id: row.get_str("session_id")?,
@@ -1375,8 +1219,8 @@ impl SessionStore {
         Ok(hits)
     }
 
-    /// Vector-embedding mirror of the memory-note markdown files (the agent
-    /// MCP memory store under the notes vaults). Keyed by absolute file path;
+    /// Vector-embedding mirror of host-provided memory documents. Keyed by the
+    /// adapter's stable document key;
     /// `content_hash` detects edits so recall re-embeds only changed files.
     /// Same turso-only gating as `message_embeddings`.
     async fn migrate_memory_semantic(&self) -> anyhow::Result<()> {
@@ -1498,167 +1342,19 @@ impl SessionStore {
             .collect()
     }
 
-    /// Full-text search mirror of `messages`. FTS5 ships in the bundled
-    /// SQLite (libsqlite3-sys sets SQLITE_ENABLE_FTS5), porter stemming
-    /// makes "fixing"/"fixed" match. The mirror is best-effort: index
-    /// failures must never break transcript persistence, so callers wrap
-    /// fts_* errors in warnings instead of propagating them. Turso has no
-    /// FTS5 at all, so there the mirror is disabled up front and
-    /// `search_messages` uses the LIKE fallback.
-    async fn migrate_fts(&self) -> anyhow::Result<()> {
-        let created = self
-            .db
-            .execute(
-                r#"
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                session_id UNINDEXED,
-                message_id UNINDEXED,
-                role UNINDEXED,
-                created UNINDEXED,
-                content,
-                tokenize = 'porter unicode61'
-            )
-            "#,
-                Vec::new(),
-            )
-            .await;
-        match created {
-            Ok(_) => {
-                self.fts_enabled.store(true, Ordering::Relaxed);
-                self.backfill_fts().await
-            }
-            Err(error) => match &self.db {
-                Db::Sqlite { .. } => Err(error),
-                Db::Turso { .. } => {
-                    tracing::warn!(
-                        %error,
-                        "FTS5 is unavailable on the turso backend; message search will use a LIKE scan"
-                    );
-                    Ok(())
-                }
-            },
-        }
-    }
-
-    /// One-time backfill of transcripts that predate the FTS mirror.
-    async fn backfill_fts(&self) -> anyhow::Result<()> {
-        let indexed = self
-            .db
-            .fetch_scalar_i64("SELECT count(*) FROM messages_fts", Vec::new())
-            .await?;
-        if indexed > 0 {
-            return Ok(());
-        }
-        let rows = self
-            .db
-            .fetch_all(
-                "SELECT session_id, id, message_json FROM messages",
-                Vec::new(),
-            )
-            .await?;
-        for row in rows {
-            let session_id = row.get_str("session_id")?;
-            let message_id = row.get_str("id")?;
-            let json = row.get_str("message_json")?;
-            let Ok(message) = serde_json::from_str::<MessageWithParts>(&json) else {
-                continue;
-            };
-            let (role, created, content) = fts_document(&message);
-            if content.is_empty() {
-                continue;
-            }
-            self.db
-                .execute(
-                    "INSERT INTO messages_fts (session_id, message_id, role, created, content) \
-                     VALUES (?, ?, ?, ?, ?)",
-                    vec![
-                        text(session_id),
-                        text(message_id),
-                        text(role),
-                        int(sqlite_i64(created)),
-                        text(content),
-                    ],
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn fts_insert_message(
-        &self,
-        session_id: &str,
-        message: &MessageWithParts,
-    ) -> anyhow::Result<()> {
-        if !self.fts_enabled.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        let (role, created, content) = fts_document(message);
-        if content.is_empty() {
-            return Ok(());
-        }
-        self.db
-            .execute(
-                "INSERT INTO messages_fts (session_id, message_id, role, created, content) \
-                 VALUES (?, ?, ?, ?, ?)",
-                vec![
-                    text(session_id),
-                    text(message_id(message)),
-                    text(role),
-                    int(sqlite_i64(created)),
-                    text(content),
-                ],
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Full-text search across session transcripts. `query` uses FTS5
-    /// syntax (bare words are AND-ed; porter stemming applies). Results
-    /// rank by bm25 and carry a snippet with match markers. Without FTS
-    /// (turso backend) the fallback AND-matches whole words case-insensitively
-    /// over recent messages — no stemming, recency order instead of bm25.
+    /// Search recent session transcripts by AND-matching query terms
+    /// case-insensitively against each flattened message document.
     pub(crate) async fn search_messages(
         &self,
         query: &str,
         session_id: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<MessageSearchHit>> {
-        let limit = limit.clamp(1, 50);
-        if !self.fts_enabled.load(Ordering::Relaxed) {
-            return self.search_messages_like(query, session_id, limit).await;
-        }
-        let sql = if session_id.is_some() {
-            "SELECT session_id, message_id, role, created, \
-             snippet(messages_fts, 4, '>>', '<<', ' ... ', 24) AS excerpt \
-             FROM messages_fts WHERE messages_fts MATCH ? AND session_id = ? \
-             ORDER BY bm25(messages_fts) LIMIT ?"
-        } else {
-            "SELECT session_id, message_id, role, created, \
-             snippet(messages_fts, 4, '>>', '<<', ' ... ', 24) AS excerpt \
-             FROM messages_fts WHERE messages_fts MATCH ? \
-             ORDER BY bm25(messages_fts) LIMIT ?"
-        };
-        let mut params = vec![text(query)];
-        if let Some(session) = session_id {
-            params.push(text(session));
-        }
-        params.push(int(limit as i64));
-        let rows = self.db.fetch_all(sql, params).await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(MessageSearchHit {
-                    session_id: row.get_str("session_id")?,
-                    message_id: row.get_str("message_id")?,
-                    role: row.get_str("role")?,
-                    created: row.get_i64("created")?.max(0) as u64,
-                    excerpt: row.get_str("excerpt")?,
-                })
-            })
-            .collect()
+        self.search_messages_like(query, session_id, limit.clamp(1, 50))
+            .await
     }
 
-    /// LIKE-scan fallback for backends without FTS5. Prefilters in SQL on the
-    /// longest term (LIKE is ASCII-case-insensitive in both engines), then
+    /// Prefilter in SQL on the longest term, then
     /// AND-matches every term against the same flattened document the FTS
     /// mirror indexes. Bounded to the most recent candidates, so it trades
     /// recall on huge histories for predictable work.
@@ -1695,7 +1391,7 @@ impl SessionStore {
             let Ok(message) = serde_json::from_str::<MessageWithParts>(&json) else {
                 continue;
             };
-            let (role, created, content) = fts_document(&message);
+            let (role, created, content) = search_document(&message);
             let matches: Vec<usize> = terms
                 .iter()
                 .map(|term| find_ignore_ascii_case(&content, term))
@@ -2292,10 +1988,6 @@ impl SessionStore {
                 ],
             )
             .await?;
-        // FTS mirror failures must never break transcript persistence.
-        if let Err(error) = self.fts_insert_message(session_id, message).await {
-            tracing::warn!(%error, "failed to index message for full-text search");
-        }
         Ok(())
     }
 
@@ -2839,7 +2531,10 @@ impl SessionStore {
         Ok(())
     }
 
-    pub(crate) async fn get_artifact(&self, id: &str) -> anyhow::Result<Option<ArtifactInfo>> {
+    pub(crate) async fn get_artifact(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<ArtifactInfo>> {
         self.db
             .fetch_optional(
                 "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE id = ?",
@@ -2877,7 +2572,10 @@ impl SessionStore {
         rows.into_iter().map(artifact_from_row).collect()
     }
 
-    pub(crate) async fn artifact_tenant(&self, id: &str) -> anyhow::Result<Option<String>> {
+    pub(crate) async fn artifact_tenant(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<String>> {
         let row = self
             .db
             .fetch_optional(
@@ -3141,13 +2839,7 @@ impl SessionStore {
     }
 
     #[cfg(test)]
-    pub(crate) async fn close(&self) {
-        match &self.db {
-            Db::Sqlite { pool, .. } => pool.close().await,
-            // Turso has no explicit close; dropping the handle releases it.
-            Db::Turso { .. } => {}
-        }
-    }
+    pub(crate) async fn close(&self) {}
 }
 
 fn artifact_from_row(row: DbRow) -> anyhow::Result<ArtifactInfo> {
@@ -3220,8 +2912,8 @@ fn sqlite_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
 
-/// One row of `search_messages` output: where the match lives plus an
-/// FTS5 snippet with `>>`/`<<` markers around matched terms.
+/// One row of `search_messages` output: where the match lives plus an excerpt
+/// with `>>`/`<<` markers around the first matched term.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct MessageSearchHit {
     pub(crate) session_id: String,
@@ -3252,11 +2944,11 @@ pub(crate) struct SemanticSearchHit {
     pub(crate) distance: f64,
 }
 
-/// Flatten a message into `(role, created, searchable text)` for the FTS
-/// index and the semantic embedding indexer. Parts are inspected as JSON so
+/// Flatten a message into `(role, created, searchable text)` for transcript
+/// search and the semantic embedding indexer. Parts are inspected as JSON so
 /// new part variants degrade to "not indexed" instead of breaking
 /// compilation or persistence.
-pub(crate) fn fts_document(message: &MessageWithParts) -> (String, u64, String) {
+pub(crate) fn search_document(message: &MessageWithParts) -> (String, u64, String) {
     let role = match &message.info {
         MessageInfo::User(_) => "user",
         MessageInfo::Assistant(_) => "assistant",
@@ -3316,8 +3008,7 @@ fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
         .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-/// Build a `>>match<<` excerpt around a match, mirroring the FTS5 snippet
-/// markers so both search paths render the same way.
+/// Build a `>>match<<` excerpt around a match for the search tool and UI.
 fn like_excerpt(content: &str, start: usize, len: usize) -> String {
     const CONTEXT: usize = 90;
     let end = (start + len).min(content.len());

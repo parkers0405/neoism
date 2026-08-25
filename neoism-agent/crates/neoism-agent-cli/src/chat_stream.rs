@@ -37,13 +37,18 @@ pub(crate) async fn stream_chat_prompt(
     prompt: ChatPromptInput,
     ui: Option<&mut BottomPrompt>,
 ) -> anyhow::Result<StreamOutcome> {
-    let event_response =
-        ensure_success_response(client.get(format!("{server}/event")).send().await?)
-            .await?;
+    let event_response = ensure_success_response(
+        client
+            .get(format!("{server}/v2/events"))
+            .query(&[("sessionId", session_id), ("tail", "true")])
+            .send()
+            .await?,
+    )
+    .await?;
     let prompt_parts = prompt.into_parts();
     ensure_empty_response(
         client
-            .post(format!("{server}/session/{session_id}/prompt_async"))
+            .post(format!("{server}/v2/sessions/{session_id}/prompt-async"))
             .json(&PromptRequest {
                 message_id: None,
                 model,
@@ -68,9 +73,14 @@ pub(crate) async fn attach_chat_session(
     session_id: &str,
     ui: Option<&mut BottomPrompt>,
 ) -> anyhow::Result<StreamOutcome> {
-    let event_response =
-        ensure_success_response(client.get(format!("{server}/event")).send().await?)
-            .await?;
+    let event_response = ensure_success_response(
+        client
+            .get(format!("{server}/v2/events"))
+            .query(&[("sessionId", session_id), ("tail", "true")])
+            .send()
+            .await?,
+    )
+    .await?;
     stream_session_events(client, server, session_id, event_response, ui, true).await
 }
 
@@ -136,7 +146,7 @@ async fn stream_session_events(
                 }
                 if interrupt && !sent_abort {
                     let _ = client
-                        .post(format!("{server}/session/{session_id}/abort"))
+                        .post(format!("{server}/v2/sessions/{session_id}/abort"))
                         .send()
                         .await;
                     sent_abort = true;
@@ -248,7 +258,7 @@ async fn stream_session_events(
                 }
                 if interrupt && !sent_abort {
                     let _ = client
-                        .post(format!("{server}/session/{session_id}/abort"))
+                        .post(format!("{server}/v2/sessions/{session_id}/abort"))
                         .send()
                         .await;
                     sent_abort = true;
@@ -452,7 +462,7 @@ async fn handle_stream_control_command(
             Some("clear") => {
                 queued.clear();
                 let _ = client
-                    .delete(format!("{server}/session/{session_id}/queue"))
+                    .delete(format!("{server}/v2/sessions/{session_id}/queue"))
                     .send()
                     .await;
                 Ok(true)
@@ -460,7 +470,7 @@ async fn handle_stream_control_command(
             Some("pop") => {
                 if queued.pop_front().is_none() {
                     let _ = client
-                        .post(format!("{server}/session/{session_id}/queue/pop"))
+                        .post(format!("{server}/v2/sessions/{session_id}/queue/pop"))
                         .send()
                         .await;
                 }

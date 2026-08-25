@@ -27,7 +27,7 @@ pub(crate) async fn reconcile(
     state: &AppState,
     info: &mut SessionInfo,
 ) -> Result<ContextEpoch, ApiError> {
-    let observed = observe(info);
+    let observed = observe(state, info);
     let previous = state
         .inner
         .store
@@ -80,8 +80,12 @@ pub(crate) fn from_session(info: &SessionInfo) -> Option<ContextEpoch> {
     serde_json::from_value(info.extra.get("contextEpoch")?.clone()).ok()
 }
 
-fn observe(info: &SessionInfo) -> ContextSnapshot {
+fn observe(state: &AppState, info: &SessionInfo) -> ContextSnapshot {
     let mut sources = BTreeMap::new();
+    sources.insert(
+        "config".to_string(),
+        json!(crate::config::snapshot(state.services(), &info.directory).ok().map(|snapshot| snapshot.identity)),
+    );
     sources.insert(
         "environment".to_string(),
         json!({
@@ -92,12 +96,18 @@ fn observe(info: &SessionInfo) -> ContextSnapshot {
     );
     sources.insert(
         "instructions".to_string(),
-        json!(crate::instruction::system(&info.directory)),
+        json!(crate::instruction::system(state.services(), &info.directory)),
     );
-    sources.insert(
-        "memory".to_string(),
-        json!(crate::mcp_memory::system_memory_indexes(&info.directory)),
-    );
+    let memory_enabled = state
+        .services()
+        .memory
+        .as_ref()
+        .is_some_and(|memory| crate::mcp::builtin_enabled(&info.directory, memory.id(), state));
+    if memory_enabled {
+        for fragment in state.services().context_fragments(std::path::Path::new(&info.directory)) {
+            sources.insert(format!("service:{}", fragment.id), json!(fragment.content));
+        }
+    }
     sources.insert(
         "calendar".to_string(),
         json!({ "unixDay": crate::now_millis() / 86_400_000 }),

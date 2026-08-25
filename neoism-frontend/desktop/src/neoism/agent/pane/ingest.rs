@@ -1035,7 +1035,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "POST",
-            &format!("/permission/{id}/reply"),
+            &format!("/v2/interactions/permissions/{id}/reply"),
             Some(&body),
         ) {
             Ok(_) => {
@@ -1057,7 +1057,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "POST",
-            &format!("/question/{id}/reply"),
+            &format!("/v2/interactions/questions/{id}/reply"),
             Some(&body),
         ) {
             Ok(_) => {
@@ -1073,7 +1073,7 @@ impl NeoismAgentPane {
         match api_request_json(
             &self.server,
             "POST",
-            &format!("/question/{id}/reject"),
+            &format!("/v2/interactions/questions/{id}/reject"),
             None,
         ) {
             Ok(_) => {

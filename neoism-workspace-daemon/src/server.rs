@@ -169,31 +169,38 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn agent_proxy_root(
+    State(state): State<AppState>,
     method: axum::http::Method,
     headers: HeaderMap,
     query: axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
-    agent_proxy_inner(String::new(), method, headers, query, body).await
+    agent_proxy_inner(&state, String::new(), method, headers, query, body).await
 }
 
 async fn agent_proxy(
+    State(state): State<AppState>,
     Path(path): Path<String>,
     method: axum::http::Method,
     headers: HeaderMap,
     query: axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
-    agent_proxy_inner(path, method, headers, query, body).await
+    agent_proxy_inner(&state, path, method, headers, query, body).await
 }
 
 async fn agent_proxy_inner(
+    state: &AppState,
     path: String,
     method: axum::http::Method,
     headers: HeaderMap,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
+    let credential = match agent_proxy_credential(&state.auth, &headers) {
+        Ok(identity) => identity,
+        Err(response) => return response,
+    };
     let base = agent_handler::configured_agent_server();
     let mut target = if path.is_empty() {
         base
@@ -210,9 +217,20 @@ async fn agent_proxy_inner(
         Err(_) => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
     };
     let mut request = client.request(method, &target);
-    // Forward the content negotiation headers the agent API cares
-    // about; hop-by-hop and host headers stay behind.
-    for name in [header::CONTENT_TYPE, header::ACCEPT] {
+    // The inbound bearer and all caller-controlled scope headers terminate at
+    // the daemon. Agent receives only the daemon-minted, short-lived identity.
+    request = request.bearer_auth(credential);
+    request = request.header(
+        "x-neoism-directory",
+        files_handler::workspace_root().to_string_lossy().as_ref(),
+    );
+    // Forward canonical representation negotiation and SSE resume state only;
+    // hop-by-hop, Authorization, and caller scope headers stay behind.
+    for name in [
+        header::CONTENT_TYPE,
+        header::ACCEPT,
+        header::HeaderName::from_static("last-event-id"),
+    ] {
         if let Some(value) = headers.get(&name) {
             request = request.header(name.clone(), value.clone());
         }
@@ -249,6 +267,69 @@ async fn agent_proxy_inner(
                 .into_response()
         }
     }
+}
+
+const AGENT_CREDENTIAL_LIFETIME_SECS: i64 = 60;
+
+fn agent_proxy_credential(
+    auth: &AuthService,
+    headers: &HeaderMap,
+) -> Result<String, Response> {
+    let bearer = cloud_auth::extract_bearer(headers);
+    let supplied = bearer.as_deref().ok_or_else(|| {
+        (StatusCode::UNAUTHORIZED, "missing daemon authentication").into_response()
+    })?;
+
+    let root = crate::path::canonicalize(&files_handler::workspace_root())
+        .unwrap_or_else(|_| files_handler::workspace_root());
+    let (subject, tenant_id, directory_prefixes, hosted) =
+        if cloud_auth::legacy_daemon_token_matches(supplied) {
+            (
+                "local-operator".to_string(),
+                "local".to_string(),
+                Vec::new(),
+                false,
+            )
+        } else {
+            let device = auth.authenticate_bearer(supplied).map_err(|_| {
+                (StatusCode::UNAUTHORIZED, "invalid daemon authentication")
+                    .into_response()
+            })?;
+            (
+                format!("device:{}", device.device_id),
+                format!("daemon-device:{}", device.device_id),
+                vec![root.to_string_lossy().into_owned()],
+                true,
+            )
+        };
+
+    let signing_key = std::env::var("NEOISM_DAEMON_TOKEN")
+        .ok()
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| {
+            tracing::error!(
+                "cannot mint Agent credential: NEOISM_DAEMON_TOKEN is unavailable"
+            );
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        })?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let claims =
+        neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
+            subject,
+            tenant_id,
+            directory_prefixes,
+            hosted,
+            now,
+            AGENT_CREDENTIAL_LIFETIME_SECS,
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    let credential = neoism_agent_service_api::daemon_credential::issue(
+        &claims,
+        signing_key.as_bytes(),
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+
+    Ok(credential)
 }
 
 /// Back-compat helper for tests that don't need a real auth service.
@@ -317,3 +398,109 @@ pub use workspace_routes::{
 
 #[cfg(test)]
 mod crdt_seed_tests;
+
+#[cfg(test)]
+mod agent_proxy_auth_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct DaemonTokenGuard(Option<String>);
+
+    impl DaemonTokenGuard {
+        fn set(token: &str) -> Self {
+            let previous = std::env::var("NEOISM_DAEMON_TOKEN").ok();
+            std::env::set_var("NEOISM_DAEMON_TOKEN", token);
+            Self(previous)
+        }
+    }
+
+    impl Drop for DaemonTokenGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("NEOISM_DAEMON_TOKEN", value),
+                None => std::env::remove_var("NEOISM_DAEMON_TOKEN"),
+            }
+        }
+    }
+
+    fn test_state(auth: AuthService) -> AppState {
+        AppState {
+            auth,
+            sessions: SessionRegistry::shared(),
+            workspaces: WorkspaceManager::bootstrap(),
+            pairing_tokens: PairingTokenStore::in_memory(),
+            crdt: CrdtSyncHub::default(),
+            paired_hosts: PairedHostStore::in_memory(),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_agent_proxy_route_rejects_an_unauthenticated_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = router(test_state(AuthService::bootstrap(temp.path()).unwrap()));
+        for path in ["/agent", "/agent/", "/agent/v2/sessions"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+
+    #[test]
+    fn agent_proxy_denies_unauthenticated_and_mints_scoped_identities() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _token = DaemonTokenGuard::set("daemon-test-key");
+        let temp = tempfile::tempdir().unwrap();
+        let auth = AuthService::bootstrap(temp.path()).unwrap();
+
+        let denied = agent_proxy_credential(&auth, &HeaderMap::new()).unwrap_err();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let mut local_headers = HeaderMap::new();
+        local_headers.insert(
+            header::AUTHORIZATION,
+            "Bearer daemon-test-key".parse().unwrap(),
+        );
+        let local = agent_proxy_credential(&auth, &local_headers).unwrap();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let local = neoism_agent_service_api::daemon_credential::verify(
+            &local,
+            b"daemon-test-key",
+            now,
+        )
+        .unwrap();
+        assert_eq!(local.tenant_id, "local");
+        assert!(!local.hosted);
+        assert!(local.directory_prefixes.is_empty());
+
+        let issued = auth.registry.issue("paired", BTreeSet::new()).unwrap();
+        let mut paired_headers = HeaderMap::new();
+        paired_headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", issued.raw_token).parse().unwrap(),
+        );
+        let paired = agent_proxy_credential(&auth, &paired_headers).unwrap();
+        let paired = neoism_agent_service_api::daemon_credential::verify(
+            &paired,
+            b"daemon-test-key",
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            paired.tenant_id,
+            format!("daemon-device:{}", issued.device_id)
+        );
+        assert!(paired.hosted);
+        assert_eq!(paired.directory_prefixes.len(), 1);
+    }
+}

@@ -199,7 +199,7 @@ pub(crate) fn builtin_tool_plugin(id: &str) -> Option<&'static str> {
     }
 }
 
-struct SkillsPlugin;
+struct SkillsPlugin(neoism_agent_service_api::AgentServices);
 
 impl AgentPlugin for SkillsPlugin {
     fn manifest(&self) -> PluginManifest {
@@ -218,12 +218,12 @@ impl AgentPlugin for SkillsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        registrar.skill_source_runtime("workspace-skills", std::sync::Arc::new(WorkspaceSkills));
+        registrar.skill_source_runtime("workspace-skills", std::sync::Arc::new(WorkspaceSkills(self.0.clone())));
         Ok(())
     }
 }
 
-struct AgentsPlugin;
+struct AgentsPlugin(neoism_agent_service_api::AgentServices);
 
 impl AgentPlugin for AgentsPlugin {
     fn manifest(&self) -> PluginManifest {
@@ -242,16 +242,16 @@ impl AgentPlugin for AgentsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        registrar.agent_source_runtime("workspace-agents", std::sync::Arc::new(WorkspaceAgents));
+        registrar.agent_source_runtime("workspace-agents", std::sync::Arc::new(WorkspaceAgents(self.0.clone())));
         Ok(())
     }
 }
 
-struct WorkspaceAgents;
+struct WorkspaceAgents(neoism_agent_service_api::AgentServices);
 
 impl AgentSource for WorkspaceAgents {
     fn load(&self, directory: &str) -> Result<AgentSourceSnapshot, PluginRuntimeError> {
-        let catalog = crate::agent::AgentCatalog::load(directory)
+        let catalog = crate::agent::AgentCatalog::load(&self.0, directory)
             .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
         Ok(AgentSourceSnapshot {
             agents: catalog.list(),
@@ -260,7 +260,7 @@ impl AgentSource for WorkspaceAgents {
     }
 }
 
-struct CommandsPlugin;
+struct CommandsPlugin(neoism_agent_service_api::AgentServices);
 
 impl AgentPlugin for CommandsPlugin {
     fn manifest(&self) -> PluginManifest {
@@ -281,7 +281,7 @@ impl AgentPlugin for CommandsPlugin {
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
         registrar.command_source_runtime(
             "workspace-commands",
-            std::sync::Arc::new(WorkspaceCommands),
+            std::sync::Arc::new(WorkspaceCommands(self.0.clone())),
         );
         Ok(())
     }
@@ -348,19 +348,19 @@ impl RuntimeTool for WebsearchTool {
     }
 }
 
-struct WorkspaceCommands;
+struct WorkspaceCommands(neoism_agent_service_api::AgentServices);
 
 impl CommandSource for WorkspaceCommands {
     fn list(
         &self,
         directory: &str,
     ) -> Result<Vec<neoism_agent_core::CommandInfo>, PluginRuntimeError> {
-        crate::command_routes::load_commands(directory)
+        crate::command_routes::load_commands(&self.0, directory)
             .map_err(|error| PluginRuntimeError::new(error.to_string()))
     }
 }
 
-struct WorkspaceSkills;
+struct WorkspaceSkills(neoism_agent_service_api::AgentServices);
 
 impl SkillSource for WorkspaceSkills {
     fn list<'a>(
@@ -368,23 +368,26 @@ impl SkillSource for WorkspaceSkills {
         directory: &'a str,
     ) -> PluginFuture<'a, Vec<neoism_agent_core::SkillInfo>> {
         Box::pin(async move {
-            crate::skill::list_async(directory)
+            crate::skill::list_async(&self.0, directory)
                 .await
                 .map_err(|error| PluginRuntimeError::new(error.to_string()))
         })
     }
 }
 
-pub(crate) fn build_host() -> Result<PluginHost, PluginHostError> {
+pub(crate) fn build_host(
+    services: &neoism_agent_service_api::AgentServices,
+) -> Result<PluginHost, PluginHostError> {
     let host = PluginHost::default();
     let mut plugins = INTERNAL_PLUGINS
             .iter()
             .copied()
+            .filter(|plugin| plugin.id != "dev.neoism.tools.notes" || services.notes.is_some())
             .map(|plugin| Box::new(plugin) as Box<dyn AgentPlugin>)
             .collect::<Vec<_>>();
-    plugins.push(Box::new(SkillsPlugin));
-    plugins.push(Box::new(AgentsPlugin));
-    plugins.push(Box::new(CommandsPlugin));
+    plugins.push(Box::new(SkillsPlugin(services.clone())));
+    plugins.push(Box::new(AgentsPlugin(services.clone())));
+    plugins.push(Box::new(CommandsPlugin(services.clone())));
     plugins.push(Box::new(WebsearchPlugin));
     host.install(plugins, &[])?;
     Ok(host)
@@ -394,7 +397,7 @@ pub(crate) fn agent_catalog(
     state: &crate::state::AppState,
     directory: &str,
 ) -> anyhow::Result<crate::agent::AgentCatalog> {
-    if !enabled(directory, AGENTS_PLUGIN_ID) {
+    if !enabled(state.services(), directory, AGENTS_PLUGIN_ID) {
         anyhow::bail!("plugin {AGENTS_PLUGIN_ID} is disabled for this workspace");
     }
     let snapshot = state.inner.plugin_host.snapshot();
@@ -412,8 +415,8 @@ pub(crate) fn agent_catalog(
     ))
 }
 
-pub(crate) fn enabled(directory: &str, plugin_id: &str) -> bool {
-    crate::config::load(directory)
+pub(crate) fn enabled(services: &neoism_agent_service_api::AgentServices, directory: &str, plugin_id: &str) -> bool {
+    crate::config::load(services, directory)
         .map(|loaded| {
             if let Some(plugin) = loaded.info.plugins.get(plugin_id) {
                 return plugin.enabled;

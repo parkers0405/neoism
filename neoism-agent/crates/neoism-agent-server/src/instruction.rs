@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::{config, default_config_dir};
+use crate::config;
 
 const INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
 
@@ -11,11 +11,11 @@ pub(crate) struct LoadedInstruction {
     pub(crate) content: String,
 }
 
-pub(crate) fn system(directory: &str) -> Vec<String> {
+pub(crate) fn system(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<String> {
     let mut paths = BTreeSet::new();
     let mut ordered = Vec::new();
 
-    for path in global_instruction_candidates() {
+    for path in global_instruction_candidates(services, directory) {
         if push_existing(&mut paths, &mut ordered, path) {
             break;
         }
@@ -25,7 +25,7 @@ pub(crate) fn system(directory: &str) -> Vec<String> {
         push_existing(&mut paths, &mut ordered, path);
     }
 
-    if let Ok(loaded) = config::load(directory) {
+    if let Ok(loaded) = config::load(services, directory) {
         for raw in loaded.info.instructions {
             if let Some(path) = configured_instruction_path(directory, &raw) {
                 push_existing(&mut paths, &mut ordered, path);
@@ -94,12 +94,8 @@ fn instruction_in_dir(dir: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn global_instruction_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![PathBuf::from(default_config_dir()).join("AGENTS.md")];
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join(".claude/CLAUDE.md"));
-    }
-    candidates
+fn global_instruction_candidates(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<PathBuf> {
+    config::roots(services, directory).into_iter().flat_map(|root| INSTRUCTION_FILES.iter().map(move |file| root.join(file))).collect()
 }
 
 fn project_instruction_files(directory: &str) -> Vec<PathBuf> {
@@ -189,17 +185,17 @@ mod tests {
     fn loads_agents_md_and_configured_instruction_files() {
         let root = temp_root("system");
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(".neoism")).unwrap();
+        std::fs::create_dir_all(root.join(".agent")).unwrap();
         std::fs::write(root.join("AGENTS.md"), "Project instructions.\n").unwrap();
         std::fs::write(root.join("EXTRA.md"), "Extra configured instructions.\n")
             .unwrap();
         std::fs::write(
-            root.join("neoism.json"),
+            root.join(".agent/agent.json"),
             r#"{ "instructions": ["EXTRA.md", "https://example.com/remote.md"] }"#,
         )
         .unwrap();
 
-        let instructions = system(root.to_str().unwrap());
+        let instructions = system(&crate::standard_services(), root.to_str().unwrap());
         assert_eq!(instructions.len(), 2);
         assert!(instructions[0].contains("Project instructions."));
         assert!(instructions[1].contains("Extra configured instructions."));
@@ -214,7 +210,7 @@ mod tests {
         std::fs::write(root.join("AGENTS.md"), "Agent instructions.\n").unwrap();
         std::fs::write(root.join("CLAUDE.md"), "Claude instructions.\n").unwrap();
 
-        let instructions = system(root.to_str().unwrap());
+        let instructions = system(&crate::standard_services(), root.to_str().unwrap());
         assert_eq!(instructions.len(), 1);
         assert!(instructions[0].contains("Agent instructions."));
         assert!(!instructions[0].contains("Claude instructions."));

@@ -1,14 +1,16 @@
 use super::*;
-use crate::state::{DbBackend, SessionStore};
+use crate::state::SessionStore;
 use crate::tool_selection::provider_tool_map;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
 use neoism_agent_core::{
-    AuthInfo, NeoismConfig, PluginStatusInfo, ProviderListResult, SessionUndoStatus,
-    SessionUndoTree,
+    AuthInfo, NeoismConfig, ProviderListResult, SessionUndoStatus, SessionUndoTree,
 };
 use serde::de::DeserializeOwned;
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tower::ServiceExt;
@@ -404,57 +406,10 @@ fn test_compaction_pair(
     ]
 }
 
-#[test]
-fn instruction_files_are_added_to_provider_context() {
-    let root = std::env::temp_dir().join(format!(
-        "neoism-agent-provider-instructions-{}",
-        Id::ascending(IdKind::Event)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join("AGENTS.md"),
-        "Always respect project instructions.\n",
-    )
-    .unwrap();
-
-    let session_id = Id::ascending(IdKind::Session);
-    let info = SessionInfo {
-        id: session_id,
-        slug: "instruction-test".to_string(),
-        project_id: "global".to_string(),
-        workspace_id: None,
-        directory: root.to_string_lossy().to_string(),
-        path: None,
-        parent_id: None,
-        title: "Instruction test".to_string(),
-        agent: None,
-        model: None,
-        version: "0.0.0".to_string(),
-        time: TimeInfo {
-            created: 1,
-            updated: 1,
-            compacting: None,
-            archived: None,
-        },
-        permission: None,
-        extra: BTreeMap::new(),
-    };
-
-    let provider_messages = provider_messages_for_session(&info, &[], "stub", None);
-
-    assert!(provider_messages[0].content.contains("Instructions from:"));
-    assert!(provider_messages[0]
-        .content
-        .contains("Always respect project instructions."));
-    assert_eq!(provider_messages.len(), 1);
-    let _ = std::fs::remove_dir_all(root);
-}
-
 #[tokio::test]
-async fn sqlite_store_persists_sessions_and_messages() {
+async fn store_persists_sessions_and_messages() {
     let path = std::env::temp_dir().join(format!(
-        "neoism-agent-{}.sqlite3",
+        "neoism-agent-{}.turso.db",
         Id::ascending(IdKind::Event)
     ));
     cleanup_sqlite_files(&path);
@@ -589,16 +544,14 @@ fn store_test_message(
 }
 
 #[tokio::test]
-async fn turso_store_persists_sessions_and_search_falls_back_to_like() {
+async fn store_persists_sessions_and_searches_with_like() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-{}.turso.db",
         Id::ascending(IdKind::Event)
     ));
     cleanup_sqlite_files(&path);
 
-    let store = SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
-        .await
-        .unwrap();
+    let store = SessionStore::open(path.clone()).await.unwrap();
     let session_id = neoism_agent_core::new_session_id();
     let now = now_millis();
     let mut session = store_test_session(&session_id, now);
@@ -623,9 +576,7 @@ async fn turso_store_persists_sessions_and_search_falls_back_to_like() {
 
     // Reopen the same file to prove persistence across handles.
     drop(store);
-    let store = SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
-        .await
-        .unwrap();
+    let store = SessionStore::open(path.clone()).await.unwrap();
     let sessions = store.list_sessions().await.unwrap();
     assert_eq!(sessions.len(), 1);
     let persisted_goal = sessions[0].goal().expect("goal persisted through Turso");
@@ -647,7 +598,7 @@ async fn turso_store_persists_sessions_and_search_falls_back_to_like() {
         2
     );
 
-    // No FTS5 on turso: search takes the LIKE fallback, AND-ing all terms.
+    // Transcript search ANDs terms in the bounded LIKE scan.
     let hits = store.search_messages("quick fox", None, 10).await.unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].session_id, session_id.to_string());
@@ -662,7 +613,7 @@ async fn turso_store_persists_sessions_and_search_falls_back_to_like() {
         .unwrap()
         .is_empty());
 
-    // delete_session removes children explicitly (no FK cascade on turso).
+    // delete_session removes child rows explicitly.
     assert!(store.delete_session(session_id.as_str()).await.unwrap());
     assert!(store
         .list_messages(session_id.as_str())
@@ -697,7 +648,7 @@ async fn setting_a_new_goal_reopens_a_completed_goal() {
         app(state.clone())
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{session_id}/goal"),
+                &format!("/v2/plugins/dev.neoism.goals/{session_id}"),
                 Some(json!({ "text": "new active goal" })),
             ))
             .await
@@ -751,7 +702,7 @@ async fn session_directory_patch_moves_and_persists_the_session() {
         app(state.clone())
             .oneshot(request(
                 Method::PATCH,
-                &format!("/session/{session_id}"),
+                &format!("/v2/sessions/{session_id}"),
                 Some(json!({ "directory": "../target" })),
             ))
             .await
@@ -784,9 +735,7 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
     ));
     cleanup_sqlite_files(&path);
 
-    let store = SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
-        .await
-        .unwrap();
+    let store = SessionStore::open(path.clone()).await.unwrap();
     assert!(store.semantic_search_supported());
     let session_id = neoism_agent_core::new_session_id();
     let now = now_millis();
@@ -866,42 +815,6 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].message_id, second_id);
-    cleanup_sqlite_files(&path);
-}
-
-#[tokio::test]
-async fn search_messages_uses_fts_on_sqlite() {
-    let path = std::env::temp_dir().join(format!(
-        "neoism-agent-fts-{}.sqlite3",
-        Id::ascending(IdKind::Event)
-    ));
-    cleanup_sqlite_files(&path);
-
-    let store = SessionStore::open_with_backend(path.clone(), DbBackend::Sqlite)
-        .await
-        .unwrap();
-    let session_id = neoism_agent_core::new_session_id();
-    let now = now_millis();
-    store
-        .insert_session(&store_test_session(&session_id, now))
-        .await
-        .unwrap();
-    store
-        .append_message(
-            session_id.as_str(),
-            &store_test_message(&session_id, now, "the quick brown fox jumps"),
-        )
-        .await
-        .unwrap();
-
-    let hits = store.search_messages("quick", None, 10).await.unwrap();
-    assert_eq!(hits.len(), 1);
-    assert!(
-        hits[0].excerpt.contains(">>quick<<"),
-        "excerpt: {}",
-        hits[0].excerpt
-    );
-    store.close().await;
     cleanup_sqlite_files(&path);
 }
 
@@ -1151,56 +1064,7 @@ async fn compact_session_publishes_streaming_compaction_events() {
 }
 
 #[tokio::test]
-async fn sync_history_replays_persisted_events() {
-    let path = std::env::temp_dir().join(format!(
-        "neoism-agent-events-{}.sqlite3",
-        Id::ascending(IdKind::Event)
-    ));
-    cleanup_sqlite_files(&path);
-    let state = AppState::open_database(path.clone()).await.unwrap();
-    let app = app(state.clone());
-    let session_id = neoism_agent_core::new_session_id();
-    state.publish(EventPayload::new(
-        event_type::SESSION_STATUS,
-        json!({ "sessionID": session_id, "status": { "type": "idle" } }),
-    ));
-
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let events = state
-                .inner
-                .store
-                .list_events_after(0, 10, Some(session_id.as_str()))
-                .await
-                .unwrap();
-            if !events.is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap();
-
-    let events: Vec<Value> = response_json(
-        app.clone().oneshot(request(
-            Method::POST,
-            "/sync/history",
-            Some(json!({ "since": 0, "sessionID": session_id })),
-        ))
-        .await
-        .unwrap(),
-    )
-    .await;
-
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["type"], event_type::SESSION_STATUS);
-    assert_eq!(events[0]["properties"]["sessionID"], session_id.as_str());
-    cleanup_sqlite_files(&path);
-}
-
-#[tokio::test]
-async fn live_stream_events_broadcast_without_entering_sync_history() {
+async fn live_stream_events_broadcast_without_persistence() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-live-events-{}.sqlite3",
         Id::ascending(IdKind::Event)
@@ -1233,50 +1097,6 @@ async fn live_stream_events_broadcast_without_entering_sync_history() {
         .await
         .unwrap()
         .is_empty());
-    cleanup_sqlite_files(&path);
-}
-
-#[tokio::test]
-async fn sync_history_accepts_opencode_aggregate_sequence_map() {
-    let path = std::env::temp_dir().join(format!(
-        "neoism-agent-sync-map-{}.sqlite3",
-        Id::ascending(IdKind::Event)
-    ));
-    cleanup_sqlite_files(&path);
-    let state = AppState::open_database(path.clone()).await.unwrap();
-    let app = app(state.clone());
-    let session_id = neoism_agent_core::new_session_id();
-    state
-        .publish_persisted(EventPayload::new(
-            event_type::SESSION_STATUS,
-            json!({ "sessionID": session_id, "status": { "type": "busy" } }),
-        ))
-        .await
-        .unwrap();
-    state
-        .publish_persisted(EventPayload::new(
-            event_type::SESSION_STATUS,
-            json!({ "sessionID": session_id, "status": { "type": "idle" } }),
-        ))
-        .await
-        .unwrap();
-
-    let events: Vec<Value> = response_json(
-        app.oneshot(request(
-            Method::POST,
-            "/sync/history",
-            Some(json!({ session_id.to_string(): 0 })),
-        ))
-        .await
-        .unwrap(),
-    )
-    .await;
-
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["aggregate_id"], session_id.as_str());
-    assert_eq!(events[0]["aggregateID"], session_id.as_str());
-    assert_eq!(events[0]["seq"], 1);
-    assert_eq!(events[0]["data"]["status"]["type"], "idle");
     cleanup_sqlite_files(&path);
 }
 
@@ -1332,13 +1152,8 @@ async fn turso_transactions_retry_while_another_store_is_writing() {
     // Two separately opened stores deliberately do not share the in-process
     // write gate. This reproduces a debug/production or multi-process writer
     // holding the database while the durable event transaction begins.
-    let event_store = SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
-        .await
-        .unwrap();
-    let projection_store =
-        SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
-            .await
-            .unwrap();
+    let event_store = SessionStore::open(path.clone()).await.unwrap();
+    let projection_store = SessionStore::open(path.clone()).await.unwrap();
     let session_id = neoism_agent_core::new_session_id();
     let session = store_test_session(&session_id, now_millis());
     projection_store.insert_session(&session).await.unwrap();
@@ -1427,201 +1242,7 @@ async fn context_epochs_survive_restart_and_advance_on_instruction_change() {
 }
 
 #[tokio::test]
-async fn sync_replay_persists_opencode_events() {
-    let path = std::env::temp_dir().join(format!(
-        "neoism-agent-sync-replay-{}.sqlite3",
-        Id::ascending(IdKind::Event)
-    ));
-    cleanup_sqlite_files(&path);
-    let state = AppState::open_database(path.clone()).await.unwrap();
-    let app = app(state.clone());
-    let session_id = neoism_agent_core::new_session_id();
-    let event_id = Id::ascending(IdKind::Event).to_string();
-
-    let replayed: Value = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                "/sync/replay",
-                Some(json!({
-                    "directory": "/tmp/neoism-test",
-                    "events": [{
-                        "id": event_id.clone(),
-                        "aggregateID": session_id.to_string(),
-                        "seq": 0,
-                        "type": event_type::SESSION_STATUS,
-                        "data": { "status": { "type": "idle" } }
-                    }]
-                })),
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(replayed["sessionID"], session_id.as_str());
-
-    let events: Vec<Value> = response_json(
-        app.oneshot(request(Method::POST, "/sync/history", Some(json!({}))))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["id"], event_id);
-    assert_eq!(events[0]["aggregate_id"], session_id.as_str());
-    assert_eq!(events[0]["seq"], 0);
-    assert_eq!(events[0]["data"]["sessionID"], session_id.as_str());
-    cleanup_sqlite_files(&path);
-}
-
-#[tokio::test]
-async fn sync_replay_projects_session_message_and_parts() {
-    let path = std::env::temp_dir().join(format!(
-        "neoism-agent-sync-project-{}.sqlite3",
-        Id::ascending(IdKind::Event)
-    ));
-    cleanup_sqlite_files(&path);
-    let state = AppState::open_database(path.clone()).await.unwrap();
-    let app = app(state.clone());
-    let session_id = neoism_agent_core::new_session_id();
-    let message_id = Id::ascending(IdKind::Message);
-    let part_id = Id::ascending(IdKind::Part);
-    let session = SessionInfo {
-        id: session_id.clone(),
-        slug: "synced-session".to_string(),
-        project_id: "global".to_string(),
-        workspace_id: None,
-        directory: "/tmp".to_string(),
-        path: None,
-        parent_id: None,
-        title: "Synced Session".to_string(),
-        agent: Some("build".to_string()),
-        model: None,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        time: TimeInfo {
-            created: 1,
-            updated: 1,
-            compacting: None,
-            archived: None,
-        },
-        permission: None,
-        extra: BTreeMap::new(),
-    };
-    let user_info = MessageInfo::User(UserMessage {
-        id: message_id.clone(),
-        session_id: session_id.clone(),
-        time: CreatedTime { created: 1 },
-        agent: "build".to_string(),
-        model: UserModel {
-            provider_id: "neoism".to_string(),
-            model_id: "stub".to_string(),
-            variant: None,
-        },
-        system: None,
-        tools: None,
-        author: None,
-    });
-    let part = Part::Text(TextPart {
-        id: part_id,
-        session_id: session_id.clone(),
-        message_id: message_id.clone(),
-        text: "projected from sync replay".to_string(),
-        synthetic: None,
-        time: None,
-    });
-
-    let replayed: Value = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                "/sync/replay",
-                Some(json!({
-                    "ownerID": "owner-a",
-                    "events": [
-                        {
-                            "id": Id::ascending(IdKind::Event).to_string(),
-                            "aggregateID": session_id.to_string(),
-                            "seq": 0,
-                            "type": event_type::SESSION_CREATED,
-                            "data": { "sessionID": session_id.to_string(), "info": session }
-                        },
-                        {
-                            "id": Id::ascending(IdKind::Event).to_string(),
-                            "aggregateID": session_id.to_string(),
-                            "seq": 1,
-                            "type": event_type::MESSAGE_UPDATED,
-                            "data": { "sessionID": session_id.to_string(), "info": user_info }
-                        },
-                        {
-                            "id": Id::ascending(IdKind::Event).to_string(),
-                            "aggregateID": session_id.to_string(),
-                            "seq": 2,
-                            "type": event_type::MESSAGE_PART_UPDATED,
-                            "data": { "sessionID": session_id.to_string(), "part": part }
-                        }
-                    ]
-                })),
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(replayed["sessionID"], session_id.as_str());
-
-    let projected_session = state
-        .inner
-        .store
-        .get_session(session_id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(projected_session.title, "Synced Session");
-    let messages = state
-        .inner
-        .store
-        .list_messages(session_id.as_str())
-        .await
-        .unwrap();
-    assert_eq!(messages.len(), 1);
-    assert!(matches!(
-        messages[0].parts.first(),
-        Some(Part::Text(TextPart { text, .. })) if text == "projected from sync replay"
-    ));
-
-    let mut ignored = projected_session.clone();
-    ignored.title = "Wrong Owner Update".to_string();
-    let _: Value = response_json(
-        app.oneshot(request(
-            Method::POST,
-            "/sync/replay",
-            Some(json!({
-                "ownerID": "owner-b",
-                "events": [{
-                    "id": Id::ascending(IdKind::Event).to_string(),
-                    "aggregateID": session_id.to_string(),
-                    "seq": 3,
-                    "type": event_type::SESSION_UPDATED,
-                    "data": { "sessionID": session_id.to_string(), "info": ignored }
-                }]
-            })),
-        ))
-        .await
-        .unwrap(),
-    )
-    .await;
-    let projected_session = state
-        .inner
-        .store
-        .get_session(session_id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(projected_session.title, "Synced Session");
-    cleanup_sqlite_files(&path);
-}
-
-#[tokio::test]
-async fn neoism_headless_routes_are_registered() {
+async fn public_api_is_v2_only() {
     std::env::set_var("NEOISM_AGENT_DISABLE_MODELS_FETCH", "true");
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-routes-{}.sqlite3",
@@ -1631,41 +1252,22 @@ async fn neoism_headless_routes_are_registered() {
     let state = AppState::open_database(path.clone()).await.unwrap();
     let app = app(state.clone());
     for (method, path) in [
-        (Method::GET, "/global/health"),
-        (Method::GET, "/global/config"),
-        (Method::GET, "/path"),
-        (Method::GET, "/config/providers"),
-        (Method::GET, "/provider"),
-        (Method::GET, "/provider/auth"),
-        (Method::GET, "/auth/test-provider"),
-        (Method::GET, "/project/current"),
-        (Method::GET, "/vcs"),
-        (Method::GET, "/command"),
-        (Method::GET, "/agent"),
-        (Method::GET, "/agent/build"),
-        (Method::GET, "/skill"),
-        (Method::GET, "/workflow"),
-        (Method::GET, "/plugin"),
-        (Method::GET, "/lsp"),
-        (Method::GET, "/lsp/hover?file=src/lib.rs&line=1&character=1"),
-        (
-            Method::GET,
-            "/lsp/definition?file=src/lib.rs&line=1&character=1",
-        ),
-        (Method::GET, "/lsp/document-symbols?file=src/lib.rs"),
-        (Method::POST, "/lsp/shutdown"),
-        (Method::GET, "/permission"),
-        (Method::GET, "/question"),
-        (Method::GET, "/pty/shells"),
-        (Method::GET, "/mcp"),
-        (Method::GET, "/mcp/test/auth/callback?code=test"),
-        (Method::POST, "/mcp/test/auth/callback"),
-        (Method::GET, "/experimental/tool/ids"),
-        (Method::POST, "/experimental/tool/read/execute"),
-        (Method::GET, "/experimental/resource"),
-        (Method::GET, "/api/session"),
-        (Method::GET, "/session"),
-        (Method::GET, "/session/status"),
+        (Method::GET, "/v2/health"),
+        (Method::GET, "/v2/config"),
+        (Method::GET, "/v2/providers/configured"),
+        (Method::GET, "/v2/providers"),
+        (Method::GET, "/v2/providers/auth-methods"),
+        (Method::GET, "/v2/agents"),
+        (Method::GET, "/v2/agents/build"),
+        (Method::GET, "/v2/skills"),
+        (Method::GET, "/v2/plugins/dev.neoism.workflows"),
+        (Method::GET, "/v2/plugins/dev.neoism.lsp"),
+        (Method::GET, "/v2/interactions/permissions"),
+        (Method::GET, "/v2/interactions/questions"),
+        (Method::GET, "/v2/plugins/dev.neoism.pty/shells"),
+        (Method::GET, "/v2/plugins/dev.neoism.mcp"),
+        (Method::GET, "/v2/sessions"),
+        (Method::GET, "/v2/sessions/status"),
     ] {
         let response = app
             .clone()
@@ -1681,6 +1283,44 @@ async fn neoism_headless_routes_are_registered() {
         assert_ne!(response.status(), StatusCode::NOT_FOUND, "{path}");
         assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
     }
+    for path in [
+        "/global/health",
+        "/session",
+        "/api/session",
+        "/provider",
+        "/permission",
+        "/mcp",
+        "/lsp",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, path, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+    let response = app
+        .oneshot(request(
+            Method::GET,
+            "/v2/sessions/ses_missing",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let error: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        error.as_object().unwrap().keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "code".to_string(),
+            "details".to_string(),
+            "message".to_string(),
+            "retryable".to_string(),
+        ])
+    );
     std::env::remove_var("NEOISM_AGENT_DISABLE_MODELS_FETCH");
     cleanup_sqlite_files(&path);
 }
@@ -1711,7 +1351,7 @@ async fn provider_auth_routes_persist_api_credentials() {
     let methods: BTreeMap<String, Vec<neoism_agent_core::ProviderAuthMethod>> =
         response_json(
             app.clone()
-                .oneshot(request(Method::GET, "/provider/auth", None))
+                .oneshot(request(Method::GET, "/v2/providers/auth-methods", None))
                 .await
                 .unwrap(),
         )
@@ -1726,7 +1366,7 @@ async fn provider_auth_routes_persist_api_credentials() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                "/provider/test-provider/oauth/authorize",
+                "/v2/providers/test-provider/oauth/authorize",
                 Some(json!({
                     "method": 0,
                     "inputs": {
@@ -1743,7 +1383,7 @@ async fn provider_auth_routes_persist_api_credentials() {
 
     let stored: Option<AuthInfo> = response_json(
         app.clone()
-            .oneshot(request(Method::GET, "/auth/test-provider", None))
+            .oneshot(request(Method::GET, "/v2/providers/test-provider/auth", None))
             .await
             .unwrap(),
     )
@@ -1758,7 +1398,7 @@ async fn provider_auth_routes_persist_api_credentials() {
 
     let providers: ProviderListResult = response_json(
         app.clone()
-            .oneshot(request(Method::GET, "/provider", None))
+            .oneshot(request(Method::GET, "/v2/providers", None))
             .await
             .unwrap(),
     )
@@ -1770,7 +1410,7 @@ async fn provider_auth_routes_persist_api_credentials() {
 
     let removed: bool = response_json(
         app.clone()
-            .oneshot(request(Method::DELETE, "/auth/test-provider", None))
+            .oneshot(request(Method::DELETE, "/v2/providers/test-provider/auth", None))
             .await
             .unwrap(),
     )
@@ -1779,7 +1419,7 @@ async fn provider_auth_routes_persist_api_credentials() {
 
     let stored: Option<AuthInfo> = response_json(
         app.clone()
-            .oneshot(request(Method::GET, "/auth/test-provider", None))
+            .oneshot(request(Method::GET, "/v2/providers/test-provider/auth", None))
             .await
             .unwrap(),
     )
@@ -1810,7 +1450,7 @@ async fn prompt_persists_streamed_assistant_message() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -1818,17 +1458,10 @@ async fn prompt_persists_streamed_assistant_message() {
     )
     .await;
 
-    let assistant: MessageWithParts = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                &format!("/session/{}/message", session.id),
-                Some(json!({
-                    "parts": [{ "type": "text", "text": "stream this" }]
-                })),
-            ))
-            .await
-            .unwrap(),
+    let assistant = v2_prompt_and_wait(
+        &app,
+        &session.id,
+        json!({ "parts": [{ "type": "text", "text": "stream this" }] }),
     )
     .await;
 
@@ -1848,17 +1481,18 @@ async fn prompt_persists_streamed_assistant_message() {
     assert!(text.text.contains("stream this"));
     assert!(text.time.as_ref().and_then(|time| time.end).is_some());
 
-    let messages: Vec<MessageWithParts> = response_json(
+    let message_page: neoism_agent_core::Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
+    let messages = message_page.items;
     assert_eq!(messages.len(), 2);
     assert_eq!(
         serde_json::to_value(&messages[1].parts).unwrap(),
@@ -1935,10 +1569,10 @@ async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
         Id::ascending(IdKind::Event)
     ));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
     std::fs::write(root.join("input.txt"), "plugin selected this file").unwrap();
     std::fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         r#"{ "permission": { "read": "allow" } }"#,
     )
     .unwrap();
@@ -1947,13 +1581,13 @@ async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
 
     let state = AppState::open_database(db_path.clone()).await.unwrap();
     state.inner.plugins.register(TestNativePlugin);
-    let app = app(state);
+    let app = app(state.clone());
 
     let tools: Vec<ToolListItem> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/experimental/tool?directory={}", root.to_string_lossy()),
+                &format!("/v2/tools?directory={}", root.to_string_lossy()),
                 None,
             ))
             .await
@@ -1964,20 +1598,35 @@ async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
         .iter()
         .any(|tool| tool.id == "read" && tool.description.contains("[plugin]")));
 
-    let result: tool::ToolExecutionResult = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                &format!(
-                    "/experimental/tool/read/execute?directory={}",
-                    root.to_string_lossy()
-                ),
-                Some(json!({ "filePath": "missing.txt" })),
-            ))
-            .await
-            .unwrap(),
+    let tool_context = plugin::ToolExecutionContext {
+        tool_id: "read".to_string(),
+        directory: root.to_string_lossy().to_string(),
+        session_id: Some("ses_test".to_string()),
+        message_id: Some("msg_test".to_string()),
+        call_id: Some("call_test".to_string()),
+    };
+    let mut arguments = json!({ "filePath": "missing.txt" });
+    state
+        .inner
+        .plugins
+        .tool_execute_before(&tool_context, &mut arguments)
+        .unwrap();
+    let mut result = tool::execute(
+        "read",
+        tool::ToolContext::new(&root)
+            .with_state(Some(state.clone()))
+            .with_permission_rules(vec![neoism_agent_core::PermissionRule {
+                permission: "read".into(), pattern: "*".into(), action: neoism_agent_core::PermissionAction::Allow,
+            }]),
+        arguments,
     )
-    .await;
+    .await
+    .unwrap();
+    state
+        .inner
+        .plugins
+        .tool_execute_after(&tool_context, &mut result)
+        .unwrap();
     assert!(result.output.contains("plugin selected this file"));
     assert!(result.title.contains("[plugin]"));
     assert_eq!(result.metadata.unwrap()["plugin"], "test-native");
@@ -1986,22 +1635,17 @@ async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
             .unwrap(),
     )
     .await;
-    let assistant: MessageWithParts = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                &format!("/session/{}/message", session.id),
-                Some(json!({ "parts": [{ "type": "text", "text": "hello plugin" }] })),
-            ))
-            .await
-            .unwrap(),
+    let assistant = v2_prompt_and_wait(
+        &app,
+        &session.id,
+        json!({ "parts": [{ "type": "text", "text": "hello plugin" }] }),
     )
     .await;
     let Part::Text(text) = &assistant.parts[1] else {
@@ -2031,7 +1675,7 @@ async fn loop_sends_tool_result_back_to_provider() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -2039,18 +1683,13 @@ async fn loop_sends_tool_result_back_to_provider() {
     )
     .await;
 
-    let assistant: MessageWithParts = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                &format!("/session/{}/message", session.id),
-                Some(json!({
-                    "model": { "providerId": "neoism", "modelId": "stub" },
-                    "parts": [{ "type": "text", "text": "read-tool: input.txt" }]
-                })),
-            ))
-            .await
-            .unwrap(),
+    let assistant = v2_prompt_and_wait(
+        &app,
+        &session.id,
+        json!({
+            "model": { "providerId": "neoism", "modelId": "stub" },
+            "parts": [{ "type": "text", "text": "read-tool: input.txt" }]
+        }),
     )
     .await;
     let MessageInfo::Assistant(info) = &assistant.info else {
@@ -2063,17 +1702,18 @@ async fn loop_sends_tool_result_back_to_provider() {
     assert!(text.text.contains("Tool result received"));
     assert!(text.text.contains("1: tool loop content"));
 
-    let messages: Vec<MessageWithParts> = response_json(
+    let message_page: neoism_agent_core::Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
+    let messages = message_page.items;
     assert_eq!(messages.len(), 3);
     assert!(messages[1].parts.iter().any(|part| matches!(
         part,
@@ -2106,7 +1746,7 @@ async fn loop_continues_until_tool_calls_stop() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -2114,18 +1754,13 @@ async fn loop_continues_until_tool_calls_stop() {
     )
     .await;
 
-    let assistant: MessageWithParts = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                &format!("/session/{}/message", session.id),
-                Some(json!({
-                    "model": { "providerId": "neoism", "modelId": "stub" },
-                    "parts": [{ "type": "text", "text": "read-tool-chain: first.txt, second.txt" }]
-                })),
-            ))
-            .await
-            .unwrap(),
+    let assistant = v2_prompt_and_wait(
+        &app,
+        &session.id,
+        json!({
+            "model": { "providerId": "neoism", "modelId": "stub" },
+            "parts": [{ "type": "text", "text": "read-tool-chain: first.txt, second.txt" }]
+        }),
     )
     .await;
     let MessageInfo::Assistant(info) = &assistant.info else {
@@ -2137,17 +1772,18 @@ async fn loop_continues_until_tool_calls_stop() {
     };
     assert!(text.text.contains("second result"));
 
-    let messages: Vec<MessageWithParts> = response_json(
+    let message_page: neoism_agent_core::Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
+    let messages = message_page.items;
     assert_eq!(messages.len(), 4);
     let completed_read_tools = messages
         .iter()
@@ -2188,7 +1824,7 @@ async fn loop_executes_same_step_parallel_tool_calls() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -2196,32 +1832,28 @@ async fn loop_executes_same_step_parallel_tool_calls() {
     )
     .await;
 
-    let _assistant: MessageWithParts = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                &format!("/session/{}/message", session.id),
-                Some(json!({
-                    "model": { "providerId": "neoism", "modelId": "stub" },
-                    "parts": [{ "type": "text", "text": "parallel-read-tools: first.txt, second.txt" }]
-                })),
-            ))
-            .await
-            .unwrap(),
+    let _assistant = v2_prompt_and_wait(
+        &app,
+        &session.id,
+        json!({
+            "model": { "providerId": "neoism", "modelId": "stub" },
+            "parts": [{ "type": "text", "text": "parallel-read-tools: first.txt, second.txt" }]
+        }),
     )
     .await;
 
-    let messages: Vec<MessageWithParts> = response_json(
+    let message_page: neoism_agent_core::Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
+    let messages = message_page.items;
     let tool_outputs = messages[1]
         .parts
         .iter()
@@ -2263,7 +1895,7 @@ async fn duplicate_tool_call_event_executes_once() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -2271,18 +1903,13 @@ async fn duplicate_tool_call_event_executes_once() {
     )
     .await;
 
-    let _: MessageWithParts = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                &format!("/session/{}/message", session.id),
-                Some(json!({
-                    "model": { "providerId": "neoism", "modelId": "gpt-5.5" },
-                    "parts": [{ "type": "text", "text": "duplicate-patch-tool: file.md" }]
-                })),
-            ))
-            .await
-            .unwrap(),
+    let _ = v2_prompt_and_wait(
+        &app,
+        &session.id,
+        json!({
+            "model": { "providerId": "neoism", "modelId": "gpt-5.5" },
+            "parts": [{ "type": "text", "text": "duplicate-patch-tool: file.md" }]
+        }),
     )
     .await;
 
@@ -2294,70 +1921,14 @@ async fn duplicate_tool_call_event_executes_once() {
 }
 
 #[tokio::test]
-async fn plugin_status_loads_configured_rust_native_plugins() {
-    let root = std::env::temp_dir().join(format!(
-        "neoism-agent-plugin-status-{}",
-        Id::ascending(IdKind::Event)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join("neoism.json"),
-        r#"{
-              "plugins": {
-                "neoism.internal.noop": { "scope": "project" },
-                "unknown.rust.plugin": { "enabled": true, "custom": true }
-              }
-            }"#,
-    )
-    .unwrap();
-    let db_path = root.join("agent.sqlite3");
-    cleanup_sqlite_files(&db_path);
-
-    let state = AppState::open_database(db_path.clone()).await.unwrap();
-    let app = app(state.clone());
-    let statuses: Vec<PluginStatusInfo> = response_json(
-        app.oneshot(request(
-            Method::GET,
-            &format!("/plugin?directory={}", root.to_string_lossy()),
-            None,
-        ))
-        .await
-        .unwrap(),
-    )
-    .await;
-
-    let noop = statuses
-        .iter()
-        .find(|status| status.id == "neoism.internal.noop")
-        .expect("internal plugin status");
-    assert!(noop.active);
-    assert_eq!(noop.source, neoism_agent_core::PluginSource::Internal);
-    let unknown = statuses
-        .iter()
-        .find(|status| status.id == "unknown.rust.plugin")
-        .expect("unknown plugin status");
-    assert!(!unknown.active);
-    assert!(unknown
-        .reason
-        .as_deref()
-        .unwrap_or_default()
-        .contains("unsupported plugin id"));
-    assert_eq!(unknown.options["custom"], true);
-
-    cleanup_sqlite_files(&db_path);
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
 async fn runtime_source_plugins_are_workspace_disableable() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-skills-disabled-{}",
         Id::ascending(IdKind::Event)
     ));
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
     std::fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         r#"{ "plugins": {
             "dev.neoism.skills": { "enabled": false },
             "dev.neoism.commands": { "enabled": false },
@@ -2370,6 +1941,7 @@ async fn runtime_source_plugins_are_workspace_disableable() {
             "dev.neoism.tools.workspace": { "enabled": false },
             "dev.neoism.semantic": { "enabled": false },
             "dev.neoism.goals": { "enabled": false },
+            "dev.neoism.subagents": { "enabled": false },
             "dev.neoism.vcs": { "enabled": false },
             "dev.neoism.pty": { "enabled": false }
         } }"#,
@@ -2428,6 +2000,7 @@ async fn runtime_source_plugins_are_workspace_disableable() {
     assert!(!tools.iter().any(|tool| tool.id == "websearch"));
     assert!(!tools.iter().any(|tool| tool.id == "lsp"));
     assert!(!tools.iter().any(|tool| tool.id == "notes"));
+    assert!(!capabilities.iter().any(|capability| capability.id == "neoism.tools.notes"));
     assert!(!tools.iter().any(|tool| tool.id == "skill"));
     assert!(!tools.iter().any(|tool| tool.id == "read"));
     assert!(!tools.iter().any(|tool| tool.id == "complete_goal"));
@@ -2454,6 +2027,14 @@ async fn runtime_source_plugins_are_workspace_disableable() {
     assert!(commands.disableable);
     assert!(!commands.enabled);
     for (plugin_id, path) in [
+        (
+            "dev.neoism.goals",
+            "/v2/plugins/dev.neoism.goals/session-test",
+        ),
+        (
+            "dev.neoism.subagents",
+            "/v2/plugins/dev.neoism.subagents/sessions/session-test/tasks",
+        ),
         ("dev.neoism.semantic", "/v2/plugins/dev.neoism.semantic/search"),
         ("dev.neoism.workflows", "/v2/plugins/dev.neoism.workflows"),
         ("dev.neoism.lsp", "/v2/plugins/dev.neoism.lsp"),
@@ -2501,15 +2082,15 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
         Id::ascending(IdKind::Event)
     ));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join(".neoism/plugins")).unwrap();
-    std::fs::create_dir_all(root.join(".neoism/tools")).unwrap();
+    std::fs::create_dir_all(root.join(".agent/plugins")).unwrap();
+    std::fs::create_dir_all(root.join(".agent/tools")).unwrap();
     std::fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         r#"{ "permission": { "bash": "allow" } }"#,
     )
     .unwrap();
     std::fs::write(
-        root.join(".neoism/plugins/test-plugin.json"),
+        root.join(".agent/plugins/test-plugin.json"),
         r#"{
           "id": "test-plugin",
           "chatHeaders": { "X-Test-Plugin": "yes" },
@@ -2519,7 +2100,7 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     )
     .unwrap();
     std::fs::write(
-        root.join(".neoism/tools/custom_echo.json"),
+        root.join(".agent/tools/custom_echo.json"),
         r#"{
           "description": "Echoes a custom tool argument",
           "command": ["bash", "-lc", "printf '%s:%s' \"$PLUGIN_ENV\" \"$NEOISM_ARG_TEXT\""],
@@ -2535,21 +2116,8 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     cleanup_sqlite_files(&db_path);
 
     let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let runtime = state.inner.workspace_runtimes.acquire(root.to_string_lossy().as_ref(), &state.inner.plugins, state.services()).await;
     let app = app(state.clone());
-    let statuses: Vec<PluginStatusInfo> = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::GET,
-                &format!("/plugin?directory={}", root.to_string_lossy()),
-                None,
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert!(statuses
-        .iter()
-        .any(|status| status.id == "test-plugin" && status.active));
     let hook_ctx = plugin::ChatHookContext {
         session_id: "ses_test".to_string(),
         agent: "build".to_string(),
@@ -2557,15 +2125,13 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
         model_id: "gpt-test".to_string(),
     };
     let mut headers = std::collections::BTreeMap::new();
-    state
-        .inner
+    runtime
         .plugins
         .chat_headers(&hook_ctx, &mut headers)
         .unwrap();
     assert_eq!(headers["X-Test-Plugin"], "yes");
     let mut options = std::collections::BTreeMap::new();
-    state
-        .inner
+    runtime
         .plugins
         .chat_options(&hook_ctx, &mut options)
         .unwrap();
@@ -2575,7 +2141,7 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/experimental/tool?directory={}", root.to_string_lossy()),
+                &format!("/v2/tools?directory={}", root.to_string_lossy()),
                 None,
             ))
             .await
@@ -2584,19 +2150,16 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     .await;
     assert!(tools.iter().any(|tool| tool.id == "custom_echo"));
 
-    let result: crate::tool::ToolExecutionResult = response_json(
-        app.oneshot(request(
-            Method::POST,
-            &format!(
-                "/experimental/tool/custom_echo/execute?directory={}",
-                root.to_string_lossy()
-            ),
-            Some(json!({ "text": "hello" })),
-        ))
-        .await
-        .unwrap(),
-    )
-    .await;
+    let mut custom_env = std::collections::BTreeMap::new();
+    runtime.plugins.shell_env(&plugin::ShellEnvContext {
+        cwd: root.to_string_lossy().into_owned(), session_id: None, call_id: None,
+    }, &mut custom_env).unwrap();
+    let result = custom_tool::execute(
+        state.services(), root.to_string_lossy().as_ref(), "custom_echo",
+        json!({ "text": "hello" }), &[neoism_agent_core::PermissionRule {
+            permission: "bash".into(), pattern: "*".into(), action: neoism_agent_core::PermissionAction::Allow,
+        }], custom_env, None,
+    ).await.unwrap().unwrap();
     assert_eq!(result.output, "loaded:hello");
     assert_eq!(result.metadata.unwrap()["customTool"], true);
 
@@ -2605,46 +2168,38 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
 }
 
 #[test]
-fn config_merges_standalone_mcp_file() {
+fn generic_config_reads_only_canonical_agent_json() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-mcp-file-{}",
         Id::ascending(IdKind::Event)
     ));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join(".neoism")).unwrap();
-    // config.json carries one server; the standalone mcp.json carries
-    // another AND overrides the first (merged after, so it wins).
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
+    // Product-specific/compatibility names are deliberately invisible to
+    // standalone Agent.
     std::fs::write(
-        root.join(".neoism/config.json"),
+        root.join("config.json"),
         r#"{ "mcp": { "alpha": { "type": "local", "command": ["alpha-old"] } } }"#,
     )
     .unwrap();
     std::fs::write(
-        root.join(".neoism/mcp.json"),
-        r#"// standalone catalog — wrapped form
-        {
-          "mcp": {
-            "alpha": { "type": "local", "command": ["alpha-new"] },
-            "beta": { "type": "local", "command": ["beta-mcp"] }
-          }
-        }"#,
+        root.join("ignored-product-config.json"),
+        r#"{"mcp":{"beta":{"type":"local","command":["ignored"]}}}"#,
     )
     .unwrap();
 
-    let loaded = config::load(root.to_str().unwrap()).unwrap();
-    assert!(loaded.info.mcp.contains_key("alpha"));
-    assert!(loaded.info.mcp.contains_key("beta"));
-    let alpha = serde_json::to_value(&loaded.info.mcp["alpha"]).unwrap();
-    assert_eq!(alpha["command"][0], "alpha-new");
-
-    // Bare-map form (no "mcp" wrapper) merges the same way.
+    let user_root = root.join("user");
+    let services = neoism_agent_service_api::AgentServices::new(std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
+        .with_config(std::sync::Arc::new(neoism_agent_service_api::StandardConfigSourceService::new(&user_root)));
     std::fs::write(
-        root.join(".neoism/mcp.json"),
-        r#"{ "gamma": { "type": "local", "command": ["gamma-mcp"] } }"#,
+        root.join(".agent/agent.json"),
+        r#"{"mcp":{"gamma":{"type":"local","command":["gamma-agent"]}}}"#,
     )
     .unwrap();
-    let loaded = config::load(root.to_str().unwrap()).unwrap();
+    let loaded = config::load(&services, root.to_str().unwrap()).unwrap();
     assert!(loaded.info.mcp.contains_key("gamma"));
+    assert!(!loaded.info.mcp.contains_key("alpha"));
+    assert!(!loaded.info.mcp.contains_key("beta"));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -2655,11 +2210,11 @@ fn config_loads_project_agents_commands_and_permissions() {
         Id::ascending(IdKind::Event)
     ));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join(".neoism/agents")).unwrap();
-    std::fs::create_dir_all(root.join(".neoism/modes")).unwrap();
-    std::fs::create_dir_all(root.join(".neoism/commands")).unwrap();
+    std::fs::create_dir_all(root.join(".agent/agents")).unwrap();
+    std::fs::create_dir_all(root.join(".agent/modes")).unwrap();
+    std::fs::create_dir_all(root.join(".agent/commands")).unwrap();
     std::fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         r#"{
               "default_agent": "plan",
               "permission": { "external_directory": { "*": "ask" } },
@@ -2673,7 +2228,7 @@ fn config_loads_project_agents_commands_and_permissions() {
     )
     .unwrap();
     std::fs::write(
-        root.join(".neoism/agents/reviewer.md"),
+        root.join(".agent/agents/reviewer.md"),
         r#"---
 description: Reviews code changes
 mode: subagent
@@ -2688,7 +2243,7 @@ Review the change and report risks.
     )
     .unwrap();
     std::fs::write(
-        root.join(".neoism/modes/architect.md"),
+        root.join(".agent/modes/architect.md"),
         r#"---
 description: Designs implementation plans
 ---
@@ -2697,7 +2252,7 @@ Design first, then hand off implementation.
     )
     .unwrap();
     std::fs::write(
-        root.join(".neoism/commands/audit.md"),
+        root.join(".agent/commands/audit.md"),
         r#"---
 description: Audit the current worktree
 agent: reviewer
@@ -2707,7 +2262,9 @@ Audit the current worktree for correctness.
     )
     .unwrap();
 
-    let loaded = config::load(root.to_str().unwrap()).unwrap();
+    let services = neoism_agent_service_api::AgentServices::new(std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
+        .with_config(std::sync::Arc::new(neoism_agent_service_api::StandardConfigSourceService::new(root.join("user"))));
+    let loaded = config::load(&services, root.to_str().unwrap()).unwrap();
     assert_eq!(loaded.info.default_agent.as_deref(), Some("plan"));
     assert!(loaded.info.agent.contains_key("reviewer"));
     assert_eq!(
@@ -2926,7 +2483,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
     let response: Value = response_json(
         app.oneshot(request(
             Method::POST,
-            "/sessions/import",
+            "/v2/sessions/import",
             Some(json!({
                 "bundle": bundle,
                 "targetWorkspaceRoot": "/srv/work/proj",
@@ -3040,12 +2597,12 @@ async fn sessions_export_route_returns_only_sessions_under_requested_root() {
         .await
         .unwrap();
 
-    // Drive POST /sessions/export through the real router.
+    // Drive the canonical export endpoint through the real router.
     let app = app(state.clone());
     let response: Value = response_json(
         app.oneshot(request(
             Method::POST,
-            "/sessions/export",
+            "/v2/sessions/export",
             Some(json!({ "workspaceRoot": "/home/alice/proj" })),
         ))
         .await
@@ -3483,6 +3040,48 @@ async fn response_json<T: DeserializeOwned>(response: Response) -> T {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+async fn v2_prompt_and_wait(
+    app: &axum::Router,
+    session_id: &Id,
+    body: Value,
+) -> MessageWithParts {
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions/{session_id}/prompt"),
+            Some(body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let page: neoism_agent_core::Page<MessageWithParts> = response_json(
+            app.clone()
+                .oneshot(request(
+                    Method::GET,
+                    &format!("/v2/sessions/{session_id}/messages"),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        if let Some(message) = page.items.into_iter().rev().find(|message| {
+            matches!(&message.info, MessageInfo::Assistant(info) if info.time.completed.is_some())
+        }) {
+            return message;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for V2 prompt completion"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn env_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
@@ -3504,4 +3103,116 @@ fn test_models_catalog() -> &'static str {
             }
           }
         }"#
+}
+
+#[derive(Default)]
+struct RecordingWorkspaceSearch {
+    label: String,
+    warms: AtomicUsize,
+}
+
+struct RecordingRootPin(PathBuf);
+
+impl neoism_agent_service_api::WorkspaceSearchRootPin for RecordingRootPin {
+    fn root(&self) -> &std::path::Path { &self.0 }
+}
+
+impl neoism_agent_service_api::WorkspaceSearchService for RecordingWorkspaceSearch {
+    fn warm(&self, _root: &std::path::Path) -> Result<(), neoism_agent_service_api::ServiceError> {
+        self.warms.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn pin_root(&self, root: &std::path::Path) -> Result<Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>, neoism_agent_service_api::ServiceError> {
+        Ok(Arc::new(RecordingRootPin(root.to_path_buf())))
+    }
+
+    fn find_files(&self, _request: &neoism_agent_service_api::FindFilesRequest) -> Result<neoism_agent_service_api::FindFilesResult, neoism_agent_service_api::ServiceError> {
+        Ok(neoism_agent_service_api::FindFilesResult {
+            items: vec![neoism_agent_service_api::WorkspaceFileMatch {
+                path: format!("{}.rs", self.label), score: 0, git_status: None, size: 0, modified: 0,
+            }],
+            bounds: Default::default(), engine: Some("fake".to_string()), fallback_reason: None,
+        })
+    }
+
+    fn grep(&self, _request: &neoism_agent_service_api::GrepWorkspaceRequest) -> Result<neoism_agent_service_api::GrepWorkspaceResult, neoism_agent_service_api::ServiceError> {
+        Ok(neoism_agent_service_api::GrepWorkspaceResult {
+            items: Vec::new(), files_with_matches: 0, total_files_searched: 0,
+            bounds: Default::default(), mode: "plain".to_string(), engine: Some("fake".to_string()), fallback_reason: None,
+        })
+    }
+
+    fn search_directories(&self, _request: &neoism_agent_service_api::DirectorySearchRequest) -> Result<neoism_agent_service_api::DirectorySearchResult, neoism_agent_service_api::ServiceError> {
+        Ok(neoism_agent_service_api::DirectorySearchResult {
+            paths: vec![self.label.clone()], bounds: Default::default(), engine: Some("fake".to_string()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn app_states_keep_workspace_search_services_isolated() {
+    let root = std::env::temp_dir().join(format!("neoism-search-isolation-{}", Id::ascending(IdKind::Event)));
+    std::fs::create_dir_all(&root).unwrap();
+    let first_search = Arc::new(RecordingWorkspaceSearch { label: "first".into(), ..Default::default() });
+    let second_search = Arc::new(RecordingWorkspaceSearch { label: "second".into(), ..Default::default() });
+    let first_services = neoism_agent_service_api::AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), first_search.clone());
+    let second_services = neoism_agent_service_api::AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), second_search.clone());
+    let first = AppState::open_database_with_services(root.join("first.db"), first_services).await.unwrap();
+    let second = AppState::open_database_with_services(root.join("second.db"), second_services).await.unwrap();
+    first.services().workspace_search.warm(&root).unwrap();
+    let search_request = neoism_agent_service_api::FindFilesRequest {
+        root: root.clone(), query: "rs".into(), offset: 0, limit: 10, control: Default::default(),
+    };
+    assert_eq!(first.services().workspace_search.find_files(&search_request).unwrap().items[0].path, "first.rs");
+    assert_eq!(second.services().workspace_search.find_files(&search_request).unwrap().items[0].path, "second.rs");
+    for (state, expected) in [(first.clone(), "first"), (second.clone(), "second")] {
+        let router = app(state);
+        let session: SessionInfo = response_json(router.clone().oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions?directory={}", root.to_string_lossy()),
+            Some(json!({})),
+        )).await.unwrap()).await;
+        let options: Value = response_json(router.oneshot(request(
+            Method::GET,
+            &format!("/v2/sessions/{}/directory-options?query=x", session.id),
+            None,
+        )).await.unwrap()).await;
+        assert!(options.as_array().unwrap().iter().any(|option| {
+            option.as_str().is_some_and(|path| path.ends_with(expected))
+        }));
+    }
+    assert_eq!(first_search.warms.load(Ordering::SeqCst), 1);
+    assert_eq!(second_search.warms.load(Ordering::SeqCst), 0);
+    cleanup_sqlite_files(&root.join("first.db"));
+    cleanup_sqlite_files(&root.join("second.db"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn disabled_workspace_tools_do_not_warm_search() {
+    let root = std::env::temp_dir().join(format!("neoism-search-disabled-{}", Id::ascending(IdKind::Event)));
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
+    std::fs::write(root.join(".agent/agent.json"), r#"{"plugins":{"dev.neoism.tools.workspace":{"enabled":false}}}"#).unwrap();
+    let search = Arc::new(RecordingWorkspaceSearch::default());
+    let services = neoism_agent_service_api::AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), search.clone());
+    let db = root.join("agent.db");
+    let state = AppState::open_database_with_services(&db, services).await.unwrap();
+    let tools = provider_tools_for_agent(&state, root.to_str().unwrap(), &[], "gpt-5.5").await.unwrap();
+    assert!(!tools.iter().any(|tool| matches!(tool.id.as_str(), "grep" | "glob" | "read")));
+    let router = app(state);
+    let session: SessionInfo = response_json(router.clone().oneshot(request(
+        Method::POST,
+        &format!("/v2/sessions?directory={}", root.to_string_lossy()),
+        Some(json!({})),
+    )).await.unwrap()).await;
+    let response = router.oneshot(request(
+        Method::GET,
+        &format!("/v2/sessions/{}/directory-options", session.id),
+        None,
+    )).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(search.warms.load(Ordering::SeqCst), 0);
+    cleanup_sqlite_files(&db);
+    let _ = std::fs::remove_dir_all(root);
 }

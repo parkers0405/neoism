@@ -140,7 +140,7 @@ fn responses_request_body_always_has_instructions() {
 
     assert_eq!(
         body["instructions"],
-        "You are Neoism, a concise coding assistant."
+        "You are a concise coding assistant."
     );
     assert_eq!(body["input"][0]["role"], "user");
 }

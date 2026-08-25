@@ -1,5 +1,11 @@
 use std::path::Path;
 
+/// Install the executable service used by this process-wide LSP runtime.
+/// Embedders must call this before invoking language-server operations.
+pub fn configure_services(services: neoism_agent_service_api::AgentServices) {
+    crate::lsp::configure_services(services);
+}
+
 pub use crate::lsp::{
     language_server_adapters, language_server_adapters_for, DiagnosticsEvent,
     LspAdapterMetadata, LspAdapterOrigin, LspAdapterTransport, LspCatalogPackageMetadata,
@@ -81,8 +87,8 @@ pub fn live_languages(directory: impl AsRef<Path>) -> std::collections::BTreeSet
     crate::lsp::live_languages(directory)
 }
 
-/// Where the Neoism LSP engine would resolve `command` for server `id`:
-/// extension-installed (managed bin), config path, `$PATH`, or missing.
+/// Where the Agent LSP engine would resolve `command` for server `id`:
+/// adapter-managed, config path, `$PATH`, or missing.
 /// Lets the Extensions page badge each language-server row with the same
 /// source the engine will actually use at runtime.
 pub fn command_source(id: &str, command: Vec<String>) -> LspCommandSource {

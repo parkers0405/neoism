@@ -24,7 +24,7 @@ pub(crate) async fn create_cli_session(
         permission: None,
         workspace_id: None,
     };
-    let mut builder = client.post(format!("{server}/session")).json(&request);
+    let mut builder = client.post(format!("{server}/v2/sessions")).json(&request);
     if let Some(dir) = dir {
         builder = builder.query(&[("directory", dir)]);
     }
@@ -46,7 +46,7 @@ pub(crate) async fn persist_session_model(
     let model = model_ref_from_cli_model(model, variant)?;
     let _: Value = response_json(
         client
-            .patch(format!("{server}/session/{session_id}"))
+            .patch(format!("{server}/v2/sessions/{session_id}"))
             .json(&json!({ "model": model }))
             .send()
             .await?,
@@ -96,7 +96,7 @@ pub(crate) async fn print_provider_model_list(
     current_model: Option<&str>,
 ) -> anyhow::Result<()> {
     let value =
-        response_json(client.get(format!("{server}/provider")).send().await?).await?;
+        response_json(client.get(format!("{server}/v2/providers")).send().await?).await?;
     let providers = value
         .get("all")
         .and_then(Value::as_array)
@@ -131,13 +131,14 @@ pub(crate) async fn print_session_messages(
 ) -> anyhow::Result<()> {
     let path = match limit {
         Some(limit) => {
-            format!("{server}/session/{session_id}/message?order=desc&limit={limit}")
+            format!("{server}/v2/sessions/{session_id}/messages?order=desc&limit={limit}")
         }
-        None => format!("{server}/session/{session_id}/message"),
+        None => format!("{server}/v2/sessions/{session_id}/messages"),
     };
     let value = response_json(client.get(path).send().await?).await?;
     let mut messages = value
-        .as_array()
+        .get("items")
+        .and_then(Value::as_array)
         .cloned()
         .context("messages response was not a list")?;
     if limit.is_some() {
@@ -165,14 +166,15 @@ pub(crate) async fn print_session_replay(
     let value = response_json(
         client
             .get(format!(
-                "{server}/session/{session_id}/message?order=desc&limit={limit}"
+                "{server}/v2/sessions/{session_id}/messages?order=desc&limit={limit}"
             ))
             .send()
             .await?,
     )
     .await?;
     let mut messages = value
-        .as_array()
+        .get("items")
+        .and_then(Value::as_array)
         .cloned()
         .context("messages response was not a list")?;
     messages.reverse();
@@ -235,13 +237,14 @@ pub(crate) async fn fetch_session_messages(
 ) -> anyhow::Result<Vec<Value>> {
     let value = response_json(
         client
-            .get(format!("{server}/session/{session_id}/message"))
+            .get(format!("{server}/v2/sessions/{session_id}/messages"))
             .send()
             .await?,
     )
     .await?;
     value
-        .as_array()
+        .get("items")
+        .and_then(Value::as_array)
         .cloned()
         .context("messages response was not a list")
 }
@@ -254,15 +257,15 @@ pub(crate) async fn fetch_context_usage_label(
     let messages = response_json(
         client
             .get(format!(
-                "{server}/session/{session_id}/message?order=desc&limit=200"
+                "{server}/v2/sessions/{session_id}/messages?order=desc&limit=200"
             ))
             .send()
             .await?,
     )
     .await?;
     let providers =
-        response_json(client.get(format!("{server}/provider")).send().await?).await?;
-    let Some(messages) = messages.as_array() else {
+        response_json(client.get(format!("{server}/v2/providers")).send().await?).await?;
+    let Some(messages) = messages.get("items").and_then(Value::as_array) else {
         return Ok(None);
     };
     Ok(context_usage_label(messages, &providers))
@@ -414,7 +417,7 @@ pub(crate) async fn fetch_session_undo_tree(
 ) -> anyhow::Result<Value> {
     response_json(
         client
-            .get(format!("{server}/session/{session_id}/undo/tree"))
+            .get(format!("{server}/v2/sessions/{session_id}/undo-tree"))
             .send()
             .await?,
     )
@@ -428,7 +431,7 @@ pub(crate) async fn fetch_session_queue(
 ) -> anyhow::Result<Value> {
     response_json(
         client
-            .get(format!("{server}/session/{session_id}/queue"))
+            .get(format!("{server}/v2/sessions/{session_id}/queue"))
             .send()
             .await?,
     )
@@ -439,14 +442,14 @@ pub(crate) async fn fetch_permission_requests(
     client: &reqwest::Client,
     server: &str,
 ) -> anyhow::Result<Value> {
-    response_json(client.get(format!("{server}/permission")).send().await?).await
+    response_json(client.get(format!("{server}/v2/interactions/permissions")).send().await?).await
 }
 
 pub(crate) async fn fetch_question_requests(
     client: &reqwest::Client,
     server: &str,
 ) -> anyhow::Result<Value> {
-    response_json(client.get(format!("{server}/question")).send().await?).await
+    response_json(client.get(format!("{server}/v2/interactions/questions")).send().await?).await
 }
 
 pub(crate) async fn abort_session_if_busy(
@@ -456,7 +459,7 @@ pub(crate) async fn abort_session_if_busy(
 ) -> anyhow::Result<()> {
     let statuses = response_json(
         client
-            .get(format!("{server}/session/status"))
+            .get(format!("{server}/v2/sessions/status"))
             .send()
             .await?,
     )
@@ -469,7 +472,7 @@ pub(crate) async fn abort_session_if_busy(
         .is_some_and(|status| status != "idle");
     if busy {
         let _ = client
-            .post(format!("{server}/session/{session_id}/abort"))
+            .post(format!("{server}/v2/sessions/{session_id}/abort"))
             .send()
             .await;
     }
@@ -510,12 +513,12 @@ pub(crate) async fn latest_assistant_text(
 ) -> anyhow::Result<Option<String>> {
     let value = response_json(
         client
-            .get(format!("{server}/session/{session_id}/message"))
+            .get(format!("{server}/v2/sessions/{session_id}/messages"))
             .send()
             .await?,
     )
     .await?;
-    let Some(messages) = value.as_array() else {
+    let Some(messages) = value.get("items").and_then(Value::as_array) else {
         return Ok(None);
     };
     Ok(messages

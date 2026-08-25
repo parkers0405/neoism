@@ -22,7 +22,7 @@ mod diagnostics;
 #[path = "tool_support/edit_match.rs"]
 mod edit_match;
 #[path = "tool_support/fff.rs"]
-mod fff;
+pub(crate) mod fff;
 #[path = "tool_support/file.rs"]
 mod file;
 #[path = "tool_support/format.rs"]
@@ -142,6 +142,10 @@ impl ToolContext {
 
     pub(crate) fn state(&self) -> Option<&AppState> {
         self.state.as_ref()
+    }
+
+    pub(crate) fn services(&self) -> neoism_agent_service_api::AgentServices {
+        self.state.as_ref().map(|state| state.services().clone()).unwrap_or_else(crate::standard_services)
     }
 
     pub(crate) fn session_id(&self) -> Option<&str> {
@@ -295,7 +299,7 @@ fn webfetch_handler(context: ToolContext, arguments: Value) -> ToolFuture {
 fn notes_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(async move {
         let directory = context.cwd.to_string_lossy();
-        if !crate::plugins::enabled(&directory, "dev.neoism.tools.notes") {
+        if !crate::plugins::enabled(&context.services(), &directory, "dev.neoism.tools.notes") {
             anyhow::bail!("Notes plugin is disabled for the workspace");
         }
         notes::notes_tool(context, arguments)
@@ -309,7 +313,7 @@ fn skill_handler(context: ToolContext, arguments: Value) -> ToolFuture {
 fn lsp_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(async move {
         let directory = context.cwd.to_string_lossy();
-        if !crate::plugins::enabled(&directory, "dev.neoism.lsp") {
+        if !crate::plugins::enabled(&context.services(), &directory, "dev.neoism.lsp") {
             anyhow::bail!("LSP plugin is disabled for the workspace");
         }
         crate::lsp::lsp_tool(context, arguments).await
@@ -405,13 +409,6 @@ pub(crate) fn validate_schema(
     Ok(())
 }
 
-pub(crate) fn ids() -> Vec<String> {
-    registry::definitions()
-        .iter()
-        .map(|tool| tool.id.to_string())
-        .collect()
-}
-
 pub(crate) fn list() -> Vec<ToolListItem> {
     registry::definitions()
         .iter()
@@ -419,8 +416,13 @@ pub(crate) fn list() -> Vec<ToolListItem> {
         .collect()
 }
 
-pub(crate) fn warm_search(cwd: &std::path::Path) {
-    fff::warm(cwd);
+pub(crate) fn warm_search(
+    services: &neoism_agent_service_api::AgentServices,
+    cwd: &std::path::Path,
+) {
+    if let Err(error) = services.workspace_search.warm(cwd) {
+        tracing::warn!(root = %cwd.display(), %error, "failed to warm workspace search");
+    }
 }
 
 pub(crate) async fn execute(
@@ -429,7 +431,7 @@ pub(crate) async fn execute(
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
     if let Some(plugin_id) = crate::plugins::builtin_tool_plugin(id) {
-        if !crate::plugins::enabled(&context.cwd.to_string_lossy(), plugin_id) {
+        if !crate::plugins::enabled(&context.services(), &context.cwd.to_string_lossy(), plugin_id) {
             anyhow::bail!("plugin {plugin_id} is disabled for this workspace");
         }
     }
@@ -437,6 +439,9 @@ pub(crate) async fn execute(
         .iter()
         .find(|tool| tool.id == id)
     {
+        if id == "notes" && context.state().and_then(|state| state.services().notes.as_ref()).is_none() {
+            anyhow::bail!("unknown tool {id}");
+        }
         return tool.execute(context, arguments).await;
     }
     let state = context
@@ -448,7 +453,7 @@ pub(crate) async fn execute(
         .contributions
         .get(&format!("Tool:{id}"))
         .ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
-    if !crate::plugins::enabled(&context.cwd.to_string_lossy(), &contribution.plugin_id) {
+    if !crate::plugins::enabled(&context.services(), &context.cwd.to_string_lossy(), &contribution.plugin_id) {
         anyhow::bail!("plugin {} is disabled for this workspace", contribution.plugin_id);
     }
     let tool = snapshot

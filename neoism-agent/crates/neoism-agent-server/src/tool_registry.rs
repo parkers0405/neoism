@@ -120,7 +120,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
         ),
         tool(
             "grep",
-            "Search file contents with FFF. pattern accepts one string or an array of literal alternatives. mode may be auto, plain, regex, or fuzzy. Results are bounded and include file paths and line numbers. Use several independent grep calls in parallel when their results do not depend on each other.",
+            "Search file contents. pattern accepts one string or an array of literal alternatives. mode may be auto, plain, regex, or fuzzy. Results are bounded and include file paths and line numbers. Use several independent grep calls in parallel when their results do not depend on each other.",
             json!({
                 "type": "object",
                 "properties": {
@@ -149,7 +149,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
         ),
         tool(
             "glob",
-            "Find files with FFF fuzzy path search and query constraints. pattern is a filename, path fragment, or glob expression. Keep broad queries short and scope with path when possible.",
+            "Find files with fuzzy path search and query constraints. pattern is a filename, path fragment, or glob expression. Keep broad queries short and scope with path when possible.",
             json!({
                 "type": "object",
                 "properties": {
@@ -185,7 +185,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
         ),
         tool(
             "notes",
-            "Neoism Markdown note-file operations: init, create, list, read, write, search, tasks, or taskToggle. Project-linked vaults are resolved automatically; graph indexing is disabled.",
+            "Injected note service operations: create, list, read, write, search, tasks, or taskToggle.",
             object(&[
                 ("operation", "string"),
                 ("path", "string"),
@@ -274,7 +274,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
         ),
         tool(
             "session_search",
-            "Full-text search across past session transcripts (FTS5). Use for episodic recall like \"didn't we fix this before?\". Returns bm25-ranked snippets with role and date.",
+            "Search recent session transcripts. Use for episodic recall like \"didn't we fix this before?\". Returns matching excerpts with role and date.",
             json!({
                 "type": "object",
                 "properties": {

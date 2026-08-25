@@ -14,6 +14,8 @@ neoism-protocol = { workspace = true }
 neoism-ui = { workspace = true }
 neoism-backend = { workspace = true }
 neoism-agent-server = { workspace = true }
+neoism-agent-service-api = { workspace = true }
+neoism-agent-neoism-adapter = { workspace = true }
 neoism-extensions = { workspace = true }
 neoism-workspace-index = { workspace = true }
 neoism-terminal-pty = { workspace = true }

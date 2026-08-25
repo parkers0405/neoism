@@ -18,7 +18,7 @@ use pty_buffer::PtyOutputBuffer;
 mod pty_process;
 
 pub(crate) use pty_process::{
-    resize_pty_process, serve_websocket, stop_all_pty_processes, stop_pty_process,
+    resize_pty_process, serve_websocket, stop_pty_process,
 };
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -144,7 +144,7 @@ pub(crate) fn discover_shells() -> Vec<ShellItem> {
     {
         let mut shells = ["pwsh.exe", "powershell.exe", "cmd.exe"]
             .into_iter()
-            .filter_map(crate::platform_shell::resolve_windows_command)
+            .filter_map(crate::platform_shell::resolve_command)
             .map(|path| {
                 let path = path.to_string_lossy().into_owned();
                 ShellItem {

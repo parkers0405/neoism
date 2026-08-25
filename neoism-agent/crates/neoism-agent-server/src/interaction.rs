@@ -23,8 +23,8 @@ pub(crate) struct QuestionReplyRequest {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct InteractionListQuery {
-    #[serde(alias = "sessionID")]
     pub(crate) session_id: Option<String>,
 }
 
@@ -218,7 +218,7 @@ async fn allowed_sessions(
     Some(
         sessions
             .into_iter()
-            .filter(|session| crate::caller::session_tenant(session) == claims.tenant_id)
+            .filter(|session| crate::caller::allows_session(claims, session))
             .map(|session| session.id.to_string())
             .collect(),
     )

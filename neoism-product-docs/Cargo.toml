@@ -1,0 +1,9 @@
+[package]
+name = "neoism-product-docs"
+description = "Immutable product documentation bundled with Neoism."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

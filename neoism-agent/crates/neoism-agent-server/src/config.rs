@@ -8,13 +8,9 @@ use serde_json::{json, Map, Value};
 
 #[path = "config_parse.rs"]
 mod config_parse;
-#[path = "config_sources.rs"]
-mod config_sources;
-
-use config_parse::{parse_jsonc, parse_markdown};
-use config_sources::{
-    absolute_path, config_directories, config_files_in_dir, entry_name, env_truthy,
-    global_config_files, markdown_files, project_config_files, worktree_root,
+use config_parse::parse_markdown;
+use neoism_agent_service_api::{
+    AgentServices, ConfigSnapshot, ConfigSnapshotRequest, ConfigUpdate, ConfigUpdateRequest,
 };
 
 #[derive(Clone, Debug)]
@@ -44,42 +40,21 @@ pub(crate) enum ConfigDiagnosticLevel {
     Warning,
 }
 
-pub(crate) fn load(directory: &str) -> anyhow::Result<LoadedConfig> {
-    let directory = absolute_path(directory);
-    let worktree = worktree_root(&directory);
+pub(crate) fn snapshot(services: &AgentServices, directory: &str) -> anyhow::Result<ConfigSnapshot> {
+    services.config.snapshot(&ConfigSnapshotRequest::new(directory)).map_err(Into::into)
+}
+
+pub(crate) fn load(services: &AgentServices, directory: &str) -> anyhow::Result<LoadedConfig> {
+    load_snapshot(&snapshot(services, directory)?)
+}
+
+pub(crate) fn load_snapshot(snapshot: &ConfigSnapshot) -> anyhow::Result<LoadedConfig> {
     let mut raw = json!({});
-
-    for file in global_config_files() {
-        merge_file(&mut raw, &file)?;
+    for layer in &snapshot.layers {
+        merge_value(&mut raw, layer.document.clone());
     }
-
-    if !env_truthy("NEOISM_AGENT_DISABLE_PROJECT_CONFIG") {
-        for file in project_config_files(&directory, worktree.as_deref()) {
-            merge_file(&mut raw, &file)?;
-        }
-    }
-
-    let directories = config_directories(&directory, worktree.as_deref());
-    for dir in &directories {
-        for file in config_files_in_dir(dir) {
-            merge_file(&mut raw, &file)?;
-        }
-        // Dedicated MCP catalog file (mcp.json / mcp.jsonc), the way
-        // skills get their own home. Merged AFTER the dir's config
-        // files so its entries win over any `mcp` map left in
-        // config.json.
-        merge_mcp_file(&mut raw, dir)?;
-        merge_markdown_entries(&mut raw, dir)?;
-    }
-
-    if let Ok(file) = std::env::var("NEOISM_AGENT_CONFIG") {
-        merge_file(&mut raw, &PathBuf::from(file))?;
-    }
-
-    if let Ok(content) = std::env::var("NEOISM_AGENT_CONFIG_CONTENT") {
-        let next = parse_jsonc(&content)
-            .context("failed to parse NEOISM_AGENT_CONFIG_CONTENT")?;
-        merge_value(&mut raw, next);
+    for root in &snapshot.discovery_roots {
+        merge_markdown_entries(&mut raw, &root.path)?;
     }
 
     let mut info: NeoismConfig =
@@ -88,171 +63,74 @@ pub(crate) fn load(directory: &str) -> anyhow::Result<LoadedConfig> {
     Ok(LoadedConfig { info })
 }
 
-pub(crate) fn set_mcp_enabled(
+#[cfg(test)]
+pub(crate) async fn set_mcp_enabled(
+    services: &AgentServices,
     directory: &str,
     name: &str,
     enabled: bool,
 ) -> anyhow::Result<()> {
-    let directory = absolute_path(directory);
-    let worktree = worktree_root(&directory);
-    let mut candidates = global_config_files();
-    if !env_truthy("NEOISM_AGENT_DISABLE_PROJECT_CONFIG") {
-        candidates.extend(project_config_files(&directory, worktree.as_deref()));
-    }
-    for dir in config_directories(&directory, worktree.as_deref()) {
-        candidates.extend(config_files_in_dir(&dir));
-        candidates.extend([dir.join("mcp.json"), dir.join("mcp.jsonc")]);
-    }
-    if let Ok(file) = std::env::var("NEOISM_AGENT_CONFIG") {
-        candidates.push(PathBuf::from(file));
-    }
-    if let Ok(content) = std::env::var("NEOISM_AGENT_CONFIG_CONTENT") {
-        let value = parse_jsonc(&content)
-            .context("failed to parse NEOISM_AGENT_CONFIG_CONTENT")?;
-        if mcp_entry(&value, false, false, name).is_some() {
-            anyhow::bail!(
-                "MCP server {name} is defined by read-only NEOISM_AGENT_CONFIG_CONTENT"
-            );
-        }
-    }
+    set_mcp_enabled_with_default(services, directory, name, enabled, None).await
+}
 
-    let source = candidates
+pub(crate) async fn set_mcp_enabled_with_default(
+    services: &AgentServices,
+    directory: &str,
+    name: &str,
+    enabled: bool,
+    default: Option<McpConfig>,
+) -> anyhow::Result<()> {
+    let snapshot = snapshot(services, directory)?;
+    let source = snapshot.layers
         .iter()
         .rev()
-        .find(|path| {
-            read_config_value(path).ok().flatten().is_some_and(|value| {
-                mcp_entry(
-                    &value,
-                    is_mcp_file(path),
-                    is_shared_terminal_config(path),
-                    name,
-                )
-                .is_some()
-            })
+        .find(|layer| {
+            layer.document.get("mcp").and_then(|mcp| mcp.get(name)).is_some()
         })
-        .cloned();
-    let loaded = load(directory.to_string_lossy().as_ref())?;
+        .map(|layer| {
+            if layer.writable { Ok(layer.source_id.clone()) } else {
+                Err(anyhow::anyhow!("MCP server {name} is defined by read-only config source `{}`", layer.source_id))
+            }
+        }).transpose()?;
+    let loaded = load_snapshot(&snapshot)?;
     let effective = loaded
         .info
         .mcp
         .get(name)
         .cloned()
+        .or(default)
         .with_context(|| format!("MCP server {name} is not configured"))?;
-    let path = source
-        .unwrap_or_else(|| PathBuf::from(crate::default_config_dir()).join("mcp.json"));
-    let dedicated = is_mcp_file(&path);
-    let mut value = read_config_value(&path)?.unwrap_or_else(|| json!({}));
-    let root = mcp_map_mut(&mut value, dedicated, is_shared_terminal_config(&path))?;
-    let entry = root
-        .entry(name.to_string())
-        .or_insert(serde_json::to_value(effective)?);
-    let object = entry
-        .as_object_mut()
+    let source_id = source.unwrap_or_else(|| snapshot.writable_target.source_id.clone());
+    let mut entry = serde_json::to_value(effective)?;
+    let object = entry.as_object_mut()
         .with_context(|| format!("MCP server {name} config is not an object"))?;
     object.insert("enabled".to_string(), Value::Bool(enabled));
-    write_config_value(&path, &value)
-}
-
-fn read_config_value(path: &Path) -> anyhow::Result<Option<Value>> {
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file {}", path.display()))?;
-    Ok(Some(parse_jsonc(&text).with_context(|| {
-        format!("failed to parse config file {}", path.display())
-    })?))
-}
-
-fn is_mcp_file(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("mcp.json" | "mcp.jsonc")
-    )
-}
-
-fn mcp_entry<'a>(
-    value: &'a Value,
-    dedicated: bool,
-    shared: bool,
-    name: &str,
-) -> Option<&'a Value> {
-    if dedicated {
-        value.get("mcp").unwrap_or(value).get(name)
-    } else if shared {
-        value.get("agent")?.get("mcp")?.get(name)
-    } else {
-        value.get("mcp")?.get(name)
-    }
-}
-
-fn mcp_map_mut(
-    value: &mut Value,
-    dedicated: bool,
-    shared: bool,
-) -> anyhow::Result<&mut Map<String, Value>> {
-    let wrapped = dedicated && value.get("mcp").is_some();
-    let target = if wrapped {
-        value
-    } else if shared {
-        value
-            .as_object_mut()
-            .context("config root is not an object")?
-            .entry("agent")
-            .or_insert_with(|| json!({}))
-    } else {
-        value
-    };
-    if dedicated && !wrapped {
-        return target
-            .as_object_mut()
-            .context("MCP config root is not an object");
-    }
-    let object = target
-        .as_object_mut()
-        .context("config root is not an object")?;
-    object
-        .entry("mcp")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .context("mcp config is not an object")
-}
-
-fn write_config_value(path: &Path, value: &Value) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temp = path.with_extension("neoism.tmp");
-    std::fs::write(&temp, format!("{}\n", serde_json::to_string_pretty(value)?))?;
-    std::fs::rename(&temp, path)
-        .with_context(|| format!("failed to replace config file {}", path.display()))
+    services.config.update(&ConfigUpdateRequest {
+        workspace: PathBuf::from(directory),
+        source_id,
+        update: ConfigUpdate::SetValue { path: vec!["mcp".into(), name.into()], value: entry },
+    }).await.map(|_| ()).map_err(Into::into)
 }
 
 #[cfg(test)]
 mod mcp_write_tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    #[test]
-    fn set_mcp_enabled_updates_the_owning_project_file() {
-        let _lock = env_lock().lock().unwrap();
+    #[tokio::test]
+    async fn set_mcp_enabled_updates_the_owning_source_id() {
         let root = std::env::temp_dir()
             .join(format!("neoism-mcp-toggle-{}", std::process::id()));
         let project = root.join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let config = project.join("neoism.json");
+        std::fs::create_dir_all(project.join(".agent")).unwrap();
+        let config = project.join(".agent/agent.json");
         std::fs::write(
             &config,
             r#"{"mcp":{"neoism-toggle-test":{"type":"remote","url":"https://example.com/mcp","enabled":true}},"theme":"keep"}"#,
         )
         .unwrap();
-        std::env::set_var("NEOISM_AGENT_DISABLE_PROJECT_CONFIG", "0");
-        set_mcp_enabled(project.to_str().unwrap(), "neoism-toggle-test", false).unwrap();
+        let services = AgentServices::new(std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
+            .with_config(std::sync::Arc::new(neoism_agent_service_api::StandardConfigSourceService::new(root.join("user"))));
+        set_mcp_enabled(&services, project.to_str().unwrap(), "neoism-toggle-test", false).await.unwrap();
         let value: Value =
             serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
         assert_eq!(value["mcp"]["neoism-toggle-test"]["enabled"], false);
@@ -261,10 +139,67 @@ mod mcp_write_tests {
     }
 }
 
-pub(crate) fn roots(directory: &str) -> Vec<PathBuf> {
-    let directory = absolute_path(directory);
-    let worktree = worktree_root(&directory);
-    config_directories(&directory, worktree.as_deref())
+#[cfg(test)]
+mod service_boundary_tests {
+    use super::*;
+    use neoism_agent_service_api::{
+        ConfigDiscoveryRoot, ConfigLayer, ConfigSourceService, ConfigWritableTarget,
+        ServiceError, ServiceFuture,
+    };
+    use std::sync::Arc;
+
+    struct FakeConfig(Value);
+
+    impl ConfigSourceService for FakeConfig {
+        fn snapshot(&self, request: &ConfigSnapshotRequest) -> Result<ConfigSnapshot, ServiceError> {
+            Ok(ConfigSnapshot {
+                identity: self.0.to_string(),
+                workspace: request.workspace.clone(),
+                layers: vec![ConfigLayer { source_id: "fake".into(), document: self.0.clone(), writable: false }],
+                discovery_roots: Vec::<ConfigDiscoveryRoot>::new(),
+                writable_target: ConfigWritableTarget { source_id: "fake".into(), label: "fake".into() },
+            })
+        }
+
+        fn update<'a>(&'a self, _request: &'a ConfigUpdateRequest) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+            Box::pin(async { Err(ServiceError::new("read only")) })
+        }
+    }
+
+    fn fake_services(model: &str) -> AgentServices {
+        AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
+            .with_config(Arc::new(FakeConfig(json!({ "model": model }))))
+    }
+
+    #[tokio::test]
+    async fn app_states_keep_injected_config_sources_isolated() {
+        let root = std::env::temp_dir().join(format!("agent-config-isolation-{}", neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = crate::state::AppState::open_database_with_services(root.join("first.db"), fake_services("one/model")).await.unwrap();
+        let second = crate::state::AppState::open_database_with_services(root.join("second.db"), fake_services("two/model")).await.unwrap();
+        assert_eq!(load(first.services(), root.to_str().unwrap()).unwrap().info.model.as_deref(), Some("one/model"));
+        assert_eq!(load(second.services(), root.to_str().unwrap()).unwrap().info.model.as_deref(), Some("two/model"));
+        assert_eq!(load(first.services(), root.to_str().unwrap()).unwrap().info.model.as_deref(), Some("one/model"));
+        drop((first, second));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generic_server_never_interprets_product_gui_groups() {
+        let services = AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
+            .with_config(Arc::new(FakeConfig(json!({
+                "agent": { "desktop-agent": { "model": "hidden/model" } },
+                "terminal": { "shell": "fish" }
+            }))));
+        let loaded = load(&services, "/workspace").unwrap();
+        assert!(loaded.info.model.is_none());
+        assert!(loaded.info.shell.is_none());
+        assert!(loaded.info.extra.contains_key("terminal"));
+    }
+}
+
+pub(crate) fn roots(services: &AgentServices, directory: &str) -> Vec<PathBuf> {
+    snapshot(services, directory).map(|snapshot| snapshot.discovery_roots.into_iter().map(|root| root.path).collect()).unwrap_or_default()
 }
 
 pub(crate) fn formatter_value(info: &NeoismConfig) -> Option<Value> {
@@ -280,8 +215,8 @@ pub(crate) fn formatter_value(info: &NeoismConfig) -> Option<Value> {
     }
 }
 
-pub(crate) fn validate(directory: &str) -> ConfigValidation {
-    match load(directory) {
+pub(crate) fn validate(services: &AgentServices, directory: &str) -> ConfigValidation {
+    match load(services, directory) {
         Ok(loaded) => validate_loaded(&loaded.info),
         Err(error) => ConfigValidation {
             ok: false,
@@ -423,85 +358,6 @@ fn warning(path: impl Into<String>, message: impl Into<String>) -> ConfigDiagnos
     }
 }
 
-fn merge_file(raw: &mut Value, path: &Path) -> anyhow::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file {}", path.display()))?;
-    let next = parse_jsonc(&text)
-        .with_context(|| format!("failed to parse config file {}", path.display()))?;
-    // The terminal's golden `config.json` groups agent settings under an
-    // `agent` block (and terminal settings under `terminal`, etc.). Feed
-    // the agent only its own block — plus the shared `terminal.shell` as
-    // the shell fallback. A dedicated `neoism.json` IS an agent config, so
-    // it is merged at its root unchanged.
-    let next = if is_shared_terminal_config(path) {
-        shared_config_agent_view(next)
-    } else {
-        next
-    };
-    merge_value(raw, next);
-    Ok(())
-}
-
-/// True for the terminal's shared `config.json` / `config.jsonc` (which
-/// nests agent keys under `agent`), false for dedicated `neoism.json`
-/// agent configs and everything else.
-fn is_shared_terminal_config(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("config.json") | Some("config.jsonc")
-    )
-}
-
-/// Project the terminal's grouped `config.json` down to just the agent's
-/// view: the `agent` block, with the shared `terminal.shell` filled in as
-/// the agent's shell when the block did not set its own. All other groups
-/// (`appearance`, `terminal`, `ui`, …) are the terminal's concern and are
-/// dropped so they never leak into the agent config.
-fn shared_config_agent_view(next: Value) -> Value {
-    let Value::Object(root) = next else {
-        return json!({});
-    };
-    let mut agent = match root.get("agent") {
-        Some(Value::Object(block)) => block.clone(),
-        _ => serde_json::Map::new(),
-    };
-    if !agent.contains_key("shell") {
-        if let Some(Value::Object(terminal)) = root.get("terminal") {
-            if let Some(shell) = terminal.get("shell") {
-                agent.insert("shell".to_string(), shell.clone());
-            }
-        }
-    }
-    Value::Object(agent)
-}
-
-/// `mcp.json` / `mcp.jsonc` in a config dir — a standalone MCP server
-/// catalog. Accepts either the wrapped form `{ "mcp": { id: {...} } }`
-/// (what the extensions page writes) or a bare `{ id: {...} }` map,
-/// which gets wrapped before merging.
-fn merge_mcp_file(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
-    for name in ["mcp.json", "mcp.jsonc"] {
-        let path = dir.join(name);
-        if !path.is_file() {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read mcp file {}", path.display()))?;
-        let value = parse_jsonc(&text)
-            .with_context(|| format!("failed to parse mcp file {}", path.display()))?;
-        let wrapped = if value.get("mcp").is_some() {
-            value
-        } else {
-            serde_json::json!({ "mcp": value })
-        };
-        merge_value(raw, wrapped);
-    }
-    Ok(())
-}
-
 fn merge_markdown_entries(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
     for root_name in ["agent", "agents"] {
         let root = dir.join(root_name);
@@ -562,6 +418,26 @@ fn merge_markdown_entries(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn markdown_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    fn collect(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() { collect(&path, files)?; }
+            else if path.extension().and_then(|ext| ext.to_str()) == Some("md") { files.push(path); }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    if root.is_dir() { collect(root, &mut files)?; }
+    files.sort();
+    Ok(files)
+}
+
+fn entry_name(root: &Path, file: &Path) -> String {
+    file.strip_prefix(root).unwrap_or(file).with_extension("").components()
+        .map(|component| component.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
 }
 
 fn set_named_entry(raw: &mut Value, field: &str, name: &str, value: Value) {
@@ -630,43 +506,6 @@ fn merge_unique_array(target: &mut Value, source: Value) {
 }
 
 fn normalize_config(info: &mut NeoismConfig) {
-    info.mcp
-        .entry(crate::mcp_notes::NOTES_MCP_ID.to_string())
-        .or_insert_with(|| McpConfig::Local {
-            command: vec![
-                "builtin".to_string(),
-                crate::mcp_notes::NOTES_MCP_ID.to_string(),
-            ],
-            args: None,
-            environment: None,
-            enabled: Some(true),
-            timeout: None,
-        });
-    info.mcp
-        .entry(crate::mcp_memory::MEMORY_MCP_ID.to_string())
-        .or_insert_with(|| McpConfig::Local {
-            command: vec![
-                "builtin".to_string(),
-                crate::mcp_memory::MEMORY_MCP_ID.to_string(),
-            ],
-            args: None,
-            environment: None,
-            enabled: Some(true),
-            timeout: None,
-        });
-    info.mcp
-        .entry(crate::mcp_docs::DOCS_MCP_ID.to_string())
-        .or_insert_with(|| McpConfig::Local {
-            command: vec![
-                "builtin".to_string(),
-                crate::mcp_docs::DOCS_MCP_ID.to_string(),
-            ],
-            args: None,
-            environment: None,
-            enabled: Some(true),
-            timeout: None,
-        });
-
     for (name, mut config) in std::mem::take(&mut info.mode) {
         config.mode = Some("primary".to_string());
         info.agent.insert(name, config);
@@ -719,6 +558,27 @@ fn normalize_config(info: &mut NeoismConfig) {
     }
 }
 
+pub(crate) fn builtin_mcp_config(id: &str) -> McpConfig {
+    McpConfig::Local {
+        command: vec!["builtin".to_string(), id.to_string()],
+        args: None,
+        environment: None,
+        enabled: Some(true),
+        timeout: None,
+    }
+}
+
+pub(crate) fn inject_builtin_mcp(
+    info: &mut NeoismConfig,
+    services: &neoism_agent_service_api::AgentServices,
+) {
+    for (id, _) in services.builtin_mcp_services() {
+        info.mcp
+            .entry(id.to_string())
+            .or_insert_with(|| builtin_mcp_config(id));
+    }
+}
+
 fn normalize_plugin_config(plugin: &mut PluginConfig) {
     plugin.id = plugin
         .id
@@ -753,60 +613,5 @@ fn merge_permission_maps(
 ) {
     for (key, value) in source {
         target.entry(key).or_insert(value);
-    }
-}
-
-#[cfg(test)]
-mod agent_view_tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn shared_config_json_is_projected_to_its_agent_block() {
-        assert!(is_shared_terminal_config(Path::new("/x/config.json")));
-        assert!(is_shared_terminal_config(Path::new("/x/config.jsonc")));
-        assert!(!is_shared_terminal_config(Path::new("/x/neoism.json")));
-
-        let view = shared_config_agent_view(json!({
-            "appearance": { "theme": "tokyo_night" },
-            "terminal": { "shell": { "program": "fish" } },
-            "ui": { "status-fps": false },
-            "agent": {
-                "model": "anthropic/claude-opus-5",
-                "text-verbosity": "high",
-                "permission": { "edit": "ask" }
-            }
-        }));
-        // Only the agent block survives — terminal/appearance/ui are dropped.
-        assert_eq!(view["model"], "anthropic/claude-opus-5");
-        assert_eq!(view["text-verbosity"], "high");
-        assert_eq!(view["permission"]["edit"], "ask");
-        assert!(view.get("appearance").is_none());
-        assert!(view.get("ui").is_none());
-        // The shared terminal shell fills in as the agent's shell.
-        assert_eq!(view["shell"], json!({ "program": "fish" }));
-        let parsed: NeoismConfig = serde_json::from_value(view).unwrap();
-        assert_eq!(
-            parsed.text_verbosity,
-            Some(neoism_agent_core::TextVerbosity::High)
-        );
-    }
-
-    #[test]
-    fn agent_shell_wins_over_shared_terminal_shell() {
-        let view = shared_config_agent_view(json!({
-            "terminal": { "shell": { "program": "fish" } },
-            "agent": { "shell": "bash" }
-        }));
-        assert_eq!(view["shell"], "bash");
-    }
-
-    #[test]
-    fn shared_config_without_agent_block_yields_only_shared_shell() {
-        let view = shared_config_agent_view(json!({
-            "terminal": { "shell": { "program": "zsh" } }
-        }));
-        assert_eq!(view["shell"], json!({ "program": "zsh" }));
-        assert!(view.get("model").is_none());
     }
 }

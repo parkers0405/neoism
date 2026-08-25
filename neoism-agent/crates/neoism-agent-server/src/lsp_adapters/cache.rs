@@ -17,20 +17,27 @@ const MAX_CACHED_ROOTS: usize = 64;
 #[derive(Clone)]
 struct CachedAdapters {
     loaded_at: Instant,
+    snapshot_identity: String,
     adapters: Vec<LanguageAdapter>,
 }
 
 static ADAPTER_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedAdapters>>> = OnceLock::new();
 pub(in crate::lsp) fn adapters_for_root(root: &Path) -> Vec<LanguageAdapter> {
+    let services = crate::standard_services();
+    adapters_for_root_with(&services, root)
+}
+
+pub(in crate::lsp) fn adapters_for_root_with(services: &neoism_agent_service_api::AgentServices, root: &Path) -> Vec<LanguageAdapter> {
+    let snapshot_identity = crate::config::snapshot(services, &root.to_string_lossy()).map(|snapshot| snapshot.identity).unwrap_or_default();
     let cache = ADAPTER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(cache) = cache.lock() {
         if let Some(cached) = cache.get(root) {
-            if cached.loaded_at.elapsed() < ADAPTER_CACHE_TTL {
+            if cached.loaded_at.elapsed() < ADAPTER_CACHE_TTL && cached.snapshot_identity == snapshot_identity {
                 return cached.adapters.clone();
             }
         }
     }
-    let adapters = resolve_adapters_uncached(root);
+    let adapters = resolve_adapters_uncached(services, root);
     if let Ok(mut cache) = cache.lock() {
         if cache.len() >= MAX_CACHED_ROOTS && !cache.contains_key(root) {
             if let Some(oldest) = cache
@@ -45,6 +52,7 @@ pub(in crate::lsp) fn adapters_for_root(root: &Path) -> Vec<LanguageAdapter> {
             root.to_path_buf(),
             CachedAdapters {
                 loaded_at: Instant::now(),
+                snapshot_identity,
                 adapters: adapters.clone(),
             },
         );
@@ -61,12 +69,12 @@ pub(in crate::lsp) fn invalidate_adapter_cache(root: &Path) {
     }
 }
 
-fn resolve_adapters_uncached(root: &Path) -> Vec<LanguageAdapter> {
+fn resolve_adapters_uncached(services: &neoism_agent_service_api::AgentServices, root: &Path) -> Vec<LanguageAdapter> {
     let mut adapters = LANGUAGE_SPECS
         .iter()
         .map(LanguageAdapter::from_builtin)
         .collect::<Vec<_>>();
-    let Ok(loaded) = crate::config::load(&root.to_string_lossy()) else {
+    let Ok(loaded) = crate::config::load(services, &root.to_string_lossy()) else {
         return adapters;
     };
     let servers = match loaded.info.lsp {

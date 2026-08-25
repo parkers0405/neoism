@@ -36,7 +36,6 @@ pub(crate) struct V2EventQuery {
     pub since: Option<u64>,
     pub limit: Option<usize>,
     pub tail: Option<bool>,
-    #[serde(alias = "sessionID")]
     pub session_id: Option<String>,
 }
 
@@ -61,7 +60,7 @@ pub(crate) async fn v2_capabilities(
     let mut capabilities = crate::plugins::capabilities(&state.inner.plugin_host.snapshot());
     for capability in capabilities.iter_mut().filter(|capability| capability.disableable) {
         let Some(plugin_id) = capability.plugin_id.as_deref() else { continue };
-        let enabled = crate::plugins::enabled(&directory, plugin_id);
+        let enabled = crate::plugins::enabled(state.services(), &directory, plugin_id);
         capability.enabled = enabled;
         capability.reason = (!enabled).then(|| "disabled by workspace config".to_string());
     }
@@ -75,7 +74,7 @@ pub(crate) async fn v2_plugins(
 ) -> Json<Vec<PluginManifestInfo>> {
     let directory = resolve_directory(query.directory, &headers);
     let mut manifests = crate::plugins::manifests(&state.inner.plugin_host.snapshot());
-    apply_workspace_plugin_status(&mut manifests, &directory);
+    apply_workspace_plugin_status(state.services(), &mut manifests, &directory);
     Json(manifests)
 }
 
@@ -87,7 +86,7 @@ pub(crate) async fn v2_plugin(
 ) -> Result<Json<PluginManifestInfo>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     let mut manifests = crate::plugins::manifests(&state.inner.plugin_host.snapshot());
-    apply_workspace_plugin_status(&mut manifests, &directory);
+    apply_workspace_plugin_status(state.services(), &mut manifests, &directory);
     manifests
         .into_iter()
         .find(|plugin| plugin.id == plugin_id)
@@ -95,9 +94,9 @@ pub(crate) async fn v2_plugin(
         .ok_or_else(|| ApiError::not_found("Plugin not found"))
 }
 
-fn apply_workspace_plugin_status(manifests: &mut [PluginManifestInfo], directory: &str) {
+fn apply_workspace_plugin_status(services: &neoism_agent_service_api::AgentServices, manifests: &mut [PluginManifestInfo], directory: &str) {
     for plugin in manifests.iter_mut().filter(|plugin| plugin.disableable) {
-        let enabled = crate::plugins::enabled(directory, &plugin.id);
+        let enabled = crate::plugins::enabled(services, directory, &plugin.id);
         plugin.enabled = enabled;
         plugin.active = enabled;
         plugin.reason = (!enabled).then(|| "disabled by workspace config".to_string());
@@ -203,7 +202,6 @@ fn v2_sse_event(envelope: EventEnvelope<Value>) -> Event {
 pub(crate) struct V2PromptRequest {
     pub prompt: Option<String>,
     pub delivery: Option<String>,
-    #[serde(alias = "messageID")]
     pub message_id: Option<MessageId>,
     pub model: Option<UserModel>,
     pub agent: Option<String>,
@@ -211,6 +209,7 @@ pub(crate) struct V2PromptRequest {
     pub no_reply: bool,
     pub system: Option<String>,
     pub tools: Option<BTreeMap<String, bool>>,
+    pub author: Option<String>,
     pub parts: Option<Vec<PromptPart>>,
     pub variant: Option<String>,
 }
@@ -222,7 +221,7 @@ pub(crate) async fn v2_session_list(
 ) -> Result<Json<Page<SessionInfo>>, ApiError> {
     let mut sessions = state.inner.store.list_sessions().await?;
     if let Some(Extension(claims)) = claims {
-        sessions.retain(|session| crate::caller::session_tenant(session) == claims.tenant_id);
+        sessions.retain(|session| crate::caller::allows_session(&claims, session));
     }
     filter_sessions(&mut sessions, &query);
     Ok(Json(Page {
@@ -255,6 +254,10 @@ pub(crate) async fn v2_prompt(
         ));
     }
     let prompt = request.into_prompt_request()?;
+    if prompt.no_reply && !state.inner.runs.read().await.contains_key(&session_id) {
+        crate::session_prompt::append_prompt(&state, &session_id, prompt, false).await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     enqueue_v2_prompt(&state, &session_id, prompt, &delivery).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -332,7 +335,7 @@ impl V2PromptRequest {
             no_reply: self.no_reply,
             system: self.system,
             tools: self.tools,
-            author: None,
+            author: self.author,
             parts,
         })
     }

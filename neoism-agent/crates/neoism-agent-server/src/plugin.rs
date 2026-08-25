@@ -419,11 +419,15 @@ impl ProcessPlugin {
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")?
-        .to_string_lossy()
-        .split(if cfg!(windows) { ';' } else { ':' })
-        .map(|directory| Path::new(directory).join(name))
-        .find(|path| path.is_file())
+    let request = neoism_agent_service_api::ExecutableRequest::new(
+        name,
+        neoism_agent_service_api::ExecutablePurpose::Sandbox,
+    );
+    crate::lsp::agent_services()
+        .executables
+        .resolve(&request)
+        .ok()
+        .map(|result| result.path)
 }
 
 #[derive(Clone)]
@@ -497,13 +501,14 @@ impl PluginRegistry {
 
     pub(crate) fn register_configured_plugins(
         &self,
+        services: &neoism_agent_service_api::AgentServices,
         config: &NeoismConfig,
         directory: &str,
     ) -> Vec<PluginStatusInfo> {
         let mut statuses = Vec::new();
         for plugin in configured_plugins(config)
             .into_iter()
-            .chain(discovered_plugin_configs(directory))
+            .chain(discovered_plugin_configs(services, directory))
         {
             let Some(id) = plugin_id(&plugin) else {
                 continue;
@@ -544,7 +549,7 @@ impl PluginRegistry {
                     plugin: Arc::new(ConfiguredInternalPlugin { definition }),
                 }
             } else {
-                match load_declarative_plugin(directory, &id, &options) {
+                match load_declarative_plugin(services, directory, &id, &options) {
                     Ok(plugin) => RegisteredPlugin {
                         id: plugin.id.clone(),
                         name: plugin.id.clone(),
@@ -578,6 +583,7 @@ impl PluginRegistry {
         statuses
     }
 
+    #[cfg(test)]
     pub(crate) fn statuses(&self) -> Vec<PluginStatusInfo> {
         self.statuses
             .read()
@@ -787,15 +793,15 @@ fn internal_plugin_definition(id: &str) -> Option<InternalPluginDefinition> {
 #[serde(rename_all = "camelCase")]
 struct DeclarativePluginFile {
     id: Option<String>,
-    #[serde(default, alias = "chat_headers")]
+    #[serde(default)]
     chat_headers: BTreeMap<String, String>,
-    #[serde(default, alias = "providerHeaders")]
+    #[serde(default)]
     provider_headers: BTreeMap<String, String>,
-    #[serde(default, alias = "chat_options", alias = "chatParams")]
+    #[serde(default)]
     chat_options: BTreeMap<String, Value>,
-    #[serde(default, alias = "providerOptions")]
+    #[serde(default)]
     provider_options: BTreeMap<String, Value>,
-    #[serde(default, alias = "shell_env")]
+    #[serde(default)]
     shell_env: BTreeMap<String, String>,
     #[serde(default)]
     chat: BTreeMap<String, Value>,
@@ -805,7 +811,7 @@ struct DeclarativePluginFile {
     shell: BTreeMap<String, Value>,
     #[serde(default)]
     command: Option<Value>,
-    #[serde(default, alias = "timeout_ms")]
+    #[serde(default)]
     timeout_ms: Option<u64>,
     #[serde(default)]
     sandbox: Option<bool>,
@@ -814,11 +820,12 @@ struct DeclarativePluginFile {
 }
 
 fn load_declarative_plugin(
+    services: &neoism_agent_service_api::AgentServices,
     directory: &str,
     id: &str,
     options: &BTreeMap<String, Value>,
 ) -> anyhow::Result<DeclarativePlugin> {
-    let path = resolve_plugin_manifest(directory, id, options).ok_or_else(|| {
+    let path = resolve_plugin_manifest(services, directory, id, options).ok_or_else(|| {
         anyhow::anyhow!(
             "unsupported plugin id; configure a JSON manifest path or place {id}.json under plugin(s)/"
         )
@@ -907,6 +914,7 @@ fn process_plugin(value: &Value) -> anyhow::Result<Vec<String>> {
 }
 
 fn resolve_plugin_manifest(
+    services: &neoism_agent_service_api::AgentServices,
     directory: &str,
     id: &str,
     options: &BTreeMap<String, Value>,
@@ -919,33 +927,33 @@ fn resolve_plugin_manifest(
         .filter(|value| !value.trim().is_empty());
     let mut candidates = Vec::new();
     if let Some(path) = explicit {
-        candidates.extend(resolve_path_candidates(directory, path));
+        candidates.extend(resolve_path_candidates(services, directory, path));
     }
     if id.ends_with(".json") || id.contains('/') || id.starts_with('.') {
-        candidates.extend(resolve_path_candidates(directory, id));
+        candidates.extend(resolve_path_candidates(services, directory, id));
     }
-    for root in crate::config::roots(directory) {
+    for root in crate::config::roots(services, directory) {
         candidates.push(root.join("plugins").join(format!("{id}.json")));
         candidates.push(root.join("plugin").join(format!("{id}.json")));
     }
     candidates.into_iter().find(|path| path.is_file())
 }
 
-fn resolve_path_candidates(directory: &str, raw: &str) -> Vec<PathBuf> {
+fn resolve_path_candidates(services: &neoism_agent_service_api::AgentServices, directory: &str, raw: &str) -> Vec<PathBuf> {
     let raw = PathBuf::from(raw);
     if raw.is_absolute() {
         return vec![raw];
     }
     let mut candidates = vec![Path::new(directory).join(&raw)];
-    for root in crate::config::roots(directory) {
+    for root in crate::config::roots(services, directory) {
         candidates.push(root.join(&raw));
     }
     candidates
 }
 
-fn discovered_plugin_configs(directory: &str) -> Vec<PluginConfig> {
+fn discovered_plugin_configs(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<PluginConfig> {
     let mut configs = Vec::new();
-    for root in crate::config::roots(directory) {
+    for root in crate::config::roots(services, directory) {
         for folder in ["plugins", "plugin"] {
             let dir = root.join(folder);
             let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -978,7 +986,33 @@ fn discovered_plugin_configs(directory: &str) -> Vec<PluginConfig> {
 #[cfg(all(test, unix))]
 mod process_tests {
     use super::*;
+    use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn declarative_manifest_uses_only_camel_case_public_fields() {
+        let canonical: DeclarativePluginFile = serde_json::from_value(json!({
+            "chatHeaders": { "X-Chat": "yes" },
+            "providerHeaders": { "X-Provider": "yes" },
+            "chatOptions": { "temperature": 0 },
+            "timeoutMs": 500
+        }))
+        .unwrap();
+        assert_eq!(canonical.chat_headers["X-Chat"], "yes");
+        assert_eq!(canonical.provider_headers["X-Provider"], "yes");
+        assert_eq!(canonical.chat_options["temperature"], 0);
+        assert_eq!(canonical.timeout_ms, Some(500));
+
+        let legacy: DeclarativePluginFile = serde_json::from_value(json!({
+            "chat_headers": { "X-Legacy": "yes" },
+            "chatParams": { "temperature": 1 },
+            "timeout_ms": 900
+        }))
+        .unwrap();
+        assert!(legacy.chat_headers.is_empty());
+        assert!(legacy.chat_options.is_empty());
+        assert_eq!(legacy.timeout_ms, None);
+    }
 
     #[test]
     fn subprocess_hook_uses_versioned_json_protocol() {

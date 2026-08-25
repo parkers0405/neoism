@@ -1,5 +1,3 @@
-use axum::extract::{Path, State};
-use axum::Json;
 use neoism_agent_core::{
     event_type, EventPayload, Id, IdKind, PermissionAction, PermissionRequestInfo,
     PermissionRule,
@@ -65,18 +63,8 @@ pub(crate) fn permission_denied(
     })
 }
 
-use crate::interaction::PermissionReplyRequest;
 use crate::permission;
 use crate::state::{AppState, PermissionPending};
-
-pub(crate) async fn session_permission_respond(
-    State(state): State<AppState>,
-    Path((_session_id, permission_id)): Path<(String, String)>,
-    Json(_reply): Json<PermissionReplyRequest>,
-) -> Json<bool> {
-    state.inner.permissions.write().await.remove(&permission_id);
-    Json(true)
-}
 
 pub(crate) fn parse_permission_required_error(error: &str) -> Option<(String, String)> {
     let marker = error.find(PERMISSION_REQUIRED_PREFIX)?;

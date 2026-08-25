@@ -4,7 +4,6 @@
 //! daemons, and agent tools all use the same parser, schema, and query logic.
 
 pub mod config;
-pub mod docs;
 pub mod frontmatter;
 pub mod graph_db;
 pub mod link_repair;

@@ -82,7 +82,7 @@ pub(crate) async fn append_prompt(
     let workspace = state
         .inner
         .workspace_runtimes
-        .acquire(&info.directory, &state.inner.plugins)
+        .acquire(&info.directory, &state.inner.plugins, state.services())
         .await;
     if create_stub_reply && state.inner.runs.read().await.contains_key(&session_id_text) {
         return Err(ApiError::conflict(SESSION_RUNNING_CONFLICT));
@@ -750,9 +750,6 @@ fn active_goal_should_continue(
     step_number: u64,
     step_limit: u64,
 ) -> bool {
-    if !crate::plugins::enabled(&info.directory, "dev.neoism.goals") {
-        return false;
-    }
     if step_number >= step_limit {
         return false;
     }
@@ -1585,11 +1582,12 @@ mod tests {
             neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
         ));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("neoism.json"), r#"{ "text-verbosity": "high" }"#)
+        std::fs::create_dir_all(root.join(".agent")).unwrap();
+        std::fs::write(root.join(".agent/agent.json"), r#"{ "text-verbosity": "high" }"#)
             .unwrap();
 
         assert_eq!(
-            configured_text_verbosity(root.to_str()),
+            configured_text_verbosity(&crate::standard_services(), root.to_str()),
             Some(neoism_agent_core::TextVerbosity::High)
         );
         let _ = std::fs::remove_dir_all(root);
@@ -2192,7 +2190,7 @@ async fn build_provider_generation_request(
                 state
                     .inner
                     .workspace_runtimes
-                    .acquire(directory, &state.inner.plugins)
+                    .acquire(directory, &state.inner.plugins, state.services())
                     .await,
             )
         } else {
@@ -2210,7 +2208,7 @@ async fn build_provider_generation_request(
         model_id: model.model_id.clone(),
         session_id: hook_ctx.map(|ctx| ctx.session_id.clone()),
         variant: model.variant.clone(),
-        text_verbosity: configured_text_verbosity(directory),
+        text_verbosity: configured_text_verbosity(state.services(), directory),
         api: metadata.api,
         auth_env: metadata.auth_env,
         messages,
@@ -2221,10 +2219,11 @@ async fn build_provider_generation_request(
 }
 
 pub(crate) fn configured_text_verbosity(
+    services: &neoism_agent_service_api::AgentServices,
     directory: Option<&str>,
 ) -> Option<neoism_agent_core::TextVerbosity> {
     directory.and_then(|directory| {
-        crate::config::load(directory)
+        crate::config::load(services, directory)
             .ok()
             .and_then(|loaded| loaded.info.text_verbosity)
     })

@@ -5,7 +5,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -764,6 +764,8 @@ pub struct NeoismAgentPane {
     skill_options: Vec<NeoismAgentPickerOption>,
     skill_options_directory: Option<Option<String>>,
     file_mention_anchor: Option<usize>,
+    file_mention_search: std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchService>,
+    file_mention_root_pin: Mutex<Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
     event_stream: Option<AgentSessionEventStream>,
     /// Transcript/state caches keyed by real session id. Parent and child
     /// sessions remain resident while navigation only changes `session_id`,
@@ -1051,6 +1053,8 @@ impl Default for NeoismAgentPane {
             skill_options: Vec::new(),
             skill_options_directory: None,
             file_mention_anchor: None,
+            file_mention_search: neoism_agent_server::standard_workspace_search(),
+            file_mention_root_pin: Mutex::new(None),
             event_stream: None,
             session_cache: HashMap::new(),
             session_preloads_in_flight: BTreeSet::new(),
@@ -1185,10 +1189,11 @@ mod submit;
 mod timeline;
 
 /// Options for the agent input bar's `@` file-mention picker. Candidates
-/// come from fff-search fuzzy file search (the same engine as the Alt+S
-/// finder) rooted at `root`, ranked best-first by fff's score and capped
-/// to `limit`. An empty `query` returns fff's top files (frecency-ranked).
+/// come from the workspace search service rooted at `root`, ranked best-first
+/// and capped to `limit`.
 fn file_mention_options(
+    search: &dyn neoism_agent_service_api::WorkspaceSearchService,
+    active_root: &Mutex<Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
     root: &Path,
     query: &str,
     limit: usize,
@@ -1199,29 +1204,7 @@ fn file_mention_options(
     // Over-fetch so the ignored-path post-filter (below) can drop a stray
     // `target/` / `build/` leak without starving the final `limit` rows.
     let fetch = limit.saturating_mul(4).max(64);
-    let relatives = with_file_mention_picker(root, |picker| {
-        let parser = fff_search::QueryParser::default();
-        let parsed = parser.parse(query);
-        let search = picker.fuzzy_search(
-            &parsed,
-            None,
-            fff_search::FuzzySearchOptions {
-                max_threads: 0,
-                project_path: Some(root),
-                pagination: fff_search::PaginationArgs {
-                    offset: 0,
-                    limit: fetch,
-                },
-                ..Default::default()
-            },
-        );
-        search
-            .items
-            .iter()
-            .map(|item| item.relative_path(picker).replace('\\', "/"))
-            .collect::<Vec<_>>()
-    })
-    .unwrap_or_default();
+    let relatives = file_mention_search(search, active_root, root, query, fetch);
 
     relatives
         .into_iter()
@@ -1239,33 +1222,39 @@ fn file_mention_options(
         .collect()
 }
 
-/// Run `op` against the same bounded, watched picker registry used by Finder
-/// and agent file tools. Returns `None` if the picker could not be built.
-fn with_file_mention_picker<T>(
+fn file_mention_search(
+    search: &dyn neoism_agent_service_api::WorkspaceSearchService,
+    active_root: &Mutex<Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
     root: &Path,
-    op: impl FnOnce(&fff_search::FilePicker) -> T,
-) -> Option<T> {
+    query: &str,
+    limit: usize,
+) -> Vec<String> {
     // Only the currently used mention root is pinned. Switching workspaces
     // releases the previous pin so the bounded registry can retire it.
-    static ACTIVE_ROOT: OnceLock<
-        Mutex<Option<neoism_agent_server::picker_registry::PickerRootPin>>,
-    > = OnceLock::new();
-    if let Ok(mut pin) = ACTIVE_ROOT.get_or_init(|| Mutex::new(None)).lock() {
-        let already_pinned = pin.as_ref().is_some_and(|pin| pin.is_for(root));
+    if let Ok(mut pin) = active_root.lock() {
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let already_pinned = pin.as_ref().is_some_and(|pin| pin.root() == canonical);
         if !already_pinned {
-            *pin = Some(neoism_agent_server::picker_registry::pin(root));
+            *pin = search.pin_root(root).ok();
         }
     }
-    neoism_agent_server::picker_registry::with_picker(root, op)
+    search.find_files(&neoism_agent_service_api::FindFilesRequest {
+        root: root.to_path_buf(),
+        query: query.to_string(),
+        offset: 0,
+        limit,
+        control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
+    })
         .inspect_err(|error| {
             tracing::warn!(
                 target: "neoism::agent_mentions",
                 root = %root.display(),
                 %error,
-                "shared fff-search query failed"
+                "workspace file-mention search failed"
             );
         })
-        .ok()
+        .map(|result| result.items.into_iter().map(|item| item.path.replace('\\', "/")).collect())
+        .unwrap_or_default()
 }
 
 /// True when any component of a relative path falls in the historic

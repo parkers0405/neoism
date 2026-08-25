@@ -361,7 +361,11 @@ async fn main() -> anyhow::Result<()> {
                 cors,
             };
             println!("neoism agent listening on http://{hostname}:{port}");
-            neoism_agent_server::listen(options).await?;
+            neoism_agent_server::listen(
+                options,
+                neoism_agent_server::standard_services(),
+            )
+            .await?;
         }
         Command::Acp {
             port,
@@ -424,7 +428,7 @@ async fn main() -> anyhow::Result<()> {
             cli_direct_commands::doctor(server, dir).await?
         }
         Command::Providers { server } => {
-            get_and_print(server, "/provider", None, false).await?
+            get_and_print(server, "/v2/providers", None, false).await?
         }
         Command::Models {
             provider,

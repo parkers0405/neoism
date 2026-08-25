@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::tool::{ToolContext, ToolExecutionResult};
-use crate::{config, default_cache_dir, default_config_dir};
+use crate::{config, default_cache_dir};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Skill {
@@ -42,8 +42,8 @@ pub(crate) fn list(directory: &str) -> anyhow::Result<Vec<SkillInfo>> {
         .collect())
 }
 
-pub(crate) async fn list_async(directory: &str) -> anyhow::Result<Vec<SkillInfo>> {
-    Ok(load_async(directory)
+pub(crate) async fn list_async(services: &neoism_agent_service_api::AgentServices, directory: &str) -> anyhow::Result<Vec<SkillInfo>> {
+    Ok(load_async(services, directory)
         .await?
         .into_iter()
         .map(|skill| skill.info)
@@ -69,13 +69,14 @@ pub(crate) fn get(directory: &str, name: &str) -> anyhow::Result<Option<Skill>> 
 
 #[cfg(test)]
 pub(crate) fn load(directory: &str) -> anyhow::Result<Vec<Skill>> {
-    let loaded = config::load(directory)?;
-    load_local(directory, &loaded.info.skills.paths)
+    let services = crate::standard_services();
+    let loaded = config::load(&services, directory)?;
+    load_local(&services, directory, &loaded.info.skills.paths)
 }
 
-pub(crate) async fn load_async(directory: &str) -> anyhow::Result<Vec<Skill>> {
-    let loaded = config::load(directory)?;
-    let mut by_name = load_local(directory, &loaded.info.skills.paths)?
+pub(crate) async fn load_async(services: &neoism_agent_service_api::AgentServices, directory: &str) -> anyhow::Result<Vec<Skill>> {
+    let loaded = config::load(services, directory)?;
+    let mut by_name = load_local(services, directory, &loaded.info.skills.paths)?
         .into_iter()
         .map(|skill| (skill.info.name.clone(), skill))
         .collect::<BTreeMap<_, _>>();
@@ -86,11 +87,12 @@ pub(crate) async fn load_async(directory: &str) -> anyhow::Result<Vec<Skill>> {
 }
 
 pub(crate) fn load_local(
+    services: &neoism_agent_service_api::AgentServices,
     directory: &str,
     configured_paths: &[String],
 ) -> anyhow::Result<Vec<Skill>> {
     let mut roots = configured_roots(directory, configured_paths);
-    roots.extend(default_roots(directory));
+    roots.extend(default_roots(services, directory));
 
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -130,7 +132,8 @@ async fn skill_tool_inner(
         .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow::anyhow!("tool argument name is required"))?;
     context.ensure_allowed("skill", &name)?;
-    let skills = load_async(&context.cwd.to_string_lossy()).await?;
+    let services = context.state().map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
+    let skills = load_async(&services, &context.cwd.to_string_lossy()).await?;
     let available = skills
         .iter()
         .map(|skill| skill.info.name.as_str())
@@ -290,23 +293,12 @@ fn configured_roots(directory: &str, paths: &[String]) -> Vec<PathBuf> {
         .collect()
 }
 
-fn default_roots(directory: &str) -> Vec<PathBuf> {
+fn default_roots(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    for dir in config::roots(directory) {
+    for dir in config::roots(services, directory) {
         roots.push(dir.join("skill"));
         roots.push(dir.join("skills"));
     }
-
-    for dir in ancestor_dirs(Path::new(directory)) {
-        for config_dir in [".neoism", ".agents", ".claude"] {
-            roots.push(dir.join(config_dir).join("skill"));
-            roots.push(dir.join(config_dir).join("skills"));
-        }
-    }
-
-    let global = PathBuf::from(default_config_dir());
-    roots.push(global.join("skill"));
-    roots.push(global.join("skills"));
 
     roots
 }
@@ -360,22 +352,6 @@ fn safe_relative_path(file: &str) -> Option<PathBuf> {
     } else {
         Some(out)
     }
-}
-
-fn ancestor_dirs(path: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let mut current = if path.is_file() {
-        path.parent().unwrap_or(path).to_path_buf()
-    } else {
-        path.to_path_buf()
-    };
-    loop {
-        dirs.push(current.clone());
-        if !current.pop() {
-            break;
-        }
-    }
-    dirs
 }
 
 fn skill_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -479,15 +455,6 @@ mod tests {
     use super::*;
 
     fn temp_root(name: &str) -> PathBuf {
-        // Pin the GLOBAL config root to an empty temp dir so the real
-        // user's `~/.config/neoism/skills` can't leak into assertions
-        // (skill discovery always unions the global root in).
-        static ISOLATE: std::sync::Once = std::sync::Once::new();
-        ISOLATE.call_once(|| {
-            let global = std::env::temp_dir().join("neoism-agent-skill-tests-global");
-            let _ = std::fs::create_dir_all(&global);
-            std::env::set_var("NEOISM_AGENT_CONFIG_DIR", &global);
-        });
         std::env::temp_dir().join(format!(
             "neoism-agent-skill-{name}-{}",
             neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -498,7 +465,7 @@ mod tests {
     fn loads_project_skills_from_neoism_directory() {
         let root = temp_root("project");
         let _ = std::fs::remove_dir_all(&root);
-        let skill_dir = root.join(".neoism/skills/refactor");
+        let skill_dir = root.join(".agent/skills/refactor");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
@@ -527,8 +494,9 @@ mod tests {
             "---\ndescription: Portable defaults\n---\nKeep behavior cross-platform.\n",
         )
         .unwrap();
+        std::fs::create_dir_all(root.join(".agent")).unwrap();
         std::fs::write(
-            root.join("neoism.json"),
+            root.join(".agent/agent.json"),
             r#"{ "skills": { "paths": ["custom/portable/SKILL.md"] } }"#,
         )
         .unwrap();

@@ -1,5 +1,32 @@
 use super::*;
 
+async fn submit_prompt_and_wait(app: &axum::Router, state: &AppState, session_id: &str, text: &str) {
+    let previous_count = state.inner.store.list_messages(session_id).await.unwrap().len();
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions/{session_id}/prompt"),
+            Some(json!({ "noReply": true, "parts": [{ "type": "text", "text": text }] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count = state.inner.store.list_messages(session_id).await.unwrap().len();
+            if count >= previous_count + 1
+                && !state.inner.runs.read().await.contains_key(session_id)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("prompt should finish");
+}
+
 #[tokio::test]
 async fn session_revert_and_unrevert_restore_message_tail() {
     let root = std::env::temp_dir().join(format!(
@@ -17,7 +44,7 @@ async fn session_revert_and_unrevert_restore_message_tail() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -26,63 +53,53 @@ async fn session_revert_and_unrevert_restore_message_tail() {
     .await;
 
     for text in ["first turn", "second turn"] {
-        let _: MessageWithParts = response_json(
-            app.clone()
-                .oneshot(request(
-                    Method::POST,
-                    &format!("/session/{}/message", session.id),
-                    Some(json!({ "parts": [{ "type": "text", "text": text }] })),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
+        submit_prompt_and_wait(&app, &state, session.id.as_str(), text).await;
     }
 
-    let messages: Vec<MessageWithParts> = response_json(
+    let messages: Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
-    assert_eq!(messages.len(), 4);
-    let second_user_id = message_id_of(&messages[2]);
+    assert_eq!(messages.items.len(), 2);
+    let second_user_id = message_id_of(&messages.items[1]);
 
     let reverted: SessionInfo = response_json(
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/undo", session.id),
-                Some(json!({ "messageID": second_user_id })),
+                &format!("/v2/sessions/{}/revert", session.id),
+                Some(json!({ "messageId": second_user_id })),
             ))
             .await
             .unwrap(),
     )
     .await;
     assert!(reverted.extra.contains_key("revert"));
-    let messages: Vec<MessageWithParts> = response_json(
+    let messages: Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.items.len(), 1);
 
     let restored: SessionInfo = response_json(
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/unrevert", session.id),
+                &format!("/v2/sessions/{}/unrevert", session.id),
                 None,
             ))
             .await
@@ -90,19 +107,19 @@ async fn session_revert_and_unrevert_restore_message_tail() {
     )
     .await;
     assert!(!restored.extra.contains_key("revert"));
-    let messages: Vec<MessageWithParts> = response_json(
+    let messages: Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
-    assert_eq!(messages.len(), 4);
-    assert_eq!(message_id_of(&messages[2]), second_user_id);
+    assert_eq!(messages.items.len(), 2);
+    assert_eq!(message_id_of(&messages.items[1]), second_user_id);
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
@@ -130,7 +147,7 @@ async fn session_undo_redo_step_without_request_body() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -139,17 +156,7 @@ async fn session_undo_redo_step_without_request_body() {
     .await;
 
     for text in ["first turn", "second turn"] {
-        let _: MessageWithParts = response_json(
-            app.clone()
-                .oneshot(request(
-                    Method::POST,
-                    &format!("/session/{}/message", session.id),
-                    Some(json!({ "parts": [{ "type": "text", "text": text }] })),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
+        submit_prompt_and_wait(&app, &state, session.id.as_str(), text).await;
     }
 
     // `/undo` with NO body (the exact shape that used to 415) must succeed and
@@ -158,7 +165,7 @@ async fn session_undo_redo_step_without_request_body() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/session/{}/undo", session.id),
+            &format!("/v2/sessions/{}/undo", session.id),
             None,
         ))
         .await
@@ -167,25 +174,25 @@ async fn session_undo_redo_step_without_request_body() {
     let reverted: SessionInfo = response_json(undo_response).await;
     assert!(reverted.extra.contains_key("revert"));
 
-    let messages: Vec<MessageWithParts> = response_json(
+    let messages: Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.items.len(), 1);
 
     // `/redo` with NO body restores the reverted turn.
     let redo_response = app
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/session/{}/redo", session.id),
+            &format!("/v2/sessions/{}/redo", session.id),
             None,
         ))
         .await
@@ -194,18 +201,18 @@ async fn session_undo_redo_step_without_request_body() {
     let restored: SessionInfo = response_json(redo_response).await;
     assert!(!restored.extra.contains_key("revert"));
 
-    let messages: Vec<MessageWithParts> = response_json(
+    let messages: Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
-    assert_eq!(messages.len(), 4);
+    assert_eq!(messages.items.len(), 2);
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
@@ -228,7 +235,7 @@ async fn session_undo_tree_reports_applied_and_reverted_nodes() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -244,7 +251,7 @@ async fn session_undo_tree_reports_applied_and_reverted_nodes() {
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/undo/tree", session.id),
+                &format!("/v2/sessions/{}/undo-tree", session.id),
                 None,
             ))
             .await
@@ -259,8 +266,8 @@ async fn session_undo_tree_reports_applied_and_reverted_nodes() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/undo", session.id),
-                Some(json!({ "messageID": user_id })),
+                &format!("/v2/sessions/{}/revert", session.id),
+                Some(json!({ "messageId": user_id })),
             ))
             .await
             .unwrap(),
@@ -270,7 +277,7 @@ async fn session_undo_tree_reports_applied_and_reverted_nodes() {
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/undo", session.id),
+                &format!("/v2/sessions/{}/undo-tree", session.id),
                 None,
             ))
             .await
@@ -303,7 +310,7 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -335,8 +342,8 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/redo", session.id),
-                Some(json!({ "messageID": second_user_id })),
+                &format!("/v2/sessions/{}/revert", session.id),
+                Some(json!({ "messageId": second_user_id })),
             ))
             .await
             .unwrap(),
@@ -346,8 +353,8 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/revert", session.id),
-                Some(json!({ "messageID": first_user_id })),
+                &format!("/v2/sessions/{}/revert", session.id),
+                Some(json!({ "messageId": first_user_id })),
             ))
             .await
             .unwrap(),
@@ -357,7 +364,7 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/undo/tree", session.id),
+                &format!("/v2/sessions/{}/undo-tree", session.id),
                 None,
             ))
             .await
@@ -374,8 +381,8 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/revert", session.id),
-                Some(json!({ "messageID": second_user_id })),
+                &format!("/v2/sessions/{}/revert", session.id),
+                Some(json!({ "messageId": second_user_id })),
             ))
             .await
             .unwrap(),
@@ -385,7 +392,7 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/undo/tree", session.id),
+                &format!("/v2/sessions/{}/undo-tree", session.id),
                 None,
             ))
             .await
@@ -401,19 +408,19 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         second_user_id.to_string()
     );
 
-    let messages: Vec<MessageWithParts> = response_json(
+    let messages: Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
-    assert_eq!(messages.len(), 2);
-    assert_eq!(message_id_of(&messages[0]), first_user_id.to_string());
+    assert_eq!(messages.items.len(), 2);
+    assert_eq!(message_id_of(&messages.items[0]), first_user_id.to_string());
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
@@ -437,7 +444,7 @@ async fn session_revert_and_unrevert_restore_file_snapshots() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -473,8 +480,8 @@ async fn session_revert_and_unrevert_restore_file_snapshots() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/revert", session.id),
-                Some(json!({ "messageID": user_id })),
+                &format!("/v2/sessions/{}/revert", session.id),
+                Some(json!({ "messageId": user_id })),
             ))
             .await
             .unwrap(),
@@ -489,7 +496,7 @@ async fn session_revert_and_unrevert_restore_file_snapshots() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/unrevert", session.id),
+                &format!("/v2/sessions/{}/unrevert", session.id),
                 None,
             ))
             .await
@@ -523,7 +530,7 @@ async fn session_revert_snapshot_conflict_keeps_messages_and_files() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -559,8 +566,8 @@ async fn session_revert_snapshot_conflict_keeps_messages_and_files() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/session/{}/revert", session.id),
-            Some(json!({ "messageID": user_id })),
+            &format!("/v2/sessions/{}/revert", session.id),
+            Some(json!({ "messageId": user_id })),
         ))
         .await
         .unwrap();

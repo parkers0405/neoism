@@ -1,3 +1,4 @@
+use neoism_agent_core::EventEnvelope;
 use serde_json::Value;
 
 use crate::chat_blockers::{permission_blocker, question_blocker, StreamBlocker};
@@ -22,12 +23,9 @@ pub(crate) fn handle_chat_sse_event(
         return Ok(ChatEventOutcome::default());
     }
     let data = data_lines.join("\n");
-    let value: Value = serde_json::from_str(&data)?;
-    let kind = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let properties = value.get("properties").unwrap_or(&Value::Null);
+    let envelope: EventEnvelope<Value> = serde_json::from_str(&data)?;
+    let kind = envelope.kind.as_str();
+    let properties = &envelope.data;
     if !event_matches_session(properties, session_id) {
         return Ok(ChatEventOutcome::default());
     }
@@ -61,8 +59,7 @@ pub(crate) fn handle_chat_sse_event(
             render_state.finish()?;
             let message = properties
                 .get("error")
-                .and_then(|error| error.get("data"))
-                .and_then(|data| data.get("message"))
+                .and_then(|error| error.get("message"))
                 .and_then(Value::as_str)
                 .unwrap_or("session error");
             println!("{RED}error:{RESET} {message}");

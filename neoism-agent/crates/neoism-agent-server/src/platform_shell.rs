@@ -92,7 +92,7 @@ fn resolve() -> ShellRuntime {
             ("powershell.exe", ShellKind::PowerShell),
             ("cmd.exe", ShellKind::Cmd),
         ] {
-            if let Some(program) = resolve_windows_command(name) {
+            if let Some(program) = resolve_command(name) {
                 return ShellRuntime { kind, program };
             }
         }
@@ -111,39 +111,22 @@ fn resolve() -> ShellRuntime {
             kind: ShellKind::Posix,
             program: std::env::var_os("SHELL")
                 .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
+                .and_then(|value| resolve_command(&value.to_string_lossy()))
                 .unwrap_or_else(|| PathBuf::from("/bin/sh")),
         }
     }
 }
 
-#[cfg(windows)]
-pub(crate) fn resolve_windows_command(name: &str) -> Option<PathBuf> {
-    let candidate = Path::new(name);
-    if candidate.components().count() > 1 && candidate.is_file() {
-        return Some(candidate.to_path_buf());
-    }
-    let path = std::env::var_os("PATH")?;
-    let extensions = std::env::var_os("PATHEXT")
-        .and_then(|value| value.into_string().ok())
-        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
-    let has_extension = candidate.extension().is_some();
-    for directory in std::env::split_paths(&path) {
-        if has_extension {
-            let path = directory.join(candidate);
-            if path.is_file() {
-                return Some(path);
-            }
-            continue;
-        }
-        for extension in extensions.split(';').filter(|value| !value.is_empty()) {
-            let path = directory.join(format!("{name}{extension}"));
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-    }
-    None
+pub(crate) fn resolve_command(name: &str) -> Option<PathBuf> {
+    let request = neoism_agent_service_api::ExecutableRequest::new(
+        name,
+        neoism_agent_service_api::ExecutablePurpose::PlatformShell,
+    );
+    crate::lsp::agent_services()
+        .executables
+        .resolve(&request)
+        .ok()
+        .map(|result| result.path)
 }
 
 pub(crate) fn program() -> String {

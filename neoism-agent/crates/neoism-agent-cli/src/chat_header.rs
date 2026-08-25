@@ -100,7 +100,7 @@ pub(crate) async fn print_session_bootstrap(
 ) -> anyhow::Result<SessionBootstrap> {
     let statuses = response_json(
         client
-            .get(format!("{server}/session/status"))
+            .get(format!("{server}/v2/sessions/status"))
             .send()
             .await?,
     )

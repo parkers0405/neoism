@@ -46,12 +46,6 @@ pub(crate) struct WorkflowDefinition {
     pub(crate) model: Option<ModelRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) permissions: Option<BTreeMap<String, WorkflowPermission>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "permission"
-    )]
-    pub(crate) legacy_permission: Option<Vec<PermissionRule>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -135,7 +129,6 @@ impl WorkflowDefinition {
 
     fn effective_permission_rules(&self) -> Option<Vec<PermissionRule>> {
         self.permission_rules()
-            .or_else(|| self.legacy_permission.clone())
     }
 }
 
@@ -248,7 +241,7 @@ pub(crate) fn spawn_scheduler(state: AppState) {
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>();
-            match install_workflow_watches(&workspaces, watch_tx.clone()) {
+            match install_workflow_watches(state.services(), &workspaces, watch_tx.clone()) {
                 Ok(replacement) => watcher = Some(replacement),
                 Err(error) => {
                     tracing::warn!(%error, "failed to install workflow filesystem watches");
@@ -280,6 +273,7 @@ pub(crate) fn spawn_scheduler(state: AppState) {
 }
 
 fn install_workflow_watches(
+    services: &neoism_agent_service_api::AgentServices,
     workspaces: &[String],
     event_tx: tokio::sync::mpsc::UnboundedSender<()>,
 ) -> anyhow::Result<notify::RecommendedWatcher> {
@@ -296,7 +290,7 @@ fn install_workflow_watches(
                 }
             }
         })?;
-    for (path, mode) in workflow_watch_paths(workspaces) {
+    for (path, mode) in workflow_watch_paths(services, workspaces) {
         if let Err(error) = watcher.watch(&path, mode) {
             tracing::warn!(path = %path.display(), %error, "failed to watch workflow path");
         }
@@ -304,11 +298,10 @@ fn install_workflow_watches(
     Ok(watcher)
 }
 
-fn workflow_watch_paths(workspaces: &[String]) -> BTreeMap<PathBuf, RecursiveMode> {
+fn workflow_watch_paths(services: &neoism_agent_service_api::AgentServices, workspaces: &[String]) -> BTreeMap<PathBuf, RecursiveMode> {
     let mut paths = BTreeMap::new();
     for workspace in workspaces {
-        let mut roots = crate::config::roots(workspace);
-        roots.push(PathBuf::from(workspace).join(".neoism"));
+        let roots = crate::config::roots(services, workspace);
         for root in roots {
             if root.is_dir() {
                 insert_watch(&mut paths, root.clone(), RecursiveMode::NonRecursive);
@@ -359,7 +352,7 @@ pub(crate) async fn workflow_list(
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
     track_workspace(&state, &workspace).await;
-    let catalog = discover_async(workspace.clone()).await?;
+    let catalog = discover_async(state.services().clone(), workspace.clone()).await?;
     let persisted = state.inner.store.list_workflows().await?;
     let workflows = catalog
         .workflows
@@ -392,7 +385,7 @@ pub(crate) async fn workflow_get(
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
     track_workspace(&state, &workspace).await;
-    let source = find_source(&workspace, &workflow_id).await?;
+    let source = find_source(state.services(), &workspace, &workflow_id).await?;
     let projection = state
         .inner
         .store
@@ -416,7 +409,7 @@ pub(crate) async fn workflow_activate(
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
     track_workspace(&state, &workspace).await;
-    let source = find_source(&workspace, &workflow_id).await?;
+    let source = find_source(state.services(), &workspace, &workflow_id).await?;
     let id = activation_id(&workspace, &workflow_id);
     let existing = state.inner.store.get_workflow(&id).await?;
     let now = now_millis();
@@ -477,7 +470,7 @@ pub(crate) async fn workflow_run_now(
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
     track_workspace(&state, &workspace).await;
-    let source = find_source(&workspace, &workflow_id).await?;
+    let source = find_source(state.services(), &workspace, &workflow_id).await?;
     let projection = ensure_projection(&state, workspace, source, false).await?;
     let run = new_run(&projection, now_millis(), "manual");
     if !state.inner.store.claim_workflow_run(&run).await? {
@@ -498,7 +491,7 @@ pub(crate) async fn workflow_preview(
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
     track_workspace(&state, &workspace).await;
-    let source = find_source(&workspace, &workflow_id).await?;
+    let source = find_source(state.services(), &workspace, &workflow_id).await?;
     let slots = preview_slots(&source.definition.schedule, now_millis(), PREVIEW_COUNT)?;
     let tz = resolve_timezone(&source.definition.schedule.timezone)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
@@ -538,8 +531,8 @@ pub(crate) async fn workflow_history(
     Ok(Json(json!({ "runs": runs })))
 }
 
-async fn discover_async(workspace: String) -> Result<WorkflowCatalog, ApiError> {
-    tokio::task::spawn_blocking(move || discover(&workspace))
+async fn discover_async(services: neoism_agent_service_api::AgentServices, workspace: String) -> Result<WorkflowCatalog, ApiError> {
+    tokio::task::spawn_blocking(move || discover(&services, &workspace))
         .await
         .map_err(|error| {
             ApiError::internal(format!("workflow discovery task failed: {error}"))
@@ -548,6 +541,9 @@ async fn discover_async(workspace: String) -> Result<WorkflowCatalog, ApiError> 
 }
 
 async fn track_workspace(state: &AppState, workspace: &str) {
+    if !crate::plugins::enabled(state.services(), workspace, "dev.neoism.workflows") {
+        return;
+    }
     if state
         .inner
         .workflow_workspaces
@@ -571,7 +567,8 @@ async fn reconcile_workspaces(state: &AppState) -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     for workspace in workspaces {
         let scan_workspace = workspace.clone();
-        let catalog = tokio::task::spawn_blocking(move || discover(&scan_workspace))
+        let services = state.services().clone();
+        let catalog = tokio::task::spawn_blocking(move || discover(&services, &scan_workspace))
             .await
             .context("workflow discovery task failed")??;
         for diagnostic in catalog.diagnostics {
@@ -627,10 +624,11 @@ async fn reconcile_workspaces(state: &AppState) -> anyhow::Result<()> {
 }
 
 async fn find_source(
+    services: &neoism_agent_service_api::AgentServices,
     workspace: &str,
     workflow_id: &str,
 ) -> Result<WorkflowSource, ApiError> {
-    let catalog = discover_async(workspace.to_string()).await?;
+    let catalog = discover_async(services.clone(), workspace.to_string()).await?;
     catalog.workflows.get(workflow_id).cloned().ok_or_else(|| {
         let detail = catalog
             .diagnostics
@@ -642,9 +640,9 @@ async fn find_source(
     })
 }
 
-fn discover(workspace: &str) -> anyhow::Result<WorkflowCatalog> {
+fn discover(services: &neoism_agent_service_api::AgentServices, workspace: &str) -> anyhow::Result<WorkflowCatalog> {
     let mut catalog = WorkflowCatalog::default();
-    for root in crate::config::roots(workspace) {
+    for root in crate::config::roots(services, workspace) {
         for directory in [root.join("workflow"), root.join("workflows")] {
             for path in markdown_files(&directory)? {
                 match parse_source(&path) {
@@ -1334,7 +1332,7 @@ async fn execute_run_inner(
 ) -> Result<(), ApiError> {
     let mut prompt = projection.definition.prompt.clone();
     if let Some(skill_name) = projection.definition.skill.as_deref() {
-        let skills = crate::skill::load_async(&projection.workspace_root).await?;
+        let skills = crate::skill::load_async(state.services(), &projection.workspace_root).await?;
         let skill = skills
             .into_iter()
             .find(|skill| {
@@ -1354,8 +1352,8 @@ async fn execute_run_inner(
     extra.insert("workflowActivationID".to_string(), json!(run.activation_id));
     extra.insert("workflowScheduledAt".to_string(), json!(run.scheduled_at));
     extra.insert("workflowTrigger".to_string(), json!(run.trigger));
-    let execution_directory = workflow_execution_directory(projection)?;
-    if !crate::plugins::enabled(&execution_directory, "dev.neoism.workflows") {
+    let execution_directory = workflow_execution_directory(state.services(), projection)?;
+    if !crate::plugins::enabled(state.services(), &execution_directory, "dev.neoism.workflows") {
         return Err(ApiError::not_found(
             "Workflow plugin is disabled for the workspace",
         ));
@@ -1446,9 +1444,10 @@ fn workspace_root(directory: String) -> Result<String, ApiError> {
 }
 
 fn workflow_execution_directory(
+    services: &neoism_agent_service_api::AgentServices,
     projection: &WorkflowProjection,
 ) -> Result<String, ApiError> {
-    let default_directory = if workflow_source_is_global(&projection.source_path) {
+    let default_directory = if workflow_source_is_global(services, &projection.workspace_root, &projection.source_path) {
         dirs::home_dir()
             .ok_or_else(|| ApiError::bad_request("home directory is unavailable"))?
     } else {
@@ -1496,16 +1495,10 @@ fn workflow_execution_directory(
     Ok(candidate.display().to_string())
 }
 
-fn workflow_source_is_global(source_path: &str) -> bool {
+fn workflow_source_is_global(services: &neoism_agent_service_api::AgentServices, workspace: &str, source_path: &str) -> bool {
     let source = FsPath::new(source_path);
-    let mut roots = vec![PathBuf::from(crate::default_config_dir())];
-    if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".neoism"));
-    }
-    if let Some(config) = std::env::var_os("NEOISM_AGENT_CONFIG_DIR") {
-        roots.push(PathBuf::from(config));
-    }
-    roots.into_iter().any(|root| source.starts_with(root))
+    let workspace = PathBuf::from(workspace);
+    crate::config::roots(services, workspace.to_string_lossy().as_ref()).into_iter().any(|root| !root.starts_with(&workspace) && source.starts_with(root))
 }
 
 fn activation_id(workspace: &str, workflow_id: &str) -> String {
@@ -1536,7 +1529,7 @@ fn publish_run(state: &AppState, run: &WorkflowRun) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{DbBackend, SessionStore};
+    use crate::state::SessionStore;
     use chrono::Timelike;
 
     fn schedule(frequency: &str) -> WorkflowSchedule {
@@ -1607,7 +1600,6 @@ mod tests {
             agent: None,
             model: None,
             permissions: None,
-            legacy_permission: None,
         };
         definition.schedule.minute = Some(10);
         assert!(validate_definition(&definition)
@@ -1682,7 +1674,6 @@ mod tests {
             agent: None,
             model: None,
             permissions: None,
-            legacy_permission: None,
         })
         .unwrap();
         assert_eq!(
@@ -1718,7 +1709,6 @@ mod tests {
                 agent: None,
                 model: None,
                 permissions: None,
-                legacy_permission: None,
             },
             active: true,
             activated_at: 0,
@@ -1726,7 +1716,7 @@ mod tests {
             updated: 0,
         };
         assert_eq!(
-            workflow_execution_directory(&projection).unwrap(),
+            workflow_execution_directory(&crate::standard_services(), &projection).unwrap(),
             nested.canonicalize().unwrap().display().to_string()
         );
         let external = std::env::temp_dir().join(format!(
@@ -1736,7 +1726,7 @@ mod tests {
         std::fs::create_dir_all(&external).unwrap();
         projection.definition.directory = Some(external.display().to_string());
         assert_eq!(
-            workflow_execution_directory(&projection).unwrap(),
+            workflow_execution_directory(&crate::standard_services(), &projection).unwrap(),
             external.canonicalize().unwrap().display().to_string()
         );
         let _ = std::fs::remove_dir_all(root);
@@ -1746,11 +1736,13 @@ mod tests {
     #[test]
     fn global_workflow_defaults_to_os_home_directory() {
         let home = dirs::home_dir().expect("home directory");
+        let services = crate::standard_services();
+        let global_root = crate::config::roots(&services, std::env::temp_dir().to_string_lossy().as_ref()).remove(0);
         let projection = WorkflowProjection {
             activation_id: "activation".to_string(),
             workflow_id: "global".to_string(),
             workspace_root: std::env::temp_dir().display().to_string(),
-            source_path: PathBuf::from(crate::default_config_dir())
+            source_path: global_root
                 .join("workflows/global.md")
                 .display()
                 .to_string(),
@@ -1766,7 +1758,6 @@ mod tests {
                 agent: None,
                 model: None,
                 permissions: None,
-                legacy_permission: None,
             },
             active: true,
             activated_at: 0,
@@ -1774,7 +1765,7 @@ mod tests {
             updated: 0,
         };
         assert_eq!(
-            workflow_execution_directory(&projection).unwrap(),
+            workflow_execution_directory(&services, &projection).unwrap(),
             home.canonicalize().unwrap().display().to_string()
         );
     }
@@ -1783,7 +1774,7 @@ mod tests {
     async fn active_frontmatter_hot_reloads_activation() {
         let unique = Id::ascending(IdKind::Event).to_string();
         let root = std::env::temp_dir().join(format!("neoism-workflow-hot-{unique}"));
-        let workflow_dir = root.join(".neoism/workflows");
+        let workflow_dir = root.join(".agent/workflows");
         std::fs::create_dir_all(&workflow_dir).unwrap();
         let workflow_path = workflow_dir.join("once.md");
         let source = |active: bool| {
@@ -1825,13 +1816,12 @@ mod tests {
 
     #[tokio::test]
     async fn scheduled_claim_survives_immediate_restart_without_duplicate_occurrence() {
-        assert_scheduled_claim_survives_restart(DbBackend::Sqlite, "sqlite3").await;
-        assert_scheduled_claim_survives_restart(DbBackend::Turso, "turso.db").await;
+        assert_scheduled_claim_survives_restart().await;
     }
 
-    async fn assert_scheduled_claim_survives_restart(backend: DbBackend, suffix: &str) {
+    async fn assert_scheduled_claim_survives_restart() {
         let path = std::env::temp_dir().join(format!(
-            "neoism-workflow-claim-{}.{suffix}",
+            "neoism-workflow-claim-{}.turso.db",
             Id::ascending(IdKind::Event),
         ));
         let projection = WorkflowProjection {
@@ -1851,7 +1841,6 @@ mod tests {
                 agent: None,
                 model: None,
                 permissions: None,
-                legacy_permission: None,
             },
             active: true,
             activated_at: 1,
@@ -1860,9 +1849,7 @@ mod tests {
         };
         let slot = 1_800_000_000_000;
 
-        let store = SessionStore::open_with_backend(path.clone(), backend)
-            .await
-            .unwrap();
+        let store = SessionStore::open(path.clone()).await.unwrap();
         store.upsert_workflow(&projection).await.unwrap();
         let first = new_run(&projection, slot, "scheduled");
         assert!(store.claim_scheduled_workflow_run(&first).await.unwrap());
@@ -1871,9 +1858,7 @@ mod tests {
         // move the queued run forward, then perform startup recovery.
         store.close().await;
         drop(store);
-        let store = SessionStore::open_with_backend(path.clone(), backend)
-            .await
-            .unwrap();
+        let store = SessionStore::open(path.clone()).await.unwrap();
         assert_eq!(
             store
                 .get_workflow(&projection.activation_id)
@@ -1920,17 +1905,17 @@ mod tests {
     fn watcher_covers_existing_and_not_yet_created_workflow_roots() {
         let unique = Id::ascending(IdKind::Event).to_string();
         let root = std::env::temp_dir().join(format!("neoism-workflow-watch-{unique}"));
-        let workflow_root = root.join(".neoism/workflows");
+        let workflow_root = root.join(".agent/workflows");
         std::fs::create_dir_all(&workflow_root).unwrap();
         let workspace = root.display().to_string();
-        let paths = workflow_watch_paths(std::slice::from_ref(&workspace));
+        let paths = workflow_watch_paths(&crate::standard_services(), std::slice::from_ref(&workspace));
         assert_eq!(
             paths.get(&workflow_root.canonicalize().unwrap()),
             Some(&RecursiveMode::Recursive)
         );
 
-        std::fs::remove_dir_all(root.join(".neoism")).unwrap();
-        let paths = workflow_watch_paths(&[workspace]);
+        std::fs::remove_dir_all(root.join(".agent")).unwrap();
+        let paths = workflow_watch_paths(&crate::standard_services(), &[workspace]);
         assert_eq!(
             paths.get(&root.canonicalize().unwrap()),
             Some(&RecursiveMode::NonRecursive)
@@ -1942,12 +1927,12 @@ mod tests {
     async fn watcher_emits_when_workflow_directory_is_created() {
         let unique = Id::ascending(IdKind::Event).to_string();
         let root = std::env::temp_dir().join(format!("neoism-workflow-event-{unique}"));
-        std::fs::create_dir_all(root.join(".neoism")).unwrap();
+        std::fs::create_dir_all(root.join(".agent")).unwrap();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let watcher =
-            install_workflow_watches(&[root.display().to_string()], event_tx).unwrap();
+            install_workflow_watches(&crate::standard_services(), &[root.display().to_string()], event_tx).unwrap();
 
-        std::fs::create_dir(root.join(".neoism/workflows")).unwrap();
+        std::fs::create_dir(root.join(".agent/workflows")).unwrap();
         tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .expect("filesystem watcher did not report workflow directory creation")

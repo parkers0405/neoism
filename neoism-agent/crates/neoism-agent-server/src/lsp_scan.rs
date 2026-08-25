@@ -21,7 +21,6 @@ use super::{
     LspCapabilities, LspCommandSource, LspDetection, LspServerState, LspStatus,
     LspWorkspace, IGNORED_DIRS, MAX_EVIDENCE, MAX_LSP_SERVERS_PER_QUERY, MAX_SCAN_FILES,
 };
-use crate::managed_lsp_path::managed_lsp_path_entries;
 
 const MAX_CARGO_ROOT_CACHE_ENTRIES: usize = 64;
 const CARGO_ROOT_NEGATIVE_TTL: Duration = Duration::from_secs(2);
@@ -400,7 +399,7 @@ fn server_status_at(
                 .cloned()
                 .unwrap_or_else(|| "missing endpoint".to_string());
             format!(
-                "{} was detected, but `{endpoint}` was not found in Neoism extensions or PATH",
+                "{} was detected, but `{endpoint}` was not found by the configured executable service",
                 adapter.name
             )
         })
@@ -623,86 +622,6 @@ fn is_ignored_dir_name(name: &OsStr) -> bool {
         .is_some_and(|name| IGNORED_DIRS.iter().any(|ignored| ignored == &name))
 }
 
-pub(super) fn command_available(command: &str) -> bool {
-    resolve_command(command).is_some()
-}
-
-/// Resolve a configured command to the concrete on-disk executable a spawn
-/// must use. On Windows the file usually carries a `PATHEXT` extension
-/// (`.exe`, npm's `.cmd` shims, ...) that the configured name omits — and
-/// `CreateProcess` will not infer `.cmd`/`.bat` — so the spawn site needs
-/// the fully resolved path back, not the bare name.
-pub(super) fn resolve_command(command: &str) -> Option<PathBuf> {
-    let path = Path::new(command);
-    if path.components().count() > 1 {
-        return resolve_executable(path.to_path_buf());
-    }
-    let managed = managed_lsp_path_entries();
-    let env_paths = env::var_os("PATH")
-        .map(|paths| env::split_paths(&paths).collect::<Vec<_>>())
-        .unwrap_or_default();
-    managed
-        .into_iter()
-        .chain(env_paths)
-        .find_map(|directory| resolve_executable(directory.join(command)))
-}
-
-fn resolve_executable(path: PathBuf) -> Option<PathBuf> {
-    if is_executable_file(&path) {
-        return Some(path);
-    }
-    #[cfg(windows)]
-    {
-        // PATHEXT is appended, never substituted: `foo.v2` probes
-        // `foo.v2.exe`, matching cmd.exe's search rules.
-        for extension in windows_pathext() {
-            let mut candidate = path.clone().into_os_string();
-            candidate.push(".");
-            candidate.push(&extension);
-            let candidate = PathBuf::from(candidate);
-            if is_executable_file(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn windows_pathext() -> Vec<String> {
-    let configured = env::var("PATHEXT").ok().map(|value| {
-        value
-            .split(';')
-            .filter_map(|ext| {
-                let ext = ext.trim().trim_start_matches('.');
-                (!ext.is_empty()).then(|| ext.to_ascii_lowercase())
-            })
-            .collect::<Vec<_>>()
-    });
-    match configured {
-        Some(extensions) if !extensions.is_empty() => extensions,
-        _ => ["com", "exe", "bat", "cmd"].map(String::from).to_vec(),
-    }
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        return metadata.permissions().mode() & 0o111 != 0;
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,37 +819,4 @@ mod tests {
         assert_eq!(cache.insertion_order.len(), MAX_CARGO_ROOT_CACHE_ENTRIES);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn command_availability_requires_an_executable_file() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join(format!(
-            "neoism-lsp-command-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).expect("create command fixture");
-        let command = dir.join("fixture-language-server");
-        fs::write(&command, b"#!/bin/sh\nexit 0\n").expect("write command fixture");
-
-        let mut permissions = fs::metadata(&command)
-            .expect("command metadata")
-            .permissions();
-        permissions.set_mode(0o644);
-        fs::set_permissions(&command, permissions).expect("make non-executable");
-        assert!(!command_available(command.to_str().expect("utf-8 path")));
-
-        let mut permissions = fs::metadata(&command)
-            .expect("command metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&command, permissions).expect("make executable");
-        assert!(command_available(command.to_str().expect("utf-8 path")));
-
-        fs::remove_dir_all(dir).expect("remove command fixture");
-    }
 }

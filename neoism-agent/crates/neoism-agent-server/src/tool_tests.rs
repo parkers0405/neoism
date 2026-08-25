@@ -55,7 +55,7 @@ async fn safe_filesystem_tools_execute_inside_project() {
     let scoped = execute(
         "grep",
         context.clone(),
-        json!({ "pattern": "needle", "path": "src\\lib.rs" }),
+        json!({ "pattern": "needle", "path": "src/lib.rs" }),
     )
     .await
     .unwrap();
@@ -185,43 +185,22 @@ async fn canonical_search_tools_expose_fff_modes_and_multi_pattern_search() {
 }
 
 #[tokio::test]
-async fn notes_tool_uses_plain_workspace_note_files() {
+async fn notes_tool_delegates_to_the_injected_service_and_rejects_removed_operations() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-notes-{}",
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
     ));
     let _ = std::fs::remove_dir_all(&root);
-    let notes_home = root.join("vaults");
-    unsafe {
-        std::env::set_var("NEOISM_NOTES_HOME", &notes_home);
-    }
-    let notes_root =
-        notes_home.join(neoism_workspace_index::config::DEFAULT_NOTES_WORKSPACE);
-    let roadmap = "Roadmap.md".to_string();
-    std::fs::create_dir_all(&notes_root).unwrap();
-    std::fs::write(
-        notes_root.join("Roadmap.md"),
-        "---\nowner: Parker\npriority: 2\n---\n# Roadmap\n\n- [ ] ship notes #neoism\n\nSee [[Plan]].\n",
-    )
-    .unwrap();
-    std::fs::write(
-        notes_root.join("Plan.md"),
-        "# Plan\n\nBack to [[Roadmap]].\n",
-    )
-    .unwrap();
-    let context = allow_context(&root);
-
-    let init = execute("notes", context.clone(), json!({ "operation": "init" }))
-        .await
-        .unwrap();
-    assert!(init.output.contains("Notes folder"));
-    assert_eq!(init.metadata.as_ref().unwrap()["operation"], "init");
+    std::fs::create_dir_all(&root).unwrap();
+    let notes = Arc::new(FakeNotesService { root: root.join("notes") });
+    let services = crate::standard_services().with_notes(notes);
+    let state = crate::state::AppState::open_database_with_services(root.join("agent.db"), services).await.unwrap();
+    let context = allow_context(&root).with_state(Some(state.clone()));
 
     let list = execute("notes", context.clone(), json!({ "operation": "list" }))
         .await
         .unwrap();
-    assert!(list.output.contains(&roadmap));
-    assert!(list.output.contains("Plan.md"));
+    assert_eq!(list.output, "Roadmap.md");
 
     let search = execute(
         "notes",
@@ -230,32 +209,85 @@ async fn notes_tool_uses_plain_workspace_note_files() {
     )
     .await
     .unwrap();
-    assert!(search.output.contains(&format!("{roadmap}:7")));
+    assert!(search.output.contains("Roadmap.md:7"));
 
     let tasks = execute("notes", context.clone(), json!({ "operation": "tasks" }))
         .await
         .unwrap();
     assert!(tasks.output.contains("Roadmap.md:7 - [ ] ship notes"));
 
-    let toggled = execute(
-        "notes",
-        context.clone(),
-        json!({ "operation": "taskToggle", "path": roadmap.clone(), "line": 7, "checked": true }),
-    )
-    .await
-    .unwrap();
-    assert!(toggled.output.contains("Roadmap.md:7"));
-    assert_eq!(toggled.metadata.as_ref().unwrap()["checked"], true);
-    assert!(std::fs::read_to_string(notes_root.join("Roadmap.md"))
-        .unwrap()
-        .contains("- [x] ship notes"));
-
     let graph = execute("notes", context, json!({ "operation": "graph" }))
         .await
-        .unwrap();
-    assert_eq!(graph.metadata.as_ref().unwrap()["disabled"], true);
+        .unwrap_err();
+    assert!(graph.to_string().contains("unknown notes operation graph"));
+
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
+    std::fs::write(
+        root.join(".agent/agent.json"),
+        r#"{"plugins":{"dev.neoism.tools.notes":{"enabled":false}}}"#,
+    )
+    .unwrap();
+    let disabled = execute(
+        "notes",
+        allow_context(&root).with_state(Some(state)),
+        json!({ "operation": "list" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(disabled.to_string().contains("disabled"));
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+struct FakeNotesService {
+    root: std::path::PathBuf,
+}
+
+impl neoism_agent_service_api::NotesService for FakeNotesService {
+    fn scope_choices(&self) -> Vec<neoism_agent_service_api::ScopeChoice> {
+        vec![neoism_agent_service_api::ScopeChoice { id: "workspace".to_string(), label: "Workspace notes".to_string(), description: None }]
+    }
+
+    fn default_scope_id(&self) -> &str { "workspace" }
+    fn tool_description(&self) -> String { "Fake injected notes".to_string() }
+
+    fn list(&self, _request: &neoism_agent_service_api::NotesRequest, _limit: usize) -> Result<Vec<neoism_agent_service_api::ScopedNotes<String>>, neoism_agent_service_api::ServiceError> {
+        Ok(vec![neoism_agent_service_api::ScopedNotes { location: self.location(), items: vec!["Roadmap.md".to_string()] }])
+    }
+
+    fn search(&self, _request: &neoism_agent_service_api::NotesRequest, _query: &str, _limit: usize) -> Result<Vec<neoism_agent_service_api::ScopedNotes<neoism_agent_service_api::NoteSearchHit>>, neoism_agent_service_api::ServiceError> {
+        Ok(vec![neoism_agent_service_api::ScopedNotes { location: self.location(), items: vec![neoism_agent_service_api::NoteSearchHit { path: "Roadmap.md".to_string(), line: 7, text: "ship notes".to_string() }] }])
+    }
+
+    fn read(&self, _request: &neoism_agent_service_api::NotesRequest, path: &str) -> Result<neoism_agent_service_api::NoteDocument, neoism_agent_service_api::ServiceError> {
+        Ok(self.document(path, "contents"))
+    }
+
+    fn tasks(&self, _request: &neoism_agent_service_api::NotesRequest, _limit: usize) -> Result<Vec<neoism_agent_service_api::ScopedNotes<neoism_agent_service_api::NoteTask>>, neoism_agent_service_api::ServiceError> {
+        Ok(vec![neoism_agent_service_api::ScopedNotes { location: self.location(), items: vec![neoism_agent_service_api::NoteTask { path: "Roadmap.md".to_string(), line: 7, checked: false, text: "ship notes".to_string() }] }])
+    }
+
+    fn create(&self, _request: &neoism_agent_service_api::NotesRequest, title: &str, content: Option<&str>) -> Result<neoism_agent_service_api::NoteDocument, neoism_agent_service_api::ServiceError> {
+        Ok(self.document(&format!("{title}.md"), content.unwrap_or_default()))
+    }
+
+    fn write(&self, _request: &neoism_agent_service_api::NotesRequest, path: &str, content: &str) -> Result<neoism_agent_service_api::NoteDocument, neoism_agent_service_api::ServiceError> {
+        Ok(self.document(path, content))
+    }
+
+    fn task_toggle(&self, _request: &neoism_agent_service_api::NotesRequest, path: &str, line: usize, checked: Option<bool>) -> Result<neoism_agent_service_api::NoteTask, neoism_agent_service_api::ServiceError> {
+        Ok(neoism_agent_service_api::NoteTask { path: path.to_string(), line, checked: checked.unwrap_or(true), text: "ship notes".to_string() })
+    }
+}
+
+impl FakeNotesService {
+    fn location(&self) -> neoism_agent_service_api::NotesLocation {
+        neoism_agent_service_api::NotesLocation { scope_id: "workspace".to_string(), scope_label: "Workspace notes".to_string(), root: self.root.clone() }
+    }
+
+    fn document(&self, path: &str, content: &str) -> neoism_agent_service_api::NoteDocument {
+        neoism_agent_service_api::NoteDocument { location: self.location(), path: path.to_string(), absolute_path: self.root.join(path), content: content.to_string() }
+    }
 }
 
 #[tokio::test]

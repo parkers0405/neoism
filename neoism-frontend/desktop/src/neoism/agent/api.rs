@@ -42,22 +42,26 @@ pub(crate) fn neoism_agent_server() -> String {
 /// agent. Shared derivation for both agent-endpoint resolvers (see
 /// `ContextManager::agent_server_override_for_current`).
 pub(crate) fn agent_reverse_proxy_for_daemon_endpoint(endpoint: &str) -> Option<String> {
-    let endpoint = endpoint.trim();
-    let http = if let Some(rest) = endpoint.strip_prefix("ws://") {
-        format!("http://{rest}")
-    } else if let Some(rest) = endpoint.strip_prefix("wss://") {
-        format!("https://{rest}")
-    } else {
+    let mut endpoint = url::Url::parse(endpoint.trim()).ok()?;
+    if endpoint.path() != "/session" {
         return None;
+    }
+    let scheme = match endpoint.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        _ => return None,
     };
-    let base = http.trim_end_matches("/session").trim_end_matches('/');
-    Some(format!("{base}/agent"))
+    endpoint.set_scheme(scheme).ok()?;
+    endpoint.set_path("/agent");
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    Some(endpoint.to_string().trim_end_matches('/').to_string())
 }
 
 pub(super) fn fetch_model_options(
     server: &str,
 ) -> Result<Vec<NeoismAgentPickerOption>, String> {
-    let value = api_request_json(server, "GET", "/config/providers", None)?
+    let value = api_request_json(server, "GET", "/v2/providers/configured", None)?
         .ok_or_else(|| "Neoism Agent returned an empty provider response".to_string())?;
     Ok(model_options_from_providers_json(&value))
 }
@@ -72,7 +76,7 @@ pub(super) fn fetch_model_context_limit(
     let value = api_request_json_with_read_timeout(
         server,
         "GET",
-        "/config/providers",
+        "/v2/providers/configured",
         None,
         Duration::from_secs(5),
     )?
@@ -85,8 +89,8 @@ pub(super) fn fetch_agent_options(
     directory: Option<&str>,
 ) -> Result<Vec<NeoismAgentPickerOption>, String> {
     let path = directory
-        .map(|dir| format!("/agent?directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/agent".to_string());
+        .map(|dir| format!("/v2/agents?directory={}", percent_encode(dir)))
+        .unwrap_or_else(|| "/v2/agents".to_string());
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "Neoism Agent returned an empty agent response".to_string())?;
     let agents = value
@@ -145,7 +149,7 @@ pub(super) fn fetch_directory_options(
     let value = api_request_json_with_read_timeout(
         server,
         "GET",
-        &format!("/session/{session_id}/directory?limit=512"),
+        &format!("/v2/sessions/{session_id}/directory-options?limit=512"),
         None,
         Duration::from_secs(20),
     )?
@@ -202,8 +206,8 @@ pub(super) fn fetch_skill_options(
     directory: Option<&str>,
 ) -> Result<Vec<NeoismAgentPickerOption>, String> {
     let path = directory
-        .map(|dir| format!("/skill?directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/skill".to_string());
+        .map(|dir| format!("/v2/skills?directory={}", percent_encode(dir)))
+        .unwrap_or_else(|| "/v2/skills".to_string());
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "Neoism Agent returned an empty skill response".to_string())?;
     let skills = value
@@ -240,12 +244,13 @@ fn fetch_sessions_sorted(
 ) -> Result<Vec<Value>, String> {
     let path = directory
         .filter(|directory| !directory.trim().is_empty())
-        .map(|dir| format!("/session?roots=true&directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/session?roots=true".to_string());
+        .map(|dir| format!("/v2/sessions?roots=true&directory={}", percent_encode(dir)))
+        .unwrap_or_else(|| "/v2/sessions?roots=true".to_string());
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "Neoism Agent returned an empty session response".to_string())?;
     let sessions = value
-        .as_array()
+        .get("items")
+        .and_then(Value::as_array)
         .ok_or_else(|| "Neoism Agent returned malformed sessions".to_string())?;
     let mut sessions = sessions.to_vec();
     sessions.sort_by(|a, b| session_updated_at(b).cmp(&session_updated_at(a)));
@@ -290,7 +295,7 @@ pub(super) fn fetch_subagent_options(
     session_id: &str,
 ) -> Result<Vec<NeoismAgentPickerOption>, String> {
     let current =
-        api_request_json(server, "GET", &format!("/session/{session_id}"), None)?
+        api_request_json(server, "GET", &format!("/v2/sessions/{session_id}"), None)?
             .ok_or_else(|| {
                 "Neoism Agent returned an empty session response".to_string()
             })?;
@@ -303,7 +308,7 @@ pub(super) fn fetch_subagent_options(
     let children = api_request_json(
         server,
         "GET",
-        &format!("/session/{parent_id}/children"),
+        &format!("/v2/sessions/{parent_id}/children"),
         None,
     )?
     .ok_or_else(|| "Neoism Agent returned an empty child session response".to_string())?;
@@ -341,7 +346,7 @@ pub(super) fn fetch_subagent_entries(
     session_id: &str,
 ) -> Result<Vec<NeoismAgentSessionEntry>, String> {
     let current =
-        api_request_json(server, "GET", &format!("/session/{session_id}"), None)?
+        api_request_json(server, "GET", &format!("/v2/sessions/{session_id}"), None)?
             .ok_or_else(|| {
                 "Neoism Agent returned an empty session response".to_string()
             })?;
@@ -408,7 +413,7 @@ fn fetch_root_session(server: &str, mut session: Value) -> Result<Value, String>
             break;
         }
         let parent =
-            api_request_json(server, "GET", &format!("/session/{parent_id}"), None);
+            api_request_json(server, "GET", &format!("/v2/sessions/{parent_id}"), None);
         let Ok(Some(parent)) = parent else {
             break;
         };
@@ -431,7 +436,7 @@ fn collect_subagent_entries(
     let children = api_request_json(
         server,
         "GET",
-        &format!("/session/{parent_id}/children"),
+        &format!("/v2/sessions/{parent_id}/children"),
         None,
     )?
     .ok_or_else(|| "Neoism Agent returned an empty child session response".to_string())?;
@@ -553,6 +558,40 @@ mod subagent_runtime_snapshot_tests {
     use super::*;
 
     #[test]
+    fn desktop_agent_api_source_contains_no_deleted_http_routes() {
+        let source = include_str!("api.rs");
+        for route in ["config", "agent", "skill"] {
+            let legacy = format!("format!(\"/{route}");
+            assert!(!source.contains(&legacy), "legacy desktop route remains: {legacy}");
+        }
+        for route in [
+            "config", "event", "provider", "permission", "question", "command", "mcp",
+        ] {
+            let legacy = format!("\"/{route}");
+            assert!(!source.contains(&legacy), "legacy desktop route remains: {legacy}");
+        }
+        let stripped_session = ["trim_end_matches(\"", "/session\")"].concat();
+        assert!(!source.contains(&stripped_session));
+    }
+
+    #[test]
+    fn daemon_endpoint_conversion_requires_explicit_session_path() {
+        assert_eq!(
+            agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878/session"),
+            Some("http://127.0.0.1:7878/agent".to_string())
+        );
+        assert_eq!(
+            agent_reverse_proxy_for_daemon_endpoint("wss://host.example/session"),
+            Some("https://host.example/agent".to_string())
+        );
+        assert_eq!(agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878"), None);
+        assert_eq!(
+            agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878/session/"),
+            None
+        );
+    }
+
+    #[test]
     fn final_runtime_snapshot_promotes_new_tree_child_to_running() {
         // Tree discovery initially has no matching status. The status
         // snapshot captured after discovery must promote the child before the
@@ -614,7 +653,7 @@ pub(crate) struct SessionStatusSnapshot {
 pub(super) fn fetch_session_statuses(
     server: &str,
 ) -> Result<HashMap<String, SessionStatusSnapshot>, String> {
-    let value = api_request_json(server, "GET", "/session/status", None)?
+    let value = api_request_json(server, "GET", "/v2/sessions/status", None)?
         .ok_or_else(|| "Neoism Agent returned an empty status response".to_string())?;
     let statuses = value
         .as_object()
@@ -658,8 +697,8 @@ pub(super) fn fetch_config_defaults(
     directory: Option<&str>,
 ) -> Result<ConfigDefaults, String> {
     let path = directory
-        .map(|dir| format!("/config?directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/config".to_string());
+        .map(|dir| format!("/v2/config?directory={}", percent_encode(dir)))
+        .unwrap_or_else(|| "/v2/config".to_string());
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "Neoism Agent returned an empty config response".to_string())?;
     Ok(config_defaults_from_json(&value))
@@ -669,7 +708,7 @@ pub(super) fn fetch_session_state(
     server: &str,
     session_id: &str,
 ) -> Result<SessionState, String> {
-    let value = api_request_json(server, "GET", &format!("/session/{session_id}"), None)?
+    let value = api_request_json(server, "GET", &format!("/v2/sessions/{session_id}"), None)?
         .ok_or_else(|| "Neoism Agent returned an empty session response".to_string())?;
     Ok(session_state_from_json(&value))
 }
@@ -700,7 +739,7 @@ pub(super) fn fetch_session_messages_page(
 ) -> Result<SessionMessagePage, String> {
     let started = super::perf::now();
     let mut path = format!(
-        "/session/{session_id}/message?order=desc&limit={}&slim=true",
+        "/v2/sessions/{session_id}/messages?order=desc&limit={}&slim=true",
         limit.max(1)
     );
     if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
@@ -716,7 +755,8 @@ pub(super) fn fetch_session_messages_page(
     )?
     .ok_or_else(|| "Neoism Agent returned an empty message response".to_string())?;
     let messages = value
-        .as_array()
+        .get("items")
+        .and_then(Value::as_array)
         .ok_or_else(|| "Neoism Agent returned malformed messages".to_string())?;
     let raw_messages = messages.len();
     let oldest_cursor = messages.last().and_then(|message| {
@@ -803,7 +843,7 @@ pub(super) fn fetch_session_goal(
     session_id: &str,
 ) -> Result<Option<SessionGoal>, String> {
     let value =
-        api_request_json(server, "GET", &format!("/session/{session_id}/goal"), None)?
+        api_request_json(server, "GET", &format!("/v2/plugins/dev.neoism.goals/{session_id}"), None)?
             .unwrap_or(Value::Null);
     Ok(value.get("goal").and_then(SessionGoal::from_json))
 }
@@ -847,7 +887,11 @@ pub(super) fn first_interaction_value(
     path: &str,
     session_id: Option<&str>,
 ) -> Result<Option<Value>, String> {
-    let value = api_request_json(server, "GET", path, None)?.ok_or_else(|| {
+    let path = match session_id {
+        Some(session_id) => format!("{path}?sessionId={}", percent_encode(session_id)),
+        None => path.to_string(),
+    };
+    let value = api_request_json(server, "GET", &path, None)?.ok_or_else(|| {
         "Neoism Agent returned an empty interaction response".to_string()
     })?;
     let items = value
@@ -855,11 +899,7 @@ pub(super) fn first_interaction_value(
         .ok_or_else(|| "Neoism Agent returned malformed interactions".to_string())?;
     Ok(items
         .iter()
-        .find(|item| {
-            session_id.is_none_or(|session_id| {
-                item_session_id(item).as_deref() == Some(session_id)
-            })
-        })
+        .next()
         .cloned())
 }
 
@@ -1011,7 +1051,7 @@ pub(crate) fn fetch_semantic_session_hits(
     current_session: Option<&str>,
     directory: Option<&str>,
 ) -> Result<Option<Vec<NeoismAgentSemanticSessionHit>>, String> {
-    let path = format!("/search/semantic?q={}&limit=20", percent_encode(query));
+    let path = format!("/v2/plugins/dev.neoism.semantic/search?q={}&limit=20", percent_encode(query));
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "empty semantic search response".to_string())?;
     if !value
@@ -1117,7 +1157,7 @@ pub(super) fn open_event_stream(
     let path = request_path(
         &base_path,
         &format!(
-            "/event?sessionID={}&since=9223372036854775807&limit=1",
+            "/v2/events?sessionId={}&tail=true&limit=1",
             percent_encode(session_id)
         ),
     );
@@ -1421,7 +1461,7 @@ pub(super) fn set_session_pinned(
     let value = api_request_json(
         server,
         "POST",
-        &format!("/session/{session_id}/pin"),
+        &format!("/v2/sessions/{session_id}/pin"),
         Some(&body),
     )?;
     Ok(value.as_ref().map(session_pinned).unwrap_or(pinned))
@@ -1429,7 +1469,7 @@ pub(super) fn set_session_pinned(
 
 /// `DELETE /session/:id` — permanently delete a session.
 pub(super) fn delete_session(server: &str, session_id: &str) -> Result<(), String> {
-    api_request_json(server, "DELETE", &format!("/session/{session_id}"), None)?;
+    api_request_json(server, "DELETE", &format!("/v2/sessions/{session_id}"), None)?;
     Ok(())
 }
 
@@ -1443,7 +1483,7 @@ pub(super) fn rename_session(
     api_request_json(
         server,
         "PATCH",
-        &format!("/session/{session_id}"),
+        &format!("/v2/sessions/{session_id}"),
         Some(&body),
     )?;
     Ok(())

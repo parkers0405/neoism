@@ -19,8 +19,6 @@ use std::fs;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use crate::managed_lsp_path::managed_lsp_path;
-
 use super::{
     capability_enabled,
     lsp_adapters::ResolvedLanguageRoute,
@@ -185,8 +183,7 @@ fn build_lsp_command(program: &str, args: &[String]) -> Command {
 /// `cmd /C`.
 #[cfg(windows)]
 fn build_lsp_command(program: &str, args: &[String]) -> Command {
-    let resolved = super::lsp_scan::resolve_command(program)
-        .unwrap_or_else(|| PathBuf::from(program));
+    let resolved = PathBuf::from(program);
     let is_batch =
         resolved
             .extension()
@@ -226,11 +223,6 @@ impl LspClient {
             .ok_or_else(|| anyhow!("LSP command is empty"))?;
         let mut command_proc = build_lsp_command(program, args);
         command_proc.current_dir(project_root).envs(env);
-        if !env.contains_key("PATH") {
-            if let Some(path) = managed_lsp_path() {
-                command_proc.env("PATH", path);
-            }
-        }
         // Own process group/tree so helpers the server forks (rust-analyzer
         // proc-macro servers, npm shim children) can be reaped with it on
         // drop instead of orphaning.

@@ -664,7 +664,7 @@ fn responses_instructions(messages: &[ProviderMessage]) -> String {
         .collect::<Vec<_>>()
         .join("\n\n");
     if instructions.is_empty() {
-        "You are Neoism, a concise coding assistant.".to_string()
+        "You are a concise coding assistant.".to_string()
     } else {
         instructions
     }

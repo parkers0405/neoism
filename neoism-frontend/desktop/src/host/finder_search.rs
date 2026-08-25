@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use neoism_ui::services::{
     IoError, SearchFileHit, SearchFileMode, SearchGitHit, SearchGrepHit, SearchGrepMode,
@@ -49,13 +49,16 @@ pub struct RemoteSearchRoute {
 
 pub struct NativeSearchService {
     remote: Mutex<Option<RemoteSearchRoute>>,
-    local_root_pin: Mutex<Option<neoism_agent_server::picker_registry::PickerRootPin>>,
+    local_search: neoism_agent_server::FffWorkspaceSearchService,
+    local_root_pin:
+        Mutex<Option<Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
 }
 
 impl NativeSearchService {
     pub fn new() -> Self {
         Self {
             remote: Mutex::new(None),
+            local_search: neoism_agent_server::FffWorkspaceSearchService::new(),
             local_root_pin: Mutex::new(None),
         }
     }
@@ -128,12 +131,16 @@ impl NativeSearchService {
             return None;
         }
         if let Ok(mut pin) = self.local_root_pin.lock() {
-            let already_pinned = pin.as_ref().is_some_and(|pin| pin.is_for(cwd));
+            let already_pinned = pin.as_ref().is_some_and(|pin| {
+                pin.root() == cwd
+                    || std::fs::canonicalize(pin.root()).ok()
+                        == std::fs::canonicalize(cwd).ok()
+            });
             if !already_pinned {
-                *pin = Some(neoism_agent_server::picker_registry::pin(cwd));
+                *pin = Some(self.local_search.pin(cwd));
             }
         }
-        neoism_agent_server::picker_registry::with_picker(cwd, op)
+        self.local_search.with_picker(cwd, op)
             .inspect_err(|error| {
                 tracing::warn!(
                     target: "neoism::finder",

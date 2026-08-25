@@ -12,11 +12,14 @@ members = [
     "neoism-window",
     "neoism-notifier",
     "neoism-protocol",
+    "neoism-product-docs",
     "neoism-workspace-index",
     "neoism-workspace-daemon",
     "neoism-terminal-pty",
     "neoism-frontend/shared",
     "neoism-agent/crates/neoism-agent-core",
+    "neoism-agent/crates/neoism-agent-service-api",
+    "neoism-agent/crates/neoism-agent-neoism-adapter",
     "neoism-agent/crates/neoism-agent-plugin-api",
     "neoism-agent/crates/neoism-agent-server",
     "neoism-agent/crates/neoism-agent-cli",
@@ -58,9 +61,12 @@ neoism-notifier = { path = "neoism-notifier", version = "0.7.55" }
 neoism-grapheme-width = { path = "neoism-grapheme-width", version = "0.7.55" }
 sugarloaf = { path = "sugarloaf", version = "0.7.55" }
 neoism-agent-core = { path = "neoism-agent/crates/neoism-agent-core", version = "0.7.55" }
+neoism-agent-service-api = { path = "neoism-agent/crates/neoism-agent-service-api", version = "0.7.55" }
+neoism-agent-neoism-adapter = { path = "neoism-agent/crates/neoism-agent-neoism-adapter", version = "0.7.55" }
 neoism-agent-plugin-api = { path = "neoism-agent/crates/neoism-agent-plugin-api", version = "0.7.55" }
 neoism-agent-server = { path = "neoism-agent/crates/neoism-agent-server", version = "0.7.55" }
 neoism-extensions = { path = "neoism-extensions", version = "0.7.55" }
+neoism-product-docs = { path = "neoism-product-docs", version = "0.7.55" }
 neoism-sync = { path = "neoism-sync", version = "0.7.55" }
 neoism-remarkable = { path = "neoism-remarkable", version = "0.7.55" }
 neoism-neoworld-core = { path = "neoism-neoworld-core", version = "0.7.55" }

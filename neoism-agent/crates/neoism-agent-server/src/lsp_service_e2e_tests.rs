@@ -555,8 +555,9 @@ fn nested_project_client_keeps_outer_workspace_cache_and_event_ownership() {
             }
         }
     });
+    fs::create_dir_all(workspace.path.join(".agent")).expect("create Agent config root");
     fs::write(
-        workspace.path.join("neoism.json"),
+        workspace.path.join(".agent/agent.json"),
         serde_json::to_vec_pretty(&config).expect("serialize nested config"),
     )
     .expect("write nested adapter config");
@@ -686,6 +687,7 @@ fn write_lsp_config_with_extension(
     mode: &str,
     extension: &str,
 ) {
+    fs::create_dir_all(root.join(".agent")).expect("create Agent config root");
     let config = json!({
         "lsp": {
             "protocol-test": {
@@ -711,7 +713,7 @@ fn write_lsp_config_with_extension(
         }
     });
     fs::write(
-        root.join("neoism.json"),
+        root.join(".agent/agent.json"),
         serde_json::to_vec_pretty(&config).expect("serialize LSP config"),
     )
     .expect("write LSP config");

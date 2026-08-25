@@ -14,6 +14,7 @@ use crate::auth_store::AuthStore;
 use crate::error::ApiError;
 use crate::state::{AppState, SemanticSearchHit};
 use neoism_agent_core::AuthInfo;
+use neoism_agent_service_api::{SemanticMemoryHit, SemanticMemoryIndex, ServiceError, ServiceFuture};
 
 const DEFAULT_MODEL: &str = "openai/text-embedding-3-small";
 /// Keep embedding inputs comfortably under model token limits.
@@ -178,16 +179,68 @@ pub(crate) fn vector_json(vector: &[f32]) -> String {
     out
 }
 
+pub(crate) struct AgentSemanticMemoryIndex {
+    store: crate::state::SessionStore,
+    client: Option<EmbeddingsClient>,
+}
+
+impl AgentSemanticMemoryIndex {
+    pub(crate) fn new(store: crate::state::SessionStore, client: Option<EmbeddingsClient>) -> Self {
+        Self { store, client }
+    }
+}
+
+impl SemanticMemoryIndex for AgentSemanticMemoryIndex {
+    fn available(&self) -> bool {
+        self.client.is_some() && self.store.semantic_search_supported()
+    }
+
+    fn model(&self) -> Option<String> {
+        self.client.as_ref().map(|client| client.model_spec.clone())
+    }
+
+    fn embed<'a>(&'a self, inputs: &'a [String]) -> ServiceFuture<'a, Result<Vec<Vec<f32>>, ServiceError>> {
+        Box::pin(async move {
+            let client = self.client.as_ref().ok_or_else(|| ServiceError::new("semantic memory is unavailable"))?;
+            client.embed(inputs).await.map_err(service_error)
+        })
+    }
+
+    fn hashes<'a>(&'a self, root_key: &'a str, model: &'a str) -> ServiceFuture<'a, Result<Vec<(String, String)>, ServiceError>> {
+        Box::pin(async move { self.store.memory_embedding_hashes(root_key, model).await.map_err(service_error) })
+    }
+
+    fn upsert<'a>(&'a self, key: &'a str, root_key: &'a str, content_hash: &'a str, model: &'a str, updated: i64, vector: &'a [f32]) -> ServiceFuture<'a, Result<(), ServiceError>> {
+        Box::pin(async move { self.store.upsert_memory_embedding(key, root_key, content_hash, model, updated, &vector_json(vector)).await.map_err(service_error) })
+    }
+
+    fn delete<'a>(&'a self, key: &'a str) -> ServiceFuture<'a, Result<(), ServiceError>> {
+        Box::pin(async move { self.store.delete_memory_embedding(key).await.map_err(service_error) })
+    }
+
+    fn search<'a>(&'a self, root_keys: &'a [String], query_vector: &'a [f32], model: &'a str, limit: usize) -> ServiceFuture<'a, Result<Vec<SemanticMemoryHit>, ServiceError>> {
+        Box::pin(async move {
+            self.store.memory_semantic_search(root_keys, &vector_json(query_vector), model, limit).await
+                .map(|hits| hits.into_iter().map(|(key, distance)| SemanticMemoryHit { key, distance }).collect())
+                .map_err(service_error)
+        })
+    }
+}
+
+fn service_error(error: impl std::fmt::Display) -> ServiceError {
+    ServiceError::new(error.to_string())
+}
+
 /// Truncate embedding input on a char boundary.
 fn clamp_input(content: &str) -> String {
     content.chars().take(MAX_INPUT_CHARS).collect()
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SemanticSearchQuery {
     q: String,
     limit: Option<usize>,
-    #[serde(rename = "sessionID")]
     session_id: Option<String>,
 }
 
@@ -199,7 +252,7 @@ pub(crate) struct SemanticSearchResponse {
     hits: Vec<SemanticSearchHit>,
 }
 
-/// `GET /search/semantic?q=…&limit=…&sessionID=…` — embed the query and rank
+/// `GET /v2/plugins/dev.neoism.semantic/search?q=…&limit=…&sessionId=…` — embed the query and rank
 /// indexed transcript messages by cosine distance.
 pub(crate) async fn semantic_search_route(
     State(state): State<AppState>,
@@ -305,7 +358,7 @@ async fn index_batch(
             processed += 1;
             continue;
         };
-        let (_, _, content) = crate::state::fts_document(&message);
+        let (_, _, content) = crate::state::search_document(&message);
         if content.trim().is_empty() {
             state
                 .inner

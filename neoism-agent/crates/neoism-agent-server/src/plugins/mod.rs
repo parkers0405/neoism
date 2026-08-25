@@ -21,14 +21,6 @@ struct InternalPlugin {
 
 const INTERNAL_PLUGINS: &[InternalPlugin] = &[
     InternalPlugin {
-        id: "dev.neoism.subagents",
-        name: "Subagents",
-        capability: "neoism.subagents",
-        event_namespace: "subagent",
-        contribution: "subagents",
-        disableable: true,
-    },
-    InternalPlugin {
         id: "dev.neoism.mcp",
         name: "MCP",
         capability: "neoism.mcp",
@@ -94,12 +86,6 @@ impl AgentPlugin for BuiltinPlugin {
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
         match self.definition.contribution {
-            "subagents" => {
-                registrar.route("subagents");
-                crate::tool::register_subagent_tools(registrar, &self.state);
-                registrar.event("subagent.*", None);
-                registrar.part("dev.neoism.subagents/task", None);
-            }
             "mcp" => {
                 registrar.route("mcp");
                 registrar.tool("execute", None);
@@ -196,6 +182,11 @@ pub(crate) fn build_host(
     if enabled_in(&config, neoism_agent_builtins::plugin::workflows::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::WorkflowsPlugin::new(
             std::sync::Arc::new(plugin_adapters::Workflows(state.clone())),
+        )));
+    }
+    if enabled_in(&config, neoism_agent_builtins::plugin::subagents::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::SubagentsPlugin::new(
+            std::sync::Arc::new(plugin_adapters::Subagents(state.clone())),
         )));
     }
     plugins.extend(INTERNAL_PLUGINS

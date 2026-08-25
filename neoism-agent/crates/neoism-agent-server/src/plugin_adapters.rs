@@ -23,6 +23,26 @@ impl neoism_agent_builtins::plugin::skills::SkillsHost for Skills {
     }
 }
 
+pub(crate) struct WorkspaceTools(pub(crate) crate::state::AppState);
+impl neoism_agent_builtins::plugin::workspace_tools::WorkspaceToolsHost for WorkspaceTools {
+    fn register_tools(&self, registrar: &mut PluginRegistrar) { crate::tool::register_workspace_tools(registrar, &self.0); }
+}
+
+pub(crate) struct NotesTools(pub(crate) crate::state::AppState);
+impl neoism_agent_builtins::plugin::notes_tools::NotesToolsHost for NotesTools {
+    fn register_tools(&self, registrar: &mut PluginRegistrar) { crate::tool::register_notes_tools(registrar, &self.0); }
+}
+
+pub(crate) struct CustomTools(pub(crate) Vec<crate::custom_tool::CustomTool>);
+impl neoism_agent_builtins::plugin::custom_tools::CustomToolsHost for CustomTools {
+    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+        for tool in &self.0 {
+            let item = tool.item();
+            registrar.tool(item.id, Some(item.parameters));
+        }
+    }
+}
+
 pub(crate) struct Subagents(pub(crate) crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::subagents::SubagentsHost for Subagents {

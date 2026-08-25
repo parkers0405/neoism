@@ -260,10 +260,7 @@ fn workspace_runtime_optional_lifecycle_is_a_decreasing_ratchet() {
     assert_ratchet(
         "concrete optional lifecycle fields in WorkspaceRuntime",
         &actual,
-        &[(
-            "neoism-agent/crates/neoism-agent-server/src/workspace_runtime.rs",
-            6,
-        )],
+        &[],
     );
 }
 

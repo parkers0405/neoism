@@ -76,14 +76,6 @@ const INTERNAL_PLUGINS: &[InternalPlugin] = &[
         contribution: "notes-tools",
         disableable: true,
     },
-    InternalPlugin {
-        id: "dev.neoism.semantic",
-        name: "Semantic search",
-        capability: "neoism.semantic",
-        event_namespace: "semantic",
-        contribution: "semantic",
-        disableable: true,
-    },
 ];
 
 struct BuiltinPlugin {
@@ -128,7 +120,6 @@ impl AgentPlugin for BuiltinPlugin {
             "pty" => registrar.route("pty"),
             "workspace-tools" => crate::tool::register_workspace_tools(registrar, &self.state),
             "notes-tools" => crate::tool::register_notes_tools(registrar, &self.state),
-            "semantic" => registrar.route("semantic-search"),
             _ => return Err(PluginHostError::Registration("unknown built-in contribution".to_string())),
         }
         Ok(())
@@ -184,6 +175,33 @@ impl neoism_agent_builtins::plugin::skills::SkillsHost for ServerSkillsHost {
 }
 
 struct ServerGoalsHost(crate::state::AppState);
+struct ServerSemanticHost(crate::state::AppState);
+
+impl neoism_agent_builtins::plugin::semantic::SemanticHost for ServerSemanticHost {
+    fn search<'a>(
+        &'a self,
+        request: neoism_agent_plugin_api::RouteRequest,
+    ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
+        Box::pin(async move {
+            use axum::extract::{Query, State};
+            let query = request.query.into_iter().fold(
+                serde_json::Map::new(),
+                |mut output, (key, values)| {
+                    output.insert(key, serde_json::json!(values.first().cloned().unwrap_or_default()));
+                    output
+                },
+            );
+            let query = serde_json::from_value(serde_json::Value::Object(query))
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            let response = crate::semantic::semantic_search_route(State(self.0.clone()), Query(query))
+                .await
+                .map_err(plugin_api_error)?;
+            let body = serde_json::to_value(response.0)
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
+        })
+    }
+}
 struct ServerConfigAdmin(crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ServerConfigAdmin {
@@ -434,6 +452,11 @@ pub(crate) fn build_host(
                 std::sync::Arc::new(ServerProviderService(state.inner.providers.clone())),
             )],
             std::sync::Arc::new(ServerProviderAdmin(state.clone())),
+        )));
+    }
+    if enabled_in(&config, neoism_agent_builtins::plugin::semantic::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::SemanticPlugin::new(
+            std::sync::Arc::new(ServerSemanticHost(state.clone())),
         )));
     }
     plugins.extend(INTERNAL_PLUGINS

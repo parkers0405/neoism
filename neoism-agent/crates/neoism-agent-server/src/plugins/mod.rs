@@ -184,6 +184,53 @@ impl neoism_agent_builtins::plugin::skills::SkillsHost for ServerSkillsHost {
 }
 
 struct ServerGoalsHost(crate::state::AppState);
+struct ServerConfigAdmin(crate::state::AppState);
+
+impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ServerConfigAdmin {
+    fn execute<'a>(
+        &'a self,
+        action: neoism_agent_builtins::plugin::config::ConfigAdminAction,
+        request: neoism_agent_plugin_api::RouteRequest,
+    ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
+        Box::pin(async move {
+            use neoism_agent_builtins::plugin::config::ConfigAdminAction;
+            let directory = request.workspace.unwrap_or_default();
+            let directory = directory.to_string_lossy();
+            let body = match action {
+                ConfigAdminAction::Get => {
+                    let mut config = crate::config::load(self.0.services(), &directory)
+                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?
+                        .info;
+                    crate::config::inject_builtin_mcp(&mut config, self.0.services());
+                    serde_json::to_value(config)
+                }
+                ConfigAdminAction::Validate => serde_json::to_value(
+                    crate::config::validate(self.0.services(), &directory),
+                ),
+                ConfigAdminAction::Update => {
+                    let config: neoism_agent_core::AgentConfigDocument =
+                        serde_json::from_value(request.body)
+                            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+                    let snapshot = crate::config::snapshot(self.0.services(), &directory)
+                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+                    self.0.services().config.update(
+                        &neoism_agent_service_api::ConfigUpdateRequest {
+                            workspace: std::path::PathBuf::from(directory.as_ref()),
+                            source_id: snapshot.writable_target.source_id,
+                            update: neoism_agent_service_api::ConfigUpdate::ReplaceDocument {
+                                document: serde_json::to_value(&config)
+                                    .map_err(|error| PluginRuntimeError::new(error.to_string()))?,
+                            },
+                        },
+                    ).await.map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+                    serde_json::to_value(config)
+                }
+            }
+            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
+        })
+    }
+}
 
 struct ServerProviderService(crate::provider::ProviderRegistry);
 struct ServerProviderAdmin(crate::state::AppState);
@@ -357,6 +404,7 @@ pub(crate) fn build_host(
     let mut plugins = vec![
         Box::new(neoism_agent_builtins::plugin::ConfigPlugin::new(
             services.clone(),
+            std::sync::Arc::new(ServerConfigAdmin(state.clone())),
         )) as Box<dyn AgentPlugin>,
     ];
     if enabled_in(

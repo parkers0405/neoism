@@ -52,7 +52,7 @@ pub fn detach_std_command(command: &mut std::process::Command) {
 }
 
 pub fn hidden_std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
-    let mut command = std::process::Command::new(program);
+    let command = std::process::Command::new(program);
     #[cfg(windows)]
     hide_std_command(&mut command);
     command
@@ -61,7 +61,7 @@ pub fn hidden_std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process:
 pub fn hidden_tokio_command(
     program: impl AsRef<std::ffi::OsStr>,
 ) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(program);
+    let command = tokio::process::Command::new(program);
     #[cfg(windows)]
     hide_tokio_command(&mut command);
     command

@@ -144,7 +144,7 @@ impl WorkspaceManager {
             inner.hosts = bootstrap_hosts();
         }
         inner.host_workspaces.clear();
-        for mut workspace in snapshot.host_workspaces {
+        for workspace in snapshot.host_workspaces {
             #[cfg(windows)]
             {
                 workspace.root_dir = workspace
@@ -199,7 +199,7 @@ impl WorkspaceManager {
             }
         }
         inner.workspaces.clear();
-        for mut ws in snapshot.workspaces {
+        for ws in snapshot.workspaces {
             #[cfg(windows)]
             {
                 ws.path = crate::path::canonicalize_lossy(&ws.path);

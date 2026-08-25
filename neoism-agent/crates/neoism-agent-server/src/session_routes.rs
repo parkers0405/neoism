@@ -122,7 +122,8 @@ pub(crate) async fn create_session_in_directory(
     let project_context = project::discover(state.services(), directory);
     let directory = project_context.directory.clone();
     let (loaded_config, _) = neoism_agent_builtins::plugin::config::load(state.services(), &directory)?;
-    let agents = crate::plugins::agent_catalog(state, &directory).await?;
+    let snapshot = state.plugin_snapshot(&directory).await;
+    let agents = crate::plugins::agent_catalog(&snapshot, &directory)?;
     let is_child = request.parent_id.is_some();
     if let Some(parent_id) = request.parent_id.as_ref() {
         let parent = state

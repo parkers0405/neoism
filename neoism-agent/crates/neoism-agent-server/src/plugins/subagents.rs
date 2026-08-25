@@ -17,8 +17,6 @@ use crate::session_actions::{
 use crate::state::AppState;
 use crate::tool::ToolExecutionResult;
 
-pub(crate) const PLUGIN_ID: &str = "dev.neoism.subagents";
-
 /// Generation-owned bookkeeping for subagent sessions. The session records
 /// remain durable, while runs, queues and keyed reconciliation locks do not.
 #[derive(Default)]
@@ -58,18 +56,18 @@ impl SubagentWorkspaceRuntime {
 }
 
 pub(crate) fn enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> bool {
-    crate::plugins::enabled(services, directory, PLUGIN_ID)
+    crate::plugins::enabled(services, directory, neoism_agent_builtins::plugin::subagents::ID)
 }
 
 #[cfg(test)]
 fn enabled_in_config(config: &neoism_agent_core::AgentConfigDocument) -> bool {
-    config.plugins.get(PLUGIN_ID).is_none_or(|plugin| plugin.enabled)
+    config.plugins.get(neoism_agent_builtins::plugin::subagents::ID).is_none_or(|plugin| plugin.enabled)
 }
 
 fn require_enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Result<(), String> {
     enabled(services, directory)
         .then_some(())
-        .ok_or_else(|| format!("plugin {PLUGIN_ID} is disabled for this workspace"))
+        .ok_or_else(|| format!("plugin {} is disabled for this workspace", neoism_agent_builtins::plugin::subagents::ID))
 }
 
 #[derive(Clone, Debug, Serialize)]

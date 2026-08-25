@@ -57,7 +57,7 @@ async fn execute_tool_call_with_env_and_cancel(
     let input_bytes = input.to_string().len();
     let services = state.services().clone();
     let contribution = crate::agent_tool_registry::tool_contribution(snapshot, tool_name);
-    if contribution.is_some_and(|item| item.plugin_id == "dev.neoism.mcp") {
+    if contribution.is_some_and(|item| item.plugin_id == neoism_agent_builtins::plugin::mcp::ID) {
         if let Some(result) = execute_mcp_gateway(
             directory,
             tool_name,
@@ -82,7 +82,7 @@ async fn execute_tool_call_with_env_and_cancel(
             return Ok(result);
         }
     }
-    if contribution.is_some_and(|item| item.plugin_id == "dev.neoism.custom-tools") {
+    if contribution.is_some_and(|item| item.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID) {
         let result = crate::custom_tool::execute(
             &services,
             directory,
@@ -108,9 +108,9 @@ async fn execute_tool_call_with_env_and_cancel(
         );
         return Ok(result);
     }
-    let formatter = crate::config::load(&services, directory)
+    let formatter = neoism_agent_builtins::plugin::config::load(&services, directory)
         .ok()
-        .and_then(|loaded| crate::config::formatter_value(&loaded.info));
+        .and_then(|(config, _)| crate::config::formatter_value(&config));
     let runtime = snapshot.runtime_tools.get(tool_name).cloned();
     let runtime = runtime.ok_or_else(|| format!("unknown tool {tool_name}"))?;
     let definition = runtime.definition();
@@ -387,7 +387,7 @@ async fn execute_stateful_tool_call(
                 .await
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("session {session_id} not found"))?;
-            if !crate::plugins::enabled(state.services(), &info.directory, "dev.neoism.goals") {
+            if !crate::plugins::enabled(state.services(), &info.directory, neoism_agent_builtins::plugin::goals::ID) {
                 return Err("Goal plugin is disabled for the workspace".to_string());
             }
             let Some(mut goal) = info.goal() else {
@@ -526,8 +526,8 @@ pub(crate) async fn session_subtask_depth(state: &AppState, session: &SessionInf
 }
 
 fn dangerously_skip_permissions_enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> bool {
-    crate::config::load(services, directory)
-        .map(|loaded| loaded.info.dangerously_skip_permissions)
+    neoism_agent_builtins::plugin::config::load(services, directory)
+        .map(|(config, _)| config.dangerously_skip_permissions)
         .unwrap_or(false)
 }
 
@@ -914,7 +914,7 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
         .map_err(|error| error.to_string())?;
     let mut env = BTreeMap::new();
     let is_custom_tool = crate::agent_tool_registry::tool_contribution(&snapshot, tool_name)
-        .is_some_and(|contribution| contribution.plugin_id == "dev.neoism.custom-tools");
+        .is_some_and(|contribution| contribution.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID);
     if tool_name == "bash" || tool_name == "background_task" || is_custom_tool {
         plugin::shell_env(
                 &snapshot,

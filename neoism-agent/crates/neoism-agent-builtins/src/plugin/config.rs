@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -8,8 +9,8 @@ use neoism_agent_plugin_api::{
     PluginScope, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
     ServiceRequest,
 };
-use neoism_agent_service_api::{AgentServices, ConfigSnapshotRequest};
-use serde_json::Value;
+use neoism_agent_service_api::{AgentServices, ConfigSnapshot, ConfigSnapshotRequest};
+use serde_json::{Map, Value};
 
 pub const ID: &str = "dev.neoism.config";
 
@@ -116,13 +117,84 @@ pub fn load(services: &AgentServices, directory: &str) -> anyhow::Result<(AgentC
     let snapshot = services
         .config
         .snapshot(&ConfigSnapshotRequest::new(directory))?;
+    load_snapshot(&snapshot)
+}
+
+pub fn load_snapshot(snapshot: &ConfigSnapshot) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
     let mut value = serde_json::json!({});
-    for layer in snapshot.layers {
-        merge(&mut value, layer.document);
+    for layer in &snapshot.layers {
+        merge(&mut value, layer.document.clone());
     }
-    let document = serde_json::from_value(value)?;
-    let roots = snapshot.discovery_roots.into_iter().map(|root| root.path).collect();
+    for root in &snapshot.discovery_roots {
+        merge_markdown_entries(&mut value, &root.path)?;
+    }
+    let mut document = serde_json::from_value(value)?;
+    normalize(&mut document);
+    let roots = snapshot.discovery_roots.iter().map(|root| root.path.clone()).collect();
     Ok((document, roots))
+}
+
+fn merge_markdown_entries(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
+    for (roots, field, content_field, mode) in [
+        (&["agent", "agents"][..], "agent", "prompt", None),
+        (&["mode", "modes"][..], "mode", "prompt", Some("primary")),
+        (&["command", "commands"][..], "command", "template", None),
+    ] {
+        for root_name in roots {
+            let root = dir.join(root_name);
+            for file in markdown_files(&root)? {
+                let (mut data, content) = parse_markdown(&file)?;
+                let name = data.get("name").and_then(Value::as_str).map(ToOwned::to_owned)
+                    .unwrap_or_else(|| entry_name(&root, &file));
+                if field == "command" { data.insert("name".into(), Value::String(name.clone())); }
+                data.insert(content_field.into(), Value::String(content.trim().to_string()));
+                if let Some(mode) = mode { data.insert("mode".into(), Value::String(mode.into())); }
+                set_named_entry(raw, field, &name, Value::Object(data));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn entry_name(root: &Path, file: &Path) -> String {
+    file.strip_prefix(root).unwrap_or(file).with_extension("").components()
+        .map(|component| component.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+}
+
+fn set_named_entry(raw: &mut Value, field: &str, name: &str, value: Value) {
+    if !raw.is_object() { *raw = Value::Object(Map::new()); }
+    let entry = raw.as_object_mut().expect("config root object").entry(field).or_insert_with(|| Value::Object(Map::new()));
+    if !entry.is_object() { *entry = Value::Object(Map::new()); }
+    entry.as_object_mut().expect("config field object").insert(name.into(), value);
+}
+
+fn normalize(info: &mut AgentConfigDocument) {
+    for (name, mut config) in std::mem::take(&mut info.mode) {
+        config.mode = Some("primary".into());
+        info.agent.insert(name, config);
+    }
+    let permissions = permissions_from_tools(&info.tools);
+    merge_permissions(&mut info.permission, permissions);
+    for (name, command) in &mut info.command {
+        if command.name.is_empty() { command.name = name.clone(); }
+    }
+    for (id, plugin) in &mut info.plugins { plugin.id = Some(id.clone()); }
+    for agent in info.agent.values_mut() {
+        if agent.steps.is_none() { agent.steps = agent.max_steps; }
+        let permissions = permissions_from_tools(&agent.tools);
+        merge_permissions(&mut agent.permission, permissions);
+    }
+}
+
+fn permissions_from_tools(tools: &BTreeMap<String, bool>) -> BTreeMap<String, Value> {
+    tools.iter().map(|(tool, enabled)| {
+        let key = if matches!(tool.as_str(), "write" | "edit") { "edit" } else { tool };
+        (key.to_string(), Value::String(if *enabled { "allow" } else { "deny" }.into()))
+    }).collect()
+}
+
+fn merge_permissions(target: &mut BTreeMap<String, Value>, source: BTreeMap<String, Value>) {
+    for (key, value) in source { target.entry(key).or_insert(value); }
 }
 
 pub(super) fn markdown_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -168,9 +240,23 @@ fn merge(target: &mut Value, source: Value) {
     match (target, source) {
         (Value::Object(target), Value::Object(source)) => {
             for (key, value) in source {
+                if key == "instructions" {
+                    merge_unique_array(target.entry(key).or_insert(Value::Array(Vec::new())), value);
+                    continue;
+                }
                 merge(target.entry(key).or_insert(Value::Null), value);
             }
         }
         (target, source) => *target = source,
+    }
+}
+
+fn merge_unique_array(target: &mut Value, source: Value) {
+    let Value::Array(source) = source else { *target = source; return; };
+    let Value::Array(target) = target else { *target = Value::Array(source); return; };
+    let mut seen = target.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect::<BTreeSet<_>>();
+    for item in source {
+        if item.as_str().is_some_and(|text| !seen.insert(text.to_string())) { continue; }
+        target.push(item);
     }
 }

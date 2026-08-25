@@ -869,7 +869,7 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
     };
     for child in deferred {
         let runtime = state.workspace_runtime(&child.directory).await;
-        if !runtime.snapshot().manifests.iter().any(|plugin| plugin.id == crate::plugins::subagents::PLUGIN_ID) {
+        if !runtime.snapshot().manifests.iter().any(|plugin| plugin.id == neoism_agent_builtins::plugin::subagents::ID) {
             clear_subtask_completion_for_teardown(state, child.id.as_str()).await;
             continue;
         }

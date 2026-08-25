@@ -414,9 +414,9 @@ fn config_signature(
     services: &neoism_agent_service_api::AgentServices,
     root: &Path,
 ) -> Vec<u8> {
-    crate::config::load(services, &root.to_string_lossy())
+    neoism_agent_builtins::plugin::config::load(services, &root.to_string_lossy())
         .ok()
-        .and_then(|loaded| serde_json::to_vec(&loaded.info).ok())
+        .and_then(|(info, _)| serde_json::to_vec(&info).ok())
         .unwrap_or_default()
 }
 

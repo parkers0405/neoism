@@ -25,8 +25,8 @@ pub(crate) fn system(services: &neoism_agent_service_api::AgentServices, directo
         push_existing(&mut paths, &mut ordered, path);
     }
 
-    if let Ok(loaded) = config::load(services, directory) {
-        for raw in loaded.info.instructions {
+    if let Ok((config, _)) = neoism_agent_builtins::plugin::config::load(services, directory) {
+        for raw in config.instructions {
             if let Some(path) = configured_instruction_path(directory, &raw) {
                 push_existing(&mut paths, &mut ordered, path);
             }

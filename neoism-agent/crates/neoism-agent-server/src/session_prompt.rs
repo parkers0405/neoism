@@ -84,7 +84,7 @@ pub(crate) async fn append_prompt(
     .await;
     let goals_enabled = crate::agent_tool_registry::plugin_present(
         &workspace.snapshot,
-        "dev.neoism.goals",
+        neoism_agent_builtins::plugin::goals::ID,
     );
     if request
         .parts
@@ -2291,9 +2291,9 @@ pub(crate) fn configured_text_verbosity(
     directory: Option<&str>,
 ) -> Option<neoism_agent_core::TextVerbosity> {
     directory.and_then(|directory| {
-        crate::config::load(services, directory)
+        neoism_agent_builtins::plugin::config::load(services, directory)
             .ok()
-            .and_then(|loaded| loaded.info.text_verbosity)
+            .and_then(|(config, _)| config.text_verbosity)
     })
 }
 

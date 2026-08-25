@@ -84,10 +84,10 @@ fn resolve_adapters_uncached(
         .iter()
         .map(LanguageAdapter::from_capability)
         .collect::<Vec<_>>();
-    let Ok(loaded) = crate::config::load(services, &root.to_string_lossy()) else {
+    let Ok((info, _)) = neoism_agent_builtins::plugin::config::load(services, &root.to_string_lossy()) else {
         return adapters;
     };
-    let servers = match loaded.info.lsp {
+    let servers = match info.lsp {
         LspConfig::Enabled(false) => return Vec::new(),
         LspConfig::Enabled(true) => return adapters,
         LspConfig::Servers(servers) => servers,

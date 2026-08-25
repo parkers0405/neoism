@@ -23,12 +23,23 @@ pub trait SkillsHost: Send + Sync + 'static {
 }
 
 pub struct SkillsPlugin {
-    services: AgentServices,
+    config: Arc<neoism_agent_core::AgentConfigDocument>,
+    discovery_roots: Arc<Vec<PathBuf>>,
     host: Arc<dyn SkillsHost>,
 }
 
 impl SkillsPlugin {
-    pub fn new(services: AgentServices, host: Arc<dyn SkillsHost>) -> Self { Self { services, host } }
+    pub fn new(
+        config: neoism_agent_core::AgentConfigDocument,
+        discovery_roots: Vec<PathBuf>,
+        host: Arc<dyn SkillsHost>,
+    ) -> Self {
+        Self {
+            config: Arc::new(config),
+            discovery_roots: Arc::new(discovery_roots),
+            host,
+        }
+    }
 }
 
 impl AgentPlugin for SkillsPlugin {
@@ -52,23 +63,30 @@ impl AgentPlugin for SkillsPlugin {
                 response_schema: None,
             },
             metadata: ContributionMetadata::new("v2.plugins.skills.list", ID, PluginScope::Workspace),
-            handler: Arc::new(SkillsRoute(self.services.clone())),
+            handler: Arc::new(SkillsRoute(self.config.clone(), self.discovery_roots.clone())),
         });
-        registrar.skill_source_runtime("workspace-skills", Arc::new(WorkspaceSkills(self.services.clone())));
+        registrar.skill_source_runtime(
+            "workspace-skills",
+            Arc::new(WorkspaceSkills(self.config.clone(), self.discovery_roots.clone())),
+        );
         self.host.register_tools(registrar);
         Ok(())
     }
 }
 
-struct SkillsRoute(AgentServices);
+struct SkillsRoute(
+    Arc<neoism_agent_core::AgentConfigDocument>,
+    Arc<Vec<PathBuf>>,
+);
 
 impl RouteHandler for SkillsRoute {
     fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
         Box::pin(async move {
             let directory = request.workspace.unwrap_or_default();
             let directory = directory.to_string_lossy();
-            let skills = list(&self.0, &directory)
+            let skills = load_from_config(&directory, &self.0, &self.1)
                 .await
+                .map(|skills| skills.into_iter().map(|skill| skill.info).collect::<Vec<_>>())
                 .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
             let body = serde_json::to_value(skills)
                 .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
@@ -77,12 +95,39 @@ impl RouteHandler for SkillsRoute {
     }
 }
 
-struct WorkspaceSkills(AgentServices);
+struct WorkspaceSkills(
+    Arc<neoism_agent_core::AgentConfigDocument>,
+    Arc<Vec<PathBuf>>,
+);
 
 impl SkillSource for WorkspaceSkills {
     fn list<'a>(&'a self, directory: &'a str) -> PluginFuture<'a, Vec<SkillInfo>> {
         Box::pin(async move {
-            list(&self.0, directory).await.map_err(|error| PluginRuntimeError::new(error.to_string()))
+            load_from_config(directory, &self.0, &self.1)
+                .await
+                .map(|skills| skills.into_iter().map(|skill| skill.info).collect())
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))
+        })
+    }
+
+    fn get<'a>(
+        &'a self,
+        directory: &'a str,
+        id: &'a str,
+    ) -> PluginFuture<'a, Option<neoism_agent_plugin_api::SkillDocument>> {
+        Box::pin(async move {
+            load_from_config(directory, &self.0, &self.1)
+                .await
+                .map(|skills| {
+                    skills
+                        .into_iter()
+                        .find(|skill| skill.info.id == id)
+                        .map(|skill| neoism_agent_plugin_api::SkillDocument {
+                            info: skill.info,
+                            content: skill.content,
+                        })
+                })
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))
         })
     }
 }
@@ -109,9 +154,17 @@ pub async fn list(services: &AgentServices, directory: &str) -> anyhow::Result<V
 
 pub async fn load(services: &AgentServices, directory: &str) -> anyhow::Result<Vec<Skill>> {
     let (document, roots) = config::load(services, directory)?;
+    load_from_config(directory, &document, &roots).await
+}
+
+async fn load_from_config(
+    directory: &str,
+    document: &neoism_agent_core::AgentConfigDocument,
+    roots: &[PathBuf],
+) -> anyhow::Result<Vec<Skill>> {
     let mut by_name = load_local(directory, &document.skills.paths, &roots)?
-        .into_iter().map(|skill| (skill.info.name.clone(), skill)).collect::<BTreeMap<_, _>>();
-    for skill in load_remote(&document.skills.urls).await { by_name.insert(skill.info.name.clone(), skill); }
+        .into_iter().map(|skill| (skill.info.id.clone(), skill)).collect::<BTreeMap<_, _>>();
+    for skill in load_remote(&document.skills.urls).await { by_name.insert(skill.info.id.clone(), skill); }
     Ok(by_name.into_values().collect())
 }
 
@@ -132,7 +185,7 @@ fn load_local(directory: &str, configured_paths: &[String], discovery_roots: &[P
     let mut by_name = BTreeMap::new();
     for file in files {
         let skill = read_skill(&file).with_context(|| format!("failed to load skill {}", file.display()))?;
-        by_name.insert(skill.info.name.clone(), skill);
+        by_name.insert(skill.info.id.clone(), skill);
     }
     Ok(by_name.into_values().collect())
 }
@@ -218,10 +271,18 @@ fn collect_skill_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<(
 fn read_skill(file: &Path) -> anyhow::Result<Skill> {
     let raw = std::fs::read_to_string(file)?;
     let (frontmatter, content) = split_frontmatter(&raw)?;
-    let fallback = file.parent().and_then(Path::file_name).and_then(|name| name.to_str()).unwrap_or("skill").to_string();
+    let id = if file.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+        file.parent().and_then(Path::file_name)
+    } else {
+        file.file_stem()
+    }
+    .and_then(|name| name.to_str())
+    .unwrap_or("skill")
+    .to_string();
     Ok(Skill {
         info: SkillInfo {
-            name: frontmatter.name.map(|name| name.trim().to_string()).filter(|name| !name.is_empty()).unwrap_or(fallback),
+            id: id.clone(),
+            name: frontmatter.name.map(|name| name.trim().to_string()).filter(|name| !name.is_empty()).unwrap_or(id),
             description: frontmatter.description.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()),
             path: Some(file.display().to_string()),
         },
@@ -257,14 +318,17 @@ fn default_cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neoism_agent_service_api::{AgentServices, StandardConfigSourceService, StandardExecutableService, WorkspaceSearchService};
 
     struct Host;
     impl SkillsHost for Host { fn register_tools(&self, _: &mut PluginRegistrar) {} }
 
     #[test]
     fn plugin_owns_manifest_and_runtime_source() {
-        let plugin = SkillsPlugin::new(test_services(Path::new(".")), Arc::new(Host));
+        let plugin = SkillsPlugin::new(
+            neoism_agent_core::AgentConfigDocument::default(),
+            Vec::new(),
+            Arc::new(Host),
+        );
         assert_eq!(plugin.manifest().id, ID);
         let mut registrar = PluginRegistrar::default();
         plugin.register(&mut registrar).unwrap();
@@ -272,17 +336,4 @@ mod tests {
 
     #[test]
     fn rejects_remote_parent_traversal() { assert!(safe_relative_path("../secret").is_none()); }
-
-    fn test_services(root: &Path) -> AgentServices {
-        AgentServices::new(Arc::new(StandardExecutableService), Arc::new(NoSearch))
-            .with_config(Arc::new(StandardConfigSourceService::new(root.join("user"))))
-    }
-    struct NoSearch;
-    impl WorkspaceSearchService for NoSearch {
-        fn warm(&self, _: &Path) -> Result<(), neoism_agent_service_api::ServiceError> { Ok(()) }
-        fn pin_root(&self, _: &Path) -> Result<Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
-        fn find_files(&self, _: &neoism_agent_service_api::FindFilesRequest) -> Result<neoism_agent_service_api::FindFilesResult, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
-        fn grep(&self, _: &neoism_agent_service_api::GrepWorkspaceRequest) -> Result<neoism_agent_service_api::GrepWorkspaceResult, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
-        fn search_directories(&self, _: &neoism_agent_service_api::DirectorySearchRequest) -> Result<neoism_agent_service_api::DirectorySearchResult, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
-    }
 }

@@ -44,11 +44,13 @@ pub(crate) async fn mcp_status(
     headers: HeaderMap,
 ) -> Result<Json<BTreeMap<String, McpStatus>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(mcp::status_with_state(
+    let plugins = state.refreshed_plugin_snapshot(&directory).await;
+    Ok(Json(mcp::status_with_snapshot(
         &directory,
         &mcp_auth::McpAuthStore::from_env(),
-        Some(&state),
-    )?))
+        &state,
+        &plugins,
+    )))
 }
 
 pub(crate) async fn mcp_catalog(
@@ -57,11 +59,13 @@ pub(crate) async fn mcp_catalog(
     headers: HeaderMap,
 ) -> Result<Json<BTreeMap<String, McpCatalogEntry>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(mcp::catalog_with_state(
+    let plugins = state.refreshed_plugin_snapshot(&directory).await;
+    Ok(Json(mcp::catalog_with_snapshot(
         &directory,
         &mcp_auth::McpAuthStore::from_env(),
-        Some(&state),
-    )?))
+        &state,
+        &plugins,
+    )))
 }
 
 pub(crate) async fn mcp_add(
@@ -93,7 +97,13 @@ pub(crate) async fn mcp_config_patch(
     if !request.enabled {
         let _ = mcp::disconnect(&state, &directory, &name).await;
     }
-    mcp::catalog_with_state(&directory, &mcp_auth::McpAuthStore::from_env(), Some(&state))?
+    let plugins = state.refreshed_plugin_snapshot(&directory).await;
+    mcp::catalog_with_snapshot(
+        &directory,
+        &mcp_auth::McpAuthStore::from_env(),
+        &state,
+        &plugins,
+    )
         .remove(&name)
         .map(Json)
         .ok_or_else(|| {
@@ -108,8 +118,14 @@ pub(crate) async fn mcp_auth_start(
     headers: HeaderMap,
 ) -> Result<Json<McpAuthStartResponse>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
+    let plugins = state.refreshed_plugin_snapshot(&directory).await;
     Ok(Json(
-        mcp::auth_start(state.services(), &directory, &name, &mcp_auth::McpAuthStore::from_env())
+        mcp::auth_start_with_config(
+            &plugins.config().mcp,
+            &directory,
+            &name,
+            &mcp_auth::McpAuthStore::from_env(),
+        )
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
@@ -123,9 +139,10 @@ pub(crate) async fn mcp_auth_callback(
     Json(request): Json<CodeRequest>,
 ) -> Result<Json<McpStatus>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
+    let plugins = state.refreshed_plugin_snapshot(&directory).await;
     Ok(Json(
-        mcp::auth_callback(
-            state.services(),
+        mcp::auth_callback_with_config(
+            &plugins.config().mcp,
             &directory,
             &name,
             &request.code,
@@ -154,8 +171,9 @@ pub(crate) async fn mcp_auth_callback_get(
                 .and_then(|entry| entry.oauth_directory)
         })
         .unwrap_or_else(|| resolve_directory(None, &headers));
-    mcp::auth_callback(
-        state.services(),
+    let plugins = state.refreshed_plugin_snapshot(&directory).await;
+    mcp::auth_callback_with_config(
+        &plugins.config().mcp,
         &directory,
         &name,
         &query.code,
@@ -176,8 +194,13 @@ pub(crate) async fn mcp_auth_authenticate(
     headers: HeaderMap,
 ) -> Result<Json<McpStatus>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
+    let plugins = state.refreshed_plugin_snapshot(&directory).await;
     Ok(Json(
-        mcp::authenticate_status(state.services(), &directory, &name, &mcp_auth::McpAuthStore::from_env())
+        mcp::authenticate_status_with_config(
+            &plugins.config().mcp,
+            &name,
+            &mcp_auth::McpAuthStore::from_env(),
+        )
             .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
 }

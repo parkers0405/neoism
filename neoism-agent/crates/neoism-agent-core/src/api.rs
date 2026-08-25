@@ -641,6 +641,7 @@ pub struct AgentInfo {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SkillInfo {
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,

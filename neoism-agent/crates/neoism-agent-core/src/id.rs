@@ -178,7 +178,7 @@ pub type QuestionId = Id;
 pub type SessionId = Id;
 pub type ToolId = Id;
 pub type UserId = Id;
-pub type WorkspaceId = Id;
+pub type WorkspaceId = String;
 
 #[cfg(test)]
 mod tests {

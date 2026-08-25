@@ -81,10 +81,12 @@ impl SessionCoordinator {
         let entry = entries.entry(session_id.to_string()).or_default();
         if entry.worker {
             entry.pending_wake = true;
+            entry.changed.notify_waiters();
             return false;
         }
         entry.worker = true;
         entry.pending_wake = false;
+        entry.changed.notify_waiters();
         true
     }
 
@@ -98,9 +100,11 @@ impl SessionCoordinator {
         };
         if entry.pending_wake {
             entry.pending_wake = false;
+            entry.changed.notify_waiters();
             return true;
         }
         entry.worker = false;
+        entry.changed.notify_waiters();
         if entry.run.is_none() {
             entries.remove(session_id);
         }
@@ -125,7 +129,27 @@ impl SessionCoordinator {
                 if entry.run.is_none() {
                     return;
                 }
-                entry.changed.clone().notified_owned()
+                let mut notified = Box::pin(entry.changed.clone().notified_owned());
+                notified.as_mut().enable();
+                notified
+            };
+            notified.await;
+        }
+    }
+
+    pub(crate) async fn wait_until_settled(&self, session_id: &str) {
+        loop {
+            let notified = {
+                let entries = self.entries.lock().await;
+                let Some(entry) = entries.get(session_id) else {
+                    return;
+                };
+                if entry.run.is_none() && !entry.worker && !entry.pending_wake {
+                    return;
+                }
+                let mut notified = Box::pin(entry.changed.clone().notified_owned());
+                notified.as_mut().enable();
+                notified
             };
             notified.await;
         }
@@ -177,5 +201,22 @@ mod tests {
             .expect("idle waiter should be notified")
             .unwrap();
         assert!(coordinator.finish_run("two", "run-3").await);
+    }
+
+    #[tokio::test]
+    async fn settled_wait_includes_the_queue_worker_lifetime() {
+        let coordinator = Arc::new(SessionCoordinator::default());
+        assert!(coordinator.wake("one").await);
+        let waiter = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.wait_until_settled("one").await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        assert!(!coordinator.finish_worker_cycle("one").await);
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("settled waiter should finish with the worker")
+            .unwrap();
     }
 }

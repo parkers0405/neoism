@@ -99,7 +99,8 @@ pub(crate) async fn append_prompt(
             "Subtask parts are disabled for this workspace",
         ));
     }
-    let workspace = workspace.runtime;
+    let plugin_snapshot = workspace.snapshot.clone();
+    let _workspace_lease = workspace;
     if create_stub_reply && state.inner.runs.read().await.contains_key(&session_id_text) {
         return Err(ApiError::conflict(SESSION_RUNNING_CONFLICT));
     }
@@ -123,7 +124,7 @@ pub(crate) async fn append_prompt(
         let trimmed = name.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     });
-    let agents = crate::plugins::agent_catalog(&workspace.snapshot(), &info.directory)?;
+    let agents = crate::plugins::agent_catalog(&plugin_snapshot, &info.directory)?;
     let agent_name = agent
         .or_else(|| info.agent.clone())
         .unwrap_or_else(|| agents.default_agent().to_string());
@@ -353,6 +354,7 @@ pub(crate) async fn append_prompt(
             &session_id_text,
             &parent_message_id,
             &reply_model,
+            &plugin_snapshot,
             &subtask_parts,
             cancellation.clone(),
         )
@@ -385,7 +387,6 @@ pub(crate) async fn append_prompt(
     if compacted_before_first_step {
         history = state.inner.store.list_messages(&session_id_text).await?;
     }
-    let plugin_snapshot = workspace.snapshot();
     let provider_service = plugin_snapshot
         .provider_services
         .values()
@@ -416,7 +417,7 @@ pub(crate) async fn append_prompt(
             MAX_STEPS_REMINDER,
         ));
     }
-    plugin::chat_messages_transform(&workspace.snapshot(), &chat_hook_ctx, &mut provider_messages)
+    plugin::chat_messages_transform(&plugin_snapshot, &chat_hook_ctx, &mut provider_messages)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let started = start_assistant_step(
         state,
@@ -446,6 +447,7 @@ pub(crate) async fn append_prompt(
     let provider_tools = provider_tools_for_agent(
         state,
         &info.directory,
+        &plugin_snapshot,
         &tool_permissions,
         &reply_model.model_id,
     )
@@ -466,6 +468,7 @@ pub(crate) async fn append_prompt(
             model_id: &reply_model.model_id,
             provider_tools: &provider_tool_map,
             tool_permissions: &tool_permissions,
+            plugin_snapshot: &plugin_snapshot,
             max_steps_reached,
         },
         build_provider_generation_request(
@@ -473,7 +476,7 @@ pub(crate) async fn append_prompt(
             &reply_model,
             provider_messages,
             provider_tools,
-            Some(&info.directory),
+            Some(&plugin_snapshot),
             Some(&chat_hook_ctx),
         )
         .await,
@@ -568,7 +571,7 @@ pub(crate) async fn append_prompt(
                 provider_messages.push(ProviderMessage::text(ProviderRole::User, content));
             }
         }
-            plugin::chat_messages_transform(&workspace.snapshot(), &chat_hook_ctx, &mut provider_messages)
+        plugin::chat_messages_transform(&plugin_snapshot, &chat_hook_ctx, &mut provider_messages)
             .map_err(|error| ApiError::internal(error.to_string()))?;
         final_assistant_message = run_followup_assistant_step(
             &provider_service,
@@ -580,6 +583,7 @@ pub(crate) async fn append_prompt(
             &info,
             &agent_info,
             &reply_model,
+            &plugin_snapshot,
             provider_messages,
             cancellation.clone(),
             max_steps_reached,
@@ -854,6 +858,7 @@ async fn run_parent_subtasks(
     session_id_text: &str,
     parent_message_id: &Id,
     reply_model: &UserModel,
+    plugin_snapshot: &crate::workspace_runtime::PluginGenerationLease,
     subtasks: &[SubtaskPart],
     cancellation: Arc<AtomicBool>,
 ) -> Result<MessageWithParts, ApiError> {
@@ -966,6 +971,7 @@ async fn run_parent_subtasks(
                 subtask.prompt.clone(),
                 subtask.agent.clone(),
                 Some(task_model.clone()),
+                Some(plugin_snapshot.clone()),
             );
             Ok::<_, ApiError>((child_session_id, metadata))
         }
@@ -1542,6 +1548,10 @@ async fn generate_model_title(
         } else {
             None
         };
+    let provider_runtime = state
+        .workspace_runtime(directory.as_deref().unwrap_or_default())
+        .await;
+    let snapshot = provider_runtime.snapshot();
     let request = build_provider_generation_request(
         &state,
         &model,
@@ -1553,14 +1563,10 @@ async fn generate_model_title(
             ProviderMessage::text(ProviderRole::User, source),
         ],
         Vec::new(),
-        directory.as_deref(),
+        Some(&snapshot),
         None,
     )
     .await;
-    let provider_runtime = state
-        .workspace_runtime(directory.as_deref().unwrap_or_default())
-        .await;
-    let snapshot = provider_runtime.snapshot();
     let Some(provider) = snapshot.provider_services.values().next() else {
         return;
     };
@@ -1634,8 +1640,8 @@ fn strip_think_blocks(raw: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn configured_text_verbosity_reads_project_config() {
+    #[tokio::test]
+    async fn generation_config_reads_project_text_verbosity() {
         let root = std::env::temp_dir().join(format!(
             "neoism-agent-text-verbosity-{}",
             neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -1645,10 +1651,13 @@ mod tests {
         std::fs::write(root.join(".agent/agent.json"), r#"{ "textVerbosity": "high" }"#)
             .unwrap();
 
-        assert_eq!(
-            configured_text_verbosity(&crate::standard_services(), root.to_str()),
-            Some(neoism_agent_core::TextVerbosity::High)
-        );
+        let state = crate::state::AppState::open_database(root.join("state.sqlite3"))
+            .await
+            .unwrap();
+        let snapshot = state.plugin_snapshot(root.to_string_lossy().as_ref()).await;
+        assert_eq!(snapshot.config().text_verbosity, Some(neoism_agent_core::TextVerbosity::High));
+        drop(snapshot);
+        drop(state);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2175,6 +2184,7 @@ async fn run_followup_assistant_step(
     info: &SessionInfo,
     agent_info: &AgentInfo,
     reply_model: &UserModel,
+    plugin_snapshot: &crate::workspace_runtime::PluginGenerationLease,
     provider_messages: Vec<ProviderMessage>,
     cancellation: Arc<AtomicBool>,
     max_steps_reached: bool,
@@ -2199,6 +2209,7 @@ async fn run_followup_assistant_step(
     let provider_tools = provider_tools_for_agent(
         state,
         &info.directory,
+        plugin_snapshot,
         &tool_permissions,
         &reply_model.model_id,
     )
@@ -2225,6 +2236,7 @@ async fn run_followup_assistant_step(
             model_id: &reply_model.model_id,
             provider_tools: &provider_tool_map,
             tool_permissions: &tool_permissions,
+            plugin_snapshot,
             max_steps_reached,
         },
         build_provider_generation_request(
@@ -2232,7 +2244,7 @@ async fn run_followup_assistant_step(
             reply_model,
             provider_messages,
             provider_tools,
-            Some(&info.directory),
+            Some(plugin_snapshot),
             Some(&chat_hook_ctx),
         )
         .await,
@@ -2246,22 +2258,14 @@ async fn build_provider_generation_request(
     model: &UserModel,
     messages: Vec<ProviderMessage>,
     tools: Vec<ToolListItem>,
-    directory: Option<&str>,
+    workspace: Option<&crate::workspace_runtime::PluginGenerationLease>,
     hook_ctx: Option<&plugin::ChatHookContext>,
 ) -> ProviderGenerationRequest {
     let metadata = provider_generation_metadata(state, model).await;
     let mut options = metadata.options;
     let mut headers = metadata.headers;
     if let Some(hook_ctx) = hook_ctx {
-        let workspace = if let Some(directory) = directory {
-            Some(
-                state.workspace_runtime(directory).await,
-            )
-        } else {
-            None
-        };
-        if let Some(runtime) = workspace.as_ref() {
-            let snapshot = runtime.snapshot();
+        if let Some(snapshot) = workspace {
             let _ = plugin::chat_options(&snapshot, hook_ctx, &mut options);
             let _ = plugin::chat_headers(&snapshot, hook_ctx, &mut headers);
         }
@@ -2271,7 +2275,8 @@ async fn build_provider_generation_request(
         model_id: model.model_id.clone(),
         session_id: hook_ctx.map(|ctx| ctx.session_id.clone()),
         variant: model.variant.clone(),
-        text_verbosity: configured_text_verbosity(state.services(), directory),
+        text_verbosity: workspace
+            .and_then(|snapshot| snapshot.config().text_verbosity),
         api: metadata.api,
         auth_env: metadata.auth_env,
         messages,
@@ -2279,17 +2284,6 @@ async fn build_provider_generation_request(
         options,
         headers,
     }
-}
-
-pub(crate) fn configured_text_verbosity(
-    services: &neoism_agent_service_api::AgentServices,
-    directory: Option<&str>,
-) -> Option<neoism_agent_core::TextVerbosity> {
-    directory.and_then(|directory| {
-        neoism_agent_builtins::plugin::config::load(services, directory)
-            .ok()
-            .and_then(|(config, _)| config.text_verbosity)
-    })
 }
 
 async fn provider_generation_metadata(

@@ -191,9 +191,31 @@ impl neoism_agent_builtins::plugin::pty::PtyHost for Pty {
         Box::pin(async move {
             let pty_id = request.path.get("pty_id").cloned().unwrap_or_default();
             let query = query_value(route_query(&request))?;
-            crate::pty_routes::prepare_connection(self.0.clone(), pty_id, query).await.map_err(api_error)
+            let generation = request_generation(&self.0, &request)
+                .ok_or_else(|| neoism_agent_plugin_api::PluginRuntimeError::new("plugin generation is no longer available"))?;
+            crate::pty_routes::prepare_connection_with_runtime(
+                self.0.clone(),
+                generation.pty(),
+                pty_id,
+                query,
+            )
+            .await
+            .map_err(api_error)
         })
     }
+}
+
+fn request_generation(
+    state: &crate::state::AppState,
+    request: &neoism_agent_plugin_api::RouteRequest,
+) -> Option<crate::workspace_runtime::PluginGenerationLease> {
+    let workspace = request.workspace.as_ref()?;
+    let generation = request.generation?;
+    state
+        .inner
+        .workspace_runtimes
+        .loaded(&workspace.to_string_lossy())?
+        .lease_generation(generation)
 }
 
 pub(crate) struct ConfigAdmin(pub(crate) crate::state::AppState);

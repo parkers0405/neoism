@@ -27,7 +27,7 @@ pub(crate) async fn reconcile(
     state: &AppState,
     info: &mut SessionInfo,
 ) -> Result<ContextEpoch, ApiError> {
-    let observed = observe(state, info);
+    let observed = observe(state, info).await;
     let previous = state
         .inner
         .store
@@ -80,11 +80,12 @@ pub(crate) fn from_session(info: &SessionInfo) -> Option<ContextEpoch> {
     serde_json::from_value(info.extra.get("contextEpoch")?.clone()).ok()
 }
 
-fn observe(state: &AppState, info: &SessionInfo) -> ContextSnapshot {
+async fn observe(state: &AppState, info: &SessionInfo) -> ContextSnapshot {
     let mut sources = BTreeMap::new();
+    let plugins = state.plugin_snapshot(&info.directory).await;
     sources.insert(
         "config".to_string(),
-        json!(crate::config::snapshot(state.services(), &info.directory).ok().map(|snapshot| snapshot.identity)),
+        json!({ "generation": plugins.generation }),
     );
     sources.insert(
         "environment".to_string(),
@@ -96,13 +97,20 @@ fn observe(state: &AppState, info: &SessionInfo) -> ContextSnapshot {
     );
     sources.insert(
         "instructions".to_string(),
-        json!(crate::instruction::system(state.services(), &info.directory)),
+        json!(crate::instruction::system_with_config(
+            state.services(),
+            &info.directory,
+            plugins.config(),
+        )),
     );
-    let memory_enabled = state
-        .services()
-        .memory
-        .as_ref()
-        .is_some_and(|memory| crate::mcp::builtin_enabled(&info.directory, memory.id(), state));
+    let mut config = plugins.config().clone();
+    crate::config::inject_builtin_mcp(&mut config, state.services());
+    let memory_enabled = state.services().memory.as_ref().is_some_and(|memory| {
+        config
+            .mcp
+            .get(memory.id())
+            .is_some_and(crate::mcp::is_enabled)
+    });
     if memory_enabled {
         for fragment in state.services().context_fragments(std::path::Path::new(&info.directory)) {
             sources.insert(format!("service:{}", fragment.id), json!(fragment.content));

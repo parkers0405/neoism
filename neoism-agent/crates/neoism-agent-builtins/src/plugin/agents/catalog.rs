@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use neoism_agent_core::{AgentConfig, AgentConfigDocument, AgentInfo, ModelRef};
-use neoism_agent_plugin_api::{AgentSourceSnapshot, PluginRuntimeError};
+use neoism_agent_plugin_api::AgentSourceSnapshot;
 use serde_json::Value;
 
 use super::native::{build_agent, native_agents};
@@ -13,15 +13,6 @@ pub struct AgentCatalog {
 }
 
 impl AgentCatalog {
-    pub fn load(
-        services: &neoism_agent_service_api::AgentServices,
-        directory: &str,
-    ) -> Result<Self, PluginRuntimeError> {
-        let (config, _) = crate::plugin::config::load(services, directory)
-            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-        Ok(Self::from_config(&config))
-    }
-
     pub fn from_config(config: &AgentConfigDocument) -> Self {
         let mut agents = native_agents();
         for agent in agents.values_mut() {

@@ -458,8 +458,25 @@ impl AppState {
     pub(crate) async fn plugin_snapshot(
         &self,
         directory: &str,
-    ) -> Arc<neoism_agent_plugin_api::RegistrySnapshot> {
+    ) -> crate::workspace_runtime::PluginGenerationLease {
+        if let Some(generation) = crate::workspace_runtime::active_generation(directory) {
+            return generation;
+        }
         self.workspace_runtime(directory).await.snapshot()
+    }
+
+    pub(crate) async fn refreshed_plugin_snapshot(
+        &self,
+        directory: &str,
+    ) -> crate::workspace_runtime::PluginGenerationLease {
+        if let Some(generation) = crate::workspace_runtime::active_generation(directory) {
+            return generation;
+        }
+        let runtime = self.workspace_runtime(directory).await;
+        crate::workspace_runtime::refresh_plugins(&runtime, self);
+        let snapshot = runtime.published_snapshot();
+        self.reconcile_workspace_plugins(&runtime, &snapshot).await;
+        snapshot
     }
 
     pub(crate) async fn workspace_runtime(&self, directory: &str) -> Arc<crate::workspace_runtime::WorkspaceRuntime> {
@@ -472,7 +489,7 @@ impl AppState {
             self.inner.workspace_plugin_generations.lock().await.remove(&stale.root);
         }
         self.reconcile_semantic_service().await;
-        let snapshot = runtime.snapshot();
+        let snapshot = runtime.published_snapshot();
         self.reconcile_workspace_plugins(&runtime, &snapshot).await;
         runtime
     }
@@ -480,37 +497,47 @@ impl AppState {
     pub(crate) async fn reconcile_workspace_plugins(
         &self,
         runtime: &Arc<crate::workspace_runtime::WorkspaceRuntime>,
-        snapshot: &neoism_agent_plugin_api::RegistrySnapshot,
+        snapshot: &crate::workspace_runtime::PluginGenerationLease,
     ) {
         let enabled = snapshot
             .manifests
             .iter()
             .map(|manifest| manifest.id.clone())
             .collect::<BTreeSet<_>>();
-        {
-            let mut generations = self.inner.workspace_plugin_generations.lock().await;
-            if generations
-                .get(&runtime.root)
-                .is_some_and(|(generation, _)| *generation == snapshot.generation)
-            {
-                return;
-            }
-            generations.insert(runtime.root.clone(), (snapshot.generation, enabled.clone()));
+        let mut generations = self.inner.workspace_plugin_generations.lock().await;
+        if runtime.published_snapshot().generation != snapshot.generation {
+            return;
         }
+        if generations
+            .get(&runtime.root)
+            .is_some_and(|(generation, _)| *generation == snapshot.generation)
+        {
+            return;
+        }
+        generations.insert(runtime.root.clone(), (snapshot.generation, enabled.clone()));
         let workflow = enabled.contains(neoism_agent_builtins::plugin::workflows::ID);
-        runtime.set_workflow_enabled(workflow);
+        snapshot.set_workflow_enabled(workflow);
         if workflow {
             crate::workflow::workspace_enabled(self, runtime.root.clone()).await;
+        } else {
+            crate::workflow::workspace_disabled(self, &runtime.root).await;
         }
         if enabled.contains(neoism_agent_builtins::plugin::semantic::ID) {
-            runtime.enable_semantic(self.clone()).await;
+            snapshot.enable_semantic(self.clone()).await;
             if let Some(memory) = self.inner.services.memory.as_ref() {
                 memory.set_semantic_index(Some(Arc::new(crate::semantic::AgentSemanticMemoryIndex::new(
-                    self.inner.store.clone(), runtime.semantic_client(),
+                    self.inner.store.clone(), snapshot.semantic_client(),
                 ))));
             }
         } else {
-            self.reconcile_semantic_service().await;
+            let semantic_enabled = generations.values().any(|(_, plugins)| {
+                plugins.contains(neoism_agent_builtins::plugin::semantic::ID)
+            });
+            if !semantic_enabled {
+                if let Some(memory) = self.inner.services.memory.as_ref() {
+                    memory.set_semantic_index(None);
+                }
+            }
         }
     }
 

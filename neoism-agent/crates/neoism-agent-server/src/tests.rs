@@ -1406,6 +1406,41 @@ async fn public_api_is_v2_only() {
         assert_ne!(response.status(), StatusCode::NOT_FOUND, "{path}");
         assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
     }
+    let manifest: Value = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::GET,
+                "/v2/plugins/dev.neoism.mcp/manifest",
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(manifest["id"], "dev.neoism.mcp");
+    let mcp_root: Value = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::GET,
+                "/v2/plugins/dev.neoism.mcp",
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_ne!(mcp_root.get("id"), Some(&json!("dev.neoism.mcp")));
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v2/plugins/dev.neoism.mcp",
+            Some(json!({})),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     for path in [
         "/global/health",
         "/session",
@@ -3382,7 +3417,16 @@ async fn disabled_workspace_tools_do_not_warm_search() {
     let services = neoism_agent_service_api::AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), search.clone());
     let db = root.join("agent.db");
     let state = AppState::open_database_with_services(&db, services).await.unwrap();
-    let tools = provider_tools_for_agent(&state, root.to_str().unwrap(), &[], "gpt-5.5").await.unwrap();
+    let snapshot = state.plugin_snapshot(root.to_str().unwrap()).await;
+    let tools = provider_tools_for_agent(
+        &state,
+        root.to_str().unwrap(),
+        &snapshot,
+        &[],
+        "gpt-5.5",
+    )
+    .await
+    .unwrap();
     assert!(!tools.iter().any(|tool| matches!(tool.id.as_str(), "grep" | "glob" | "read")));
     let router = app(state);
     let session: SessionInfo = response_json(router.clone().oneshot(request(

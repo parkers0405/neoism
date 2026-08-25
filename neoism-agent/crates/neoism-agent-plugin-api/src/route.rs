@@ -60,6 +60,8 @@ pub struct RouteRequest {
     pub workspace: Option<PathBuf>,
     pub session_id: Option<String>,
     pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     pub path: BTreeMap<String, String>,
     pub query: BTreeMap<String, Vec<String>>,
     pub headers: BTreeMap<String, String>,

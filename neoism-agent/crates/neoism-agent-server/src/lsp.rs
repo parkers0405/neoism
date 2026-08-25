@@ -61,7 +61,23 @@ impl LspRuntime {
     pub fn new(services: neoism_agent_service_api::AgentServices) -> Self {
         let (diagnostics_bus, _) = broadcast::channel(512);
         let service = Arc::new_cyclic(|weak| {
-            lsp_service::LspService::new(services, diagnostics_bus, weak.clone())
+            lsp_service::LspService::new(services, diagnostics_bus, weak.clone(), None)
+        });
+        Self { service }
+    }
+
+    pub(crate) fn new_with_config(
+        services: neoism_agent_service_api::AgentServices,
+        config: Arc<neoism_agent_core::AgentConfigDocument>,
+    ) -> Self {
+        let (diagnostics_bus, _) = broadcast::channel(512);
+        let service = Arc::new_cyclic(|weak| {
+            lsp_service::LspService::new(
+                services,
+                diagnostics_bus,
+                weak.clone(),
+                Some(config),
+            )
         });
         Self { service }
     }
@@ -75,6 +91,7 @@ impl LspRuntime {
             &self.service.adapter_cache,
             self.services(),
             root,
+            self.service.generation_config.as_deref(),
         )
     }
 

@@ -11,7 +11,20 @@ pub(crate) struct LoadedInstruction {
     pub(crate) content: String,
 }
 
-pub(crate) fn system(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<String> {
+#[cfg(test)]
+fn system(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<String> {
+    let config = neoism_agent_builtins::plugin::config::load(services, directory)
+        .ok()
+        .map(|(config, _)| config)
+        .unwrap_or_default();
+    system_with_config(services, directory, &config)
+}
+
+pub(crate) fn system_with_config(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &str,
+    config: &neoism_agent_core::AgentConfigDocument,
+) -> Vec<String> {
     let mut paths = BTreeSet::new();
     let mut ordered = Vec::new();
 
@@ -25,12 +38,10 @@ pub(crate) fn system(services: &neoism_agent_service_api::AgentServices, directo
         push_existing(&mut paths, &mut ordered, path);
     }
 
-    if let Ok((config, _)) = neoism_agent_builtins::plugin::config::load(services, directory) {
-        for raw in config.instructions {
-            if let Some(path) = configured_instruction_path(directory, &raw) {
+    for raw in &config.instructions {
+            if let Some(path) = configured_instruction_path(directory, raw) {
                 push_existing(&mut paths, &mut ordered, path);
             }
-        }
     }
 
     ordered

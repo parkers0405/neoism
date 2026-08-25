@@ -25,7 +25,7 @@ use crate::session_loop::{
 };
 use crate::session_retry;
 use crate::state::AppState;
-use crate::tool_runtime::execute_tool_call_with_permission_wait;
+use crate::tool_runtime::execute_tool_call_in_generation;
 use crate::tool_selection::normalize_provider_tool_name;
 
 const TOOL_EXECUTION_CONCURRENCY: usize = 10;
@@ -89,6 +89,7 @@ pub(crate) struct ProviderStreamEventContext<'a> {
     pub model_id: &'a str,
     pub provider_tools: &'a HashMap<String, ToolListItem>,
     pub tool_permissions: &'a [PermissionRule],
+    pub plugin_snapshot: &'a crate::workspace_runtime::PluginGenerationLease,
     pub max_steps_reached: bool,
 }
 
@@ -896,12 +897,13 @@ fn spawn_tool_call(
     let call_id = call.id.clone();
     let name = call.name.clone();
     let input = call.input.clone();
+    let plugin_snapshot = ctx.plugin_snapshot.clone();
     tokio::spawn(async move {
         let _permit = semaphore
             .acquire_owned()
             .await
             .map_err(|_| "tool execution concurrency gate closed".to_string())?;
-        execute_tool_call_with_permission_wait(
+        execute_tool_call_in_generation(
             &state,
             &session_id,
             &assistant_id,
@@ -910,6 +912,7 @@ fn spawn_tool_call(
             &call_id,
             &name,
             input,
+            plugin_snapshot,
         )
         .await
     })

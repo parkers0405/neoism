@@ -1,10 +1,15 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::any::Any;
-use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
+
+tokio::task_local! {
+    static ACTIVE_PLUGIN_GENERATION: PluginGenerationLease;
+}
 
 const IDLE_TTL: Duration = Duration::from_secs(60 * 60);
 const CONFIG_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -12,7 +17,6 @@ const CONFIG_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) struct WorkspaceRuntime {
     pub(crate) root: PathBuf,
     services: neoism_agent_service_api::AgentServices,
-    lifecycle: RwLock<Arc<WorkspaceLifecycle>>,
     generation: PluginGenerationSlot,
     signature: RwLock<Vec<u8>>,
 }
@@ -70,7 +74,140 @@ impl PluginLifecycleRegistry {
 
 pub(crate) struct PluginGeneration {
     snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>,
+    config: Arc<neoism_agent_core::AgentConfigDocument>,
+    lifecycle: Arc<WorkspaceLifecycle>,
+    services: neoism_agent_service_api::AgentServices,
+    root: PathBuf,
     lifecycles: PluginLifecycleRegistry,
+}
+
+#[derive(Clone)]
+pub(crate) struct PluginGenerationLease {
+    inner: Arc<PluginGeneration>,
+}
+
+impl Deref for PluginGenerationLease {
+    type Target = neoism_agent_plugin_api::RegistrySnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner.snapshot
+    }
+}
+
+impl AsRef<neoism_agent_plugin_api::RegistrySnapshot> for PluginGenerationLease {
+    fn as_ref(&self) -> &neoism_agent_plugin_api::RegistrySnapshot {
+        self
+    }
+}
+
+impl PluginGenerationLease {
+    pub(crate) fn config(&self) -> &neoism_agent_core::AgentConfigDocument {
+        &self.inner.config
+    }
+
+    pub(crate) fn mcp(&self) -> Arc<crate::mcp::McpRuntimeManager> {
+        self.inner
+            .lifecycle
+            .state(neoism_agent_builtins::plugin::mcp::ID)
+    }
+
+    pub(crate) fn lsp(&self) -> crate::lsp::LspRuntime {
+        (*self.inner.lifecycle.state_with(
+            neoism_agent_builtins::plugin::lsp::ID,
+            || {
+                crate::lsp::LspRuntime::new_with_config(
+                    self.inner.services.clone(),
+                    self.inner.config.clone(),
+                )
+            },
+        ))
+        .clone()
+    }
+
+    pub(crate) fn background(&self) -> Arc<crate::background_job::BackgroundWorkspaceRuntime> {
+        self.inner
+            .lifecycle
+            .state(neoism_agent_builtins::plugin::workspace_tools::ID)
+    }
+
+    pub(crate) fn subagents(&self) -> Arc<crate::plugins::subagents::SubagentWorkspaceRuntime> {
+        self.inner
+            .lifecycle
+            .state(neoism_agent_builtins::plugin::subagents::ID)
+    }
+
+    pub(crate) fn pty(&self) -> Arc<crate::pty::PtyWorkspaceRuntime> {
+        self.inner
+            .lifecycle
+            .state(neoism_agent_builtins::plugin::pty::ID)
+    }
+
+    fn belongs_to(&self, directory: &str) -> bool {
+        self.inner.root == canonical_location(directory)
+    }
+
+    pub(crate) fn set_workflow_enabled(&self, enabled: bool) {
+        self.inner
+            .lifecycle
+            .state::<WorkflowLifecycle>(neoism_agent_builtins::plugin::workflows::ID)
+            .workflow_enabled
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) async fn enable_semantic(&self, state: crate::state::AppState) {
+        let semantic = self
+            .inner
+            .lifecycle
+            .state::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID);
+        let auth = if let Some(provider_id) = crate::semantic::EmbeddingsClient::configured_provider_id() {
+            state.inner.provider_service.auth(&provider_id).await.ok().flatten()
+        } else {
+            None
+        };
+        let client = {
+            let mut client = semantic.client.lock().expect("semantic client lock poisoned");
+            client
+                .get_or_insert_with(|| crate::semantic::EmbeddingsClient::from_env(auth))
+                .clone()
+        };
+        let mut indexer = semantic.indexer.lock().await;
+        if indexer.is_none() {
+            *indexer = crate::semantic::spawn_indexer(state, self.inner.root.clone(), client);
+        }
+    }
+
+    pub(crate) fn semantic_client(&self) -> Option<crate::semantic::EmbeddingsClient> {
+        let semantic = self
+            .inner
+            .lifecycle
+            .state::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID);
+        let client = semantic
+            .client
+            .lock()
+            .expect("semantic client lock poisoned")
+            .clone()
+            .flatten();
+        client
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+pub(crate) fn active_generation(directory: &str) -> Option<PluginGenerationLease> {
+    ACTIVE_PLUGIN_GENERATION
+        .try_with(|generation| generation.belongs_to(directory).then(|| generation.clone()))
+        .ok()
+        .flatten()
+}
+
+pub(crate) async fn scope_generation<F: std::future::Future>(
+    generation: PluginGenerationLease,
+    future: F,
+) -> F::Output {
+    ACTIVE_PLUGIN_GENERATION.scope(generation, future).await
 }
 
 impl PluginGeneration {
@@ -78,12 +215,20 @@ impl PluginGeneration {
     /// callers cannot publish a partially-ready generation.
     pub(crate) fn build(
         snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>,
+        config: Arc<neoism_agent_core::AgentConfigDocument>,
+        lifecycle: Arc<WorkspaceLifecycle>,
+        services: neoism_agent_service_api::AgentServices,
+        root: PathBuf,
         configure: impl FnOnce(&mut PluginGenerationBuilder) -> Result<(), String>,
     ) -> Result<Arc<Self>, String> {
         let mut builder = PluginGenerationBuilder::default();
         configure(&mut builder)?;
         Ok(Arc::new(Self {
             snapshot,
+            config,
+            lifecycle,
+            services,
+            root,
             lifecycles: PluginLifecycleRegistry { handles: builder.lifecycles },
         }))
     }
@@ -95,43 +240,43 @@ impl PluginGeneration {
             .iter()
             .map(|manifest| manifest.id.clone())
             .collect::<Vec<_>>();
-        Self::build(snapshot, |builder| {
-            for plugin_id in plugin_ids {
-                builder.register(plugin_id, || Ok(()), || {})?;
-            }
-            Ok(())
-        })
+        Self::build(
+            snapshot,
+            Arc::new(neoism_agent_core::AgentConfigDocument::default()),
+            Arc::new(WorkspaceLifecycle::default()),
+            crate::standard_services(),
+            PathBuf::new(),
+            |builder| {
+                for plugin_id in plugin_ids {
+                    builder.register(plugin_id, || Ok(()), || {})?;
+                }
+                Ok(())
+            },
+        )
         .expect("installed plugin generation is ready")
     }
 
     fn workspace(
         snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>,
+        config: Arc<neoism_agent_core::AgentConfigDocument>,
         lifecycle: Arc<WorkspaceLifecycle>,
         state: &crate::state::AppState,
         root: PathBuf,
     ) -> Arc<Self> {
         let plugin_ids = snapshot.manifests.iter().map(|manifest| manifest.id.clone()).collect::<Vec<_>>();
-        let weak_state = Arc::downgrade(&state.inner);
-        Self::build(snapshot, |builder| {
+        Self::build(snapshot, config, lifecycle.clone(), state.services().clone(), root.clone(), |builder| {
             for plugin_id in plugin_ids {
                 let lifecycle = lifecycle.clone();
-                let weak_state = weak_state.clone();
                 let root = root.clone();
                 let teardown_id = plugin_id.clone();
                 builder.register(plugin_id, || Ok(()), move || {
-                    let Some(inner) = weak_state.upgrade() else { return; };
-                    let state = crate::state::AppState { inner };
                     tokio::spawn(async move {
-                        lifecycle.teardown_plugin(&teardown_id, &state, &root).await;
+                        lifecycle.teardown_plugin(&teardown_id, &root).await;
                     });
                 })?;
             }
             Ok(())
         }).expect("workspace plugin generation is ready")
-    }
-
-    pub(crate) fn snapshot(&self) -> Arc<neoism_agent_plugin_api::RegistrySnapshot> {
-        self.snapshot.clone()
     }
 
     #[cfg(test)]
@@ -165,15 +310,39 @@ impl PluginGenerationBuilder {
 
 struct PluginGenerationSlot {
     published: RwLock<Arc<PluginGeneration>>,
+    retired: StdMutex<Vec<Weak<PluginGeneration>>>,
 }
 
 impl PluginGenerationSlot {
     fn new(generation: Arc<PluginGeneration>) -> Self {
-        Self { published: RwLock::new(generation) }
+        Self {
+            published: RwLock::new(generation),
+            retired: StdMutex::new(Vec::new()),
+        }
     }
 
     fn load(&self) -> Arc<PluginGeneration> {
         self.published.read().expect("plugin generation lock poisoned").clone()
+    }
+
+    fn lease(&self, generation: u64) -> Option<PluginGenerationLease> {
+        let published = self
+            .published
+            .read()
+            .expect("plugin generation lock poisoned");
+        if published.snapshot.generation == generation {
+            return Some(PluginGenerationLease {
+                inner: published.clone(),
+            });
+        }
+        drop(published);
+        self.retired
+            .lock()
+            .expect("retired generation lock poisoned")
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|candidate| candidate.snapshot.generation == generation)
+            .map(|inner| PluginGenerationLease { inner })
     }
 
     /// The only publication point. The fully-built candidate becomes visible
@@ -184,7 +353,30 @@ impl PluginGenerationSlot {
             plugins = candidate.lifecycles.len(),
             "publishing ready plugin generation"
         );
-        *self.published.write().expect("plugin generation lock poisoned") = candidate;
+        let retired = {
+            let mut published = self.published.write().expect("plugin generation lock poisoned");
+            std::mem::replace(&mut *published, candidate)
+        };
+        self.retired
+            .lock()
+            .expect("retired generation lock poisoned")
+            .push(Arc::downgrade(&retired));
+        drop(retired);
+    }
+
+    fn has_leases(&self) -> bool {
+        let current_leased = Arc::strong_count(
+            &self
+                .published
+                .read()
+                .expect("plugin generation lock poisoned"),
+        ) > 1;
+        let mut retired = self
+            .retired
+            .lock()
+            .expect("retired generation lock poisoned");
+        retired.retain(|generation| generation.strong_count() > 0);
+        current_leased || !retired.is_empty()
     }
 }
 
@@ -220,7 +412,7 @@ impl WorkspaceLifecycle {
         Some(state.downcast::<T>().unwrap_or_else(|_| panic!("plugin state type mismatch for {plugin_id}")))
     }
 
-    async fn teardown_plugin(&self, plugin_id: &str, state: &crate::state::AppState, root: &Path) {
+    async fn teardown_plugin(&self, plugin_id: &str, root: &Path) {
         if plugin_id == neoism_agent_builtins::plugin::mcp::ID {
             if let Some(runtime) = self.state_if_allocated::<crate::mcp::McpRuntimeManager>(plugin_id) {
                 runtime.shutdown_workspace(root.to_string_lossy().as_ref()).await;
@@ -232,7 +424,7 @@ impl WorkspaceLifecycle {
         } else if plugin_id == neoism_agent_builtins::plugin::workspace_tools::ID {
             if let Some(runtime) = self.state_if_allocated::<crate::background_job::BackgroundWorkspaceRuntime>(plugin_id) { runtime.cancel_and_clear().await; }
         } else if plugin_id == neoism_agent_builtins::plugin::subagents::ID {
-            if let Some(runtime) = self.state_if_allocated::<crate::plugins::subagents::SubagentWorkspaceRuntime>(plugin_id) { runtime.teardown(state, root).await; }
+            if let Some(runtime) = self.state_if_allocated::<crate::plugins::subagents::SubagentWorkspaceRuntime>(plugin_id) { runtime.teardown().await; }
         } else if plugin_id == neoism_agent_builtins::plugin::semantic::ID {
             if let Some(runtime) = self.state_if_allocated::<SemanticLifecycle>(plugin_id) {
                 if let Some(indexer) = runtime.indexer.lock().await.take() { indexer.shutdown().await; }
@@ -240,7 +432,6 @@ impl WorkspaceLifecycle {
         } else if plugin_id == neoism_agent_builtins::plugin::workflows::ID {
             if let Some(runtime) = self.state_if_allocated::<WorkflowLifecycle>(plugin_id) {
                 runtime.workflow_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
-                crate::workflow::workspace_disabled(state, root).await;
             }
         }
     }
@@ -259,15 +450,29 @@ struct WorkflowLifecycle {
 
 impl WorkspaceRuntime {
     pub(crate) fn plugin_generation(&self) -> Arc<PluginGeneration> {
-        self.generation.load()
+        active_generation(&self.root.to_string_lossy())
+            .map(|generation| generation.inner)
+            .unwrap_or_else(|| self.generation.load())
     }
 
-    pub(crate) fn snapshot(&self) -> Arc<neoism_agent_plugin_api::RegistrySnapshot> {
-        self.plugin_generation().snapshot()
+    pub(crate) fn snapshot(&self) -> PluginGenerationLease {
+        PluginGenerationLease {
+            inner: self.plugin_generation(),
+        }
+    }
+
+    pub(crate) fn published_snapshot(&self) -> PluginGenerationLease {
+        PluginGenerationLease {
+            inner: self.generation.load(),
+        }
+    }
+
+    pub(crate) fn lease_generation(&self, generation: u64) -> Option<PluginGenerationLease> {
+        self.generation.lease(generation)
     }
 
     fn lifecycle(&self) -> Arc<WorkspaceLifecycle> {
-        self.lifecycle.read().expect("workspace lifecycle lock poisoned").clone()
+        self.plugin_generation().lifecycle.clone()
     }
 
     pub(crate) fn mcp(&self) -> Arc<crate::mcp::McpRuntimeManager> {
@@ -284,7 +489,14 @@ impl WorkspaceRuntime {
     }
 
     pub(crate) fn lsp(&self) -> crate::lsp::LspRuntime {
-        (*self.lifecycle().state_with(neoism_agent_builtins::plugin::lsp::ID, || crate::lsp::LspRuntime::new(self.services.clone()))).clone()
+        let generation = self.plugin_generation();
+        (*generation.lifecycle.state_with(neoism_agent_builtins::plugin::lsp::ID, || {
+            crate::lsp::LspRuntime::new_with_config(
+                self.services.clone(),
+                generation.config.clone(),
+            )
+        }))
+        .clone()
     }
 
     pub(crate) fn lsp_if_allocated(&self) -> Option<crate::lsp::LspRuntime> {
@@ -299,10 +511,6 @@ impl WorkspaceRuntime {
         self.lifecycle().state_if_allocated(neoism_agent_builtins::plugin::pty::ID)
     }
 
-    pub(crate) fn background(&self) -> Arc<crate::background_job::BackgroundWorkspaceRuntime> {
-        self.lifecycle().state(neoism_agent_builtins::plugin::workspace_tools::ID)
-    }
-
     pub(crate) fn background_if_allocated(&self) -> Option<Arc<crate::background_job::BackgroundWorkspaceRuntime>> {
         self.lifecycle().state_if_allocated(neoism_agent_builtins::plugin::workspace_tools::ID)
     }
@@ -315,38 +523,16 @@ impl WorkspaceRuntime {
         self.lifecycle().state_if_allocated(neoism_agent_builtins::plugin::subagents::ID)
     }
 
-    pub(crate) fn set_workflow_enabled(&self, enabled: bool) {
-        self.lifecycle().state::<WorkflowLifecycle>(neoism_agent_builtins::plugin::workflows::ID).workflow_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
-    }
-
     pub(crate) async fn teardown(&self, state: &crate::state::AppState) {
-        let lifecycle = self.lifecycle();
-        for plugin_id in self.snapshot().manifests.iter().map(|manifest| manifest.id.as_str()) {
-            lifecycle.teardown_plugin(plugin_id, state, &self.root).await;
+        let generation = self.plugin_generation();
+        let lifecycle = generation.lifecycle.clone();
+        for plugin_id in generation.snapshot.manifests.iter().map(|manifest| manifest.id.as_str()) {
+            lifecycle.teardown_plugin(plugin_id, &self.root).await;
         }
-        self.plugin_generation().lifecycles.disarm();
+        crate::workflow::workspace_disabled(state, &self.root).await;
+        generation.lifecycles.disarm();
     }
 
-    pub(crate) async fn enable_semantic(&self, state: crate::state::AppState) {
-        let semantic = self.lifecycle().state::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID);
-        let auth = if let Some(provider_id) = crate::semantic::EmbeddingsClient::configured_provider_id() {
-            state.inner.provider_service.auth(&provider_id).await.ok().flatten()
-        } else { None };
-        let client = {
-            let mut client = semantic.client.lock().expect("semantic client lock poisoned");
-            client.get_or_insert_with(|| crate::semantic::EmbeddingsClient::from_env(auth)).clone()
-        };
-        let mut indexer = semantic.indexer.lock().await;
-        if indexer.is_none() {
-            *indexer = crate::semantic::spawn_indexer(state, self.root.clone(), client);
-        }
-    }
-
-    pub(crate) fn semantic_client(&self) -> Option<crate::semantic::EmbeddingsClient> {
-        let semantic = self.lifecycle().state::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID);
-        let client = semantic.client.lock().expect("semantic client lock poisoned").clone().flatten();
-        client
-    }
 }
 
 #[derive(Default)]
@@ -372,6 +558,7 @@ impl WorkspaceRuntimeRegistry {
         let mut entries = self.entries.lock().await;
         let stale = entries.iter().filter_map(|(root, entry)| {
             (Arc::strong_count(&entry.runtime) == 1
+                && !entry.runtime.generation.has_leases()
                 && now.duration_since(entry.last_used) >= IDLE_TTL)
                 .then(|| root.clone())
         }).collect::<Vec<_>>();
@@ -391,16 +578,19 @@ impl WorkspaceRuntimeRegistry {
             return (runtime, evicted);
         }
 
-        let signature = config_signature(services, &root);
-        let host = crate::plugins::build_host(state, &root.to_string_lossy())
-            .expect("built-in workspace plugin registration must be valid");
+        let signature = config_signature(services, &root).unwrap_or_default();
+        let build = crate::plugins::build_host(state, &root.to_string_lossy())
+            .or_else(|error| {
+                tracing::error!(%error, root = %root.display(), "initial workspace configuration rejected; using safe defaults");
+                crate::plugins::build_default_host(state, &root.to_string_lossy())
+            })
+            .expect("default built-in workspace plugin registration must be valid");
         let lifecycle = Arc::new(WorkspaceLifecycle::default());
-        let snapshot = host.snapshot();
-        let generation = PluginGeneration::workspace(snapshot, lifecycle.clone(), state, root.clone());
+        let snapshot = build.host.snapshot();
+        let generation = PluginGeneration::workspace(snapshot, build.config, lifecycle, state, root.clone());
         let runtime = Arc::new(WorkspaceRuntime {
             root: root.clone(),
             services: services.clone(),
-            lifecycle: RwLock::new(lifecycle),
             generation: PluginGenerationSlot::new(generation),
             signature: RwLock::new(signature),
         });
@@ -429,9 +619,15 @@ impl WorkspaceRuntimeRegistry {
     }
 }
 
-fn refresh_plugins(runtime: &WorkspaceRuntime, state: &crate::state::AppState) {
+pub(crate) fn refresh_plugins(runtime: &WorkspaceRuntime, state: &crate::state::AppState) {
     let services = state.services();
-    let signature = config_signature(services, &runtime.root);
+    let signature = match config_signature(services, &runtime.root) {
+        Ok(signature) => signature,
+        Err(error) => {
+            tracing::error!(%error, root = %runtime.root.display(), "workspace plugin configuration rejected; retaining last-known-good generation");
+            return;
+        }
+    };
     {
         let current = runtime.signature.read().expect("workspace signature lock poisoned");
         if *current == signature {
@@ -439,13 +635,12 @@ fn refresh_plugins(runtime: &WorkspaceRuntime, state: &crate::state::AppState) {
         }
     }
     match crate::plugins::build_host(state, &runtime.root.to_string_lossy()) {
-        Ok(host) => {
-            let old_generation = runtime.snapshot().generation;
-            let mut next = (*host.snapshot()).clone();
+        Ok(build) => {
+            let old_generation = runtime.published_snapshot().generation;
+            let mut next = (*build.host.snapshot()).clone();
             next.generation = old_generation.saturating_add(1);
             let lifecycle = Arc::new(WorkspaceLifecycle::default());
-            let candidate = PluginGeneration::workspace(Arc::new(next), lifecycle.clone(), state, runtime.root.clone());
-            *runtime.lifecycle.write().expect("workspace lifecycle lock poisoned") = lifecycle;
+            let candidate = PluginGeneration::workspace(Arc::new(next), build.config, lifecycle, state, runtime.root.clone());
             runtime.generation.publish(candidate);
             *runtime.signature.write().expect("workspace signature lock poisoned") = signature;
         }
@@ -456,11 +651,10 @@ fn refresh_plugins(runtime: &WorkspaceRuntime, state: &crate::state::AppState) {
 fn config_signature(
     services: &neoism_agent_service_api::AgentServices,
     root: &Path,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
     neoism_agent_builtins::plugin::config::load(services, &root.to_string_lossy())
-        .ok()
-        .and_then(|(info, _)| serde_json::to_vec(&info).ok())
-        .unwrap_or_default()
+        .map_err(|error| error.to_string())
+        .and_then(|(info, _)| serde_json::to_vec(&info).map_err(|error| error.to_string()))
 }
 
 pub(crate) fn canonical_location(directory: &str) -> PathBuf {
@@ -488,15 +682,22 @@ mod tests {
     ) -> Arc<PluginGeneration> {
         let mut snapshot = neoism_agent_plugin_api::RegistrySnapshot::empty();
         snapshot.generation = generation;
-        PluginGeneration::build(Arc::new(snapshot), |builder| {
-            builder.register(
-                plugin_id,
-                || Ok(()),
-                move || {
-                    teardown_count.fetch_add(1, Ordering::SeqCst);
-                },
-            )
-        })
+        PluginGeneration::build(
+            Arc::new(snapshot),
+            Arc::new(neoism_agent_core::AgentConfigDocument::default()),
+            Arc::new(WorkspaceLifecycle::default()),
+            crate::standard_services(),
+            PathBuf::new(),
+            |builder| {
+                builder.register(
+                    plugin_id,
+                    || Ok(()),
+                    move || {
+                        teardown_count.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+            },
+        )
         .unwrap()
     }
 
@@ -506,6 +707,10 @@ mod tests {
         let count = teardowns.clone();
         let result = PluginGeneration::build(
             Arc::new(neoism_agent_plugin_api::RegistrySnapshot::empty()),
+            Arc::new(neoism_agent_core::AgentConfigDocument::default()),
+            Arc::new(WorkspaceLifecycle::default()),
+            crate::standard_services(),
+            PathBuf::new(),
             |builder| {
                 builder.register(
                     "test.not-ready",
@@ -547,6 +752,21 @@ mod tests {
         )));
         assert_eq!(old_count.load(Ordering::SeqCst), 0);
         drop(in_flight);
+        assert_eq!(old_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn published_snapshot_lease_delays_generation_retirement() {
+        let old_count = Arc::new(AtomicUsize::new(0));
+        let slot = PluginGenerationSlot::new(test_generation(1, "test.plugin", old_count.clone()));
+        let lease = PluginGenerationLease { inner: slot.load() };
+
+        slot.publish(PluginGeneration::empty(Arc::new(
+            neoism_agent_plugin_api::RegistrySnapshot::empty(),
+        )));
+        assert_eq!(lease.generation, 1);
+        assert_eq!(old_count.load(Ordering::SeqCst), 0);
+        drop(lease);
         assert_eq!(old_count.load(Ordering::SeqCst), 1);
     }
 
@@ -595,6 +815,128 @@ mod tests {
         let (second, _) = registry.acquire(&other.to_string_lossy(), &state).await;
         assert!(Arc::ptr_eq(&first, &alias));
         assert!(!Arc::ptr_eq(&first, &second));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn invalid_reload_retains_last_known_good_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-workspace-invalid-reload-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(root.join(".agent")).unwrap();
+        std::fs::create_dir_all(root.join(".agent/skills/review")).unwrap();
+        std::fs::write(
+            root.join(".agent/skills/review/SKILL.md"),
+            "---\nname: Review\ndescription: Review code\n---\nReview the current changes.",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".agent/agent.json"),
+            r#"{"dangerouslySkipPermissions":true,"agent":{"reviewer":{"description":"Reviews code"}}}"#,
+        )
+        .unwrap();
+        let state = crate::state::AppState::open_database(root.join("state.sqlite3"))
+            .await
+            .unwrap();
+        let runtime = state.workspace_runtime(root.to_string_lossy().as_ref()).await;
+        let generation = runtime.snapshot().generation;
+        let manifests = runtime.snapshot().manifests.clone();
+        assert!(runtime.snapshot().config().dangerously_skip_permissions);
+        assert!(crate::plugins::agent_catalog(&runtime.snapshot(), root.to_string_lossy().as_ref())
+            .unwrap()
+            .get("reviewer")
+            .is_some());
+        assert!(crate::skill::resolve_from_snapshot(
+            &runtime.snapshot(),
+            root.to_string_lossy().as_ref(),
+            "review",
+        )
+        .await
+        .unwrap()
+        .is_some());
+
+        std::fs::write(root.join(".agent/agent.json"), "{").unwrap();
+        refresh_plugins(&runtime, &state);
+
+        assert_eq!(runtime.snapshot().generation, generation);
+        assert_eq!(runtime.snapshot().manifests, manifests);
+        assert!(runtime.snapshot().config().dangerously_skip_permissions);
+        assert!(crate::plugins::agent_catalog(&runtime.snapshot(), root.to_string_lossy().as_ref())
+            .unwrap()
+            .get("reviewer")
+            .is_some());
+        assert!(crate::skill::resolve_from_snapshot(
+            &runtime.snapshot(),
+            root.to_string_lossy().as_ref(),
+            "review",
+        )
+        .await
+        .unwrap()
+        .is_some());
+        drop(runtime);
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn generation_lease_prevents_idle_runtime_eviction() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-workspace-leased-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let state = crate::state::AppState::open_database(root.join("state.sqlite3"))
+            .await
+            .unwrap();
+        let registry = WorkspaceRuntimeRegistry::default();
+        let (runtime, _) = registry.acquire(&root.to_string_lossy(), &state).await;
+        let lease = runtime.snapshot();
+        let mut next = neoism_agent_plugin_api::RegistrySnapshot::empty();
+        next.generation = lease.generation + 1;
+        runtime
+            .generation
+            .publish(PluginGeneration::empty(Arc::new(next)));
+        let published_generation = runtime.published_snapshot().generation;
+        let routed_generation = scope_generation(lease.clone(), async {
+            let routed = runtime.snapshot().generation;
+            let published = runtime.published_snapshot();
+            state.reconcile_workspace_plugins(&runtime, &published).await;
+            routed
+        })
+        .await;
+        assert_eq!(routed_generation, lease.generation);
+        assert_eq!(runtime.published_snapshot().generation, published_generation);
+        assert_eq!(
+            state
+                .inner
+                .workspace_plugin_generations
+                .lock()
+                .await
+                .get(&canonical_location(root.to_string_lossy().as_ref()))
+                .map(|(generation, _)| *generation),
+            Some(published_generation),
+        );
+        drop(runtime);
+        registry
+            .entries
+            .lock()
+            .await
+            .get_mut(&canonical_location(root.to_string_lossy().as_ref()))
+            .unwrap()
+            .last_used = Instant::now() - IDLE_TTL - Duration::from_secs(1);
+
+        let (_, evicted) = registry.acquire(&other.to_string_lossy(), &state).await;
+        assert!(evicted.is_empty());
+
+        drop(lease);
+        let third = other.join("third");
+        std::fs::create_dir_all(&third).unwrap();
+        let (_, evicted) = registry.acquire(&third.to_string_lossy(), &state).await;
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].root, canonical_location(root.to_string_lossy().as_ref()));
+        drop(state);
         let _ = std::fs::remove_dir_all(root);
     }
 

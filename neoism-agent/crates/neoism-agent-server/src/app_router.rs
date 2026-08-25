@@ -53,7 +53,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/audit", get(audit_list))
         .route("/v2/capabilities", get(v2_capabilities))
         .route("/v2/plugins", get(v2_plugins))
-        .route("/v2/plugins/:plugin_id", get(v2_plugin))
+        .route("/v2/plugins/:plugin_id/manifest", get(v2_plugin))
         .route("/v2/events", get(v2_events))
         .route("/v2/artifacts", get(artifact_list).post(artifact_create))
         .route(
@@ -187,7 +187,14 @@ async fn plugin_route_dispatch(
             .map(|params| (registered, params))
     });
     if let Some((registered, path_params)) = websocket_route {
-        return dispatch_websocket_route(registered, path_params, directory, request).await;
+        return dispatch_websocket_route(
+            registered,
+            path_params,
+            directory,
+            request,
+            snapshot.clone(),
+        )
+        .await;
     }
     let runtime_route = snapshot.runtime_routes.values().find_map(|registered| {
         (registered.route.descriptor.method.as_str() == request.method().as_str())
@@ -196,7 +203,14 @@ async fn plugin_route_dispatch(
             .map(|params| (registered, params))
     });
     if let Some((registered, path_params)) = runtime_route {
-        return dispatch_runtime_route(registered, path_params, directory, request).await;
+        return dispatch_runtime_route(
+            registered,
+            path_params,
+            directory,
+            request,
+            snapshot.clone(),
+        )
+        .await;
     }
     StatusCode::NOT_FOUND.into_response()
 }
@@ -238,6 +252,7 @@ async fn dispatch_websocket_route(
     path: std::collections::BTreeMap<String, String>,
     directory: String,
     request: Request<Body>,
+    generation_lease: crate::workspace_runtime::PluginGenerationLease,
 ) -> Response {
     let (mut parts, _) = request.into_parts();
     let query = url::form_urlencoded::parse(parts.uri.query().unwrap_or_default().as_bytes())
@@ -252,12 +267,18 @@ async fn dispatch_websocket_route(
         workspace: Some(directory.into()),
         session_id: path.get("session_id").cloned(),
         actor: claims.map(|claims| claims.subject.clone()),
+        generation: Some(generation_lease.generation),
         path,
         query,
         headers,
         body: serde_json::Value::Null,
     };
-    let session = match registered.route.handler.prepare(route_request).await {
+    let session = match crate::workspace_runtime::scope_generation(
+        generation_lease.clone(),
+        registered.route.handler.prepare(route_request),
+    )
+    .await
+    {
         Ok(session) => session,
         Err(error) => return auth_error(StatusCode::BAD_REQUEST, "plugin.websocket_rejected", &error.to_string()),
     };
@@ -266,6 +287,7 @@ async fn dispatch_websocket_route(
         Err(error) => return error.into_response(),
     };
     upgrade.on_upgrade(move |socket| async move {
+        let _generation_lease = generation_lease;
         let _ = session.run(Box::new(HostWebSocket(socket))).await;
     }).into_response()
 }
@@ -275,6 +297,7 @@ async fn dispatch_runtime_route(
     path_params: std::collections::BTreeMap<String, String>,
     directory: String,
     request: Request<Body>,
+    generation: crate::workspace_runtime::PluginGenerationLease,
 ) -> Response {
     let (parts, body) = request.into_parts();
     let mut query = std::collections::BTreeMap::<String, Vec<String>>::new();
@@ -324,12 +347,18 @@ async fn dispatch_runtime_route(
         workspace: Some(directory.into()),
         session_id,
         actor,
+        generation: Some(generation.generation),
         path: path_params,
         query,
         headers,
         body,
     };
-    match registered.route.handler.handle(request).await {
+    match crate::workspace_runtime::scope_generation(
+        generation,
+        registered.route.handler.handle(request),
+    )
+    .await
+    {
         Ok(plugin_response) => {
             let status = StatusCode::from_u16(plugin_response.status)
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

@@ -7,15 +7,16 @@ use neoism_agent_core::{Id, IdKind, SessionInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::path::Path as FsPath;
 use tokio::sync::Mutex;
 
 use crate::error::ApiError;
 use crate::session_actions::{
     create_subtask_session, spawn_background_subtask_prompt,
 };
+use crate::plugins;
 use crate::state::AppState;
 use crate::tool::ToolExecutionResult;
+use crate::workspace_runtime::PluginGenerationLease;
 
 /// Generation-owned bookkeeping for subagent sessions. The session records
 /// remain durable, while runs, queues and keyed reconciliation locks do not.
@@ -33,30 +34,9 @@ impl SubagentWorkspaceRuntime {
         self.sessions.lock().await.contains(session_id)
     }
 
-    pub(crate) async fn teardown(&self, state: &AppState, root: &FsPath) {
-        let mut ids = std::mem::take(&mut *self.sessions.lock().await);
-        let mut workspace_ids = ids.clone();
-        if let Ok(sessions) = state.inner.store.list_sessions().await {
-            for session in sessions.into_iter().filter(|session| crate::workspace_runtime::canonical_location(&session.directory) == root) {
-                let id = session.id.to_string();
-                workspace_ids.insert(id.clone());
-                if session.parent_id.is_some() {
-                    ids.insert(id);
-                }
-            }
-        }
-        for id in &ids {
-            crate::session_actions::cancel_session_run_for_teardown(state, id).await;
-            crate::session_actions::clear_subtask_completion_for_teardown(state, id).await;
-            crate::session_queue::clear_session_prompt_queue(state, id).await;
-        }
-        state.inner.subtask_completion_locks.lock().await.retain(|id, _| !workspace_ids.contains(id));
-        state.inner.subtask_parent_locks.lock().await.retain(|id, _| !workspace_ids.contains(id));
+    pub(crate) async fn teardown(&self) {
+        self.sessions.lock().await.clear();
     }
-}
-
-pub(crate) fn enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> bool {
-    crate::plugins::enabled(services, directory, neoism_agent_builtins::plugin::subagents::ID)
 }
 
 #[cfg(test)]
@@ -64,8 +44,9 @@ fn enabled_in_config(config: &neoism_agent_core::AgentConfigDocument) -> bool {
     config.plugins.get(neoism_agent_builtins::plugin::subagents::ID).is_none_or(|plugin| plugin.enabled)
 }
 
-fn require_enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Result<(), String> {
-    enabled(services, directory)
+async fn require_enabled(state: &AppState, directory: &str) -> Result<(), String> {
+    let snapshot = state.plugin_snapshot(directory).await;
+    plugins::enabled(&snapshot, neoism_agent_builtins::plugin::subagents::ID)
         .then_some(())
         .ok_or_else(|| format!("plugin {} is disabled for this workspace", neoism_agent_builtins::plugin::subagents::ID))
 }
@@ -99,6 +80,7 @@ pub(crate) struct StopSubagentsResult {
 
 pub(crate) async fn start_task_tool(
     state: &AppState,
+    snapshot: PluginGenerationLease,
     session_id: &Id,
     input: Value,
     cancel: Option<Arc<AtomicBool>>,
@@ -114,7 +96,9 @@ pub(crate) async fn start_task_tool(
     let parent = parent_session(state, session_id.as_str())
         .await
         .map_err(|error| error.to_string())?;
-    require_enabled(state.services(), &parent.directory)?;
+    plugins::enabled(&snapshot, neoism_agent_builtins::plugin::subagents::ID)
+        .then_some(())
+        .ok_or_else(|| format!("plugin {} is disabled for this workspace", neoism_agent_builtins::plugin::subagents::ID))?;
     let task_id = string_arg(&input, "task_id");
     let continuing = task_id.is_some();
     if !continuing {
@@ -140,8 +124,7 @@ pub(crate) async fn start_task_tool(
         )
         .await;
     }
-    let snapshot = state.plugin_snapshot(&parent.directory).await;
-    let agents = crate::plugins::agent_catalog(&snapshot, &parent.directory)
+    let agents = plugins::agent_catalog(&snapshot, &parent.directory)
         .map_err(|error| error.to_string())?;
     let agent = agents.get(&agent_name).ok_or_else(|| {
         let available = agents
@@ -172,11 +155,11 @@ pub(crate) async fn start_task_tool(
                 .await?;
             child.id.to_string()
         } else {
-            create_child(state, &parent, &command, &description, &agent.name, child_model.clone())
+            create_child(state, &snapshot, &parent, &command, &description, &agent.name, child_model.clone())
                 .await?
         }
     } else {
-        create_child(state, &parent, &command, &description, &agent.name, child_model.clone())
+        create_child(state, &snapshot, &parent, &command, &description, &agent.name, child_model.clone())
             .await?
     };
     if crate::tool_runtime::session_is_running(state, &child_session_id).await {
@@ -223,6 +206,7 @@ pub(crate) async fn start_task_tool(
             prompt,
             agent.name.clone(),
             child_model,
+            Some(snapshot.clone()),
         );
         return Ok(ToolExecutionResult {
             title: description,
@@ -263,6 +247,7 @@ pub(crate) async fn start_task_tool(
 
 async fn create_child(
     state: &AppState,
+    snapshot: &PluginGenerationLease,
     parent: &SessionInfo,
     command: &str,
     description: &str,
@@ -272,7 +257,7 @@ async fn create_child(
     let child = create_subtask_session(state, parent, command, description, agent, model)
         .await
         .map_err(|error| error.to_string())?;
-    state.workspace_runtime(&parent.directory).await.subagents().track(child.id.to_string()).await;
+    snapshot.subagents().track(child.id.to_string()).await;
     Ok(child.id.to_string())
 }
 
@@ -285,7 +270,9 @@ pub(crate) async fn list_tasks(
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<SubagentTaskInfo>>, ApiError> {
     let parent = parent_session(&state, &session_id).await?;
-    require_enabled(state.services(), &parent.directory).map_err(ApiError::not_found)?;
+    require_enabled(&state, &parent.directory)
+        .await
+        .map_err(ApiError::not_found)?;
     let mut children = crate::tool_runtime::descendant_sessions(&state, parent.id.as_str())
         .await
         .map_err(ApiError::internal)?;
@@ -303,7 +290,9 @@ pub(crate) async fn stop_tasks(
     Json(request): Json<StopSubagentsRequest>,
 ) -> Result<Json<StopSubagentsResult>, ApiError> {
     let parent = parent_session(&state, &session_id).await?;
-    require_enabled(state.services(), &parent.directory).map_err(ApiError::not_found)?;
+    require_enabled(&state, &parent.directory)
+        .await
+        .map_err(ApiError::not_found)?;
     let result = stop(&state, &parent, request.task_id.as_deref())
         .await
         .map_err(ApiError::bad_request)?;
@@ -312,13 +301,16 @@ pub(crate) async fn stop_tasks(
 
 pub(crate) async fn task_result_tool(
     state: &AppState,
+    snapshot: &PluginGenerationLease,
     session_id: &Id,
     input: Value,
 ) -> Result<ToolExecutionResult, String> {
     let parent = parent_session(state, session_id.as_str())
         .await
         .map_err(|error| error.to_string())?;
-    require_enabled(state.services(), &parent.directory)?;
+    plugins::enabled(snapshot, neoism_agent_builtins::plugin::subagents::ID)
+        .then_some(())
+        .ok_or_else(|| format!("plugin {} is disabled for this workspace", neoism_agent_builtins::plugin::subagents::ID))?;
     if let Some(task_id) = input.get("task_id").and_then(Value::as_str) {
         let child = child_session(state, task_id).await?;
         crate::tool_runtime::ensure_child_task_belongs_to_parent(state, &parent, &child).await?;
@@ -375,13 +367,16 @@ pub(crate) async fn task_result_tool(
 
 pub(crate) async fn stop_task_tool(
     state: &AppState,
+    snapshot: &PluginGenerationLease,
     session_id: &Id,
     input: Value,
 ) -> Result<ToolExecutionResult, String> {
     let parent = parent_session(state, session_id.as_str())
         .await
         .map_err(|error| error.to_string())?;
-    require_enabled(state.services(), &parent.directory)?;
+    plugins::enabled(snapshot, neoism_agent_builtins::plugin::subagents::ID)
+        .then_some(())
+        .ok_or_else(|| format!("plugin {} is disabled for this workspace", neoism_agent_builtins::plugin::subagents::ID))?;
     let task_id = input.get("task_id").and_then(Value::as_str);
     let result = stop(state, &parent, task_id).await?;
     let count = result.stopped.len();

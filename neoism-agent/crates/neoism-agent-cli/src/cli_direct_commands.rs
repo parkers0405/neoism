@@ -1,5 +1,5 @@
 use anyhow::Context;
-use neoism_agent_core::{CreateSessionRequest, PromptPart, PromptRequest, UserModel};
+use neoism_agent_core::{CreateSessionRequest, Id, IdKind, PromptPart, PromptRequest, UserModel};
 use serde_json::{json, Value};
 
 use crate::{
@@ -147,23 +147,67 @@ pub(super) async fn run(
         }),
     };
 
-    let response = response_json(
-        client
-            .post(format!("{server}/v2/sessions/{session_id}/prompt"))
-            .json(&PromptRequest {
-                message_id: None,
-                model: prompt_model,
-                agent,
-                no_reply: false,
-                system: None,
-                tools: None,
-                author: None,
-                parts: vec![PromptPart::Text { text: message }],
-            })
-            .send()
-            .await?,
-    )
-    .await?;
+    let user_message_id = Id::ascending(IdKind::Message);
+    client
+        .post(format!("{server}/v2/sessions/{session_id}/prompt"))
+        .json(&PromptRequest {
+            message_id: Some(user_message_id.clone()),
+            model: prompt_model,
+            agent,
+            no_reply: false,
+            system: None,
+            tools: None,
+            author: None,
+            parts: vec![PromptPart::Text { text: message }],
+        })
+        .send()
+        .await?
+        .error_for_status()?;
+    client
+        .post(format!("{server}/v2/sessions/{session_id}/wait"))
+        .send()
+        .await?
+        .error_for_status()?;
+    let user_message_id = user_message_id.to_string();
+    let mut cursor = String::new();
+    let response = loop {
+        let messages = response_json(
+            client
+                .get(format!("{server}/v2/sessions/{session_id}/messages"))
+                .query(&[
+                    ("limit", "256"),
+                    ("order", "desc"),
+                    ("cursor", cursor.as_str()),
+                ])
+                .send()
+                .await?,
+        )
+        .await?;
+        if let Some(response) = assistant_response_to(&messages, &user_message_id) {
+            break response.clone();
+        }
+        let items = messages
+            .get("items")
+            .and_then(Value::as_array)
+            .context("server did not return a message page")?;
+        if items.len() < 256 || page_contains_message(items, &user_message_id) {
+            anyhow::bail!("submitted prompt completed without an assistant response");
+        }
+        cursor = items
+            .last()
+            .and_then(|message| message.get("info"))
+            .and_then(|info| info.get("id"))
+            .and_then(Value::as_str)
+            .context("server returned a message page without a cursor")?
+            .to_string();
+    };
+    if let Some(error) = response
+        .get("info")
+        .and_then(|info| info.get("error"))
+        .filter(|error| !error.is_null())
+    {
+        anyhow::bail!("submitted prompt failed: {error}");
+    }
 
     println!(
         "{}",
@@ -172,4 +216,53 @@ pub(super) async fn run(
         )?
     );
     Ok(())
+}
+
+fn page_contains_message(messages: &[Value], message_id: &str) -> bool {
+    messages.iter().any(|message| {
+        message
+            .get("info")
+            .and_then(|info| info.get("id"))
+            .and_then(Value::as_str)
+            == Some(message_id)
+    })
+}
+
+fn assistant_response_to<'a>(messages: &'a Value, user_message_id: &str) -> Option<&'a Value> {
+    messages
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|message| {
+                message
+                    .get("info")
+                    .and_then(|info| info.get("role"))
+                    .and_then(Value::as_str)
+                    == Some("assistant")
+                    && message
+                        .get("info")
+                        .and_then(|info| info.get("parentId"))
+                        .and_then(Value::as_str)
+                        == Some(user_message_id)
+            })
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synchronous_run_selects_only_the_submitted_turn_response() {
+        let messages = json!({
+            "items": [
+                { "info": { "role": "assistant", "id": "stale", "parentId": "old-prompt" } },
+                { "info": { "role": "assistant", "id": "final", "parentId": "prompt" } },
+                { "info": { "role": "user", "id": "prompt" } },
+                { "info": { "role": "assistant", "id": "old", "parentId": "older-prompt" } }
+            ]
+        });
+        assert_eq!(assistant_response_to(&messages, "prompt").unwrap()["info"]["id"], "final");
+        assert!(assistant_response_to(&messages, "failed-prompt").is_none());
+    }
 }

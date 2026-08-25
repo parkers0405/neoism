@@ -66,7 +66,7 @@ pub(crate) struct ToolContext {
     state: Option<AppState>,
     session_id: Option<String>,
     utilities: Arc<crate::utility_runtime::UtilityRuntime>,
-    workspace_runtime: Option<Arc<crate::workspace_runtime::WorkspaceRuntime>>,
+    plugin_snapshot: Option<crate::workspace_runtime::PluginGenerationLease>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -100,7 +100,7 @@ impl ToolContext {
             state: None,
             session_id: None,
             utilities: crate::utility_runtime::UtilityRuntime::new(&services),
-            workspace_runtime: None,
+            plugin_snapshot: None,
         }
     }
 
@@ -130,12 +130,19 @@ impl ToolContext {
     pub(crate) fn with_state(mut self, state: Option<AppState>) -> Self {
         if let Some(state) = state.as_ref() {
             self.utilities = state.inner.utilities.clone();
-            self.workspace_runtime = state
-                .inner
-                .workspace_runtimes
-                .loaded(&self.cwd.to_string_lossy());
         }
         self.state = state;
+        self
+    }
+
+    pub(crate) fn with_generation(mut self, generation: Option<u64>) -> Self {
+        if let (Some(state), Some(generation)) = (self.state.as_ref(), generation) {
+            self.plugin_snapshot = state
+                .inner
+                .workspace_runtimes
+                .loaded(&self.cwd.to_string_lossy())
+                .and_then(|runtime| runtime.lease_generation(generation));
+        }
         self
     }
 
@@ -153,7 +160,18 @@ impl ToolContext {
     }
 
     pub(crate) fn lsp_runtime(&self) -> crate::lsp::LspRuntime {
-        self.workspace_runtime.as_ref().expect("tool workspace runtime was not reconciled").lsp()
+        self.plugin_snapshot
+            .as_ref()
+            .expect("tool plugin generation was not provided")
+            .lsp()
+    }
+
+    pub(crate) fn plugin_snapshot(
+        &self,
+    ) -> &crate::workspace_runtime::PluginGenerationLease {
+        self.plugin_snapshot
+            .as_ref()
+            .expect("tool plugin generation was not provided")
     }
 
     pub(crate) fn services(&self) -> neoism_agent_service_api::AgentServices {
@@ -264,6 +282,7 @@ impl neoism_agent_plugin_api::RuntimeTool for BuiltinTool {
     ) -> neoism_agent_plugin_api::PluginFuture<'a, neoism_agent_plugin_api::PluginToolResult> {
         let context = ToolContext::new(&invocation.directory)
             .with_state(self.state.as_ref().and_then(Weak::upgrade).map(|inner| AppState { inner }))
+            .with_generation(invocation.generation)
             .with_session_id(invocation.session_id)
             .with_permission_rules(invocation.permission_rules)
             .with_env(invocation.env)
@@ -494,7 +513,7 @@ pub(crate) async fn execute(
     let state = context.state.as_ref().ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
     let runtime = state.workspace_runtime(&context.cwd.to_string_lossy()).await;
     let snapshot = runtime.snapshot();
-    context.workspace_runtime = Some(runtime);
+    context.plugin_snapshot = Some(snapshot.clone());
     let _contribution = snapshot
         .contributions
         .get(&format!("Tool:{id}"))
@@ -520,6 +539,7 @@ pub(crate) async fn execute(
             env: context.env.clone(),
             cancel: context.cancel.clone(),
             formatter: context.formatter.clone(),
+            generation: Some(snapshot.generation),
         })
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;

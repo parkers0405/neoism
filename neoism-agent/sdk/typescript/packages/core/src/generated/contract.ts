@@ -163,7 +163,7 @@ export interface ApiOperations {
   "v2.interactions.questions.reply": { method: "POST"; path: "/v2/interactions/questions/{request_id}/reply"; input: { path: { request_id: string; }; body: QuestionReply; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.meta.get": { method: "GET"; path: "/v2/meta"; input: { signal?: AbortSignal; }; responses: { "200": ApiMeta; }; response: ApiMeta; };
   "v2.openapi.get": { method: "GET"; path: "/v2/openapi.json"; input: { signal?: AbortSignal; }; responses: { "200": OpenApiDocument; }; response: OpenApiDocument; };
-  "v2.plugins.get": { method: "GET"; path: "/v2/plugins/{plugin_id}"; input: { path: { plugin_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": PluginManifest; }; response: PluginManifest; };
+  "v2.plugins.get": { method: "GET"; path: "/v2/plugins/{plugin_id}/manifest"; input: { path: { plugin_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": PluginManifest; }; response: PluginManifest; };
   "v2.plugins.goals.clear": { method: "DELETE"; path: "/v2/plugins/dev.neoism.goals/{session_id}"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": GoalResponse; }; response: GoalResponse; };
   "v2.plugins.goals.get": { method: "GET"; path: "/v2/plugins/dev.neoism.goals/{session_id}"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": GoalResponse; }; response: GoalResponse; };
   "v2.plugins.goals.research": { method: "POST"; path: "/v2/plugins/dev.neoism.goals/{session_id}/research"; input: { path: { session_id: string; }; body: GoalResearchRequest; signal?: AbortSignal; }; responses: { "200": GoalResponse; }; response: GoalResponse; };
@@ -310,7 +310,7 @@ export const operationDescriptors = {
   "v2.interactions.questions.reply": {"method":"POST","path":"/v2/interactions/questions/{request_id}/reply","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.meta.get": {"method":"GET","path":"/v2/meta","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.openapi.get": {"method":"GET","path":"/v2/openapi.json","transport":"http","response":"json","responses":{"200":["application/json"]}},
-  "v2.plugins.get": {"method":"GET","path":"/v2/plugins/{plugin_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.plugins.get": {"method":"GET","path":"/v2/plugins/{plugin_id}/manifest","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.goals.clear": {"method":"DELETE","path":"/v2/plugins/dev.neoism.goals/{session_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.goals.get": {"method":"GET","path":"/v2/plugins/dev.neoism.goals/{session_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.goals.research": {"method":"POST","path":"/v2/plugins/dev.neoism.goals/{session_id}/research","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},

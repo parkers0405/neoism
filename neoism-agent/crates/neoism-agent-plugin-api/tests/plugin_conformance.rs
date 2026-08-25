@@ -121,6 +121,7 @@ fn assert_plugin_conforms(plugin: Box<dyn AgentPlugin>) {
         env: BTreeMap::new(),
         cancel: None,
         formatter: None,
+        generation: None,
     }))
     .expect("runtime tool executes through public DTOs");
     assert_eq!(result.output, "hello");

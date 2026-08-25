@@ -7,7 +7,6 @@ use neoism_agent_core::{
     PermissionAction, PermissionRule, PromptPart, PromptRequest, QuestionRequestInfo,
     SessionInfo, TodoInfo, UserModel,
 };
-use neoism_agent_plugin_api::RegistrySnapshot;
 use serde_json::{json, Value};
 
 use crate::error::ApiError;
@@ -51,7 +50,7 @@ async fn execute_tool_call_with_env_and_cancel(
     input: Value,
     env: BTreeMap<String, String>,
     cancel: Option<Arc<AtomicBool>>,
-    snapshot: &RegistrySnapshot,
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> Result<tool::ToolExecutionResult, String> {
     let started = crate::perf::now();
     let input_bytes = input.to_string().len();
@@ -108,9 +107,7 @@ async fn execute_tool_call_with_env_and_cancel(
         );
         return Ok(result);
     }
-    let formatter = neoism_agent_builtins::plugin::config::load(&services, directory)
-        .ok()
-        .and_then(|(config, _)| crate::config::formatter_value(&config));
+    let formatter = crate::config::formatter_value(snapshot.config());
     let runtime = snapshot.runtime_tools.get(tool_name).cloned();
     let runtime = runtime.ok_or_else(|| format!("unknown tool {tool_name}"))?;
     let definition = runtime.definition();
@@ -130,6 +127,7 @@ async fn execute_tool_call_with_env_and_cancel(
             env,
             cancel,
             formatter,
+            generation: Some(snapshot.generation),
         })
         .await
         .map_err(|error| error.to_string())?;
@@ -192,6 +190,7 @@ async fn execute_stateful_tool_call(
     input: Value,
     env: BTreeMap<String, String>,
     cancel: Option<Arc<AtomicBool>>,
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> Result<Option<tool::ToolExecutionResult>, String> {
     match tool_name {
         "todowrite" => {
@@ -334,6 +333,7 @@ async fn execute_stateful_tool_call(
         "background_task" => {
             let result = crate::background_job::start_background_task_tool(
                 state,
+                snapshot.clone(),
                 session_id,
                 permissions,
                 input,
@@ -345,7 +345,7 @@ async fn execute_stateful_tool_call(
         "background_task_result" => {
             ensure_tool_permission(permissions, "background_task_result", "*")?;
             let result = crate::background_job::background_task_result_tool(
-                state, session_id, input,
+                snapshot.background(), session_id, input,
             )
             .await?;
             Ok(Some(result))
@@ -356,6 +356,7 @@ async fn execute_stateful_tool_call(
             ensure_tool_permission(permissions, "task", &agent_name)?;
             crate::plugins::subagents::start_task_tool(
                 state,
+                snapshot.clone(),
                 session_id,
                 input,
                 cancel.clone(),
@@ -365,12 +366,24 @@ async fn execute_stateful_tool_call(
         }
         "task_result" => {
             ensure_tool_permission(permissions, "task_result", "*")?;
-            let result = crate::plugins::subagents::task_result_tool(state, session_id, input).await?;
+            let result = crate::plugins::subagents::task_result_tool(
+                state,
+                snapshot,
+                session_id,
+                input,
+            )
+            .await?;
             Ok(Some(result))
         }
         "stop_task" => {
             ensure_tool_permission(permissions, "stop_task", "*")?;
-            let result = crate::plugins::subagents::stop_task_tool(state, session_id, input).await?;
+            let result = crate::plugins::subagents::stop_task_tool(
+                state,
+                snapshot,
+                session_id,
+                input,
+            )
+            .await?;
             Ok(Some(result))
         }
         "complete_goal" => {
@@ -387,7 +400,7 @@ async fn execute_stateful_tool_call(
                 .await
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("session {session_id} not found"))?;
-            if !crate::plugins::enabled(state.services(), &info.directory, neoism_agent_builtins::plugin::goals::ID) {
+            if !crate::plugins::enabled(snapshot, neoism_agent_builtins::plugin::goals::ID) {
                 return Err("Goal plugin is disabled for the workspace".to_string());
             }
             let Some(mut goal) = info.goal() else {
@@ -525,10 +538,8 @@ pub(crate) async fn session_subtask_depth(state: &AppState, session: &SessionInf
     depth
 }
 
-fn dangerously_skip_permissions_enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> bool {
-    neoism_agent_builtins::plugin::config::load(services, directory)
-        .map(|(config, _)| config.dangerously_skip_permissions)
-        .unwrap_or(false)
+fn dangerously_skip_permissions_enabled(config: &neoism_agent_core::AgentConfigDocument) -> bool {
+    config.dangerously_skip_permissions
 }
 
 pub(crate) fn ensure_tool_permission(
@@ -863,7 +874,7 @@ pub(crate) async fn run_child_task_prompt_with_cancel(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute_tool_call_with_permission_wait(
+pub(crate) async fn execute_tool_call_in_generation(
     state: &AppState,
     session_id: &Id,
     message_id: &Id,
@@ -872,19 +883,16 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
     call_id: &str,
     tool_name: &str,
     input: Value,
+    snapshot: crate::workspace_runtime::PluginGenerationLease,
 ) -> Result<tool::ToolExecutionResult, String> {
     let started = crate::perf::now();
     let input_bytes = input.to_string().len();
-    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
-        state, directory,
-    )
-    .await;
-    let snapshot = workspace.snapshot;
     if crate::agent_tool_registry::tool_contribution(&snapshot, tool_name).is_none() {
         return Err(format!("unknown or disabled tool {tool_name}"));
     }
-    let workspace = workspace.runtime;
-    let workspace_directory = workspace.root.to_string_lossy().into_owned();
+    let workspace_directory = crate::workspace_runtime::canonical_location(directory)
+        .to_string_lossy()
+        .into_owned();
     let directory = workspace_directory.as_str();
     let mut one_time_rules = Vec::new();
     let session = state
@@ -957,6 +965,7 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
             hooked_input.clone(),
             env.clone(),
             cancel.clone(),
+            &snapshot,
         )
         .await?
         {
@@ -1042,7 +1051,7 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
                 // parse as a permission-required error), so agent-level
                 // denies — e.g. `task` for sub-agents — keep denying even
                 // in skip-permissions mode.
-                if dangerously_skip_permissions_enabled(state.services(), directory) {
+                if dangerously_skip_permissions_enabled(snapshot.config()) {
                     one_time_rules.push(PermissionRule {
                         permission,
                         pattern: target,
@@ -1065,6 +1074,32 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
         }
     }
     Err("permission approval did not satisfy the tool call".to_string())
+}
+
+#[cfg(test)]
+pub(crate) async fn execute_tool_call_with_permission_wait(
+    state: &AppState,
+    session_id: &Id,
+    message_id: &Id,
+    directory: &str,
+    permissions: Vec<PermissionRule>,
+    call_id: &str,
+    tool_name: &str,
+    input: Value,
+) -> Result<tool::ToolExecutionResult, String> {
+    let snapshot = state.plugin_snapshot(directory).await;
+    execute_tool_call_in_generation(
+        state,
+        session_id,
+        message_id,
+        directory,
+        permissions,
+        call_id,
+        tool_name,
+        input,
+        snapshot,
+    )
+    .await
 }
 
 fn truncate_direct_tool_result(

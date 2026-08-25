@@ -171,7 +171,7 @@ pub fn apply(services: &AgentServices, directory: &str, patch: &str) -> VcsApply
 }
 
 pub fn patch_from_body(body: &Value) -> Option<&str> {
-    body.get("patch").or_else(|| body.get("diff")).or_else(|| body.get("content")).and_then(Value::as_str)
+    body.get("patch").and_then(Value::as_str)
 }
 
 fn failure(error: impl Into<String>) -> VcsApplyResult { VcsApplyResult { success: false, error: Some(error.into()) } }
@@ -260,8 +260,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_legacy_patch_body_names() {
-        assert_eq!(patch_from_body(&json!({"diff": "x"})), Some("x"));
+    fn accepts_only_canonical_patch_body_name() {
+        assert_eq!(patch_from_body(&json!({"patch": "x"})), Some("x"));
+        assert_eq!(patch_from_body(&json!({"diff": "x"})), None);
+        assert_eq!(patch_from_body(&json!({"content": "x"})), None);
     }
 
     #[test]

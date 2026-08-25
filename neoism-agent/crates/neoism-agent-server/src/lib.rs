@@ -88,7 +88,6 @@ mod tool_runtime;
 mod tool_selection;
 mod utility_runtime;
 mod v2_routes;
-mod vcs;
 pub(crate) mod windows_process;
 mod workflow;
 mod workspace_runtime;

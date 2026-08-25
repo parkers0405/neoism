@@ -267,39 +267,47 @@ pub(crate) fn build_host(
 ) -> Result<PluginHost, PluginHostError> {
     let services = state.services();
     let host = PluginHost::default();
-    let mut plugins = INTERNAL_PLUGINS
+    let config = neoism_agent_builtins::plugin::config::load(services, directory)
+        .map(|(config, _)| config)
+        .unwrap_or_default();
+    let mut plugins = vec![
+        Box::new(neoism_agent_builtins::plugin::ConfigPlugin::new(
+            services.clone(),
+        )) as Box<dyn AgentPlugin>,
+    ];
+    plugins.extend(INTERNAL_PLUGINS
             .iter()
             .copied()
             .filter(|plugin| plugin.id != "dev.neoism.tools.notes" || services.notes.is_some())
-            .filter(|plugin| enabled(services, directory, plugin.id))
+            .filter(|plugin| enabled_in(&config, plugin.id))
             .map(|definition| Box::new(BuiltinPlugin { definition, state: state.clone() }) as Box<dyn AgentPlugin>)
-            .collect::<Vec<_>>();
-    if enabled(services, directory, neoism_agent_builtins::plugin::skills::ID) {
+            .collect::<Vec<_>>());
+    if enabled_in(&config, neoism_agent_builtins::plugin::skills::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::SkillsPlugin::new(
             services.clone(),
             std::sync::Arc::new(ServerSkillsHost(state.clone())),
         )));
     }
-    if enabled(services, directory, AGENTS_PLUGIN_ID) {
+    if enabled_in(&config, AGENTS_PLUGIN_ID) {
         plugins.push(Box::new(AgentsPlugin(services.clone())));
     }
-    if enabled(services, directory, neoism_agent_builtins::plugin::commands::ID) {
+    if enabled_in(&config, neoism_agent_builtins::plugin::commands::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::CommandsPlugin::new(services.clone())));
     }
-    if enabled(services, directory, neoism_agent_builtins::plugin::websearch::ID) {
+    if enabled_in(&config, neoism_agent_builtins::plugin::websearch::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::WebsearchPlugin));
     }
-    if enabled(services, directory, neoism_agent_builtins::plugin::vcs::ID) {
+    if enabled_in(&config, neoism_agent_builtins::plugin::vcs::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::VcsPlugin::new(
             services.clone(),
         )));
     }
-    if enabled(services, directory, neoism_agent_builtins::plugin::goals::ID) {
+    if enabled_in(&config, neoism_agent_builtins::plugin::goals::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::GoalsPlugin::new(
             std::sync::Arc::new(ServerGoalsHost(state.clone())),
         )));
     }
-    if enabled(services, directory, "dev.neoism.tools.workspace") {
+    if enabled_in(&config, "dev.neoism.tools.workspace") {
         let custom_tools = crate::custom_tool::load(services, directory);
         if !custom_tools.is_empty() {
             plugins.push(Box::new(CustomToolsPlugin(custom_tools)));
@@ -307,9 +315,7 @@ pub(crate) fn build_host(
     }
     plugins.extend(crate::plugin::configured_agent_plugins(
         services,
-        &crate::config::load(services, directory)
-            .map(|loaded| loaded.info)
-            .unwrap_or_default(),
+        &config,
         directory,
     ));
     host.install(plugins, &[])?;
@@ -336,11 +342,16 @@ pub(crate) async fn agent_catalog(
 }
 
 pub(crate) fn enabled(services: &neoism_agent_service_api::AgentServices, directory: &str, plugin_id: &str) -> bool {
-    crate::config::load(services, directory)
-        .map(|loaded| {
-            loaded.info.plugins.get(plugin_id).is_none_or(|plugin| plugin.enabled)
-        })
+    neoism_agent_builtins::plugin::config::load(services, directory)
+        .map(|(config, _)| enabled_in(&config, plugin_id))
         .unwrap_or(true)
+}
+
+fn enabled_in(config: &neoism_agent_core::AgentConfigDocument, plugin_id: &str) -> bool {
+    config
+        .plugins
+        .get(plugin_id)
+        .is_none_or(|plugin| plugin.enabled)
 }
 
 pub(crate) fn manifests(snapshot: &RegistrySnapshot) -> Vec<PluginManifestInfo> {

@@ -52,7 +52,7 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
         crate::standard_services(),
     ).await.unwrap();
     assert!(!configured_servers(root.to_str().unwrap(), Some(&absent)).unwrap().contains_key("fake-service"));
-    let error = tools_with_state(root.to_str().unwrap(), "fake-service", &store, Some(absent)).await.unwrap_err();
+    let error = tools_with_state(root.to_str().unwrap(), "fake-service", &store, absent).await.unwrap_err();
     assert!(error.to_string().contains("not configured"));
 
     let services = crate::standard_services()
@@ -60,8 +60,8 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
     let state = crate::state::AppState::open_database_with_services(root.join("present.db"), services).await.unwrap();
     let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state)).unwrap();
     assert!(matches!(catalog["fake-service"].status, McpStatus::Connected));
-    assert_eq!(tools_with_state(root.to_str().unwrap(), "fake-service", &store, Some(state.clone())).await.unwrap()[0].name, "fake.call");
-    let result = call_tool_with_state(root.to_str().unwrap(), "fake-service", "fake.call", json!({}), &store, Some(state.clone())).await.unwrap();
+    assert_eq!(tools_with_state(root.to_str().unwrap(), "fake-service", &store, state.clone()).await.unwrap()[0].name, "fake.call");
+    let result = call_tool_with_state(root.to_str().unwrap(), "fake-service", "fake.call", json!({}), &store, state.clone()).await.unwrap();
     assert_eq!(tool_result_text(&result), "fake result");
 
     fs::write(
@@ -71,7 +71,7 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
     .unwrap();
     let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state)).unwrap();
     assert!(matches!(catalog["fake-service"].status, McpStatus::Disabled));
-    let error = tools_with_state(root.to_str().unwrap(), "fake-service", &store, Some(state)).await.unwrap_err();
+    let error = tools_with_state(root.to_str().unwrap(), "fake-service", &store, state).await.unwrap_err();
     assert!(error.to_string().contains("disabled"));
     let _ = fs::remove_dir_all(root);
 }
@@ -219,24 +219,25 @@ async fn local_stdio_runtime_lists_and_calls_tools() {
     .unwrap();
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
     let directory = root.to_str().unwrap();
+    let state = test_state(&root).await;
 
-    let connected = connect(directory, "mock", &store).await.unwrap();
+    let connected = connect(directory, "mock", &store, state.clone()).await.unwrap();
     assert!(matches!(connected, McpStatus::Connected));
     assert!(matches!(
-        status(directory, &store).unwrap()["mock"],
+        status(directory, &store, &state).unwrap()["mock"],
         McpStatus::Connected
     ));
 
-    let tools = tools(directory, "mock", &store).await.unwrap();
+    let tools = tools(directory, "mock", &store, state.clone()).await.unwrap();
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "echo");
     assert_eq!(tools[0].client, "mock");
     assert_eq!(tool_runtime_id("mock", "echo-tool"), "mcp__mock__echo_tool");
 
-    let resources = resources(directory, "mock", &store).await.unwrap();
+    let resources = resources(directory, "mock", &store, state.clone()).await.unwrap();
     assert_eq!(resources[0].uri, "file:///tmp/example.txt");
 
-    let prompts = prompts(directory, "mock", &store).await.unwrap();
+    let prompts = prompts(directory, "mock", &store, state.clone()).await.unwrap();
     assert_eq!(prompts[0].arguments[0].name, "topic");
 
     let result = call_tool(
@@ -245,12 +246,13 @@ async fn local_stdio_runtime_lists_and_calls_tools() {
         "echo",
         json!({ "text": "hello" }),
         &store,
+        state.clone(),
     )
     .await
     .unwrap();
     assert_eq!(tool_result_text(&result), "ok");
 
-    assert!(disconnect(directory, "mock").await.unwrap());
+    assert!(disconnect(&state, directory, "mock").await.unwrap());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -263,8 +265,9 @@ async fn killed_local_runtime_reconnects_before_the_next_call() {
     write_local_mock_config(&root, &server, &pid_file, "first", true);
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
     let directory = root.to_str().unwrap();
+    let state = test_state(&root).await;
 
-    let first = call_tool(directory, "mock", "echo", json!({}), &store)
+    let first = call_tool(directory, "mock", "echo", json!({}), &store, state.clone())
         .await
         .unwrap();
     assert_eq!(tool_result_text(&first), "first");
@@ -275,14 +278,14 @@ async fn killed_local_runtime_reconnects_before_the_next_call() {
         .unwrap()
         .success());
 
-    let second = call_tool(directory, "mock", "echo", json!({}), &store)
+    let second = call_tool(directory, "mock", "echo", json!({}), &store, state.clone())
         .await
         .unwrap();
     assert_eq!(tool_result_text(&second), "first");
     let pids = wait_for_pid_count(&pid_file, 2);
     assert_ne!(pids[0], pids[1]);
 
-    assert!(disconnect(directory, "mock").await.unwrap());
+    assert!(disconnect(&state, directory, "mock").await.unwrap());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -295,21 +298,22 @@ async fn changed_local_config_restarts_the_runtime() {
     write_local_mock_config(&root, &server, &pid_file, "first", true);
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
     let directory = root.to_str().unwrap();
+    let state = test_state(&root).await;
 
-    let first = call_tool(directory, "mock", "echo", json!({}), &store)
+    let first = call_tool(directory, "mock", "echo", json!({}), &store, state.clone())
         .await
         .unwrap();
     assert_eq!(tool_result_text(&first), "first");
     write_local_mock_config(&root, &server, &pid_file, "second", true);
 
-    let second = call_tool(directory, "mock", "echo", json!({}), &store)
+    let second = call_tool(directory, "mock", "echo", json!({}), &store, state.clone())
         .await
         .unwrap();
     assert_eq!(tool_result_text(&second), "second");
     let pids = wait_for_pid_count(&pid_file, 2);
     assert_ne!(pids[0], pids[1]);
 
-    assert!(disconnect(directory, "mock").await.unwrap());
+    assert!(disconnect(&state, directory, "mock").await.unwrap());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -322,13 +326,57 @@ async fn manually_disabled_local_config_disconnects_the_runtime() {
     write_local_mock_config(&root, &server, &pid_file, "first", true);
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
     let directory = root.to_str().unwrap();
+    let state = test_state(&root).await;
 
-    connect(directory, "mock", &store).await.unwrap();
+    connect(directory, "mock", &store, state.clone()).await.unwrap();
     write_local_mock_config(&root, &server, &pid_file, "first", false);
-    let error = tools(directory, "mock", &store).await.unwrap_err();
+    let error = tools(directory, "mock", &store, state.clone()).await.unwrap_err();
 
     assert!(error.to_string().contains("disabled"));
-    assert!(!disconnect(directory, "mock").await.unwrap());
+    assert!(!disconnect(&state, directory, "mock").await.unwrap());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn app_states_isolate_and_shutdown_local_mcp_runtimes() {
+    let root = temp_dir("state-isolation-shutdown");
+    let server = configurable_mock_mcp_server(&root);
+    let pid_file = root.join("pids");
+    write_local_mock_config(&root, &server, &pid_file, "isolated", true);
+    let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let directory = root.to_str().unwrap();
+    let first = AppState::open_database(root.join("first.db")).await.unwrap();
+    let second = AppState::open_database(root.join("second.db")).await.unwrap();
+
+    connect(directory, "mock", &store, first.clone())
+        .await
+        .unwrap();
+    connect(directory, "mock", &store, second.clone())
+        .await
+        .unwrap();
+    let pids = wait_for_pid_count(&pid_file, 2);
+    assert_ne!(pids[0], pids[1]);
+
+    first.shutdown().await;
+    assert!(first.workspace_runtime(directory).await.mcp().status(directory, "mock").is_none());
+    assert!(matches!(
+        second.workspace_runtime(directory).await.mcp().status(directory, "mock"),
+        Some(McpStatus::Connected)
+    ));
+    assert_eq!(
+        tool_result_text(
+            &call_tool(directory, "mock", "echo", json!({}), &store, second.clone())
+                .await
+                .unwrap()
+        ),
+        "isolated"
+    );
+
+    second.shutdown().await;
+    for pid in pids {
+        assert!(!process_is_alive(pid), "MCP child {pid} survived shutdown");
+    }
     let _ = fs::remove_dir_all(root);
 }
 
@@ -385,22 +433,23 @@ async fn remote_http_runtime_lists_and_calls_tools_with_headers_and_bearer_token
         )
         .unwrap();
     let directory = root.to_str().unwrap();
+    let state = test_state(&root).await;
 
-    let connected = connect(directory, "remote", &store).await.unwrap();
+    let connected = connect(directory, "remote", &store, state.clone()).await.unwrap();
     assert!(matches!(connected, McpStatus::Connected));
     assert!(matches!(
-        status(directory, &store).unwrap()["remote"],
+        status(directory, &store, &state).unwrap()["remote"],
         McpStatus::Connected
     ));
 
-    let tools = tools(directory, "remote", &store).await.unwrap();
+    let tools = tools(directory, "remote", &store, state.clone()).await.unwrap();
     assert_eq!(tools[0].name, "echo");
     assert_eq!(tools[0].client, "remote");
 
-    let resources = resources(directory, "remote", &store).await.unwrap();
+    let resources = resources(directory, "remote", &store, state.clone()).await.unwrap();
     assert_eq!(resources[0].uri, "https://example.com/resource");
 
-    let prompts = prompts(directory, "remote", &store).await.unwrap();
+    let prompts = prompts(directory, "remote", &store, state.clone()).await.unwrap();
     assert_eq!(prompts[0].name, "summarize");
 
     let result = call_tool(
@@ -409,6 +458,7 @@ async fn remote_http_runtime_lists_and_calls_tools_with_headers_and_bearer_token
         "echo",
         json!({ "text": "hello" }),
         &store,
+        state.clone(),
     )
     .await
     .unwrap();
@@ -433,7 +483,7 @@ async fn remote_http_runtime_lists_and_calls_tools_with_headers_and_bearer_token
     assert!(methods.contains(&"prompts/list".to_string()));
     assert!(methods.contains(&"tools/call".to_string()));
 
-    assert!(disconnect(directory, "remote").await.unwrap());
+    assert!(disconnect(&state, directory, "remote").await.unwrap());
     let _ = shutdown_tx.send(());
     let _ = server.await;
     let _ = fs::remove_dir_all(root);
@@ -470,19 +520,20 @@ async fn remote_tool_failure_keeps_connection_and_catalog() {
     .unwrap();
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
     let directory = root.to_str().unwrap();
+    let state = test_state(&root).await;
 
-    connect(directory, "remote", &store).await.unwrap();
-    let error = call_tool(directory, "remote", "echo", json!({}), &store)
+    connect(directory, "remote", &store, state.clone()).await.unwrap();
+    let error = call_tool(directory, "remote", "echo", json!({}), &store, state.clone())
         .await
         .unwrap_err();
 
     assert!(format!("{error:#}").contains("forced tool failure"));
     assert!(matches!(
-        status(directory, &store).unwrap()["remote"],
+        status(directory, &store, &state).unwrap()["remote"],
         McpStatus::Connected
     ));
     assert_eq!(
-        tools(directory, "remote", &store).await.unwrap()[0].name,
+        tools(directory, "remote", &store, state.clone()).await.unwrap()[0].name,
         "echo"
     );
     assert_eq!(
@@ -495,7 +546,7 @@ async fn remote_tool_failure_keeps_connection_and_catalog() {
         1
     );
 
-    assert!(disconnect(directory, "remote").await.unwrap());
+    assert!(disconnect(&state, directory, "remote").await.unwrap());
     let _ = shutdown_tx.send(());
     let _ = server.await;
     let _ = fs::remove_dir_all(root);
@@ -550,7 +601,8 @@ async fn remote_http_connect_invalidates_stale_bearer_token_on_unauthorized() {
         )
         .unwrap();
 
-    let status = connect(root.to_str().unwrap(), "remote", &store)
+    let state = test_state(&root).await;
+    let status = connect(root.to_str().unwrap(), "remote", &store, state)
         .await
         .unwrap();
 
@@ -613,7 +665,8 @@ async fn expired_refresh_token_is_cleared_and_reports_needs_auth() {
         )
         .unwrap();
 
-    let status = connect(root.to_str().unwrap(), "remote", &store)
+    let state = test_state(&root).await;
+    let status = connect(root.to_str().unwrap(), "remote", &store, state)
         .await
         .unwrap();
 
@@ -655,6 +708,16 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn temp_auth_path(name: &str) -> std::path::PathBuf {
     let dir = temp_dir(name);
     dir.join("mcp-auth.json")
+}
+
+async fn test_state(root: &std::path::Path) -> AppState {
+    AppState::open_database(root.join("agent-test.db")).await.unwrap()
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn mock_mcp_server(root: &std::path::Path) -> std::path::PathBuf {

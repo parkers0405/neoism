@@ -51,9 +51,6 @@ const COMPACTION_PROMPT_TEMPLATE: &str = r#"Output exactly the Markdown structur
 
 ## Relevant Files
 - [file or directory path: why it matters, or "(none)"]
-
-## Durable Memory Candidates
-- [facts worth saving to persistent memory: user preferences and corrections, durable project facts, hard-won diagnoses; or "(none)"]
 </template>
 
 Rules:
@@ -414,7 +411,7 @@ async fn generate_model_compaction_summary(
     if model_compaction_disabled() || messages.is_empty() {
         return None;
     }
-    let model = compaction_model(state, info, model);
+    let model = compaction_model(state, info, model).await;
     let providers = state
         .inner
         .provider_catalog
@@ -528,12 +525,12 @@ fn should_keep_partial_compaction_output(raw: &str) -> bool {
     clean_model_compaction_summary(raw).is_some()
 }
 
-fn compaction_model(
+async fn compaction_model(
     state: &AppState,
     info: &SessionInfo,
     fallback: &neoism_agent_core::UserModel,
 ) -> neoism_agent_core::UserModel {
-    crate::plugins::agent_catalog(state, &info.directory)
+    crate::plugins::agent_catalog(state, &info.directory).await
         .ok()
         .and_then(|catalog| catalog.get("compaction"))
         .and_then(|agent| compaction_model_from_agent(&agent))
@@ -1164,14 +1161,17 @@ pub(crate) fn provider_messages_for_session(
     messages: &[MessageWithParts],
     model_id: &str,
     run_system: Option<&str>,
+    goals_enabled: bool,
 ) -> Vec<ProviderMessage> {
     let mut provider_messages = Vec::new();
     provider_messages.push(workspace_system_message(info, model_id));
     if let Some(update) = context_epoch_update_message(info) {
         provider_messages.push(update);
     }
-    if let Some(goal) = goal_system_message(info) {
-        provider_messages.push(goal);
+    if goals_enabled {
+        if let Some(goal) = goal_system_message(info) {
+            provider_messages.push(goal);
+        }
     }
     if let Some(system) = run_system_message(run_system) {
         provider_messages.push(system);
@@ -1358,6 +1358,46 @@ mod tests {
         assert!(COMPACTION_PROMPT_TEMPLATE.contains("## Goal"));
         assert!(COMPACTION_PROMPT_TEMPLATE.contains("## Constraints & Preferences"));
         assert!(COMPACTION_PROMPT_TEMPLATE.contains("## Relevant Files"));
+        assert!(!COMPACTION_PROMPT_TEMPLATE.contains("Memory"));
+    }
+
+    #[test]
+    fn standard_workspace_prompt_is_product_neutral_and_service_context_is_optional() {
+        let mut info = test_session_info();
+        let standard = workspace_system_message(&info, "stub").content;
+        for assumption in [
+            "Neoism",
+            "vault",
+            "product documentation",
+            "durable memory",
+        ] {
+            assert!(!standard
+                .to_ascii_lowercase()
+                .contains(&assumption.to_ascii_lowercase()));
+        }
+        assert!(!standard.contains("optional injected context"));
+
+        let mut sources = std::collections::BTreeMap::new();
+        sources.insert(
+            "service:test".to_string(),
+            serde_json::json!("optional injected context"),
+        );
+        let snapshot = crate::context_epoch::ContextSnapshot { sources };
+        let epoch = crate::context_epoch::ContextEpoch {
+            baseline: snapshot.clone(),
+            snapshot,
+            generation: 1,
+            baseline_seq: 0,
+            updated: 0,
+        };
+        info.extra.insert(
+            "contextEpoch".to_string(),
+            serde_json::to_value(epoch).unwrap(),
+        );
+
+        assert!(workspace_system_message(&info, "stub")
+            .content
+            .contains("optional injected context"));
     }
 
     #[test]
@@ -1491,6 +1531,7 @@ mod tests {
             &[marker, summary, recent],
             &model.model_id,
             None,
+            true,
         );
         let joined = provider_messages
             .iter()
@@ -1526,6 +1567,7 @@ mod tests {
             &[old, tail, marker, summary],
             &model.model_id,
             None,
+            true,
         );
         let joined = provider_messages
             .iter()
@@ -1716,5 +1758,14 @@ mod tests {
         let message = goal_system_message(&info).expect("blocked goal should inject");
         assert!(message.content.contains("BLOCKED"));
         assert!(message.content.contains("ship the EXO integration"));
+    }
+
+    #[test]
+    fn disabled_goals_are_not_injected_into_provider_context() {
+        let info = session_with_goal(neoism_agent_core::GoalStatus::Active);
+        let messages = provider_messages_for_session(&info, &[], "stub", None, false);
+        assert!(!messages
+            .iter()
+            .any(|message| message.content.contains("Persistent goal")));
     }
 }

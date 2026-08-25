@@ -100,7 +100,7 @@ async fn ensure_server(
                 port,
                 cors: Vec::new(),
             },
-            neoism_agent_server::standard_services(),
+            crate::standalone_services(),
         )
         .await;
         if let Err(error) = result {

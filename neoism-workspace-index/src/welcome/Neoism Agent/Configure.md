@@ -10,10 +10,10 @@ Neoism's application configuration uses domain blocks. Agent settings belong und
 {
   "agent": {
     "model": "anthropic/claude-sonnet-4-5",
-    "small-model": "anthropic/claude-haiku-4-5",
-    "default-agent": "build",
+    "smallModel": "anthropic/claude-haiku-4-5",
+    "defaultAgent": "build",
     "variant": "high",
-    "text-verbosity": "low",
+    "textVerbosity": "low",
     "instructions": ["AGENTS.md"],
     "permission": {
       "edit": "ask",
@@ -32,7 +32,7 @@ A workspace may contain `neoism.json` or `neoism.jsonc`. These files are agent-s
 ```jsonc
 {
   "model": "anthropic/claude-sonnet-4-5",
-  "default-agent": "build",
+  "defaultAgent": "build",
   "instructions": ["AGENTS.md", "docs/engineering.md"],
   "permission": {
     "bash": {
@@ -64,10 +64,10 @@ MCP definitions may also live in a dedicated `mcp.json` or `mcp.jsonc`. A dedica
 | Field | Purpose |
 |---|---|
 | `model` | Default `provider/model` selection. |
-| `small-model` | Less expensive model used for lightweight internal work when available. |
+| `smallModel` | Less expensive model used for lightweight internal work when available. |
 | `variant` | Default reasoning/model variant, such as `high`. |
-| `text-verbosity` | Response length for supported models: `low`, `medium`, or `high`. GPT-5.x defaults to `low`. |
-| `default-agent` | Initial primary agent. |
+| `textVerbosity` | Response length for supported models: `low`, `medium`, or `high`. GPT-5.x defaults to `low`. |
+| `defaultAgent` | Initial primary agent. |
 | `agent` | Named custom agent definitions. |
 | `command` | Named prompt commands. |
 | `skills` | Skill discovery configuration. |
@@ -78,9 +78,9 @@ MCP definitions may also live in a dedicated `mcp.json` or `mcp.jsonc`. A dedica
 | `formatter` | Formatter definitions used by formatting tools. |
 | `lsp` | Language-server definitions. |
 | `share` / `autoshare` | Session-sharing policy. |
-| `enabled-providers` | Provider allowlist. |
-| `disabled-providers` | Provider denylist. |
-| `dangerously-skip-permissions` | Converts otherwise undecided/ask operations to allow; explicit deny rules still win. |
+| `enabledProviders` | Provider allowlist. |
+| `disabledProviders` | Provider denylist. |
+| `dangerouslySkipPermissions` | Converts otherwise undecided/ask operations to allow; explicit deny rules still win. |
 
 ## Complete practical example
 
@@ -88,10 +88,10 @@ MCP definitions may also live in a dedicated `mcp.json` or `mcp.jsonc`. A dedica
 {
   "agent": {
     "model": "openai/gpt-5.2-codex",
-    "small-model": "anthropic/claude-haiku-4-5",
-    "default-agent": "build",
+    "smallModel": "anthropic/claude-haiku-4-5",
+    "defaultAgent": "build",
     "variant": "high",
-    "text-verbosity": "low",
+    "textVerbosity": "low",
     "agent": {
       "review": {
         "description": "Reviews changes without editing files",

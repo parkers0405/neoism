@@ -2,6 +2,8 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use neoism_agent_core::{Id, IdKind, PtyInfo, ShellItem};
 use serde::{Deserialize, Serialize};
@@ -17,9 +19,23 @@ use pty_buffer::PtyOutputBuffer;
 #[path = "pty_process.rs"]
 mod pty_process;
 
-pub(crate) use pty_process::{
-    resize_pty_process, serve_websocket, stop_pty_process,
-};
+pub(crate) use pty_process::{serve_websocket, PtyProcessRegistry};
+
+/// Lazily allocated PTY state owned by a single workspace generation.
+#[derive(Default)]
+pub(crate) struct PtyWorkspaceRuntime {
+    pub(crate) infos: RwLock<HashMap<String, PtyInfo>>,
+    pub(crate) tokens: RwLock<ConnectTokens>,
+    pub(crate) processes: Arc<PtyProcessRegistry>,
+}
+
+impl PtyWorkspaceRuntime {
+    pub(crate) async fn shutdown(&self) {
+        self.processes.shutdown().await;
+        self.infos.write().await.clear();
+        self.tokens.write().await.tokens.clear();
+    }
+}
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -238,6 +238,7 @@ pub(crate) async fn handle_socket(
     workspace_manager: WorkspaceManager,
     pairing_tokens: PairingTokenStore,
     crdt: CrdtSyncHub,
+    lsp_runtime: neoism_agent_server::language_server::LspRuntime,
 ) {
     let (mut sink, mut stream) = socket.split();
     tracing::debug!("websocket connection established");
@@ -282,7 +283,7 @@ pub(crate) async fn handle_socket(
     // engine pushes here the instant a language server publishes; we forward
     // to the editor from the select loop below. `active_editor_file` gates it
     // so a workspace-wide push for a non-focused buffer isn't shown.
-    let mut lsp_diagnostics_rx = crate::language_server::subscribe_diagnostics();
+    let mut lsp_diagnostics_rx = crate::language_server::subscribe_diagnostics(&lsp_runtime);
     let mut active_editor_file: Option<String> = None;
     // Latest `Editor` envelope request id. Unsolicited engine pushes are
     // tagged with it so the client's reply-correlation routing still works.
@@ -975,14 +976,15 @@ pub(crate) async fn handle_socket(
                             // + status walk build the LspSnapshot on a
                             // blocking task so a cold server spawn can't
                             // stall PTY forwarding behind a keystroke sync.
-                            crate::language_server::queue_buffer_sync(&root, &file, text);
+                            crate::language_server::queue_buffer_sync(&lsp_runtime, &root, &file, text);
                             {
                                 let root = root.clone();
                                 let tx = editor_query_tx.clone();
+                                let lsp_runtime = lsp_runtime.clone();
                                 tokio::task::spawn_blocking(move || {
                                     if let Some(message) =
                                         crate::language_server::buffer_snapshot_message(
-                                            &root, &file, surface_id,
+                                            &lsp_runtime, &root, &file, surface_id,
                                         )
                                     {
                                         let _ =
@@ -1000,6 +1002,7 @@ pub(crate) async fn handle_socket(
                             text,
                             surface_id,
                         } => match crate::language_server::run_action(
+                            &lsp_runtime,
                             &root,
                             action,
                             text.as_deref(),
@@ -1111,8 +1114,10 @@ pub(crate) async fn handle_socket(
                         } => {
                             let root = root.clone();
                             let tx = editor_query_tx.clone();
+                            let lsp_runtime = lsp_runtime.clone();
                             tokio::task::spawn_blocking(move || {
                                 let message = crate::language_server::query_at(
+                                    &lsp_runtime,
                                     &root,
                                     seq,
                                     action,
@@ -1138,9 +1143,11 @@ pub(crate) async fn handle_socket(
                         } => {
                             let root = root.clone();
                             let tx = editor_query_tx.clone();
+                            let lsp_runtime = lsp_runtime.clone();
                             tokio::task::spawn_blocking(move || {
                                 let message =
                                     crate::language_server::apply_code_action_at(
+                                        &lsp_runtime,
                                         &root,
                                         seq,
                                         action,
@@ -1172,9 +1179,10 @@ pub(crate) async fn handle_socket(
                             if let Ok(file) = crate::path::canonicalize(&file) {
                                 if file.starts_with(&root) {
                                     let root = root.clone();
+                                    let lsp_runtime = lsp_runtime.clone();
                                     tokio::task::spawn_blocking(move || {
                                         crate::language_server::save_document(
-                                            &root, &file,
+                                            &lsp_runtime, &root, &file,
                                         );
                                     });
                                 }
@@ -1438,7 +1446,7 @@ pub(crate) async fn handle_socket(
                         let _ = send_json(&mut sink, &denial).await;
                         continue;
                     }
-                    for message in config_handler::handle(message).await {
+                    for message in config_handler::handle(&lsp_runtime, message).await {
                         let resp = ServiceServerMessage::ConfigReply {
                             request_id,
                             message,

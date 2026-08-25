@@ -234,6 +234,10 @@ pub enum ExecutablePurpose {
     Sandbox,
     PlatformShell,
     ExternalAgent,
+    Plugin,
+    VersionControl,
+    ProjectMetadata,
+    Browser,
     Other(String),
 }
 
@@ -306,6 +310,107 @@ pub trait ExecutableService: Send + Sync {
     fn resolve(&self, request: &ExecutableRequest) -> Result<ExecutableResult, ExecutableError>;
 }
 
+/// Immutable host-owned language-server capability registry. Product adapters
+/// publish a new snapshot when their catalog changes; an Agent runtime never
+/// mutates or supplements this catalog globally.
+pub trait LanguageCapabilityService: Send + Sync {
+    fn snapshot(&self) -> Arc<LanguageCapabilitySnapshot>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LanguageCapabilitySnapshot {
+    pub generation: u64,
+    pub languages: Arc<[LanguageServerCapability]>,
+}
+
+impl LanguageCapabilitySnapshot {
+    pub fn empty() -> Self {
+        Self { generation: 0, languages: Arc::from([]) }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LanguageServerCapability {
+    pub id: String,
+    pub name: String,
+    pub catalog_packages: Vec<LanguageCatalogPackage>,
+    pub transport: LanguageServerTransport,
+    pub routes: Vec<LanguageRouteCapability>,
+    pub markers: Vec<String>,
+    pub root_policy: LanguageRootPolicy,
+    pub capabilities: LanguageServerOperations,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LanguageCatalogPackage {
+    pub package_id: String,
+    pub executable: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LanguageServerTransport {
+    Stdio { command: Vec<String> },
+    Tcp {
+        default_host: String,
+        default_port: u16,
+        host_env: Option<String>,
+        port_env: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LanguageRouteCapability {
+    pub id: String,
+    pub document_language_id: String,
+    pub extensions: Vec<String>,
+    pub filename_patterns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LanguageRootPolicy {
+    NearestMarker,
+    CargoMetadata { manifest: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LanguageServerOperations {
+    pub workspace_symbols: bool,
+    pub completion: bool,
+    pub hover: bool,
+    pub definition: bool,
+    pub references: bool,
+    pub implementation: bool,
+    pub call_hierarchy: bool,
+    pub diagnostics: bool,
+    pub document_symbols: bool,
+    pub formatting: bool,
+    pub code_actions: bool,
+    pub rename: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct StaticLanguageCapabilityService {
+    snapshot: Arc<LanguageCapabilitySnapshot>,
+}
+
+impl StaticLanguageCapabilityService {
+    pub fn new(snapshot: LanguageCapabilitySnapshot) -> Self {
+        Self { snapshot: Arc::new(snapshot) }
+    }
+
+    pub fn empty() -> Self {
+        Self::new(LanguageCapabilitySnapshot::empty())
+    }
+}
+
+impl Default for StaticLanguageCapabilityService {
+    fn default() -> Self { Self::empty() }
+}
+
+impl LanguageCapabilityService for StaticLanguageCapabilityService {
+    fn snapshot(&self) -> Arc<LanguageCapabilitySnapshot> { self.snapshot.clone() }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceError {
     pub message: String,
@@ -335,7 +440,7 @@ impl From<std::io::Error> for ServiceError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScopeChoice {
-    /// Stable, backend-owned identifier accepted by every notes operation.
+    /// Stable, service-owned identifier accepted by every notes operation.
     pub id: String,
     pub label: String,
     pub description: Option<String>,
@@ -574,7 +679,7 @@ pub struct MemoryLocation {
     pub scope_id: String,
     pub label: String,
     /// Stable storage key used by the semantic index. Its representation is
-    /// backend-owned and must not be interpreted by the Agent server.
+    /// service-owned and must not be interpreted by the Agent server.
     pub storage_key: String,
 }
 
@@ -609,7 +714,7 @@ pub struct SemanticMemoryHit {
 }
 
 /// Agent-owned vector storage and ranking. Hosts receive only this narrow
-/// interface; session databases and their concrete backend never cross the
+/// interface; session databases and their concrete store never cross the
 /// service boundary.
 pub trait SemanticMemoryIndex: Send + Sync {
     fn available(&self) -> bool;
@@ -639,6 +744,7 @@ pub trait MemoryService: BuiltinMcpService {
 #[derive(Clone)]
 pub struct AgentServices {
     pub executables: Arc<dyn ExecutableService>,
+    pub language_capabilities: Arc<dyn LanguageCapabilityService>,
     pub workspace_search: Arc<dyn WorkspaceSearchService>,
     pub config: Arc<dyn ConfigSourceService>,
     pub notes: Option<Arc<dyn NotesService>>,
@@ -655,6 +761,7 @@ impl AgentServices {
         let config = Arc::new(StandardConfigSourceService::from_environment());
         Self {
             executables,
+            language_capabilities: Arc::new(StaticLanguageCapabilityService::empty()),
             workspace_search,
             config,
             notes: None,
@@ -666,6 +773,14 @@ impl AgentServices {
 
     pub fn with_config(mut self, config: Arc<dyn ConfigSourceService>) -> Self {
         self.config = config;
+        self
+    }
+
+    pub fn with_language_capabilities(
+        mut self,
+        language_capabilities: Arc<dyn LanguageCapabilityService>,
+    ) -> Self {
+        self.language_capabilities = language_capabilities;
         self
     }
 

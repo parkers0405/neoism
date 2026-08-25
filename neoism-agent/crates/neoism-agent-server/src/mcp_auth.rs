@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -55,7 +56,6 @@ pub(crate) struct McpAuthEntry {
     pub(crate) server_url: Option<String>,
 }
 
-#[allow(dead_code)]
 impl McpAuthStore {
     #[cfg(test)]
     pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
@@ -156,6 +156,7 @@ impl McpAuthStore {
         self.set(mcp_name, entry)
     }
 
+    #[cfg(test)]
     pub(crate) fn update_code_verifier(
         &self,
         mcp_name: &str,
@@ -166,6 +167,7 @@ impl McpAuthStore {
         self.set(mcp_name, entry)
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_code_verifier(&self, mcp_name: &str) -> anyhow::Result<()> {
         let Some(mut entry) = self.get(mcp_name)? else {
             return Ok(());
@@ -174,6 +176,7 @@ impl McpAuthStore {
         self.set(mcp_name, entry)
     }
 
+    #[cfg(test)]
     pub(crate) fn update_oauth_state(
         &self,
         mcp_name: &str,
@@ -184,6 +187,7 @@ impl McpAuthStore {
         self.set(mcp_name, entry)
     }
 
+    #[cfg(test)]
     pub(crate) fn get_oauth_state(
         &self,
         mcp_name: &str,
@@ -191,6 +195,7 @@ impl McpAuthStore {
         Ok(self.get(mcp_name)?.and_then(|entry| entry.oauth_state))
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_oauth_state(&self, mcp_name: &str) -> anyhow::Result<()> {
         let Some(mut entry) = self.get(mcp_name)? else {
             return Ok(());
@@ -199,6 +204,7 @@ impl McpAuthStore {
         self.set(mcp_name, entry)
     }
 
+    #[cfg(test)]
     pub(crate) fn is_token_expired(
         &self,
         mcp_name: &str,
@@ -255,7 +261,7 @@ fn decode_auth(content: &str) -> anyhow::Result<BTreeMap<String, McpAuthEntry>> 
     Ok(serde_json::from_str(content)?)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

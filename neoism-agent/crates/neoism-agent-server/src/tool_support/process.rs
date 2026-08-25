@@ -79,10 +79,12 @@ pub(crate) fn set_new_process_group(command: &mut Command) {
 
 #[cfg(windows)]
 pub(crate) fn set_new_process_group(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
     // `creation_flags` REPLACES any previously-set flags (Command exposes
     // no getter), so this must stay the only flag-setting site for
     // commands routed through here.
-    crate::windows_process::hide_tokio_command(command);
+    command.creation_flags(crate::windows_process::HIDDEN_CONSOLE);
 }
 
 #[cfg(not(any(unix, windows)))]

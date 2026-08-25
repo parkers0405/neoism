@@ -453,6 +453,7 @@ async fn session_revert_and_unrevert_restore_file_snapshots() {
     .await;
 
     let result = execute_tool_call(
+        &state,
         root.to_str().unwrap(),
         vec![PermissionRule {
             permission: "*".to_string(),
@@ -539,6 +540,7 @@ async fn session_revert_snapshot_conflict_keeps_messages_and_files() {
     .await;
 
     let result = execute_tool_call(
+        &state,
         root.to_str().unwrap(),
         vec![PermissionRule {
             permission: "*".to_string(),

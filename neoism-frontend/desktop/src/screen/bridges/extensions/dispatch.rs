@@ -267,7 +267,8 @@ impl Screen<'_> {
     /// install would provide. `server` may be an engine adapter id
     /// (e.g. `rust`, `typescript`) or already a catalog package id.
     fn catalog_candidates_for_server(server: &str) -> Vec<String> {
-        let adapters = neoism_agent_server::language_server::language_server_adapters();
+        let snapshot = neoism_agent_neoism_adapter::language_capability_snapshot();
+        let adapters = &snapshot.languages;
         let mut candidates: Vec<String> = adapters
             .iter()
             .find(|adapter| adapter.id == server)
@@ -448,7 +449,11 @@ impl Screen<'_> {
             .and_then(|m| m.run.as_ref())
             .filter(|run| !run.command.is_empty())
             .map(|run| {
+                let runtime = neoism_agent_server::language_server::LspRuntime::new(
+                    neoism_agent_neoism_adapter::neoism_services(),
+                );
                 neoism_agent_server::language_server::command_source(
+                    &runtime,
                     id,
                     run.command.clone(),
                 )

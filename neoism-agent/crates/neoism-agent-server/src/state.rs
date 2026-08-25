@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use neoism_agent_core::{
     ArtifactInfo, AuditEntry, EventPayload, Id, IdKind, MessageInfo, MessageWithParts,
-    PermissionRequestInfo, PermissionRule, PromptRequest, PtyInfo, QuestionRequestInfo,
+    PermissionRequestInfo, PermissionRule, PromptRequest, QuestionRequestInfo,
     SessionInfo, SessionStatus, TodoInfo,
 };
 use neoism_agent_service_api::AgentServices;
@@ -16,7 +16,6 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use turso::Value as SqlValue;
 
 use crate::auth_store::AuthStore;
-use crate::plugin::PluginRegistry;
 use crate::provider::ProviderRegistry;
 use crate::provider_catalog::ProviderCatalog;
 
@@ -30,15 +29,14 @@ pub(crate) struct InnerState {
     pub(crate) store: SessionStore,
     pub(crate) artifact_root: PathBuf,
     pub(crate) auth_store: AuthStore,
-    /// Embeddings provider for semantic transcript search; `None` when no
-    /// API key is configured (semantic search reports unavailable).
-    pub(crate) semantic: Option<crate::semantic::EmbeddingsClient>,
     pub(crate) providers: ProviderRegistry,
     pub(crate) provider_catalog: ProviderCatalog,
+    pub(crate) caller_policy: crate::caller::CallerPolicy,
+    pub(crate) utilities: Arc<crate::utility_runtime::UtilityRuntime>,
     pub(crate) provider_oauth: RwLock<HashMap<String, ProviderOAuthPending>>,
-    pub(crate) plugin_host: neoism_agent_plugin_api::PluginHost,
-    pub(crate) plugins: PluginRegistry,
     pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
+    pub(crate) workspace_plugin_generations:
+        Mutex<HashMap<PathBuf, (u64, BTreeSet<String>)>>,
     pub(crate) statuses: RwLock<HashMap<String, SessionStatus>>,
     pub(crate) runs: RwLock<HashMap<String, SessionRun>>,
     pub(crate) session_coordinator: crate::session_coordinator::SessionCoordinator,
@@ -49,20 +47,16 @@ pub(crate) struct InnerState {
     /// Serializes each parent's list/check/enqueue reconciliation so sibling
     /// completions cannot race through queue dedupe.
     pub(crate) subtask_parent_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    pub(crate) background_jobs:
-        RwLock<HashMap<String, crate::background_job::BackgroundJob>>,
-    pub(crate) background_job_cancellations: RwLock<HashMap<String, oneshot::Sender<()>>>,
     pub(crate) permissions: RwLock<HashMap<String, PermissionRequestInfo>>,
     pub(crate) permission_waiters: RwLock<HashMap<String, PermissionPending>>,
     pub(crate) permission_approvals: RwLock<HashMap<String, Vec<PermissionRule>>>,
     pub(crate) questions: RwLock<HashMap<String, QuestionRequestInfo>>,
     pub(crate) question_waiters: RwLock<HashMap<String, QuestionPending>>,
     pub(crate) todos: RwLock<HashMap<String, Vec<TodoInfo>>>,
-    pub(crate) ptys: RwLock<HashMap<String, PtyInfo>>,
-    pub(crate) pty_connect_tokens: RwLock<crate::pty::ConnectTokens>,
     pub(crate) workflow_workspaces: RwLock<BTreeSet<String>>,
     pub(crate) workflow_reconcile: Mutex<()>,
     pub(crate) workflow_notify: Arc<Notify>,
+    pub(crate) workflow_scheduler_started: AtomicBool,
     events: broadcast::Sender<EventPayload>,
     event_writer: mpsc::UnboundedSender<(EventPayload, bool)>,
 }
@@ -126,7 +120,7 @@ pub(crate) struct SessionStore {
 
 /// Turso database access shared by the store. Reads may run concurrently,
 /// while writes pass through one process-local gate so ordinary in-process
-/// contention does not consume the backend's bounded busy retry budget.
+    /// contention does not consume the store's bounded busy retry budget.
 #[derive(Clone)]
 struct Db {
     database: turso::Database,
@@ -246,7 +240,7 @@ fn event_statements(
                 opt_text(owner_id.map(ToOwned::to_owned)),
                 opt_text(session_id),
                 text(serde_json::to_string(event)?),
-                int(sqlite_i64(crate::now_millis())),
+                int(store_i64(crate::now_millis())),
             ],
         ),
     ])
@@ -382,17 +376,8 @@ impl Db {
 #[derive(Clone, Debug)]
 pub(crate) struct PersistedEvent {
     pub(crate) seq: i64,
-    pub(crate) aggregate_id: String,
-    pub(crate) aggregate_seq: i64,
-    pub(crate) owner_id: Option<String>,
     pub(crate) created: i64,
     pub(crate) payload: EventPayload,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct AggregateSequence {
-    pub(crate) seq: i64,
-    pub(crate) owner_id: Option<String>,
 }
 
 impl AppState {
@@ -429,32 +414,30 @@ impl AppState {
         let (events, _) = broadcast::channel(1024);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
         let auth_store = AuthStore::from_env();
+        let caller_policy = crate::caller::CallerPolicy::from_env();
+        let utilities = crate::utility_runtime::UtilityRuntime::new(&services);
         let permission_approvals = store.list_permission_approvals().await?;
         let durable_permissions = store.list_pending_permissions().await?;
         let durable_questions = store.list_pending_questions().await?;
         store.interrupt_stale_runs().await?;
-        crate::lsp::configure_services(services.clone());
-        let plugin_host = crate::plugins::build_host(&services)?;
         let state = Self {
             inner: Arc::new(InnerState {
                 services,
                 store,
                 artifact_root,
                 providers: ProviderRegistry::from_env(auth_store.clone()),
-                semantic: crate::semantic::EmbeddingsClient::from_env(&auth_store),
                 auth_store,
                 provider_catalog: ProviderCatalog::from_env(),
+                caller_policy,
+                utilities,
                 provider_oauth: RwLock::new(HashMap::new()),
-                plugin_host,
-                plugins: PluginRegistry::default(),
                 workspace_runtimes: Default::default(),
+                workspace_plugin_generations: Mutex::new(HashMap::new()),
                 statuses: RwLock::new(HashMap::new()),
                 runs: RwLock::new(HashMap::new()),
                 session_coordinator: Default::default(),
                 subtask_completion_locks: Mutex::new(HashMap::new()),
                 subtask_parent_locks: Mutex::new(HashMap::new()),
-                background_jobs: RwLock::new(HashMap::new()),
-                background_job_cancellations: RwLock::new(HashMap::new()),
                 permissions: RwLock::new(
                     durable_permissions
                         .into_iter()
@@ -471,29 +454,24 @@ impl AppState {
                 ),
                 question_waiters: RwLock::new(HashMap::new()),
                 todos: RwLock::new(HashMap::new()),
-                ptys: RwLock::new(HashMap::new()),
-                pty_connect_tokens: RwLock::new(crate::pty::ConnectTokens::default()),
                 workflow_workspaces: RwLock::new(BTreeSet::new()),
                 workflow_reconcile: Mutex::new(()),
                 workflow_notify: Arc::new(Notify::new()),
+                workflow_scheduler_started: AtomicBool::new(false),
                 events,
                 event_writer,
             }),
         };
-        if let Some(memory) = state.inner.services.memory.as_ref() {
-            memory.set_semantic_index(Some(Arc::new(crate::semantic::AgentSemanticMemoryIndex::new(
-                state.inner.store.clone(),
-                state.inner.semantic.clone(),
-            ))));
-        }
         let durable_store = state.inner.store.clone();
         let durable_events = state.inner.events.clone();
-        let durable_plugins = state.inner.plugins.clone();
+        let durable_state = state.clone();
         tokio::spawn(async move {
             while let Some((event, broadcast)) = event_reader.recv().await {
                 match durable_store.append_event(&event).await {
                     Ok(()) => {
-                        durable_plugins.publish_event(&event);
+                        for runtime in durable_state.inner.workspace_runtimes.runtimes().await {
+                            crate::plugin::publish_event(&runtime.snapshot(), &event);
+                        }
                         if broadcast {
                             let _ = durable_events.send(event);
                         }
@@ -506,12 +484,93 @@ impl AppState {
         });
         crate::session_queue::resume_prompt_queues(state.clone()).await?;
         crate::session_actions::resume_pending_subtask_completions(&state).await;
-        crate::workflow::spawn_scheduler(state.clone());
         Ok(state)
     }
 
     pub fn services(&self) -> &AgentServices {
         &self.inner.services
+    }
+
+    pub(crate) async fn plugin_snapshot(
+        &self,
+        directory: &str,
+    ) -> Arc<neoism_agent_plugin_api::RegistrySnapshot> {
+        self.workspace_runtime(directory).await.snapshot()
+    }
+
+    pub(crate) async fn workspace_runtime(&self, directory: &str) -> Arc<crate::workspace_runtime::WorkspaceRuntime> {
+        let (runtime, evicted) = self.inner
+            .workspace_runtimes
+            .acquire(directory, self)
+            .await;
+        for stale in evicted {
+            stale.teardown(self).await;
+            self.inner.workspace_plugin_generations.lock().await.remove(&stale.root);
+        }
+        self.reconcile_semantic_service().await;
+        let snapshot = runtime.snapshot();
+        self.reconcile_workspace_plugins(&runtime, &snapshot).await;
+        runtime
+    }
+
+    pub(crate) async fn reconcile_workspace_plugins(
+        &self,
+        runtime: &Arc<crate::workspace_runtime::WorkspaceRuntime>,
+        snapshot: &neoism_agent_plugin_api::RegistrySnapshot,
+    ) {
+        let enabled = snapshot
+            .manifests
+            .iter()
+            .map(|manifest| manifest.id.clone())
+            .collect::<BTreeSet<_>>();
+        let previous = {
+            let mut generations = self.inner.workspace_plugin_generations.lock().await;
+            if generations
+                .get(&runtime.root)
+                .is_some_and(|(generation, _)| *generation == snapshot.generation)
+            {
+                return;
+            }
+            generations
+                .insert(runtime.root.clone(), (snapshot.generation, enabled.clone()))
+                .map(|(_, plugins)| plugins)
+        };
+        if previous.is_some() {
+            runtime.replace_generation(self).await;
+        }
+        let workflow = enabled.contains("dev.neoism.workflows");
+        runtime.set_workflow_enabled(workflow);
+        if workflow {
+            crate::workflow::workspace_enabled(self, runtime.root.clone()).await;
+        }
+        if enabled.contains("dev.neoism.semantic") {
+            runtime.enable_semantic(self.clone()).await;
+            if let Some(memory) = self.inner.services.memory.as_ref() {
+                memory.set_semantic_index(Some(Arc::new(crate::semantic::AgentSemanticMemoryIndex::new(
+                    self.inner.store.clone(), runtime.semantic_client(self),
+                ))));
+            }
+        } else {
+            self.reconcile_semantic_service().await;
+        }
+    }
+
+    async fn reconcile_semantic_service(&self) {
+        let enabled = self.inner.workspace_plugin_generations.lock().await.values()
+            .any(|(_, plugins)| plugins.contains("dev.neoism.semantic"));
+        if !enabled {
+            if let Some(memory) = self.inner.services.memory.as_ref() {
+                memory.set_semantic_index(None);
+            }
+        }
+    }
+
+    /// Stop state-owned subprocesses and background transport tasks.
+    pub async fn shutdown(&self) {
+        for runtime in self.inner.workspace_runtimes.runtimes().await {
+            runtime.teardown(self).await;
+        }
+        self.inner.workspace_plugin_generations.lock().await.clear();
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventPayload> {
@@ -538,25 +597,22 @@ impl AppState {
         &self,
         event: EventPayload,
     ) -> anyhow::Result<()> {
-        self.publish_persisted_with_owner(event, None).await
-    }
-
-    pub(crate) async fn publish_persisted_with_owner(
-        &self,
-        event: EventPayload,
-        owner_id: Option<&str>,
-    ) -> anyhow::Result<()> {
-        self.inner
-            .store
-            .append_event_with_owner(&event, owner_id)
-            .await?;
-        self.inner.plugins.publish_event(&event);
+        self.inner.store.append_event(&event).await?;
+        for runtime in self.inner.workspace_runtimes.runtimes().await {
+            crate::plugin::publish_event(&runtime.snapshot(), &event);
+        }
         let _ = self.inner.events.send(event);
         Ok(())
     }
 
     pub(crate) fn publish_committed(&self, event: EventPayload) {
-        self.inner.plugins.publish_event(&event);
+        let state = self.clone();
+        let hook_event = event.clone();
+        tokio::spawn(async move {
+            for runtime in state.inner.workspace_runtimes.runtimes().await {
+                crate::plugin::publish_event(&runtime.snapshot(), &hook_event);
+            }
+        });
         let _ = self.inner.events.send(event);
     }
 
@@ -573,7 +629,7 @@ impl AppState {
                         .to_string(),
                     vec![
                         text(serde_json::to_string(info)?),
-                        int(sqlite_i64(info.time.updated)),
+                        int(store_i64(info.time.updated)),
                         text(info.id.to_string()),
                     ],
                 )],
@@ -600,7 +656,7 @@ impl AppState {
                         text(message_id(message)),
                         text(session_id),
                         text(serde_json::to_string(message)?),
-                        int(sqlite_i64(message_created(message))),
+                        int(store_i64(message_created(message))),
                         text(session_id),
                     ],
                 )],
@@ -668,9 +724,9 @@ impl AppState {
                         text(session_id),
                         text(serde_json::to_string(&epoch.baseline)?),
                         text(serde_json::to_string(&epoch.snapshot)?),
-                        int(sqlite_i64(epoch.generation)),
-                        int(sqlite_i64(epoch.baseline_seq)),
-                        int(sqlite_i64(epoch.updated)),
+                        int(store_i64(epoch.generation)),
+                        int(store_i64(epoch.baseline_seq)),
+                        int(store_i64(epoch.updated)),
                     ],
                 )],
                 &event,
@@ -698,7 +754,7 @@ impl AppState {
                         text(session_id),
                         text(session_id),
                         text(serde_json::to_string(request)?),
-                        int(sqlite_i64(crate::now_millis())),
+                        int(store_i64(crate::now_millis())),
                         text(delivery),
                     ],
                 )],
@@ -971,8 +1027,6 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
-        self.ensure_event_columns().await?;
-        self.ensure_artifact_columns().await?;
         self.ensure_prompt_queue_columns().await?;
         self.db
             .execute(
@@ -984,7 +1038,6 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
-        self.backfill_event_sequences().await?;
         self.db
             .execute(
                 "CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated)",
@@ -1088,19 +1141,30 @@ impl SessionStore {
     pub(crate) async fn messages_missing_embeddings(
         &self,
         model: &str,
+        session_ids: &[String],
         limit: usize,
     ) -> anyhow::Result<Vec<PendingEmbedding>> {
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; session_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT m.session_id, m.id, m.created, m.message_json \
+             FROM messages m \
+             LEFT JOIN message_embeddings e \
+               ON e.message_id = m.id AND (e.model = ? OR e.model = 'none') \
+             WHERE e.message_id IS NULL AND m.session_id IN ({placeholders}) \
+               AND m.session_id NOT IN (SELECT session_id FROM session_runs WHERE status IN ('running', 'retry')) \
+             ORDER BY m.created DESC LIMIT ?"
+        );
+        let mut params = vec![text(model)];
+        params.extend(session_ids.iter().cloned().map(text));
+        params.push(int(limit.clamp(1, 256) as i64));
         let rows = self
             .db
             .fetch_all(
-                "SELECT m.session_id, m.id, m.created, m.message_json \
-                 FROM messages m \
-                 LEFT JOIN message_embeddings e \
-                   ON e.message_id = m.id AND (e.model = ? OR e.model = 'none') \
-                 WHERE e.message_id IS NULL \
-                   AND m.session_id NOT IN (SELECT session_id FROM session_runs WHERE status IN ('running', 'retry')) \
-                 ORDER BY m.created DESC LIMIT ?",
-                vec![text(model), int(limit.clamp(1, 256) as i64)],
+                &sql,
+                params,
             )
             .await?;
         rows.into_iter()
@@ -1355,7 +1419,7 @@ impl SessionStore {
     }
 
     /// Prefilter in SQL on the longest term, then
-    /// AND-matches every term against the same flattened document the FTS
+    /// AND-matches every term against the same flattened searchable document
     /// mirror indexes. Bounded to the most recent candidates, so it trades
     /// recall on huge histories for predictable work.
     async fn search_messages_like(
@@ -1418,36 +1482,6 @@ impl SessionStore {
         Ok(hits)
     }
 
-    async fn ensure_event_columns(&self) -> anyhow::Result<()> {
-        for (column, definition) in [
-            ("aggregate_id", "TEXT"),
-            ("aggregate_seq", "INTEGER"),
-            ("owner_id", "TEXT"),
-        ] {
-            if !self.table_has_column("events", column).await? {
-                self.db
-                    .execute(
-                        &format!("ALTER TABLE events ADD COLUMN {column} {definition}"),
-                        Vec::new(),
-                    )
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn ensure_artifact_columns(&self) -> anyhow::Result<()> {
-        if !self.table_has_column("artifacts", "tenant_id").await? {
-            self.db
-                .execute(
-                    "ALTER TABLE artifacts ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'local'",
-                    Vec::new(),
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
     async fn ensure_prompt_queue_columns(&self) -> anyhow::Result<()> {
         if !self.table_has_column("prompt_queue", "delivery").await? {
             self.db
@@ -1471,29 +1505,6 @@ impl SessionStore {
             }
         }
         Ok(false)
-    }
-
-    async fn backfill_event_sequences(&self) -> anyhow::Result<()> {
-        let rows = self
-            .db
-            .fetch_all(
-                "SELECT seq, event_json FROM events INDEXED BY idx_events_missing_aggregate WHERE aggregate_id IS NULL OR aggregate_seq IS NULL ORDER BY seq ASC",
-                Vec::new(),
-            )
-            .await?;
-        for row in rows {
-            let seq = row.get_i64("seq")?;
-            let payload: EventPayload = decode_json(row.get_str("event_json")?)?;
-            let aggregate_id = crate::sync::aggregate_id(&payload);
-            let aggregate_seq = self.next_aggregate_sequence(&aggregate_id, None).await?;
-            self.db
-                .execute(
-                    "UPDATE events SET aggregate_id = ?, aggregate_seq = ? WHERE seq = ?",
-                    vec![text(aggregate_id), int(aggregate_seq), int(seq)],
-                )
-                .await?;
-        }
-        Ok(())
     }
 
     pub(crate) async fn list_sessions(&self) -> anyhow::Result<Vec<SessionInfo>> {
@@ -1535,7 +1546,7 @@ impl SessionStore {
                 vec![
                     text(info.id.to_string()),
                     text(serde_json::to_string(info)?),
-                    int(sqlite_i64(info.time.updated)),
+                    int(store_i64(info.time.updated)),
                 ],
             )
             .await?;
@@ -1566,12 +1577,12 @@ impl SessionStore {
                     text(&projection.source_hash),
                     text(serde_json::to_string(&projection.definition)?),
                     int(i64::from(projection.active)),
-                    int(sqlite_i64(projection.activated_at)),
+                    int(store_i64(projection.activated_at)),
                     projection
                         .last_scheduled_at
-                        .map(|value| int(sqlite_i64(value)))
+                        .map(|value| int(store_i64(value)))
                         .unwrap_or(SqlValue::Null),
-                    int(sqlite_i64(projection.updated)),
+                    int(store_i64(projection.updated)),
                 ],
             )
             .await?;
@@ -1590,7 +1601,7 @@ impl SessionStore {
                 "UPDATE workflows SET active = ?, updated = ? WHERE activation_id = ?",
                 vec![
                     int(i64::from(active)),
-                    int(sqlite_i64(updated)),
+                    int(store_i64(updated)),
                     text(activation_id),
                 ],
             )
@@ -1656,18 +1667,18 @@ impl SessionStore {
                     text(&run.id),
                     text(&run.activation_id),
                     text(&run.workflow_id),
-                    int(sqlite_i64(run.scheduled_at)),
+                    int(store_i64(run.scheduled_at)),
                     run.started_at
-                        .map(|v| int(sqlite_i64(v)))
+                        .map(|v| int(store_i64(v)))
                         .unwrap_or(SqlValue::Null),
                     run.finished_at
-                        .map(|v| int(sqlite_i64(v)))
+                        .map(|v| int(store_i64(v)))
                         .unwrap_or(SqlValue::Null),
                     opt_text(run.session_id.clone()),
                     text(&run.status),
                     text(&run.trigger),
                     opt_text(run.error.clone()),
-                    int(sqlite_i64(run.created)),
+                    int(store_i64(run.created)),
                     text(&run.activation_id),
                 ],
             )
@@ -1700,18 +1711,18 @@ impl SessionStore {
                         text(&run.id),
                         text(&run.activation_id),
                         text(&run.workflow_id),
-                        int(sqlite_i64(run.scheduled_at)),
+                        int(store_i64(run.scheduled_at)),
                         run.started_at
-                            .map(|v| int(sqlite_i64(v)))
+                            .map(|v| int(store_i64(v)))
                             .unwrap_or(SqlValue::Null),
                         run.finished_at
-                            .map(|v| int(sqlite_i64(v)))
+                            .map(|v| int(store_i64(v)))
                             .unwrap_or(SqlValue::Null),
                         opt_text(run.session_id.clone()),
                         text(&run.status),
                         text(&run.trigger),
                         opt_text(run.error.clone()),
-                        int(sqlite_i64(run.created)),
+                        int(store_i64(run.created)),
                         text(&run.activation_id),
                     ],
                 ),
@@ -1725,9 +1736,9 @@ impl SessionStore {
                     WHERE activation_id = ?"#
                         .to_string(),
                     vec![
-                        int(sqlite_i64(run.scheduled_at)),
-                        int(sqlite_i64(run.scheduled_at)),
-                        int(sqlite_i64(crate::now_millis())),
+                        int(store_i64(run.scheduled_at)),
+                        int(store_i64(run.scheduled_at)),
+                        int(store_i64(crate::now_millis())),
                         text(&run.activation_id),
                     ],
                 ),
@@ -1751,8 +1762,8 @@ impl SessionStore {
                 vec![
                     text(status),
                     session_id.map(text).unwrap_or(SqlValue::Null),
-                    int(sqlite_i64(now)),
-                    finished.then(|| int(sqlite_i64(now))).unwrap_or(SqlValue::Null),
+                    int(store_i64(now)),
+                    finished.then(|| int(store_i64(now))).unwrap_or(SqlValue::Null),
                     error.map(text).unwrap_or(SqlValue::Null),
                     text(run_id),
                 ],
@@ -1797,7 +1808,7 @@ impl SessionStore {
                 "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?",
                 vec![
                     text(serde_json::to_string(info)?),
-                    int(sqlite_i64(info.time.updated)),
+                    int(store_i64(info.time.updated)),
                     text(info.id.to_string()),
                 ],
             )
@@ -1983,7 +1994,7 @@ impl SessionStore {
                     text(message_id(message)),
                     text(session_id),
                     text(serde_json::to_string(message)?),
-                    int(sqlite_i64(message_created(message))),
+                    int(store_i64(message_created(message))),
                     int(position),
                 ],
             )
@@ -2117,20 +2128,11 @@ impl SessionStore {
                 vec![
                     text(project_id),
                     text(serde_json::to_string(rules)?),
-                    int(sqlite_i64(crate::now_millis())),
+                    int(store_i64(crate::now_millis())),
                 ],
             )
             .await?;
         Ok(())
-    }
-
-    pub(crate) async fn enqueue_prompt(
-        &self,
-        session_id: &str,
-        request: &PromptRequest,
-    ) -> anyhow::Result<usize> {
-        self.enqueue_prompt_with_delivery(session_id, request, "queue")
-            .await
     }
 
     pub(crate) async fn enqueue_prompt_with_delivery(
@@ -2157,24 +2159,12 @@ impl SessionStore {
                     text(session_id),
                     int(position),
                     text(serde_json::to_string(request)?),
-                    int(sqlite_i64(crate::now_millis())),
+                    int(store_i64(crate::now_millis())),
                     text(delivery),
                 ],
             )
             .await?;
         self.queued_prompt_count(session_id).await
-    }
-
-    pub(crate) async fn list_queued_prompts(
-        &self,
-        session_id: &str,
-    ) -> anyhow::Result<Vec<PromptRequest>> {
-        Ok(self
-            .list_queued_prompt_entries(session_id)
-            .await?
-            .into_iter()
-            .map(|(request, _)| request)
-            .collect())
     }
 
     pub(crate) async fn list_queued_prompt_entries(
@@ -2326,7 +2316,7 @@ impl SessionStore {
                     text(session_id),
                     int(position),
                     text(serde_json::to_string(request)?),
-                    int(sqlite_i64(crate::now_millis())),
+                    int(store_i64(crate::now_millis())),
                     text(delivery),
                 ],
             )
@@ -2401,69 +2391,6 @@ impl SessionStore {
         Ok(())
     }
 
-    async fn next_aggregate_sequence(
-        &self,
-        aggregate_id: &str,
-        owner_id: Option<&str>,
-    ) -> anyhow::Result<i64> {
-        let latest = self.aggregate_sequence(aggregate_id).await?;
-        let next = latest.as_ref().map(|row| row.seq + 1).unwrap_or(0);
-        let owner = latest
-            .and_then(|row| row.owner_id)
-            .or_else(|| owner_id.map(ToOwned::to_owned));
-        self.db
-            .execute(
-                r#"
-            INSERT INTO event_sequences (aggregate_id, seq, owner_id)
-            VALUES (?, ?, ?)
-            ON CONFLICT(aggregate_id) DO UPDATE SET
-                seq = excluded.seq,
-                owner_id = COALESCE(event_sequences.owner_id, excluded.owner_id)
-            "#,
-                vec![text(aggregate_id), int(next), opt_text(owner)],
-            )
-            .await?;
-        Ok(next)
-    }
-
-    pub(crate) async fn aggregate_sequence(
-        &self,
-        aggregate_id: &str,
-    ) -> anyhow::Result<Option<AggregateSequence>> {
-        let row = self
-            .db
-            .fetch_optional(
-                "SELECT seq, owner_id FROM event_sequences WHERE aggregate_id = ?",
-                vec![text(aggregate_id)],
-            )
-            .await?;
-        row.map(|row| {
-            Ok(AggregateSequence {
-                seq: row.get_i64("seq")?,
-                owner_id: row.get_opt_str("owner_id")?,
-            })
-        })
-        .transpose()
-    }
-
-    pub(crate) async fn claim_aggregate_owner(
-        &self,
-        aggregate_id: &str,
-        owner_id: &str,
-    ) -> anyhow::Result<()> {
-        self.db
-            .execute(
-                r#"
-            INSERT INTO event_sequences (aggregate_id, seq, owner_id)
-            VALUES (?, -1, ?)
-            ON CONFLICT(aggregate_id) DO UPDATE SET owner_id = excluded.owner_id
-            "#,
-                vec![text(aggregate_id), text(owner_id)],
-            )
-            .await?;
-        Ok(())
-    }
-
     pub(crate) async fn list_events_after(
         &self,
         since: i64,
@@ -2474,14 +2401,14 @@ impl SessionStore {
         let rows = if let Some(session_id) = session_id {
             self.db
                 .fetch_all(
-                    "SELECT seq, aggregate_id, aggregate_seq, owner_id, created, event_json FROM events WHERE seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
+                    "SELECT seq, created, event_json FROM events WHERE seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
                     vec![int(since), text(session_id), int(limit)],
                 )
                 .await?
         } else {
             self.db
                 .fetch_all(
-                    "SELECT seq, aggregate_id, aggregate_seq, owner_id, created, event_json FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+                    "SELECT seq, created, event_json FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?",
                     vec![int(since), int(limit)],
                 )
                 .await?
@@ -2490,9 +2417,6 @@ impl SessionStore {
             .map(|row| {
                 Ok(PersistedEvent {
                     seq: row.get_i64("seq")?,
-                    aggregate_id: row.get_str("aggregate_id")?,
-                    aggregate_seq: row.get_i64("aggregate_seq")?,
-                    owner_id: row.get_opt_str("owner_id")?,
                     created: row.get_i64("created")?,
                     payload: decode_json(row.get_str("event_json")?)?,
                 })
@@ -2524,7 +2448,7 @@ impl SessionStore {
                     text(&artifact.sha256),
                     opt_text(artifact.session_id.clone()),
                     text(tenant_id),
-                    int(sqlite_i64(artifact.created)),
+                    int(store_i64(artifact.created)),
                 ],
             )
             .await?;
@@ -2603,7 +2527,7 @@ impl SessionStore {
                     text(&entry.method),
                     text(&entry.path),
                     int(entry.status.into()),
-                    int(sqlite_i64(entry.created)),
+                    int(store_i64(entry.created)),
                 ],
             )
             .await?;
@@ -2669,7 +2593,7 @@ impl SessionStore {
         session_id: &str,
         payload_json: String,
     ) -> anyhow::Result<()> {
-        let now = sqlite_i64(crate::now_millis());
+        let now = store_i64(crate::now_millis());
         self.db
             .execute(
                 r#"
@@ -2703,7 +2627,7 @@ impl SessionStore {
                 vec![
                     text(state),
                     text(response.to_string()),
-                    int(sqlite_i64(crate::now_millis())),
+                    int(store_i64(crate::now_millis())),
                     text(id),
                 ],
             )
@@ -2720,7 +2644,7 @@ impl SessionStore {
                 "UPDATE interaction_requests SET state = 'cancelled', response_json = ?, updated = ? WHERE session_id = ? AND state = 'pending'",
                 vec![
                     text(json!({ "reason": "session cancelled" }).to_string()),
-                    int(sqlite_i64(crate::now_millis())),
+                    int(store_i64(crate::now_millis())),
                     text(session_id),
                 ],
             )
@@ -2774,7 +2698,7 @@ impl SessionStore {
         run_id: &str,
         session_id: &str,
     ) -> anyhow::Result<()> {
-        let now = sqlite_i64(crate::now_millis());
+        let now = store_i64(crate::now_millis());
         self.db
             .execute(
                 r#"
@@ -2806,7 +2730,7 @@ impl SessionStore {
             "#,
                 vec![
                     text(status),
-                    int(sqlite_i64(crate::now_millis())),
+                    int(store_i64(crate::now_millis())),
                     opt_text(error.map(|value| value.to_string())),
                     text(run_id),
                 ],
@@ -2827,7 +2751,7 @@ impl SessionStore {
             WHERE status IN ('running', 'retry')
             "#,
                 vec![
-                    int(sqlite_i64(crate::now_millis())),
+                    int(store_i64(crate::now_millis())),
                     text(
                         json!({ "message": "Server restarted before run completed" })
                             .to_string(),
@@ -2908,7 +2832,7 @@ fn message_created(message: &MessageWithParts) -> u64 {
     }
 }
 
-fn sqlite_i64(value: u64) -> i64 {
+fn store_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
 

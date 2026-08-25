@@ -22,8 +22,13 @@ pub(crate) async fn pty_shells() -> Json<Vec<ShellItem>> {
 }
 
 pub(crate) async fn pty_list(State(state): State<AppState>) -> Json<Vec<PtyInfo>> {
-    let ptys = state.inner.ptys.read().await;
-    Json(pty::list_ptys(&*ptys))
+    let mut out = Vec::new();
+    for runtime in state.inner.workspace_runtimes.runtimes().await {
+        if let Some(ptys) = runtime.pty_if_allocated() {
+            out.extend(pty::list_ptys(&*ptys.infos.read().await));
+        }
+    }
+    Json(out)
 }
 
 pub(crate) async fn pty_create(
@@ -39,13 +44,21 @@ pub(crate) async fn pty_create(
         .find(|shell| shell.acceptable)
         .map(|shell| shell.path)
         .unwrap_or_else(pty::fallback_shell);
-    let info = pty::create_pty_info(
+    let directory = resolve_directory(query.directory, &headers);
+    let runtime = state.workspace_runtime(&directory).await;
+    let pty_runtime = runtime.pty();
+    let mut info = pty::create_pty_info(
         request,
-        resolve_directory(query.directory, &headers),
+        runtime.root.to_string_lossy().into_owned(),
         shell,
         now_millis(),
     );
-    let mut ptys = state.inner.ptys.write().await;
+    if let Some(program) = info.command.first_mut() {
+        let resolved = resolve_pty_command(state.services(), program, &info.cwd)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        *program = resolved.to_string_lossy().into_owned();
+    }
+    let mut ptys = pty_runtime.infos.write().await;
     let info = pty::insert_pty(&mut *ptys, info);
     drop(ptys);
     state.publish(EventPayload::new(
@@ -55,11 +68,46 @@ pub(crate) async fn pty_create(
     Ok(Json(info))
 }
 
+fn resolve_pty_command(
+    services: &neoism_agent_service_api::AgentServices,
+    program: &str,
+    cwd: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let requested = crate::executable::in_directory(program, std::path::Path::new(cwd));
+    crate::executable::resolve_command(
+        services,
+        requested,
+        neoism_agent_service_api::ExecutablePurpose::Other("pty-command".to_string()),
+        "PTY command",
+    )
+}
+
+#[cfg(test)]
+mod executable_tests {
+    use super::*;
+    use crate::executable::test_support::FakeExecutableService;
+    use std::sync::Arc;
+
+    #[test]
+    fn pty_command_honors_injected_path_and_reports_missing_executable() {
+        let injected = std::path::PathBuf::from("/injected/pty-shell");
+        let mut services = crate::standard_services();
+        services.executables = Arc::new(FakeExecutableService::with("pty-shell", &injected));
+        assert_eq!(resolve_pty_command(&services, "pty-shell", ".").unwrap(), injected);
+
+        services.executables = Arc::new(FakeExecutableService::default());
+        let error = resolve_pty_command(&services, "pty-shell", ".").unwrap_err().to_string();
+        assert!(error.contains("PTY command executable `pty-shell` is unavailable"));
+        assert!(error.contains("install it"));
+    }
+}
+
 pub(crate) async fn pty_get(
     State(state): State<AppState>,
     Path(pty_id): Path<String>,
 ) -> Result<Json<PtyInfo>, ApiError> {
-    let ptys = state.inner.ptys.read().await;
+    let runtime = find_pty_runtime(&state, &pty_id).await.ok_or_else(|| ApiError::not_found("PTY session not found"))?;
+    let ptys = runtime.infos.read().await;
     pty::get_pty(&*ptys, &pty_id)
         .map(Json)
         .map_err(|_| ApiError::not_found("PTY session not found"))
@@ -72,12 +120,13 @@ pub(crate) async fn pty_update(
 ) -> Result<Json<PtyInfo>, ApiError> {
     let size = request.size;
     let updated = {
-        let mut ptys = state.inner.ptys.write().await;
+        let runtime = find_pty_runtime(&state, &pty_id).await.ok_or_else(|| ApiError::not_found("PTY session not found"))?;
+        let mut ptys = runtime.infos.write().await;
         pty::update_pty(&mut *ptys, &pty_id, request)
             .map_err(|_| ApiError::not_found("PTY session not found"))?
     };
     if let Some(size) = size {
-        pty::resize_pty_process(&pty_id, size).await;
+        find_pty_runtime(&state, &pty_id).await.unwrap().processes.resize(&pty_id, size).await;
     }
     state.publish(EventPayload::new(
         event_type::PTY_UPDATED,
@@ -90,11 +139,12 @@ pub(crate) async fn pty_remove(
     State(state): State<AppState>,
     Path(pty_id): Path<String>,
 ) -> Result<Json<bool>, ApiError> {
-    let mut ptys = state.inner.ptys.write().await;
+    let runtime = find_pty_runtime(&state, &pty_id).await.ok_or_else(|| ApiError::not_found("PTY session not found"))?;
+    let mut ptys = runtime.infos.write().await;
     let removed = pty::remove_pty(&mut *ptys, &pty_id)
         .map_err(|_| ApiError::not_found("PTY session not found"))?;
     drop(ptys);
-    pty::stop_pty_process(&pty_id).await;
+    runtime.processes.stop(&pty_id).await;
     state.publish(EventPayload::new(
         event_type::PTY_DELETED,
         json!({ "id": removed.id.clone(), "ptyID": removed.id.clone(), "info": removed.clone() }),
@@ -115,12 +165,14 @@ pub(crate) async fn pty_connect_token(
         return Err(ApiError::forbidden("PTY connect ticket header is required"));
     }
     {
-        let ptys = state.inner.ptys.read().await;
+        let runtime = find_pty_runtime(&state, &pty_id).await.ok_or_else(|| ApiError::not_found("PTY session not found"))?;
+        let ptys = runtime.infos.read().await;
         pty::get_pty(&*ptys, &pty_id)
             .map_err(|_| ApiError::not_found("PTY session not found"))?;
     }
     let now = now_millis();
-    let mut tokens = state.inner.pty_connect_tokens.write().await;
+    let runtime = find_pty_runtime(&state, &pty_id).await.ok_or_else(|| ApiError::not_found("PTY session not found"))?;
+    let mut tokens = runtime.tokens.write().await;
     tokens.prune_expired(now);
     Ok(Json(tokens.issue(pty_id, now)))
 }
@@ -131,8 +183,9 @@ pub(crate) async fn pty_connect(
     Query(query): Query<PtyConnectQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
+    let runtime = find_pty_runtime(&state, &pty_id).await.ok_or_else(|| ApiError::not_found("PTY session not found"))?;
     let info = {
-        let ptys = state.inner.ptys.read().await;
+        let ptys = runtime.infos.read().await;
         pty::get_pty(&*ptys, &pty_id)
             .map_err(|_| ApiError::not_found("PTY session not found"))?
     };
@@ -140,20 +193,23 @@ pub(crate) async fn pty_connect(
         .ticket
         .as_deref()
         .ok_or_else(|| ApiError::forbidden("PTY connect ticket is required"))?;
-    state
-        .inner
-        .pty_connect_tokens
+    runtime
+        .tokens
         .write()
         .await
         .validate(&pty_id, ticket, now_millis())
         .map_err(|_| ApiError::forbidden("invalid PTY connect ticket"))?;
 
     let cursor = query.cursor;
-    let publish_state = state.clone();
+    let processes = runtime.processes.clone();
+    let publish_state = std::sync::Arc::downgrade(&state.inner);
     Ok(ws
         .on_upgrade(move |socket| async move {
-            pty::serve_websocket(info, cursor, socket, move |id, exit_status| {
-                publish_state.publish(EventPayload::new(
+            pty::serve_websocket(processes, info, cursor, socket, move |id, exit_status| {
+                let Some(inner) = publish_state.upgrade() else {
+                    return;
+                };
+                AppState { inner }.publish(EventPayload::new(
                     event_type::PTY_EXITED,
                     json!({ "id": id, "ptyID": id, "exitStatus": exit_status }),
                 ));
@@ -161,4 +217,14 @@ pub(crate) async fn pty_connect(
             .await;
         })
         .into_response())
+}
+
+async fn find_pty_runtime(state: &AppState, pty_id: &str) -> Option<std::sync::Arc<pty::PtyWorkspaceRuntime>> {
+    for runtime in state.inner.workspace_runtimes.runtimes().await {
+        let Some(ptys) = runtime.pty_if_allocated() else { continue; };
+        if ptys.infos.read().await.contains_key(pty_id) {
+            return Some(ptys);
+        }
+    }
+    None
 }

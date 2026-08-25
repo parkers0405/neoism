@@ -597,7 +597,7 @@ pub fn validate_config_document(content: &str) -> Result<(), String> {
     }
     deserialize_config(content)?;
     if let Some(agent) = value.get("agent") {
-        serde_json::from_value::<neoism_agent_core::api::NeoismConfig>(agent.clone())
+        serde_json::from_value::<neoism_agent_core::api::AgentConfigDocument>(agent.clone())
             .map_err(|error| format!("agent config: {error}"))?;
     }
     Ok(())
@@ -1238,7 +1238,7 @@ mod tests {
                 .is_err()
         );
         assert!(validate_config_document(
-            "{ \"agent\": { \"enabled-providers\": \"all\" } }"
+            "{ \"agent\": { \"enabledProviders\": \"all\" } }"
         )
         .is_err());
         assert!(validate_config_document("[]").is_err());

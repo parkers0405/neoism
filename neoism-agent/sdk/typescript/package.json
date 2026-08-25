@@ -9,6 +9,7 @@
     "contract:print": "cargo run --quiet --manifest-path ../../../Cargo.toml -p neoism-agent -- openapi",
     "contract:check": "bash ../../scripts/openapi.sh check",
     "contract:update": "bash ../../scripts/openapi.sh update",
+    "test": "node ../../scripts/generate-contract.test.mjs",
     "typecheck": "tsc -b --pretty false"
   },
   "devDependencies": {

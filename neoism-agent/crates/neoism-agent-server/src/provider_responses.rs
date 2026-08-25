@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use neoism_agent_core::{
     ProviderMessage, ProviderRole, ProviderStreamEvent, ToolListItem,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 const TEXT_ID: &str = "text";
@@ -60,12 +59,12 @@ pub(crate) fn responses_request_body_with_text_verbosity(
     let model = model.into();
     let model_id = model.clone();
     let mut instructions = responses_instructions(messages);
-    // Neoism's client-side equivalent of Codex's ultra mode: the backend
+    // Neoism's client-side equivalent of Codex's ultra mode: the service
     // gets a plain deep reasoning effort (see responses_reasoning_options)
     // while subagent orchestration happens on our side — the model is told
     // to delegate proactively via the `task` tool. Codex does exactly this
     // (openai/codex core/src/context/multi_agent_mode_instructions.rs); its
-    // ChatGPT backend rejects the platform API's `multi_agent` body param.
+    // ChatGPT service rejects the platform API's `multi_agent` body param.
     if variant_is_ultra(variant) && tools.iter().any(|tool| tool.id == "task") {
         instructions.push_str(ULTRA_DELEGATION_INSTRUCTIONS);
     }
@@ -130,7 +129,7 @@ fn model_is_gpt_5_6(model_id: &str) -> bool {
     model_id.to_ascii_lowercase().contains("gpt-5.6")
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn parse_responses_sse_line(
     line: &str,
 ) -> anyhow::Result<Vec<ProviderStreamEvent>> {
@@ -833,12 +832,6 @@ fn error_message(value: &Value) -> String {
     }
     string_field(value, &["message"])
         .unwrap_or_else(|| "Responses API stream failed".to_string())
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-struct ResponsesEventEnvelope {
-    r#type: Option<String>,
 }
 
 #[cfg(test)]

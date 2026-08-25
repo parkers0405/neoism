@@ -22,7 +22,7 @@ use super::paths::{
     directory_entries, display_path, existing_project_path, project_path_for_write,
     truncate_line,
 };
-use super::{diagnostics, edit_match, format, locks, ToolContext, ToolExecutionResult};
+use super::{diagnostics, edit_match, format, ToolContext, ToolExecutionResult};
 
 const DEFAULT_READ_LIMIT: usize = 2000;
 const MAX_READ_BYTES: usize = 50 * 1024;
@@ -296,7 +296,7 @@ pub(super) async fn write_tool(
         project_path_for_write(&context, required_string(&arguments, "filePath")?)?;
     let display = display_path(&context.cwd, &path);
     context.ensure_allowed("edit", &display)?;
-    let _lock = locks::lock_file(&path).await;
+    let _lock = context.utilities().file_locks.lock_file(&path).await;
 
     let locked_path = path.clone();
     let mutation = tokio::task::spawn_blocking(move || {
@@ -351,8 +351,8 @@ fn write_tool_metadata(
     mutation: WriteMutation,
 ) -> anyhow::Result<ToolExecutionResult> {
     let formatted =
-        format::format_paths(&context.cwd, context.formatter(), [path.clone()]);
-    let lsp_touch = diagnostics::touch_paths(&context.cwd, [path.clone()]);
+        format::format_paths(&context.services(), &context.cwd, context.formatter(), [path.clone()]);
+    let lsp_touch = diagnostics::touch_paths(&context.lsp_runtime(), &context.cwd, [path.clone()]);
 
     let mut metadata = json!({
         "path": mutation.display,
@@ -367,7 +367,7 @@ fn write_tool_metadata(
     }
     format::attach_formatted(&mut metadata, &formatted);
     let report =
-        diagnostics::attach_lsp_diagnostics(&context.cwd, [path.clone()], &mut metadata);
+        diagnostics::attach_lsp_diagnostics(&context.lsp_runtime(), &context.cwd, [path.clone()], &mut metadata);
 
     let mut output = format!(
         "Wrote {} bytes to {} (previously {} bytes)",
@@ -393,7 +393,7 @@ pub(super) async fn edit_tool(
     let path = existing_project_path(&context, path_arg)?;
     let display = display_path(&context.cwd, &path);
     context.ensure_allowed("edit", &display)?;
-    let _lock = locks::lock_file(&path).await;
+    let _lock = context.utilities().file_locks.lock_file(&path).await;
 
     let locked_path = path.clone();
     let mutation = tokio::task::spawn_blocking(move || {
@@ -472,8 +472,8 @@ fn edit_tool_metadata(
     mutation: EditMutation,
 ) -> anyhow::Result<ToolExecutionResult> {
     let formatted =
-        format::format_paths(&context.cwd, context.formatter(), [path.clone()]);
-    let lsp_touch = diagnostics::touch_paths(&context.cwd, [path.clone()]);
+        format::format_paths(&context.services(), &context.cwd, context.formatter(), [path.clone()]);
+    let lsp_touch = diagnostics::touch_paths(&context.lsp_runtime(), &context.cwd, [path.clone()]);
 
     let mut metadata = json!({
         "path": mutation.display,
@@ -488,7 +488,7 @@ fn edit_tool_metadata(
     }
     format::attach_formatted(&mut metadata, &formatted);
     let report =
-        diagnostics::attach_lsp_diagnostics(&context.cwd, [path.clone()], &mut metadata);
+        diagnostics::attach_lsp_diagnostics(&context.lsp_runtime(), &context.cwd, [path.clone()], &mut metadata);
 
     let mut output = format!(
         "Replaced {} occurrence(s) in {}",

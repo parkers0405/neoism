@@ -7,6 +7,7 @@ use neoism_agent_core::{
     PermissionAction, PermissionRule, PromptPart, PromptRequest, QuestionRequestInfo,
     SessionInfo, TodoInfo, UserModel,
 };
+use neoism_agent_plugin_api::RegistrySnapshot;
 use serde_json::{json, Value};
 
 use crate::error::ApiError;
@@ -14,43 +15,35 @@ use crate::project_routes::project_info;
 use crate::session_actions::append_child_subtask_prompt;
 use crate::state::{AppState, QuestionPending};
 use crate::{
-    ask_permission_for_tool, execute_mcp_gateway, execute_mcp_tool_by_runtime_id,
-    now_millis, parse_permission_required_error, permission, plugin, tool,
+    ask_permission_for_tool, execute_mcp_gateway, now_millis,
+    parse_permission_required_error, permission, plugin, tool,
 };
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) async fn execute_tool_call(
+    state: &AppState,
     directory: &str,
     permissions: Vec<PermissionRule>,
     tool_name: &str,
     input: Value,
 ) -> Result<tool::ToolExecutionResult, String> {
-    execute_tool_call_with_env(directory, permissions, tool_name, input, BTreeMap::new())
-        .await
-}
-
-async fn execute_tool_call_with_env(
-    directory: &str,
-    permissions: Vec<PermissionRule>,
-    tool_name: &str,
-    input: Value,
-    env: BTreeMap<String, String>,
-) -> Result<tool::ToolExecutionResult, String> {
+    let snapshot = state.plugin_snapshot(directory).await;
     execute_tool_call_with_env_and_cancel(
-        None,
+        state,
         None,
         directory,
         permissions,
         tool_name,
         input,
-        env,
+        BTreeMap::new(),
         None,
+        &snapshot,
     )
     .await
 }
 
 async fn execute_tool_call_with_env_and_cancel(
-    state: Option<&AppState>,
+    state: &AppState,
     session_id: Option<&Id>,
     directory: &str,
     permissions: Vec<PermissionRule>,
@@ -58,60 +51,53 @@ async fn execute_tool_call_with_env_and_cancel(
     input: Value,
     env: BTreeMap<String, String>,
     cancel: Option<Arc<AtomicBool>>,
+    snapshot: &RegistrySnapshot,
 ) -> Result<tool::ToolExecutionResult, String> {
     let started = crate::perf::now();
     let input_bytes = input.to_string().len();
-    if let Some(result) = execute_mcp_gateway(
-        directory,
-        tool_name,
-        input.clone(),
-        &permissions,
-        cancel.clone(),
-        state.cloned(),
-    )
-    .await
-    .map_err(|error| format!("{error:#}"))?
-    {
-        let result = settle_direct_tool_result(result, state.is_none())?;
-        log_tool_perf(
-            "mcp_gateway",
+    let services = state.services().clone();
+    let contribution = crate::agent_tool_registry::tool_contribution(snapshot, tool_name);
+    if contribution.is_some_and(|item| item.plugin_id == "dev.neoism.mcp") {
+        if let Some(result) = execute_mcp_gateway(
             directory,
             tool_name,
-            input_bytes,
-            &result,
-            started,
-        );
-        return Ok(result);
+            input.clone(),
+            &permissions,
+            cancel.clone(),
+            Some(state.clone()),
+            snapshot,
+        )
+        .await
+        .map_err(|error| format!("{error:#}"))?
+        {
+            let result = settle_direct_tool_result(result, false)?;
+            log_tool_perf(
+                "mcp_gateway",
+                directory,
+                tool_name,
+                input_bytes,
+                &result,
+                started,
+            );
+            return Ok(result);
+        }
     }
-    if let Some(result) = execute_mcp_tool_by_runtime_id(
-        directory,
-        tool_name,
-        input.clone(),
-        &permissions,
-        cancel.clone(),
-        state.cloned(),
-    )
-    .await
-    .map_err(|error| format!("{error:#}"))?
-    {
-        let result = settle_direct_tool_result(result, state.is_none())?;
-        log_tool_perf("mcp", directory, tool_name, input_bytes, &result, started);
-        return Ok(result);
-    }
-    let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
-    if let Some(result) = crate::custom_tool::execute(
-        &services,
-        directory,
-        tool_name,
-        input.clone(),
-        &permissions,
-        env.clone(),
-        cancel.clone(),
-    )
-    .await
-    .map_err(|error| error.to_string())?
-    {
-        let result = settle_direct_tool_result(result, state.is_none())?;
+    if contribution.is_some_and(|item| item.plugin_id == "dev.neoism.custom-tools") {
+        let result = crate::custom_tool::execute(
+            &services,
+            directory,
+            tool_name,
+            input.clone(),
+            &permissions,
+            env.clone(),
+            cancel.clone(),
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            format!("custom tool {tool_name} disappeared from the workspace snapshot")
+        })?;
+        let result = settle_direct_tool_result(result, false)?;
         log_tool_perf(
             "custom",
             directory,
@@ -125,20 +111,40 @@ async fn execute_tool_call_with_env_and_cancel(
     let formatter = crate::config::load(&services, directory)
         .ok()
         .and_then(|loaded| crate::config::formatter_value(&loaded.info));
-    let result = tool::execute(
-        tool_name,
-        tool::ToolContext::new(directory.to_string())
-            .with_permission_rules(permissions)
-            .with_env(env)
-            .with_cancel(cancel)
-            .with_formatter(formatter)
-            .with_state(state.cloned())
-            .with_session_id(session_id.map(|id| id.to_string())),
-        input,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let result = settle_direct_tool_result(result, state.is_none())?;
+    let runtime = snapshot.runtime_tools.get(tool_name).cloned().or_else(|| {
+        crate::agent_tool_registry::is_kernel_tool(tool_name)
+            .then(|| {
+                tool::kernel_runtime_tool(tool_name, state)
+            })
+            .flatten()
+    });
+    let runtime = runtime.ok_or_else(|| format!("unknown tool {tool_name}"))?;
+    let definition = runtime.definition();
+    if let Some(permission) = definition.permission {
+        let target = input
+            .get(&permission.argument)
+            .and_then(Value::as_str)
+            .unwrap_or("*");
+        ensure_tool_permission(&permissions, &permission.permission, target)?;
+    }
+    let result = runtime
+        .execute(neoism_agent_plugin_api::PluginToolInvocation {
+            directory: directory.to_string(),
+            session_id: session_id.map(ToString::to_string),
+            arguments: input,
+            permission_rules: permissions,
+            env,
+            cancel,
+            formatter,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = tool::ToolExecutionResult {
+        title: result.title,
+        output: result.output,
+        metadata: result.metadata,
+    };
+    let result = settle_direct_tool_result(result, false)?;
     log_tool_perf(
         "builtin",
         directory,
@@ -874,12 +880,17 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
 ) -> Result<tool::ToolExecutionResult, String> {
     let started = crate::perf::now();
     let input_bytes = input.to_string().len();
-    let workspace = state
-        .inner
-        .workspace_runtimes
-        .acquire(directory, &state.inner.plugins, state.services())
-        .await;
-    let workspace_plugins = &workspace.plugins;
+    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+        state, directory,
+    )
+    .await;
+    let snapshot = workspace.snapshot;
+    if !crate::agent_tool_registry::is_kernel_tool(tool_name)
+        && crate::agent_tool_registry::tool_contribution(&snapshot, tool_name).is_none()
+    {
+        return Err(format!("unknown or disabled tool {tool_name}"));
+    }
+    let workspace = workspace.runtime;
     let workspace_directory = workspace.root.to_string_lossy().into_owned();
     let directory = workspace_directory.as_str();
     let mut one_time_rules = Vec::new();
@@ -894,7 +905,7 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
         .is_some_and(|session| session.extra.contains_key("workflowRunID"));
     let project_id = session
         .map(|session| session.project_id)
-        .unwrap_or_else(|| project_info(directory.to_string()).id);
+        .unwrap_or_else(|| project_info(state, directory.to_string()).id);
     // Invocation hooks are part of one logical tool call. Approval may resume
     // permission evaluation, but it must never rerun hooks or regenerate the
     // environment and thereby duplicate plugin side effects.
@@ -906,17 +917,14 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
         call_id: Some(call_id.to_string()),
     };
     let mut hooked_input = input;
-    workspace_plugins
-        .tool_execute_before(&ctx, &mut hooked_input)
+    plugin::tool_execute_before(&snapshot, &ctx, &mut hooked_input)
         .map_err(|error| error.to_string())?;
     let mut env = BTreeMap::new();
-    let services = state.services().clone();
-    let is_custom_tool = crate::custom_tool::list(&services, directory)
-        .iter()
-        .any(|tool| tool.id == tool_name);
+    let is_custom_tool = crate::agent_tool_registry::tool_contribution(&snapshot, tool_name)
+        .is_some_and(|contribution| contribution.plugin_id == "dev.neoism.custom-tools");
     if tool_name == "bash" || tool_name == "background_task" || is_custom_tool {
-        workspace_plugins
-            .shell_env(
+        plugin::shell_env(
+                &snapshot,
                 &plugin::ShellEnvContext {
                     cwd: directory.to_string(),
                     session_id: Some(session_id.to_string()),
@@ -960,8 +968,7 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
         .await?
         {
             let mut result = result;
-            workspace_plugins
-                .tool_execute_after(&ctx, &mut result)
+            plugin::tool_execute_after(&snapshot, &ctx, &mut result)
                 .map_err(|error| error.to_string())?;
             apply_central_output_truncation(&mut result)?;
             publish_lsp_updated_if_needed(state, &result);
@@ -981,7 +988,7 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
             return Ok(result);
         }
         match execute_tool_call_with_env_and_cancel(
-            Some(state),
+            state,
             Some(session_id),
             directory,
             effective,
@@ -989,12 +996,12 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
             hooked_input.clone(),
             env.clone(),
             cancel.clone(),
+            &snapshot,
         )
         .await
         {
             Ok(mut result) => {
-                workspace_plugins
-                    .tool_execute_after(&ctx, &mut result)
+                plugin::tool_execute_after(&snapshot, &ctx, &mut result)
                     .map_err(|error| error.to_string())?;
                 apply_central_output_truncation(&mut result)?;
                 publish_lsp_updated_if_needed(state, &result);

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::args::required_string;
 use super::paths::{display_path, project_path_for_write};
-use super::{diagnostics, format, locks, patch, ToolContext, ToolExecutionResult};
+use super::{diagnostics, format, patch, ToolContext, ToolExecutionResult};
 
 struct PatchMutation {
     touched: Vec<String>,
@@ -55,7 +55,7 @@ async fn apply_v4a_patch(
     }
 
     tracing::info!(paths = ?lock_paths, "V4A apply_patch waiting for file locks");
-    let _locks = locks::lock_files(lock_paths).await;
+    let _locks = context.utilities().file_locks.lock_files(lock_paths).await;
     tracing::info!("V4A apply_patch acquired file locks");
 
     let mutation = tokio::task::spawn_blocking({
@@ -224,12 +224,13 @@ fn apply_v4a_patch_metadata(
     mutation: PatchMutation,
 ) -> anyhow::Result<ToolExecutionResult> {
     let formatted = format::format_paths(
+        &context.services(),
         &context.cwd,
         context.formatter(),
         mutation.diagnostic_paths.clone(),
     );
     let lsp_touch =
-        diagnostics::touch_paths(&context.cwd, mutation.diagnostic_paths.clone());
+        diagnostics::touch_paths(&context.lsp_runtime(), &context.cwd, mutation.diagnostic_paths.clone());
     let mut metadata = json!({ "paths": mutation.touched });
     metadata["lspTouch"] = lsp_touch;
     let mut snapshots = Vec::new();
@@ -242,6 +243,7 @@ fn apply_v4a_patch_metadata(
     crate::snapshot::add_metadata_snapshots(&mut metadata, snapshots);
     format::attach_formatted(&mut metadata, &formatted);
     let report = diagnostics::attach_lsp_diagnostics(
+        &context.lsp_runtime(),
         &context.cwd,
         mutation.diagnostic_paths,
         &mut metadata,

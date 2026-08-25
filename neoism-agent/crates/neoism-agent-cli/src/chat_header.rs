@@ -18,19 +18,6 @@ const NEOISM_WORDMARK: &[&str] = &[
     "╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝╚══════╝╚═╝     ╚═╝",
 ];
 
-// SVG-rasterized version (from frontends/rioterm/assets/splash/neoism-wordmark.svg);
-// kept here in case we want to switch back.
-#[allow(dead_code)]
-const NEOISM_WORDMARK_SVG: &[&str] = &[
-    "                           ██                  ",
-    "                                               ",
-    "██████   █████   █████    ███    █████  ██████ ",
-    "██   ██ ███████ ██   ██    ██   ██      █ ██ ██",
-    "██   ██ ███████ ██   ██    ██     █████  █ ██ ██",
-    "██   ██ ██      ██   ██    ██        ██ █ ██ ██",
-    "██   ██  █████   █████   ██████ ██████  █ ██ ██",
-];
-
 pub(crate) fn print_chat_header(
     session_id: &str,
     model: Option<&str>,

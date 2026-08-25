@@ -24,6 +24,7 @@ mod custom_tool;
 #[cfg(test)]
 mod edit_smoke_tests;
 mod error;
+mod executable;
 mod external_acp;
 mod external_agent;
 mod firecrawl;
@@ -45,7 +46,6 @@ pub use openapi::canonical_openapi;
 mod perf;
 mod permission;
 mod permission_runtime;
-mod picker_registry;
 mod platform_shell;
 mod plugin;
 mod plugins;
@@ -91,6 +91,7 @@ mod tool;
 mod tool_routes;
 mod tool_runtime;
 mod tool_selection;
+mod utility_runtime;
 mod v2_routes;
 mod vcs;
 mod vcs_routes;
@@ -103,7 +104,7 @@ mod workspace_runtime;
 #[cfg(test)]
 use agent::AgentCatalog;
 pub(crate) use agent_tool_registry::{
-    available_tools_for_directory, execute_mcp_gateway, execute_mcp_tool_by_runtime_id,
+    available_tools_for_directory, execute_mcp_gateway,
     provider_tools_for_agent,
 };
 use anyhow::Context;
@@ -131,7 +132,7 @@ use neoism_agent_core::{
 #[cfg(test)]
 use neoism_agent_core::{
     CompactionPart, CreatedTime, EventPayload, Id, IdKind, MessageInfo, MessageWithParts,
-    Page, Part, PermissionRule, PromptPart, PromptRequest, ProviderMessage, ProviderRole,
+    Page, Part, PermissionRule, PromptPart, PromptRequest, ProviderRole,
     SessionInfo, TextPart, UserMessage, UserModel,
 };
 pub(crate) use permission_runtime::{
@@ -171,7 +172,6 @@ pub use session_transfer::{
     SESSION_BUNDLE_VERSION,
 };
 pub use state::AppState;
-pub use picker_registry::FffWorkspaceSearchService;
 #[cfg(test)]
 use state::SessionRun;
 use tokio::net::TcpListener;
@@ -184,16 +184,42 @@ use tool_runtime::execute_tool_call_with_permission_wait;
 use tool_selection::normalize_provider_tool_name;
 use tool_selection::{tool_allowed_for_model, use_apply_patch_for_model};
 
-pub fn standard_workspace_search(
-) -> std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchService> {
-    std::sync::Arc::new(FffWorkspaceSearchService::new())
-}
-
-pub fn standard_services() -> neoism_agent_service_api::AgentServices {
+pub fn services_with_workspace_search(
+    workspace_search: std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchService>,
+) -> neoism_agent_service_api::AgentServices {
     neoism_agent_service_api::AgentServices::new(
         std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
-        standard_workspace_search(),
+        workspace_search,
     )
+}
+
+pub fn standard_workspace_search(
+) -> std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchService> {
+    std::sync::Arc::new(UnavailableWorkspaceSearch)
+}
+
+/// Minimal services for server-internal helpers which do not perform workspace
+/// search. Standalone binaries explicitly inject their chosen search adapter.
+pub fn standard_services() -> neoism_agent_service_api::AgentServices {
+    services_with_workspace_search(standard_workspace_search())
+}
+
+struct UnavailableWorkspaceSearch;
+
+impl neoism_agent_service_api::WorkspaceSearchService for UnavailableWorkspaceSearch {
+    fn warm(&self, _root: &std::path::Path) -> Result<(), neoism_agent_service_api::ServiceError> { Ok(()) }
+    fn pin_root(&self, _root: &std::path::Path) -> Result<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>, neoism_agent_service_api::ServiceError> {
+        Err(neoism_agent_service_api::ServiceError::new("workspace search service was not injected"))
+    }
+    fn find_files(&self, _request: &neoism_agent_service_api::FindFilesRequest) -> Result<neoism_agent_service_api::FindFilesResult, neoism_agent_service_api::ServiceError> {
+        Err(neoism_agent_service_api::ServiceError::new("workspace search service was not injected"))
+    }
+    fn grep(&self, _request: &neoism_agent_service_api::GrepWorkspaceRequest) -> Result<neoism_agent_service_api::GrepWorkspaceResult, neoism_agent_service_api::ServiceError> {
+        Err(neoism_agent_service_api::ServiceError::new("workspace search service was not injected"))
+    }
+    fn search_directories(&self, _request: &neoism_agent_service_api::DirectorySearchRequest) -> Result<neoism_agent_service_api::DirectorySearchResult, neoism_agent_service_api::ServiceError> {
+        Err(neoism_agent_service_api::ServiceError::new("workspace search service was not injected"))
+    }
 }
 
 #[derive(Clone)]
@@ -253,7 +279,6 @@ pub async fn listen(
     );
     let state_started = crate::perf::now();
     let state = AppState::open_default(services).await?;
-    crate::semantic::spawn_indexer(state.clone());
     tracing::info!(
         target: "neoism_agent::perf",
         listen_addr = %actual,
@@ -261,7 +286,8 @@ pub async fn listen(
         total_start_ms = crate::perf::elapsed_ms(started),
         "server state opened"
     );
-    let result = axum::serve(listener, app_router::app_with_cors(state, &options.cors)).await;
+    let result = axum::serve(listener, app_router::app_with_cors(state.clone(), &options.cors)).await;
+    state.shutdown().await;
     tracing::warn!(
         target: "neoism_agent::perf",
         listen_addr = %actual,

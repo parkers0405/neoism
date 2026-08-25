@@ -8,7 +8,7 @@ use std::process::Stdio;
 #[cfg(unix)]
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -23,21 +23,14 @@ use tracing::warn;
 use super::pty_buffer::{PtyOutputBuffer, PtyOutputEvent};
 use super::{PtyError, PtySize};
 
-pub(crate) async fn stop_pty_process(pty_id: &str) {
-    process_registry().stop(pty_id).await;
-}
-
-pub(crate) async fn resize_pty_process(pty_id: &str, size: PtySize) {
-    process_registry().resize(pty_id, size).await;
-}
-
 pub(crate) async fn serve_websocket(
+    registry: Arc<PtyProcessRegistry>,
     info: PtyInfo,
     cursor: Option<i64>,
     mut socket: WebSocket,
     on_exit: impl Fn(String, Option<i32>) + Send + Sync + 'static,
 ) {
-    let process = match process_registry()
+    let process = match registry
         .get_or_spawn(info.clone(), Arc::new(on_exit))
         .await
     {
@@ -202,22 +195,42 @@ enum PtyInput {
 }
 
 #[derive(Default)]
-struct PtyProcessRegistry {
+pub(crate) struct PtyProcessRegistry {
     processes: Mutex<HashMap<String, Arc<PtyProcess>>>,
+    closed: AtomicBool,
 }
 
 impl PtyProcessRegistry {
+    pub(crate) async fn shutdown(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let processes = self
+            .processes
+            .lock()
+            .await
+            .drain()
+            .map(|(_, process)| process)
+            .collect::<Vec<_>>();
+        for process in processes {
+            stop_process(process).await;
+        }
+    }
+
     async fn get_or_spawn(
-        &'static self,
+        self: &Arc<Self>,
         info: PtyInfo,
         on_exit: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
     ) -> Result<Arc<PtyProcess>, PtyError> {
         let mut processes = self.processes.lock().await;
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(PtyError::SpawnFailed(
+                "PTY runtime is shut down".to_string(),
+            ));
+        }
         if let Some(process) = processes.get(&info.id) {
             return Ok(process.clone());
         }
 
-        let process = spawn_process(info.clone(), on_exit)?;
+        let process = spawn_process(info.clone(), on_exit, Arc::downgrade(self))?;
         processes.insert(info.id, process.clone());
         Ok(process)
     }
@@ -232,25 +245,19 @@ impl PtyProcessRegistry {
         }
     }
 
-    async fn stop(&self, pty_id: &str) {
+    pub(crate) async fn stop(&self, pty_id: &str) {
         let process = self.processes.lock().await.remove(pty_id);
         if let Some(process) = process {
             stop_process(process).await;
         }
     }
 
-    async fn resize(&self, pty_id: &str, size: PtySize) {
+    pub(crate) async fn resize(&self, pty_id: &str, size: PtySize) {
         let process = self.processes.lock().await.get(pty_id).cloned();
         if let Some(process) = process {
             let _ = resize_process(process, size).await;
         }
     }
-
-}
-
-fn process_registry() -> &'static PtyProcessRegistry {
-    static REGISTRY: OnceLock<PtyProcessRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(PtyProcessRegistry::default)
 }
 
 async fn stop_process(process: Arc<PtyProcess>) {
@@ -263,6 +270,14 @@ async fn stop_process(process: Arc<PtyProcess>) {
     }
     let mut child = process.child.lock().await;
     child.start_kill();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+    child.on_reaped();
     let _ = process.output.send(PtyOutputEvent::Exited);
 }
 
@@ -283,32 +298,35 @@ fn signal_process_group(process: &PtyProcess, signal: libc::c_int) {
 fn spawn_process(
     info: PtyInfo,
     on_exit: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
+    registry: Weak<PtyProcessRegistry>,
 ) -> Result<Arc<PtyProcess>, PtyError> {
-    spawn_pty_process(info, on_exit)
+    spawn_pty_process(info, on_exit, registry)
 }
 
 #[cfg(not(unix))]
 fn spawn_process(
     info: PtyInfo,
     on_exit: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
+    registry: Weak<PtyProcessRegistry>,
 ) -> Result<Arc<PtyProcess>, PtyError> {
     // Prefer a real pseudoconsole; the pipe fallback (no TTY, no
     // resize, no ANSI) only remains for pre-1809 conhosts where
     // `CreatePseudoConsole` is unavailable.
     #[cfg(windows)]
-    match spawn_conpty_process(info.clone(), on_exit.clone()) {
+    match spawn_conpty_process(info.clone(), on_exit.clone(), registry.clone()) {
         Ok(process) => return Ok(process),
         Err(error) => {
             warn!(pty_id = %info.id, ?error, "ConPTY spawn failed; falling back to pipe process");
         }
     }
-    spawn_pipe_process(info, on_exit)
+    spawn_pipe_process(info, on_exit, registry)
 }
 
 #[cfg(not(unix))]
 fn spawn_pipe_process(
     info: PtyInfo,
     on_exit: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
+    registry: Weak<PtyProcessRegistry>,
 ) -> Result<Arc<PtyProcess>, PtyError> {
     let command = info.command.first().ok_or_else(|| {
         PtyError::SpawnFailed(
@@ -370,7 +388,7 @@ fn spawn_pipe_process(
         "stderr",
     ));
 
-    monitor_process(child, process.clone(), output, pty_id, on_exit);
+    monitor_process(child, process.clone(), output, pty_id, on_exit, registry);
     Ok(process)
 }
 
@@ -381,6 +399,7 @@ fn spawn_pipe_process(
 fn spawn_conpty_process(
     info: PtyInfo,
     on_exit: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
+    registry: Weak<PtyProcessRegistry>,
 ) -> Result<Arc<PtyProcess>, PtyError> {
     if info.command.is_empty() {
         return Err(PtyError::SpawnFailed(
@@ -414,7 +433,7 @@ fn spawn_conpty_process(
         "conpty",
     ));
 
-    monitor_process(child, process.clone(), output, pty_id, on_exit);
+    monitor_process(child, process.clone(), output, pty_id, on_exit, registry);
     Ok(process)
 }
 
@@ -422,6 +441,7 @@ fn spawn_conpty_process(
 fn spawn_pty_process(
     info: PtyInfo,
     on_exit: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
+    registry: Weak<PtyProcessRegistry>,
 ) -> Result<Arc<PtyProcess>, PtyError> {
     let command = info.command.first().ok_or_else(|| {
         PtyError::SpawnFailed(
@@ -519,7 +539,7 @@ fn spawn_pty_process(
         "pty",
     ));
 
-    monitor_process(child, process.clone(), output, pty_id, on_exit);
+    monitor_process(child, process.clone(), output, pty_id, on_exit, registry);
     Ok(process)
 }
 
@@ -567,6 +587,7 @@ fn monitor_process(
     output: broadcast::Sender<PtyOutputEvent>,
     pty_id: String,
     on_exit: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
+    registry: Weak<PtyProcessRegistry>,
 ) {
     tokio::spawn(async move {
         let mut code = None;
@@ -591,7 +612,9 @@ fn monitor_process(
         child.lock().await.on_reaped();
         let already_exited = process.exited.swap(true, Ordering::SeqCst);
         let _ = output.send(PtyOutputEvent::Exited);
-        process_registry().remove_if_same(&pty_id, &process).await;
+        if let Some(registry) = registry.upgrade() {
+            registry.remove_if_same(&pty_id, &process).await;
+        }
         if !already_exited {
             on_exit(pty_id, code);
         }
@@ -1075,6 +1098,50 @@ async fn write_stdin(stdin: &Arc<Mutex<PtyInput>>, data: &[u8]) -> Result<(), Pt
                 .await
                 .map_err(|error| PtyError::Io(error.to_string()))
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn info(id: &str) -> PtyInfo {
+        PtyInfo {
+            id: id.to_string(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "trap 'exit 0' HUP TERM; while :; do sleep 1; done".to_string(),
+            ],
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            title: "test".to_string(),
+            time: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn registries_are_isolated_and_shutdown_their_processes() {
+        let first = Arc::new(PtyProcessRegistry::default());
+        let second = Arc::new(PtyProcessRegistry::default());
+        let first_process = first
+            .get_or_spawn(info("same-id"), Arc::new(|_, _| {}))
+            .await
+            .unwrap();
+        let second_process = second
+            .get_or_spawn(info("same-id"), Arc::new(|_, _| {}))
+            .await
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&first_process, &second_process));
+        first.shutdown().await;
+        assert!(first_process.exited.load(Ordering::SeqCst));
+        assert!(!second_process.exited.load(Ordering::SeqCst));
+        assert!(first.processes.lock().await.is_empty());
+        assert_eq!(second.processes.lock().await.len(), 1);
+
+        second.shutdown().await;
+        assert!(second_process.exited.load(Ordering::SeqCst));
+        assert!(second.processes.lock().await.is_empty());
     }
 }
 

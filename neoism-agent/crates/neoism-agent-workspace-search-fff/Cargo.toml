@@ -1,0 +1,17 @@
+[package]
+name = "neoism-agent-workspace-search-fff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dirs = "6"
+dunce.workspace = true
+fff-search.workspace = true
+git2.workspace = true
+globset.workspace = true
+ignore.workspace = true
+neoism-agent-service-api.workspace = true
+regex.workspace = true

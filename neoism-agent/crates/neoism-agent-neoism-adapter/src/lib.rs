@@ -10,6 +10,7 @@ use neoism_agent_service_api::{
 
 mod docs;
 mod config;
+mod lsp;
 mod memory;
 mod notes;
 
@@ -25,8 +26,9 @@ pub fn neoism_services() -> AgentServices {
     let memory = Arc::new(memory::NeoismMemoryService::new());
     AgentServices::new(
         Arc::new(NeoismExecutableService::new()),
-        neoism_agent_server::standard_workspace_search(),
+        Arc::new(neoism_agent_workspace_search_fff::FffWorkspaceSearchService::new()),
     )
+        .with_language_capabilities(Arc::new(lsp::NeoismLanguageCapabilityService::new()))
         .with_config(Arc::new(config::NeoismConfigSourceService::new()) as Arc<dyn ConfigSourceService>)
         .with_notes(notes.clone() as Arc<dyn NotesService>)
         .with_documentation(documentation.clone() as Arc<dyn DocumentationService>)
@@ -34,6 +36,12 @@ pub fn neoism_services() -> AgentServices {
         .with_builtin_mcp(notes as Arc<dyn BuiltinMcpService>)
         .with_builtin_mcp(documentation as Arc<dyn BuiltinMcpService>)
         .with_builtin_mcp(memory as Arc<dyn BuiltinMcpService>)
+}
+
+pub fn language_capability_snapshot(
+) -> Arc<neoism_agent_service_api::LanguageCapabilitySnapshot> {
+    use neoism_agent_service_api::LanguageCapabilityService as _;
+    lsp::NeoismLanguageCapabilityService::new().snapshot()
 }
 
 pub struct NeoismExecutableService {

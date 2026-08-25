@@ -99,7 +99,7 @@ Permission requests from child agents include their source session, title, paren
 ```jsonc
 {
   "agent": {
-    "dangerously-skip-permissions": true
+    "dangerouslySkipPermissions": true
   }
 }
 ```

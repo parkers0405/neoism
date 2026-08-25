@@ -104,7 +104,7 @@ pub(crate) async fn run_acp_prompt(
 ) -> Result<AcpRunResult, String> {
     let cwd = child.directory.clone();
     let (client, mut events) =
-        AcpClient::spawn(runtime.acp_config(&cwd, state.services()))
+        AcpClient::spawn(runtime.acp_config(&cwd, state.services())?)
             .map_err(|error| error.to_string())?;
     let collector = Arc::new(tokio::sync::Mutex::new(AcpRunCollector::default()));
 
@@ -193,7 +193,7 @@ pub(crate) async fn run_acp_prompt(
 
     drain_pre_prompt_acp_events(runtime, &client, &mut events).await;
 
-    let terminal_manager = AcpTerminalManager::new(PathBuf::from(&cwd));
+    let terminal_manager = AcpTerminalManager::new(PathBuf::from(&cwd), state.services().clone());
     let event_task = tokio::spawn(handle_acp_events(AcpEventContext {
         state: state.clone(),
         child_id: child.id.to_string(),

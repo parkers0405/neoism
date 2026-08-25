@@ -1,22 +1,27 @@
-#[path = "lsp_languages/registry.rs"]
-mod registry;
-#[cfg(test)]
-#[path = "lsp_languages/tests.rs"]
-mod tests;
-#[path = "lsp_languages/types.rs"]
-mod types;
+use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(test)]
-pub(super) use registry::{
-    adapter_by_id, best_adapter_for_path, document_language_id_for_path,
-};
-pub(super) use registry::{
-    adapter_supports_catalog_package, logical_language_for_path, LANGUAGE_SPECS,
-};
-#[cfg(test)]
-use types::wildcard_filename_matches;
-use types::{CatalogPackageSpec, LanguageRoute};
-pub(super) use types::{
-    LanguageSpec, LspOperation, LspTransportSpec, WorkspaceRootStrategySpec,
-    WorkspaceScan,
-};
+#[derive(Clone, Debug, Default)]
+pub(in crate::lsp) struct WorkspaceScan {
+    pub(in crate::lsp) files: usize,
+    pub(in crate::lsp) extensions: BTreeMap<String, usize>,
+    pub(in crate::lsp) markers: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::lsp) enum LspOperation {
+    WorkspaceSymbols,
+    Completion,
+    SignatureHelp,
+    Hover,
+    Definition,
+    References,
+    Implementation,
+    CallHierarchy,
+    DocumentHighlight,
+    InlayHints,
+    Diagnostics,
+    DocumentSymbols,
+    Formatting,
+    CodeActions,
+    Rename,
+}

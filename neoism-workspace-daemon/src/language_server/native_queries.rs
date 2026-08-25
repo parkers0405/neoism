@@ -26,6 +26,7 @@ use neoism_protocol::editor::{
 /// Serve one `LspQueryAt`. Blocking — call from `spawn_blocking`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn query_at(
+    runtime: &engine::LspRuntime,
     root: &Path,
     seq: u64,
     action: EditorLspAction,
@@ -42,10 +43,10 @@ pub(crate) fn query_at(
     // resolves this position against the client's live text, never a
     // stale revision — the FIFO guarantee the desktop worker gives its
     // Sync-before-query jobs.
-    super::live_sync::flush_document_sync(root, &file);
+    super::live_sync::flush_document_sync(runtime, root, &file);
     match action {
         EditorLspAction::Hover => {
-            let hovers = engine::hover(root, &file, line, character);
+            let hovers = engine::hover(runtime, root, &file, line, character);
             let mut contents = String::new();
             for hover in hovers {
                 if hover.contents.trim().is_empty() {
@@ -68,7 +69,7 @@ pub(crate) fn query_at(
             // One synthetic hover carrying the active signature +
             // parameter — rides the hover surface so the card,
             // dismissal and rendering are shared (desktop parity).
-            let contents = engine::signature_help(root, &file, line, character)
+            let contents = engine::signature_help(runtime, root, &file, line, character)
                 .into_iter()
                 .next()
                 .and_then(|help| {
@@ -114,6 +115,7 @@ pub(crate) fn query_at(
         EditorLspAction::Completion => {
             let live_text = super::active_buffer::live_buffer_text(&file);
             let items = engine::completion_with_trigger(
+                runtime,
                 root,
                 &file,
                 line,
@@ -146,7 +148,7 @@ pub(crate) fn query_at(
             }
         }
         EditorLspAction::Definition => {
-            let locations = engine::definition(root, &file, line, character)
+            let locations = engine::definition(runtime, root, &file, line, character)
                 .into_iter()
                 .filter_map(|location| {
                     let range = location.range?;
@@ -171,7 +173,7 @@ pub(crate) fn query_at(
             )
         }
         EditorLspAction::References => {
-            let locations = engine::references(root, &file, line, character);
+            let locations = engine::references(runtime, root, &file, line, character);
             // Ready-made reference rows: read each hit's line text
             // (live buffer first, then disk), path relative to the
             // workspace root — desktop worker parity.
@@ -230,7 +232,7 @@ pub(crate) fn query_at(
             )
         }
         EditorLspAction::CodeActions => {
-            let groups = engine::code_actions(root, &file, line, character);
+            let groups = engine::code_actions(runtime, root, &file, line, character);
             let mut code_actions = Vec::new();
             for group in &groups {
                 let server_id = group
@@ -289,7 +291,7 @@ pub(crate) fn query_at(
                     message: "rename needs a new name".to_string(),
                 };
             }
-            let groups = engine::rename(root, &file, line, character, new_name);
+            let groups = engine::rename(runtime, root, &file, line, character, new_name);
             // Per-server groups; the first with a real edit wins so a
             // multi-server file can't double-apply (desktop parity).
             let edit = groups.iter().find_map(|group| {
@@ -311,7 +313,7 @@ pub(crate) fn query_at(
             )
         }
         EditorLspAction::Format => {
-            let edits = engine::formatting(root, &file);
+            let edits = engine::formatting(runtime, root, &file);
             let typed = typed_edits(&edits);
             query_result(
                 surface_id,
@@ -348,6 +350,7 @@ pub(crate) fn query_at(
 /// edit is split between typed client edits (open files) and on-disk
 /// patches. Blocking — call from `spawn_blocking`.
 pub(crate) fn apply_code_action_at(
+    runtime: &engine::LspRuntime,
     root: &Path,
     seq: u64,
     selected: EditorLspCodeAction,
@@ -360,7 +363,7 @@ pub(crate) fn apply_code_action_at(
     let action = selected.payload;
     let is_bare_command = action.get("command").is_some_and(|c| c.is_string());
     let (edit, ran_command) = if is_bare_command {
-        let _ = engine::execute_command(root, &file, &server_id, action);
+        let _ = engine::execute_command(runtime, root, &file, &server_id, action);
         (None, true)
     } else {
         let mut action = action;
@@ -368,7 +371,7 @@ pub(crate) fn apply_code_action_at(
         // (rust-analyzer style).
         if action.get("edit").is_none() {
             if let Some(resolved) =
-                engine::resolve_code_action(root, &file, &server_id, action.clone())
+                engine::resolve_code_action(runtime, root, &file, &server_id, action.clone())
             {
                 action = resolved;
             }
@@ -376,7 +379,7 @@ pub(crate) fn apply_code_action_at(
         let edit = action.get("edit").filter(|edit| !edit.is_null()).cloned();
         let ran_command = match action.get("command") {
             Some(command) if !command.is_null() => {
-                let _ = engine::execute_command(root, &file, &server_id, command.clone());
+                let _ = engine::execute_command(runtime, root, &file, &server_id, command.clone());
                 true
             }
             _ => false,

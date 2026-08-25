@@ -14,6 +14,7 @@ struct FormatterCommand {
 }
 
 pub(super) fn format_paths(
+    services: &neoism_agent_service_api::AgentServices,
     cwd: &Path,
     config: Option<&Value>,
     paths: impl IntoIterator<Item = PathBuf>,
@@ -23,7 +24,7 @@ pub(super) fn format_paths(
     };
     let mut formatted = Vec::new();
     let mut seen = BTreeSet::new();
-    let commands = formatter_commands(cwd, config);
+    let commands = formatter_commands(services, cwd, config);
 
     for path in paths {
         let path = if path.is_absolute() {
@@ -47,7 +48,7 @@ pub(super) fn format_paths(
             .iter()
             .filter(|formatter| formatter.extensions.iter().any(|ext| ext == &extension))
         {
-            if run_formatter(cwd, &path, formatter) {
+            if run_formatter(services, cwd, &path, formatter) {
                 changed = true;
             }
         }
@@ -80,8 +81,8 @@ fn formatting_enabled(config: &&Value) -> bool {
     }
 }
 
-fn formatter_commands(cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
-    let mut commands = builtin_formatters(cwd, config);
+fn formatter_commands(services: &neoism_agent_service_api::AgentServices, cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
+    let mut commands = builtin_formatters(services, cwd, config);
     if let Value::Object(map) = config {
         for (name, value) in map {
             if matches!(name.as_str(), "disabled" | "disable") {
@@ -115,28 +116,28 @@ fn formatter_commands(cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
     commands
 }
 
-fn builtin_formatters(cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
+fn builtin_formatters(services: &neoism_agent_service_api::AgentServices, cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
     let mut commands = Vec::new();
     push_builtin(
         &mut commands,
         config,
         "rustfmt",
         &[".rs"],
-        which("rustfmt").map(|bin| vec![bin, "$FILE".to_string()]),
+        which(services, "rustfmt").map(|bin| vec![bin, "$FILE".to_string()]),
     );
     push_builtin(
         &mut commands,
         config,
         "gofmt",
         &[".go"],
-        which("gofmt").map(|bin| vec![bin, "-w".to_string(), "$FILE".to_string()]),
+        which(services, "gofmt").map(|bin| vec![bin, "-w".to_string(), "$FILE".to_string()]),
     );
     push_builtin(
         &mut commands,
         config,
         "zig",
         &[".zig", ".zon"],
-        which("zig").map(|bin| vec![bin, "fmt".to_string(), "$FILE".to_string()]),
+        which(services, "zig").map(|bin| vec![bin, "fmt".to_string(), "$FILE".to_string()]),
     );
     if find_up(cwd, ".clang-format").is_some() {
         push_builtin(
@@ -147,7 +148,7 @@ fn builtin_formatters(cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
                 ".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".h++",
                 ".ino", ".C", ".H",
             ],
-            which("clang-format")
+            which(services, "clang-format")
                 .map(|bin| vec![bin, "-i".to_string(), "$FILE".to_string()]),
         );
     }
@@ -162,7 +163,7 @@ fn builtin_formatters(cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
                 ".jsonc", ".yaml", ".yml", ".toml", ".xml", ".md", ".mdx", ".graphql",
                 ".gql",
             ],
-            which("prettier")
+            which(services, "prettier")
                 .map(|bin| vec![bin, "--write".to_string(), "$FILE".to_string()]),
         );
     }
@@ -180,7 +181,7 @@ fn builtin_formatters(cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
                 ".jsonc", ".yaml", ".yml", ".toml", ".xml", ".md", ".mdx", ".graphql",
                 ".gql",
             ],
-            which("biome").map(|bin| {
+            which(services, "biome").map(|bin| {
                 vec![
                     bin,
                     "format".to_string(),
@@ -204,7 +205,7 @@ fn builtin_formatters(cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
             config,
             "ruff",
             &[".py", ".pyi"],
-            which("ruff").map(|bin| vec![bin, "format".to_string(), "$FILE".to_string()]),
+            which(services, "ruff").map(|bin| vec![bin, "format".to_string(), "$FILE".to_string()]),
         );
     }
     commands
@@ -272,7 +273,7 @@ fn custom_command(value: &Value) -> Option<Vec<String>> {
     }
 }
 
-fn run_formatter(cwd: &Path, path: &Path, formatter: &FormatterCommand) -> bool {
+fn run_formatter(services: &neoism_agent_service_api::AgentServices, cwd: &Path, path: &Path, formatter: &FormatterCommand) -> bool {
     let Some((program, args)) = formatter.command.split_first() else {
         return false;
     };
@@ -281,7 +282,7 @@ fn run_formatter(cwd: &Path, path: &Path, formatter: &FormatterCommand) -> bool 
         program,
         neoism_agent_service_api::ExecutablePurpose::Formatter,
     );
-    let Ok(resolved) = crate::lsp::agent_services().executables.resolve(&request) else {
+    let Ok(resolved) = services.executables.resolve(&request) else {
         return false;
     };
     let mut command = Command::new(resolved.path);
@@ -328,13 +329,12 @@ fn normalize_extension(value: &str) -> String {
     }
 }
 
-fn which(program: &str) -> Option<String> {
+fn which(services: &neoism_agent_service_api::AgentServices, program: &str) -> Option<String> {
     let request = neoism_agent_service_api::ExecutableRequest::new(
         program,
         neoism_agent_service_api::ExecutablePurpose::Formatter,
     );
-    crate::lsp::agent_services()
-        .executables
+    services.executables
         .resolve(&request)
         .ok()
         .map(|result| result.path.display().to_string())

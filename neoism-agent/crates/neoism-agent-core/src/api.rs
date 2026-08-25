@@ -1,50 +1,35 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::mcp::McpConfig;
 use crate::session::ModelRef;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct NeoismConfig {
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfigDocument {
     #[serde(default, rename = "$schema")]
     pub schema: Option<String>,
-    /// Shell for the run tool. Accepts a plain string OR the app
-    /// config's `{ "program": ..., "args": [...] }` table — the agent
-    /// now reads the same `config.json` as the terminal, and `shell`
-    /// is the one key both sides define, so the lenient shape keeps a
-    /// merged config parseable by both.
-    #[serde(default, deserialize_with = "deserialize_shell")]
+    /// Shell command for the run tool. Product-specific shell tables are
+    /// projected to this canonical string by the embedding adapter.
+    #[serde(default)]
     pub shell: Option<String>,
-    #[serde(default, alias = "disabled_providers")]
+    #[serde(default)]
     pub disabled_providers: Vec<String>,
-    #[serde(default, alias = "enabled_providers")]
+    #[serde(default)]
     pub enabled_providers: Option<Vec<String>>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(
-        default,
-        alias = "reasoning-effort",
-        alias = "thinking",
-        alias = "reasoning",
-        alias = "reasoning_effort",
-        alias = "reasoningEffort"
-    )]
+    #[serde(default)]
     pub variant: Option<String>,
     /// Controls the length of final text emitted by supported providers.
     /// OpenAI GPT-5 Responses models support low, medium, and high.
-    #[serde(
-        default,
-        alias = "text_verbosity",
-        alias = "textVerbosity",
-        alias = "verbosity"
-    )]
+    #[serde(default)]
     pub text_verbosity: Option<TextVerbosity>,
-    #[serde(default, alias = "small_model")]
+    #[serde(default)]
     pub small_model: Option<String>,
-    #[serde(default, alias = "default_agent")]
+    #[serde(default)]
     pub default_agent: Option<String>,
     #[serde(default)]
     pub agent: BTreeMap<String, AgentConfig>,
@@ -52,8 +37,6 @@ pub struct NeoismConfig {
     pub mode: BTreeMap<String, AgentConfig>,
     #[serde(default)]
     pub command: BTreeMap<String, CommandInfo>,
-    #[serde(default)]
-    pub plugin: Vec<PluginConfig>,
     #[serde(default)]
     pub plugins: BTreeMap<String, PluginConfig>,
     #[serde(default)]
@@ -79,9 +62,8 @@ pub struct NeoismConfig {
     /// `neoism --dangerously-skip-permissions`, as a config key: every
     /// permission that would ASK is auto-allowed instead (explicit
     /// `"deny"` rules still deny). Applied by injecting a `"*": "allow"`
-    /// base rule during config normalization. Accepts the kebab-case
-    /// spelling too since it co-lives with the terminal's config keys.
-    #[serde(default, alias = "dangerously_skip_permissions")]
+    /// base rule during config normalization.
+    #[serde(default)]
     pub dangerously_skip_permissions: bool,
     #[serde(default)]
     pub tools: BTreeMap<String, bool>,
@@ -89,8 +71,6 @@ pub struct NeoismConfig {
     pub instructions: Vec<String>,
     #[serde(default)]
     pub experimental: ExperimentalConfig,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -111,48 +91,8 @@ impl TextVerbosity {
     }
 }
 
-/// `shell` as a plain string ("fish"), or the terminal config's
-/// `{ "program": "/bin/fish", "args": ["--login"] }` table (program +
-/// args joined). Anything else → `None` rather than failing the whole
-/// config decode.
-fn deserialize_shell<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Option::<Value>::deserialize(deserializer)?;
-    Ok(match value {
-        Some(Value::String(shell)) => {
-            let shell = shell.trim().to_string();
-            (!shell.is_empty()).then_some(shell)
-        }
-        Some(Value::Object(map)) => map
-            .get("program")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|program| !program.is_empty())
-            .map(|program| {
-                let args = map
-                    .get("args")
-                    .and_then(Value::as_array)
-                    .map(|args| {
-                        args.iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                    .unwrap_or_default();
-                if args.is_empty() {
-                    program.to_string()
-                } else {
-                    format!("{program} {args}")
-                }
-            }),
-        _ => None,
-    })
-}
-
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "camelCase")]
 pub struct SkillsConfig {
     #[serde(default)]
     pub paths: Vec<String>,
@@ -161,7 +101,7 @@ pub struct SkillsConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "camelCase")]
 pub struct WatcherConfig {
     #[serde(default)]
     pub ignore: Vec<String>,
@@ -217,24 +157,25 @@ impl Default for LspConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "camelCase")]
 pub struct ExperimentalConfig {
-    #[serde(default, alias = "disable_paste_summary")]
+    #[serde(default)]
     pub disable_paste_summary: Option<bool>,
-    #[serde(default, alias = "batch_tool")]
+    #[serde(default)]
     pub batch_tool: Option<bool>,
     #[serde(default)]
     pub open_telemetry: Option<bool>,
-    #[serde(default, alias = "primary_tools")]
+    #[serde(default)]
     pub primary_tools: Vec<String>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    /// Explicit extension point for experimental implementation-specific flags.
+    #[serde(default)]
+    pub options: BTreeMap<String, Value>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "is_plugin_enabled_default")]
     pub enabled: bool,
@@ -242,8 +183,6 @@ pub struct PluginConfig {
     pub scope: Option<PluginScope>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, Value>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
 }
 
 impl Default for PluginConfig {
@@ -253,72 +192,8 @@ impl Default for PluginConfig {
             enabled: true,
             scope: None,
             options: BTreeMap::new(),
-            extra: BTreeMap::new(),
         }
     }
-}
-
-impl<'de> Deserialize<'de> for PluginConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let input = PluginConfigInput::deserialize(deserializer)?;
-        Ok(match input {
-            PluginConfigInput::Id(id) => Self {
-                id: Some(id),
-                ..Self::default()
-            },
-            PluginConfigInput::Tuple(id, options) => Self {
-                id: Some(id),
-                options,
-                ..Self::default()
-            },
-            PluginConfigInput::Fields(fields) => {
-                let mut enabled = fields.enabled.unwrap_or(true);
-                if fields.disable {
-                    enabled = false;
-                }
-                Self {
-                    id: fields.id,
-                    enabled,
-                    scope: fields.scope,
-                    options: fields.options,
-                    extra: fields.extra,
-                }
-            }
-            PluginConfigInput::Enabled(enabled) => Self {
-                enabled,
-                ..Self::default()
-            },
-        })
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum PluginConfigInput {
-    Id(String),
-    Tuple(String, BTreeMap<String, Value>),
-    Fields(PluginConfigFields),
-    Enabled(bool),
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
-struct PluginConfigFields {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default, alias = "disabled")]
-    disable: bool,
-    #[serde(default)]
-    scope: Option<PluginScope>,
-    #[serde(default)]
-    options: BTreeMap<String, Value>,
-    #[serde(flatten)]
-    extra: BTreeMap<String, Value>,
 }
 
 fn is_plugin_enabled_default(enabled: &bool) -> bool {
@@ -328,9 +203,7 @@ fn is_plugin_enabled_default(enabled: &bool) -> bool {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginScope {
-    #[serde(alias = "user")]
     Global,
-    #[serde(alias = "local")]
     Project,
     Session,
 }
@@ -366,7 +239,7 @@ pub struct PluginStatusInfo {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -376,7 +249,7 @@ pub struct AgentConfig {
     pub variant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    #[serde(default, alias = "top_p", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
@@ -396,12 +269,10 @@ pub struct AgentConfig {
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps: Option<u64>,
-    #[serde(default, alias = "maxSteps", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,
     #[serde(default)]
     pub permission: BTreeMap<String, Value>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -550,100 +421,107 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn shell_accepts_string_and_terminal_config_table() {
-        let string_form: NeoismConfig =
+    fn canonical_shell_is_a_string_and_terminal_table_is_rejected() {
+        let string_form: AgentConfigDocument =
             serde_json::from_value(json!({ "shell": "fish" })).unwrap();
         assert_eq!(string_form.shell.as_deref(), Some("fish"));
+        assert!(serde_json::from_value::<AgentConfigDocument>(json!({
+            "shell": { "program": "/bin/zsh", "args": ["--login"] }
+        })).is_err());
 
-        // The unified config.json shares `shell` with the terminal,
-        // which writes `{ program, args }` — must parse, not error.
-        let table_form: NeoismConfig = serde_json::from_value(json!({
-            "shell": { "program": "/bin/zsh", "args": ["--login"] },
-            "fonts": { "size": 14.0 },
-            "neoism": { "theme": "pastel_dark" }
-        }))
-        .unwrap();
-        assert_eq!(table_form.shell.as_deref(), Some("/bin/zsh --login"));
-        // App-only sections land in the flatten catch-all, not errors.
-        assert!(table_form.extra.contains_key("fonts"));
+        let product_group: AgentConfigDocument = serde_json::from_value(json!({
+            "terminal": { "shell": "fish" }
+        })).unwrap();
+        assert!(product_group.shell.is_none());
+        assert!(serde_json::to_value(product_group).unwrap().get("terminal").is_none());
     }
 
     #[test]
-    fn dangerous_skip_permissions_accepts_all_spellings() {
-        for key in [
-            "dangerously-skip-permissions",
-            "dangerously_skip_permissions",
-        ] {
-            let config: NeoismConfig =
-                serde_json::from_value(json!({ key: true })).unwrap();
-            assert!(config.dangerously_skip_permissions, "{key}");
+    fn canonical_root_fields_are_camel_case_only() {
+        let canonical: AgentConfigDocument = serde_json::from_value(json!({
+            "disabledProviders": ["legacy"],
+            "enabledProviders": ["openai"],
+            "smallModel": "openai/small",
+            "defaultAgent": "build",
+            "textVerbosity": "high",
+            "dangerouslySkipPermissions": true
+        })).unwrap();
+        assert_eq!(canonical.disabled_providers, ["legacy"]);
+        assert_eq!(canonical.enabled_providers.unwrap(), ["openai"]);
+        assert_eq!(canonical.small_model.as_deref(), Some("openai/small"));
+        assert_eq!(canonical.default_agent.as_deref(), Some("build"));
+        assert_eq!(canonical.text_verbosity, Some(TextVerbosity::High));
+        assert!(canonical.dangerously_skip_permissions);
+
+        let legacy: AgentConfigDocument = serde_json::from_value(json!({
+            "disabled_providers": ["legacy"],
+            "enabled_providers": ["openai"],
+            "small_model": "openai/small",
+            "default_agent": "build"
+        })).unwrap();
+        assert!(legacy.disabled_providers.is_empty());
+        assert!(legacy.enabled_providers.is_none());
+        assert!(legacy.small_model.is_none());
+        assert!(legacy.default_agent.is_none());
+
+        for key in ["dangerously-skip-permissions", "dangerously_skip_permissions"] {
+            let config: AgentConfigDocument = serde_json::from_value(json!({ key: true })).unwrap();
+            assert!(!config.dangerously_skip_permissions, "legacy key {key} must be ignored");
         }
-        let default: NeoismConfig = serde_json::from_value(json!({})).unwrap();
-        assert!(!default.dangerously_skip_permissions);
     }
 
     #[test]
-    fn reasoning_effort_accepts_unified_config_spelling() {
-        for key in ["reasoning-effort", "reasoning_effort", "reasoningEffort"] {
-            let config: NeoismConfig =
-                serde_json::from_value(json!({ key: "medium" })).unwrap();
-            assert_eq!(config.variant.as_deref(), Some("medium"), "{key}");
+    fn reasoning_and_thinking_compatibility_keys_are_ignored() {
+        for key in ["reasoning-effort", "reasoning_effort", "reasoningEffort", "reasoning", "thinking"] {
+            let config: AgentConfigDocument = serde_json::from_value(json!({ key: "medium" })).unwrap();
+            assert!(config.variant.is_none(), "legacy key {key} must be ignored");
         }
+        let canonical: AgentConfigDocument = serde_json::from_value(json!({ "variant": "medium" })).unwrap();
+        assert_eq!(canonical.variant.as_deref(), Some("medium"));
     }
 
     #[test]
-    fn text_verbosity_accepts_supported_config_spellings() {
-        for key in [
-            "text-verbosity",
-            "text_verbosity",
-            "textVerbosity",
-            "verbosity",
-        ] {
-            let config: NeoismConfig =
-                serde_json::from_value(json!({ key: "high" })).unwrap();
-            assert_eq!(config.text_verbosity, Some(TextVerbosity::High), "{key}");
+    fn text_verbosity_accepts_only_canonical_spelling() {
+        let canonical: AgentConfigDocument = serde_json::from_value(json!({ "textVerbosity": "high" })).unwrap();
+        assert_eq!(canonical.text_verbosity, Some(TextVerbosity::High));
+        for key in ["text-verbosity", "text_verbosity", "verbosity"] {
+            let config: AgentConfigDocument = serde_json::from_value(json!({ key: "high" })).unwrap();
+            assert!(config.text_verbosity.is_none(), "legacy key {key} must be ignored");
         }
-        assert!(serde_json::from_value::<NeoismConfig>(json!({
-            "text-verbosity": "maximum"
+        assert!(serde_json::from_value::<AgentConfigDocument>(json!({
+            "textVerbosity": "maximum"
         }))
         .is_err());
     }
 
     #[test]
-    fn plugin_config_accepts_array_and_map_forms() {
-        let config: NeoismConfig = serde_json::from_value(json!({
-            "plugin": [
-                "neoism.internal.noop",
-                {
-                    "id": "neoism.internal.config",
-                    "scope": "global",
+    fn plugin_config_accepts_only_the_canonical_plugins_map() {
+        let config: AgentConfigDocument = serde_json::from_value(json!({
+            "plugins": {
+                "dev.example.disabled": {
+                    "enabled": false,
+                    "scope": "project",
                     "options": { "level": "all" }
                 }
-            ],
-            "plugins": {
-                "neoism.internal.disabled": {
-                    "enabled": false,
-                    "scope": "project"
-                }
-            }
+            },
+            "plugin": ["dev.example.ignored"]
         }))
         .expect("plugin config should decode");
 
-        assert_eq!(config.plugin[0].id.as_deref(), Some("neoism.internal.noop"));
-        assert_eq!(config.plugin[1].scope, Some(PluginScope::Global));
-        assert_eq!(config.plugin[1].options["level"], "all");
-        assert_eq!(config.plugins["neoism.internal.disabled"].enabled, false);
+        assert!(!config.plugins["dev.example.disabled"].enabled);
+        assert_eq!(config.plugins["dev.example.disabled"].scope, Some(PluginScope::Project));
+        assert_eq!(config.plugins["dev.example.disabled"].options["level"], "all");
     }
 
     #[test]
     fn formatter_config_accepts_bool_and_map_forms() {
-        let enabled: NeoismConfig = serde_json::from_value(json!({
+        let enabled: AgentConfigDocument = serde_json::from_value(json!({
             "formatter": true
         }))
         .expect("bool formatter config should decode");
         assert_eq!(enabled.formatter, FormatterConfig::Enabled(true));
 
-        let mapped: NeoismConfig = serde_json::from_value(json!({
+        let mapped: AgentConfigDocument = serde_json::from_value(json!({
             "formatter": {
                 "testfmt": {
                     "extensions": ["txt"],
@@ -660,7 +538,7 @@ mod tests {
 
     #[test]
     fn opencode_config_surface_keys_decode_as_typed_fields() {
-        let config: NeoismConfig = serde_json::from_value(json!({
+        let config: AgentConfigDocument = serde_json::from_value(json!({
             "watcher": { "ignore": ["target/**"] },
             "share": "auto",
             "autoshare": true,
@@ -672,11 +550,11 @@ mod tests {
                 }
             },
             "experimental": {
-                "disable_paste_summary": true,
-                "batch_tool": false,
-                "open-telemetry": true,
-                "primary_tools": ["read", "grep"],
-                "future_flag": "kept"
+                "disablePasteSummary": true,
+                "batchTool": false,
+                "openTelemetry": true,
+                "primaryTools": ["read", "grep"],
+                "options": { "futureFlag": "kept" }
             }
         }))
         .expect("OpenCode-style passive config keys should decode");
@@ -694,9 +572,23 @@ mod tests {
         assert_eq!(config.experimental.batch_tool, Some(false));
         assert_eq!(config.experimental.open_telemetry, Some(true));
         assert_eq!(config.experimental.primary_tools, vec!["read", "grep"]);
-        assert_eq!(config.experimental.extra["future_flag"], "kept");
-        assert!(!config.extra.contains_key("watcher"));
-        assert!(!config.extra.contains_key("lsp"));
+        assert_eq!(config.experimental.options["futureFlag"], "kept");
+    }
+
+    #[test]
+    fn nested_agent_config_is_camel_case_only_and_unknown_fields_do_not_become_options() {
+        let config: AgentConfigDocument = serde_json::from_value(json!({
+            "agent": {
+                "canonical": { "topP": 0.8, "maxSteps": 12, "options": { "providerFlag": true } },
+                "legacy": { "top_p": 0.4, "top-p": 0.5, "max-steps": 3, "mystery": true }
+            }
+        })).unwrap();
+        assert_eq!(config.agent["canonical"].top_p, Some(0.8));
+        assert_eq!(config.agent["canonical"].max_steps, Some(12));
+        assert_eq!(config.agent["canonical"].options["providerFlag"], true);
+        assert_eq!(config.agent["legacy"].top_p, None);
+        assert_eq!(config.agent["legacy"].max_steps, None);
+        assert!(config.agent["legacy"].options.is_empty());
     }
 }
 

@@ -7,13 +7,15 @@ use super::{
     BuiltinTool, ToolHandler,
 };
 
-pub(super) fn definitions() -> &'static [BuiltinTool] {
-    static DEFINITIONS: std::sync::OnceLock<Vec<BuiltinTool>> =
-        std::sync::OnceLock::new();
-    DEFINITIONS.get_or_init(|| vec![
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum ToolOwner { Workspace, Notes, Skills, Lsp, Subagents, Goals, Kernel }
+
+pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
+    vec![
         tool(
+            ToolOwner::Workspace, owner,
             "bash",
-            crate::platform_shell::tool_description(),
+            "Run shell commands",
             object_required(
                 &[
                     ("command", "string"),
@@ -26,16 +28,9 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             bash_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "background_task",
-            if cfg!(windows) {
-                match crate::platform_shell::runtime().kind() {
-                    crate::platform_shell::ShellKind::PowerShell => "Start a long-running PowerShell command in the background and return a job_id immediately",
-                    crate::platform_shell::ShellKind::Cmd => "Start a long-running Command Prompt command in the background and return a job_id immediately",
-                    crate::platform_shell::ShellKind::Posix => "Start a long-running shell command in the background and return a job_id immediately",
-                }
-            } else {
-                "Start a long-running shell command in the background and return a job_id immediately"
-            },
+            "Start a long-running shell command in the background and return a job_id immediately",
             json!({
                 "type": "object",
                 "properties": {
@@ -65,6 +60,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             stateful_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "background_task_result",
             "Check background shell task status or collect a completed result",
             json!({
@@ -79,6 +75,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             stateful_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "read",
             "Read one file or directory. filePath is required; offset is 1-indexed, the default limit is 2000 lines, and output stops at 50 KB. Call multiple read tools in parallel for independent files. Use grep before reading a large file when you need specific content.",
             json!({
@@ -96,6 +93,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             read_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "write",
             "Create or overwrite files",
             object_required(
@@ -105,6 +103,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             write_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "edit",
             "Replaces text in a file. Requires filePath, oldString, and newString. For V4A envelope patches, use apply_patch.",
             object_required(
@@ -119,6 +118,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             edit_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "grep",
             "Search file contents. pattern accepts one string or an array of literal alternatives. mode may be auto, plain, regex, or fuzzy. Results are bounded and include file paths and line numbers. Use several independent grep calls in parallel when their results do not depend on each other.",
             json!({
@@ -148,6 +148,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             grep_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "glob",
             "Find files with fuzzy path search and query constraints. pattern is a filename, path fragment, or glob expression. Keep broad queries short and scope with path when possible.",
             json!({
@@ -164,12 +165,14 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             glob_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "apply_patch",
             "Use the apply_patch tool to edit one or many files atomically. patchText must be a V4A envelope patch with *** Begin Patch, one or more *** Add File / *** Delete File / *** Update File headers, and *** End Patch. Put related multi-file changes in one patch; independent tool calls may run in parallel.",
             object_required(&[("patchText", "string")], &["patchText"]),
             apply_patch_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "webfetch",
             "Fetch and read a web page",
             json!({
@@ -184,6 +187,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             webfetch_handler,
         ),
         tool(
+            ToolOwner::Notes, owner,
             "notes",
             "Injected note service operations: create, list, read, write, search, tasks, or taskToggle.",
             object(&[
@@ -200,12 +204,14 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             notes_handler,
         ),
         tool(
+            ToolOwner::Skills, owner,
             "skill",
             "Load a configured SKILL.md instruction by name",
             object_required(&[("name", "string")], &["name"]),
             skill_handler,
         ),
         tool(
+            ToolOwner::Lsp, owner,
             "lsp",
             "Query language-server information for the workspace. Supports status, workspaceSymbol, hover, goToDefinition, findReferences, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls, diagnostics, and documentSymbol.",
             json!({
@@ -245,8 +251,9 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             lsp_handler,
         ),
         tool(
+            ToolOwner::Kernel, owner,
             "artifact_read",
-            "Read lines from saved large tool output by artifact:// URI, artifact id, or Neoism-managed output path.",
+            "Read lines from saved large tool output by artifact:// URI, artifact id, or runtime-managed output path.",
             json!({
                 "type": "object",
                 "properties": {
@@ -259,8 +266,9 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             artifact_read_handler,
         ),
         tool(
+            ToolOwner::Kernel, owner,
             "artifact_search",
-            "Search saved large tool output by artifact:// URI, artifact id, or Neoism-managed output path.",
+            "Search saved large tool output by artifact:// URI, artifact id, or runtime-managed output path.",
             json!({
                 "type": "object",
                 "properties": {
@@ -273,6 +281,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             artifact_search_handler,
         ),
         tool(
+            ToolOwner::Workspace, owner,
             "session_search",
             "Search recent session transcripts. Use for episodic recall like \"didn't we fix this before?\". Returns matching excerpts with role and date.",
             json!({
@@ -296,6 +305,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             stateful_handler,
         ),
         tool(
+            ToolOwner::Kernel, owner,
             "todowrite",
             "Update an agent-visible task list",
             json!({
@@ -317,8 +327,9 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             stateful_handler,
         ),
         tool(
+            ToolOwner::Subagents, owner,
             "task",
-            "Delegate work to a subagent. For broad read-only codebase research, launch the explore subagent as the only tool call in the step. Strongly prefer stopping the parent turn and waiting for Neoism to deliver its concise completion result when further work depends on it. The parent may continue user conversation or genuinely independent light work, but must not duplicate the exploration with parent-session tools or poll while it runs.",
+            "Delegate work to a subagent. For broad read-only codebase research, launch the explore subagent as the only tool call in the step. Strongly prefer stopping the parent turn and waiting for the Agent runtime to deliver its concise completion result when further work depends on it. The parent may continue user conversation or genuinely independent light work, but must not duplicate the exploration with parent-session tools or poll while it runs.",
             json!({
                 "type": "object",
                 "properties": {
@@ -340,7 +351,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
                     },
                     "background": {
                         "type": "boolean",
-                        "description": "Defaults to true so the UI stays usable while the subagent works. When true, start the subagent and then stop your turn unless the user explicitly asked you to continue with independent work; you will be notified when it finishes. Set false only when the next step truly must synchronously wait inside this same model turn."
+                        "description": "Defaults to true. When true, start the subagent and then stop your turn unless the user explicitly asked you to continue with independent work; the Agent runtime will notify you when it finishes. Set false only when the next step truly must synchronously wait inside this same model turn."
                     },
                     "command": {
                         "type": "string",
@@ -352,6 +363,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             stateful_handler,
         ),
         tool(
+            ToolOwner::Subagents, owner,
             "task_result",
             "Check background subagent task status or collect a completed result",
             json!({
@@ -366,6 +378,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             stateful_handler,
         ),
         tool(
+            ToolOwner::Subagents, owner,
             "stop_task",
             "Stop a running subagent task. Cancels the subagent's run and clears its queued follow-ups. Pass a task_id to stop one subagent, or omit it to stop every running subagent for this session.",
             json!({
@@ -380,6 +393,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             stateful_handler,
         ),
         tool(
+            ToolOwner::Kernel, owner,
             "question",
             "Ask the user a structured question",
             json!({
@@ -394,6 +408,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             stateful_handler,
         ),
         tool(
+            ToolOwner::Goals, owner,
             "complete_goal",
             "Mark the active persistent goal complete (or blocked) so the agent stops continuing automatically. Call this when the goal is fully accomplished, or when you cannot make further progress without the user.",
             json!({
@@ -414,38 +429,44 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
             stateful_handler,
         ),
         tool(
+            ToolOwner::Kernel, owner,
             "plan_enter",
             "Enter planning mode",
             json!({ "type": "object", "properties": {} }),
             stateful_handler,
         ),
         tool(
+            ToolOwner::Kernel, owner,
             "plan_exit",
             "Exit planning mode",
             json!({ "type": "object", "properties": {} }),
             stateful_handler,
         ),
-    ]).as_slice()
+    ].into_iter().flatten().collect()
 }
 
 fn tool(
+    tool_owner: ToolOwner,
+    requested_owner: ToolOwner,
     id: &'static str,
     description: &'static str,
     mut parameters: Value,
     handler: ToolHandler,
-) -> BuiltinTool {
+) -> Option<BuiltinTool> {
+    if tool_owner != requested_owner { return None; }
     if let Some(schema) = parameters.as_object_mut() {
         schema
             .entry("additionalProperties")
             .or_insert_with(|| Value::Bool(false));
     }
-    BuiltinTool {
+    Some(BuiltinTool {
         id,
         description,
         parameters,
         output_schema: super::standard_output_schema(),
         handler,
-    }
+        state: None,
+    })
 }
 
 fn object(properties: &[(&str, &str)]) -> Value {
@@ -466,4 +487,26 @@ fn object_with_required(properties: &[(&str, &str)], required: &[&str]) -> Value
         "properties": properties,
         "required": required,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_tool_descriptions_are_product_neutral() {
+        let visible = definitions(ToolOwner::Workspace)
+            .into_iter()
+            .map(|tool| format!("{}\n{}", tool.description, tool.parameters))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_ascii_lowercase();
+
+        for assumption in ["neoism", "vault", "product documentation"] {
+            assert!(
+                !visible.contains(assumption),
+                "tool description contains {assumption}"
+            );
+        }
+    }
 }

@@ -13,7 +13,7 @@ pub(crate) async fn agent_list(
     headers: HeaderMap,
 ) -> Result<Json<Vec<AgentInfo>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(crate::plugins::agent_catalog(&state, &directory)?.list()))
+    Ok(Json(crate::plugins::agent_catalog(&state, &directory).await?.list()))
 }
 
 pub(crate) async fn agent_get(
@@ -23,7 +23,7 @@ pub(crate) async fn agent_get(
     Path(name): Path<String>,
 ) -> Result<Json<AgentInfo>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    crate::plugins::agent_catalog(&state, &directory)?
+    crate::plugins::agent_catalog(&state, &directory).await?
         .get(&name)
         .map(Json)
         .ok_or_else(|| ApiError::not_found("Agent not found"))
@@ -35,10 +35,7 @@ pub(crate) async fn skill_list(
     headers: HeaderMap,
 ) -> Result<Json<Vec<SkillInfo>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    if !crate::plugins::enabled(state.services(), &directory, "dev.neoism.skills") {
-        return Ok(Json(Vec::new()));
-    }
-    let snapshot = state.inner.plugin_host.snapshot();
+    let snapshot = state.plugin_snapshot(&directory).await;
     let mut skills = Vec::new();
     for source in snapshot.skill_sources.values() {
         skills.extend(

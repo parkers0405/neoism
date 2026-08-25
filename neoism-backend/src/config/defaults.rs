@@ -287,9 +287,9 @@ pub fn default_config_file_content() -> String {
     // ── [agent] — the coding agent (its own block, same file) ─────
     // "agent": {
     //     "model": "anthropic/claude-opus-5",
-    //     "small-model": "anthropic/claude-haiku-4-5",
-    //     "reasoning-effort": "high", // low | medium | high | xhigh | max
-    //     "text-verbosity": "low",    // low | medium | high
+    //     "smallModel": "anthropic/claude-haiku-4-5",
+    //     "variant": "high",       // low | medium | high | xhigh | max
+    //     "textVerbosity": "low",  // low | medium | high
     //     "permission": { "edit": "ask", "bash": "ask" },
     //     "mcp": { "my-server": { "type": "local", "command": ["my-mcp"] } },
     // },

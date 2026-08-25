@@ -1,23 +1,18 @@
 import {
   capabilityEnabled,
+  createContractClient,
   type CapabilityInfo,
   type NeoismClient,
   type PluginSdk,
+  type StopSubagentsResult,
+  type SubagentTask,
 } from "@neoism/sdk-core";
 
-export interface SubagentTask {
-  id: string;
-  sessionId: string;
-  childSessionId?: string;
-  agent: string;
-  status: "queued" | "running" | "pending" | "completed" | "error" | "stopped";
-  description?: string;
-  result?: string;
-}
+export type { SubagentTask } from "@neoism/sdk-core";
 
 export interface SubagentsClient {
   list(sessionId: string): Promise<SubagentTask[]>;
-  stop(sessionId: string, taskId?: string): Promise<void>;
+  stop(sessionId: string, taskId?: string): Promise<StopSubagentsResult>;
 }
 
 export const subagents: PluginSdk<SubagentsClient> = {
@@ -27,18 +22,12 @@ export const subagents: PluginSdk<SubagentsClient> = {
     return capabilityEnabled(capabilities, this.capability);
   },
   client(core: NeoismClient): SubagentsClient {
-    const prefix = "/v2/plugins/dev.neoism.subagents";
+    const operations = createContractClient(core.transport);
     return {
-      list: (sessionId) => core.transport.request<SubagentTask[]>({
-        path: `${prefix}/sessions/${encodeURIComponent(sessionId)}/tasks`,
+      list: (sessionId) => operations.request("v2.subagents.tasks.list", { path: { session_id: sessionId } }),
+      stop: (sessionId, taskId) => operations.request("v2.subagents.tasks.stop", {
+        path: { session_id: sessionId }, body: taskId ? { taskId } : {},
       }),
-      async stop(sessionId, taskId) {
-        await core.transport.request<void>({
-          method: "POST",
-          path: `${prefix}/sessions/${encodeURIComponent(sessionId)}/stop`,
-          body: taskId ? { taskId } : {},
-        });
-      },
     };
   },
 };

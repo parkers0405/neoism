@@ -85,14 +85,14 @@ Agent settings are nested under `agent`:
 ```jsonc
 {
   "agent": {
-    "reasoning-effort": "high",
-    "text-verbosity": "low",
+    "variant": "high",
+    "textVerbosity": "low",
     "input-hints": true,
     "permission": {
       "edit": "ask",
       "bash": "ask",
     },
-    "dangerously-skip-permissions": false,
+    "dangerouslySkipPermissions": false,
   },
 }
 ```

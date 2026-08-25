@@ -8,9 +8,9 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use neoism_agent_core::{event_type, EventPayload, GoalResearchNote, SessionInfo};
-use serde::Deserialize;
-use serde_json::{json, Value};
+use neoism_agent_core::{event_type, EventPayload, GoalResearchNote, SessionGoal, SessionInfo};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::error::ApiError;
 use crate::firecrawl::{self, FirecrawlPage};
@@ -31,11 +31,18 @@ pub(crate) struct SetGoalRequest {
     pub(crate) paused: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoalResponse {
+    goal: Option<SessionGoal>,
+    research_enabled: bool,
+}
+
 /// Return the active goal (or `null`).
 pub(crate) async fn session_goal_get(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<GoalResponse>, ApiError> {
     let info = ensure_session(&state, &session_id).await?;
     require_enabled(state.services(), &info)?;
     Ok(Json(goal_response(&info)))
@@ -49,7 +56,7 @@ pub(crate) async fn session_goal_set(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     body: Option<Json<SetGoalRequest>>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<GoalResponse>, ApiError> {
     let request = body.map(|Json(body)| body).unwrap_or_default();
     let mut info = ensure_session(&state, &session_id).await?;
     require_enabled(state.services(), &info)?;
@@ -103,7 +110,7 @@ pub(crate) async fn session_goal_set(
 pub(crate) async fn session_goal_clear(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<GoalResponse>, ApiError> {
     let mut info = ensure_session(&state, &session_id).await?;
     require_enabled(state.services(), &info)?;
     info.clear_goal();
@@ -124,7 +131,7 @@ pub(crate) async fn session_goal_research(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Json(request): Json<GoalResearchRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<GoalResponse>, ApiError> {
     let mut info = ensure_session(&state, &session_id).await?;
     require_enabled(state.services(), &info)?;
     if !firecrawl::firecrawl_enabled() {
@@ -185,15 +192,9 @@ async fn persist(state: &AppState, info: &mut SessionInfo) -> Result<(), ApiErro
     Ok(())
 }
 
-fn goal_response(info: &SessionInfo) -> Value {
-    match info.goal() {
-        Some(goal) => json!({
-            "goal": goal,
-            "researchEnabled": firecrawl::firecrawl_enabled(),
-        }),
-        None => json!({
-            "goal": Value::Null,
-            "researchEnabled": firecrawl::firecrawl_enabled(),
-        }),
+fn goal_response(info: &SessionInfo) -> GoalResponse {
+    GoalResponse {
+        goal: info.goal(),
+        research_enabled: firecrawl::firecrawl_enabled(),
     }
 }

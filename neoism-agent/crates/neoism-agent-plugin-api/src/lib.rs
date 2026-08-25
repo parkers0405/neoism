@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use neoism_agent_core::{
-    AgentInfo, CapabilityInfo, CommandInfo, PluginManifestInfo, SkillInfo, PLUGIN_API_VERSION,
+    AgentInfo, CapabilityInfo, CommandInfo, PermissionRule, PluginManifestInfo, SkillInfo,
+    PLUGIN_API_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -95,13 +97,15 @@ pub struct PluginToolPermission {
     pub argument: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
 pub struct PluginToolInvocation {
     pub directory: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     pub arguments: Value,
+    pub permission_rules: Vec<PermissionRule>,
+    pub env: BTreeMap<String, String>,
+    pub cancel: Option<Arc<AtomicBool>>,
+    pub formatter: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -119,6 +123,68 @@ pub trait RuntimeTool: Send + Sync + 'static {
         &'a self,
         invocation: PluginToolInvocation,
     ) -> PluginFuture<'a, PluginToolResult>;
+}
+
+/// A typed runtime for plugin lifecycle hooks. Hook payloads are JSON values so
+/// process plugins and native plugins share one protocol and one execution path.
+pub trait RuntimeHook: Send + Sync + 'static {
+    fn invoke(
+        &self,
+        hook: &str,
+        context: Value,
+        value: Value,
+    ) -> Result<Value, PluginRuntimeError>;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PluginLifecycle {
+    pub active: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct RegisteredRuntimeHook {
+    pub plugin_id: String,
+    pub runtime: Arc<dyn RuntimeHook>,
+    lifecycle: Arc<RwLock<PluginLifecycle>>,
+}
+
+impl RegisteredRuntimeHook {
+    #[doc(hidden)]
+    pub fn for_test(plugin_id: impl Into<String>, runtime: Arc<dyn RuntimeHook>) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            runtime,
+            lifecycle: Arc::new(RwLock::new(PluginLifecycle { active: true, reason: None })),
+        }
+    }
+
+    pub fn lifecycle(&self) -> PluginLifecycle {
+        self.lifecycle.read().expect("plugin lifecycle lock poisoned").clone()
+    }
+
+    pub fn invoke(
+        &self,
+        hook: &str,
+        context: Value,
+        value: Value,
+    ) -> Result<Value, PluginRuntimeError> {
+        match self.runtime.invoke(hook, context, value) {
+            Ok(value) => {
+                *self.lifecycle.write().expect("plugin lifecycle lock poisoned") =
+                    PluginLifecycle { active: true, reason: None };
+                Ok(value)
+            }
+            Err(error) => {
+                *self.lifecycle.write().expect("plugin lifecycle lock poisoned") =
+                    PluginLifecycle {
+                        active: false,
+                        reason: Some(format!("{hook} failed: {error}")),
+                    };
+                Err(error)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Error)]
@@ -164,6 +230,7 @@ pub struct PluginRegistrar {
     command_sources: BTreeMap<String, Arc<dyn CommandSource>>,
     runtime_tools: BTreeMap<String, Arc<dyn RuntimeTool>>,
     agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
+    runtime_hooks: Vec<Arc<dyn RuntimeHook>>,
 }
 
 impl PluginRegistrar {
@@ -235,6 +302,10 @@ impl PluginRegistrar {
         self.runtime_tools.insert(definition.id, tool);
     }
 
+    pub fn runtime_hook(&mut self, hook: Arc<dyn RuntimeHook>) {
+        self.runtime_hooks.push(hook);
+    }
+
     pub fn route(&mut self, id: impl Into<String>) {
         self.item(ContributionKind::Route, id);
     }
@@ -290,6 +361,7 @@ pub struct RegistrySnapshot {
     pub command_sources: BTreeMap<String, Arc<dyn CommandSource>>,
     pub runtime_tools: BTreeMap<String, Arc<dyn RuntimeTool>>,
     pub agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
+    pub runtime_hooks: Vec<RegisteredRuntimeHook>,
 }
 
 impl RegistrySnapshot {
@@ -303,6 +375,7 @@ impl RegistrySnapshot {
             command_sources: BTreeMap::new(),
             runtime_tools: BTreeMap::new(),
             agent_sources: BTreeMap::new(),
+            runtime_hooks: Vec::new(),
         }
     }
 }
@@ -340,6 +413,27 @@ impl PluginHost {
         }
 
         let order = dependency_order(&manifests)?;
+        let enabled_ids = order
+            .iter()
+            .filter(|id| {
+                let manifest = &manifests[*id];
+                !disabled.iter().any(|pattern| matches_pattern(pattern, id))
+                    || !manifest.disableable
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for id in &enabled_ids {
+            if let Some(dependency) = manifests[id]
+                .requires
+                .iter()
+                .find(|dependency| !enabled_ids.contains(*dependency))
+            {
+                return Err(PluginHostError::MissingDependency {
+                    plugin: id.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+        }
         let mut manifest_infos = Vec::with_capacity(order.len());
         let mut capabilities = Vec::new();
         let mut contributions = BTreeMap::new();
@@ -347,6 +441,7 @@ impl PluginHost {
         let mut command_sources = BTreeMap::new();
         let mut runtime_tools = BTreeMap::new();
         let mut agent_sources = BTreeMap::new();
+        let mut runtime_hooks = Vec::new();
         for id in order {
             let manifest = &manifests[&id];
             let requested_disabled = disabled.iter().any(|pattern| matches_pattern(pattern, &id));
@@ -402,6 +497,23 @@ impl PluginHost {
                         )));
                     }
                 }
+                let lifecycle = Arc::new(RwLock::new(PluginLifecycle {
+                    active: true,
+                    reason: None,
+                }));
+                for hook in registrar.runtime_hooks {
+                    runtime_hooks.push(RegisteredRuntimeHook {
+                        plugin_id: id.clone(),
+                        runtime: hook,
+                        lifecycle: lifecycle.clone(),
+                    });
+                }
+            }
+            // Disableable plugins are structurally absent. Consumers must not
+            // infer availability from an inactive manifest that still leaked
+            // out of a process-global catalog.
+            if !enabled {
+                continue;
             }
             for capability in &manifest.capabilities {
                 capabilities.push(CapabilityInfo {
@@ -443,6 +555,7 @@ impl PluginHost {
             command_sources,
             runtime_tools,
             agent_sources,
+            runtime_hooks,
         });
         *self.snapshot.write().expect("plugin host lock poisoned") = snapshot.clone();
         Ok(snapshot)
@@ -571,8 +684,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(snapshot.manifests[0].id, "dev.neoism.base");
-        assert!(!snapshot.manifests[1].enabled);
+        assert_eq!(snapshot.manifests.len(), 1);
+        assert_eq!(snapshot.manifests[0].id, "dev.neoism.base");
         assert_eq!(snapshot.contributions.len(), 1);
+        assert!(snapshot
+            .capabilities
+            .iter()
+            .all(|capability| capability.plugin_id.as_deref() != Some("dev.neoism.child")));
+        assert!(snapshot
+            .contributions
+            .values()
+            .all(|contribution| contribution.plugin_id != "dev.neoism.child"));
+        assert!(!snapshot.runtime_tools.contains_key("dev.neoism.child/tool"));
     }
 
     struct EmptySkills;

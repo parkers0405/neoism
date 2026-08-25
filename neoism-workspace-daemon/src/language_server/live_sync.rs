@@ -20,6 +20,7 @@ enum LiveDocumentEvent {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct LiveDocumentKey {
+    runtime: usize,
     workspace_root: PathBuf,
     file: PathBuf,
 }
@@ -33,10 +34,12 @@ fn live_document_senders(
 }
 
 fn live_document_sender(
+    runtime: &language_server::LspRuntime,
     workspace_root: &Path,
     file: &Path,
 ) -> mpsc::Sender<LiveDocumentEvent> {
     let key = LiveDocumentKey {
+        runtime: runtime.instance_key(),
         workspace_root: workspace_root.to_path_buf(),
         file: file.to_path_buf(),
     };
@@ -53,11 +56,13 @@ fn live_document_sender(
                     .and_then(|name| name.to_str())
                     .unwrap_or("document")
             );
+            let runtime = runtime.clone();
             thread::Builder::new()
                 .name(worker_name)
                 .spawn(move || {
                     run_live_document_events(receiver, |event| {
                         process_live_document_event(
+                            &runtime,
                             &key.workspace_root,
                             &key.file,
                             event,
@@ -73,11 +78,11 @@ fn live_document_sender(
 /// Queue an authoritative live buffer snapshot immediately after an editor or
 /// collaborative edit. This is the production `didOpen`/`didChange` path; it
 /// is event-driven and never waits for the diagnostics/status recovery poll.
-pub fn sync_document(workspace_root: &Path, file: &Path, text: String) {
-    if language_server::language_id_for_path_in(workspace_root, file).is_none() {
+pub fn sync_document(runtime: &language_server::LspRuntime, workspace_root: &Path, file: &Path, text: String) {
+    if language_server::language_id_for_path_in(runtime, workspace_root, file).is_none() {
         return;
     }
-    if live_document_sender(workspace_root, file)
+    if live_document_sender(runtime, workspace_root, file)
         .send(LiveDocumentEvent::Sync { text })
         .is_err()
     {
@@ -91,11 +96,11 @@ pub fn sync_document(workspace_root: &Path, file: &Path, text: String) {
 /// Queue `didSave` behind every preceding edit for this document. Keeping save
 /// on the same FIFO prevents a fast `:w` from reaching a build-backed server
 /// before the final insert-mode `didChange`.
-pub fn save_document(workspace_root: &Path, file: &Path) {
-    if language_server::language_id_for_path_in(workspace_root, file).is_none() {
+pub fn save_document(runtime: &language_server::LspRuntime, workspace_root: &Path, file: &Path) {
+    if language_server::language_id_for_path_in(runtime, workspace_root, file).is_none() {
         return;
     }
-    if live_document_sender(workspace_root, file)
+    if live_document_sender(runtime, workspace_root, file)
         .send(LiveDocumentEvent::Save)
         .is_err()
     {
@@ -110,12 +115,12 @@ pub fn save_document(workspace_root: &Path, file: &Path) {
 /// LSP service. Interactive queries use this barrier instead of re-sending a
 /// full snapshot on a separate thread, which could otherwise overtake queued
 /// insert edits and regress the server to older text.
-pub fn flush_document_sync(workspace_root: &Path, file: &Path) {
-    if language_server::language_id_for_path_in(workspace_root, file).is_none() {
+pub fn flush_document_sync(runtime: &language_server::LspRuntime, workspace_root: &Path, file: &Path) {
+    if language_server::language_id_for_path_in(runtime, workspace_root, file).is_none() {
         return;
     }
     let (ready, completed) = mpsc::sync_channel(0);
-    if live_document_sender(workspace_root, file)
+    if live_document_sender(runtime, workspace_root, file)
         .send(LiveDocumentEvent::Barrier { ready })
         .is_ok()
     {
@@ -124,16 +129,17 @@ pub fn flush_document_sync(workspace_root: &Path, file: &Path) {
 }
 
 fn process_live_document_event(
+    runtime: &language_server::LspRuntime,
     workspace_root: &Path,
     file: &Path,
     event: LiveDocumentEvent,
 ) {
     match event {
         LiveDocumentEvent::Sync { text } => {
-            language_server::sync_document(workspace_root, file, Some(&text));
+            language_server::sync_document(runtime, workspace_root, file, Some(&text));
         }
         LiveDocumentEvent::Save => {
-            language_server::save_document(workspace_root, file);
+            language_server::save_document(runtime, workspace_root, file);
         }
         LiveDocumentEvent::Barrier { ready } => {
             let _ = ready.send(());

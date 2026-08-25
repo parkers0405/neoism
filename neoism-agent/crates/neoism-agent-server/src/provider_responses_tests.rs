@@ -492,7 +492,7 @@ fn ignores_unknown_events() {
 #[test]
 fn responses_request_body_ultra_maps_to_max_effort_on_gpt56() {
     // GPT-5.6 ultra rides the wire as effort "max" (Codex's Ultra => Max);
-    // no `multi_agent` body param — the codex backend rejects it.
+    // no `multi_agent` body param — the Codex service rejects it.
     let body = responses_request_body("gpt-5.6-sol", Some("ultra"), &[], &[]);
     assert_eq!(body["reasoning"]["effort"], serde_json::json!("max"));
     assert!(body.get("multi_agent").is_none());

@@ -766,7 +766,7 @@ pub(crate) async fn handle_get_config_defaults(
         Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ConfigDefaults {
                 agent: value
-                    .get("default-agent")
+                    .get("defaultAgent")
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),

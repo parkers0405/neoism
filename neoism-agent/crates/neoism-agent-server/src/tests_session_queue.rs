@@ -628,7 +628,7 @@ async fn prompt_queue_survives_server_restart() {
     state
         .inner
         .store
-        .enqueue_prompt(
+        .enqueue_prompt_with_delivery(
             session.id.as_str(),
             &PromptRequest {
                 message_id: None,
@@ -642,6 +642,7 @@ async fn prompt_queue_survives_server_restart() {
                     text: "queued before restart".to_string(),
                 }],
             },
+            "queue",
         )
         .await
         .unwrap();
@@ -1003,16 +1004,19 @@ async fn held_subtask_completion_delivers_when_parent_turn_ends() {
     // Finished child with a durable pending completion (the outbox entry
     // `mark_subtask_completion_pending` writes).
     let child_id = neoism_agent_core::new_session_id();
+    let completion_id = Id::ascending(IdKind::Message);
     let mut child_extra = BTreeMap::new();
     child_extra.insert(
-        "subtaskCompletion".to_string(),
-        json!({
+        "subtaskCompletions".to_string(),
+        json!([{
+            "id": completion_id,
             "pending": true,
             "status": "completed",
             "result": "the last subagent result",
             "completedAt": 42,
-        }),
+        }]),
     );
+    child_extra.insert("subtaskPersistenceVersion".to_string(), json!(1));
     let child = SessionInfo {
         id: child_id.clone(),
         slug: "held-child".to_string(),
@@ -1035,6 +1039,16 @@ async fn held_subtask_completion_delivers_when_parent_turn_ends() {
         extra: child_extra,
     };
     state.inner.store.insert_session(&child).await.unwrap();
+    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+        &state,
+        &child.directory,
+    )
+    .await;
+    workspace
+        .runtime
+        .subagents()
+        .track(child.id.to_string())
+        .await;
     // The stale Busy status that used to wedge delivery forever.
     state
         .inner
@@ -1080,8 +1094,10 @@ async fn held_subtask_completion_delivers_when_parent_turn_ends() {
     assert_eq!(
         stored_child
             .extra
-            .get("subtaskCompletion")
-            .and_then(|value| value.get("pending"))
+            .get("subtaskCompletions")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|records| records.first())
+            .and_then(|record| record.get("pending"))
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );

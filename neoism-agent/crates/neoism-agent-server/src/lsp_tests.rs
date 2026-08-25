@@ -1,7 +1,6 @@
 use super::lsp_parse::{
     parse_completion, parse_diagnostics, parse_hover, parse_workspace_symbols,
 };
-use super::lsp_query::language_id_for_path as protocol_language_id_for_path;
 use super::*;
 use std::{
     env,
@@ -13,9 +12,89 @@ use std::{
 };
 
 use serde_json::{json, Value};
+use neoism_agent_service_api::{
+    LanguageCapabilitySnapshot, LanguageRootPolicy, LanguageRouteCapability,
+    LanguageServerCapability, LanguageServerOperations, LanguageServerTransport,
+    StaticLanguageCapabilityService,
+};
+
+fn fake_language(
+    id: &str,
+    name: &str,
+    command: &[&str],
+    routes: &[(&str, &str, &[&str], &[&str])],
+    markers: &[&str],
+) -> LanguageServerCapability {
+    LanguageServerCapability {
+        id: id.to_string(),
+        name: name.to_string(),
+        catalog_packages: Vec::new(),
+        transport: LanguageServerTransport::Stdio {
+            command: command.iter().map(|part| (*part).to_string()).collect(),
+        },
+        routes: routes
+            .iter()
+            .map(|(route_id, language_id, extensions, patterns)| LanguageRouteCapability {
+                id: (*route_id).to_string(),
+                document_language_id: (*language_id).to_string(),
+                extensions: extensions.iter().map(|value| (*value).to_string()).collect(),
+                filename_patterns: patterns.iter().map(|value| (*value).to_string()).collect(),
+            })
+            .collect(),
+        markers: markers.iter().map(|marker| (*marker).to_string()).collect(),
+        root_policy: if id == "rust" {
+            LanguageRootPolicy::CargoMetadata { manifest: "Cargo.toml".to_string() }
+        } else {
+            LanguageRootPolicy::NearestMarker
+        },
+        capabilities: LanguageServerOperations {
+            workspace_symbols: true,
+            completion: true,
+            hover: true,
+            definition: true,
+            references: true,
+            implementation: true,
+            call_hierarchy: true,
+            diagnostics: true,
+            document_symbols: true,
+            formatting: true,
+            code_actions: true,
+            rename: true,
+        },
+    }
+}
+
+fn test_runtime() -> LspRuntime {
+    let languages = vec![
+        fake_language("rust", "Rust", &["rust-analyzer"], &[("rust", "rust", &["rs"], &[])], &["Cargo.toml"]),
+        fake_language(
+            "typescript",
+            "TypeScript",
+            &["typescript-language-server", "--stdio"],
+            &[
+                ("typescript", "typescript", &["ts"], &[]),
+                ("javascript", "javascript", &["js"], &[]),
+            ],
+            &["package.json"],
+        ),
+        fake_language("python", "Python", &["pyright-langserver", "--stdio"], &[("python", "python", &["py"], &[])], &[]),
+        fake_language("go", "Go", &["gopls"], &[("go", "go", &["go"], &[])], &["go.mod"]),
+        fake_language("json", "JSON", &["json-lsp", "--stdio"], &[("json", "json", &["json"], &[])], &[]),
+        fake_language("nix", "Nix", &["nil"], &[("nix", "nix", &["nix"], &[])], &["flake.nix"]),
+        fake_language("docker", "Docker", &["docker-language-server", "start", "--stdio"], &[("dockerfile", "dockerfile", &[], &["Dockerfile"])], &[]),
+    ];
+    let services = crate::standard_services().with_language_capabilities(std::sync::Arc::new(
+        StaticLanguageCapabilityService::new(LanguageCapabilitySnapshot {
+            generation: 1,
+            languages: std::sync::Arc::from(languages),
+        }),
+    ));
+    LspRuntime::new(services)
+}
 
 struct TempWorkspace {
     path: PathBuf,
+    runtime: LspRuntime,
 }
 
 impl TempWorkspace {
@@ -26,7 +105,7 @@ impl TempWorkspace {
             .as_nanos();
         let path = env::temp_dir().join(format!("neoism-lsp-{name}-{nonce}"));
         fs::create_dir_all(path.join(".agent")).expect("create temp workspace");
-        Self { path }
+        Self { path, runtime: test_runtime() }
     }
 
     fn touch(&self, relative: &str) {
@@ -50,7 +129,7 @@ fn detects_rust_from_cargo_marker_and_extension() {
     workspace.touch("Cargo.toml");
     workspace.touch("src/main.rs");
 
-    let statuses = status(&workspace.path);
+    let statuses = status(&workspace.runtime, &workspace.path);
     let rust = statuses
         .iter()
         .find(|item| item.id == "rust")
@@ -71,7 +150,7 @@ fn detects_multiple_languages_and_skips_ignored_directories() {
     workspace.touch("script.py");
     workspace.touch("node_modules/ignored.go");
 
-    let statuses = status(&workspace.path);
+    let statuses = status(&workspace.runtime, &workspace.path);
     let ids: Vec<&str> = statuses.iter().map(|item| item.id.as_str()).collect();
 
     assert!(ids.contains(&"typescript"));
@@ -92,7 +171,7 @@ fn file_scoped_status_does_not_scan_or_report_unrelated_languages() {
     let scan = workspace_scan_for_file(&workspace.path, &file);
     assert_eq!(scan.files, 0, "known extensions bypass workspace scans");
 
-    let statuses = status_for_file(&workspace.path, &file);
+    let statuses = status_for_file(&workspace.runtime, &workspace.path, &file);
     assert_eq!(
         statuses
             .iter()
@@ -115,9 +194,9 @@ fn unknown_file_extension_does_not_inherit_workspace_lsps() {
         scan.files, 0,
         "unknown extensions must not scan the workspace"
     );
-    assert!(status_for_file(&workspace.path, &file).is_empty());
+    assert!(status_for_file(&workspace.runtime, &workspace.path, &file).is_empty());
     assert_eq!(
-        file_query_specs(&workspace.path, &file, LspOperation::Diagnostics).len(),
+        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Diagnostics).len(),
         0,
         "workspace LSPs must never receive an unknown document language"
     );
@@ -136,9 +215,9 @@ fn extensionless_file_does_not_inherit_workspace_lsps() {
         scan.files, 0,
         "extensionless files must not scan the workspace"
     );
-    assert!(status_for_file(&workspace.path, &file).is_empty());
+    assert!(status_for_file(&workspace.runtime, &workspace.path, &file).is_empty());
     assert_eq!(
-        file_query_specs(&workspace.path, &file, LspOperation::Diagnostics).len(),
+        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Diagnostics).len(),
         0,
         "an unrelated extensionless file must not inherit workspace LSPs"
     );
@@ -151,6 +230,7 @@ fn extensionless_file_does_not_inherit_workspace_lsps() {
 #[test]
 #[ignore = "requires an installed rust-analyzer"]
 fn managed_rust_analyzer_publishes_fixture_diagnostics() {
+    let runtime = test_runtime();
     // Deliberately pass the outer Neoism workspace, matching the live editor
     // tree. The engine must select the fixture's nearest Cargo.toml as RA's
     // project root while retaining the outer root for cache/event ownership.
@@ -162,23 +242,23 @@ fn managed_rust_analyzer_publishes_fixture_diagnostics() {
     let file = project_root.join("src/main.rs");
     let text = fs::read_to_string(&file).expect("read fixture");
 
-    shutdown_all();
+    shutdown_all(&runtime);
     assert_eq!(
-        sync_document(&workspace_root, &file, Some(&text)),
+        sync_document(&runtime, &workspace_root, &file, Some(&text)),
         vec!["rust"]
     );
-    let status = status_for_file(&workspace_root, &file);
+    let status = status_for_file(&runtime, &workspace_root, &file);
     assert_eq!(status.len(), 1);
     assert_eq!(Path::new(&status[0].workspace.root), project_root);
     let deadline = Instant::now() + Duration::from_secs(30);
     let diagnostics = loop {
-        let diagnostics = cached_diagnostics(&workspace_root, &file);
+        let diagnostics = cached_diagnostics(&runtime, &workspace_root, &file);
         if diagnostics.len() >= 4 || Instant::now() >= deadline {
             break diagnostics;
         }
         thread::sleep(Duration::from_millis(100));
     };
-    shutdown_all();
+    shutdown_all(&runtime);
 
     assert!(
         diagnostics.len() >= 4,
@@ -213,6 +293,7 @@ fn managed_rust_analyzer_publishes_fixture_diagnostics() {
 #[test]
 #[ignore = "requires an installed nil language server"]
 fn installed_nil_publishes_nix_fixture_diagnostics() {
+    let runtime = test_runtime();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../fixtures/editor-diagnostics/nix")
         .canonicalize()
@@ -220,17 +301,17 @@ fn installed_nil_publishes_nix_fixture_diagnostics() {
     let file = root.join("flake.nix");
     let text = fs::read_to_string(&file).expect("read Nix fixture");
 
-    shutdown_all();
-    assert_eq!(sync_document(&root, &file, Some(&text)), vec!["nix"]);
+    shutdown_all(&runtime);
+    assert_eq!(sync_document(&runtime, &root, &file, Some(&text)), vec!["nix"]);
     let deadline = Instant::now() + Duration::from_secs(30);
     let diagnostics = loop {
-        let diagnostics = cached_diagnostics(&root, &file);
+        let diagnostics = cached_diagnostics(&runtime, &root, &file);
         if diagnostics.len() >= 3 || Instant::now() >= deadline {
             break diagnostics;
         }
         thread::sleep(Duration::from_millis(100));
     };
-    shutdown_all();
+    shutdown_all(&runtime);
 
     assert!(
         diagnostics.len() >= 3,
@@ -261,6 +342,7 @@ fn installed_nil_publishes_nix_fixture_diagnostics() {
 #[test]
 #[ignore = "requires managed docker-language-server"]
 fn managed_docker_language_server_publishes_dockerfile_diagnostics() {
+    let runtime = test_runtime();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../fixtures/editor-diagnostics/docker")
         .canonicalize()
@@ -268,21 +350,21 @@ fn managed_docker_language_server_publishes_dockerfile_diagnostics() {
     let file = root.join("Dockerfile");
     let text = fs::read_to_string(&file).expect("read Docker fixture");
 
-    shutdown_all();
-    assert_eq!(sync_document(&root, &file, Some(&text)), vec!["docker"]);
+    shutdown_all(&runtime);
+    assert_eq!(sync_document(&runtime, &root, &file, Some(&text)), vec!["docker"]);
     // Exercise the same write/touch path the daemon uses. The client sends
     // didSave only when the server advertises it, and otherwise relies on the
     // push-diagnostics lifecycle established by didOpen/didChange.
-    let _ = touch_document_diagnostics(&root, &file, Some(&text));
+    let _ = touch_document_diagnostics(&runtime, &root, &file, Some(&text));
     let deadline = Instant::now() + Duration::from_secs(30);
     let diagnostics = loop {
-        let diagnostics = cached_diagnostics(&root, &file);
+        let diagnostics = cached_diagnostics(&runtime, &root, &file);
         if diagnostics.len() >= 3 || Instant::now() >= deadline {
             break diagnostics;
         }
         thread::sleep(Duration::from_millis(100));
     };
-    shutdown_all();
+    shutdown_all(&runtime);
 
     assert!(
         diagnostics.len() >= 3,
@@ -311,6 +393,7 @@ fn managed_docker_language_server_publishes_dockerfile_diagnostics() {
 #[test]
 #[ignore = "requires typescript-language-server and TypeScript"]
 fn installed_typescript_server_publishes_ts_and_js_fixture_diagnostics() {
+    let runtime = test_runtime();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../fixtures/editor-diagnostics/typescript")
         .canonicalize()
@@ -325,11 +408,11 @@ fn installed_typescript_server_publishes_ts_and_js_fixture_diagnostics() {
     ] {
         let file = root.join(name);
         let text = fs::read_to_string(&file).expect("read TypeScript fixture");
-        shutdown_all();
-        assert_eq!(sync_document(&root, &file, Some(&text)), vec!["typescript"]);
+        shutdown_all(&runtime);
+        assert_eq!(sync_document(&runtime, &root, &file, Some(&text)), vec!["typescript"]);
         let deadline = Instant::now() + Duration::from_secs(30);
         let diagnostics = loop {
-            let diagnostics = cached_diagnostics(&root, &file);
+            let diagnostics = cached_diagnostics(&runtime, &root, &file);
             if diagnostics.len() >= 3 || Instant::now() >= deadline {
                 break diagnostics;
             }
@@ -363,12 +446,12 @@ fn installed_typescript_server_publishes_ts_and_js_fixture_diagnostics() {
             .replace("missingTypeScriptFixtureSymbol", "scrollSection001")
             .replace("missingJavaScriptFixtureSymbol", "scrollSection001");
         assert_eq!(
-            sync_document(&root, &file, Some(&fixed)),
+            sync_document(&runtime, &root, &file, Some(&fixed)),
             vec!["typescript"]
         );
         let clear_deadline = Instant::now() + Duration::from_secs(10);
         let cleared = loop {
-            let diagnostics = cached_diagnostics(&root, &file);
+            let diagnostics = cached_diagnostics(&runtime, &root, &file);
             if diagnostics.is_empty() || Instant::now() >= clear_deadline {
                 break diagnostics;
             }
@@ -378,152 +461,15 @@ fn installed_typescript_server_publishes_ts_and_js_fixture_diagnostics() {
             cleared.is_empty(),
             "{expected_language} diagnostics did not clear after an unsaved live edit: {cleared:#?}"
         );
-        shutdown_all();
+        shutdown_all(&runtime);
     }
 }
 
 #[test]
-fn shared_typescript_server_opens_javascript_with_javascript_language_id() {
-    assert_eq!(
-        protocol_language_id_for_path("typescript", Path::new("src/app.js")),
-        Some("javascript")
-    );
-    assert_eq!(
-        protocol_language_id_for_path("typescript", Path::new("src/app.ts")),
-        Some("typescript")
-    );
-}
-
-#[test]
-fn every_builtin_route_has_a_real_protocol_language_id() {
-    for spec in LANGUAGE_SPECS {
-        for route in spec.routes {
-            assert!(
-                !route.document_language_id.is_empty(),
-                "{} / {}",
-                spec.id,
-                route.id
-            );
-            assert_ne!(
-                route.document_language_id, "plaintext",
-                "{} / {}",
-                spec.id, route.id
-            );
-
-            let representative = if let Some(extension) = route.extensions.first() {
-                PathBuf::from(format!("fixture.{extension}"))
-            } else {
-                let pattern = route
-                    .filename_patterns
-                    .first()
-                    .expect("route has an extension or filename pattern");
-                PathBuf::from(pattern.replace('*', "dev"))
-            };
-            assert_eq!(
-                spec.language_id_for_path(&representative),
-                Some(route.document_language_id),
-                "adapter {} did not route {}",
-                spec.id,
-                representative.display()
-            );
-        }
-    }
-}
-
-#[test]
-fn docker_filename_routes_beat_generic_extension_adapters() {
-    let cases = [
-        ("Dockerfile", "dockerfile"),
-        ("Dockerfile.dev", "dockerfile"),
-        ("ci.Dockerfile", "dockerfile"),
-        ("Containerfile", "dockerfile"),
-        ("compose.yaml", "dockercompose"),
-        ("docker-compose.override.yml", "dockercompose"),
-        ("docker-bake.hcl", "dockerbake"),
-        ("docker-bake.json", "dockerbake"),
-    ];
-    for (file, language_id) in cases {
-        let adapter = lsp_languages::best_adapter_for_path(Path::new(file))
-            .unwrap_or_else(|| panic!("missing adapter for {file}"));
-        assert_eq!(adapter.id, "docker", "wrong adapter for {file}");
-        assert_eq!(
-            adapter.language_id_for_path(Path::new(file)),
-            Some(language_id)
-        );
-    }
-
-    assert_eq!(
-        lsp_languages::best_adapter_for_path(Path::new("ordinary.yaml"))
-            .map(|spec| spec.id),
-        Some("yaml")
-    );
-    assert_eq!(
-        lsp_languages::best_adapter_for_path(Path::new("ordinary.json"))
-            .map(|spec| spec.id),
-        Some("json")
-    );
-}
-
-#[test]
-fn nix_godot_and_unknown_files_route_without_plaintext_fallbacks() {
-    assert_eq!(language_id_for_path("flake.nix"), Some("nix"));
-    assert_eq!(
-        lsp_languages::document_language_id_for_path(Path::new("flake.nix")),
-        Some("nix")
-    );
-    assert_eq!(language_id_for_path("player.gd"), Some("gdscript"));
-    assert_eq!(
-        lsp_languages::best_adapter_for_path(Path::new("player.gd")).map(|spec| spec.id),
-        Some("godot")
-    );
-    for file in ["project.godot", "level.tscn", "player.gd.uid", "Makefile"] {
-        assert_eq!(
-            language_id_for_path(file),
-            None,
-            "{file} is not a text-document route"
-        );
-        assert_eq!(
-            lsp_languages::document_language_id_for_path(Path::new(file)),
-            None,
-            "{file} must never fall back to plaintext"
-        );
-    }
-}
-
-#[test]
-fn shared_adapters_keep_one_server_identity_and_route_tsx_jsx() {
-    let ts = lsp_languages::best_adapter_for_path(Path::new("app.ts"))
-        .expect("TypeScript adapter");
-    let js = lsp_languages::best_adapter_for_path(Path::new("app.js"))
-        .expect("JavaScript adapter");
-    assert_eq!(ts.id, "typescript");
-    assert_eq!(js.id, ts.id, "JS and TS must share one server identity");
-    assert_eq!(
-        ts.language_id_for_path(Path::new("app.tsx")),
-        Some("typescriptreact")
-    );
-    assert_eq!(
-        ts.language_id_for_path(Path::new("app.jsx")),
-        Some("javascriptreact")
-    );
-}
-
-#[test]
-fn file_scoped_status_keeps_server_identity_but_uses_the_document_route() {
-    let workspace = TempWorkspace::new("route-status");
-    for (file, server_id, language) in [
-        ("Dockerfile", "docker", "dockerfile"),
-        ("game/player.gd", "godot", "gdscript"),
-        ("web/app.js", "typescript", "javascript"),
-    ] {
-        workspace.touch(file);
-        let statuses = status_for_file(&workspace.path, workspace.path.join(file));
-        let status = statuses
-            .iter()
-            .find(|status| status.id == server_id)
-            .unwrap_or_else(|| panic!("missing {server_id} status for {file}"));
-        assert_eq!(status.language, language, "wrong route for {file}");
-    }
+fn language_id_for_path_uses_the_injected_runtime() {
+    let runtime = test_runtime();
+    assert_eq!(language_id_for_path(&runtime, "fixture.rs"), Some("rust".to_string()));
+    assert_eq!(language_id_for_path(&runtime, "fixture.unknown"), None);
 }
 
 #[test]
@@ -531,7 +477,7 @@ fn returns_empty_status_for_unrecognized_workspace() {
     let workspace = TempWorkspace::new("empty");
     workspace.touch("README.md");
 
-    assert!(status(&workspace.path).is_empty());
+    assert!(status(&workspace.runtime, &workspace.path).is_empty());
 }
 
 #[test]
@@ -553,7 +499,7 @@ fn status_includes_configured_lsp_servers() {
     )
     .expect("write config");
 
-    let statuses = status(&workspace.path);
+    let statuses = status(&workspace.runtime, &workspace.path);
     let custom = statuses
         .iter()
         .find(|item| item.id == "custom-rust")
@@ -588,7 +534,7 @@ fn configured_status_supports_generic_tcp_endpoints_without_a_command() {
     )
     .expect("write config");
 
-    let configured = status(&workspace.path)
+    let configured = status(&workspace.runtime, &workspace.path)
         .into_iter()
         .find(|status| status.id == "remote-gdscript")
         .expect("configured TCP status");
@@ -635,10 +581,10 @@ fn configured_stdio_adapter_adds_a_genuinely_new_language_route() {
 
     let file = workspace.path.join("src/example.quux");
     assert_eq!(
-        language_id_for_path_in(&workspace.path, &file).as_deref(),
+        language_id_for_path_in(&workspace.runtime, &workspace.path, &file).as_deref(),
         Some("quux")
     );
-    let adapters = file_query_specs(&workspace.path, &file, LspOperation::Hover);
+    let adapters = file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Hover);
     assert_eq!(adapters.len(), 1);
     assert_eq!(adapters[0].id, "quux-lsp");
     assert_eq!(
@@ -646,10 +592,10 @@ fn configured_stdio_adapter_adds_a_genuinely_new_language_route() {
         Some("quux-script")
     );
     assert!(
-        file_query_specs(&workspace.path, &file, LspOperation::Completion).is_empty()
+        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Completion).is_empty()
     );
 
-    let metadata = language_server_adapters_for(&workspace.path)
+    let metadata = language_server_adapters_for(&workspace.runtime, &workspace.path)
         .into_iter()
         .find(|adapter| adapter.id == "quux-lsp")
         .expect("dynamic adapter metadata");
@@ -706,10 +652,10 @@ fn document_lifecycle_is_not_gated_by_diagnostics_capability() {
 
     let file = workspace.path.join("src/example.liveonly");
     assert!(
-        file_query_specs(&workspace.path, &file, LspOperation::Diagnostics).is_empty(),
+        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Diagnostics).is_empty(),
         "fixture intentionally disables diagnostics"
     );
-    let lifecycle = file_lifecycle_specs(&workspace.path, &file);
+    let lifecycle = file_lifecycle_specs(&workspace.runtime, &workspace.path, &file);
     assert_eq!(lifecycle.len(), 1);
     assert_eq!(lifecycle[0].id, "live-only-lsp");
 }
@@ -736,11 +682,11 @@ fn invalid_custom_route_is_actionable_and_never_falls_back_to_plaintext() {
     .expect("write invalid adapter config");
 
     let file = workspace.path.join("broken.quux");
-    assert_eq!(language_id_for_path_in(&workspace.path, &file), None);
+    assert_eq!(language_id_for_path_in(&workspace.runtime, &workspace.path, &file), None);
     assert!(
-        file_query_specs(&workspace.path, &file, LspOperation::Diagnostics).is_empty()
+        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Diagnostics).is_empty()
     );
-    let status = status_for_file(&workspace.path, &file)
+    let status = status_for_file(&workspace.runtime, &workspace.path, &file)
         .into_iter()
         .find(|status| status.id == "broken-quux")
         .expect("invalid adapter status");
@@ -753,23 +699,22 @@ fn invalid_custom_route_is_actionable_and_never_falls_back_to_plaintext() {
 }
 
 #[test]
-fn legacy_builtin_override_keeps_the_builtin_route_table() {
-    let workspace = TempWorkspace::new("legacy-builtin-override");
+fn builtin_override_keeps_the_builtin_route_table() {
+    let workspace = TempWorkspace::new("builtin-override");
     workspace.touch("src/lib.rs");
     fs::write(
         workspace.path.join(".agent/agent.json"),
         r#"{
           "lsp": {
             "rust": {
-              "language": "rust",
               "command": ["/bin/sh"]
             }
           }
         }"#,
     )
-    .expect("write legacy override");
+    .expect("write override");
 
-    let adapter = lsp_adapters::adapters_for_root(&workspace.path)
+    let adapter = workspace.runtime.adapters_for_root(&workspace.path)
         .into_iter()
         .find(|adapter| adapter.id == "rust")
         .expect("overridden Rust adapter");
@@ -786,54 +731,40 @@ fn explicit_lsp_false_disables_builtins_and_cache_refreshes() {
     let workspace = TempWorkspace::new("lsp-disable-cache");
     fs::write(workspace.path.join(".agent/agent.json"), r#"{ "lsp": false }"#)
         .expect("disable LSP");
-    assert!(lsp_adapters::adapters_for_root(&workspace.path).is_empty());
+    assert!(workspace.runtime.adapters_for_root(&workspace.path).is_empty());
 
     fs::write(workspace.path.join(".agent/agent.json"), r#"{ "lsp": true }"#)
         .expect("enable LSP");
-    assert!(lsp_adapters::adapters_for_root(&workspace.path)
+    assert!(workspace.runtime.adapters_for_root(&workspace.path)
         .iter()
         .any(|adapter| adapter.id == "rust"), "snapshot identity invalidates stale adapter config immediately");
-    lsp_adapters::invalidate_adapter_cache(&workspace.path);
+    lsp_adapters::invalidate_adapter_cache(&workspace.runtime.service.adapter_cache, &workspace.path);
 }
 
 #[test]
 fn public_adapter_metadata_is_the_catalog_source_of_truth() {
-    let adapters = language_server_adapters();
-    let docker = adapters
+    let runtime = test_runtime();
+    let adapters = language_server_adapters(&runtime);
+    let rust = adapters
         .iter()
-        .find(|adapter| adapter.id == "docker")
-        .expect("Docker adapter metadata");
+        .find(|adapter| adapter.id == "rust")
+        .expect("fake Rust adapter metadata");
     assert_eq!(
-        docker.transport,
+        rust.transport,
         LspAdapterTransport::Stdio {
-            command: vec![
-                "docker-language-server".to_string(),
-                "start".to_string(),
-                "--stdio".to_string(),
-            ]
+            command: vec!["rust-analyzer".to_string()]
         }
     );
-    assert!(docker
+    assert!(rust
         .routes
         .iter()
-        .any(|route| route.document_language_id == "dockercompose"));
-
-    let godot = adapters
-        .iter()
-        .find(|adapter| adapter.id == "godot")
-        .expect("Godot adapter metadata");
-    assert!(matches!(
-        godot.transport,
-        LspAdapterTransport::Tcp {
-            default_port: 6005,
-            ..
-        }
-    ));
+        .any(|route| route.document_language_id == "rust"));
 }
 
 #[test]
 fn resolves_command_source_for_runtime_launches() {
-    let (missing_command, missing_source) = resolve_lsp_command(
+    let runtime = test_runtime();
+    let (missing_command, missing_source) = runtime.resolve_lsp_command(
         "definitely-not-installed-language-server",
         vec!["definitely-not-installed-language-server".to_string()],
     );
@@ -844,11 +775,11 @@ fn resolves_command_source_for_runtime_launches() {
     assert_eq!(missing_source, LspCommandSource::Missing);
 
     let (explicit_command, explicit_source) =
-        resolve_lsp_command("sh", vec!["/bin/sh".to_string()]);
+        runtime.resolve_lsp_command("sh", vec!["/bin/sh".to_string()]);
     assert_eq!(explicit_command, vec!["/bin/sh".to_string()]);
     assert_eq!(explicit_source, LspCommandSource::Config);
 
-    let (path_command, path_source) = resolve_lsp_command("sh", vec!["sh".to_string()]);
+    let (path_command, path_source) = runtime.resolve_lsp_command("sh", vec!["sh".to_string()]);
     assert!(Path::new(&path_command[0]).is_file());
     assert_eq!(path_source, LspCommandSource::Path);
 }
@@ -885,24 +816,6 @@ fn lsp_resolution_uses_the_injected_executable_service() {
     );
     assert_eq!(command[0], "/managed/pyright-langserver");
     assert_eq!(source, LspCommandSource::Extension);
-}
-
-#[test]
-fn normalizes_opencode_lsp_operation_aliases() {
-    assert_eq!(normalize_operation("findReferences"), "references");
-    assert_eq!(normalize_operation("find_references"), "references");
-    assert_eq!(normalize_operation("goToImplementation"), "implementation");
-    assert_eq!(
-        normalize_operation("go-to-implementation"),
-        "implementation"
-    );
-    assert_eq!(
-        normalize_operation("prepareCallHierarchy"),
-        "prepare_call_hierarchy"
-    );
-    assert_eq!(normalize_operation("incomingCalls"), "incoming_calls");
-    assert_eq!(normalize_operation("outgoingCalls"), "outgoing_calls");
-    assert_eq!(normalize_operation("diagnostics"), "diagnostics");
 }
 
 #[test]

@@ -536,14 +536,16 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
 #[derive(Clone)]
 pub(crate) struct AcpTerminalManager {
     cwd: PathBuf,
+    services: neoism_agent_service_api::AgentServices,
     next_id: Arc<AtomicU64>,
     terminals: Arc<Mutex<HashMap<String, Arc<AcpTerminal>>>>,
 }
 
 impl AcpTerminalManager {
-    pub(crate) fn new(cwd: PathBuf) -> Self {
+    pub(crate) fn new(cwd: PathBuf, services: neoism_agent_service_api::AgentServices) -> Self {
         Self {
             cwd,
+            services,
             next_id: Arc::new(AtomicU64::new(1)),
             terminals: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -580,7 +582,12 @@ impl AcpTerminalManager {
             .map(|v| v as usize)
             .unwrap_or(DEFAULT_TERMINAL_OUTPUT_LIMIT);
 
-        let mut child_cmd = Command::new(&command);
+        let executable = resolve_acp_terminal_command(&self.services, &command, &cwd)
+        .map_err(|error| AcpRpcError {
+            code: -32000,
+            message: error.to_string(),
+        })?;
+        let mut child_cmd = Command::new(executable);
         child_cmd
             .args(&args)
             .current_dir(&cwd)
@@ -676,6 +683,44 @@ impl AcpTerminalManager {
                 code: -32000,
                 message: format!("Unknown ACP terminal id `{id}`"),
             })
+    }
+}
+
+fn resolve_acp_terminal_command(
+    services: &neoism_agent_service_api::AgentServices,
+    command: &str,
+    cwd: &Path,
+) -> anyhow::Result<PathBuf> {
+    let requested_command = crate::executable::in_directory(command, cwd);
+    crate::executable::resolve_command(
+        services,
+        requested_command,
+        neoism_agent_service_api::ExecutablePurpose::ExternalAgent,
+        "ACP terminal command",
+    )
+}
+
+#[cfg(test)]
+mod executable_tests {
+    use super::*;
+    use crate::executable::test_support::FakeExecutableService;
+
+    #[test]
+    fn acp_terminal_honors_injected_path_and_reports_missing_executable() {
+        let injected = PathBuf::from("/injected/acp-command");
+        let mut services = crate::standard_services();
+        services.executables = Arc::new(FakeExecutableService::with("acp-command", &injected));
+        assert_eq!(
+            resolve_acp_terminal_command(&services, "acp-command", Path::new(".")).unwrap(),
+            injected
+        );
+
+        services.executables = Arc::new(FakeExecutableService::default());
+        let error = resolve_acp_terminal_command(&services, "acp-command", Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ACP terminal command executable `acp-command` is unavailable"));
+        assert!(error.contains("install it"));
     }
 }
 

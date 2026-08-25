@@ -26,7 +26,7 @@ use mcp_oauth::{
     refresh_oauth_tokens, remote_auth_status_async, usable_oauth_config,
     valid_tokens_for_url,
 };
-use mcp_runtime::runtime_manager;
+pub(crate) use mcp_runtime::McpRuntimeManager;
 #[cfg(test)]
 use mcp_transport::parse_http_rpc_response;
 
@@ -36,8 +36,9 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub(crate) fn status(
     directory: &str,
     auth_store: &McpAuthStore,
+    state: &AppState,
 ) -> anyhow::Result<BTreeMap<String, McpStatus>> {
-    status_with_state(directory, auth_store, None)
+    status_with_state(directory, auth_store, Some(state))
 }
 
 pub(crate) fn status_with_state(
@@ -95,7 +96,7 @@ fn config_source_writable(directory: &str, name: &str, state: Option<&AppState>)
     }).unwrap_or(false)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn status_for_config(
     config: &BTreeMap<String, McpConfig>,
     auth_store: &McpAuthStore,
@@ -146,7 +147,7 @@ fn status_for_entry_with_directory(
         return McpStatus::Disabled;
     }
     if let Some(directory) = directory {
-        if let Some(status) = runtime_manager().status(directory, name) {
+        if let Some(status) = state.and_then(|state| state.inner.workspace_runtimes.loaded(directory)).and_then(|runtime| runtime.mcp_if_allocated()).and_then(|mcp| mcp.status(directory, name)) {
             return status;
         }
     }
@@ -186,17 +187,18 @@ pub(crate) async fn connect(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
+    state: AppState,
 ) -> anyhow::Result<McpStatus> {
-    connect_with_state(directory, name, auth_store, None).await
+    connect_with_state(directory, name, auth_store, state).await
 }
 
 pub(crate) async fn connect_with_state(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
-    state: Option<AppState>,
+    state: AppState,
 ) -> anyhow::Result<McpStatus> {
-    let config = configured_servers(directory, state.as_ref())?;
+    let config = configured_servers(directory, Some(&state))?;
     let entry = config
         .get(name)
         .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
@@ -208,13 +210,13 @@ async fn connect_config(
     name: &str,
     config: &McpConfig,
     auth_store: &McpAuthStore,
-    state: Option<AppState>,
+    state: AppState,
 ) -> anyhow::Result<McpStatus> {
     if !is_enabled(config) {
-        let _ = runtime_manager().disconnect(directory, name).await;
+        let _ = state.workspace_runtime(directory).await.mcp().disconnect(directory, name).await;
         return Ok(McpStatus::Disabled);
     }
-    if builtin_service(state.as_ref(), name).is_some() {
+    if builtin_service(Some(&state), name).is_some() {
         return Ok(McpStatus::Connected);
     }
     match config {
@@ -232,7 +234,7 @@ async fn connect_config(
                 });
             }
             let environment = expand_env_map(environment.as_ref());
-            runtime_manager()
+            state.workspace_runtime(directory).await.mcp()
                 .connect_local(
                     directory,
                     name,
@@ -255,7 +257,7 @@ async fn connect_config(
             match auth_status {
                 McpStatus::Connected => {
                     let headers = expand_env_map(headers.as_ref());
-                    match runtime_manager()
+                    match state.workspace_runtime(directory).await.mcp()
                         .connect_remote(
                             directory,
                             name,
@@ -294,7 +296,7 @@ async fn connect_config(
                                     error: format!("{error:#}"),
                                 }
                             };
-                            runtime_manager().connect_remote_status(
+                            state.workspace_runtime(directory).await.mcp().connect_remote_status(
                                 directory,
                                 name,
                                 url,
@@ -305,8 +307,8 @@ async fn connect_config(
                     }
                 }
                 other => {
-                    let _ = runtime_manager().disconnect(directory, name).await;
-                    runtime_manager().connect_remote_status(
+                    let _ = state.workspace_runtime(directory).await.mcp().disconnect(directory, name).await;
+                    state.workspace_runtime(directory).await.mcp().connect_remote_status(
                         directory,
                         name,
                         url,
@@ -319,8 +321,12 @@ async fn connect_config(
     }
 }
 
-pub(crate) async fn disconnect(directory: &str, name: &str) -> anyhow::Result<bool> {
-    runtime_manager().disconnect(directory, name).await
+pub(crate) async fn disconnect(
+    state: &AppState,
+    directory: &str,
+    name: &str,
+) -> anyhow::Result<bool> {
+    state.workspace_runtime(directory).await.mcp().disconnect(directory, name).await
 }
 
 #[cfg(test)]
@@ -328,17 +334,18 @@ pub(crate) async fn tools(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
+    state: AppState,
 ) -> anyhow::Result<Vec<McpToolInfo>> {
-    tools_with_state(directory, name, auth_store, None).await
+    tools_with_state(directory, name, auth_store, state).await
 }
 
 pub(crate) async fn tools_with_state(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
-    state: Option<AppState>,
+    state: AppState,
 ) -> anyhow::Result<Vec<McpToolInfo>> {
-    if let Some(service) = enabled_builtin_service(directory, name, state.as_ref())? {
+    if let Some(service) = enabled_builtin_service(directory, name, Some(&state))? {
         return Ok(service.tools().into_iter().map(|tool| McpToolInfo {
             name: tool.name,
             description: tool.description,
@@ -347,8 +354,8 @@ pub(crate) async fn tools_with_state(
             annotations: tool.annotations,
         }).collect());
     }
-    ensure_connected_with_state(directory, name, auth_store, state).await?;
-    runtime_manager()
+    ensure_connected_with_state(directory, name, auth_store, state.clone()).await?;
+    state.workspace_runtime(directory).await.mcp()
         .tools(directory, name)
         .ok_or_else(|| anyhow!("MCP server {name} is not connected"))
 }
@@ -358,17 +365,18 @@ pub(crate) async fn resources(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
+    state: AppState,
 ) -> anyhow::Result<Vec<McpResource>> {
-    resources_with_state(directory, name, auth_store, None).await
+    resources_with_state(directory, name, auth_store, state).await
 }
 
 pub(crate) async fn resources_with_state(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
-    state: Option<AppState>,
+    state: AppState,
 ) -> anyhow::Result<Vec<McpResource>> {
-    if let Some(service) = enabled_builtin_service(directory, name, state.as_ref())? {
+    if let Some(service) = enabled_builtin_service(directory, name, Some(&state))? {
         return Ok(service.resources().into_iter().map(|resource| McpResource {
             name: resource.name,
             uri: resource.uri,
@@ -377,8 +385,8 @@ pub(crate) async fn resources_with_state(
             client: name.to_string(),
         }).collect());
     }
-    ensure_connected_with_state(directory, name, auth_store, state).await?;
-    runtime_manager()
+    ensure_connected_with_state(directory, name, auth_store, state.clone()).await?;
+    state.workspace_runtime(directory).await.mcp()
         .resources(directory, name)
         .ok_or_else(|| anyhow!("MCP server {name} is not connected"))
 }
@@ -388,17 +396,18 @@ pub(crate) async fn prompts(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
+    state: AppState,
 ) -> anyhow::Result<Vec<McpPromptInfo>> {
-    prompts_with_state(directory, name, auth_store, None).await
+    prompts_with_state(directory, name, auth_store, state).await
 }
 
 pub(crate) async fn prompts_with_state(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
-    state: Option<AppState>,
+    state: AppState,
 ) -> anyhow::Result<Vec<McpPromptInfo>> {
-    if let Some(service) = enabled_builtin_service(directory, name, state.as_ref())? {
+    if let Some(service) = enabled_builtin_service(directory, name, Some(&state))? {
         return Ok(service.prompts().into_iter().map(|prompt| McpPromptInfo {
             name: prompt.name,
             description: prompt.description,
@@ -410,8 +419,8 @@ pub(crate) async fn prompts_with_state(
             client: name.to_string(),
         }).collect());
     }
-    ensure_connected_with_state(directory, name, auth_store, state).await?;
-    runtime_manager()
+    ensure_connected_with_state(directory, name, auth_store, state.clone()).await?;
+    state.workspace_runtime(directory).await.mcp()
         .prompts(directory, name)
         .ok_or_else(|| anyhow!("MCP server {name} is not connected"))
 }
@@ -423,8 +432,9 @@ pub(crate) async fn call_tool(
     tool: &str,
     arguments: Value,
     auth_store: &McpAuthStore,
+    state: AppState,
 ) -> anyhow::Result<McpToolCallResult> {
-    call_tool_with_state(directory, client, tool, arguments, auth_store, None).await
+    call_tool_with_state(directory, client, tool, arguments, auth_store, state).await
 }
 
 pub(crate) async fn call_tool_with_state(
@@ -433,9 +443,9 @@ pub(crate) async fn call_tool_with_state(
     tool: &str,
     arguments: Value,
     auth_store: &McpAuthStore,
-    state: Option<AppState>,
+    state: AppState,
 ) -> anyhow::Result<McpToolCallResult> {
-    if let Some(service) = enabled_builtin_service(directory, client, state.as_ref())? {
+    if let Some(service) = enabled_builtin_service(directory, client, Some(&state))? {
         let result = service.call_tool_async(std::path::Path::new(directory), tool, arguments).await?;
         return Ok(McpToolCallResult {
             content: result.content.into_iter().map(|content| match content {
@@ -448,18 +458,18 @@ pub(crate) async fn call_tool_with_state(
     }
     ensure_connected_with_state(directory, client, auth_store, state.clone()).await?;
     let retry_arguments = arguments.clone();
-    let result = runtime_manager()
+    let result = state.workspace_runtime(directory).await.mcp()
         .call_tool(directory, client, tool, arguments)
         .await;
     if let Err(error) = &result {
         if refresh_remote_credentials_after_auth_error(
-            directory, client, auth_store, error, state.as_ref(),
+            directory, client, auth_store, error, Some(&state),
         )
         .await?
         {
-            let _ = runtime_manager().disconnect(directory, client).await;
-            ensure_connected_with_state(directory, client, auth_store, state).await?;
-            return runtime_manager()
+            let _ = state.workspace_runtime(directory).await.mcp().disconnect(directory, client).await;
+            ensure_connected_with_state(directory, client, auth_store, state.clone()).await?;
+            return state.workspace_runtime(directory).await.mcp()
                 .call_tool(directory, client, tool, retry_arguments)
                 .await;
         }
@@ -467,7 +477,6 @@ pub(crate) async fn call_tool_with_state(
     result
 }
 
-#[allow(dead_code)]
 pub(crate) fn tool_runtime_id(client: &str, tool: &str) -> String {
     format!(
         "mcp__{}__{}",
@@ -476,7 +485,6 @@ pub(crate) fn tool_runtime_id(client: &str, tool: &str) -> String {
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn tool_result_text(result: &McpToolCallResult) -> String {
     let mut out = Vec::new();
     for content in &result.content {
@@ -501,11 +509,11 @@ async fn ensure_connected_with_state(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
-    state: Option<AppState>,
+    state: AppState,
 ) -> anyhow::Result<()> {
-    let config = configured_servers(directory, state.as_ref())?;
+    let config = configured_servers(directory, Some(&state))?;
     let Some(entry) = config.get(name) else {
-        let _ = runtime_manager().disconnect(directory, name).await;
+        let _ = state.workspace_runtime(directory).await.mcp().disconnect(directory, name).await;
         return Err(anyhow!("MCP server {name} is not configured"));
     };
     match connect_config(directory, name, entry, auth_store, state).await? {
@@ -564,6 +572,7 @@ pub(crate) fn builtin_enabled(directory: &str, id: &str, state: &AppState) -> bo
 }
 
 pub(crate) async fn reconcile_configured_servers(
+    state: &AppState,
     directory: &str,
     config: &BTreeMap<String, McpConfig>,
 ) {
@@ -572,7 +581,7 @@ pub(crate) async fn reconcile_configured_servers(
         .filter(|(_, entry)| is_enabled(entry))
         .map(|(name, _)| name.clone())
         .collect::<BTreeSet<_>>();
-    runtime_manager()
+    state.workspace_runtime(directory).await.mcp()
         .disconnect_except(directory, &configured)
         .await;
 }
@@ -667,7 +676,6 @@ fn expand_env_placeholders(value: &str) -> String {
     out
 }
 
-#[allow(dead_code)]
 fn sanitize_tool_id(value: &str) -> String {
     let sanitized: String = value
         .chars()

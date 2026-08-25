@@ -165,12 +165,16 @@ fn manifest_has_registered_lsp_adapter(manifest: &ExtensionManifest) -> bool {
     if !manifest_is_lsp(manifest) {
         return false;
     }
+    let runtime = neoism_agent_server::language_server::LspRuntime::new(
+        neoism_agent_neoism_adapter::neoism_services(),
+    );
     manifest
         .run
         .as_ref()
         .and_then(|run| run.command.first())
         .is_some_and(|command| {
             neoism_agent_server::language_server::supports_language_server_package(
+                &runtime,
                 &manifest.id,
                 command,
             )
@@ -302,14 +306,17 @@ fn language_server_entries(
         LspAdapterOrigin, LspAdapterTransport, LspCommandSource,
     };
 
+    let runtime = neoism_agent_server::language_server::LspRuntime::new(
+        neoism_agent_neoism_adapter::neoism_services(),
+    );
     let adapters = match workspace_root {
         Some(root) => {
-            neoism_agent_server::language_server::language_server_adapters_for(root)
+            neoism_agent_server::language_server::language_server_adapters_for(&runtime, root)
         }
-        None => neoism_agent_server::language_server::language_server_adapters(),
+        None => neoism_agent_server::language_server::language_server_adapters(&runtime),
     };
     let live = workspace_root
-        .map(neoism_agent_server::language_server::live_languages)
+        .map(|root| neoism_agent_server::language_server::live_languages(&runtime, root))
         .unwrap_or_default();
 
     adapters
@@ -372,6 +379,7 @@ fn language_server_entries(
                 LspAdapterTransport::Stdio { command } => {
                     let executable = command.first().cloned().unwrap_or_default();
                     let source = neoism_agent_server::language_server::command_source(
+                        &runtime,
                         &adapter.id,
                         command.clone(),
                     );
@@ -521,7 +529,10 @@ fn catalog_manifests_for_engine_adapters() -> Vec<ExtensionManifest> {
         return Vec::new();
     };
     let mut manifests = Vec::new();
-    for adapter in neoism_agent_server::language_server::language_server_adapters() {
+    for adapter in neoism_agent_neoism_adapter::language_capability_snapshot()
+        .languages
+        .iter()
+    {
         for package in &adapter.catalog_packages {
             let Some(pkg) = registry.iter().find(|p| p.name == package.package_id) else {
                 continue;

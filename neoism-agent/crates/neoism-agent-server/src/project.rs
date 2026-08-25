@@ -9,10 +9,13 @@ pub(crate) struct ProjectContext {
     pub(crate) path: Option<String>,
 }
 
-pub(crate) fn discover(directory: impl AsRef<Path>) -> ProjectContext {
+pub(crate) fn discover(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: impl AsRef<Path>,
+) -> ProjectContext {
     let directory = canonicalize_lossy(directory.as_ref());
     let directory_text = path_text(&directory);
-    let Some(worktree) = git_output(&directory, &["rev-parse", "--show-toplevel"])
+    let Some(worktree) = git_output(services, &directory, &["rev-parse", "--show-toplevel"])
         .map(PathBuf::from)
         .map(|path| canonicalize_lossy(&path))
     else {
@@ -23,7 +26,7 @@ pub(crate) fn discover(directory: impl AsRef<Path>) -> ProjectContext {
         };
     };
 
-    let id = project_id(&directory).unwrap_or_else(|| "global".to_string());
+    let id = project_id(services, &directory).unwrap_or_else(|| "global".to_string());
     let worktree_text = path_text(&worktree);
     let path = relative_path(&worktree, &directory);
     ProjectContext {
@@ -39,11 +42,11 @@ pub(crate) fn discover(directory: impl AsRef<Path>) -> ProjectContext {
     }
 }
 
-fn project_id(directory: &Path) -> Option<String> {
-    if let Some(cached) = read_cached_id(directory) {
+fn project_id(services: &neoism_agent_service_api::AgentServices, directory: &Path) -> Option<String> {
+    if let Some(cached) = read_cached_id(services, directory) {
         return Some(cached);
     }
-    let mut roots = git_output(directory, &["rev-list", "--max-parents=0", "HEAD"])?
+    let mut roots = git_output(services, directory, &["rev-list", "--max-parents=0", "HEAD"])?
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -51,27 +54,27 @@ fn project_id(directory: &Path) -> Option<String> {
         .collect::<Vec<_>>();
     roots.sort();
     let id = roots.into_iter().next()?;
-    let _ = write_cached_id(directory, &id);
+    let _ = write_cached_id(services, directory, &id);
     Some(id)
 }
 
-fn read_cached_id(directory: &Path) -> Option<String> {
-    let path = cache_path(directory)?;
+fn read_cached_id(services: &neoism_agent_service_api::AgentServices, directory: &Path) -> Option<String> {
+    let path = cache_path(services, directory)?;
     std::fs::read_to_string(path)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
 
-fn write_cached_id(directory: &Path, id: &str) -> anyhow::Result<()> {
-    let Some(path) = cache_path(directory) else {
+fn write_cached_id(services: &neoism_agent_service_api::AgentServices, directory: &Path, id: &str) -> anyhow::Result<()> {
+    let Some(path) = cache_path(services, directory) else {
         return Ok(());
     };
     std::fs::write(path, id).context("failed to cache project id")
 }
 
-fn cache_path(directory: &Path) -> Option<PathBuf> {
-    let common = git_output(directory, &["rev-parse", "--git-common-dir"])?;
+fn cache_path(services: &neoism_agent_service_api::AgentServices, directory: &Path) -> Option<PathBuf> {
+    let common = git_output(services, directory, &["rev-parse", "--git-common-dir"])?;
     let common = PathBuf::from(common);
     let path = if common.is_absolute() {
         common
@@ -114,9 +117,8 @@ fn path_text(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn git_output(directory: &Path, args: &[&str]) -> Option<String> {
-    let mut command = std::process::Command::new("git");
-    command.args(args).current_dir(directory);
+fn git_output(services: &neoism_agent_service_api::AgentServices, directory: &Path, args: &[&str]) -> Option<String> {
+    let mut command = git_command(services, directory, args).ok()?;
     crate::tool::process::set_new_process_group_std(&mut command);
     let output = command.output().ok()?;
     if !output.status.success() {
@@ -126,10 +128,49 @@ fn git_output(directory: &Path, args: &[&str]) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+fn git_command(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &Path,
+    args: &[&str],
+) -> anyhow::Result<std::process::Command> {
+    let git = crate::executable::resolve(
+        services,
+        "git",
+        neoism_agent_service_api::ExecutablePurpose::VersionControl,
+        "Git project discovery",
+    )?;
+    let mut command = std::process::Command::new(git);
+    command.args(args).current_dir(directory);
+    Ok(command)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use neoism_agent_core::{Id, IdKind};
+
+    fn services() -> neoism_agent_service_api::AgentServices {
+        crate::standard_services()
+    }
+
+    #[test]
+    fn project_discovery_honors_injected_git_and_reports_missing_git() {
+        use crate::executable::test_support::FakeExecutableService;
+        use std::sync::Arc;
+
+        let injected = PathBuf::from("/injected/project-git");
+        let mut services = services();
+        services.executables = Arc::new(FakeExecutableService::with("git", &injected));
+        let command = git_command(&services, Path::new("."), &["status"]).unwrap();
+        assert_eq!(command.get_program(), injected.as_os_str());
+
+        services.executables = Arc::new(FakeExecutableService::default());
+        let error = git_command(&services, Path::new("."), &["status"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Git project discovery executable `git` is unavailable"));
+        assert!(error.contains("install it"));
+    }
 
     #[test]
     fn non_git_directory_uses_global_project() {
@@ -140,7 +181,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
-        let context = discover(&root);
+        let context = discover(&services(), &root);
         assert_eq!(context.info.id, "global");
         assert_eq!(context.path, None);
 
@@ -172,9 +213,9 @@ mod tests {
             ],
         );
         let root_commit =
-            git_output(&root, &["rev-list", "--max-parents=0", "HEAD"]).unwrap();
+            git_output(&services(), &root, &["rev-list", "--max-parents=0", "HEAD"]).unwrap();
 
-        let context = discover(&child);
+        let context = discover(&services(), &child);
         assert_eq!(context.info.id, root_commit);
         assert_eq!(context.path.as_deref(), Some("nested"));
         assert_eq!(

@@ -5,7 +5,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -1053,7 +1053,9 @@ impl Default for NeoismAgentPane {
             skill_options: Vec::new(),
             skill_options_directory: None,
             file_mention_anchor: None,
-            file_mention_search: neoism_agent_server::standard_workspace_search(),
+            file_mention_search: Arc::new(
+                neoism_agent_workspace_search_fff::FffWorkspaceSearchService::new(),
+            ),
             file_mention_root_pin: Mutex::new(None),
             event_stream: None,
             session_cache: HashMap::new(),

@@ -9,11 +9,11 @@ You are a deeply pragmatic, effective software engineer. You take engineering qu
 
 - Use `grep` for content search and `glob` for fuzzy path search. `grep.pattern` accepts a string or an array of literal alternatives and supports auto, plain, regex, and fuzzy modes. Search before reading large files. Direct parent-session searches and reads are appropriate for a targeted question involving roughly 2-3 known files.
 - For broad read-only codebase research, architecture discovery, or questions such as "how does this subsystem work?", strongly prefer delegating to `subagent_type: "explore"` before issuing a broad batch of parent-session searches or reads. Start Explore as the only tool call in that step; do not pair it with parent `grep`, `glob`, `read`, or research-oriented `bash` calls. Give Explore the complete question and a quick, medium, or very thorough scope.
-- After starting Explore in the background, the strong default is to stop the parent turn and wait for its automatic completion notification whenever the next work depends on its findings or would require substantial parent-context research. The parent may keep responding to the user, provide status, answer from context it already has, or perform genuinely independent light work while Explore runs. Do not duplicate Explore's investigation in the parent, start a competing broad search/read batch, or poll with `task_result`. Resume the researched task from Explore's concise result when Neoism delivers it. A small targeted lookup involving roughly 2-3 known files may stay in the parent.
+- After starting Explore in the background, the strong default is to stop the parent turn and wait for its automatic completion notification whenever the next work depends on its findings or would require substantial parent-context research. The parent may keep responding to the user, provide status, answer from context it already has, or perform genuinely independent light work while Explore runs. Do not duplicate Explore's investigation in the parent, start a competing broad search/read batch, or poll with `task_result`. Resume the researched task from Explore's concise result when the Agent runtime delivers it. A small targeted lookup involving roughly 2-3 known files may stay in the parent.
 - Parallelize independent tool calls inside the agent that owns the work. Avoid noisy command chains with separators like `echo "====";` because they render poorly to the user.
 - When delegating work with the `task` tool, use `subagent_type: "general"` for broad research or multi-step work and `subagent_type: "explore"` for fast read-only codebase discovery. Use external ACP-backed agents only when the user explicitly asks for them: `subagent_type: "opencode"`, `"codex"`, or `"claude"`. Do not invent agent names such as `research`; if a user configured more agents, use the configured name exactly. Do not send placeholder prompts that only ask a subagent to say it is ready; the task prompt should contain the actual work the child agent should do.
 - The `task` tool starts subagents in the background by default. Reuse the returned `task_id` with `task` only when you later need to continue that child session. Set `background: false` only when an exceptional workflow truly requires a synchronous child result.
-- After delegating research to Explore, strongly prefer ending the parent turn and waiting for Neoism to resume it with the completion result. Continue only for user conversation or genuinely independent light work; never repeat the child's broad research in the parent. For other subagents, also prefer stopping and waiting unless there is useful independent parent work. Do not poll subagents in a tight loop.
+- After delegating research to Explore, strongly prefer ending the parent turn and waiting for the Agent runtime to resume it with the completion result. Continue only for user conversation or genuinely independent light work; never repeat the child's broad research in the parent. For other subagents, also prefer stopping and waiting unless there is useful independent parent work. Do not poll subagents in a tight loop.
 - Use `stop_task` to cancel a subagent you no longer need: pass its `task_id` to stop one, or omit it to stop every running subagent for this session.
 
 ## Editing Approach
@@ -177,7 +177,7 @@ fn build_prompt() -> String {
 
 fn plan_prompt() -> String {
     format!(
-        "You are operating as Neoism's plan agent. Inspect and reason freely, but do not modify files or run write-adjacent tools unless the user exits planning mode.\n\n{}",
+        "You are operating as the plan agent. Inspect and reason freely, but do not modify files or run write-adjacent tools unless the user exits planning mode.\n\n{}",
         ENGINEERING_AGENT_PROMPT
     )
 }
@@ -193,52 +193,23 @@ fn external_directory_permission() -> Value {
         std::env::temp_dir().join("*").to_string_lossy().to_string(),
         json!("allow"),
     );
-    if let Some(state) = default_state_dir() {
-        permissions.insert(
-            state
-                .join("neoism/tool-output/*")
-                .to_string_lossy()
-                .to_string(),
-            json!("allow"),
-        );
-    }
-    permissions.insert(
-        std::env::temp_dir()
-            .join("neoism-agent-state/tool-output/*")
-            .to_string_lossy()
-            .to_string(),
-        json!("allow"),
-    );
     Value::Object(permissions)
 }
 
 fn plan_edit_permission() -> Value {
     let mut permissions = serde_json::Map::new();
     permissions.insert("*".to_string(), json!("ask"));
-    permissions.insert(".opencode/plans/*.md".to_string(), json!("allow"));
-    permissions.insert(".neoism/plans/*.md".to_string(), json!("allow"));
+    permissions.insert(".agent/plans/*.md".to_string(), json!("allow"));
     if let Some(data) = data_dir() {
-        for app in ["opencode", "neoism"] {
-            permissions.insert(
-                data.join(app)
-                    .join("plans/*.md")
-                    .to_string_lossy()
-                    .to_string(),
-                json!("allow"),
-            );
-        }
+        permissions.insert(
+            data.join("agent")
+                .join("plans/*.md")
+                .to_string_lossy()
+                .to_string(),
+            json!("allow"),
+        );
     }
     Value::Object(permissions)
-}
-
-fn default_state_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .map(|home| home.join(".local/state"))
-        })
 }
 
 fn data_dir() -> Option<std::path::PathBuf> {

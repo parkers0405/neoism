@@ -10,6 +10,46 @@ use std::{
 };
 
 use serde_json::{json, Value};
+use neoism_agent_service_api::{
+    LanguageRootPolicy, LanguageRouteCapability, LanguageServerCapability,
+    LanguageServerOperations, LanguageServerTransport,
+};
+
+fn fake_tcp_adapter() -> super::super::lsp_adapters::LanguageAdapter {
+    super::super::lsp_adapters::LanguageAdapter::from_capability(&LanguageServerCapability {
+        id: "fake-tcp".to_string(),
+        name: "Fake TCP".to_string(),
+        catalog_packages: Vec::new(),
+        transport: LanguageServerTransport::Tcp {
+            default_host: "127.0.0.1".to_string(),
+            default_port: 6005,
+            host_env: None,
+            port_env: None,
+        },
+        routes: vec![LanguageRouteCapability {
+            id: "fake-script".to_string(),
+            document_language_id: "fake-script".to_string(),
+            extensions: vec!["gd".to_string()],
+            filename_patterns: Vec::new(),
+        }],
+        markers: Vec::new(),
+        root_policy: LanguageRootPolicy::NearestMarker,
+        capabilities: LanguageServerOperations {
+            workspace_symbols: true,
+            completion: true,
+            hover: true,
+            definition: true,
+            references: true,
+            implementation: true,
+            call_hierarchy: true,
+            diagnostics: true,
+            document_symbols: true,
+            formatting: true,
+            code_actions: true,
+            rename: true,
+        },
+    })
+}
 
 /// Exercises the real Content-Length framing and shared JSON-RPC router over
 /// TCP. The fixture identifies as GDScript because Godot's editor-owned LSP is
@@ -25,12 +65,10 @@ fn tcp_transport_runs_full_document_and_server_request_lifecycle() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake TCP LSP");
     let port = listener.local_addr().expect("listener address").port();
     let server = thread::spawn(move || run_fake_tcp_server(listener, true));
-    let godot = super::super::lsp_adapters::LanguageAdapter::from_builtin(
-        super::super::lsp_languages::adapter_by_id("godot")
-            .expect("built-in Godot adapter"),
-    );
+    let godot = fake_tcp_adapter();
 
     let mut client = LspClient::connect_tcp(
+        std::sync::Weak::new(),
         &workspace.path,
         &workspace.path,
         "godot-test",
@@ -124,12 +162,10 @@ fn tcp_transport_omits_save_text_when_the_server_does_not_request_it() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake TCP LSP");
     let port = listener.local_addr().expect("listener address").port();
     let server = thread::spawn(move || run_fake_tcp_server(listener, false));
-    let godot = super::super::lsp_adapters::LanguageAdapter::from_builtin(
-        super::super::lsp_languages::adapter_by_id("godot")
-            .expect("built-in Godot adapter"),
-    );
+    let godot = fake_tcp_adapter();
 
     let mut client = LspClient::connect_tcp(
+        std::sync::Weak::new(),
         &workspace.path,
         &workspace.path,
         "godot-save-test",
@@ -200,13 +236,11 @@ fn real_godot_4_7_publishes_gdscript_fixture_diagnostics() {
         .expect("start headless Godot editor");
     let _godot = ChildGuard(child);
 
-    let godot = super::super::lsp_adapters::LanguageAdapter::from_builtin(
-        super::super::lsp_languages::adapter_by_id("godot")
-            .expect("built-in Godot adapter"),
-    );
+    let godot = fake_tcp_adapter();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut client = loop {
         match LspClient::connect_tcp(
+            std::sync::Weak::new(),
             &workspace.path,
             &workspace.path,
             "godot-smoke",

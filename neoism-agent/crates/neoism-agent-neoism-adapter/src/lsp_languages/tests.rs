@@ -1,19 +1,4 @@
 use super::*;
-use std::path::Path;
-
-#[test]
-fn filename_globs_are_anchored_and_case_insensitive() {
-    assert!(wildcard_filename_matches("Dockerfile.*", "Dockerfile.dev"));
-    assert!(wildcard_filename_matches("*.Dockerfile", "ci.Dockerfile"));
-    assert!(wildcard_filename_matches(
-        "compose.*.yaml",
-        "compose.dev.yaml"
-    ));
-    assert!(!wildcard_filename_matches(
-        "Dockerfile.*",
-        "xDockerfile.dev"
-    ));
-}
 
 #[test]
 fn every_stdio_adapter_has_an_explicit_catalog_contract_or_opt_out() {
@@ -98,44 +83,23 @@ fn representative_catalog_contracts_match_executable_argv_and_routes() {
 
     for (adapter_id, package_id, executable, args) in expected {
         let adapter = adapter_by_id(adapter_id).expect("declared adapter");
-        assert!(adapter.supports_catalog_package(package_id, executable));
+        assert!(adapter.catalog_packages.iter().any(|package| {
+            package.package_id == package_id && package.executable == executable
+        }));
         let command = stdio_command(adapter).expect("stdio adapter");
         assert!(command[0].eq_ignore_ascii_case(executable));
         assert_eq!(&command[1..], args);
 
     }
 
-    let route_cases = [
-        ("src/app.tsx", "typescript", "typescriptreact"),
-        ("src/app.mjs", "typescript", "javascript"),
-        ("src/main.py", "python", "python"),
-        ("tools/check.ksh", "bash", "shellscript"),
-        ("tools/check.csh", "bash", "shellscript"),
-        ("settings.jsonc", "json", "jsonc"),
-        ("Dockerfile.dev", "docker", "dockerfile"),
-        ("compose.test.yaml", "docker", "dockercompose"),
-        ("docker-bake.hcl", "docker", "dockerbake"),
-        ("flake.nix", "nix", "nix"),
-        ("go.mod", "go", "gomod"),
-        ("go.work", "go", "gowork"),
-        ("templates/page.heex", "elixir", "heex"),
-        ("generated/value.zir", "zig", "zir"),
-    ];
-    for (path, adapter_id, language_id) in route_cases {
-        let adapter = best_adapter_for_path(Path::new(path)).expect("routed path");
-        assert_eq!(adapter.id, adapter_id, "wrong adapter for {path}");
-        assert_eq!(
-            adapter.language_id_for_path(Path::new(path)),
-            Some(language_id),
-            "wrong languageId for {path}"
-        );
-    }
 }
 
 #[test]
 fn omnisharp_catalog_binary_is_started_in_language_server_mode() {
     let adapter = adapter_by_id("csharp").unwrap();
-    assert!(adapter.supports_catalog_package("omnisharp", "OmniSharp"));
+    assert!(adapter.catalog_packages.iter().any(|package| {
+        package.package_id == "omnisharp" && package.executable == "OmniSharp"
+    }));
     let command = stdio_command(adapter).unwrap();
     assert_eq!(command.first().copied(), Some("omnisharp"));
     assert!(command.contains(&"--languageserver"));

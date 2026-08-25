@@ -6,6 +6,9 @@ use axum::Json;
 use neoism_agent_core::{Id, IdKind, SessionInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::path::Path as FsPath;
+use tokio::sync::Mutex;
 
 use crate::error::ApiError;
 use crate::session_actions::{
@@ -15,29 +18,52 @@ use crate::state::AppState;
 use crate::tool::ToolExecutionResult;
 
 pub(crate) const PLUGIN_ID: &str = "dev.neoism.subagents";
-pub(crate) const TOOL_IDS: &[&str] = &["task", "task_result", "stop_task"];
+
+/// Generation-owned bookkeeping for subagent sessions. The session records
+/// remain durable, while runs, queues and keyed reconciliation locks do not.
+#[derive(Default)]
+pub(crate) struct SubagentWorkspaceRuntime {
+    sessions: Mutex<BTreeSet<String>>,
+}
+
+impl SubagentWorkspaceRuntime {
+    pub(crate) async fn track(&self, session_id: impl Into<String>) {
+        self.sessions.lock().await.insert(session_id.into());
+    }
+
+    pub(crate) async fn contains(&self, session_id: &str) -> bool {
+        self.sessions.lock().await.contains(session_id)
+    }
+
+    pub(crate) async fn teardown(&self, state: &AppState, root: &FsPath) {
+        let mut ids = std::mem::take(&mut *self.sessions.lock().await);
+        let mut workspace_ids = ids.clone();
+        if let Ok(sessions) = state.inner.store.list_sessions().await {
+            for session in sessions.into_iter().filter(|session| crate::workspace_runtime::canonical_location(&session.directory) == root) {
+                let id = session.id.to_string();
+                workspace_ids.insert(id.clone());
+                if session.parent_id.is_some() {
+                    ids.insert(id);
+                }
+            }
+        }
+        for id in &ids {
+            crate::session_actions::cancel_session_run_for_teardown(state, id).await;
+            crate::session_actions::clear_subtask_completion_for_teardown(state, id).await;
+            crate::session_queue::clear_session_prompt_queue(state, id).await;
+        }
+        state.inner.subtask_completion_locks.lock().await.retain(|id, _| !workspace_ids.contains(id));
+        state.inner.subtask_parent_locks.lock().await.retain(|id, _| !workspace_ids.contains(id));
+    }
+}
 
 pub(crate) fn enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> bool {
     crate::plugins::enabled(services, directory, PLUGIN_ID)
 }
 
 #[cfg(test)]
-fn enabled_in_config(config: &neoism_agent_core::NeoismConfig) -> bool {
-    if let Some(plugin) = config.plugins.get(PLUGIN_ID) {
-        return plugin.enabled;
-    }
-    let mut enabled = true;
-    for plugin in &config.plugin {
-        let Some(id) = plugin.id.as_deref() else {
-            continue;
-        };
-        if id == PLUGIN_ID {
-            enabled = plugin.enabled;
-        } else if id == format!("-{PLUGIN_ID}") || id == "-*" {
-            enabled = false;
-        }
-    }
-    enabled
+fn enabled_in_config(config: &neoism_agent_core::AgentConfigDocument) -> bool {
+    config.plugins.get(PLUGIN_ID).is_none_or(|plugin| plugin.enabled)
 }
 
 fn require_enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Result<(), String> {
@@ -116,7 +142,7 @@ pub(crate) async fn start_task_tool(
         )
         .await;
     }
-    let agents = crate::plugins::agent_catalog(state, &parent.directory)
+    let agents = crate::plugins::agent_catalog(state, &parent.directory).await
         .map_err(|error| error.to_string())?;
     let agent = agents.get(&agent_name).ok_or_else(|| {
         let available = agents
@@ -244,10 +270,11 @@ async fn create_child(
     agent: &str,
     model: Option<neoism_agent_core::UserModel>,
 ) -> Result<String, String> {
-    create_subtask_session(state, parent, command, description, agent, model)
+    let child = create_subtask_session(state, parent, command, description, agent, model)
         .await
-        .map(|child| child.id.to_string())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    state.workspace_runtime(&parent.directory).await.subagents().track(child.id.to_string()).await;
+    Ok(child.id.to_string())
 }
 
 fn string_arg(input: &Value, name: &str) -> Option<String> {
@@ -462,7 +489,7 @@ mod tests {
 
     #[test]
     fn workspace_config_can_disable_subagents() {
-        let mut config = neoism_agent_core::NeoismConfig::default();
+        let mut config = neoism_agent_core::AgentConfigDocument::default();
         config.plugins.insert(
             PLUGIN_ID.to_string(),
             neoism_agent_core::PluginConfig {

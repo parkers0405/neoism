@@ -176,6 +176,7 @@ enum McpStatus {
 pub fn maybe_run(
     args: &[OsString],
     ensure_server_started: impl FnOnce(),
+    services: neoism_agent_service_api::AgentServices,
 ) -> Option<Result<(), String>> {
     let command = args.first()?.to_string_lossy();
     if command != "auth" && command != "mcp" {
@@ -188,7 +189,7 @@ pub fn maybe_run(
     Some(match Cli::try_parse_from(argv) {
         Ok(cli) => {
             ensure_server_started();
-            run(cli.command)
+            run(cli.command, services)
         }
         Err(error) => {
             let exit_code = error.exit_code();
@@ -202,29 +203,32 @@ pub fn maybe_run(
     })
 }
 
-fn run(command: Command) -> Result<(), String> {
+fn run(command: Command, services: neoism_agent_service_api::AgentServices) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("failed to start command runtime: {error}"))?;
     runtime.block_on(async move {
         match command {
-            Command::Auth(args) => run_auth(args.command).await,
-            Command::Mcp(args) => run_mcp(args.command).await,
+            Command::Auth(args) => run_auth(args.command, &services).await,
+            Command::Mcp(args) => run_mcp(args.command, &services).await,
         }
     })
 }
 
-async fn run_auth(command: AuthCommand) -> Result<(), String> {
+async fn run_auth(command: AuthCommand, services: &neoism_agent_service_api::AgentServices) -> Result<(), String> {
     match command {
-        AuthCommand::Login(args) => auth_login(args).await,
+        AuthCommand::Login(args) => auth_login(args, services).await,
         AuthCommand::List(output) => auth_list(output).await,
         AuthCommand::Status(args) => auth_status(args).await,
         AuthCommand::Logout(args) => auth_logout(args).await,
     }
 }
 
-async fn auth_login(mut args: AuthLoginArgs) -> Result<(), String> {
+async fn auth_login(
+    mut args: AuthLoginArgs,
+    services: &neoism_agent_service_api::AgentServices,
+) -> Result<(), String> {
     let codex = args.provider.eq_ignore_ascii_case("codex");
     let provider = provider_id(&args.provider).to_string();
     let methods: BTreeMap<String, Vec<AuthMethod>> =
@@ -272,7 +276,7 @@ async fn auth_login(mut args: AuthLoginArgs) -> Result<(), String> {
             .ok_or_else(|| format!("provider {provider} did not start OAuth authorization"))?;
             println!("{}\n\n{}", authorization.instructions, authorization.url);
             if !args.no_open {
-                if let Err(error) = open_browser(&authorization.url) {
+                if let Err(error) = open_browser(services, &authorization.url) {
                     eprintln!("Could not open a browser ({error}). Open the URL above to continue.");
                 }
             }
@@ -336,7 +340,10 @@ async fn auth_logout(args: AuthProviderArgs) -> Result<(), String> {
     )
 }
 
-async fn run_mcp(command: McpCommand) -> Result<(), String> {
+async fn run_mcp(
+    command: McpCommand,
+    services: &neoism_agent_service_api::AgentServices,
+) -> Result<(), String> {
     match command {
         McpCommand::List(output) => mcp_list(output, false).await,
         McpCommand::Auth(args) => match args.command {
@@ -346,7 +353,7 @@ async fn run_mcp(command: McpCommand) -> Result<(), String> {
                     "an MCP server name is required; use `neoism mcp auth list` to list servers"
                         .to_string()
                 })?;
-                mcp_authenticate(name, args.no_open, args.output).await
+                mcp_authenticate(name, args.no_open, args.output, services).await
             }
         },
         McpCommand::Logout(args) => mcp_logout(args).await,
@@ -372,6 +379,7 @@ async fn mcp_authenticate(
     name: String,
     no_open: bool,
     output: OutputArgs,
+    services: &neoism_agent_service_api::AgentServices,
 ) -> Result<(), String> {
     let auth_path = mcp_auth_path(&name);
     let started: McpAuthStart = post_json(&output.server, &auth_path, &json!({})).await?;
@@ -380,7 +388,7 @@ async fn mcp_authenticate(
         started.authorization_url
     );
     if !no_open {
-        if let Err(error) = open_browser(&started.authorization_url) {
+        if let Err(error) = open_browser(services, &started.authorization_url) {
             eprintln!(
                 "Could not open a browser ({error}). Open the URL above to continue."
             );
@@ -512,26 +520,11 @@ fn prompt_secret(prompt: &str) -> Result<String, String> {
     }
 }
 
-fn open_browser(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = std::process::Command::new("open");
-        command.arg(url);
-        command
-    };
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "start", "", url]);
-        crate::windows_process::hide_std_command(&mut command);
-        command
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(url);
-        command
-    };
+fn open_browser(
+    services: &neoism_agent_service_api::AgentServices,
+    url: &str,
+) -> Result<(), String> {
+    let mut command = browser_command(services, url)?;
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -539,6 +532,46 @@ fn open_browser(url: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+fn browser_command(
+    services: &neoism_agent_service_api::AgentServices,
+    url: &str,
+) -> Result<std::process::Command, String> {
+    #[cfg(target_os = "macos")]
+    let launcher = "open";
+    #[cfg(target_os = "windows")]
+    let launcher = "cmd";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let launcher = "xdg-open";
+    let launcher = crate::executable::resolve(
+        services,
+        launcher,
+        neoism_agent_service_api::ExecutablePurpose::Browser,
+        "browser launcher",
+    )
+    .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new(&launcher);
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new(&launcher);
+        command.args(["/C", "start", "", url]);
+        crate::windows_process::hide_std_command(&mut command);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[allow(unused_mut)]
+    let mut command = {
+        let mut command = std::process::Command::new(&launcher);
+        command.arg(url);
+        command
+    };
+    Ok(command)
 }
 
 fn percent_encode(value: &str) -> String {
@@ -660,6 +693,33 @@ fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_launcher_honors_injected_path_and_reports_missing_launcher() {
+        use crate::executable::test_support::FakeExecutableService;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        #[cfg(target_os = "macos")]
+        let launcher = "open";
+        #[cfg(target_os = "windows")]
+        let launcher = "cmd";
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let launcher = "xdg-open";
+
+        let injected = PathBuf::from("/injected/browser-launcher");
+        let mut services = crate::standard_services();
+        services.executables = Arc::new(FakeExecutableService::with(launcher, &injected));
+        let command = browser_command(&services, "https://example.invalid").unwrap();
+        assert_eq!(command.get_program(), injected.as_os_str());
+
+        services.executables = Arc::new(FakeExecutableService::default());
+        let error = browser_command(&services, "https://example.invalid")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("browser launcher executable"));
+        assert!(error.contains("install it"));
+    }
 
     #[test]
     fn parses_public_auth_commands() {

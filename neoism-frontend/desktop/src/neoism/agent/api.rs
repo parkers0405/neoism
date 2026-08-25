@@ -835,7 +835,7 @@ pub(super) fn api_request_json_with_read_timeout(
     response_json(response)
 }
 
-/// Fetch the session's persistent goal. `GET /session/:id/goal` returns
+/// Fetch the session's persistent goal. The goals plugin route returns
 /// `{ goal, researchEnabled }`; we lift just the goal object into the
 /// shared [`SessionGoal`] shape (or `None` when no goal is set).
 pub(super) fn fetch_session_goal(

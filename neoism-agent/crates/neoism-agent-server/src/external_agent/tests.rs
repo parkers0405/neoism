@@ -19,8 +19,11 @@ fn resolves_supported_external_agents() {
 
 #[test]
 fn external_acp_configs_use_expected_launchers() {
-    let services = crate::standard_services();
-    let codex = ExternalRuntime::Codex.acp_config("/tmp", &services);
+    let mut services = crate::standard_services();
+    services.executables = std::sync::Arc::new(
+        crate::executable::test_support::FakeExecutableService::with("npx", "/injected/npx"),
+    );
+    let codex = ExternalRuntime::Codex.acp_config("/tmp", &services).unwrap();
     assert_eq!(
         std::path::Path::new(&codex.command)
             .file_name()
@@ -32,7 +35,7 @@ fn external_acp_configs_use_expected_launchers() {
         vec!["--yes", "@zed-industries/codex-acp@latest"]
     );
 
-    let claude = ExternalRuntime::Claude.acp_config("/tmp", &services);
+    let claude = ExternalRuntime::Claude.acp_config("/tmp", &services).unwrap();
     assert_eq!(
         std::path::Path::new(&claude.command)
             .file_name()
@@ -43,6 +46,15 @@ fn external_acp_configs_use_expected_launchers() {
         claude.args,
         vec!["--yes", "@agentclientprotocol/claude-agent-acp@latest"]
     );
+
+    services.executables = std::sync::Arc::new(
+        crate::executable::test_support::FakeExecutableService::default(),
+    );
+    let error = ExternalRuntime::Codex
+        .acp_config("/tmp", &services)
+        .unwrap_err();
+    assert!(error.contains("external Agent executable `npx` is unavailable"));
+    assert!(error.contains("install it"));
 }
 
 #[test]

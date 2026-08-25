@@ -1336,9 +1336,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    neoism_agent_server::language_server::configure_services(
-        neoism_agent_neoism_adapter::neoism_services(),
-    );
 
     #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     configure_debug_service_isolation()?;
@@ -1373,9 +1370,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if let Some(result) = neoism_agent_server::auth_cli::maybe_run(&raw_args, || {
-        agent_server::ensure_started_for_request();
-    }) {
+    if let Some(result) = neoism_agent_server::auth_cli::maybe_run(
+        &raw_args,
+        || agent_server::ensure_started_for_request(),
+        neoism_agent_neoism_adapter::neoism_services(),
+    ) {
         return result.map_err(Into::into);
     }
 

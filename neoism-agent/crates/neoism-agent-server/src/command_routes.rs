@@ -14,8 +14,8 @@ pub(crate) async fn command_list(
 ) -> Result<Json<Vec<CommandInfo>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     let mut commands = Vec::new();
-    if crate::plugins::enabled(state.services(), &directory, "dev.neoism.commands") {
-        for source in state.inner.plugin_host.snapshot().command_sources.values() {
+    {
+        for source in state.plugin_snapshot(&directory).await.command_sources.values() {
             commands.extend(
                 source
                     .list(&directory)
@@ -56,15 +56,12 @@ pub(crate) fn load_commands(services: &neoism_agent_service_api::AgentServices, 
     Ok(commands)
 }
 
-pub(crate) fn find_command(
+pub(crate) async fn find_command(
     state: &AppState,
     directory: &str,
     name: &str,
 ) -> anyhow::Result<Option<CommandInfo>> {
-    if !crate::plugins::enabled(state.services(), directory, "dev.neoism.commands") {
-        return Ok(None);
-    }
-    for source in state.inner.plugin_host.snapshot().command_sources.values() {
+    for source in state.plugin_snapshot(directory).await.command_sources.values() {
         if let Some(command) = source
             .list(directory)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?

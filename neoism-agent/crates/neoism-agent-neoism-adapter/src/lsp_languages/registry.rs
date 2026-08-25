@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use super::{
     CatalogPackageSpec, LanguageRoute, LanguageSpec, LspTransportSpec,
     WorkspaceRootStrategySpec,
@@ -709,32 +707,4 @@ pub(in crate::lsp) const LANGUAGE_SPECS: &[LanguageSpec] = &[
 #[cfg(test)]
 pub(in crate::lsp) fn adapter_by_id(id: &str) -> Option<&'static LanguageSpec> {
     LANGUAGE_SPECS.iter().find(|spec| spec.id == id)
-}
-
-pub(in crate::lsp) fn best_adapter_for_path(
-    path: &Path,
-) -> Option<&'static LanguageSpec> {
-    LANGUAGE_SPECS
-        .iter()
-        .filter_map(|spec| spec.match_priority(path).map(|score| (score, spec)))
-        .max_by_key(|(score, _)| *score)
-        .map(|(_, spec)| spec)
-}
-
-pub(in crate::lsp) fn logical_language_for_path(path: &Path) -> Option<&'static str> {
-    best_adapter_for_path(path)?.logical_language_for_path(path)
-}
-
-#[cfg(test)]
-pub(in crate::lsp) fn document_language_id_for_path(path: &Path) -> Option<&'static str> {
-    best_adapter_for_path(path)?.language_id_for_path(path)
-}
-
-pub(in crate::lsp) fn adapter_supports_catalog_package(
-    package_id: &str,
-    command: &str,
-) -> bool {
-    LANGUAGE_SPECS
-        .iter()
-        .any(|spec| spec.supports_catalog_package(package_id, command))
 }

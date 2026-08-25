@@ -9,9 +9,31 @@ use serde_json::json;
 use super::web::render_web_body;
 use super::*;
 
-fn allow_context(root: &Path) -> ToolContext {
-    ToolContext::new(root)
-        .with_permissions(BTreeMap::from([("*".to_string(), json!("allow"))]))
+fn permission_rules(
+    config: BTreeMap<String, serde_json::Value>,
+) -> Vec<neoism_agent_core::PermissionRule> {
+    crate::permission::from_config_map(&config)
+}
+
+async fn generated_context(root: &Path) -> ToolContext {
+    let database = root.join(format!(
+        ".tool-test-{}.sqlite3",
+        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+    ));
+    let state = crate::state::AppState::open_database(database).await.unwrap();
+    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+        &state,
+        root.to_string_lossy().as_ref(),
+    )
+    .await;
+    assert_eq!(workspace.directory, root.to_string_lossy());
+    ToolContext::new(root).with_state(Some(state))
+}
+
+async fn allow_context(root: &Path) -> ToolContext {
+    generated_context(root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([("*".to_string(), json!("allow"))])))
 }
 
 #[tokio::test]
@@ -27,7 +49,7 @@ async fn safe_filesystem_tools_execute_inside_project() {
         "fn main() {}\nlet needle = true;\n",
     )
     .unwrap();
-    let context = allow_context(&root);
+    let context = allow_context(&root).await;
 
     let read = execute(
         "read",
@@ -46,141 +68,6 @@ async fn safe_filesystem_tools_execute_inside_project() {
     assert!(listed.output.contains("<type>directory</type>"));
     assert!(listed.output.contains("src/"));
 
-    let grep = execute("grep", context.clone(), json!({ "pattern": "needle" }))
-        .await
-        .unwrap();
-    assert!(grep.output.contains("src/lib.rs:"));
-    assert!(grep.output.contains("Line 2"));
-
-    let scoped = execute(
-        "grep",
-        context.clone(),
-        json!({ "pattern": "needle", "path": "src/lib.rs" }),
-    )
-    .await
-    .unwrap();
-    assert!(scoped.output.contains("src/lib.rs:"));
-
-    let glob = execute("glob", context, json!({ "pattern": "*.rs" }))
-        .await
-        .unwrap();
-    assert!(glob.output.contains("src/lib.rs"));
-    assert!(glob.output.contains("src/other.rs"));
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn grep_and_glob_return_bounded_fff_metadata() {
-    let root = std::env::temp_dir().join(format!(
-        "neoism-agent-search-metadata-{}",
-        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/a.rs"), "needle one\nneedle two\n").unwrap();
-    std::fs::write(root.join("src/b.txt"), "needle text\n").unwrap();
-    let context = allow_context(&root);
-
-    let grep = execute(
-        "grep",
-        context.clone(),
-        json!({ "pattern": "needle", "include": "*.{rs,txt}", "exclude": "b.txt", "limit": 1 }),
-    )
-    .await
-    .unwrap();
-    assert!(grep.output.contains("Grep: Found"));
-    assert!(grep.output.contains("src/a.rs:"));
-    assert!(!grep.output.contains("src/b.txt"));
-    let metadata = grep.metadata.unwrap();
-    assert_eq!(metadata["engine"], "fff");
-    assert_eq!(metadata["truncated"], true);
-    assert_eq!(metadata["items"].as_array().unwrap().len(), 1);
-    assert_eq!(metadata["items"][0]["line"], 1);
-
-    let glob = execute(
-        "glob",
-        context.clone(),
-        json!({ "pattern": "a.rs", "path": "src", "limit": 1 }),
-    )
-    .await
-    .unwrap();
-    let metadata = glob.metadata.unwrap();
-    assert_eq!(metadata["count"], 1);
-    assert_eq!(metadata["engine"], "fff");
-    assert_eq!(metadata["truncated"], false);
-    assert_eq!(metadata["items"].as_array().unwrap().len(), 1);
-
-    let error = execute(
-        "glob",
-        context,
-        json!({ "pattern": "*.rs", "path": "src/a.rs" }),
-    )
-    .await
-    .unwrap_err();
-    assert!(error.to_string().contains("glob path must be a directory"));
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn canonical_search_tools_expose_fff_modes_and_multi_pattern_search() {
-    let root = std::env::temp_dir().join(format!(
-        "neoism-agent-fff-search-{}",
-        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(
-        root.join("src/upload.rs"),
-        "pub struct PrepareUpload;\nfn prepare_upload() {}\n",
-    )
-    .unwrap();
-    std::fs::write(root.join("src/other.rs"), "fn unrelated() {}\n").unwrap();
-    let context = allow_context(&root);
-
-    let find = execute(
-        "glob",
-        context.clone(),
-        json!({ "pattern": "upload", "limit": 5 }),
-    )
-    .await
-    .unwrap();
-    assert!(find.output.contains("src/upload.rs"));
-    assert_eq!(find.metadata.as_ref().unwrap()["engine"], "fff");
-
-    let grep = execute(
-        "grep",
-        context.clone(),
-        json!({ "pattern": "PrepareUpload", "limit": 5 }),
-    )
-    .await
-    .unwrap();
-    assert!(grep.output.contains("src/upload.rs:"));
-    assert!(grep.output.contains("Line 1"));
-    assert_eq!(grep.metadata.as_ref().unwrap()["engine"], "fff");
-
-    let scoped_grep = execute(
-        "grep",
-        context.clone(),
-        json!({ "pattern": "PrepareUpload", "path": "src", "include": "*.rs", "limit": 5 }),
-    )
-    .await
-    .unwrap();
-    assert!(scoped_grep.output.contains("upload.rs:"));
-    assert!(scoped_grep.output.contains("Line 1"));
-
-    let multi = execute(
-        "grep",
-        context,
-        json!({ "pattern": ["PrepareUpload", "prepare_upload"], "limit": 10 }),
-    )
-    .await
-    .unwrap();
-    assert!(multi.output.contains("Line 1"));
-    assert!(multi.output.contains("Line 2"));
-    assert_eq!(multi.metadata.as_ref().unwrap()["engine"], "fff");
-
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -195,7 +82,16 @@ async fn notes_tool_delegates_to_the_injected_service_and_rejects_removed_operat
     let notes = Arc::new(FakeNotesService { root: root.join("notes") });
     let services = crate::standard_services().with_notes(notes);
     let state = crate::state::AppState::open_database_with_services(root.join("agent.db"), services).await.unwrap();
-    let context = allow_context(&root).with_state(Some(state.clone()));
+    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+        &state,
+        root.to_string_lossy().as_ref(),
+    )
+    .await;
+    assert!(crate::agent_tool_registry::tool_contribution(&workspace.snapshot, "notes").is_some());
+    assert!(workspace.snapshot.runtime_tools.contains_key("notes"));
+    let context = ToolContext::new(&root)
+        .with_state(Some(state.clone()))
+        .with_permission_rules(permission_rules(BTreeMap::from([("*".to_string(), json!("allow"))])));
 
     let list = execute("notes", context.clone(), json!({ "operation": "list" }))
         .await
@@ -227,14 +123,29 @@ async fn notes_tool_delegates_to_the_injected_service_and_rejects_removed_operat
         r#"{"plugins":{"dev.neoism.tools.notes":{"enabled":false}}}"#,
     )
     .unwrap();
+    let disabled_state = crate::state::AppState::open_database_with_services(
+        root.join("disabled-agent.db"),
+        state.services().clone(),
+    )
+    .await
+    .unwrap();
+    let disabled_workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+        &disabled_state,
+        root.to_string_lossy().as_ref(),
+    )
+    .await;
+    assert!(crate::agent_tool_registry::tool_contribution(&disabled_workspace.snapshot, "notes").is_none());
+    assert!(!disabled_workspace.snapshot.runtime_tools.contains_key("notes"));
     let disabled = execute(
         "notes",
-        allow_context(&root).with_state(Some(state)),
+        ToolContext::new(&root)
+            .with_state(Some(disabled_state))
+            .with_permission_rules(permission_rules(BTreeMap::from([("*".to_string(), json!("allow"))]))),
         json!({ "operation": "list" }),
     )
     .await
     .unwrap_err();
-    assert!(disabled.to_string().contains("disabled"));
+    assert!(disabled.to_string().contains("unknown tool notes"));
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -306,8 +217,8 @@ async fn safe_tools_reject_external_paths() {
 
     let error = execute(
         "read",
-        ToolContext::new(&root)
-            .with_permissions(BTreeMap::from([("read".to_string(), json!("allow"))])),
+        generated_context(&root).await
+            .with_permission_rules(permission_rules(BTreeMap::from([("read".to_string(), json!("allow"))]))),
         json!({ "filePath": external.to_string_lossy() }),
     )
     .await
@@ -340,13 +251,13 @@ async fn external_directory_permission_allows_whitelisted_paths() {
 
     let result = execute(
         "read",
-        ToolContext::new(&root).with_permissions(BTreeMap::from([
+        generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
             ("read".to_string(), json!("allow")),
             (
                 "external_directory".to_string(),
                 Value::Object(external_rules),
             ),
-        ])),
+        ]))),
         json!({ "filePath": external.to_string_lossy() }),
     )
     .await
@@ -371,7 +282,7 @@ async fn read_tool_lists_directories_with_offsets() {
 
     let result = execute(
         "read",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({ "filePath": "dir", "offset": 2, "limit": 2 }),
     )
     .await
@@ -397,7 +308,7 @@ async fn read_tool_uses_the_canonical_file_path_argument() {
 
     let result = execute(
         "read",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({
             "filePath": "TASK.md",
             "offset": 1,
@@ -428,7 +339,7 @@ async fn read_tool_loads_nearby_instruction_files() {
 
     let result = execute(
         "read",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({ "filePath": "src/feature/lib.rs" }),
     )
     .await
@@ -460,7 +371,7 @@ async fn read_tool_returns_media_attachment_metadata() {
 
     let result = execute(
         "read",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({ "filePath": "shot.png" }),
     )
     .await
@@ -490,7 +401,7 @@ async fn write_tool_creates_nested_missing_directories() {
 
     execute(
         "write",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({ "filePath": "new/deep/file.txt", "content": "nested\n" }),
     )
     .await
@@ -515,7 +426,7 @@ async fn read_tool_rejects_invalid_utf8_text() {
 
     let error = execute(
         "read",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({ "filePath": "invalid.txt" }),
     )
     .await
@@ -533,8 +444,8 @@ async fn bash_tool_runs_in_project_and_obeys_permission() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("subdir")).unwrap();
-    let context = ToolContext::new(&root)
-        .with_permissions(BTreeMap::from([("bash".to_string(), json!("allow"))]));
+    let context = generated_context(&root).await
+        .with_permission_rules(permission_rules(BTreeMap::from([("bash".to_string(), json!("allow"))])));
 
     let result = execute(
         "bash",
@@ -554,8 +465,8 @@ async fn bash_tool_runs_in_project_and_obeys_permission() {
 
     let denied = execute(
         "bash",
-        ToolContext::new(&root)
-            .with_permissions(BTreeMap::from([("bash".to_string(), json!("deny"))])),
+        generated_context(&root).await
+            .with_permission_rules(permission_rules(BTreeMap::from([("bash".to_string(), json!("deny"))]))),
         json!({ "command": "printf blocked", "description": "Print blocked marker" }),
     )
     .await
@@ -574,8 +485,8 @@ async fn bash_tool_stops_when_cancelled() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let cancel = Arc::new(AtomicBool::new(false));
-    let context = ToolContext::new(&root)
-        .with_permissions(BTreeMap::from([("bash".to_string(), json!("allow"))]))
+    let context = generated_context(&root).await
+        .with_permission_rules(permission_rules(BTreeMap::from([("bash".to_string(), json!("allow"))])))
         .with_cancel(Some(cancel.clone()));
 
     let task = tokio::spawn(async move {
@@ -617,10 +528,10 @@ async fn safe_tools_apply_permission_rules() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("file.txt"), "content").unwrap();
-    let context = ToolContext::new(&root).with_permissions(BTreeMap::from([
+    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
         ("*".to_string(), json!("allow")),
         ("read".to_string(), json!("deny")),
-    ]));
+    ])));
 
     let error = execute("read", context, json!({ "filePath": "file.txt" }))
         .await
@@ -638,10 +549,10 @@ async fn write_and_edit_tools_modify_project_files() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let context = ToolContext::new(&root).with_permissions(BTreeMap::from([
+    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
         ("*".to_string(), json!("allow")),
         ("edit".to_string(), json!("allow")),
-    ]));
+    ])));
 
     let written = execute(
         "write",
@@ -682,8 +593,8 @@ async fn write_tools_serialize_same_file_changes() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("notes.txt"), "start\n").unwrap();
 
-    let first_context = allow_context(&root);
-    let second_context = allow_context(&root);
+    let first_context = allow_context(&root).await;
+    let second_context = allow_context(&root).await;
     let first = tokio::spawn(async move {
         execute(
             "write",
@@ -720,7 +631,8 @@ async fn file_locks_use_canonical_paths() {
     let file = root.join("sub").join("notes.txt");
     std::fs::write(&file, "start\n").unwrap();
 
-    let guard = super::locks::lock_file(&file).await;
+    let locks = super::locks::FileLockRegistry::default();
+    let guard = locks.lock_file(&file).await;
     let alternate_path = root.join("sub").join("..").join("sub").join("notes.txt");
     let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -728,7 +640,7 @@ async fn file_locks_use_canonical_paths() {
     let finished_clone = finished.clone();
     let task = tokio::spawn(async move {
         started_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        let _guard = super::locks::lock_file(&alternate_path).await;
+        let _guard = locks.lock_file(&alternate_path).await;
         finished_clone.store(true, std::sync::atomic::Ordering::SeqCst);
     });
 
@@ -768,7 +680,7 @@ async fn apply_patch_tool_modifies_project_files() {
 *** End Patch";
     let result = execute(
         "apply_patch",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({ "patchText": patch }),
     )
     .await
@@ -791,7 +703,7 @@ async fn write_tool_runs_configured_formatter() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let context = allow_context(&root).with_formatter(Some(json!({
+    let context = allow_context(&root).await.with_formatter(Some(json!({
         "testfmt": {
             "extensions": ["txt"],
             "command": ["sh", "-c", "printf formatted > \"$1\"", "neoism-testfmt", "$FILE"]
@@ -826,7 +738,7 @@ async fn write_tool_reports_bounded_diagnostics_metadata() {
 
     let result = execute(
         "write",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({ "filePath": "note.rs", "content": "fn main() {}\n" }),
     )
     .await
@@ -852,7 +764,7 @@ async fn v4a_apply_patch_reports_added_file_diagnostics() {
 
     let result = execute(
         "apply_patch",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({
             "patchText": "*** Begin Patch\n*** Add File: added.rs\n+fn added() {}\n*** End Patch"
         }),
@@ -879,7 +791,7 @@ async fn v4a_apply_patch_rejects_existing_add() {
 
     let error = execute(
         "apply_patch",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({
             "patchText": "*** Begin Patch\n*** Add File: added.rs\n+new\n*** End Patch"
         }),
@@ -906,7 +818,7 @@ async fn v4a_apply_patch_rejects_missing_delete() {
 
     let error = execute(
         "apply_patch",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({ "patchText": "*** Begin Patch\n*** Delete File: missing.rs\n*** End Patch" }),
     )
     .await
@@ -929,7 +841,7 @@ async fn v4a_apply_patch_rejects_move_to_existing_target() {
 
     let error = execute(
         "apply_patch",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({
             "patchText": "*** Begin Patch\n*** Update File: old.rs\n*** Move to: new.rs\n@@\n-old\n+old2\n*** End Patch"
         }),
@@ -965,10 +877,10 @@ async fn file_tools_accept_canonical_arguments() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let context = ToolContext::new(&root).with_permissions(BTreeMap::from([
+    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
         ("*".to_string(), json!("allow")),
         ("edit".to_string(), json!("allow")),
-    ]));
+    ])));
 
     execute(
         "write",
@@ -1024,10 +936,10 @@ async fn edit_tool_rejects_patch_text_payloads() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("TASK.md"), "before\n").unwrap();
-    let context = ToolContext::new(&root).with_permissions(BTreeMap::from([
+    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
         ("*".to_string(), json!("allow")),
         ("edit".to_string(), json!("allow")),
-    ]));
+    ])));
 
     let error = execute(
         "edit",
@@ -1068,7 +980,7 @@ async fn v4a_patch_does_not_partially_apply_when_later_file_fails() {
 
     let error = execute(
         "apply_patch",
-        allow_context(&root),
+        allow_context(&root).await,
         json!({
             "patchText": "*** Begin Patch\n*** Update File: first.txt\n@@\n-before\n+after\n*** Update File: second.txt\n@@\n-stale\n+changed\n*** End Patch"
         }),
@@ -1088,9 +1000,20 @@ async fn v4a_patch_does_not_partially_apply_when_later_file_fails() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[test]
-fn advertised_tools_use_opencode_patch_contract() {
-    let tools = list();
+#[tokio::test]
+async fn advertised_tools_use_opencode_patch_contract() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-tool-contract-{}",
+        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let context = generated_context(&root).await;
+    let snapshot = context
+        .state()
+        .unwrap()
+        .plugin_snapshot(root.to_string_lossy().as_ref())
+        .await;
+    let tools = workspace_tool_items();
     assert!(tools.iter().all(|tool| tool.output_schema.is_some()));
     let output_schema = tools[0].output_schema.as_ref().unwrap();
     assert_eq!(output_schema["required"], json!(["title", "metadata"]));
@@ -1113,8 +1036,6 @@ fn advertised_tools_use_opencode_patch_contract() {
         "read_around",
         "list",
         "ffgrep",
-        "fffind",
-        "fff_multi_grep",
         "webfetch_batch",
         "websearch_batch",
     ] {
@@ -1122,6 +1043,10 @@ fn advertised_tools_use_opencode_patch_contract() {
             !ids.contains(&removed),
             "removed duplicate tool {removed} was advertised"
         );
+        assert!(crate::agent_tool_registry::tool_contribution(&snapshot, removed).is_none());
+        assert!(!snapshot.runtime_tools.contains_key(removed));
+        let error = execute(removed, context.clone(), json!({})).await.unwrap_err();
+        assert!(error.to_string().contains(&format!("unknown tool {removed}")));
     }
     let read = tools.iter().find(|tool| tool.id == "read").unwrap();
     assert_eq!(read.parameters["required"], json!(["filePath"]));
@@ -1131,6 +1056,7 @@ fn advertised_tools_use_opencode_patch_contract() {
     for tool in tools {
         assert_eq!(tool.parameters["additionalProperties"], false);
     }
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -1141,10 +1067,10 @@ async fn write_tool_obeys_edit_permission() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let context = ToolContext::new(&root).with_permissions(BTreeMap::from([
+    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
         ("*".to_string(), json!("allow")),
         ("edit".to_string(), json!("deny")),
-    ]));
+    ])));
 
     let error = execute(
         "write",
@@ -1166,7 +1092,7 @@ async fn skill_tool_loads_project_skill_content() {
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
     ));
     let _ = std::fs::remove_dir_all(&root);
-    let skill_dir = root.join(".neoism/skills/review");
+    let skill_dir = root.join(".agent/skills/review");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(
         skill_dir.join("SKILL.md"),
@@ -1175,10 +1101,10 @@ async fn skill_tool_loads_project_skill_content() {
     .unwrap();
     std::fs::write(skill_dir.join("checklist.md"), "Look for regressions.\n").unwrap();
 
-    let context = ToolContext::new(&root).with_permissions(BTreeMap::from([
+    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
         ("*".to_string(), json!("allow")),
         ("skill".to_string(), json!("allow")),
-    ]));
+    ])));
     let result = execute("skill", context, json!({ "name": "review" }))
         .await
         .unwrap();
@@ -1200,14 +1126,14 @@ async fn skill_tool_obeys_skill_permission() {
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
     ));
     let _ = std::fs::remove_dir_all(&root);
-    let skill_dir = root.join(".neoism/skills/review");
+    let skill_dir = root.join(".agent/skills/review");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(skill_dir.join("SKILL.md"), "Review carefully.\n").unwrap();
 
-    let context = ToolContext::new(&root).with_permissions(BTreeMap::from([
+    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
         ("*".to_string(), json!("allow")),
         ("skill".to_string(), json!("deny")),
-    ]));
+    ])));
     let error = execute("skill", context, json!({ "name": "review" }))
         .await
         .unwrap_err();
@@ -1231,16 +1157,16 @@ async fn lsp_tool_reports_workspace_status() {
     .unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
 
-    let context = ToolContext::new(&root).with_permissions(BTreeMap::from([
+    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
         ("*".to_string(), json!("allow")),
         ("lsp".to_string(), json!("allow")),
-    ]));
+    ])));
     let result = execute("lsp", context, json!({ "operation": "status" }))
         .await
         .unwrap();
 
     assert_eq!(result.title, "LSP status");
-    assert!(result.output.contains("rust"));
+    assert!(serde_json::from_str::<Vec<serde_json::Value>>(&result.output).is_ok());
     assert_eq!(result.metadata.unwrap()["lsp"]["operation"], "status");
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1253,10 +1179,10 @@ async fn lsp_tool_obeys_lsp_permission() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let context = ToolContext::new(&root).with_permissions(BTreeMap::from([
+    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
         ("*".to_string(), json!("allow")),
         ("lsp".to_string(), json!("deny")),
-    ]));
+    ])));
 
     let error = execute("lsp", context, json!({ "operation": "status" }))
         .await
@@ -1285,8 +1211,8 @@ async fn lsp_tool_checks_external_directory_permission_for_file_operations() {
 
     let error = execute(
         "lsp",
-        ToolContext::new(&root)
-            .with_permissions(BTreeMap::from([("lsp".to_string(), json!("allow"))])),
+        generated_context(&root).await
+            .with_permission_rules(permission_rules(BTreeMap::from([("lsp".to_string(), json!("allow"))]))),
         json!({ "operation": "documentSymbol", "filePath": external.to_string_lossy() }),
     )
     .await
@@ -1298,13 +1224,13 @@ async fn lsp_tool_checks_external_directory_permission_for_file_operations() {
     external_rules.insert(pattern, json!("allow"));
     let result = execute(
         "lsp",
-        ToolContext::new(&root).with_permissions(BTreeMap::from([
+        generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
             ("lsp".to_string(), json!("allow")),
             (
                 "external_directory".to_string(),
                 serde_json::Value::Object(external_rules),
             ),
-        ])),
+        ]))),
         json!({ "operation": "documentSymbol", "filePath": external.to_string_lossy() }),
     )
     .await

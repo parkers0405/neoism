@@ -4,10 +4,10 @@
 //! This is the *source* side that pairs with [`crate::session_import_route`].
 //! When a workspace *promote* relocates a workspace's home to another host it
 //! must ship the agent along with it. Promote knows the workspace checkout path
-//! it is moving — not the individual session ids — so `POST /sessions/export`
+//! it is moving — not the individual session ids — so `POST /v2/sessions/export`
 //! takes a `workspaceRoot` and returns a [`SessionBundle`] for every session
 //! living under that root. The target host then feeds each bundle to
-//! `POST /sessions/import`.
+//! `POST /v2/sessions/import`.
 //!
 //! Like every other mutating route in [`crate::app`], this handler relies on the
 //! router-wide layer stack (CORS + tracing) rather than a per-route auth guard —
@@ -21,7 +21,7 @@ use crate::error::ApiError;
 use crate::session_transfer::{export_sessions_under_workspace_root, SessionBundle};
 use crate::state::AppState;
 
-/// Request body for `POST /sessions/export`.
+/// Request body for `POST /v2/sessions/export`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExportSessionsRequest {
@@ -31,7 +31,7 @@ pub(crate) struct ExportSessionsRequest {
     pub(crate) workspace_root: String,
 }
 
-/// Response body for `POST /sessions/export`: every matching session's portable
+/// Response body for `POST /v2/sessions/export`: every matching session's portable
 /// snapshot, in store order (most-recently-updated first).
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,7 +41,7 @@ pub(crate) struct ExportSessionsResponse {
     pub(crate) bundles: Vec<SessionBundle>,
 }
 
-/// `POST /sessions/export` — gather every session under `workspaceRoot` into a
+/// `POST /v2/sessions/export` — gather every session under `workspaceRoot` into a
 /// list of portable [`SessionBundle`]s for the target host to import.
 pub(crate) async fn sessions_export(
     State(state): State<AppState>,

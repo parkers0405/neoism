@@ -539,7 +539,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.small-model",
+            "agent.smallModel",
             "Small model",
             "Model used for lightweight agent tasks.",
             Kind::String,
@@ -550,7 +550,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.default-agent",
+            "agent.defaultAgent",
             "Default agent",
             "Agent selected for new sessions.",
             Kind::String,
@@ -561,7 +561,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.reasoning-effort",
+            "agent.variant",
             "Reasoning effort",
             "How much supported models reason.",
             Kind::String,
@@ -572,7 +572,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.text-verbosity",
+            "agent.textVerbosity",
             "Response length",
             "Final-answer detail for supported models.",
             Kind::String,
@@ -583,7 +583,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.dangerously-skip-permissions",
+            "agent.dangerouslySkipPermissions",
             "Skip permission prompts",
             "Allow actions that would otherwise ask.",
             Kind::Boolean,
@@ -854,7 +854,7 @@ fn apply_schema_metadata(rows: &mut Vec<D>) {
     }
     for path in [
         "agent.model",
-        "agent.small-model",
+        "agent.smallModel",
         "agent.agent.*.model",
         "agent.mode.*.model",
     ] {
@@ -862,7 +862,7 @@ fn apply_schema_metadata(rows: &mut Vec<D>) {
             row.provider = Some(Provider::Models);
         }
     }
-    for path in ["agent.enabled-providers", "agent.disabled-providers"] {
+    for path in ["agent.enabledProviders", "agent.disabledProviders"] {
         if let Some(row) = rows.iter_mut().find(|row| row.path == path) {
             row.provider = Some(Provider::ProviderIds);
         }
@@ -921,7 +921,7 @@ fn append_grouped_backend_fields(rows: &mut Vec<D>) {
     let mut generated = Vec::new();
     collect_defaults("", &defaults, &mut generated);
     if let Ok(agent_defaults) =
-        serde_json::to_value(neoism_agent_core::api::NeoismConfig::default())
+        serde_json::to_value(neoism_agent_core::api::AgentConfigDocument::default())
     {
         collect_defaults("agent", &agent_defaults, &mut generated);
     }
@@ -930,7 +930,7 @@ fn append_grouped_backend_fields(rows: &mut Vec<D>) {
         "model": null,
         "variant": null,
         "temperature": null,
-        "top-p": null,
+        "topP": null,
         "prompt": null,
         "tools": {},
         "disable": false,
@@ -940,7 +940,7 @@ fn append_grouped_backend_fields(rows: &mut Vec<D>) {
         "options": {},
         "color": null,
         "steps": null,
-        "max-steps": null,
+        "maxSteps": null,
         "permission": {},
     });
     for prefix in ["agent.agent.*", "agent.mode.*"] {
@@ -1071,7 +1071,7 @@ fn enrich_runtime_suggestions(rows: &mut [D]) {
                 }
                 "appearance.mashup-pack" => (Some(Provider::MashupPacks), packs.clone()),
                 "terminal.shell.program" => (Some(Provider::Shells), shells.clone()),
-                "agent.default-agent" | "agent.agent" | "agent.mode" => {
+                "agent.defaultAgent" | "agent.agent" | "agent.mode" => {
                     (Some(Provider::AgentNames), agents.clone())
                 }
                 _ => (None, Vec::new()),
@@ -1190,14 +1190,14 @@ mod tests {
         }
         assert!(paths.contains("platform.windows.renderer.backend"));
         assert!(paths.contains("renderer.disable-unfocused-render"));
-        assert!(paths.contains("agent.enabled-providers"));
+        assert!(paths.contains("agent.enabledProviders"));
         assert!(paths.contains("agent.instructions"));
         assert!(paths.contains("agent.mcp"));
         assert!(paths.contains("agent.agent.*.model"));
         assert!(paths.contains("agent.mode.*.permission"));
         assert!(descriptors
             .iter()
-            .find(|row| row.path == "agent.default-agent")
+            .find(|row| row.path == "agent.defaultAgent")
             .unwrap()
             .static_suggestions
             .contains(&"build".to_string()));

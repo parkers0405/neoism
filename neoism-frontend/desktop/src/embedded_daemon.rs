@@ -281,6 +281,9 @@ impl EmbeddedDaemonHandle {
                                 neoism_workspace_daemon::hosts::PairedHostStore::in_memory()
                             });
                     let app = server::router(server::AppState {
+                        lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+                            neoism_agent_neoism_adapter::neoism_services(),
+                        ),
                         auth: auth_service,
                         sessions: neoism_workspace_daemon::sessions::SessionRegistry::shared(),
                         workspaces,

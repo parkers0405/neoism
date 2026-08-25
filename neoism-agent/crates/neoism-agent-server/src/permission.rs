@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use neoism_agent_core::{PermissionAction, PermissionRule};
 use serde_json::Value;
 
-#[allow(dead_code)]
 const EDIT_TOOLS: &[&str] = &["edit", "write", "apply_patch"];
 
 pub(crate) fn evaluate(
@@ -26,13 +25,6 @@ pub(crate) fn evaluate(
         })
 }
 
-#[allow(dead_code)]
-pub(crate) fn merge(
-    rulesets: impl IntoIterator<Item = Vec<PermissionRule>>,
-) -> Vec<PermissionRule> {
-    rulesets.into_iter().flatten().collect()
-}
-
 pub(crate) fn from_config_map(config: &BTreeMap<String, Value>) -> Vec<PermissionRule> {
     config
         .iter()
@@ -40,7 +32,6 @@ pub(crate) fn from_config_map(config: &BTreeMap<String, Value>) -> Vec<Permissio
         .collect()
 }
 
-#[allow(dead_code)]
 pub(crate) fn disabled(tools: &[String], rules: &[PermissionRule]) -> BTreeSet<String> {
     tools
         .iter()

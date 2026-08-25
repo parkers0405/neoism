@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use neoism_agent_core::{McpToolInfo, PermissionAction, PermissionRule, ToolListItem};
+use neoism_agent_plugin_api::{RegisteredContribution, RegistrySnapshot};
 use serde_json::{json, Value};
 
 use crate::agent::AgentCatalog;
@@ -19,17 +20,62 @@ const MCP_CATALOG_BUDGET: usize = 2_000;
 const MCP_SEARCH_DEFAULT_LIMIT: usize = 10;
 const MCP_SEARCH_MAX_LIMIT: usize = 50;
 
-pub(crate) async fn configured_mcp_tools_with_state(
+pub(crate) struct WorkspacePluginSnapshot {
+    pub(crate) directory: String,
+    pub(crate) runtime: Arc<crate::workspace_runtime::WorkspaceRuntime>,
+    pub(crate) snapshot: Arc<RegistrySnapshot>,
+}
+
+pub(crate) async fn acquire_workspace_plugin_snapshot(
+    state: &AppState,
     directory: &str,
-    state: Option<AppState>,
+) -> WorkspacePluginSnapshot {
+    let (runtime, evicted) = state.inner.workspace_runtimes.acquire(directory, state).await;
+    for stale in evicted {
+        stale.teardown(state).await;
+        state
+            .inner
+            .workspace_plugin_generations
+            .lock()
+            .await
+            .remove(&stale.root);
+    }
+    let directory = runtime.root.to_string_lossy().into_owned();
+    let snapshot = runtime.snapshot();
+    state.reconcile_workspace_plugins(&runtime, &snapshot).await;
+    WorkspacePluginSnapshot {
+        directory,
+        runtime,
+        snapshot,
+    }
+}
+
+pub(crate) fn tool_contribution<'a>(
+    snapshot: &'a RegistrySnapshot,
+    tool_id: &str,
+) -> Option<&'a RegisteredContribution> {
+    snapshot.contributions.get(&format!("Tool:{tool_id}"))
+}
+
+pub(crate) fn plugin_present(snapshot: &RegistrySnapshot, plugin_id: &str) -> bool {
+    snapshot.manifests.iter().any(|manifest| manifest.id == plugin_id)
+}
+
+pub(crate) fn is_kernel_tool(tool_id: &str) -> bool {
+    tool::kernel_tools().iter().any(|tool| tool.id == tool_id)
+}
+
+async fn configured_mcp_tools_with_snapshot(
+    directory: &str,
+    runtime_state: AppState,
+    snapshot: &RegistrySnapshot,
 ) -> Vec<McpToolInfo> {
-    let services = state.as_ref().map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
-    if !crate::plugins::enabled(&services, directory, "dev.neoism.mcp") {
+    if tool_contribution(snapshot, MCP_GATEWAY_TOOL).is_none() {
         return Vec::new();
     }
-    let config = mcp::configured_servers(directory, state.as_ref())
+    let config = mcp::configured_servers(directory, Some(&runtime_state))
         .unwrap_or_default();
-    mcp::reconcile_configured_servers(directory, &config).await;
+    mcp::reconcile_configured_servers(&runtime_state, directory, &config).await;
     let names = config.keys().cloned().collect::<Vec<_>>();
     let mut tools = Vec::new();
     for name in names {
@@ -37,7 +83,7 @@ pub(crate) async fn configured_mcp_tools_with_state(
             directory,
             &name,
             &mcp_auth::McpAuthStore::from_env(),
-            state.clone(),
+            runtime_state.clone(),
         )
         .await
         else {
@@ -52,13 +98,13 @@ pub(crate) async fn available_tools_for_directory(
     state: &AppState,
     directory: &str,
 ) -> Result<Vec<ToolListItem>, ApiError> {
-    let runtime = state
-        .inner
-        .workspace_runtimes
-        .acquire(directory, &state.inner.plugins, state.services())
-        .await;
-    let directory = runtime.root.to_string_lossy();
-    let mut tools = tool::list();
+    let workspace = acquire_workspace_plugin_snapshot(state, directory).await;
+    let directory = workspace.directory;
+    let snapshot = workspace.snapshot;
+    let mut tools = Vec::new();
+    // Interaction and artifact operations are kernel run services rather than
+    // optional workspace plugins.
+    tools.extend(tool::kernel_tools());
     if state.services().notes.is_none() {
         tools.retain(|tool| tool.id != "notes");
     } else if let Some(notes) = state.services().notes.as_ref() {
@@ -69,21 +115,7 @@ pub(crate) async fn available_tools_for_directory(
             }
         }
     }
-    tools.retain(|tool| {
-        crate::plugins::builtin_tool_plugin(&tool.id)
-            .is_none_or(|plugin_id| crate::plugins::enabled(state.services(), &directory, plugin_id))
-    });
-    if !crate::plugins::subagents::enabled(state.services(), &directory) {
-        tools.retain(|tool| !crate::plugins::subagents::TOOL_IDS.contains(&tool.id.as_str()));
-    }
-    let snapshot = state.inner.plugin_host.snapshot();
-    for (id, tool) in &snapshot.runtime_tools {
-        let Some(contribution) = snapshot.contributions.get(&format!("Tool:{id}")) else {
-            continue;
-        };
-        if !crate::plugins::enabled(state.services(), &directory, &contribution.plugin_id) {
-            continue;
-        }
+    for tool in snapshot.runtime_tools.values() {
         let definition = tool.definition();
         tools.push(ToolListItem {
             id: definition.id,
@@ -92,17 +124,19 @@ pub(crate) async fn available_tools_for_directory(
             output_schema: Some(definition.output_schema),
         });
     }
-    tools.extend(crate::custom_tool::list(state.services(), &directory));
     tools.extend(
-        configured_mcp_tools_with_state(&directory, Some(state.clone()))
+        crate::custom_tool::list(state.services(), &directory)
+            .into_iter()
+            .filter(|tool| tool_contribution(&snapshot, &tool.id).is_some()),
+    );
+    tools.extend(
+        configured_mcp_tools_with_snapshot(&directory, state.clone(), &snapshot)
             .await
             .into_iter()
             .map(mcp_tool_list_item),
     );
     for tool in &mut tools {
-        runtime
-            .plugins
-            .tool_definition(tool)
+        crate::plugin::tool_definition(&snapshot, tool)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
     tools.sort_by(|left, right| left.id.cmp(&right.id));
@@ -133,12 +167,12 @@ pub(crate) async fn provider_tools_for_agent(
     if !mcp.is_empty() {
         visible.push(mcp_gateway_tool(&mcp));
     }
-    append_task_agent_descriptions(state, directory, permissions, &mut visible)?;
+    append_task_agent_descriptions(state, directory, permissions, &mut visible).await?;
     visible.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(visible)
 }
 
-fn append_task_agent_descriptions(
+async fn append_task_agent_descriptions(
     state: &AppState,
     directory: &str,
     permissions: &[PermissionRule],
@@ -147,7 +181,7 @@ fn append_task_agent_descriptions(
     let Some(task) = tools.iter_mut().find(|tool| tool.id == "task") else {
         return Ok(());
     };
-    let catalog = crate::plugins::agent_catalog(state, directory)
+    let catalog = crate::plugins::agent_catalog(state, directory).await
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let description = task_agent_description(&catalog, permissions);
     if !description.is_empty() {
@@ -326,13 +360,17 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     permissions: &[PermissionRule],
     cancel: Option<Arc<AtomicBool>>,
     state: Option<AppState>,
+    snapshot: &RegistrySnapshot,
 ) -> anyhow::Result<Option<tool::ToolExecutionResult>> {
     if !runtime_id.starts_with("mcp__") {
         return Ok(None);
     }
     ensure_tool_permission(permissions, "mcp", runtime_id)
         .map_err(|error| anyhow::anyhow!(error))?;
-    let Some(tool) = configured_mcp_tools_with_state(directory, state.clone())
+    let runtime_state = state
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
+    let Some(tool) = configured_mcp_tools_with_snapshot(directory, runtime_state, snapshot)
         .await
         .into_iter()
         .find(|tool| mcp::tool_runtime_id(&tool.client, &tool.name) == runtime_id)
@@ -340,6 +378,7 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
         anyhow::bail!("unknown MCP tool {runtime_id}");
     };
     let auth_store = mcp_auth::McpAuthStore::from_env();
+    let state = state.ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
     let call = mcp::call_tool_with_state(
         directory,
         &tool.client,
@@ -383,11 +422,15 @@ pub(crate) async fn execute_mcp_gateway(
     permissions: &[PermissionRule],
     cancel: Option<Arc<AtomicBool>>,
     state: Option<AppState>,
+    snapshot: &RegistrySnapshot,
 ) -> anyhow::Result<Option<tool::ToolExecutionResult>> {
     if tool_name != MCP_GATEWAY_TOOL {
         return Ok(None);
     }
-    let mut tools = configured_mcp_tools_with_state(directory, state.clone()).await;
+    let runtime_state = state
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
+    let mut tools = configured_mcp_tools_with_snapshot(directory, runtime_state, snapshot).await;
     let runtime_ids = tools
         .iter()
         .map(|tool| mcp::tool_runtime_id(&tool.client, &tool.name))
@@ -433,11 +476,14 @@ pub(crate) async fn execute_mcp_gateway(
                         })
                         .cloned()
                 }) {
+                    let runtime_state = state.clone().ok_or_else(|| {
+                        anyhow::anyhow!("MCP tool runtime requires AppState")
+                    })?;
                     let mut requested = mcp::tools_with_state(
                         directory,
                         &name,
                         &mcp_auth::McpAuthStore::from_env(),
-                        state.clone(),
+                        runtime_state,
                     )
                     .await?;
                     tools.append(&mut requested);
@@ -463,6 +509,7 @@ pub(crate) async fn execute_mcp_gateway(
                 permissions,
                 cancel,
                 state,
+                snapshot,
             )
             .await
         }
@@ -614,10 +661,38 @@ fn search_score(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn execution_snapshot_uses_canonical_workspace_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-tool-snapshot-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("agent.sqlite3");
+        let state = AppState::open_database(db.clone()).await.unwrap();
+
+        let canonical = acquire_workspace_plugin_snapshot(
+            &state,
+            root.to_string_lossy().as_ref(),
+        )
+        .await;
+        let alias = acquire_workspace_plugin_snapshot(
+            &state,
+            root.join(".").to_string_lossy().as_ref(),
+        )
+        .await;
+
+        assert_eq!(canonical.directory, alias.directory);
+        assert!(Arc::ptr_eq(&canonical.runtime, &alias.runtime));
+        assert!(Arc::ptr_eq(&canonical.snapshot, &alias.snapshot));
+        state.inner.store.close().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn task_description_advertises_permitted_subagents_like_opencode() {
         let catalog =
-            AgentCatalog::from_config(&neoism_agent_core::NeoismConfig::default());
+            AgentCatalog::from_config(&neoism_agent_core::AgentConfigDocument::default());
         let build = catalog.get("build").unwrap();
         let permissions = permission::from_config_map(&build.permission);
 
@@ -633,7 +708,7 @@ mod tests {
     #[test]
     fn task_description_hides_denied_subagents() {
         let catalog =
-            AgentCatalog::from_config(&neoism_agent_core::NeoismConfig::default());
+            AgentCatalog::from_config(&neoism_agent_core::AgentConfigDocument::default());
         let permissions = vec![
             PermissionRule {
                 permission: "task".to_string(),

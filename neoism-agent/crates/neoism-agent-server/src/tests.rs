@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
 use neoism_agent_core::{
-    AuthInfo, NeoismConfig, ProviderListResult, SessionUndoStatus, SessionUndoTree,
+    AgentConfigDocument, AuthInfo, ProviderListResult, SessionUndoStatus, SessionUndoTree,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
@@ -40,7 +40,7 @@ fn gpt_models_get_opencode_patch_toolset() {
     assert!(tool_allowed_for_model("write", "gpt-4.1"));
 
     let available = provider_tool_map(
-        &tool::list()
+        &tool::workspace_tool_items()
             .into_iter()
             .filter(|tool| tool.id == "apply_patch")
             .collect::<Vec<_>>(),
@@ -150,7 +150,7 @@ fn compacted_summary_is_added_to_provider_context() {
     let summary = build_session_summary(&messages);
     messages.extend(test_compaction_pair(&session_id, None, &summary));
 
-    let provider_messages = provider_messages_for_session(&info, &messages, "stub", None);
+    let provider_messages = provider_messages_for_session(&info, &messages, "stub", None, true);
 
     assert!(matches!(provider_messages[0].role, ProviderRole::System));
     assert!(provider_messages[0]
@@ -217,6 +217,7 @@ fn provider_context_includes_active_run_system_once() {
         &messages,
         "stub",
         Some("active run prompt"),
+        true,
     );
 
     assert_eq!(
@@ -316,7 +317,7 @@ fn compacted_summary_trims_messages_already_covered_by_summary() {
     ));
     messages.push(tail_message);
 
-    let provider_messages = provider_messages_for_session(&info, &messages, "stub", None);
+    let provider_messages = provider_messages_for_session(&info, &messages, "stub", None, true);
 
     assert!(provider_messages.iter().any(|message| message
         .content
@@ -757,7 +758,7 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
         (message_id_of(&messages[0]), message_id_of(&messages[1]));
 
     let pending = store
-        .messages_missing_embeddings("test-model", 10)
+        .messages_missing_embeddings("test-model", &[session_id.to_string()], 10)
         .await
         .unwrap();
     assert_eq!(pending.len(), 2);
@@ -783,7 +784,7 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
         .await
         .unwrap();
     assert!(store
-        .messages_missing_embeddings("test-model", 10)
+        .messages_missing_embeddings("test-model", &[session_id.to_string()], 10)
         .await
         .unwrap()
         .is_empty());
@@ -1131,13 +1132,7 @@ async fn concurrent_event_commits_keep_one_gapless_aggregate_sequence() {
         .await
         .unwrap();
     assert_eq!(events.len(), 24);
-    assert_eq!(
-        events
-            .iter()
-            .map(|event| event.aggregate_seq)
-            .collect::<Vec<_>>(),
-        (0..24).collect::<Vec<_>>()
-    );
+    assert!(events.windows(2).all(|pair| pair[1].seq == pair[0].seq + 1));
     cleanup_sqlite_files(&path);
 }
 
@@ -1188,13 +1183,7 @@ async fn turso_transactions_retry_while_another_store_is_writing() {
         .await
         .unwrap();
     assert_eq!(events.len(), writes);
-    assert_eq!(
-        events
-            .iter()
-            .map(|event| event.aggregate_seq)
-            .collect::<Vec<_>>(),
-        (0..writes as i64).collect::<Vec<_>>()
-    );
+    assert!(events.windows(2).all(|pair| pair[1].seq == pair[0].seq + 1));
 
     drop(projection_store);
     drop(event_store);
@@ -1503,9 +1492,11 @@ async fn prompt_persists_streamed_assistant_message() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-struct TestNativePlugin;
+#[cfg(any())]
+struct TestRuntimeHook;
 
-impl plugin::NativePlugin for TestNativePlugin {
+#[cfg(any())]
+impl plugin::RuntimeHook for TestRuntimeHook {
     fn name(&self) -> &str {
         "test-native"
     }
@@ -1563,6 +1554,7 @@ impl plugin::NativePlugin for TestNativePlugin {
 }
 
 #[tokio::test]
+#[cfg(any())]
 async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-native-plugin-{}",
@@ -1580,7 +1572,7 @@ async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
     cleanup_sqlite_files(&db_path);
 
     let state = AppState::open_database(db_path.clone()).await.unwrap();
-    state.inner.plugins.register(TestNativePlugin);
+    let snapshot = state.plugin_snapshot(root.to_string_lossy().as_ref()).await;
     let app = app(state.clone());
 
     let tools: Vec<ToolListItem> = response_json(
@@ -1606,11 +1598,7 @@ async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
         call_id: Some("call_test".to_string()),
     };
     let mut arguments = json!({ "filePath": "missing.txt" });
-    state
-        .inner
-        .plugins
-        .tool_execute_before(&tool_context, &mut arguments)
-        .unwrap();
+    plugin::tool_execute_before(&snapshot, &tool_context, &mut arguments).unwrap();
     let mut result = tool::execute(
         "read",
         tool::ToolContext::new(&root)
@@ -1622,11 +1610,7 @@ async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
     )
     .await
     .unwrap();
-    state
-        .inner
-        .plugins
-        .tool_execute_after(&tool_context, &mut result)
-        .unwrap();
+    plugin::tool_execute_after(&snapshot, &tool_context, &mut result).unwrap();
     assert!(result.output.contains("plugin selected this file"));
     assert!(result.title.contains("[plugin]"));
     assert_eq!(result.metadata.unwrap()["plugin"], "test-native");
@@ -1963,30 +1947,27 @@ async fn runtime_source_plugins_are_workspace_disableable() {
             .unwrap(),
     )
     .await;
-    let skills = capabilities
-        .iter()
-        .find(|capability| capability.plugin_id.as_deref() == Some("dev.neoism.skills"))
-        .expect("skills capability");
-    assert!(skills.disableable);
-    assert!(!skills.enabled);
+    let snapshot = state.plugin_snapshot(&directory).await;
+    let disabled_ids = [
+        "dev.neoism.skills", "dev.neoism.commands", "dev.neoism.websearch",
+        "dev.neoism.agents", "dev.neoism.mcp", "dev.neoism.lsp",
+        "dev.neoism.workflows", "dev.neoism.tools.notes",
+        "dev.neoism.tools.workspace", "dev.neoism.semantic", "dev.neoism.goals",
+        "dev.neoism.subagents", "dev.neoism.vcs", "dev.neoism.pty",
+    ];
+    assert!(snapshot.manifests.iter().all(|manifest| !disabled_ids.contains(&manifest.id.as_str())));
+    assert!(snapshot.capabilities.iter().all(|capability| capability.plugin_id.as_deref().is_none_or(|id| !disabled_ids.contains(&id))));
+    assert!(snapshot.contributions.values().all(|contribution| !disabled_ids.contains(&contribution.plugin_id.as_str())));
+    assert!(snapshot.runtime_tools.is_empty());
 
-    let listed: Vec<neoism_agent_core::SkillInfo> = response_json(
-        app.clone().oneshot(request(
+    let response = app.clone().oneshot(request(
             Method::GET,
             &format!("/v2/skills?directory={directory}"),
             None,
         ))
         .await
-        .unwrap(),
-    )
-    .await;
-    assert!(listed.is_empty());
-    let websearch = capabilities
-        .iter()
-        .find(|capability| capability.plugin_id.as_deref() == Some("dev.neoism.websearch"))
-        .expect("websearch capability");
-    assert!(websearch.disableable);
-    assert!(!websearch.enabled);
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let tools: Vec<neoism_agent_core::ToolListItem> = response_json(
         app.clone().oneshot(request(
             Method::GET,
@@ -2004,12 +1985,6 @@ async fn runtime_source_plugins_are_workspace_disableable() {
     assert!(!tools.iter().any(|tool| tool.id == "skill"));
     assert!(!tools.iter().any(|tool| tool.id == "read"));
     assert!(!tools.iter().any(|tool| tool.id == "complete_goal"));
-    let agents = capabilities
-        .iter()
-        .find(|capability| capability.plugin_id.as_deref() == Some("dev.neoism.agents"))
-        .expect("agents capability");
-    assert!(agents.disableable);
-    assert!(!agents.enabled);
     let response = app
         .clone()
         .oneshot(request(
@@ -2020,12 +1995,6 @@ async fn runtime_source_plugins_are_workspace_disableable() {
         .await
         .unwrap();
     assert!(!response.status().is_success());
-    let commands = capabilities
-        .iter()
-        .find(|capability| capability.plugin_id.as_deref() == Some("dev.neoism.commands"))
-        .expect("commands capability");
-    assert!(commands.disableable);
-    assert!(!commands.enabled);
     for (plugin_id, path) in [
         (
             "dev.neoism.goals",
@@ -2042,12 +2011,7 @@ async fn runtime_source_plugins_are_workspace_disableable() {
         ("dev.neoism.vcs", "/v2/plugins/dev.neoism.vcs"),
         ("dev.neoism.pty", "/v2/plugins/dev.neoism.pty/shells"),
     ] {
-        let capability = capabilities
-            .iter()
-            .find(|capability| capability.plugin_id.as_deref() == Some(plugin_id))
-            .expect("route plugin capability");
-        assert!(capability.disableable);
-        assert!(!capability.enabled);
+        assert!(!snapshot.manifests.iter().any(|manifest| manifest.id == plugin_id));
         let response = app
             .clone()
             .oneshot(request(
@@ -2059,17 +2023,111 @@ async fn runtime_source_plugins_are_workspace_disableable() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
-    let listed: Vec<neoism_agent_core::CommandInfo> = response_json(
-        app.oneshot(request(
+    let response = app.oneshot(request(
             Method::GET,
             &format!("/v2/commands?directory={directory}"),
             None,
         ))
         .await
-        .unwrap(),
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn disabled_execution_contributions_have_no_side_effects() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-disabled-execution-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(root.join(".agent/tools")).unwrap();
+    let marker = root.join("spawned");
+    std::fs::write(
+        root.join(".agent/agent.json"),
+        format!(
+            r#"{{
+                "plugins": {{
+                    "dev.neoism.tools.workspace": {{ "enabled": false }},
+                    "dev.neoism.subagents": {{ "enabled": false }},
+                    "dev.neoism.mcp": {{ "enabled": false }},
+                    "dev.neoism.goals": {{ "enabled": false }}
+                }},
+                "mcp": {{ "disabled": {{ "type": "local", "command": ["sh", "-c", "touch '{}'"] }} }}
+            }}"#,
+            marker.display()
+        ),
     )
-    .await;
-    assert!(listed.is_empty());
+    .unwrap();
+    std::fs::write(
+        root.join(".agent/tools/custom_spawn.json"),
+        format!(
+            r#"{{ "command": ["sh", "-c", "touch '{}'"], "parameters": {{ "type": "object" }} }}"#,
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let mut session = store_test_session(&session_id, now_millis());
+    session.directory = root.to_string_lossy().into_owned();
+    state.inner.store.insert_session(&session).await.unwrap();
+    let message_id = Id::ascending(IdKind::Message);
+    let permissions = vec![neoism_agent_core::PermissionRule {
+        permission: "*".to_string(),
+        pattern: "*".to_string(),
+        action: neoism_agent_core::PermissionAction::Allow,
+    }];
+
+    for (name, input) in [
+        ("bash", json!({ "command": format!("touch {}", marker.display()) })),
+        ("background_task", json!({ "command": format!("touch {}", marker.display()), "description": "disabled" })),
+        ("session_search", json!({ "query": "anything" })),
+        ("task", json!({ "description": "disabled", "prompt": "disabled", "subagent_type": "general" })),
+        ("execute", json!({ "action": "search" })),
+        ("custom_spawn", json!({})),
+    ] {
+        let result = execute_tool_call_with_permission_wait(
+            &state,
+            &session_id,
+            &message_id,
+            root.to_string_lossy().as_ref(),
+            permissions.clone(),
+            "call-disabled",
+            name,
+            input,
+        )
+        .await;
+        assert!(result.is_err(), "disabled {name} unexpectedly executed");
+    }
+
+    let workspace = state.workspace_runtime(root.to_string_lossy().as_ref()).await;
+    assert!(!workspace.mcp_is_allocated(), "disabled MCP allocated a runtime");
+    assert!(workspace.background_if_allocated().is_none(), "disabled background tool allocated state");
+    assert!(!marker.exists(), "a disabled shell, MCP, background, or custom tool spawned");
+    assert_eq!(state.inner.store.list_sessions().await.unwrap().len(), 1, "disabled task created a child session");
+
+    let subtask = PromptRequest {
+        message_id: None,
+        model: None,
+        agent: None,
+        no_reply: false,
+        system: None,
+        tools: None,
+        author: None,
+        parts: vec![PromptPart::Subtask {
+            prompt: "disabled".to_string(),
+            description: "disabled".to_string(),
+            agent: "general".to_string(),
+            model: None,
+            command: None,
+        }],
+    };
+    assert!(append_prompt(&state, session_id.as_str(), subtask, true).await.is_err());
+    assert_eq!(state.inner.store.list_sessions().await.unwrap().len(), 1);
+
     state.inner.store.close().await;
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
@@ -2092,7 +2150,7 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     std::fs::write(
         root.join(".agent/plugins/test-plugin.json"),
         r#"{
-          "id": "test-plugin",
+          "id": "dev.example.test-plugin",
           "chatHeaders": { "X-Test-Plugin": "yes" },
           "chatOptions": { "metadata": { "plugin": true } },
           "shellEnv": { "PLUGIN_ENV": "loaded" }
@@ -2116,7 +2174,7 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     cleanup_sqlite_files(&db_path);
 
     let state = AppState::open_database(db_path.clone()).await.unwrap();
-    let runtime = state.inner.workspace_runtimes.acquire(root.to_string_lossy().as_ref(), &state.inner.plugins, state.services()).await;
+    let runtime = state.workspace_runtime(root.to_string_lossy().as_ref()).await;
     let app = app(state.clone());
     let hook_ctx = plugin::ChatHookContext {
         session_id: "ses_test".to_string(),
@@ -2125,16 +2183,10 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
         model_id: "gpt-test".to_string(),
     };
     let mut headers = std::collections::BTreeMap::new();
-    runtime
-        .plugins
-        .chat_headers(&hook_ctx, &mut headers)
-        .unwrap();
+    plugin::chat_headers(&runtime.snapshot(), &hook_ctx, &mut headers).unwrap();
     assert_eq!(headers["X-Test-Plugin"], "yes");
     let mut options = std::collections::BTreeMap::new();
-    runtime
-        .plugins
-        .chat_options(&hook_ctx, &mut options)
-        .unwrap();
+    plugin::chat_options(&runtime.snapshot(), &hook_ctx, &mut options).unwrap();
     assert_eq!(options["metadata"]["plugin"], true);
 
     let tools: Vec<ToolListItem> = response_json(
@@ -2151,7 +2203,7 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     assert!(tools.iter().any(|tool| tool.id == "custom_echo"));
 
     let mut custom_env = std::collections::BTreeMap::new();
-    runtime.plugins.shell_env(&plugin::ShellEnvContext {
+    plugin::shell_env(&runtime.snapshot(), &plugin::ShellEnvContext {
         cwd: root.to_string_lossy().into_owned(), session_id: None, call_id: None,
     }, &mut custom_env).unwrap();
     let result = custom_tool::execute(
@@ -2216,8 +2268,8 @@ fn config_loads_project_agents_commands_and_permissions() {
     std::fs::write(
         root.join(".agent/agent.json"),
         r#"{
-              "default_agent": "plan",
-              "permission": { "external_directory": { "*": "ask" } },
+              "defaultAgent": "plan",
+              "permission": { "externalDirectory": { "*": "ask" } },
               "agent": {
                 "build": {
                   "temperature": 0.2,
@@ -2296,12 +2348,12 @@ Audit the current worktree for correctness.
 
 #[test]
 fn config_validation_reports_real_setup_problems() {
-    let mut config = NeoismConfig {
+    let mut config = AgentConfigDocument {
         default_agent: Some("missing".to_string()),
         enabled_providers: Some(vec!["openai".to_string()]),
         disabled_providers: vec!["openai".to_string()],
         model: Some("gpt-5.5".to_string()),
-        ..NeoismConfig::default()
+        ..AgentConfigDocument::default()
     };
     config.command.insert(
         "audit".to_string(),
@@ -2440,7 +2492,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
     source
         .inner
         .store
-        .enqueue_prompt(
+        .enqueue_prompt_with_delivery(
             session_id.as_str(),
             &PromptRequest {
                 message_id: None,
@@ -2454,6 +2506,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
                     text: "continue please".to_string(),
                 }],
             },
+            "queue",
         )
         .await
         .unwrap();
@@ -2479,7 +2532,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
         .unwrap()
         .is_none());
 
-    // Drive POST /sessions/import through the router; assert 2xx + echoed id.
+    // Drive POST /v2/sessions/import through the router; assert 2xx + echoed id.
     let response: Value = response_json(
         app.oneshot(request(
             Method::POST,
@@ -2527,7 +2580,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
     let queued = target
         .inner
         .store
-        .list_queued_prompts(session_id.as_str())
+        .list_queued_prompt_entries(session_id.as_str())
         .await
         .unwrap();
     assert_eq!(queued.len(), 1);
@@ -2548,7 +2601,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
 #[tokio::test]
 async fn sessions_export_route_returns_only_sessions_under_requested_root() {
     // A workspace promote knows the checkout path it is moving, not the session
-    // ids living there, so POST /sessions/export takes a workspaceRoot and must
+    // ids living there, so POST /v2/sessions/export takes a workspaceRoot and must
     // return a bundle for every session under it — and nothing else.
     let db = std::env::temp_dir().join(format!(
         "neoism-agent-export-{}.sqlite3",

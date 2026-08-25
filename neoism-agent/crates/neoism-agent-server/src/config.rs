@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use neoism_agent_core::{FormatterConfig, McpConfig, NeoismConfig, PluginConfig};
+use neoism_agent_core::{AgentConfigDocument, FormatterConfig, McpConfig};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
@@ -15,7 +15,7 @@ use neoism_agent_service_api::{
 
 #[derive(Clone, Debug)]
 pub(crate) struct LoadedConfig {
-    pub(crate) info: NeoismConfig,
+    pub(crate) info: AgentConfigDocument,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,8 +57,8 @@ pub(crate) fn load_snapshot(snapshot: &ConfigSnapshot) -> anyhow::Result<LoadedC
         merge_markdown_entries(&mut raw, &root.path)?;
     }
 
-    let mut info: NeoismConfig =
-        serde_json::from_value(raw).context("failed to decode Neoism config")?;
+    let mut info: AgentConfigDocument =
+        serde_json::from_value(raw).context("failed to decode Agent config")?;
     normalize_config(&mut info);
     Ok(LoadedConfig { info })
 }
@@ -194,7 +194,7 @@ mod service_boundary_tests {
         let loaded = load(&services, "/workspace").unwrap();
         assert!(loaded.info.model.is_none());
         assert!(loaded.info.shell.is_none());
-        assert!(loaded.info.extra.contains_key("terminal"));
+        assert!(serde_json::to_value(loaded.info).unwrap().get("terminal").is_none());
     }
 }
 
@@ -202,7 +202,7 @@ pub(crate) fn roots(services: &AgentServices, directory: &str) -> Vec<PathBuf> {
     snapshot(services, directory).map(|snapshot| snapshot.discovery_roots.into_iter().map(|root| root.path).collect()).unwrap_or_default()
 }
 
-pub(crate) fn formatter_value(info: &NeoismConfig) -> Option<Value> {
+pub(crate) fn formatter_value(info: &AgentConfigDocument) -> Option<Value> {
     match &info.formatter {
         FormatterConfig::Enabled(false) => None,
         FormatterConfig::Enabled(true) => Some(Value::Bool(true)),
@@ -229,7 +229,7 @@ pub(crate) fn validate(services: &AgentServices, directory: &str) -> ConfigValid
     }
 }
 
-pub(crate) fn validate_loaded(info: &NeoismConfig) -> ConfigValidation {
+pub(crate) fn validate_loaded(info: &AgentConfigDocument) -> ConfigValidation {
     let mut diagnostics = Vec::new();
     let enabled = info
         .enabled_providers
@@ -251,13 +251,13 @@ pub(crate) fn validate_loaded(info: &NeoismConfig) -> ConfigValidation {
     if let Some(default_agent) = info.default_agent.as_deref() {
         if !default_agent.trim().is_empty() && !info.agent.contains_key(default_agent) {
             diagnostics.push(warning(
-                "default-agent",
+                "defaultAgent",
                 format!("default agent `{default_agent}` is not configured"),
             ));
         }
     }
     validate_model_ref("model", info.model.as_deref(), &mut diagnostics);
-    validate_model_ref("small-model", info.small_model.as_deref(), &mut diagnostics);
+    validate_model_ref("smallModel", info.small_model.as_deref(), &mut diagnostics);
 
     for (name, agent) in &info.agent {
         if name.trim().is_empty() {
@@ -307,15 +307,6 @@ pub(crate) fn validate_loaded(info: &NeoismConfig) -> ConfigValidation {
                 ));
             }
         }
-    }
-
-    for key in info.extra.keys() {
-        diagnostics.push(warning(
-            key.clone(),
-            format!(
-                "unknown top-level config key `{key}` is preserved but not interpreted"
-            ),
-        ));
     }
 
     ConfigValidation {
@@ -505,7 +496,7 @@ fn merge_unique_array(target: &mut Value, source: Value) {
     }
 }
 
-fn normalize_config(info: &mut NeoismConfig) {
+fn normalize_config(info: &mut AgentConfigDocument) {
     for (name, mut config) in std::mem::take(&mut info.mode) {
         config.mode = Some("primary".to_string());
         info.agent.insert(name, config);
@@ -529,21 +520,8 @@ fn normalize_config(info: &mut NeoismConfig) {
         }
     }
 
-    for plugin in &mut info.plugin {
-        normalize_plugin_config(plugin);
-    }
-
     for (id, plugin) in &mut info.plugins {
-        if plugin
-            .id
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-        {
-            plugin.id = Some(id.clone());
-        }
-        normalize_plugin_config(plugin);
+        plugin.id = Some(id.clone());
     }
 
     for agent in info.agent.values_mut() {
@@ -552,9 +530,6 @@ fn normalize_config(info: &mut NeoismConfig) {
         }
         let tool_permissions = permissions_from_tools(&agent.tools);
         merge_permission_maps(&mut agent.permission, tool_permissions);
-        for (key, value) in std::mem::take(&mut agent.extra) {
-            agent.options.entry(key).or_insert(value);
-        }
     }
 }
 
@@ -569,24 +544,13 @@ pub(crate) fn builtin_mcp_config(id: &str) -> McpConfig {
 }
 
 pub(crate) fn inject_builtin_mcp(
-    info: &mut NeoismConfig,
+    info: &mut AgentConfigDocument,
     services: &neoism_agent_service_api::AgentServices,
 ) {
     for (id, _) in services.builtin_mcp_services() {
         info.mcp
             .entry(id.to_string())
             .or_insert_with(|| builtin_mcp_config(id));
-    }
-}
-
-fn normalize_plugin_config(plugin: &mut PluginConfig) {
-    plugin.id = plugin
-        .id
-        .take()
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty());
-    for (key, value) in std::mem::take(&mut plugin.extra) {
-        plugin.options.entry(key).or_insert(value);
     }
 }
 

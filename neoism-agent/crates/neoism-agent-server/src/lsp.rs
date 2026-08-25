@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::Arc,
     time::Duration,
 };
 
@@ -33,12 +33,12 @@ mod lsp_service;
 #[path = "lsp_uri.rs"]
 mod lsp_uri;
 use lsp_adapters::{
-    adapters_for_root, best_route_in, AdapterOrigin, LanguageAdapter,
+    best_route_in, AdapterOrigin, LanguageAdapter,
     ResolvedLanguageRoute, ResolvedLspTransport,
 };
 #[cfg(test)]
 use lsp_client::read_lsp_message;
-use lsp_languages::{LspOperation, WorkspaceScan, LANGUAGE_SPECS};
+use lsp_languages::{LspOperation, WorkspaceScan};
 #[cfg(test)]
 use lsp_query::query_workspace_symbols_with_command;
 use lsp_scan::{
@@ -47,6 +47,69 @@ use lsp_scan::{
     normalized_root, operation_supported, scan_workspace, server_status_for_file,
 };
 use lsp_uri::path_to_file_uri;
+
+/// All mutable language-server state for one application instance.
+///
+/// Clones share one instance; separately constructed runtimes share no clients,
+/// diagnostics, configuration caches, metadata caches, or event receivers.
+#[derive(Clone)]
+pub struct LspRuntime {
+    service: Arc<lsp_service::LspService>,
+}
+
+impl LspRuntime {
+    pub fn new(services: neoism_agent_service_api::AgentServices) -> Self {
+        let (diagnostics_bus, _) = broadcast::channel(512);
+        let service = Arc::new_cyclic(|weak| {
+            lsp_service::LspService::new(services, diagnostics_bus, weak.clone())
+        });
+        Self { service }
+    }
+
+    pub fn services(&self) -> &neoism_agent_service_api::AgentServices {
+        &self.service.services
+    }
+
+    fn adapters_for_root(&self, root: &Path) -> Vec<LanguageAdapter> {
+        lsp_adapters::adapters_for_root_with(
+            &self.service.adapter_cache,
+            self.services(),
+            root,
+        )
+    }
+
+    pub fn resolve_lsp_command(
+        &self,
+        id: &str,
+        command: Vec<String>,
+    ) -> (Vec<String>, LspCommandSource) {
+        resolve_lsp_command_with(self.services(), id, command)
+    }
+
+    pub fn subscribe_diagnostics(&self) -> broadcast::Receiver<DiagnosticsEvent> {
+        self.service.diagnostics_bus.subscribe()
+    }
+
+    pub fn shutdown(&self) {
+        self.service.shutdown_all();
+    }
+
+    pub fn shutdown_root(&self, root: &Path) {
+        self.service.shutdown_root(root);
+    }
+
+    pub fn instance_key(&self) -> usize {
+        Arc::as_ptr(&self.service) as usize
+    }
+}
+
+impl Drop for LspRuntime {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.service) == 1 {
+            self.service.shutdown_all();
+        }
+    }
+}
 
 const MAX_SCAN_FILES: usize = 10_000;
 const MAX_EVIDENCE: usize = 8;
@@ -177,10 +240,10 @@ pub struct LspLanguageRouteMetadata {
     pub filename_patterns: Vec<String>,
 }
 
-pub fn language_server_adapters() -> Vec<LspAdapterMetadata> {
-    LANGUAGE_SPECS
+pub fn language_server_adapters(runtime: &LspRuntime) -> Vec<LspAdapterMetadata> {
+    runtime.services().language_capabilities.snapshot().languages
         .iter()
-        .map(LanguageAdapter::from_builtin)
+        .map(LanguageAdapter::from_capability)
         .map(|adapter| adapter_metadata(&adapter))
         .collect()
 }
@@ -188,17 +251,18 @@ pub fn language_server_adapters() -> Vec<LspAdapterMetadata> {
 /// The complete runtime registry for one workspace, after project config has
 /// added, replaced, disabled, or overridden adapters.
 pub fn language_server_adapters_for(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
 ) -> Vec<LspAdapterMetadata> {
-    language_server_adapters_for_with_services(&crate::standard_services(), directory)
+    language_server_adapters_for_with_services(runtime, directory)
 }
 
 pub fn language_server_adapters_for_with_services(
-    services: &neoism_agent_service_api::AgentServices,
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
 ) -> Vec<LspAdapterMetadata> {
     let root = normalized_root(directory.as_ref());
-    lsp_adapters::adapters_for_root_with(services, &root)
+    runtime.adapters_for_root(&root)
         .iter()
         .map(adapter_metadata)
         .collect()
@@ -478,18 +542,18 @@ pub struct LspDocumentHighlight {
     pub language: Option<String>,
 }
 
-pub fn status(directory: impl AsRef<Path>) -> Vec<LspStatus> {
-    status_with_services(&crate::standard_services(), directory)
+pub fn status(runtime: &LspRuntime, directory: impl AsRef<Path>) -> Vec<LspStatus> {
+    status_with_services(runtime, directory)
 }
 
 pub fn status_with_services(
-    services: &neoism_agent_service_api::AgentServices,
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
 ) -> Vec<LspStatus> {
     let root = normalized_root(directory.as_ref());
-    let adapters = lsp_adapters::adapters_for_root_with(services, &root);
+    let adapters = runtime.adapters_for_root(&root);
     let scan = scan_workspace(&root, &adapters);
-    detected_servers(&root, &scan, &adapters)
+    detected_servers(runtime, &root, &scan, &adapters)
 }
 
 /// Status narrowed to the language(s) that can handle one concrete file.
@@ -497,12 +561,13 @@ pub fn status_with_services(
 /// file extension is stronger evidence and this path runs in the editor's
 /// periodic status refresh.
 pub fn status_for_file(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<LspStatus> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let adapters = adapters_for_root(&root);
+    let adapters = runtime.adapters_for_root(&root);
     let strongest_match = adapters
         .iter()
         .filter_map(|adapter| adapter.match_priority(&file))
@@ -532,7 +597,7 @@ pub fn status_for_file(
     matching_adapters
         .iter()
         .map(|adapter| {
-            let mut status = server_status_for_file(&root, &file, &evidence, adapter);
+            let mut status = server_status_for_file(runtime, &root, &file, &evidence, adapter);
             if let Some(language) = adapter.logical_language_for_path(&file) {
                 status.language = language.to_string();
             }
@@ -553,19 +618,30 @@ fn workspace_scan_for_file(_root: &Path, _file: &Path) -> WorkspaceScan {
 /// any (e.g. `foo.rs` -> "rust"). Used to narrow the workspace server
 /// list to the servers relevant to the open buffer for the status-bar
 /// pill. Returns `None` for extensions no bundled spec claims.
-pub fn language_id_for_path(file: impl AsRef<Path>) -> Option<&'static str> {
-    lsp_languages::logical_language_for_path(file.as_ref())
+pub fn language_id_for_path(runtime: &LspRuntime, file: impl AsRef<Path>) -> Option<String> {
+    let file = file.as_ref();
+    runtime
+        .services()
+        .language_capabilities
+        .snapshot()
+        .languages
+        .iter()
+        .map(LanguageAdapter::from_capability)
+        .filter_map(|adapter| adapter.match_priority(file).map(|score| (score, adapter)))
+        .max_by_key(|(score, _)| *score)
+        .and_then(|(_, adapter)| adapter.logical_language_for_path(file).map(ToOwned::to_owned))
 }
 
 /// Workspace-aware language routing, including arbitrary adapters declared in
 /// the canonical Agent config. This is the authoritative API for editor buffers.
 pub fn language_id_for_path_in(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Option<String> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let adapters = adapters_for_root(&root);
+    let adapters = runtime.adapters_for_root(&root);
     let strongest = adapters
         .iter()
         .filter_map(|adapter| adapter.match_priority(&file))
@@ -584,16 +660,46 @@ pub fn language_id_for_path_in(
 /// Whether a specific catalog package exposes the executable declared by a
 /// built-in adapter. Package identity is part of the match so similarly named
 /// binaries cannot accidentally advertise an unusable attachment.
-pub fn supports_language_server_package(package_id: &str, command: &str) -> bool {
-    lsp_languages::adapter_supports_catalog_package(package_id, command)
+pub fn supports_language_server_package(
+    runtime: &LspRuntime,
+    package_id: &str,
+    command: &str,
+) -> bool {
+    let executable = normalized_executable(command);
+    runtime
+        .services()
+        .language_capabilities
+        .snapshot()
+        .languages
+        .iter()
+        .flat_map(|adapter| &adapter.catalog_packages)
+        .any(|package| {
+            package.package_id.eq_ignore_ascii_case(package_id)
+                && package.executable.eq_ignore_ascii_case(&executable)
+        })
+}
+
+fn normalized_executable(command: &str) -> String {
+    let executable = command
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(command);
+    [".exe", ".cmd", ".bat"]
+        .iter()
+        .find_map(|suffix| executable.to_ascii_lowercase().strip_suffix(suffix).map(ToOwned::to_owned))
+        .unwrap_or_else(|| executable.to_string())
 }
 
 /// Language ids with a live (spawned + initialized) LSP client under
 /// `directory`. The status pill uses this to show a server as actually
 /// "attached" rather than merely "available on PATH".
-pub fn live_languages(directory: impl AsRef<Path>) -> std::collections::BTreeSet<String> {
+pub fn live_languages(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+) -> std::collections::BTreeSet<String> {
     let root = normalized_root(directory.as_ref());
-    lsp_service::service().live_languages(&root)
+    runtime.service.live_languages(&root)
 }
 
 /// A `textDocument/publishDiagnostics` push from a language server, delivered
@@ -608,20 +714,16 @@ pub struct DiagnosticsEvent {
     pub diagnostics: Vec<LspDiagnostic>,
 }
 
-fn diagnostics_bus() -> &'static broadcast::Sender<DiagnosticsEvent> {
-    static BUS: OnceLock<broadcast::Sender<DiagnosticsEvent>> = OnceLock::new();
-    BUS.get_or_init(|| broadcast::channel(512).0)
-}
-
 /// Subscribe to real-time `publishDiagnostics` pushes from every LSP client.
 /// The daemon drains this and forwards to the editor with zero polling.
-pub fn subscribe_diagnostics() -> broadcast::Receiver<DiagnosticsEvent> {
-    diagnostics_bus().subscribe()
+pub fn subscribe_diagnostics(runtime: &LspRuntime) -> broadcast::Receiver<DiagnosticsEvent> {
+    runtime.subscribe_diagnostics()
 }
 
 /// Fan a raw `publishDiagnostics` notification onto the bus. Called by the LSP
 /// client's reader thread the instant the server sends it.
 fn dispatch_diagnostics(
+    service: &lsp_service::LspService,
     root: &Path,
     server_id: &str,
     routes: &[ResolvedLanguageRoute],
@@ -650,7 +752,7 @@ fn dispatch_diagnostics(
         .get("version")
         .and_then(Value::as_i64)
         .and_then(|version| i32::try_from(version).ok());
-    if !lsp_service::service().store_versioned_diagnostics(
+    if !service.store_versioned_diagnostics(
         root,
         &file,
         server_id,
@@ -666,9 +768,9 @@ fn dispatch_diagnostics(
         }
         return;
     }
-    let diagnostics = lsp_service::service().cached_diagnostics(root, &file);
+    let diagnostics = service.cached_diagnostics(root, &file);
     // send() only errors when there are no live receivers — harmless.
-    let _ = diagnostics_bus().send(DiagnosticsEvent {
+    let _ = service.diagnostics_bus.send(DiagnosticsEvent {
         root: root.to_path_buf(),
         server_id: server_id.to_string(),
         language: language.to_string(),
@@ -686,22 +788,6 @@ fn dispatch_diagnostics(
                 .unwrap_or(0),
         );
     }
-}
-
-pub(crate) fn resolve_lsp_command(
-    id: &str,
-    command: Vec<String>,
-) -> (Vec<String>, LspCommandSource) {
-    let services = lsp_service::service().services();
-    resolve_lsp_command_with(&services, id, command)
-}
-
-pub(crate) fn configure_services(services: neoism_agent_service_api::AgentServices) {
-    lsp_service::service().configure_services(services);
-}
-
-pub(crate) fn agent_services() -> neoism_agent_service_api::AgentServices {
-    lsp_service::service().services()
 }
 
 fn resolve_lsp_command_with(
@@ -736,11 +822,12 @@ fn resolve_lsp_command_with(
 }
 
 fn unavailable_lsp_error(
+    runtime: &LspRuntime,
     root: &Path,
     file: Option<&Path>,
     operation: LspOperation,
 ) -> Option<anyhow::Error> {
-    let adapters = adapters_for_root(root);
+    let adapters = runtime.adapters_for_root(root);
     let scan = scan_workspace(root, &adapters);
     let mut matching = Vec::new();
     let mut missing = Vec::new();
@@ -758,7 +845,7 @@ fn unavailable_lsp_error(
             continue;
         }
         matching.push(adapter);
-        if !adapter.is_valid() || !adapter_endpoint_available(adapter) {
+        if !adapter.is_valid() || !adapter_endpoint_available(runtime, adapter) {
             missing.push(adapter);
         }
     }
@@ -798,6 +885,7 @@ fn unavailable_lsp_error(
 }
 
 pub fn workspace_symbols(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     query: &str,
 ) -> Vec<WorkspaceSymbol> {
@@ -807,7 +895,7 @@ pub fn workspace_symbols(
     }
 
     let root = normalized_root(directory.as_ref());
-    let adapters = adapters_for_root(&root);
+    let adapters = runtime.adapters_for_root(&root);
     let scan = scan_workspace(&root, &adapters);
     let mut symbols = Vec::new();
     let mut seen = BTreeSet::new();
@@ -816,10 +904,10 @@ pub fn workspace_symbols(
         .iter()
         .filter(|spec| spec.workspace_symbols && language_detected(spec, &scan))
         .filter(|spec| spec.is_valid())
-        .filter(|spec| adapter_endpoint_available(spec))
+        .filter(|spec| adapter_endpoint_available(runtime, spec))
         .take(MAX_LSP_SERVERS_PER_QUERY)
     {
-        match lsp_service::service().workspace_symbols(&root, query, spec) {
+        match runtime.service.workspace_symbols(&root, query, spec) {
             Ok(found) => {
                 for symbol in found {
                     let key = (
@@ -853,6 +941,7 @@ pub fn workspace_symbols(
 /// a zero-based UTF-8 byte column; the client converts it to the server's
 /// negotiated wire encoding exactly once.
 pub fn hover(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -863,8 +952,8 @@ pub fn hover(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::Hover) {
-        match lsp_service::service().hover(&root, &file, line, character, &spec) {
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Hover) {
+        match runtime.service.hover(&root, &file, line, character, &spec) {
             Ok(found) => {
                 for hover in found {
                     let key = (
@@ -895,6 +984,7 @@ pub fn hover(
 /// `character` is a zero-based UTF-8 byte column; the client converts it to
 /// the server's negotiated wire encoding exactly once.
 pub fn signature_help(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -905,8 +995,8 @@ pub fn signature_help(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::SignatureHelp) {
-        match lsp_service::service().signature_help(&root, &file, line, character, &spec)
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::SignatureHelp) {
+        match runtime.service.signature_help(&root, &file, line, character, &spec)
         {
             Ok(found) => {
                 for help in found {
@@ -934,6 +1024,7 @@ pub fn signature_help(
 /// Returned hint positions are one-based (line, UTF-8 byte column), matching
 /// every other position this module emits.
 pub fn inlay_hints(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     start_line: u32,
@@ -944,8 +1035,8 @@ pub fn inlay_hints(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::InlayHints) {
-        match lsp_service::service()
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::InlayHints) {
+        match runtime.service
             .inlay_hints(&root, &file, start_line, end_line, &spec)
         {
             Ok(found) => {
@@ -978,6 +1069,7 @@ pub fn inlay_hints(
 /// Occurrences of the symbol under an exact zero-based line and zero-based
 /// UTF-8 byte column, scoped to `file`.
 pub fn document_highlights(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -988,8 +1080,8 @@ pub fn document_highlights(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::DocumentHighlight) {
-        match lsp_service::service()
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::DocumentHighlight) {
+        match runtime.service
             .document_highlights(&root, &file, line, character, &spec)
         {
             Ok(found) => {
@@ -1021,16 +1113,18 @@ pub fn document_highlights(
 /// `file`. Exact cursor position (no multi-position fallback — completion is
 /// position-precise). Returns the first non-empty server response.
 pub fn completion(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
     character: u32,
     text: Option<&str>,
 ) -> Vec<LspCompletionItem> {
-    completion_with_trigger(directory, file, line, character, text, None)
+    completion_with_trigger(runtime, directory, file, line, character, text, None)
 }
 
 pub fn completion_with_trigger(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -1040,8 +1134,8 @@ pub fn completion_with_trigger(
 ) -> Vec<LspCompletionItem> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    for spec in file_query_specs(&root, &file, LspOperation::Completion) {
-        match lsp_service::service().completion(
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Completion) {
+        match runtime.service.completion(
             &root,
             &file,
             line,
@@ -1065,6 +1159,7 @@ pub fn completion_with_trigger(
 /// client transport converts positions back to the negotiated encoding for
 /// the request and to bytes again for the response.
 pub fn resolve_completion(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     server_id: &str,
@@ -1072,11 +1167,11 @@ pub fn resolve_completion(
 ) -> Option<Value> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    for spec in file_query_specs(&root, &file, LspOperation::Completion)
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Completion)
         .into_iter()
         .filter(|spec| spec.id == server_id)
     {
-        match lsp_service::service().resolve_completion(&root, &file, &spec, item.clone())
+        match runtime.service.resolve_completion(&root, &file, &spec, item.clone())
         {
             Ok(resolved) => return Some(resolved),
             Err(error) => {
@@ -1093,6 +1188,7 @@ pub fn resolve_completion(
 }
 
 pub fn execute_completion_command(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     server_id: &str,
@@ -1100,11 +1196,11 @@ pub fn execute_completion_command(
 ) -> Option<Value> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    for spec in file_query_specs(&root, &file, LspOperation::Completion)
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Completion)
         .into_iter()
         .filter(|spec| spec.id == server_id)
     {
-        match lsp_service::service().execute_command(&root, &file, &spec, command.clone())
+        match runtime.service.execute_command(&root, &file, &spec, command.clone())
         {
             Ok(result) => return Some(result),
             Err(error) => {
@@ -1124,14 +1220,15 @@ pub fn execute_completion_command(
 /// so the client knows when to auto-open completion mid-token. Empty when no
 /// server is available or it advertises none.
 pub fn completion_trigger_characters(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<String> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    for spec in file_query_specs(&root, &file, LspOperation::Completion) {
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Completion) {
         if let Ok(chars) =
-            lsp_service::service().completion_trigger_characters(&root, &file, &spec)
+            runtime.service.completion_trigger_characters(&root, &file, &spec)
         {
             if !chars.is_empty() {
                 return chars;
@@ -1143,6 +1240,7 @@ pub fn completion_trigger_characters(
 
 /// Definitions at an exact zero-based line and zero-based UTF-8 byte column.
 pub fn definitions(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -1153,8 +1251,8 @@ pub fn definitions(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::Definition) {
-        match lsp_service::service().definitions(&root, &file, line, character, &spec) {
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Definition) {
+        match runtime.service.definitions(&root, &file, line, character, &spec) {
             Ok(found) => {
                 for location in found {
                     let key = (location.path.clone(), location.range.clone());
@@ -1181,6 +1279,7 @@ pub fn definitions(
 }
 
 pub fn references(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -1191,8 +1290,8 @@ pub fn references(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::References) {
-        match lsp_service::service().references(&root, &file, line, character, &spec) {
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::References) {
+        match runtime.service.references(&root, &file, line, character, &spec) {
             Ok(found) => {
                 for location in found {
                     let key = (location.path.clone(), location.range.clone());
@@ -1219,6 +1318,7 @@ pub fn references(
 }
 
 pub fn implementations(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -1229,8 +1329,8 @@ pub fn implementations(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::Implementation) {
-        match lsp_service::service().implementations(&root, &file, line, character, &spec)
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Implementation) {
+        match runtime.service.implementations(&root, &file, line, character, &spec)
         {
             Ok(found) => {
                 for location in found {
@@ -1258,6 +1358,7 @@ pub fn implementations(
 }
 
 pub fn prepare_call_hierarchy(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -1268,8 +1369,8 @@ pub fn prepare_call_hierarchy(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::CallHierarchy) {
-        match lsp_service::service()
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::CallHierarchy) {
+        match runtime.service
             .prepare_call_hierarchy(&root, &file, line, character, &spec)
         {
             Ok(found) => {
@@ -1298,24 +1399,27 @@ pub fn prepare_call_hierarchy(
 }
 
 pub fn incoming_calls(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
     character: u32,
 ) -> Vec<LspCallHierarchyCall> {
-    call_hierarchy_calls(directory, file, line, character, true)
+    call_hierarchy_calls(runtime, directory, file, line, character, true)
 }
 
 pub fn outgoing_calls(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
     character: u32,
 ) -> Vec<LspCallHierarchyCall> {
-    call_hierarchy_calls(directory, file, line, character, false)
+    call_hierarchy_calls(runtime, directory, file, line, character, false)
 }
 
 fn call_hierarchy_calls(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -1327,8 +1431,8 @@ fn call_hierarchy_calls(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::CallHierarchy) {
-        let found = lsp_service::service()
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::CallHierarchy) {
+        let found = runtime.service
             .call_hierarchy_calls(&root, &file, line, character, &spec, incoming);
         match found {
             Ok(found) => {
@@ -1362,6 +1466,7 @@ fn call_hierarchy_calls(
 }
 
 pub fn diagnostics(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<LspDiagnostic> {
@@ -1370,8 +1475,8 @@ pub fn diagnostics(
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::Diagnostics) {
-        match lsp_service::service().diagnostics(&root, &file, &spec) {
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Diagnostics) {
+        match runtime.service.diagnostics(&root, &file, &spec) {
             Ok(found) => {
                 for diagnostic in found {
                     let key = (
@@ -1407,16 +1512,17 @@ pub fn diagnostics(
 /// `client.diagnostics` map: the blocking wait happens once in [`touch_document`]
 /// (opencode's `touchFile(_, "document")`), and this just reads the result.
 pub fn cached_diagnostics(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<LspDiagnostic> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    if language_id_for_path_in(&root, &file).is_none() {
-        lsp_service::service().clear_diagnostics(&root, &file);
+    if language_id_for_path_in(runtime, &root, &file).is_none() {
+        runtime.service.clear_diagnostics(&root, &file);
         return Vec::new();
     }
-    lsp_service::service().cached_diagnostics(&root, &file)
+    runtime.service.cached_diagnostics(&root, &file)
 }
 
 /// Snapshot of every file the language servers have published diagnostics for,
@@ -1424,10 +1530,11 @@ pub fn cached_diagnostics(
 /// of all known diagnostics (we never spawn a server here — it only reads the
 /// cache that prior touch/diagnostics queries populated).
 pub fn cached_project_diagnostics(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
 ) -> Vec<(PathBuf, Vec<LspDiagnostic>)> {
     let root = normalized_root(directory.as_ref());
-    lsp_service::service().cached_diagnostics_snapshot(&root)
+    runtime.service.cached_diagnostics_snapshot(&root)
 }
 
 pub(crate) fn tool_result_has_diagnostics(
@@ -1440,11 +1547,12 @@ pub(crate) fn tool_result_has_diagnostics(
         .is_some()
 }
 
-pub fn shutdown_all() {
-    lsp_service::service().shutdown_all();
+pub fn shutdown_all(runtime: &LspRuntime) {
+    runtime.shutdown();
 }
 
 pub fn document_symbols(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<LspDocumentSymbol> {
@@ -1452,8 +1560,8 @@ pub fn document_symbols(
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::DocumentSymbols) {
-        match lsp_service::service().document_symbols(&root, &file, &spec) {
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::DocumentSymbols) {
+        match runtime.service.document_symbols(&root, &file, &spec) {
             Ok(found) => {
                 results.extend(found);
                 if results.len() >= MAX_SYMBOLS {
@@ -1475,13 +1583,17 @@ pub fn document_symbols(
     results
 }
 
-pub fn formatting(directory: impl AsRef<Path>, file: impl AsRef<Path>) -> Vec<Value> {
+pub fn formatting(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+) -> Vec<Value> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::Formatting) {
-        match lsp_service::service().formatting(&root, &file, &spec) {
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Formatting) {
+        match runtime.service.formatting(&root, &file, &spec) {
             Ok(result) => results.push(json!({
                 "language": spec.id,
                 "path": file.display().to_string(),
@@ -1502,6 +1614,7 @@ pub fn formatting(directory: impl AsRef<Path>, file: impl AsRef<Path>) -> Vec<Va
 }
 
 pub fn code_actions(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -1511,8 +1624,8 @@ pub fn code_actions(
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::CodeActions) {
-        match lsp_service::service().code_actions(&root, &file, line, character, &spec) {
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::CodeActions) {
+        match runtime.service.code_actions(&root, &file, line, character, &spec) {
             Ok(result) => results.push(json!({
                 "language": spec.id,
                 "path": file.display().to_string(),
@@ -1533,6 +1646,7 @@ pub fn code_actions(
 }
 
 pub fn resolve_code_action(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     server_id: &str,
@@ -1541,11 +1655,11 @@ pub fn resolve_code_action(
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
 
-    for spec in file_query_specs(&root, &file, LspOperation::CodeActions)
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::CodeActions)
         .into_iter()
         .filter(|spec| spec.id == server_id)
     {
-        match lsp_service::service().resolve_code_action(
+        match runtime.service.resolve_code_action(
             &root,
             &file,
             &spec,
@@ -1567,6 +1681,7 @@ pub fn resolve_code_action(
 }
 
 pub fn execute_command(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     server_id: &str,
@@ -1575,11 +1690,11 @@ pub fn execute_command(
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
 
-    for spec in file_query_specs(&root, &file, LspOperation::CodeActions)
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::CodeActions)
         .into_iter()
         .filter(|spec| spec.id == server_id)
     {
-        match lsp_service::service().execute_command(&root, &file, &spec, command.clone())
+        match runtime.service.execute_command(&root, &file, &spec, command.clone())
         {
             Ok(result) => return Some(result),
             Err(error) => {
@@ -1597,6 +1712,7 @@ pub fn execute_command(
 }
 
 pub fn rename(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     line: u32,
@@ -1607,8 +1723,8 @@ pub fn rename(
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::Rename) {
-        match lsp_service::service()
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Rename) {
+        match runtime.service
             .rename(&root, &file, line, character, new_name, &spec)
         {
             Ok(result) if !result.is_null() => results.push(json!({
@@ -1632,11 +1748,12 @@ pub fn rename(
 }
 
 pub fn touch_document(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     text: Option<&str>,
 ) -> Vec<Value> {
-    let diagnostics = touch_document_diagnostics(directory.as_ref(), file.as_ref(), text);
+    let diagnostics = touch_document_diagnostics(runtime, directory.as_ref(), file.as_ref(), text);
     diagnostics
         .into_iter()
         .map(|(language, path, cached_diagnostics)| {
@@ -1651,6 +1768,7 @@ pub fn touch_document(
 }
 
 pub fn touch_document_diagnostics(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     text: Option<&str>,
@@ -1659,8 +1777,8 @@ pub fn touch_document_diagnostics(
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
 
-    for spec in file_query_specs(&root, &file, LspOperation::Diagnostics) {
-        match lsp_service::service().touch(&root, &file, text, &spec) {
+    for spec in file_query_specs(runtime, &root, &file, LspOperation::Diagnostics) {
+        match runtime.service.touch(&root, &file, text, &spec) {
             Ok(diagnostics) => {
                 results.push((spec.id.to_string(), file.clone(), diagnostics))
             }
@@ -1683,6 +1801,7 @@ pub fn touch_document_diagnostics(
 /// ([`subscribe_diagnostics`]). Fire-and-forget: no diagnostics are returned
 /// or waited for here. Returns the language ids that were synced.
 pub fn sync_document(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
     text: Option<&str>,
@@ -1690,8 +1809,8 @@ pub fn sync_document(
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut synced = Vec::new();
-    for spec in file_lifecycle_specs(&root, &file) {
-        match lsp_service::service().sync(&root, &file, text, &spec) {
+    for spec in file_lifecycle_specs(runtime, &root, &file) {
+        match runtime.service.sync(&root, &file, text, &spec) {
             Ok(()) => synced.push(spec.id.to_string()),
             Err(error) => {
                 if std::env::var_os("NEOISM_LSP_LOG").is_some() {
@@ -1710,12 +1829,16 @@ pub fn sync_document(
 /// Send textDocument/didSave to every attached adapter that owns this file and
 /// negotiated save notifications. Edits must be synchronized first; callers
 /// that use Neoism's ordered live-document queue get that guarantee.
-pub fn save_document(directory: impl AsRef<Path>, file: impl AsRef<Path>) -> Vec<String> {
+pub fn save_document(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+) -> Vec<String> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut saved = Vec::new();
-    for spec in file_lifecycle_specs(&root, &file) {
-        match lsp_service::service().save(&root, &file, &spec) {
+    for spec in file_lifecycle_specs(runtime, &root, &file) {
+        match runtime.service.save(&root, &file, &spec) {
             Ok(()) => saved.push(spec.id.to_string()),
             Err(error) => tracing::debug!(
                 language = spec.id,
@@ -1731,12 +1854,13 @@ pub fn save_document(directory: impl AsRef<Path>, file: impl AsRef<Path>) -> Vec
 /// Send `textDocument/didClose` to every attached adapter that owns this
 /// document, then evict its versions and diagnostics from the workspace cache.
 pub fn close_document(
+    runtime: &LspRuntime,
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    lsp_service::service().close_document(&root, &file)
+    runtime.service.close_document(&root, &file)
 }
 
 pub(crate) async fn lsp_tool(
@@ -1752,21 +1876,23 @@ fn lsp_tool_blocking(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
+    let runtime = context.lsp_runtime();
     let operation = string_arg(&arguments, "operation")
         .ok_or_else(|| anyhow::anyhow!("tool argument operation is required"))?;
-    match normalize_operation(&operation).as_str() {
+    match operation.as_str() {
         "status" => {
             context.ensure_allowed("lsp", "*")?;
-            let result = status(&context.cwd);
+            let result = status(&runtime, &context.cwd);
             tool_result("LSP status", "status", json!(result))
         }
-        "workspace_symbol" => {
+        "workspaceSymbol" => {
             context.ensure_allowed("lsp", "*")?;
             let query = string_arg(&arguments, "query")
                 .ok_or_else(|| anyhow::anyhow!("tool argument query is required"))?;
-            let result = workspace_symbols(&context.cwd, &query);
+            let result = workspace_symbols(&runtime, &context.cwd, &query);
             if result.is_empty() {
                 if let Some(error) = unavailable_lsp_error(
+                    &runtime,
                     &normalized_root(&context.cwd),
                     None,
                     LspOperation::WorkspaceSymbols,
@@ -1779,86 +1905,86 @@ fn lsp_tool_blocking(
         "hover" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
             let (line, character) = position_args(&arguments)?;
-            let result = hover(&context.cwd, &file, line, character);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::Hover, &result)?;
+            let result = hover(&runtime, &context.cwd, &file, line, character);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::Hover, &result)?;
             tool_result("LSP hover", "hover", json!(result))
         }
-        "definition" => {
+        "goToDefinition" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
             let (line, character) = position_args(&arguments)?;
-            let result = definitions(&context.cwd, &file, line, character);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::Definition, &result)?;
+            let result = definitions(&runtime, &context.cwd, &file, line, character);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::Definition, &result)?;
             tool_result("LSP definitions", "goToDefinition", json!(result))
         }
-        "references" => {
+        "findReferences" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
             let (line, character) = position_args(&arguments)?;
-            let result = references(&context.cwd, &file, line, character);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::References, &result)?;
+            let result = references(&runtime, &context.cwd, &file, line, character);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::References, &result)?;
             tool_result("LSP references", "findReferences", json!(result))
         }
-        "implementation" => {
+        "goToImplementation" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
             let (line, character) = position_args(&arguments)?;
-            let result = implementations(&context.cwd, &file, line, character);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::Implementation, &result)?;
+            let result = implementations(&runtime, &context.cwd, &file, line, character);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::Implementation, &result)?;
             tool_result("LSP implementations", "goToImplementation", json!(result))
         }
-        "prepare_call_hierarchy" => {
+        "prepareCallHierarchy" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
             let (line, character) = position_args(&arguments)?;
-            let result = prepare_call_hierarchy(&context.cwd, &file, line, character);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::CallHierarchy, &result)?;
+            let result = prepare_call_hierarchy(&runtime, &context.cwd, &file, line, character);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::CallHierarchy, &result)?;
             tool_result(
                 "LSP call hierarchy",
                 "prepareCallHierarchy",
                 json!(result),
             )
         }
-        "incoming_calls" => {
+        "incomingCalls" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
             let (line, character) = position_args(&arguments)?;
-            let result = incoming_calls(&context.cwd, &file, line, character);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::CallHierarchy, &result)?;
+            let result = incoming_calls(&runtime, &context.cwd, &file, line, character);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::CallHierarchy, &result)?;
             tool_result("LSP incoming calls", "incomingCalls", json!(result))
         }
-        "outgoing_calls" => {
+        "outgoingCalls" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
             let (line, character) = position_args(&arguments)?;
-            let result = outgoing_calls(&context.cwd, &file, line, character);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::CallHierarchy, &result)?;
+            let result = outgoing_calls(&runtime, &context.cwd, &file, line, character);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::CallHierarchy, &result)?;
             tool_result("LSP outgoing calls", "outgoingCalls", json!(result))
         }
         "diagnostics" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
-            let result = diagnostics(&context.cwd, &file);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::Diagnostics, &result)?;
+            let result = diagnostics(&runtime, &context.cwd, &file);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::Diagnostics, &result)?;
             tool_result("LSP diagnostics", "diagnostics", json!(result))
         }
-        "document_symbol" => {
+        "documentSymbol" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
-            let result = document_symbols(&context.cwd, &file);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::DocumentSymbols, &result)?;
+            let result = document_symbols(&runtime, &context.cwd, &file);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::DocumentSymbols, &result)?;
             tool_result("LSP document symbols", "documentSymbol", json!(result))
         }
         "formatting" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
-            let result = formatting(&context.cwd, &file);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::Formatting, &result)?;
+            let result = formatting(&runtime, &context.cwd, &file);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::Formatting, &result)?;
             tool_result("LSP formatting", "formatting", json!(result))
         }
-        "code_action" => {
+        "codeAction" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
             let (line, character) = position_args(&arguments)?;
-            let result = code_actions(&context.cwd, &file, line, character);
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::CodeActions, &result)?;
+            let result = code_actions(&runtime, &context.cwd, &file, line, character);
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::CodeActions, &result)?;
             tool_result("LSP code actions", "codeAction", json!(result))
         }
         "touch" => {
             let file = checked_lsp_file(&context, &file_arg(&arguments)?)?;
             let text = string_arg_either_many(&arguments, &["text", "content"]);
-            let result = touch_document(&context.cwd, &file, text.as_deref());
-            ensure_available_if_empty(&context.cwd, &file, LspOperation::Diagnostics, &result)?;
+            let result = touch_document(&runtime, &context.cwd, &file, text.as_deref());
+            ensure_available_if_empty(&runtime, &context.cwd, &file, LspOperation::Diagnostics, &result)?;
             tool_result("LSP touch", "touch", json!(result))
         }
         other => anyhow::bail!(
@@ -1919,6 +2045,7 @@ fn tool_result(
 }
 
 fn ensure_available_if_empty<T>(
+    runtime: &LspRuntime,
     directory: &Path,
     file: &Path,
     operation: LspOperation,
@@ -1928,50 +2055,10 @@ fn ensure_available_if_empty<T>(
         return Ok(());
     }
     let root = normalized_root(directory);
-    if let Some(error) = unavailable_lsp_error(&root, Some(file), operation) {
+    if let Some(error) = unavailable_lsp_error(runtime, &root, Some(file), operation) {
         return Err(error);
     }
     Ok(())
-}
-
-fn normalize_operation(operation: &str) -> String {
-    let normalized = operation
-        .trim()
-        .replace(['-', ' '], "_")
-        .to_ascii_lowercase();
-    match normalized.as_str() {
-        "workspacesymbol" | "workspace_symbols" | "workspace_symbol" => {
-            "workspace_symbol".to_string()
-        }
-        "gotodefinition" | "go_to_definition" | "definition" | "definitions" => {
-            "definition".to_string()
-        }
-        "findreferences" | "find_references" | "reference" | "references" => {
-            "references".to_string()
-        }
-        "gotoimplementation"
-        | "go_to_implementation"
-        | "implementation"
-        | "implementations" => "implementation".to_string(),
-        "preparecallhierarchy" | "prepare_call_hierarchy" | "call_hierarchy" => {
-            "prepare_call_hierarchy".to_string()
-        }
-        "incomingcalls" | "incoming_calls" => "incoming_calls".to_string(),
-        "outgoingcalls" | "outgoing_calls" => "outgoing_calls".to_string(),
-        "diagnostic" | "diagnostics" => "diagnostics".to_string(),
-        "documentsymbol" | "document_symbols" | "document_symbol" => {
-            "document_symbol".to_string()
-        }
-        "format" | "formatting" | "documentformatting" | "document_formatting" => {
-            "formatting".to_string()
-        }
-        "codeaction" | "code_actions" | "code_action" | "quickfix" | "quick_fix" => {
-            "code_action".to_string()
-        }
-        "touch" | "didopen" | "didchange" | "didsave" | "did_open" | "did_change"
-        | "did_save" => "touch".to_string(),
-        other => other.to_string(),
-    }
 }
 
 fn file_arg(arguments: &Value) -> anyhow::Result<String> {

@@ -6,6 +6,7 @@ use neoism_ui::services::{
     IoError, SearchFileHit, SearchFileMode, SearchGitHit, SearchGrepHit, SearchGrepMode,
     SearchService,
 };
+use neoism_agent_service_api::WorkspaceSearchService as _;
 
 use crate::screen::panes::is_project_workspace;
 
@@ -49,7 +50,7 @@ pub struct RemoteSearchRoute {
 
 pub struct NativeSearchService {
     remote: Mutex<Option<RemoteSearchRoute>>,
-    local_search: neoism_agent_server::FffWorkspaceSearchService,
+    local_search: Arc<neoism_agent_workspace_search_fff::FffWorkspaceSearchService>,
     local_root_pin:
         Mutex<Option<Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
 }
@@ -58,7 +59,9 @@ impl NativeSearchService {
     pub fn new() -> Self {
         Self {
             remote: Mutex::new(None),
-            local_search: neoism_agent_server::FffWorkspaceSearchService::new(),
+            local_search: Arc::new(
+                neoism_agent_workspace_search_fff::FffWorkspaceSearchService::new(),
+            ),
             local_root_pin: Mutex::new(None),
         }
     }
@@ -137,7 +140,7 @@ impl NativeSearchService {
                         == std::fs::canonicalize(cwd).ok()
             });
             if !already_pinned {
-                *pin = Some(self.local_search.pin(cwd));
+                *pin = self.local_search.pin_root(cwd).ok();
             }
         }
         self.local_search.with_picker(cwd, op)

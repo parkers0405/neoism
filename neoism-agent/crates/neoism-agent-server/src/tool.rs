@@ -3,7 +3,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use neoism_agent_core::{PermissionAction, PermissionRule, ToolListItem};
 use serde::{Deserialize, Serialize};
@@ -16,19 +16,19 @@ mod args;
 #[path = "tool_support/artifact.rs"]
 pub(crate) mod artifact;
 #[path = "tool_support/bash.rs"]
-mod bash;
+pub(crate) mod bash;
 #[path = "tool_support/diagnostics.rs"]
 mod diagnostics;
 #[path = "tool_support/edit_match.rs"]
 mod edit_match;
-#[path = "tool_support/fff.rs"]
-pub(crate) mod fff;
+#[path = "tool_support/workspace_search.rs"]
+pub(crate) mod workspace_search;
 #[path = "tool_support/file.rs"]
 mod file;
 #[path = "tool_support/format.rs"]
 mod format;
 #[path = "tool_support/locks.rs"]
-mod locks;
+pub(crate) mod locks;
 #[path = "tool_support/notes.rs"]
 mod notes;
 #[path = "tool_support/patch.rs"]
@@ -43,8 +43,6 @@ pub(crate) mod process;
 mod registry;
 #[path = "tool_support/shell_scan.rs"]
 pub(crate) mod shell_scan;
-#[path = "tool_support/streaming_search.rs"]
-mod streaming_search;
 #[path = "tool_support/truncate.rs"]
 pub(crate) mod truncate;
 #[path = "tool_support/web.rs"]
@@ -66,6 +64,8 @@ pub(crate) struct ToolContext {
     formatter: Option<Value>,
     state: Option<AppState>,
     session_id: Option<String>,
+    utilities: Arc<crate::utility_runtime::UtilityRuntime>,
+    workspace_runtime: Option<Arc<crate::workspace_runtime::WorkspaceRuntime>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -78,16 +78,18 @@ pub(crate) struct ToolExecutionResult {
 }
 
 #[derive(Clone)]
-struct BuiltinTool {
+pub(crate) struct BuiltinTool {
     id: &'static str,
     description: &'static str,
     parameters: Value,
     output_schema: Value,
     handler: ToolHandler,
+    state: Option<Weak<crate::state::InnerState>>,
 }
 
 impl ToolContext {
     pub(crate) fn new(cwd: impl Into<PathBuf>) -> Self {
+        let services = crate::standard_services();
         Self {
             cwd: cwd.into(),
             permission_rules: Vec::new(),
@@ -96,15 +98,9 @@ impl ToolContext {
             formatter: None,
             state: None,
             session_id: None,
+            utilities: crate::utility_runtime::UtilityRuntime::new(&services),
+            workspace_runtime: None,
         }
-    }
-
-    pub(crate) fn with_permissions(
-        mut self,
-        permissions: BTreeMap<String, Value>,
-    ) -> Self {
-        self.permission_rules = crate::permission::from_config_map(&permissions);
-        self
     }
 
     pub(crate) fn with_permission_rules(
@@ -131,6 +127,13 @@ impl ToolContext {
     }
 
     pub(crate) fn with_state(mut self, state: Option<AppState>) -> Self {
+        if let Some(state) = state.as_ref() {
+            self.utilities = state.inner.utilities.clone();
+            self.workspace_runtime = state
+                .inner
+                .workspace_runtimes
+                .loaded(&self.cwd.to_string_lossy());
+        }
         self.state = state;
         self
     }
@@ -142,6 +145,14 @@ impl ToolContext {
 
     pub(crate) fn state(&self) -> Option<&AppState> {
         self.state.as_ref()
+    }
+
+    pub(crate) fn utilities(&self) -> &crate::utility_runtime::UtilityRuntime {
+        &self.utilities
+    }
+
+    pub(crate) fn lsp_runtime(&self) -> crate::lsp::LspRuntime {
+        self.workspace_runtime.as_ref().expect("tool workspace runtime was not reconciled").lsp()
     }
 
     pub(crate) fn services(&self) -> neoism_agent_service_api::AgentServices {
@@ -207,7 +218,11 @@ enum PermissionDecision {
 }
 
 impl BuiltinTool {
-    fn item(&self) -> ToolListItem {
+    pub(crate) fn id(&self) -> &'static str {
+        self.id
+    }
+
+    pub(crate) fn item(&self) -> ToolListItem {
         ToolListItem {
             id: self.id.to_string(),
             description: self.description.to_string(),
@@ -216,7 +231,12 @@ impl BuiltinTool {
         }
     }
 
-    fn execute(&self, context: ToolContext, arguments: Value) -> ToolFuture {
+    pub(crate) fn with_state(mut self, state: AppState) -> Self {
+        self.state = Some(Arc::downgrade(&state.inner));
+        self
+    }
+
+    fn execute_builtin(&self, context: ToolContext, arguments: Value) -> ToolFuture {
         let validation = validate_schema(&self.parameters, &arguments, "$input");
         let handler = self.handler;
         let output_schema = self.output_schema.clone();
@@ -225,6 +245,41 @@ impl BuiltinTool {
             let result = handler(context, arguments).await?;
             result.validate(&output_schema)?;
             Ok(result)
+        })
+    }
+}
+
+impl neoism_agent_plugin_api::RuntimeTool for BuiltinTool {
+    fn definition(&self) -> neoism_agent_plugin_api::PluginToolDefinition {
+        neoism_agent_plugin_api::PluginToolDefinition {
+            id: self.id.to_string(),
+            description: self.description.to_string(),
+            parameters: self.parameters.clone(),
+            output_schema: self.output_schema.clone(),
+            permission: None,
+        }
+    }
+
+    fn execute<'a>(
+        &'a self,
+        invocation: neoism_agent_plugin_api::PluginToolInvocation,
+    ) -> neoism_agent_plugin_api::PluginFuture<'a, neoism_agent_plugin_api::PluginToolResult> {
+        let context = ToolContext::new(&invocation.directory)
+            .with_state(self.state.as_ref().and_then(Weak::upgrade).map(|inner| AppState { inner }))
+            .with_session_id(invocation.session_id)
+            .with_permission_rules(invocation.permission_rules)
+            .with_env(invocation.env)
+            .with_cancel(invocation.cancel)
+            .with_formatter(invocation.formatter);
+        Box::pin(async move {
+            self.execute_builtin(context, invocation.arguments)
+                .await
+                .map(|result| neoism_agent_plugin_api::PluginToolResult {
+                    title: result.title,
+                    output: result.output,
+                    metadata: result.metadata,
+                })
+                .map_err(|error| neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string()))
         })
     }
 }
@@ -273,11 +328,11 @@ fn edit_handler(context: ToolContext, arguments: Value) -> ToolFuture {
 }
 
 fn grep_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(fff::grep_tool(context, arguments))
+    Box::pin(workspace_search::grep_tool(context, arguments))
 }
 
 fn glob_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(fff::glob_tool(context, arguments))
+    Box::pin(workspace_search::glob_tool(context, arguments))
 }
 
 fn apply_patch_handler(context: ToolContext, arguments: Value) -> ToolFuture {
@@ -297,13 +352,7 @@ fn webfetch_handler(context: ToolContext, arguments: Value) -> ToolFuture {
 }
 
 fn notes_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(async move {
-        let directory = context.cwd.to_string_lossy();
-        if !crate::plugins::enabled(&context.services(), &directory, "dev.neoism.tools.notes") {
-            anyhow::bail!("Notes plugin is disabled for the workspace");
-        }
-        notes::notes_tool(context, arguments)
-    })
+    Box::pin(async move { notes::notes_tool(context, arguments) })
 }
 
 fn skill_handler(context: ToolContext, arguments: Value) -> ToolFuture {
@@ -311,13 +360,7 @@ fn skill_handler(context: ToolContext, arguments: Value) -> ToolFuture {
 }
 
 fn lsp_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(async move {
-        let directory = context.cwd.to_string_lossy();
-        if !crate::plugins::enabled(&context.services(), &directory, "dev.neoism.lsp") {
-            anyhow::bail!("LSP plugin is disabled for the workspace");
-        }
-        crate::lsp::lsp_tool(context, arguments).await
-    })
+    Box::pin(async move { crate::lsp::lsp_tool(context, arguments).await })
 }
 
 fn stateful_handler(_context: ToolContext, _arguments: Value) -> ToolFuture {
@@ -409,11 +452,39 @@ pub(crate) fn validate_schema(
     Ok(())
 }
 
-pub(crate) fn list() -> Vec<ToolListItem> {
-    registry::definitions()
-        .iter()
+pub(crate) fn kernel_tools() -> Vec<ToolListItem> {
+    registry::definitions(registry::ToolOwner::Kernel)
+        .into_iter()
         .map(|tool| tool.item())
         .collect()
+}
+
+fn register_owned_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginRegistrar,
+    state: &AppState,
+    owner: registry::ToolOwner,
+) {
+    for tool in registry::definitions(owner) {
+        registrar.runtime_tool(Arc::new(tool.with_state(state.clone())));
+    }
+}
+
+pub(crate) fn register_workspace_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) {
+    register_owned_tools(registrar, state, registry::ToolOwner::Workspace);
+}
+
+#[cfg(test)]
+pub(crate) fn workspace_tool_items() -> Vec<ToolListItem> {
+    registry::definitions(registry::ToolOwner::Workspace).into_iter().map(|tool| tool.item()).collect()
+}
+pub(crate) fn register_notes_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Notes); }
+pub(crate) fn register_skill_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Skills); }
+pub(crate) fn register_lsp_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Lsp); }
+pub(crate) fn register_subagent_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Subagents); }
+pub(crate) fn register_goal_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Goals); }
+
+pub(crate) fn kernel_runtime_tool(id: &str, state: &AppState) -> Option<Arc<dyn neoism_agent_plugin_api::RuntimeTool>> {
+    registry::definitions(registry::ToolOwner::Kernel).into_iter().find(|tool| tool.id() == id).map(|tool| Arc::new(tool.with_state(state.clone())) as Arc<dyn neoism_agent_plugin_api::RuntimeTool>)
 }
 
 pub(crate) fn warm_search(
@@ -425,37 +496,20 @@ pub(crate) fn warm_search(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn execute(
     id: &str,
-    context: ToolContext,
+    mut context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
-    if let Some(plugin_id) = crate::plugins::builtin_tool_plugin(id) {
-        if !crate::plugins::enabled(&context.services(), &context.cwd.to_string_lossy(), plugin_id) {
-            anyhow::bail!("plugin {plugin_id} is disabled for this workspace");
-        }
-    }
-    if let Some(tool) = registry::definitions()
-        .iter()
-        .find(|tool| tool.id == id)
-    {
-        if id == "notes" && context.state().and_then(|state| state.services().notes.as_ref()).is_none() {
-            anyhow::bail!("unknown tool {id}");
-        }
-        return tool.execute(context, arguments).await;
-    }
-    let state = context
-        .state
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
-    let snapshot = state.inner.plugin_host.snapshot();
-    let contribution = snapshot
+    let state = context.state.as_ref().ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
+    let runtime = state.workspace_runtime(&context.cwd.to_string_lossy()).await;
+    let snapshot = runtime.snapshot();
+    context.workspace_runtime = Some(runtime);
+    let _contribution = snapshot
         .contributions
         .get(&format!("Tool:{id}"))
         .ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
-    if !crate::plugins::enabled(&context.services(), &context.cwd.to_string_lossy(), &contribution.plugin_id) {
-        anyhow::bail!("plugin {} is disabled for this workspace", contribution.plugin_id);
-    }
     let tool = snapshot
         .runtime_tools
         .get(id)
@@ -471,8 +525,12 @@ pub(crate) async fn execute(
     let result = tool
         .execute(neoism_agent_plugin_api::PluginToolInvocation {
             directory: context.cwd.to_string_lossy().into_owned(),
-            session_id: context.session_id,
+            session_id: context.session_id.clone(),
             arguments,
+            permission_rules: context.permission_rules.clone(),
+            env: context.env.clone(),
+            cancel: context.cancel.clone(),
+            formatter: context.formatter.clone(),
         })
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;

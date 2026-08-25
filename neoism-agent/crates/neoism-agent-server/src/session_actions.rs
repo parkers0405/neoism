@@ -20,10 +20,12 @@ use crate::{
 };
 
 const SUBTASK_COMPLETION_SYSTEM_MARKER: &str =
-    "Neoism runtime notification: background subagent completion.";
+    "Agent runtime notification: background subagent completion.";
 const SUBTASK_RESULT_INLINE_CHARS: usize = 32_000;
 const SUBTASK_COMPLETION_EXTRA_KEY: &str = "subtaskCompletion";
 const SUBTASK_COMPLETIONS_EXTRA_KEY: &str = "subtaskCompletions";
+const SUBTASK_PERSISTENCE_VERSION_KEY: &str = "subtaskPersistenceVersion";
+const SUBTASK_PERSISTENCE_VERSION: u64 = 1;
 /// Set on a child when a continue-prompt is QUEUED onto it (the task tool's
 /// child-already-running branch). The queued prompt runs through the generic
 /// queue worker — no spawn wrapper exists to publish the completion — so the
@@ -34,7 +36,6 @@ const SUBTASK_NOTIFY_ON_IDLE_KEY: &str = "subtaskNotifyOnIdle";
 struct PendingSubtaskCompletion {
     child: SessionInfo,
     message_id: MessageId,
-    legacy: bool,
     status: String,
     text: String,
     completed_at: u64,
@@ -61,6 +62,24 @@ pub(crate) struct SessionShellRequest {
 }
 
 pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> bool {
+    abort_session_run_impl(state, session_id, true).await
+}
+
+pub(crate) async fn cancel_session_run_for_teardown(state: &AppState, session_id: &str) -> bool {
+    abort_session_run_impl(state, session_id, false).await
+}
+
+pub(crate) async fn clear_subtask_completion_for_teardown(state: &AppState, session_id: &str) {
+    if let Ok(Some(mut child)) = state.inner.store.get_session(session_id).await {
+        if child.extra.remove(SUBTASK_NOTIFY_ON_IDLE_KEY).is_some() {
+            if let Err(error) = state.inner.store.update_session(&child).await {
+                tracing::warn!(%error, session_id, "failed to clear subtask completion during workspace teardown");
+            }
+        }
+    }
+}
+
+async fn abort_session_run_impl(state: &AppState, session_id: &str, reconcile_completion: bool) -> bool {
     let cancelled = state.inner.runs.write().await.remove(session_id);
     let coordinated = state.inner.session_coordinator.abort_run(session_id).await;
     if let Some(cancelled) = cancelled.as_ref().or(coordinated.as_ref()) {
@@ -121,7 +140,9 @@ pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> boo
         }
     }
 
-    reconcile_parent_subtask_completions_for_child(state, session_id).await;
+    if reconcile_completion {
+        reconcile_parent_subtask_completions_for_child(state, session_id).await;
+    }
 
     cancelled.is_some() || coordinated.is_some() || was_busy
 }
@@ -134,7 +155,7 @@ pub(crate) async fn create_subtask_session(
     agent: &str,
     model: Option<UserModel>,
 ) -> Result<SessionInfo, ApiError> {
-    let agents = crate::plugins::agent_catalog(state, &parent.directory)?;
+    let agents = crate::plugins::agent_catalog(state, &parent.directory).await?;
     let agent_info = agents.get(agent).ok_or_else(|| {
         let available = agents
             .list()
@@ -268,6 +289,17 @@ pub(crate) async fn publish_background_subtask_finished(
     status: &str,
     text: &str,
 ) {
+    let tracked = match state.inner.store.get_session(child_id).await {
+        Ok(Some(child)) => state.inner.workspace_runtimes.loaded(&child.directory)
+            .and_then(|runtime| runtime.subagents_if_allocated()),
+        _ => None,
+    };
+    let Some(tracked) = tracked else {
+        return;
+    };
+    if !tracked.contains(child_id).await {
+        return;
+    }
     if subtask_has_active_work(state, child_id).await {
         return;
     }
@@ -345,7 +377,18 @@ async fn mark_subtask_completion_pending(
     if owed_completion_generation(&child) != Some(generation.clone()) {
         return Ok(None);
     }
-    let repaired = normalize_subtask_completions(&mut child);
+    let repaired = if child
+        .extra
+        .get(SUBTASK_COMPLETIONS_EXTRA_KEY)
+        .is_some_and(Value::is_array)
+    {
+        false
+    } else {
+        child
+            .extra
+            .insert(SUBTASK_COMPLETIONS_EXTRA_KEY.to_string(), json!([]));
+        true
+    };
     let existing_pending = child.extra[SUBTASK_COMPLETIONS_EXTRA_KEY]
         .as_array()
         .and_then(|records| {
@@ -387,14 +430,11 @@ async fn mark_subtask_completion_pending(
         ));
     };
     records.push(completion);
+    child.extra.insert(
+        SUBTASK_PERSISTENCE_VERSION_KEY.to_string(),
+        json!(SUBTASK_PERSISTENCE_VERSION),
+    );
     clear_owed_generation_if_matching(&mut child, generation);
-    // A pre-array singular record can overlap the generation being migrated.
-    // Once a generation-aware record exists it is authoritative.
-    if let Some(Value::Object(legacy)) = child.extra.get_mut(SUBTASK_COMPLETION_EXTRA_KEY)
-    {
-        legacy.insert("pending".to_string(), json!(false));
-        legacy.insert("supersededAt".to_string(), json!(completed_at));
-    }
     child.time.updated = completed_at;
     state.inner.store.update_session(&child).await?;
     state.publish(EventPayload::new(
@@ -404,12 +444,11 @@ async fn mark_subtask_completion_pending(
     Ok(Some((child, true)))
 }
 
-fn normalize_subtask_completions(child: &mut SessionInfo) -> bool {
+fn migrate_completion_records(child: &mut SessionInfo) {
     let original = child
         .extra
         .remove(SUBTASK_COMPLETIONS_EXTRA_KEY)
         .unwrap_or_else(|| json!([]));
-    let original_array = original.as_array().cloned();
     let mut candidates = Vec::new();
     collect_recoverable_completion_records(original, &mut candidates);
     let mut normalized = Vec::new();
@@ -440,12 +479,10 @@ fn normalize_subtask_completions(child: &mut SessionInfo) -> bool {
         }
         normalized.push(record);
     }
-    let repaired = original_array.as_ref() != Some(&normalized);
     child.extra.insert(
         SUBTASK_COMPLETIONS_EXTRA_KEY.to_string(),
         Value::Array(normalized),
     );
-    repaired
 }
 
 fn collect_recoverable_completion_records(value: Value, records: &mut Vec<Value>) {
@@ -514,8 +551,6 @@ async fn enqueue_parent_subtask_completion_prompts_if_ready(
     if state.inner.store.get_session(parent_id).await?.is_none() {
         return Ok(());
     }
-    repair_parent_completion_metadata(state, parent_id).await?;
-    retire_overlapping_legacy_completions(state, parent_id).await?;
     let pending = pending_parent_subtask_completions(state, parent_id).await?;
     if pending.is_empty() {
         return Ok(());
@@ -569,92 +604,6 @@ async fn enqueue_parent_subtask_completion_prompts_if_ready(
     Ok(())
 }
 
-async fn repair_parent_completion_metadata(
-    state: &AppState,
-    parent_id: &str,
-) -> Result<(), ApiError> {
-    let children = state
-        .inner
-        .store
-        .list_sessions()
-        .await?
-        .into_iter()
-        .filter(|child| child.parent_id.as_ref().map(Id::as_str) == Some(parent_id))
-        .filter(|child| child.extra.contains_key(SUBTASK_COMPLETIONS_EXTRA_KEY))
-        .map(|child| child.id.to_string())
-        .collect::<Vec<_>>();
-    for child_id in children {
-        let mutation_lock =
-            subtask_keyed_lock(&state.inner.subtask_completion_locks, &child_id).await;
-        let _guard = mutation_lock.lock().await;
-        let Some(mut child) = state.inner.store.get_session(&child_id).await? else {
-            continue;
-        };
-        if normalize_subtask_completions(&mut child) {
-            child.time.updated = now_millis().max(child.time.updated);
-            state.inner.store.update_session(&child).await?;
-            state.publish(EventPayload::new(
-                event_type::SESSION_UPDATED,
-                json!({ "sessionID": child.id.to_string(), "info": child }),
-            ));
-        }
-    }
-    Ok(())
-}
-
-async fn retire_overlapping_legacy_completions(
-    state: &AppState,
-    parent_id: &str,
-) -> Result<(), ApiError> {
-    let children = state
-        .inner
-        .store
-        .list_sessions()
-        .await?
-        .into_iter()
-        .filter(|child| child.parent_id.as_ref().map(Id::as_str) == Some(parent_id))
-        .filter(|child| {
-            child
-                .extra
-                .get(SUBTASK_COMPLETIONS_EXTRA_KEY)
-                .and_then(Value::as_array)
-                .is_some_and(|records| !records.is_empty())
-                && child
-                    .extra
-                    .get(SUBTASK_COMPLETION_EXTRA_KEY)
-                    .and_then(|legacy| legacy.get("pending"))
-                    .and_then(Value::as_bool)
-                    == Some(true)
-        })
-        .map(|child| child.id.to_string())
-        .collect::<Vec<_>>();
-    for child_id in children {
-        let mutation_lock =
-            subtask_keyed_lock(&state.inner.subtask_completion_locks, &child_id).await;
-        let _guard = mutation_lock.lock().await;
-        let Some(mut child) = state.inner.store.get_session(&child_id).await? else {
-            continue;
-        };
-        let has_array_history = child
-            .extra
-            .get(SUBTASK_COMPLETIONS_EXTRA_KEY)
-            .and_then(Value::as_array)
-            .is_some_and(|records| !records.is_empty());
-        if has_array_history {
-            if let Some(Value::Object(legacy)) =
-                child.extra.get_mut(SUBTASK_COMPLETION_EXTRA_KEY)
-            {
-                if legacy.get("pending").and_then(Value::as_bool) == Some(true) {
-                    legacy.insert("pending".to_string(), json!(false));
-                    legacy.insert("supersededAt".to_string(), json!(now_millis()));
-                    state.inner.store.update_session(&child).await?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Mark a child so its next true-idle point publishes a subtask completion
 /// to the parent. Called when a continue-prompt is queued onto a running
 /// child — the only subagent execution path with no completion wrapper.
@@ -672,9 +621,16 @@ pub(crate) async fn mark_subtask_notify_on_idle(
     if child.parent_id.is_none() {
         return Ok(());
     }
+    if let Some(runtime) = state.inner.workspace_runtimes.loaded(&child.directory) {
+        runtime.subagents().track(child_id.to_string()).await;
+    }
     child.extra.insert(
         SUBTASK_NOTIFY_ON_IDLE_KEY.to_string(),
         json!({ "generation": generation.to_string() }),
+    );
+    child.extra.insert(
+        SUBTASK_PERSISTENCE_VERSION_KEY.to_string(),
+        json!(SUBTASK_PERSISTENCE_VERSION),
     );
     child.time.updated = now_millis().max(child.time.updated);
     state.inner.store.update_session(&child).await?;
@@ -690,39 +646,14 @@ pub(crate) async fn publish_deferred_subtask_completion_if_idle(
     state: &AppState,
     session_id: &str,
 ) {
-    let mut child = match state.inner.store.get_session(session_id).await {
+    let child = match state.inner.store.get_session(session_id).await {
         Ok(Some(child)) => child,
         _ => return,
     };
     if child.parent_id.is_none() {
         return;
     }
-    let generation = if let Some(generation) = owed_completion_generation(&child) {
-        generation
-    } else if child
-        .extra
-        .get(SUBTASK_NOTIFY_ON_IDLE_KEY)
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        // Migration for a persisted pre-generation boolean marker. Prefer the
-        // latest durable child prompt identity; if the prompt was still queued
-        // by the old build, allocate a stable migration generation once.
-        let generation = latest_child_user_message_id(state, session_id)
-            .await
-            .unwrap_or_else(|| Id::ascending(IdKind::Message));
-        if mark_subtask_notify_on_idle(state, session_id, &generation)
-            .await
-            .is_err()
-        {
-            return;
-        }
-        child.extra.insert(
-            SUBTASK_NOTIFY_ON_IDLE_KEY.to_string(),
-            json!({ "generation": generation.to_string() }),
-        );
-        generation
-    } else {
+    let Some(generation) = owed_completion_generation(&child) else {
         return;
     };
     if subtask_has_active_work(state, session_id).await {
@@ -852,10 +783,78 @@ pub(crate) async fn reconcile_parent_subtask_completions_for_child(
     }
 }
 
+/// Versioned durable-data migration retained because removing it would strand
+/// subtask results written into session `extra` by shipped builds. This is the
+/// only compatibility parser: runtime paths below consume version 1 records.
+async fn migrate_subtask_persistence_v1(state: &AppState) -> Result<(), ApiError> {
+    let sessions = state.inner.store.list_sessions().await?;
+    for mut child in sessions.into_iter().filter(|session| {
+        session.extra.contains_key(SUBTASK_COMPLETION_EXTRA_KEY)
+            || session.extra.contains_key(SUBTASK_COMPLETIONS_EXTRA_KEY)
+            || session.extra.contains_key(SUBTASK_NOTIFY_ON_IDLE_KEY)
+    }) {
+        if child
+            .extra
+            .get(SUBTASK_PERSISTENCE_VERSION_KEY)
+            .and_then(Value::as_u64)
+            == Some(SUBTASK_PERSISTENCE_VERSION)
+        {
+            continue;
+        }
+
+        let mut records = child
+            .extra
+            .remove(SUBTASK_COMPLETIONS_EXTRA_KEY)
+            .unwrap_or_else(|| json!([]));
+        let has_records = records
+            .as_array()
+            .is_some_and(|records| !records.is_empty());
+        if !has_records {
+            if let Some(mut completion) = child.extra.remove(SUBTASK_COMPLETION_EXTRA_KEY) {
+                if completion.get("pending").and_then(Value::as_bool) == Some(true) {
+                    if let Some(map) = completion.as_object_mut() {
+                        map.entry("id".to_string()).or_insert_with(|| {
+                            json!(format!("msg_subtask_completion_{}", child.id))
+                        });
+                    }
+                    records = Value::Array(vec![completion]);
+                }
+            }
+        } else {
+            child.extra.remove(SUBTASK_COMPLETION_EXTRA_KEY);
+        }
+        child
+            .extra
+            .insert(SUBTASK_COMPLETIONS_EXTRA_KEY.to_string(), records);
+        migrate_completion_records(&mut child);
+
+        if child.extra.get(SUBTASK_NOTIFY_ON_IDLE_KEY).and_then(Value::as_bool) == Some(true) {
+            let generation = latest_child_user_message_id(state, child.id.as_str())
+                .await
+                .unwrap_or_else(|| Id::ascending(IdKind::Message));
+            child.extra.insert(
+                SUBTASK_NOTIFY_ON_IDLE_KEY.to_string(),
+                json!({ "generation": generation.to_string() }),
+            );
+        }
+        child.extra.insert(
+            SUBTASK_PERSISTENCE_VERSION_KEY.to_string(),
+            json!(SUBTASK_PERSISTENCE_VERSION),
+        );
+        child.time.updated = now_millis().max(child.time.updated);
+        state.inner.store.update_session(&child).await?;
+    }
+    Ok(())
+}
+
 /// Recover completion notifications that were persisted but not queued before
-/// a shutdown (or by an older build). This makes the completion outbox truly
-/// durable: reopening Neoism delivers the result instead of orphaning it.
+/// a shutdown. This makes the completion outbox truly durable: reopening
+/// Neoism delivers the result instead of orphaning it.
 pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
+    if let Err(error) = migrate_subtask_persistence_v1(state).await {
+        tracing::warn!(%error, "failed to migrate durable subtask state");
+        return;
+    }
     let deferred = match state
         .inner
         .store
@@ -869,10 +868,16 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
         }
     };
     for child in deferred {
+        let runtime = state.workspace_runtime(&child.directory).await;
+        if !runtime.snapshot().manifests.iter().any(|plugin| plugin.id == crate::plugins::subagents::PLUGIN_ID) {
+            clear_subtask_completion_for_teardown(state, child.id.as_str()).await;
+            continue;
+        }
+        runtime.subagents().track(child.id.to_string()).await;
         publish_deferred_subtask_completion_if_idle(state, child.id.as_str()).await;
     }
 
-    let mut sessions = match state
+    let sessions = match state
         .inner
         .store
         .list_sessions_with_extra_key(SUBTASK_COMPLETIONS_EXTRA_KEY)
@@ -884,34 +889,10 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
             return;
         }
     };
-    // The singular object was persisted by older builds. It is read only for
-    // pending-record recovery; all newly-created completions use the array.
-    if let Ok(legacy) = state
-        .inner
-        .store
-        .list_sessions_with_extra_key(SUBTASK_COMPLETION_EXTRA_KEY)
-        .await
-    {
-        let known = sessions
-            .iter()
-            .map(|session| session.id.to_string())
-            .collect::<BTreeSet<_>>();
-        sessions.extend(
-            legacy
-                .into_iter()
-                .filter(|session| !known.contains(session.id.as_str())),
-        );
-    }
     let parent_ids = sessions
         .into_iter()
         .filter(|session| {
             session.extra.contains_key(SUBTASK_COMPLETIONS_EXTRA_KEY)
-                || session
-                    .extra
-                    .get(SUBTASK_COMPLETION_EXTRA_KEY)
-                    .and_then(|completion| completion.get("pending"))
-                    .and_then(Value::as_bool)
-                    == Some(true)
         })
         .filter_map(|session| session.parent_id.map(|parent| parent.to_string()))
         .collect::<BTreeSet<_>>();
@@ -938,12 +919,7 @@ async fn pending_parent_subtask_completions(
             session.parent_id.as_ref().map(|id| id.as_str()) == Some(parent_id)
         })
         .flat_map(|child| {
-            let has_generation_aware_history = child
-                .extra
-                .get(SUBTASK_COMPLETIONS_EXTRA_KEY)
-                .and_then(Value::as_array)
-                .is_some_and(|records| !records.is_empty());
-            let mut records = child
+            child
                 .extra
                 .get(SUBTASK_COMPLETIONS_EXTRA_KEY)
                 .and_then(Value::as_array)
@@ -960,7 +936,6 @@ async fn pending_parent_subtask_completions(
                     Some(PendingSubtaskCompletion {
                         child: child.clone(),
                         message_id,
-                        legacy: false,
                         status: completion
                             .get("status")
                             .and_then(Value::as_str)
@@ -977,42 +952,7 @@ async fn pending_parent_subtask_completions(
                             .unwrap_or(child.time.updated),
                     })
                 })
-                .collect::<Vec<_>>();
-            if !has_generation_aware_history {
-                if let Some(completion) = child
-                    .extra
-                    .get(SUBTASK_COMPLETION_EXTRA_KEY)
-                    .filter(|completion| {
-                        completion.get("pending").and_then(Value::as_bool) == Some(true)
-                    })
-                {
-                    let legacy_id = Id::parse(
-                        IdKind::Message,
-                        format!("msg_subtask_completion_{}", child.id),
-                    )
-                    .expect("legacy runtime completion message id");
-                    records.push(PendingSubtaskCompletion {
-                        message_id: legacy_id,
-                        legacy: true,
-                        status: completion
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .unwrap_or("completed")
-                            .to_string(),
-                        text: completion
-                            .get("result")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        completed_at: completion
-                            .get("completedAt")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(child.time.updated),
-                        child: child.clone(),
-                    });
-                }
-            }
-            records
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     pending.sort_by_key(|completion| completion.completed_at);
@@ -1050,29 +990,20 @@ pub(crate) async fn acknowledge_parent_subtask_completion_delivery(
         else {
             continue;
         };
-        if completion.legacy {
-            if let Some(Value::Object(map)) =
-                child.extra.get_mut(SUBTASK_COMPLETION_EXTRA_KEY)
-            {
-                map.insert("pending".to_string(), json!(false));
-                map.insert("notifiedAt".to_string(), json!(notified_at));
-            }
-        } else {
-            let Some(records) = child
-                .extra
-                .get_mut(SUBTASK_COMPLETIONS_EXTRA_KEY)
-                .and_then(Value::as_array_mut)
-            else {
-                continue;
-            };
-            let Some(record) = records.iter_mut().find(|record| {
-                record.get("id").and_then(Value::as_str) == Some(message_id.as_str())
-            }) else {
-                continue;
-            };
-            record["pending"] = json!(false);
-            record["notifiedAt"] = json!(notified_at);
-        }
+        let Some(records) = child
+            .extra
+            .get_mut(SUBTASK_COMPLETIONS_EXTRA_KEY)
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        let Some(record) = records.iter_mut().find(|record| {
+            record.get("id").and_then(Value::as_str) == Some(message_id.as_str())
+        }) else {
+            continue;
+        };
+        record["pending"] = json!(false);
+        record["notifiedAt"] = json!(notified_at);
         state.inner.store.update_session(&child).await?;
         state.publish(EventPayload::new(
             event_type::SESSION_UPDATED,
@@ -1184,7 +1115,7 @@ fn parent_subtask_completions_request(
 fn parent_subtask_completion_system() -> String {
     [
         SUBTASK_COMPLETION_SYSTEM_MARKER.to_string(),
-        "This message is generated by the runtime, not by the user. Treat it as session state."
+        "This message is generated by the Agent runtime, not by the user. Treat it as session state."
             .to_string(),
         "One or more background subagent executions have finished; other subagents may still be active."
             .to_string(),
@@ -1314,6 +1245,18 @@ mod tests {
 
     async fn insert_session(state: &AppState, session: &SessionInfo) {
         state.inner.store.insert_session(session).await.unwrap();
+        if session.parent_id.is_some() {
+            let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+                state,
+                &session.directory,
+            )
+            .await;
+            workspace
+                .runtime
+                .subagents()
+                .track(session.id.to_string())
+                .await;
+        }
     }
 
     async fn hold_parent_run(state: &AppState, parent: &SessionInfo) {
@@ -1958,7 +1901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_boolean_marker_recovers_and_legacy_overlap_delivers_once() {
+    async fn persisted_subtask_v0_is_migrated_once_without_stranding_results() {
         let db_path = std::env::temp_dir().join(format!(
             "neoism-agent-subtask-legacy-generation-{}.sqlite3",
             Id::ascending(IdKind::Event)
@@ -1971,11 +1914,15 @@ mod tests {
         child
             .extra
             .insert(SUBTASK_NOTIFY_ON_IDLE_KEY.to_string(), json!(true));
+        child.extra.insert(
+            SUBTASK_COMPLETION_EXTRA_KEY.to_string(),
+            json!({"pending": true, "status": "completed", "result": "durable result"}),
+        );
         insert_session(&state, &parent).await;
         insert_session(&state, &child).await;
-        hold_parent_run(&state, &parent).await;
-        resume_pending_subtask_completions(&state).await;
-        let mut stored = state
+        migrate_subtask_persistence_v1(&state).await.unwrap();
+        migrate_subtask_persistence_v1(&state).await.unwrap();
+        let stored = state
             .inner
             .store
             .get_session(child.id.as_str())
@@ -1989,40 +1936,16 @@ mod tests {
                 .len(),
             1
         );
-        stored.extra.insert(
-            SUBTASK_COMPLETION_EXTRA_KEY.to_string(),
-            json!({"pending": true, "status": "completed", "result": "legacy duplicate"}),
-        );
-        state.inner.store.update_session(&stored).await.unwrap();
         assert_eq!(
-            pending_parent_subtask_completions(&state, parent.id.as_str())
-                .await
-                .unwrap()
-                .len(),
-            1
+            stored.extra[SUBTASK_COMPLETIONS_EXTRA_KEY][0]["result"],
+            "durable result"
         );
-        resume_pending_subtask_completions(&state).await;
         assert_eq!(
-            state
-                .inner
-                .store
-                .list_queued_prompt_entries(parent.id.as_str())
-                .await
-                .unwrap()
-                .len(),
-            1
+            stored.extra[SUBTASK_PERSISTENCE_VERSION_KEY],
+            SUBTASK_PERSISTENCE_VERSION
         );
-        let retired = state
-            .inner
-            .store
-            .get_session(child.id.as_str())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            retired.extra[SUBTASK_COMPLETION_EXTRA_KEY]["pending"].as_bool(),
-            Some(false)
-        );
+        assert!(stored.extra.get(SUBTASK_COMPLETION_EXTRA_KEY).is_none());
+        assert!(owed_completion_generation(&stored).is_some());
     }
 
     #[tokio::test]
@@ -2275,7 +2198,6 @@ mod tests {
         let request = parent_subtask_completions_request(&[PendingSubtaskCompletion {
             child: child.clone(),
             message_id,
-            legacy: false,
             status: "completed".to_string(),
             text: "final notes".to_string(),
             completed_at: child.time.updated,
@@ -2319,7 +2241,6 @@ mod tests {
             PendingSubtaskCompletion {
                 child: first.clone(),
                 message_id: Id::ascending(IdKind::Message),
-                legacy: false,
                 status: "completed".to_string(),
                 text: "first result".to_string(),
                 completed_at: 10,
@@ -2327,7 +2248,6 @@ mod tests {
             PendingSubtaskCompletion {
                 child: second.clone(),
                 message_id: Id::ascending(IdKind::Message),
-                legacy: false,
                 status: "error".to_string(),
                 text: "second error".to_string(),
                 completed_at: 20,
@@ -2354,8 +2274,8 @@ pub(crate) async fn session_command(
     Json(request): Json<SessionCommandRequest>,
 ) -> Result<Json<MessageWithParts>, ApiError> {
     let session = ensure_session(&state, &session_id).await?;
-    let command = find_command(&state, &session.directory, &request.command)?;
-    let agents = crate::plugins::agent_catalog(&state, &session.directory)?;
+    let command = find_command(&state, &session.directory, &request.command).await?;
+    let agents = crate::plugins::agent_catalog(&state, &session.directory).await?;
     let text = command
         .as_ref()
         .and_then(|command| command.template.as_deref())

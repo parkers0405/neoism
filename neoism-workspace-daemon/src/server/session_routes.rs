@@ -34,6 +34,7 @@ pub(crate) async fn session_upgrade(
                 let registry = state.sessions.clone();
                 let pairing_tokens = state.pairing_tokens.clone();
                 let crdt = state.crdt.clone();
+                let lsp_runtime = state.lsp_runtime.clone();
                 return ws.on_upgrade(move |socket| async move {
                     let output_rx = registry.subscribe();
                     handle_socket(
@@ -46,6 +47,7 @@ pub(crate) async fn session_upgrade(
                         workspaces,
                         pairing_tokens,
                         crdt,
+                        lsp_runtime,
                     )
                     .await;
                 });
@@ -81,6 +83,7 @@ pub(crate) async fn session_upgrade(
     let registry = state.sessions.clone();
     let pairing_tokens = state.pairing_tokens.clone();
     let crdt = state.crdt.clone();
+    let lsp_runtime = state.lsp_runtime.clone();
     ws.on_upgrade(move |socket| async move {
         let output_rx = registry.subscribe();
         // Legacy path has no device record — permissions checks become
@@ -95,6 +98,7 @@ pub(crate) async fn session_upgrade(
             workspaces,
             pairing_tokens,
             crdt,
+            lsp_runtime,
         )
         .await;
     })

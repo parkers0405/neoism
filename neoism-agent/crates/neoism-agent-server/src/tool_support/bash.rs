@@ -1,13 +1,15 @@
 #[cfg(not(windows))]
 use std::collections::HashMap;
 use std::process::Stdio;
+#[cfg(not(windows))]
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use serde_json::{json, Value};
 use tokio::process::Command;
 #[cfg(not(windows))]
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 
 use super::args::{optional_string, required_string, usize_arg};
 use super::paths::{display_path, existing_project_path};
@@ -15,8 +17,9 @@ use super::{process, shell_scan, truncate, ToolContext, ToolExecutionResult};
 
 const MAX_CAPTURE_BYTES_PER_STREAM: usize = 1024 * 1024;
 
-/// The login shell's fully-resolved environment, captured exactly ONCE
-/// per process. Running `$SHELL -lc <cmd>` for every tool call re-sources
+/// One runtime's cached login-shell environment. The single-entry cache is
+/// bounded and is invalidated when the resolved shell changes or its TTL
+/// expires. Running `$SHELL -lc <cmd>` for every tool call re-sources
 /// the entire login profile each time (`path_helper`, Homebrew init,
 /// nvm/pyenv/rbenv, oh-my-zsh …) — commonly 0.5–2s of pure startup per
 /// command on macOS. Instead we source the profile a single time, cache
@@ -24,13 +27,47 @@ const MAX_CAPTURE_BYTES_PER_STREAM: usize = 1024 * 1024;
 /// shell that inherits it: same PATH/tooling, none of the per-command
 /// re-sourcing tax.
 #[cfg(not(windows))]
-static LOGIN_ENV: OnceCell<HashMap<String, String>> = OnceCell::const_new();
+const LOGIN_ENV_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[cfg(not(windows))]
-async fn login_shell_env(shell: &str) -> &'static HashMap<String, String> {
-    LOGIN_ENV
-        .get_or_init(|| capture_login_env(shell.to_string()))
-        .await
+struct CachedLoginEnvironment {
+    shell: String,
+    captured_at: std::time::Instant,
+    environment: Arc<HashMap<String, String>>,
+}
+
+#[cfg(not(windows))]
+#[derive(Default)]
+pub(crate) struct LoginShellEnvironment {
+    cached: Mutex<Option<CachedLoginEnvironment>>,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+pub(crate) struct LoginShellEnvironment;
+
+#[cfg(not(windows))]
+impl LoginShellEnvironment {
+    pub(crate) async fn get(&self, shell: &str) -> Arc<HashMap<String, String>> {
+        let mut cached = self.cached.lock().await;
+        if let Some(entry) = cached.as_ref() {
+            if entry.shell == shell && entry.captured_at.elapsed() < LOGIN_ENV_TTL {
+                return entry.environment.clone();
+            }
+        }
+        let environment = Arc::new(capture_login_env(shell.to_string()).await);
+        *cached = Some(CachedLoginEnvironment {
+            shell: shell.to_string(),
+            captured_at: std::time::Instant::now(),
+            environment: environment.clone(),
+        });
+        environment
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn cache_len(&self) -> usize {
+        usize::from(self.cached.lock().await.is_some())
+    }
 }
 
 #[cfg(not(windows))]
@@ -38,6 +75,7 @@ async fn capture_login_env(shell: String) -> HashMap<String, String> {
     let captured = Command::new(&shell)
         .arg("-lc")
         .arg("env")
+        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -114,7 +152,7 @@ pub(super) async fn bash_tool(
         &command,
         &cwd,
         &project_root,
-        crate::platform_shell::runtime().kind(),
+        context.utilities().shell.kind(),
     );
     for dir in &scan.external_dirs {
         context.ensure_explicit_allowed("external_directory", dir)?;
@@ -126,13 +164,13 @@ pub(super) async fn bash_tool(
     let timeout_ms = usize_arg(&arguments, "timeout").unwrap_or(120_000).max(1) as u64;
     let description =
         optional_string(&arguments, "description").unwrap_or_else(|| command.clone());
-    let runtime = crate::platform_shell::runtime();
+    let runtime = &context.utilities().shell;
     let shell = runtime.program().to_string_lossy().into_owned();
-    // Non-login `-c` + the once-captured login env (see `LOGIN_ENV`): the
+    // Non-login `-c` + this runtime's cached login environment: the
     // profile is already resolved, so we skip re-sourcing it per command.
     #[cfg(not(windows))]
     let login_env = tokio::select! {
-        env = login_shell_env(&shell) => env,
+        env = context.utilities().login_shell_environment.get(&shell) => env,
         _ = process::wait_for_cancel(context.cancel.clone()) => {
             anyhow::bail!("{} command aborted\n(no output)", runtime.display_name());
         }
@@ -143,13 +181,13 @@ pub(super) async fn bash_tool(
         .current_dir(&cwd)
         .env("TERM", "xterm-256color")
         .env("NEOISM_TERMINAL", "1")
-        .envs(context.env.clone())
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(not(windows))]
     process.envs(login_env.iter());
+    process.envs(context.env.clone());
     process::set_new_process_group(&mut process);
     let mut child = process
         .spawn()
@@ -231,4 +269,28 @@ pub(super) async fn bash_tool(
         output: rendered,
         metadata: Some(metadata),
     })
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn login_environment_cache_stays_single_entry_when_shell_changes() {
+        let cache = LoginShellEnvironment::default();
+        let _ = cache.get("/definitely/missing-shell-a").await;
+        let _ = cache.get("/definitely/missing-shell-b").await;
+        assert_eq!(cache.cache_len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn expired_login_environment_is_recaptured() {
+        let cache = LoginShellEnvironment::default();
+        let first = cache.get("/definitely/missing-shell").await;
+        cache.cached.lock().await.as_mut().unwrap().captured_at =
+            std::time::Instant::now() - LOGIN_ENV_TTL;
+        let second = cache.get("/definitely/missing-shell").await;
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.cache_len().await, 1);
+    }
 }

@@ -27,7 +27,7 @@ impl NotesService for NeoismNotesService {
     }
 
     fn tool_description(&self) -> String {
-        "Neoism Markdown note-file operations: create, list, read, write, search, tasks, or taskToggle. Scope choices are advertised by the notes backend.".to_string()
+        "Neoism Markdown note-file operations: create, list, read, write, search, tasks, or taskToggle. Scope choices are advertised by the notes service.".to_string()
     }
 
     fn list(&self, request: &NotesRequest, limit: usize) -> Result<Vec<ScopedNotes<String>>, ServiceError> {
@@ -307,7 +307,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scope_choices_are_stable_backend_ids() {
+    fn scope_choices_are_stable_service_ids() {
         let choices = NeoismNotesService.scope_choices();
         assert_eq!(choices.iter().map(|choice| choice.id.as_str()).collect::<Vec<_>>(), ["auto", "project", "vault", "all"]);
         assert!(choices.iter().all(|choice| !choice.label.is_empty()));

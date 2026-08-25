@@ -1,4 +1,10 @@
 import type { EventOptions, NeoismTransport, RequestDescriptor } from "./transport.js";
+import {
+  createContractClient,
+  type ContractClient,
+  type OperationInput,
+  type OperationResponse,
+} from "./generated/contract.js";
 import type {
   ApiMeta,
   AuditEntry,
@@ -19,6 +25,8 @@ import type {
 
 export interface NeoismClient {
   readonly transport: NeoismTransport;
+  /** Complete generated V2 surface, keyed by canonical operation ID. */
+  readonly operations: ContractClient;
   readonly meta: { get(): Promise<ApiMeta> };
   readonly audit: { list(limit?: number): Promise<AuditEntry[]> };
   readonly capabilities: {
@@ -59,14 +67,14 @@ export interface NeoismClient {
     agents: { list(directory?: string): Promise<AgentInfo[]>; get(name: string, directory?: string): Promise<AgentInfo> };
     commands: { list(directory?: string): Promise<CommandInfo[]> };
     providers: {
-      list(directory?: string): Promise<Record<string, unknown>>;
-      configured(directory?: string): Promise<unknown[]>;
-      authMethods(directory?: string): Promise<unknown>;
-      auth(providerId: string): Promise<unknown>;
-      setAuth(providerId: string, credential: unknown): Promise<unknown>;
-      removeAuth(providerId: string): Promise<void>;
-      oauthAuthorize(providerId: string, input: unknown): Promise<unknown>;
-      oauthCallback(providerId: string, input: unknown): Promise<unknown>;
+      list(directory?: string): Promise<OperationResponse<"v2.providers.list">>;
+      configured(directory?: string): Promise<OperationResponse<"v2.providers.configured">>;
+      authMethods(directory?: string): Promise<OperationResponse<"v2.providers.authMethods">>;
+      auth(providerId: string): Promise<OperationResponse<"v2.providers.auth.get">>;
+      setAuth(providerId: string, credential: OperationInput<"v2.providers.auth.set">["body"]): Promise<boolean>;
+      removeAuth(providerId: string): Promise<boolean>;
+      oauthAuthorize(providerId: string, input: OperationInput<"v2.providers.oauth.authorize">["body"]): Promise<OperationResponse<"v2.providers.oauth.authorize">>;
+      oauthCallback(providerId: string, input: OperationInput<"v2.providers.oauth.callback">["body"]): Promise<boolean>;
     };
     skills: { list(directory?: string): Promise<unknown[]> };
     tools: { list(directory?: string): Promise<ToolInfo[]> };
@@ -76,13 +84,13 @@ export interface NeoismClient {
     create(input?: { directory?: string; title?: string }): Promise<Session>;
     get(id: string): Promise<Session>;
     update(id: string, input: Record<string, unknown>): Promise<Session>;
-    delete(id: string): Promise<void>;
+    delete(id: string): Promise<boolean>;
     messages(id: string, options?: { order?: "asc" | "desc"; limit?: number; slim?: boolean }): Promise<Page<MessageWithParts>>;
     prompt(id: string, request: PromptRequest): Promise<void>;
-    abort(id: string): Promise<void>;
+    abort(id: string): Promise<boolean>;
     status(): Promise<Record<string, unknown>>;
-    queue(id: string): Promise<unknown[]>;
-    clearQueue(id: string): Promise<void>;
+    queue(id: string): Promise<OperationResponse<"v2.sessions.queue.list">>;
+    clearQueue(id: string): Promise<OperationResponse<"v2.sessions.queue.clear">>;
     popQueue(id: string): Promise<unknown>;
     command(id: string, command: string): Promise<unknown>;
     undo(id: string): Promise<unknown>;
@@ -94,23 +102,27 @@ export interface NeoismClient {
 }
 
 export function createNeoismClient(transport: NeoismTransport): NeoismClient {
-  const request = <T>(path: string) => transport.request<T>({ path });
+  const operations = createContractClient(transport);
+  const clean = <T extends object>(value: T) => Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  ) as { [Key in keyof T]?: Exclude<T[Key], undefined> };
   return {
     transport,
-    meta: { get: () => request<ApiMeta>("/v2/meta") },
-    audit: { list: (limit) => transport.request<AuditEntry[]>({ path: "/v2/audit", query: { limit } }) },
+    operations,
+    meta: { get: () => operations.request("v2.meta.get", {}) },
+    audit: { list: (limit) => operations.request("v2.audit.list", { query: clean({ limit }) }) },
     capabilities: {
-      list: () => request<CapabilityInfo[]>("/v2/capabilities"),
+      list: () => operations.request("v2.capabilities.list", {}),
       async has(id, minimumVersion) {
-        const capability = (await request<CapabilityInfo[]>("/v2/capabilities"))
+        const capability = (await operations.request("v2.capabilities.list", {}))
           .find((candidate) => candidate.id === id && candidate.enabled);
         return capability !== undefined &&
           (minimumVersion === undefined || compareVersions(capability.version, minimumVersion) >= 0);
       },
     },
     plugins: {
-      list: () => request<PluginManifest[]>("/v2/plugins"),
-      get: (id) => request<PluginManifest>(`/v2/plugins/${encodeURIComponent(id)}`),
+      list: () => operations.request("v2.plugins.list", {}),
+      get: (id) => operations.request("v2.plugins.get", { path: { plugin_id: id } }),
       request: (id, path = "", options = {}) => {
         const suffix = path
           .replace(/^\/+/, "")
@@ -126,122 +138,71 @@ export function createNeoismClient(transport: NeoismTransport): NeoismClient {
     },
     events: { subscribe: (options) => transport.events(options) },
     artifacts: {
-      list: (sessionId) => transport.request<ArtifactInfo[]>({
-        path: "/v2/artifacts",
-        ...(sessionId ? { query: { sessionId } } : {}),
+      list: (sessionId) => operations.request("v2.artifacts.list", { query: clean({ sessionId }) }),
+      get: (id) => operations.request("v2.artifacts.get", { path: { artifact_id: id } }),
+      upload: (data, options = {}) => operations.request("v2.artifacts.create", {
+        headers: clean({
+          "Content-Type": options.mediaType ?? (data instanceof Blob ? data.type : "application/octet-stream"),
+          "X-Neoism-Filename": options.filename,
+          "X-Neoism-Session-Id": options.sessionId,
+        }), body: data,
       }),
-      get: (id) => request<ArtifactInfo>(`/v2/artifacts/${encodeURIComponent(id)}`),
-      upload: (data, options = {}) => transport.request<ArtifactInfo>({
-        method: "POST",
-        path: "/v2/artifacts",
-        headers: {
-          "content-type": options.mediaType ?? (data instanceof Blob ? data.type : "application/octet-stream"),
-          ...(options.filename ? { "x-neoism-filename": options.filename } : {}),
-          ...(options.sessionId ? { "x-neoism-session-id": options.sessionId } : {}),
-        },
-        body: data,
-      }),
-      download: (id, signal) => transport.request<Uint8Array>({
-        path: `/v2/artifacts/${encodeURIComponent(id)}/content`,
-        response: "bytes",
-        ...(signal ? { signal } : {}),
-      }),
+      download: (id, signal) => operations.request("v2.artifacts.content", { path: { artifact_id: id }, ...(signal ? { signal } : {}) }),
       async delete(id) {
-        await transport.request<void>({ method: "DELETE", path: `/v2/artifacts/${encodeURIComponent(id)}` });
+        await operations.request("v2.artifacts.delete", { path: { artifact_id: id } });
       },
     },
     interactions: {
       permissions: {
-        list: (sessionId) => transport.request<PermissionRequest[]>({ path: "/v2/interactions/permissions", query: { sessionId } }),
-        reply: (id, reply, message) => transport.request<boolean>({
-          method: "POST",
-          path: `/v2/interactions/permissions/${encodeURIComponent(id)}/reply`,
-          body: { reply, ...(message ? { message } : {}) },
-        }),
+        list: (sessionId) => operations.request("v2.interactions.permissions.list", { query: clean({ sessionId }) }),
+        reply: (id, reply, message) => operations.request("v2.interactions.permissions.reply", { path: { request_id: id }, body: clean({ reply, message }) }),
       },
       questions: {
-        list: (sessionId) => transport.request<QuestionRequest[]>({ path: "/v2/interactions/questions", query: { sessionId } }),
-        reply: (id, answers) => transport.request<boolean>({
-          method: "POST",
-          path: `/v2/interactions/questions/${encodeURIComponent(id)}/reply`,
-          body: { answers },
-        }),
-        reject: (id) => transport.request<boolean>({
-          method: "POST",
-          path: `/v2/interactions/questions/${encodeURIComponent(id)}/reject`,
-        }),
+        list: (sessionId) => operations.request("v2.interactions.questions.list", { query: clean({ sessionId }) }),
+        reply: (id, answers) => operations.request("v2.interactions.questions.reply", { path: { request_id: id }, body: { answers } }),
+        reject: (id) => operations.request("v2.interactions.questions.reject", { path: { request_id: id } }),
       },
     },
     catalog: {
       agents: {
-        list: (directory) => transport.request<AgentInfo[]>({ path: "/v2/agents", query: { directory } }),
-        get: (name, directory) => transport.request<AgentInfo>({ path: `/v2/agents/${encodeURIComponent(name)}`, query: { directory } }),
+        list: (directory) => operations.request("v2.agents.list", { query: clean({ directory }) }),
+        get: (name, directory) => operations.request("v2.agents.get", { path: { name }, query: clean({ directory }) }),
       },
-      commands: { list: (directory) => transport.request<CommandInfo[]>({ path: "/v2/commands", query: { directory } }) },
+      commands: { list: (directory) => operations.request("v2.commands.list", { query: clean({ directory }) }) },
       providers: {
-        list: (directory) => transport.request<Record<string, unknown>>({ path: "/v2/providers", query: { directory } }),
-        configured: (directory) => transport.request<unknown[]>({ path: "/v2/providers/configured", query: { directory } }),
-        authMethods: (directory) => transport.request<unknown>({ path: "/v2/providers/auth-methods", query: { directory } }),
-        auth: (providerId) => request<unknown>(`/v2/providers/${encodeURIComponent(providerId)}/auth`),
-        setAuth: (providerId, body) => transport.request<unknown>({ method: "PUT", path: `/v2/providers/${encodeURIComponent(providerId)}/auth`, body }),
-        async removeAuth(providerId) {
-          await transport.request<void>({ method: "DELETE", path: `/v2/providers/${encodeURIComponent(providerId)}/auth` });
-        },
-        oauthAuthorize: (providerId, body) => transport.request<unknown>({ method: "POST", path: `/v2/providers/${encodeURIComponent(providerId)}/oauth/authorize`, body }),
-        oauthCallback: (providerId, body) => transport.request<unknown>({ method: "POST", path: `/v2/providers/${encodeURIComponent(providerId)}/oauth/callback`, body }),
+        list: (directory) => operations.request("v2.providers.list", { query: clean({ directory }) }),
+        configured: (directory) => operations.request("v2.providers.configured", { query: clean({ directory }) }),
+        authMethods: (directory) => operations.request("v2.providers.authMethods", { query: clean({ directory }) }),
+        auth: (providerId) => operations.request("v2.providers.auth.get", { path: { provider_id: providerId } }),
+        setAuth: (providerId, body) => operations.request("v2.providers.auth.set", { path: { provider_id: providerId }, body }),
+        removeAuth: (providerId) => operations.request("v2.providers.auth.delete", { path: { provider_id: providerId } }),
+        oauthAuthorize: (providerId, body) => operations.request("v2.providers.oauth.authorize", { path: { provider_id: providerId }, body }),
+        oauthCallback: (providerId, body) => operations.request("v2.providers.oauth.callback", { path: { provider_id: providerId }, body }),
       },
-      skills: { list: (directory) => transport.request<unknown[]>({ path: "/v2/skills", query: { directory } }) },
-      tools: { list: (directory) => transport.request<ToolInfo[]>({ path: "/v2/tools", query: { directory } }) },
+      skills: { list: (directory) => operations.request("v2.skills.list", { query: clean({ directory }) }) },
+      tools: { list: (directory) => operations.request("v2.tools.list", { query: clean({ directory }) }) },
     },
     sessions: {
-      list: (options = {}) => transport.request<Page<Session>>({ path: "/v2/sessions", query: options }),
-      create: (input = {}) => transport.request<Session>({
-        method: "POST",
-        path: "/v2/sessions",
-        ...(input.directory ? { query: { directory: input.directory } } : {}),
-        body: input.title ? { title: input.title } : {},
-      }),
-      get: (id) => request<Session>(`/v2/sessions/${encodeURIComponent(id)}`),
-      update: (id, body) => transport.request<Session>({
-        method: "PATCH",
-        path: `/v2/sessions/${encodeURIComponent(id)}`,
-        body,
-      }),
-      async delete(id) {
-        await transport.request<void>({
-          method: "DELETE",
-          path: `/v2/sessions/${encodeURIComponent(id)}`,
-        });
-      },
-      messages: (id, options = {}) => transport.request<Page<MessageWithParts>>({
-        path: `/v2/sessions/${encodeURIComponent(id)}/messages`,
-        query: options,
-      }),
+      list: (options = {}) => operations.request("v2.sessions.list", { query: clean({ ...options, roots: options.roots === undefined ? undefined : String(options.roots) }) }),
+      create: (input = {}) => operations.request("v2.sessions.create", { query: clean({ directory: input.directory }), body: input.title ? { title: input.title } : {} }),
+      get: (id) => operations.request("v2.sessions.get", { path: { session_id: id } }),
+      update: (id, body) => operations.request("v2.sessions.update", { path: { session_id: id }, body }),
+      delete: (id) => operations.request("v2.sessions.delete", { path: { session_id: id } }),
+      messages: (id, options = {}) => operations.request("v2.sessions.messages", { path: { session_id: id }, query: options }),
       async prompt(id, body) {
-        await transport.request<void>({
-          method: "POST",
-          path: `/v2/sessions/${encodeURIComponent(id)}/prompt`,
-          body,
-        });
+        await operations.request("v2.sessions.prompt", { path: { session_id: id }, body });
       },
-      async abort(id) {
-        await transport.request<void>({
-          method: "POST",
-          path: `/v2/sessions/${encodeURIComponent(id)}/abort`,
-        });
-      },
-      status: () => request<Record<string, unknown>>("/v2/sessions/status"),
-      queue: (id) => request<unknown[]>(`/v2/sessions/${encodeURIComponent(id)}/queue`),
-      async clearQueue(id) {
-        await transport.request<void>({ method: "DELETE", path: `/v2/sessions/${encodeURIComponent(id)}/queue` });
-      },
-      popQueue: (id) => transport.request<unknown>({ method: "POST", path: `/v2/sessions/${encodeURIComponent(id)}/queue/pop`, body: {} }),
-      command: (id, command) => transport.request<unknown>({ method: "POST", path: `/v2/sessions/${encodeURIComponent(id)}/commands`, body: { command } }),
-      undo: (id) => transport.request<unknown>({ method: "POST", path: `/v2/sessions/${encodeURIComponent(id)}/undo`, body: {} }),
-      redo: (id) => transport.request<unknown>({ method: "POST", path: `/v2/sessions/${encodeURIComponent(id)}/redo`, body: {} }),
-      summarize: (id) => transport.request<unknown>({ method: "POST", path: `/v2/sessions/${encodeURIComponent(id)}/summarize`, body: {} }),
-      pin: (id, pinned) => transport.request<unknown>({ method: "POST", path: `/v2/sessions/${encodeURIComponent(id)}/pin`, body: { pinned } }),
-      cancelJob: (id, jobId) => transport.request<unknown>({ method: "DELETE", path: `/v2/sessions/${encodeURIComponent(id)}/jobs/${encodeURIComponent(jobId)}` }),
+      abort: (id) => operations.request("v2.sessions.abort", { path: { session_id: id } }),
+      status: () => operations.request("v2.sessions.status", {}),
+      queue: (id) => operations.request("v2.sessions.queue.list", { path: { session_id: id } }),
+      clearQueue: (id) => operations.request("v2.sessions.queue.clear", { path: { session_id: id } }),
+      popQueue: (id) => operations.request("v2.sessions.queue.pop", { path: { session_id: id } }),
+      command: (id, command) => operations.request("v2.sessions.commands.execute", { path: { session_id: id }, body: { command } }),
+      undo: (id) => operations.request("v2.sessions.undo", { path: { session_id: id }, body: {} }),
+      redo: (id) => operations.request("v2.sessions.redo", { path: { session_id: id }, body: {} }),
+      summarize: (id) => operations.request("v2.sessions.summarize", { path: { session_id: id }, body: {} }),
+      pin: (id, pinned) => operations.request("v2.sessions.pin", { path: { session_id: id }, body: { pinned } }),
+      cancelJob: (id, jobId) => operations.request("v2.sessions.jobs.cancel", { path: { session_id: id, job_id: jobId } }),
     },
   };
 }

@@ -11,7 +11,7 @@ pub enum McpConfig {
         command: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args: Option<Vec<String>>,
-        #[serde(default, alias = "env", skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         environment: Option<BTreeMap<String, String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
@@ -227,12 +227,12 @@ pub enum McpContent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NeoismConfig;
+    use crate::AgentConfigDocument;
     use serde_json::json;
 
     #[test]
     fn config_decodes_typed_mcp_map() {
-        let config: NeoismConfig = serde_json::from_value(json!({
+        let config: AgentConfigDocument = serde_json::from_value(json!({
             "mcp": {
                 "local-example": {
                     "type": "local",
@@ -245,7 +245,7 @@ mod tests {
                     "type": "local",
                     "command": "node",
                     "args": ["server.js"],
-                    "env": { "A": "B" }
+                    "environment": { "A": "B" }
                 },
                 "remote-example": {
                     "type": "remote",
@@ -281,6 +281,19 @@ mod tests {
             config.mcp["remote-example"],
             McpConfig::Remote { .. }
         ));
+    }
+
+    #[test]
+    fn legacy_env_key_is_ignored() {
+        let config: AgentConfigDocument = serde_json::from_value(json!({
+            "mcp": {
+                "legacy": { "type": "local", "command": ["node"], "env": { "A": "B" } }
+            }
+        })).unwrap();
+        let McpConfig::Local { environment, .. } = &config.mcp["legacy"] else {
+            panic!("expected local config");
+        };
+        assert!(environment.is_none());
     }
 
     #[test]

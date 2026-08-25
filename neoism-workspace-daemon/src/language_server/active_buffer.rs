@@ -30,11 +30,11 @@ pub(crate) fn live_buffer_text(file: &Path) -> Option<String> {
 /// stall PTY forwarding behind a keystroke sync). Because it runs
 /// inline, queue order matches socket order — interactive queries that
 /// later `flush_document_sync` are guaranteed to see this text.
-pub(crate) fn queue_buffer_sync(workspace_root: &Path, file: &Path, text: String) {
+pub(crate) fn queue_buffer_sync(runtime: &language_server::LspRuntime, workspace_root: &Path, file: &Path, text: String) {
     if let Ok(mut store) = live_text_store().lock() {
         store.insert(file.to_path_buf(), text.clone());
     }
-    super::live_sync::sync_document(workspace_root, file, text);
+    super::live_sync::sync_document(runtime, workspace_root, file, text);
 }
 
 /// The BLOCKING half: wait for the queued sync to reach the engine,
@@ -43,6 +43,7 @@ pub(crate) fn queue_buffer_sync(workspace_root: &Path, file: &Path, text: String
 /// last one is fresh enough (`language_server::status` walks the
 /// workspace — desktop throttles the same way in `refresh_lsp_pill`).
 pub(crate) fn buffer_snapshot_message(
+    runtime: &language_server::LspRuntime,
     workspace_root: &Path,
     file: &Path,
     surface_id: Option<String>,
@@ -62,9 +63,9 @@ pub(crate) fn buffer_snapshot_message(
             }
         }
     }
-    super::live_sync::flush_document_sync(workspace_root, file);
-    let statuses = language_server::status(workspace_root, Some(file));
-    let filetype = language_server::language_id_for_path_in(workspace_root, file)
+    super::live_sync::flush_document_sync(runtime, workspace_root, file);
+    let statuses = language_server::status(runtime, workspace_root, Some(file));
+    let filetype = language_server::language_id_for_path_in(runtime, workspace_root, file)
         .unwrap_or_default();
     let servers = statuses
         .into_iter()
@@ -114,8 +115,9 @@ pub(crate) fn buffer_snapshot_message(
 /// Subscribe to the engine's real-time `publishDiagnostics` bus. The socket
 /// loop drains this and forwards to the editor with zero polling.
 pub(crate) fn subscribe_diagnostics(
+    runtime: &language_server::LspRuntime,
 ) -> tokio::sync::broadcast::Receiver<language_server::DiagnosticsEvent> {
-    language_server::subscribe_diagnostics()
+    language_server::subscribe_diagnostics(runtime)
 }
 
 /// Convert an engine diagnostics push into the editor message.

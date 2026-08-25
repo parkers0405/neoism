@@ -1,6 +1,6 @@
 //! Semantic transcript search: a background indexer embeds message text via
 //! an OpenAI-compatible `/embeddings` endpoint into the `message_embeddings`
-//! vector table (turso backend only), and `semantic_search` ranks messages by
+//! vector table, and `semantic_search` ranks messages by
 //! cosine distance to an embedded query. Indexing is fully out of the prompt
 //! path: nothing here ever blocks message persistence or streaming.
 
@@ -22,6 +22,19 @@ const MAX_INPUT_CHARS: usize = 8_000;
 const BATCH_SIZE: usize = 32;
 const IDLE_POLL: Duration = Duration::from_secs(5);
 const ERROR_BACKOFF: Duration = Duration::from_secs(60);
+
+pub(crate) struct SemanticIndexerHandle {
+    cancel: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SemanticIndexerHandle {
+    pub(crate) async fn shutdown(self) {
+        let _ = self.cancel.send(());
+        self.task.abort();
+        let _ = self.task.await;
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct EmbeddingsClient {
@@ -246,7 +259,7 @@ pub(crate) struct SemanticSearchQuery {
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct SemanticSearchResponse {
-    /// False when the backend has no vector support or no embeddings
+    /// False when the store has no vector support or no embeddings
     /// provider is configured — clients should quietly fall back.
     available: bool,
     hits: Vec<SemanticSearchHit>,
@@ -259,7 +272,7 @@ pub(crate) async fn semantic_search_route(
     Query(query): Query<SemanticSearchQuery>,
 ) -> Result<Json<SemanticSearchResponse>, ApiError> {
     let store = &state.inner.store;
-    let Some(client) = state.inner.semantic.as_ref() else {
+    let Some(client) = EmbeddingsClient::from_env(&state.inner.auth_store) else {
         return Ok(Json(SemanticSearchResponse {
             available: false,
             hits: Vec::new(),
@@ -297,43 +310,50 @@ pub(crate) async fn semantic_search_route(
     }))
 }
 
-/// Start the background embedding indexer if the backend supports vector
+/// Start the background embedding indexer if the store supports vector
 /// search and an embeddings provider is configured. Safe to call always.
-pub(crate) fn spawn_indexer(state: AppState) {
+pub(crate) fn spawn_indexer(state: AppState, root: std::path::PathBuf, client: Option<EmbeddingsClient>) -> Option<SemanticIndexerHandle> {
     if !state.inner.store.semantic_search_supported() {
         tracing::info!(
-            "semantic search unavailable: database backend has no vector support"
+            "semantic search unavailable: store has no vector support"
         );
-        return;
+        return None;
     }
-    let Some(client) = state.inner.semantic.clone() else {
-        return;
+    let Some(client) = client else {
+        return None;
     };
-    tokio::spawn(async move {
+    let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
         tracing::info!(model = client.model_spec, "semantic search indexer started");
         loop {
-            match index_batch(&state, &client).await {
-                Ok(0) => tokio::time::sleep(IDLE_POLL).await,
+            match index_batch(&state, &root, &client).await {
+                Ok(0) => tokio::select! { _ = &mut cancelled => break, _ = tokio::time::sleep(IDLE_POLL) => {} },
                 Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(%error, "semantic indexing batch failed; backing off");
-                    tokio::time::sleep(ERROR_BACKOFF).await;
+                    tokio::select! { _ = &mut cancelled => break, _ = tokio::time::sleep(ERROR_BACKOFF) => {} }
                 }
             }
         }
     });
+    Some(SemanticIndexerHandle { cancel, task })
 }
 
 /// Embed one batch of not-yet-indexed messages. Returns how many rows were
 /// processed (embedded or tombstoned); 0 means fully caught up.
 async fn index_batch(
     state: &AppState,
+    root: &std::path::Path,
     client: &EmbeddingsClient,
 ) -> anyhow::Result<usize> {
+    let session_ids = state.inner.store.list_sessions().await?.into_iter()
+        .filter(|session| crate::workspace_runtime::canonical_location(&session.directory) == root)
+        .map(|session| session.id.to_string())
+        .collect::<Vec<_>>();
     let pending = state
         .inner
         .store
-        .messages_missing_embeddings(&client.model_spec, BATCH_SIZE)
+        .messages_missing_embeddings(&client.model_spec, &session_ids, BATCH_SIZE)
         .await?;
     if pending.is_empty() {
         return Ok(0);

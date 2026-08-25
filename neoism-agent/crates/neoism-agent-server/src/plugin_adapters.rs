@@ -94,6 +94,64 @@ impl neoism_agent_builtins::plugin::lsp::LspHost for Lsp {
     }
 }
 
+pub(crate) struct Mcp(pub(crate) crate::state::AppState);
+
+impl neoism_agent_builtins::plugin::mcp::McpHost for Mcp {
+    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+        registrar.tool("execute", None);
+    }
+
+    fn execute<'a>(&'a self, action: neoism_agent_builtins::plugin::mcp::McpAction, request: neoism_agent_plugin_api::RouteRequest) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
+        Box::pin(async move {
+            use axum::extract::{Path, Query, State};
+            use axum::Json;
+            use neoism_agent_builtins::plugin::mcp::McpAction;
+            let query = route_query(&request);
+            let state = State(self.0.clone());
+            let headers = axum::http::HeaderMap::new();
+            let name = request.path.get("name").cloned().unwrap_or_default();
+            if matches!(action, McpAction::AuthCallbackGet) {
+                let response = crate::mcp_routes::mcp_auth_callback_get(
+                    state, Path(name), Query(query_value(query)?), headers,
+                ).await.map_err(api_error)?;
+                let mut response = neoism_agent_plugin_api::RouteResponse::json(200, serde_json::Value::String(response.0));
+                response.headers.insert("content-type".into(), "text/html; charset=utf-8".into());
+                return Ok(response);
+            }
+            let value = match action {
+                McpAction::Status => serde_json::to_value(crate::mcp_routes::mcp_status(state, Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Add => {
+                    let body = serde_json::from_value(request.body).map_err(runtime_error)?;
+                    serde_json::to_value(crate::mcp_routes::mcp_add(Json(body)).await.0)
+                }
+                McpAction::Catalog => serde_json::to_value(crate::mcp_routes::mcp_catalog(state, Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::AuthStart => serde_json::to_value(crate::mcp_routes::mcp_auth_start(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::AuthRemove => serde_json::to_value(crate::mcp_routes::mcp_auth_remove(state, Query(query_value(query)?), Path(name), headers).await.map_err(api_error)?.0),
+                McpAction::AuthCallbackPost => {
+                    let body = serde_json::from_value(request.body).map_err(runtime_error)?;
+                    serde_json::to_value(crate::mcp_routes::mcp_auth_callback(state, Path(name), Query(query_value(query)?), headers, Json(body)).await.map_err(api_error)?.0)
+                }
+                McpAction::Authenticate => serde_json::to_value(crate::mcp_routes::mcp_auth_authenticate(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Connect => serde_json::to_value(crate::mcp_routes::mcp_connect(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Disconnect => serde_json::to_value(crate::mcp_routes::mcp_disconnect(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Config => {
+                    let body = serde_json::from_value(request.body).map_err(runtime_error)?;
+                    serde_json::to_value(crate::mcp_routes::mcp_config_patch(state, Path(name), Query(query_value(query)?), headers, Json(body)).await.map_err(api_error)?.0)
+                }
+                McpAction::Tools => serde_json::to_value(crate::mcp_routes::mcp_tools(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::ToolCall => {
+                    let tool_name = request.path.get("tool_name").cloned().unwrap_or_default();
+                    serde_json::to_value(crate::mcp_routes::mcp_tool_call(state, Path((name, tool_name)), Query(query_value(query)?), headers, Json(request.body)).await.map_err(api_error)?.0)
+                }
+                McpAction::Resources => serde_json::to_value(crate::mcp_routes::mcp_resources(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Prompts => serde_json::to_value(crate::mcp_routes::mcp_prompts(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::AuthCallbackGet => unreachable!(),
+            }.map_err(runtime_error)?;
+            Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
+        })
+    }
+}
+
 pub(crate) struct ConfigAdmin(pub(crate) crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {

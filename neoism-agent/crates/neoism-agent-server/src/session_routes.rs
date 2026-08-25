@@ -5,6 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::Extension;
 use axum::http::HeaderMap;
 use axum::Json;
+use neoism_agent_builtins::plugin::vcs;
 use neoism_agent_core::{
     event_type, CreateSessionRequest, EventPayload, Id, IdKind, MessageId, MessageInfo,
     MessageWithParts, Part, SessionInfo, TimeInfo, TodoInfo, VcsFileDiff,
@@ -16,7 +17,7 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use crate::{
     message_id_of, model_ref_from_config_with_variant,
-    now_millis, project, resolve_directory, slug, vcs, InstanceQuery,
+    now_millis, project, resolve_directory, slug, InstanceQuery,
 };
 
 #[derive(Clone, Debug, Deserialize)]

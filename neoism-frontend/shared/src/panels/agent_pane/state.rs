@@ -360,12 +360,6 @@ impl NeoismAgentMessage {
         message
     }
 
-    pub(super) fn subtask(title: impl Into<String>, text: impl Into<String>) -> Self {
-        let mut message = Self::new(NeoismAgentMessageKind::Subtask, text);
-        message.title = title.into();
-        message
-    }
-
     pub(super) fn system(title: impl Into<String>, text: impl Into<String>) -> Self {
         let mut message = Self::new(NeoismAgentMessageKind::System, text);
         message.title = title.into();
@@ -2025,21 +2019,6 @@ fn background_task_empty_snapshot(message: &NeoismAgentMessage) -> bool {
     let text = format!("{}\n{}", message.detail, message.text).to_ascii_lowercase();
     text.contains("no background tasks exist")
         || text.contains("no background tasks are running")
-}
-
-/// A background-task completion card carrying the durable job identity —
-/// either the client-injected copy synthesized from the live
-/// `session.background_task.completed` event or the server-persisted
-/// runtime notification mapped by `api_mapping::background_completion_card`
-/// (both use id `background-task-{job}`). These are transcript events the
-/// user must keep: `apply_history` re-merges any copy a server snapshot
-/// hasn't caught up to instead of letting the replacement wipe it.
-pub(in crate::panels::agent_pane) fn is_background_completion_card(
-    message: &NeoismAgentMessage,
-) -> bool {
-    message.kind == NeoismAgentMessageKind::Tool
-        && message.tool == "background_task_result"
-        && message.id.starts_with("background-task-")
 }
 
 fn running_background_task_count(messages: &[NeoismAgentMessage]) -> usize {

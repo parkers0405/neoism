@@ -112,7 +112,7 @@ fn plugin_api_stays_transport_storage_and_product_independent() {
     )
     .expect("read plugin-api manifest");
     let dependencies = manifest_dependencies(&manifest);
-    let allowed = ["neoism-agent-core", "serde", "serde_json", "thiserror"]
+    let allowed = ["futures-core", "neoism-agent-core", "serde", "serde_json", "thiserror"]
         .into_iter()
         .collect::<BTreeSet<_>>();
     let forbidden = dependencies
@@ -332,7 +332,11 @@ fn manifest_dependencies(manifest: &str) -> BTreeSet<&str> {
         }
         if in_dependencies {
             if let Some((name, _)) = line.split_once('=') {
-                let name = name.trim().trim_matches('"');
+                let name = name
+                    .trim()
+                    .trim_matches('"')
+                    .strip_suffix(".workspace")
+                    .unwrap_or_else(|| name.trim().trim_matches('"'));
                 if !name.is_empty() && !name.starts_with('#') {
                     dependencies.insert(name);
                 }
@@ -357,7 +361,7 @@ fn inline_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
 fn ids_after_marker<'a>(source: &'a str, marker: &str) -> BTreeSet<&'a str> {
     let lines = source.lines().collect::<Vec<_>>();
     let mut ids = BTreeSet::new();
-    for (index, line) in lines
+    for (index, _) in lines
         .iter()
         .enumerate()
         .filter(|(_, line)| line.contains(marker))

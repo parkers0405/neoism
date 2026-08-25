@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -6,13 +6,13 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use axum::Extension;
+use axum::Json;
 use futures_core::Stream;
 use neoism_agent_core::{
-    ApiMeta, CapabilityInfo, EventEnvelope, EventSubject, MessageId, MessageWithParts, Page,
-    PageCursor, PluginManifestInfo, PromptPart, PromptRequest, SessionInfo, UserModel,
-    API_VERSION, PLUGIN_API_VERSION,
+    ApiMeta, CapabilityInfo, EventEnvelope, EventSubject, MessageId, MessageWithParts,
+    Page, PageCursor, PluginManifestInfo, PromptPart, PromptRequest, SessionInfo,
+    UserModel, API_VERSION, PLUGIN_API_VERSION,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -26,8 +26,8 @@ use crate::session_queue::{
 };
 use crate::state::AppState;
 use crate::{
-    compact_session_context, ensure_session, filter_sessions, resolve_directory, InstanceQuery,
-    SessionListQuery,
+    compact_session_context, ensure_session, filter_sessions, resolve_directory,
+    InstanceQuery, SessionListQuery,
 };
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -105,10 +105,15 @@ pub(crate) async fn v2_events(
     let mut cursor = explicit_cursor.unwrap_or(0);
     let page_size = query.limit.unwrap_or(1_000).clamp(1, 5_000);
     let session_id = query.session_id;
-    // Subscribe before replay. Live notifications only wake the durable-log
-    // reader, so replay/live overlap and receiver lag cannot duplicate or lose
-    // events.
-    let mut receiver = BroadcastStream::new(state.subscribe());
+    // Subscribe before replay so neither durable commits nor transient token
+    // deltas can land between the initial query and the live receivers.
+    let mut durable_receiver = BroadcastStream::new(state.subscribe_durable());
+    let mut live_receiver = BroadcastStream::new(state.subscribe_live());
+    let mut session_family = if let Some(root) = session_id.as_deref() {
+        Some(session_family_ids(&state, root).await)
+    } else {
+        None
+    };
     if explicit_cursor.is_none() && query.tail.unwrap_or(false) {
         cursor = state
             .inner
@@ -119,28 +124,134 @@ pub(crate) async fn v2_events(
     }
     let stream = async_stream::stream! {
         loop {
+            // Read the global sequence when scoped, then filter in memory. An
+            // exact `events.session_id = root` query excludes every child and
+            // cannot represent the desktop's one-stream session-family model.
             let replay = state
                 .inner
                 .store
-                .list_events_after(cursor as i64, page_size, session_id.as_deref())
+                .list_events_after(cursor as i64, page_size, None)
                 .await
                 .unwrap_or_default();
             let replayed = replay.len();
             for event in replay {
                 cursor = event.seq.max(0) as u64;
-                yield Ok(v2_sse_event(persisted_event_envelope(event)));
+                if event_matches_family(&event.payload, session_family.as_ref()) {
+                    yield Ok(v2_sse_event(persisted_event_envelope(event)));
+                }
             }
             if replayed == page_size {
                 continue;
             }
-            // Any broadcast result, including lag, triggers another durable
-            // read from the last emitted sequence.
-            if tokio_stream::StreamExt::next(&mut receiver).await.is_none() {
-                break;
+            tokio::select! {
+                durable = tokio_stream::StreamExt::next(&mut durable_receiver) => {
+                    if durable.is_none() {
+                        break;
+                    }
+                    if let Some(root) = session_id.as_deref() {
+                        session_family = Some(session_family_ids(&state, root).await);
+                    }
+                }
+                live = tokio_stream::StreamExt::next(&mut live_receiver) => {
+                    let live = match live {
+                        Some(Ok(live)) => live,
+                        Some(Err(_)) => continue,
+                        None => break,
+                    };
+                    if !event_matches_family(&live, session_family.as_ref()) {
+                        if let (Some(root), Some(event_session_id)) =
+                            (session_id.as_deref(), event_session_id(&live))
+                        {
+                            if session_descends_from(&state, event_session_id, root).await {
+                                if let Some(family) = session_family.as_mut() {
+                                    family.insert(event_session_id.to_string());
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    yield Ok(v2_live_sse_event(live));
+                }
             }
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+}
+
+async fn session_family_ids(state: &AppState, root: &str) -> HashSet<String> {
+    let mut family = HashSet::from([root.to_string()]);
+    let Ok(sessions) = state.inner.store.list_sessions().await else {
+        return family;
+    };
+    loop {
+        let before = family.len();
+        for session in &sessions {
+            if session
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| family.contains(parent.as_str()))
+            {
+                family.insert(session.id.to_string());
+            }
+        }
+        if family.len() == before {
+            return family;
+        }
+    }
+}
+
+async fn session_descends_from(state: &AppState, session_id: &str, root: &str) -> bool {
+    let mut current = session_id.to_string();
+    let mut visited = HashSet::new();
+    while visited.insert(current.clone()) {
+        if current == root {
+            return true;
+        }
+        let Ok(Some(session)) = state.inner.store.get_session(&current).await else {
+            return false;
+        };
+        let Some(parent) = session.parent_id else {
+            return false;
+        };
+        current = parent.to_string();
+    }
+    false
+}
+
+fn event_session_id(event: &neoism_agent_core::EventPayload) -> Option<&str> {
+    event.properties.get("sessionID").and_then(Value::as_str)
+}
+
+fn event_matches_family(
+    event: &neoism_agent_core::EventPayload,
+    family: Option<&HashSet<String>>,
+) -> bool {
+    family.is_none_or(|family| {
+        event_session_id(event).is_some_and(|session_id| family.contains(session_id))
+    })
+}
+
+fn v2_live_sse_event(event: neoism_agent_core::EventPayload) -> Event {
+    let session_id = event_session_id(&event).map(str::to_string);
+    let envelope = EventEnvelope {
+        id: event.id.to_string(),
+        sequence: 0,
+        source: event_source(&event.kind).to_string(),
+        schema_version: "1.0.0".to_string(),
+        timestamp: crate::server_util::now_millis() as i64,
+        subject: session_id.map(|id| EventSubject {
+            kind: "session".to_string(),
+            id,
+        }),
+        kind: event.kind,
+        data: event.properties,
+    };
+    Event::default()
+        .event(envelope.kind.clone())
+        .data(serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_string()))
 }
 
 fn persisted_event_envelope(event: crate::state::PersistedEvent) -> EventEnvelope<Value> {

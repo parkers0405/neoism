@@ -451,13 +451,6 @@ pub(crate) fn validate_schema(
     Ok(())
 }
 
-pub(crate) fn kernel_tools() -> Vec<ToolListItem> {
-    registry::definitions(registry::ToolOwner::Kernel)
-        .into_iter()
-        .map(|tool| tool.item())
-        .collect()
-}
-
 fn register_owned_tools(
     registrar: &mut neoism_agent_plugin_api::PluginRegistrar,
     state: &AppState,
@@ -481,10 +474,8 @@ pub(crate) fn register_skill_tools(registrar: &mut neoism_agent_plugin_api::Plug
 pub(crate) fn register_lsp_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Lsp); }
 pub(crate) fn register_subagent_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Subagents); }
 pub(crate) fn register_goal_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Goals); }
-
-pub(crate) fn kernel_runtime_tool(id: &str, state: &AppState) -> Option<Arc<dyn neoism_agent_plugin_api::RuntimeTool>> {
-    registry::definitions(registry::ToolOwner::Kernel).into_iter().find(|tool| tool.id() == id).map(|tool| Arc::new(tool.with_state(state.clone())) as Arc<dyn neoism_agent_plugin_api::RuntimeTool>)
-}
+pub(crate) fn register_artifact_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Artifacts); }
+pub(crate) fn register_interaction_tools(registrar: &mut neoism_agent_plugin_api::PluginRegistrar, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Interactions); }
 
 pub(crate) fn warm_search(
     services: &neoism_agent_service_api::AgentServices,

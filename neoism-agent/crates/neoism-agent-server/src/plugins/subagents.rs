@@ -140,7 +140,8 @@ pub(crate) async fn start_task_tool(
         )
         .await;
     }
-    let agents = crate::plugins::agent_catalog(state, &parent.directory).await
+    let snapshot = state.plugin_snapshot(&parent.directory).await;
+    let agents = crate::plugins::agent_catalog(&snapshot, &parent.directory)
         .map_err(|error| error.to_string())?;
     let agent = agents.get(&agent_name).ok_or_else(|| {
         let available = agents

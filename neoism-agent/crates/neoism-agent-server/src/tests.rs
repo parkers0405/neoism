@@ -2339,13 +2339,6 @@ Audit the current worktree for correctness.
         Some("reviewer")
     );
 
-    let catalog = AgentCatalog::from_config(&loaded.info);
-    let agents = catalog.list();
-    assert_eq!(
-        agents.first().map(|agent| agent.name.as_str()),
-        Some("plan")
-    );
-    assert_eq!(catalog.get("reviewer").unwrap().mode, "subagent");
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -523,7 +523,8 @@ async fn compaction_model(
     info: &SessionInfo,
     fallback: &neoism_agent_core::UserModel,
 ) -> neoism_agent_core::UserModel {
-    crate::plugins::agent_catalog(state, &info.directory).await
+    let snapshot = state.plugin_snapshot(&info.directory).await;
+    crate::plugins::agent_catalog(&snapshot, &info.directory)
         .ok()
         .and_then(|catalog| catalog.get("compaction"))
         .and_then(|agent| compaction_model_from_agent(&agent))

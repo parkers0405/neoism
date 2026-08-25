@@ -155,7 +155,8 @@ pub(crate) async fn create_subtask_session(
     agent: &str,
     model: Option<UserModel>,
 ) -> Result<SessionInfo, ApiError> {
-    let agents = crate::plugins::agent_catalog(state, &parent.directory).await?;
+    let snapshot = state.plugin_snapshot(&parent.directory).await;
+    let agents = crate::plugins::agent_catalog(&snapshot, &parent.directory)?;
     let agent_info = agents.get(agent).ok_or_else(|| {
         let available = agents
             .list()
@@ -2275,7 +2276,8 @@ pub(crate) async fn session_command(
 ) -> Result<Json<MessageWithParts>, ApiError> {
     let session = ensure_session(&state, &session_id).await?;
     let command = find_command(&state, &session.directory, &request.command).await?;
-    let agents = crate::plugins::agent_catalog(&state, &session.directory).await?;
+    let snapshot = state.plugin_snapshot(&session.directory).await;
+    let agents = crate::plugins::agent_catalog(&snapshot, &session.directory)?;
     let text = command
         .as_ref()
         .and_then(|command| command.template.as_deref())

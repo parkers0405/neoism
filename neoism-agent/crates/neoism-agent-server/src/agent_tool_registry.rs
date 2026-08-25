@@ -6,7 +6,7 @@ use neoism_agent_core::{McpToolInfo, PermissionAction, PermissionRule, ToolListI
 use neoism_agent_plugin_api::{RegisteredContribution, RegistrySnapshot};
 use serde_json::{json, Value};
 
-use crate::agent::AgentCatalog;
+use neoism_agent_plugin_api::AgentSourceSnapshot;
 use crate::error::ApiError;
 use crate::session_loop::wait_for_cancellation;
 use crate::state::AppState;
@@ -174,7 +174,8 @@ async fn append_task_agent_descriptions(
     let Some(task) = tools.iter_mut().find(|tool| tool.id == "task") else {
         return Ok(());
     };
-    let catalog = crate::plugins::agent_catalog(state, directory).await
+    let snapshot = state.plugin_snapshot(directory).await;
+    let catalog = crate::plugins::agent_catalog(&snapshot, directory)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let description = task_agent_description(&catalog, permissions);
     if !description.is_empty() {
@@ -185,7 +186,7 @@ async fn append_task_agent_descriptions(
 }
 
 fn task_agent_description(
-    catalog: &AgentCatalog,
+    catalog: &AgentSourceSnapshot,
     permissions: &[PermissionRule],
 ) -> String {
     let agents = catalog
@@ -683,8 +684,7 @@ mod tests {
 
     #[test]
     fn task_description_advertises_permitted_subagents_like_opencode() {
-        let catalog =
-            AgentCatalog::from_config(&neoism_agent_core::AgentConfigDocument::default());
+        let catalog = task_agent_fixture();
         let build = catalog.get("build").unwrap();
         let permissions = permission::from_config_map(&build.permission);
 
@@ -699,8 +699,7 @@ mod tests {
 
     #[test]
     fn task_description_hides_denied_subagents() {
-        let catalog =
-            AgentCatalog::from_config(&neoism_agent_core::AgentConfigDocument::default());
+        let catalog = task_agent_fixture();
         let permissions = vec![
             PermissionRule {
                 permission: "task".to_string(),
@@ -718,6 +717,53 @@ mod tests {
 
         assert!(!description.contains("- explore:"));
         assert!(description.contains("- general:"));
+    }
+
+    fn task_agent_fixture() -> AgentSourceSnapshot {
+        AgentSourceSnapshot {
+            agents: vec![
+                test_agent("build", None, "primary", false),
+                test_agent(
+                    "explore",
+                    Some("Fast agent specialized for exploring codebases, including how do API endpoints work?"),
+                    "subagent",
+                    false,
+                ),
+                test_agent(
+                    "general",
+                    Some("General-purpose agent for researching complex questions."),
+                    "subagent",
+                    false,
+                ),
+                test_agent("compaction", None, "primary", true),
+                test_agent("title", None, "primary", true),
+            ],
+            default_agent: "build".to_string(),
+        }
+    }
+
+    fn test_agent(
+        name: &str,
+        description: Option<&str>,
+        mode: &str,
+        hidden: bool,
+    ) -> neoism_agent_core::AgentInfo {
+        neoism_agent_core::AgentInfo {
+            name: name.to_string(),
+            description: description.map(str::to_string),
+            mode: mode.to_string(),
+            native: true,
+            hidden,
+            top_p: None,
+            temperature: None,
+            color: None,
+            permission: BTreeMap::from([("*".to_string(), json!("allow"))]),
+            model: None,
+            variant: None,
+            prompt: None,
+            options: BTreeMap::new(),
+            steps: None,
+        }
     }
 
     fn mcp_tool(client: &str, name: &str, description: &str) -> McpToolInfo {

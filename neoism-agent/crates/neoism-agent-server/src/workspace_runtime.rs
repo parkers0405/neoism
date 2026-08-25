@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -12,8 +12,122 @@ pub(crate) struct WorkspaceRuntime {
     pub(crate) root: PathBuf,
     services: neoism_agent_service_api::AgentServices,
     lifecycle: RwLock<Arc<WorkspaceLifecycle>>,
-    snapshot: RwLock<Arc<neoism_agent_plugin_api::RegistrySnapshot>>,
+    generation: PluginGenerationSlot,
     signature: RwLock<Vec<u8>>,
+}
+
+/// An opaque, exactly-once retirement hook for plugin-owned resources.
+///
+/// The server deliberately does not know the resource type. Cloning this
+/// handle is a lease: replacement removes the generation from publication,
+/// while retirement waits until all in-flight leases have been dropped.
+pub(crate) struct PluginLifecycleHandle {
+    teardown: StdMutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
+}
+
+impl PluginLifecycleHandle {
+    pub(crate) fn new(teardown: impl FnOnce() + Send + 'static) -> Self {
+        Self { teardown: StdMutex::new(Some(Box::new(teardown))) }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        if let Some(teardown) = self.teardown.lock().expect("plugin lifecycle lock poisoned").take() {
+            teardown();
+        }
+    }
+}
+
+impl Drop for PluginLifecycleHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// One immutable, ready-to-serve plugin generation.
+pub(crate) struct PluginLifecycleRegistry {
+    handles: HashMap<String, Arc<PluginLifecycleHandle>>,
+}
+
+impl PluginLifecycleRegistry {
+    pub(crate) fn get(&self, plugin_id: &str) -> Option<Arc<PluginLifecycleHandle>> {
+        self.handles.get(plugin_id).cloned()
+    }
+}
+
+pub(crate) struct PluginGeneration {
+    snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>,
+    lifecycles: PluginLifecycleRegistry,
+}
+
+impl PluginGeneration {
+    /// Build privately. A failed readiness check drops all candidate handles;
+    /// callers cannot publish a partially-ready generation.
+    pub(crate) fn build(
+        snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>,
+        configure: impl FnOnce(&mut PluginGenerationBuilder) -> Result<(), String>,
+    ) -> Result<Arc<Self>, String> {
+        let mut builder = PluginGenerationBuilder::default();
+        configure(&mut builder)?;
+        Ok(Arc::new(Self {
+            snapshot,
+            lifecycles: PluginLifecycleRegistry { handles: builder.lifecycles },
+        }))
+    }
+
+    fn empty(snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>) -> Arc<Self> {
+        Self::build(snapshot, |_| Ok(())).expect("empty plugin generation is ready")
+    }
+
+    pub(crate) fn snapshot(&self) -> Arc<neoism_agent_plugin_api::RegistrySnapshot> {
+        self.snapshot.clone()
+    }
+
+    pub(crate) fn lifecycle(&self, plugin_id: &str) -> Option<Arc<PluginLifecycleHandle>> {
+        self.lifecycles.get(plugin_id)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PluginGenerationBuilder {
+    lifecycles: HashMap<String, Arc<PluginLifecycleHandle>>,
+}
+
+impl PluginGenerationBuilder {
+    pub(crate) fn register(
+        &mut self,
+        plugin_id: impl Into<String>,
+        ready: impl FnOnce() -> Result<(), String>,
+        teardown: impl FnOnce() + Send + 'static,
+    ) -> Result<(), String> {
+        let plugin_id = plugin_id.into();
+        let handle = Arc::new(PluginLifecycleHandle::new(teardown));
+        ready()?;
+        if self.lifecycles.contains_key(&plugin_id) {
+            return Err(format!("duplicate plugin lifecycle: {plugin_id}"));
+        }
+        self.lifecycles.insert(plugin_id, handle);
+        Ok(())
+    }
+}
+
+struct PluginGenerationSlot {
+    published: RwLock<Arc<PluginGeneration>>,
+}
+
+impl PluginGenerationSlot {
+    fn new(generation: Arc<PluginGeneration>) -> Self {
+        Self { published: RwLock::new(generation) }
+    }
+
+    fn load(&self) -> Arc<PluginGeneration> {
+        self.published.read().expect("plugin generation lock poisoned").clone()
+    }
+
+    /// The only publication point. The fully-built candidate becomes visible
+    /// in one write; the old generation retires when its final Arc lease ends.
+    fn publish(&self, candidate: Arc<PluginGeneration>) {
+        *self.published.write().expect("plugin generation lock poisoned") = candidate;
+    }
 }
 
 /// Optional plugin state for one canonical workspace and plugin generation.
@@ -34,8 +148,12 @@ pub(crate) struct WorkspaceLifecycle {
 }
 
 impl WorkspaceRuntime {
+    pub(crate) fn plugin_generation(&self) -> Arc<PluginGeneration> {
+        self.generation.load()
+    }
+
     pub(crate) fn snapshot(&self) -> Arc<neoism_agent_plugin_api::RegistrySnapshot> {
-        self.snapshot.read().expect("workspace snapshot lock poisoned").clone()
+        self.plugin_generation().snapshot()
     }
 
     fn lifecycle(&self) -> Arc<WorkspaceLifecycle> {
@@ -183,7 +301,7 @@ impl WorkspaceRuntimeRegistry {
             root: root.clone(),
             services: services.clone(),
             lifecycle: RwLock::new(Arc::new(WorkspaceLifecycle::default())),
-            snapshot: RwLock::new(host.snapshot()),
+            generation: PluginGenerationSlot::new(PluginGeneration::empty(host.snapshot())),
             signature: RwLock::new(signature),
         });
         entries.insert(
@@ -225,7 +343,8 @@ fn refresh_plugins(runtime: &WorkspaceRuntime, state: &crate::state::AppState) {
             let old_generation = runtime.snapshot().generation;
             let mut next = (*host.snapshot()).clone();
             next.generation = old_generation.saturating_add(1);
-            *runtime.snapshot.write().expect("workspace snapshot lock poisoned") = Arc::new(next);
+            let candidate = PluginGeneration::empty(Arc::new(next));
+            runtime.generation.publish(candidate);
             *runtime.signature.write().expect("workspace signature lock poisoned") = signature;
         }
         Err(error) => tracing::error!(%error, root = %runtime.root.display(), "workspace plugin generation rejected"),
@@ -258,6 +377,104 @@ pub(crate) fn canonical_location(directory: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn test_generation(
+        generation: u64,
+        plugin_id: &str,
+        teardown_count: Arc<AtomicUsize>,
+    ) -> Arc<PluginGeneration> {
+        let mut snapshot = neoism_agent_plugin_api::RegistrySnapshot::empty();
+        snapshot.generation = generation;
+        PluginGeneration::build(Arc::new(snapshot), |builder| {
+            builder.register(
+                plugin_id,
+                || Ok(()),
+                move || {
+                    teardown_count.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn failed_readiness_is_never_publishable_and_tears_down_candidate() {
+        let teardowns = Arc::new(AtomicUsize::new(0));
+        let count = teardowns.clone();
+        let result = PluginGeneration::build(
+            Arc::new(neoism_agent_plugin_api::RegistrySnapshot::empty()),
+            |builder| {
+                builder.register(
+                    "test.not-ready",
+                    || Err("not ready".to_string()),
+                    move || {
+                        count.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(teardowns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn replacement_publishes_complete_generation_atomically() {
+        let old_count = Arc::new(AtomicUsize::new(0));
+        let new_count = Arc::new(AtomicUsize::new(0));
+        let slot = PluginGenerationSlot::new(test_generation(1, "test.old", old_count.clone()));
+        let candidate = test_generation(2, "test.new", new_count.clone());
+
+        slot.publish(candidate);
+        let current = slot.load();
+        assert_eq!(current.snapshot.generation, 2);
+        assert!(current.lifecycle("test.new").is_some());
+        assert!(current.lifecycle("test.old").is_none());
+        assert_eq!(old_count.load(Ordering::SeqCst), 1);
+        assert_eq!(new_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn replacement_retains_old_generation_for_in_flight_arc_users() {
+        let old_count = Arc::new(AtomicUsize::new(0));
+        let slot = PluginGenerationSlot::new(test_generation(1, "test.plugin", old_count.clone()));
+        let in_flight = slot.load();
+
+        slot.publish(PluginGeneration::empty(Arc::new(
+            neoism_agent_plugin_api::RegistrySnapshot::empty(),
+        )));
+        assert_eq!(old_count.load(Ordering::SeqCst), 0);
+        drop(in_flight);
+        assert_eq!(old_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn plugin_generations_are_isolated_per_workspace_slot() {
+        let first_count = Arc::new(AtomicUsize::new(0));
+        let second_count = Arc::new(AtomicUsize::new(0));
+        let first = PluginGenerationSlot::new(test_generation(1, "test.plugin", first_count.clone()));
+        let second = PluginGenerationSlot::new(test_generation(1, "test.plugin", second_count.clone()));
+
+        first.publish(PluginGeneration::empty(Arc::new(
+            neoism_agent_plugin_api::RegistrySnapshot::empty(),
+        )));
+        assert_eq!(first_count.load(Ordering::SeqCst), 1);
+        assert_eq!(second_count.load(Ordering::SeqCst), 0);
+        assert!(second.load().lifecycle("test.plugin").is_some());
+    }
+
+    #[test]
+    fn lifecycle_shutdown_runs_exactly_once() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let teardown_count = count.clone();
+        let handle = PluginLifecycleHandle::new(move || {
+            teardown_count.fetch_add(1, Ordering::SeqCst);
+        });
+        handle.shutdown();
+        handle.shutdown();
+        drop(handle);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn canonical_paths_share_one_workspace_and_other_roots_do_not() {

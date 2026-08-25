@@ -85,6 +85,28 @@ pub struct AgentSourceSnapshot {
     pub default_agent: String,
 }
 
+impl AgentSourceSnapshot {
+    pub fn list(&self) -> Vec<AgentInfo> {
+        let mut agents = self.agents.clone();
+        agents.sort_by(|left, right| {
+            let left_default = left.name == self.default_agent;
+            let right_default = right.name == self.default_agent;
+            right_default
+                .cmp(&left_default)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        agents
+    }
+
+    pub fn get(&self, name: &str) -> Option<AgentInfo> {
+        self.agents.iter().find(|agent| agent.name == name).cloned()
+    }
+
+    pub fn default_agent(&self) -> &str {
+        &self.default_agent
+    }
+}
+
 pub trait AgentSource: Send + Sync + 'static {
     fn load(&self, directory: &str) -> Result<AgentSourceSnapshot, PluginRuntimeError>;
 }
@@ -241,6 +263,7 @@ pub struct PluginRegistrar {
     command_sources: BTreeMap<String, Arc<dyn CommandSource>>,
     runtime_tools: BTreeMap<String, Arc<dyn RuntimeTool>>,
     agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
+    agent_services: BTreeMap<String, Arc<dyn AgentService>>,
     runtime_hooks: Vec<Arc<dyn RuntimeHook>>,
     runtime_routes: Vec<RouteContribution>,
     runtime_websocket_routes: Vec<WebSocketRouteContribution>,
@@ -267,6 +290,15 @@ impl PluginRegistrar {
         let id = id.into();
         self.item(ContributionKind::Agent, id.clone());
         self.agent_sources.insert(id, source);
+    }
+
+    pub fn agent_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn AgentService>,
+    ) {
+        let id = id.into();
+        self.agent_services.insert(id, service);
     }
 
     pub fn command(&mut self, id: impl Into<String>) {
@@ -428,6 +460,7 @@ pub struct RegistrySnapshot {
     pub command_sources: BTreeMap<String, Arc<dyn CommandSource>>,
     pub runtime_tools: BTreeMap<String, Arc<dyn RuntimeTool>>,
     pub agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
+    pub agent_services: BTreeMap<String, Arc<dyn AgentService>>,
     pub runtime_hooks: Vec<RegisteredRuntimeHook>,
     pub runtime_routes: BTreeMap<String, RegisteredRouteContribution>,
     pub runtime_websocket_routes: BTreeMap<String, RegisteredWebSocketRouteContribution>,
@@ -448,6 +481,7 @@ impl RegistrySnapshot {
             command_sources: BTreeMap::new(),
             runtime_tools: BTreeMap::new(),
             agent_sources: BTreeMap::new(),
+            agent_services: BTreeMap::new(),
             runtime_hooks: Vec::new(),
             runtime_routes: BTreeMap::new(),
             runtime_websocket_routes: BTreeMap::new(),
@@ -520,6 +554,7 @@ impl PluginHost {
         let mut command_sources = BTreeMap::new();
         let mut runtime_tools = BTreeMap::new();
         let mut agent_sources = BTreeMap::new();
+        let mut agent_services = BTreeMap::new();
         let mut runtime_hooks = Vec::new();
         let mut runtime_routes = BTreeMap::new();
         let mut runtime_websocket_routes = BTreeMap::new();
@@ -582,6 +617,11 @@ impl PluginHost {
                         )));
                     }
                 }
+                merge_runtime_services(
+                    &mut agent_services,
+                    registrar.agent_services,
+                    "AgentService",
+                )?;
                 let lifecycle = Arc::new(RwLock::new(PluginLifecycle {
                     active: true,
                     reason: None,
@@ -691,6 +731,7 @@ impl PluginHost {
             command_sources,
             runtime_tools,
             agent_sources,
+            agent_services,
             runtime_hooks,
             runtime_routes,
             runtime_websocket_routes,

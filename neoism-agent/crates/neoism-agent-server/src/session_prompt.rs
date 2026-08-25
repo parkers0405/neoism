@@ -123,7 +123,7 @@ pub(crate) async fn append_prompt(
         let trimmed = name.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     });
-    let agents = crate::plugins::agent_catalog(state, &info.directory).await?;
+    let agents = crate::plugins::agent_catalog(&workspace.snapshot(), &info.directory)?;
     let agent_name = agent
         .or_else(|| info.agent.clone())
         .unwrap_or_else(|| agents.default_agent().to_string());

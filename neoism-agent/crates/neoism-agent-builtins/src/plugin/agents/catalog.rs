@@ -1,50 +1,57 @@
 use std::collections::BTreeMap;
 
 use neoism_agent_core::{AgentConfig, AgentConfigDocument, AgentInfo, ModelRef};
-#[cfg(test)]
-use serde_json::json;
+use neoism_agent_plugin_api::{AgentSourceSnapshot, PluginRuntimeError};
 use serde_json::Value;
 
-#[path = "agent_native.rs"]
-mod agent_native;
-
-use agent_native::{build_agent, native_agents};
+use super::native::{build_agent, native_agents};
 
 #[derive(Clone)]
-pub(crate) struct AgentCatalog {
+pub struct AgentCatalog {
     agents: BTreeMap<String, AgentInfo>,
     default_agent: String,
 }
 
 impl AgentCatalog {
-    pub(crate) fn load(services: &neoism_agent_service_api::AgentServices, directory: &str) -> anyhow::Result<Self> {
-        let (config, _) = neoism_agent_builtins::plugin::config::load(services, directory)?;
+    pub fn load(
+        services: &neoism_agent_service_api::AgentServices,
+        directory: &str,
+    ) -> Result<Self, PluginRuntimeError> {
+        let (config, _) = crate::plugin::config::load(services, directory)
+            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
         Ok(Self::from_config(&config))
     }
 
-    pub(crate) fn from_config(config: &AgentConfigDocument) -> Self {
+    pub fn from_config(config: &AgentConfigDocument) -> Self {
         let mut agents = native_agents();
-
         for agent in agents.values_mut() {
-            merge_permission(&mut agent.permission, config.permission.clone());
+            merge_json_map(&mut agent.permission, config.permission.clone());
         }
-
         for (name, override_config) in &config.agent {
             if override_config.disable {
                 agents.remove(name);
                 continue;
             }
-
             let entry = agents
                 .entry(name.clone())
                 .or_insert_with(|| custom_agent(name, &config.permission));
             apply_override(entry, override_config);
         }
-
         Self::with_default(agents, config.default_agent.clone())
     }
 
-    pub(crate) fn list(&self) -> Vec<AgentInfo> {
+    pub fn from_snapshot(snapshot: AgentSourceSnapshot) -> Self {
+        Self {
+            agents: snapshot
+                .agents
+                .into_iter()
+                .map(|agent| (agent.name.clone(), agent))
+                .collect(),
+            default_agent: snapshot.default_agent,
+        }
+    }
+
+    pub fn list(&self) -> Vec<AgentInfo> {
         let mut agents = self.agents.values().cloned().collect::<Vec<_>>();
         agents.sort_by(|left, right| {
             let left_default = left.name == self.default_agent;
@@ -56,7 +63,7 @@ impl AgentCatalog {
         agents
     }
 
-    pub(crate) fn get(&self, name: &str) -> Option<AgentInfo> {
+    pub fn get(&self, name: &str) -> Option<AgentInfo> {
         self.agents.get(name).cloned().or_else(|| {
             self.agents
                 .values()
@@ -65,27 +72,18 @@ impl AgentCatalog {
         })
     }
 
-    pub(crate) fn default_agent(&self) -> &str {
+    pub fn default_agent(&self) -> &str {
         &self.default_agent
     }
 
-    pub(crate) fn from_runtime(
-        agents: Vec<AgentInfo>,
-        default_agent: String,
-    ) -> Self {
-        Self {
-            agents: agents
-                .into_iter()
-                .map(|agent| (agent.name.clone(), agent))
-                .collect(),
-            default_agent,
+    pub fn snapshot(&self) -> AgentSourceSnapshot {
+        AgentSourceSnapshot {
+            agents: self.list(),
+            default_agent: self.default_agent.clone(),
         }
     }
 
-    fn with_default(
-        agents: BTreeMap<String, AgentInfo>,
-        configured: Option<String>,
-    ) -> Self {
+    fn with_default(agents: BTreeMap<String, AgentInfo>, configured: Option<String>) -> Self {
         let default_agent = configured
             .filter(|name| is_valid_default(agents.get(name)))
             .or_else(|| {
@@ -112,10 +110,7 @@ fn apply_override(agent: &mut AgentInfo, config: &AgentConfig) {
     }
     agent.variant = config.variant.clone().or_else(|| agent.variant.clone());
     agent.prompt = config.prompt.clone().or_else(|| agent.prompt.clone());
-    agent.description = config
-        .description
-        .clone()
-        .or_else(|| agent.description.clone());
+    agent.description = config.description.clone().or_else(|| agent.description.clone());
     agent.temperature = config.temperature.or(agent.temperature);
     agent.top_p = config.top_p.or(agent.top_p);
     agent.mode = config.mode.clone().unwrap_or_else(|| agent.mode.clone());
@@ -124,7 +119,7 @@ fn apply_override(agent: &mut AgentInfo, config: &AgentConfig) {
     agent.name = config.name.clone().unwrap_or_else(|| agent.name.clone());
     agent.steps = config.steps.or(agent.steps);
     merge_json_map(&mut agent.options, config.options.clone());
-    merge_permission(&mut agent.permission, config.permission.clone());
+    merge_json_map(&mut agent.permission, config.permission.clone());
 }
 
 fn custom_agent(name: &str, user_permission: &BTreeMap<String, Value>) -> AgentInfo {
@@ -136,7 +131,7 @@ fn custom_agent(name: &str, user_permission: &BTreeMap<String, Value>) -> AgentI
     agent.hidden = false;
     agent.prompt = None;
     agent.color = None;
-    merge_permission(&mut agent.permission, user_permission.clone());
+    merge_json_map(&mut agent.permission, user_permission.clone());
     agent
 }
 
@@ -153,13 +148,6 @@ fn is_valid_default(agent: Option<&AgentInfo>) -> bool {
     agent
         .map(|agent| agent.mode != "subagent" && !agent.hidden)
         .unwrap_or(false)
-}
-
-fn merge_permission(
-    target: &mut BTreeMap<String, Value>,
-    source: BTreeMap<String, Value>,
-) {
-    merge_json_map(target, source);
 }
 
 fn merge_json_map(target: &mut BTreeMap<String, Value>, source: BTreeMap<String, Value>) {
@@ -180,77 +168,49 @@ fn merge_json_map(target: &mut BTreeMap<String, Value>, source: BTreeMap<String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neoism_agent_core::PermissionAction;
+    use serde_json::json;
 
     #[test]
-    fn per_agent_permission_overrides_global_permission() {
+    fn config_permissions_and_display_names_are_interpreted_in_builtins() {
         let mut config = AgentConfigDocument::default();
         config.permission.insert("bash".to_string(), json!("deny"));
         config.agent.insert(
             "build".to_string(),
             AgentConfig {
+                name: Some("Builder".to_string()),
                 permission: BTreeMap::from([("bash".to_string(), json!("allow"))]),
                 ..AgentConfig::default()
             },
         );
-
         let catalog = AgentCatalog::from_config(&config);
-        let rules =
-            crate::permission::from_config_map(&catalog.get("build").unwrap().permission);
-
-        assert_eq!(
-            crate::permission::evaluate("bash", "cargo test", &rules).action,
-            PermissionAction::Allow
-        );
-    }
-
-    #[test]
-    fn agent_name_override_keeps_key_and_display_lookup() {
-        let mut config = AgentConfigDocument::default();
-        config.agent.insert(
-            "build".to_string(),
-            AgentConfig {
-                name: Some("Builder".to_string()),
-                ..AgentConfig::default()
-            },
-        );
-
-        let catalog = AgentCatalog::from_config(&config);
-
         assert_eq!(catalog.get("build").unwrap().name, "Builder");
-        assert_eq!(catalog.get("Builder").unwrap().name, "Builder");
+        assert_eq!(catalog.get("Builder").unwrap().permission["bash"], json!("allow"));
     }
 
     #[test]
-    fn native_build_and_plan_include_ported_prompts() {
+    fn native_agents_preserve_prompts_and_modes() {
         let catalog = AgentCatalog::from_config(&AgentConfigDocument::default());
-
-        let build = catalog.get("build").unwrap();
-        let plan = catalog.get("plan").unwrap();
-        let general = catalog.get("general").unwrap();
-        let explore = catalog.get("explore").unwrap();
-
-        assert!(build.prompt.unwrap().contains("GOLDEN STANDARD"));
-        assert!(plan.prompt.unwrap().contains("plan agent"));
-        assert_eq!(general.mode, "subagent");
-        assert_eq!(explore.mode, "subagent");
-        assert!(explore.prompt.unwrap().contains("file search specialist"));
+        assert!(catalog.get("build").unwrap().prompt.unwrap().contains("GOLDEN STANDARD"));
+        assert!(catalog.get("plan").unwrap().prompt.unwrap().contains("plan agent"));
+        assert_eq!(catalog.get("general").unwrap().mode, "subagent");
+        assert!(catalog.get("explore").unwrap().prompt.unwrap().contains("file search specialist"));
     }
 
     #[test]
-    fn plan_agent_asks_for_general_edits_but_allows_plan_files() {
-        let catalog = AgentCatalog::from_config(&AgentConfigDocument::default());
-        let rules =
-            crate::permission::from_config_map(&catalog.get("plan").unwrap().permission);
+    fn configured_default_is_first_and_plan_edits_remain_scoped() {
+        let config = AgentConfigDocument {
+            default_agent: Some("plan".to_string()),
+            ..AgentConfigDocument::default()
+        };
+        let catalog = AgentCatalog::from_config(&config);
+        assert_eq!(catalog.list().first().map(|agent| agent.name.as_str()), Some("plan"));
 
-        assert_eq!(
-            crate::permission::evaluate("edit", "src/lib.rs", &rules).action,
-            PermissionAction::Ask
-        );
-        assert_eq!(
-            crate::permission::evaluate("edit", ".agent/plans/next.md", &rules).action,
-            PermissionAction::Allow
-        );
+        let edit = catalog.get("plan").unwrap().permission["edit"]
+            .as_object()
+            .cloned()
+            .unwrap();
+        assert_eq!(edit["*"], json!("ask"));
+        assert_eq!(edit[".agent/plans/*.md"], json!("allow"));
     }
 
     #[test]
@@ -260,19 +220,10 @@ mod tests {
             .into_iter()
             .filter_map(|name| catalog.get(name).and_then(|agent| agent.prompt))
             .collect::<Vec<_>>()
-            .join("\n");
-        let lower = prompts.to_ascii_lowercase();
-
-        for assumption in [
-            "neoism",
-            "vault",
-            "product documentation",
-            "durable memory",
-        ] {
-            assert!(
-                !lower.contains(assumption),
-                "provider prompt contains {assumption}"
-            );
+            .join("\n")
+            .to_ascii_lowercase();
+        for assumption in ["neoism", "vault", "product documentation", "durable memory"] {
+            assert!(!prompts.contains(assumption), "provider prompt contains {assumption}");
         }
     }
 }

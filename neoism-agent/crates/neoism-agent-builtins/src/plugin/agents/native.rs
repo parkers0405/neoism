@@ -82,7 +82,9 @@ Never tell the user to "save/copy this file", the user is on the same machine an
 
 Your responses are rendered as GitHub-flavored Markdown.
 
-Never use nested bullets. Keep lists flat (single level). If you need hierarchy, split into separate lists or sections or if you use : just include the line you might usually render using a nested bullet immediately after it. For numbered lists, only use the `1. 2. 3.` style markers (with a period), never `1)`.
+Never use nested bullets. Keep lists flat (single level). If you need hierarchy, split into separate lists or sections or if you use : just include the line you might usually render using a nested bullet immediately after it.
+
+For numbered lists, only use the `1. 2. 3.` style markers (with a period), never `1)`.
 
 Use short `##` Markdown headings for multi-part answers; omit headings only for simple one-line replies. Use lists when they improve scanability.
 
@@ -123,192 +125,49 @@ For large or complex changes, lead with the solution, then explain what you did 
 Use `todowrite` only when a long task materially benefits from visible progress tracking. Do not create a task list for ordinary debugging or let planning delay the first useful inspection or edit."#;
 
 pub(super) fn native_agents() -> BTreeMap<String, AgentInfo> {
-    let mut agents = BTreeMap::new();
-    for agent in [
-        build_agent(),
-        plan_agent(),
-        general_agent(),
-        explore_agent(),
-        compaction_agent(),
-        title_agent(),
-        summary_agent(),
-    ] {
-        agents.insert(agent.name.clone(), agent);
-    }
-    agents
+    [build_agent(), plan_agent(), general_agent(), explore_agent(), compaction_agent(), title_agent(), summary_agent()]
+        .into_iter().map(|agent| (agent.name.clone(), agent)).collect()
 }
 
 pub(super) fn build_agent() -> AgentInfo {
     AgentInfo {
-        name: "build".to_string(),
-        description: Some(
-            "Default software engineering agent with normal tool permissions."
-                .to_string(),
-        ),
-        mode: "primary".to_string(),
-        native: true,
-        hidden: false,
-        top_p: None,
-        temperature: None,
-        color: Some("primary".to_string()),
-        permission: permissions(&[
-            ("*", json!("allow")),
-            ("doom_loop", json!("ask")),
-            ("question", json!("allow")),
-            ("plan_enter", json!("allow")),
-            ("plan_exit", json!("deny")),
-            ("read", read_permission()),
-            ("external_directory", external_directory_permission()),
-        ]),
-        model: None,
-        variant: None,
-        prompt: Some(build_prompt()),
-        options: BTreeMap::new(),
-        steps: None,
+        name: "build".into(), description: Some("Default software engineering agent with normal tool permissions.".into()), mode: "primary".into(), native: true, hidden: false,
+        top_p: None, temperature: None, color: Some("primary".into()),
+        permission: permissions(&[("*", json!("allow")), ("doom_loop", json!("ask")), ("question", json!("allow")), ("plan_enter", json!("allow")), ("plan_exit", json!("deny")), ("read", read_permission()), ("external_directory", external_directory_permission())]),
+        model: None, variant: None,
+        prompt: Some(format!("{}\n\n- If user asks for a a lot of organization, and want a complete remap, do not think your a smart guy for 'just get it working' your work should ALWAYS be GOLDEN STANDARD.", ENGINEERING_AGENT_PROMPT)),
+        options: BTreeMap::new(), steps: None,
     }
-}
-
-fn build_prompt() -> String {
-    format!(
-        "{}\n\n- If user asks for a a lot of organization, and want a complete remap, do not think your a smart guy for 'just get it working' your work should ALWAYS be GOLDEN STANDARD.",
-        ENGINEERING_AGENT_PROMPT
-    )
-}
-
-fn plan_prompt() -> String {
-    format!(
-        "You are operating as the plan agent. Inspect and reason freely, but do not modify files or run write-adjacent tools unless the user exits planning mode.\n\n{}",
-        ENGINEERING_AGENT_PROMPT
-    )
-}
-
-fn read_permission() -> Value {
-    json!({ "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" })
-}
-
-fn external_directory_permission() -> Value {
-    let mut permissions = serde_json::Map::new();
-    permissions.insert("*".to_string(), json!("ask"));
-    permissions.insert(
-        std::env::temp_dir().join("*").to_string_lossy().to_string(),
-        json!("allow"),
-    );
-    Value::Object(permissions)
-}
-
-fn plan_edit_permission() -> Value {
-    let mut permissions = serde_json::Map::new();
-    permissions.insert("*".to_string(), json!("ask"));
-    permissions.insert(".agent/plans/*.md".to_string(), json!("allow"));
-    if let Some(data) = data_dir() {
-        permissions.insert(
-            data.join("agent")
-                .join("plans/*.md")
-                .to_string_lossy()
-                .to_string(),
-            json!("allow"),
-        );
-    }
-    Value::Object(permissions)
-}
-
-fn data_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .map(|home| home.join(".local/share"))
-        })
 }
 
 fn plan_agent() -> AgentInfo {
     AgentInfo {
-        name: "plan".to_string(),
-        description: Some(
-            "Planning agent that can inspect context but cannot edit project files."
-                .to_string(),
-        ),
-        mode: "primary".to_string(),
-        native: true,
-        hidden: false,
-        top_p: None,
-        temperature: None,
-        color: Some("secondary".to_string()),
-        permission: permissions(&[
-            ("*", json!("allow")),
-            ("doom_loop", json!("ask")),
-            ("edit", plan_edit_permission()),
-            ("write", json!({ "*": "deny" })),
-            ("question", json!("allow")),
-            ("plan_enter", json!("deny")),
-            ("plan_exit", json!("allow")),
-            ("read", read_permission()),
-            ("external_directory", external_directory_permission()),
-        ]),
-        model: None,
-        variant: None,
-        prompt: Some(plan_prompt()),
-        options: BTreeMap::new(),
-        steps: None,
+        name: "plan".into(), description: Some("Planning agent that can inspect context but cannot edit project files.".into()), mode: "primary".into(), native: true, hidden: false,
+        top_p: None, temperature: None, color: Some("secondary".into()),
+        permission: permissions(&[("*", json!("allow")), ("doom_loop", json!("ask")), ("edit", plan_edit_permission()), ("write", json!({ "*": "deny" })), ("question", json!("allow")), ("plan_enter", json!("deny")), ("plan_exit", json!("allow")), ("read", read_permission()), ("external_directory", external_directory_permission())]),
+        model: None, variant: None,
+        prompt: Some(format!("You are operating as the plan agent. Inspect and reason freely, but do not modify files or run write-adjacent tools unless the user exits planning mode.\n\n{}", ENGINEERING_AGENT_PROMPT)),
+        options: BTreeMap::new(), steps: None,
     }
 }
 
 fn general_agent() -> AgentInfo {
     AgentInfo {
-        name: "general".to_string(),
-        description: Some(
-            "General-purpose agent for researching complex questions and executing multi-step tasks."
-                .to_string(),
-        ),
-        mode: "subagent".to_string(),
-        native: true,
-        hidden: false,
-        top_p: None,
-        temperature: None,
-        color: Some("accent".to_string()),
-        permission: permissions(&[
-            ("*", json!("allow")),
-            ("doom_loop", json!("ask")),
-            ("todowrite", json!("deny")),
-            ("read", read_permission()),
-            ("external_directory", external_directory_permission()),
-        ]),
-        model: None,
-        variant: None,
-        prompt: None,
-        options: BTreeMap::new(),
-        steps: None,
+        name: "general".into(), description: Some("General-purpose agent for researching complex questions and executing multi-step tasks.".into()), mode: "subagent".into(), native: true, hidden: false,
+        top_p: None, temperature: None, color: Some("accent".into()),
+        permission: permissions(&[("*", json!("allow")), ("doom_loop", json!("ask")), ("todowrite", json!("deny")), ("read", read_permission()), ("external_directory", external_directory_permission())]),
+        model: None, variant: None, prompt: None, options: BTreeMap::new(), steps: None,
     }
 }
 
 fn explore_agent() -> AgentInfo {
     AgentInfo {
-        name: "explore".to_string(),
-        description: Some(
-            "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (for example, \"src/components/**/*.tsx\"), search code for keywords (for example, \"API endpoints\"), or answer questions about the codebase (for example, \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions."
-                .to_string(),
-        ),
-        mode: "subagent".to_string(),
-        native: true,
-        hidden: false,
-        top_p: None,
-        temperature: None,
-        color: Some("info".to_string()),
-        permission: permissions(&[
-            ("*", json!("deny")),
-            ("bash", json!("allow")),
-            ("glob", json!("allow")),
-            ("grep", json!("allow")),
-            ("read", json!("allow")),
-            ("webfetch", json!("allow")),
-            ("websearch", json!("allow")),
-            ("external_directory", external_directory_permission()),
-        ]),
-        model: None,
-        variant: None,
-        prompt: Some(
-            r#"You are a file search specialist. You excel at thoroughly navigating and exploring codebases.
+        name: "explore".into(),
+        description: Some("Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (for example, \"src/components/**/*.tsx\"), search code for keywords (for example, \"API endpoints\"), or answer questions about the codebase (for example, \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions.".into()),
+        mode: "subagent".into(), native: true, hidden: false, top_p: None, temperature: None, color: Some("info".into()),
+        permission: permissions(&[("*", json!("deny")), ("bash", json!("allow")), ("glob", json!("allow")), ("grep", json!("allow")), ("read", json!("allow")), ("webfetch", json!("allow")), ("websearch", json!("allow")), ("external_directory", external_directory_permission())]),
+        model: None, variant: None,
+        prompt: Some(r#"You are a file search specialist. You excel at thoroughly navigating and exploring codebases.
 
 Your strengths:
 - Rapidly finding files using glob patterns
@@ -326,53 +185,42 @@ Guidelines:
 - Do not create any files or run commands that modify the user's system state in any way
 - Return one concise, evidence-backed final report so the parent does not need your raw tool output
 
-Complete the user's search request efficiently and report your findings clearly."#
-                .to_string(),
-        ),
-        options: BTreeMap::new(),
-        steps: None,
+Complete the user's search request efficiently and report your findings clearly."#.into()),
+        options: BTreeMap::new(), steps: None,
     }
 }
 
-fn compaction_agent() -> AgentInfo {
-    hidden_primary(
-        "compaction",
-        "Compacts long sessions into durable context while preserving decisions, constraints, and next actions.",
-    )
-}
-
-fn title_agent() -> AgentInfo {
-    let mut agent = hidden_primary("title", "Generates concise session titles.");
-    agent.temperature = Some(0.5);
-    agent
-}
-
-fn summary_agent() -> AgentInfo {
-    hidden_primary("summary", "Summarizes a session for handoff or sync.")
-}
+fn compaction_agent() -> AgentInfo { hidden_primary("compaction", "Compacts long sessions into durable context while preserving decisions, constraints, and next actions.") }
+fn summary_agent() -> AgentInfo { hidden_primary("summary", "Summarizes a session for handoff or sync.") }
+fn title_agent() -> AgentInfo { let mut agent = hidden_primary("title", "Generates concise session titles."); agent.temperature = Some(0.5); agent }
 
 fn hidden_primary(name: &str, prompt: &str) -> AgentInfo {
-    AgentInfo {
-        name: name.to_string(),
-        description: None,
-        mode: "primary".to_string(),
-        native: true,
-        hidden: true,
-        top_p: None,
-        temperature: None,
-        color: None,
-        permission: permissions(&[("*", json!("deny"))]),
-        model: None,
-        variant: None,
-        prompt: Some(prompt.to_string()),
-        options: BTreeMap::new(),
-        steps: None,
+    AgentInfo { name: name.into(), description: None, mode: "primary".into(), native: true, hidden: true, top_p: None, temperature: None, color: None, permission: permissions(&[("*", json!("deny"))]), model: None, variant: None, prompt: Some(prompt.into()), options: BTreeMap::new(), steps: None }
+}
+
+fn read_permission() -> Value { json!({ "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" }) }
+
+fn external_directory_permission() -> Value {
+    let mut permissions = serde_json::Map::new();
+    permissions.insert("*".into(), json!("ask"));
+    permissions.insert(std::env::temp_dir().join("*").to_string_lossy().to_string(), json!("allow"));
+    Value::Object(permissions)
+}
+
+fn plan_edit_permission() -> Value {
+    let mut permissions = serde_json::Map::new();
+    permissions.insert("*".into(), json!("ask"));
+    permissions.insert(".agent/plans/*.md".into(), json!("allow"));
+    if let Some(data) = data_dir() {
+        permissions.insert(data.join("agent").join("plans/*.md").to_string_lossy().to_string(), json!("allow"));
     }
+    Value::Object(permissions)
+}
+
+fn data_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from).map(|home| home.join(".local/share")))
 }
 
 fn permissions(entries: &[(&str, Value)]) -> BTreeMap<String, Value> {
-    entries
-        .iter()
-        .map(|(key, value)| ((*key).to_string(), value.clone()))
-        .collect()
+    entries.iter().map(|(key, value)| ((*key).to_string(), value.clone())).collect()
 }

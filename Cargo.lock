@@ -4904,6 +4904,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "neoism-agent-builtins"
+version = "0.7.55"
+dependencies = [
+ "anyhow",
+ "futures",
+ "neoism-agent-core",
+ "neoism-agent-plugin-api",
+ "neoism-agent-service-api",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "neoism-agent-core"
 version = "0.7.55"
 dependencies = [
@@ -4956,6 +4972,7 @@ dependencies = [
  "git2",
  "iana-time-zone",
  "libc",
+ "neoism-agent-builtins",
  "neoism-agent-core",
  "neoism-agent-plugin-api",
  "neoism-agent-service-api",

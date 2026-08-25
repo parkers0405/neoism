@@ -21,6 +21,7 @@ libc.workspace = true
 neoism-agent-core.workspace = true
 neoism-agent-service-api.workspace = true
 neoism-agent-plugin-api.workspace = true
+neoism-agent-builtins.workspace = true
 notify = "8.2.0"
 rand.workspace = true
 reqwest.workspace = true

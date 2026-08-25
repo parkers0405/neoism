@@ -22,6 +22,7 @@ members = [
     "neoism-agent/crates/neoism-agent-workspace-search-fff",
     "neoism-agent/crates/neoism-agent-neoism-adapter",
     "neoism-agent/crates/neoism-agent-plugin-api",
+    "neoism-agent/crates/neoism-agent-builtins",
     "neoism-agent/crates/neoism-agent-server",
     "neoism-agent/crates/neoism-agent-cli",
     "neoism-frontend/desktop",
@@ -66,6 +67,7 @@ neoism-agent-service-api = { path = "neoism-agent/crates/neoism-agent-service-ap
 neoism-agent-workspace-search-fff = { path = "neoism-agent/crates/neoism-agent-workspace-search-fff", version = "0.7.55" }
 neoism-agent-neoism-adapter = { path = "neoism-agent/crates/neoism-agent-neoism-adapter", version = "0.7.55" }
 neoism-agent-plugin-api = { path = "neoism-agent/crates/neoism-agent-plugin-api", version = "0.7.55" }
+neoism-agent-builtins = { path = "neoism-agent/crates/neoism-agent-builtins", version = "0.7.55" }
 neoism-agent-server = { path = "neoism-agent/crates/neoism-agent-server", version = "0.7.55" }
 neoism-extensions = { path = "neoism-extensions", version = "0.7.55" }
 neoism-product-docs = { path = "neoism-product-docs", version = "0.7.55" }

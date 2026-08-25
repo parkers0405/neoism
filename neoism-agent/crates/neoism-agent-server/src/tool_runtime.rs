@@ -404,11 +404,12 @@ async fn execute_stateful_tool_call(
                     metadata: None,
                 }));
             };
-            goal.status = status;
-            if !summary.trim().is_empty() {
-                goal.summary = summary.trim().to_string();
-            }
-            goal.updated = now_millis().max(goal.updated.saturating_add(1));
+            goal = neoism_agent_builtins::plugin::goals::complete(
+                goal,
+                status,
+                &summary,
+                now_millis(),
+            );
             info.set_goal(&goal);
             info.time.updated = now_millis()
                 .max(info.time.updated.saturating_add(1))

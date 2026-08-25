@@ -186,6 +186,7 @@ impl neoism_agent_builtins::plugin::skills::SkillsHost for ServerSkillsHost {
 struct ServerGoalsHost(crate::state::AppState);
 
 struct ServerProviderService(crate::provider::ProviderRegistry);
+struct ServerProviderAdmin(crate::state::AppState);
 
 impl neoism_agent_plugin_api::ProviderService for ServerProviderService {
     fn descriptor(&self) -> neoism_agent_plugin_api::ProviderDescriptor {
@@ -216,6 +217,67 @@ impl neoism_agent_plugin_api::ProviderService for ServerProviderService {
             ),
         })
     }
+}
+
+impl neoism_agent_builtins::plugin::providers::ProviderAdminHost for ServerProviderAdmin {
+    fn execute<'a>(
+        &'a self,
+        action: neoism_agent_builtins::plugin::providers::ProviderAdminAction,
+        provider_id: Option<&'a str>,
+        body: serde_json::Value,
+    ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
+        Box::pin(async move {
+            use axum::extract::{Path, State};
+            use axum::Json;
+            use neoism_agent_builtins::plugin::providers::ProviderAdminAction;
+            let state = State(self.0.clone());
+            let provider_id = provider_id.unwrap_or_default().to_string();
+            let value = match action {
+                ProviderAdminAction::List => serde_json::to_value(
+                    crate::provider_routes::provider_list(state).await.map_err(plugin_api_error)?.0,
+                ),
+                ProviderAdminAction::Configured => serde_json::to_value(
+                    crate::provider_routes::config_providers(state).await.map_err(plugin_api_error)?.0,
+                ),
+                ProviderAdminAction::AuthMethods => serde_json::to_value(
+                    crate::provider_routes::provider_auth_methods(state).await.map_err(plugin_api_error)?.0,
+                ),
+                ProviderAdminAction::AuthGet => serde_json::to_value(
+                    crate::provider_routes::auth_get(state, Path(provider_id)).await.map_err(plugin_api_error)?.0,
+                ),
+                ProviderAdminAction::AuthSet => {
+                    let info = serde_json::from_value(body)
+                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+                    serde_json::to_value(
+                        crate::provider_routes::auth_set(state, Path(provider_id), Json(info)).await.map_err(plugin_api_error)?.0,
+                    )
+                }
+                ProviderAdminAction::AuthRemove => serde_json::to_value(
+                    crate::provider_routes::auth_remove(state, Path(provider_id)).await.map_err(plugin_api_error)?.0,
+                ),
+                ProviderAdminAction::OAuthAuthorize => {
+                    let request = serde_json::from_value(body)
+                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+                    serde_json::to_value(
+                        crate::provider_routes::provider_oauth_authorize(state, Path(provider_id), Json(request)).await.map_err(plugin_api_error)?.0,
+                    )
+                }
+                ProviderAdminAction::OAuthCallback => {
+                    let request = serde_json::from_value(body)
+                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+                    serde_json::to_value(
+                        crate::provider_routes::provider_oauth_callback(state, Path(provider_id), Json(request)).await.map_err(plugin_api_error)?.0,
+                    )
+                }
+            }
+            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
+        })
+    }
+}
+
+fn plugin_api_error(error: crate::error::ApiError) -> PluginRuntimeError {
+    PluginRuntimeError::new(error.to_string())
 }
 
 struct ServerArtifactsHost(crate::state::AppState);
@@ -323,6 +385,7 @@ pub(crate) fn build_host(
                 "runtime".into(),
                 std::sync::Arc::new(ServerProviderService(state.inner.providers.clone())),
             )],
+            std::sync::Arc::new(ServerProviderAdmin(state.clone())),
         )));
     }
     plugins.extend(INTERNAL_PLUGINS

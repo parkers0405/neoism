@@ -7,7 +7,7 @@ use std::sync::Arc;
 use neoism_agent_core::{VcsApplyResult, VcsFileDiff, VcsFileStatus, VcsInfo};
 use neoism_agent_plugin_api::{
     AgentPlugin, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar,
-    ContributionMetadata, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
+    ContributionMetadata, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
     RouteRequest, RouteResponse, RouteScope,
 };
 use neoism_agent_service_api::{AgentServices, ExecutablePurpose, ExecutableRequest};
@@ -52,7 +52,7 @@ impl AgentPlugin for VcsPlugin {
                     request_schema: None,
                     response_schema: None,
                 },
-                metadata: ContributionMetadata::default(),
+                metadata: ContributionMetadata::new(operation_id, ID, PluginScope::Workspace),
                 handler: Arc::new(VcsRoute { services: self.services.clone(), action }),
             });
         }

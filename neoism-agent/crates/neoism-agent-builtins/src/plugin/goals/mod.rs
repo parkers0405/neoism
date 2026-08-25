@@ -7,10 +7,10 @@ use neoism_agent_core::{GoalResearchNote, GoalStatus, SessionGoal};
 use neoism_agent_plugin_api::{
     AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest,
     PluginRegistrar, PluginRuntimeError, RouteContribution, RouteDescriptor, RouteHandler,
-    RouteMethod, RouteRequest, RouteResponse, RouteScope,
+    PluginScope, RouteMethod, RouteRequest, RouteResponse, RouteScope,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 
 pub const ID: &str = "dev.neoism.goals";
 pub const FIRECRAWL_API_KEY_ENV: &str = "FIRECRAWL_API_KEY";
@@ -57,7 +57,7 @@ impl AgentPlugin for GoalsPlugin {
                     request_schema: None,
                     response_schema: None,
                 },
-                metadata: ContributionMetadata::default(),
+                metadata: ContributionMetadata::new(id, ID, PluginScope::Workspace),
                 handler: Arc::new(GoalRoute { host: self.host.clone(), action }),
             });
         }

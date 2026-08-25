@@ -5,7 +5,9 @@ use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 
-use neoism_agent_core::{PermissionAction, PermissionRule, ToolListItem};
+use neoism_agent_core::{PermissionAction, PermissionRule};
+#[cfg(test)]
+use neoism_agent_core::ToolListItem;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -217,10 +219,7 @@ enum PermissionDecision {
 }
 
 impl BuiltinTool {
-    pub(crate) fn id(&self) -> &'static str {
-        self.id
-    }
-
+    #[cfg(test)]
     pub(crate) fn item(&self) -> ToolListItem {
         ToolListItem {
             id: self.id.to_string(),

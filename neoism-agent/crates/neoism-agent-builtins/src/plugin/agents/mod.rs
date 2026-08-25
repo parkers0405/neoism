@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use neoism_agent_plugin_api::{
     AgentPlugin, AgentSource, ContributionMetadata, PluginFuture, PluginHostError,
-    PluginManifest, PluginRegistrar, PluginRuntimeError, RouteContribution, RouteDescriptor,
+    PluginManifest, PluginRegistrar, PluginRuntimeError, PluginScope, RouteContribution, RouteDescriptor,
     RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
 };
 
@@ -50,7 +50,7 @@ impl AgentPlugin for AgentsPlugin {
                     request_schema: None,
                     response_schema: None,
                 },
-                metadata: ContributionMetadata::default(),
+                metadata: ContributionMetadata::new(id, ID, PluginScope::Workspace),
                 handler: Arc::new(AgentRoute {
                     source: self.source.clone(),
                     action,

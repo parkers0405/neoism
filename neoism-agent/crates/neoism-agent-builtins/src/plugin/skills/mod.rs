@@ -6,7 +6,7 @@ use anyhow::Context;
 use neoism_agent_core::SkillInfo;
 use neoism_agent_plugin_api::{
     AgentPlugin, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar,
-    ContributionMetadata, PluginRuntimeError, RouteContribution, RouteDescriptor, RouteHandler,
+    ContributionMetadata, PluginRuntimeError, PluginScope, RouteContribution, RouteDescriptor, RouteHandler,
     RouteMethod, RouteRequest, RouteResponse, RouteScope, SkillSource,
 };
 use neoism_agent_service_api::AgentServices;
@@ -51,7 +51,7 @@ impl AgentPlugin for SkillsPlugin {
                 request_schema: None,
                 response_schema: None,
             },
-            metadata: ContributionMetadata::default(),
+            metadata: ContributionMetadata::new("v2.plugins.skills.list", ID, PluginScope::Workspace),
             handler: Arc::new(SkillsRoute(self.services.clone())),
         });
         registrar.skill_source_runtime("workspace-skills", Arc::new(WorkspaceSkills(self.services.clone())));

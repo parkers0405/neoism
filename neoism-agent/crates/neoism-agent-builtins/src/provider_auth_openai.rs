@@ -11,7 +11,7 @@ use super::provider_auth_util::{
     pkce_challenge, random_oauth_string,
 };
 use crate::provider_auth_browser::start_openai_browser_callback_listener;
-use crate::state::ProviderOAuthPending;
+use crate::ProviderOAuthPending;
 
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_ISSUER: &str = "https://auth.openai.com";

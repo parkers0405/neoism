@@ -1269,12 +1269,7 @@ async fn auto_compaction_threshold_for_user_model(
     state: &AppState,
     model: &UserModel,
 ) -> Option<u64> {
-    let providers = state.inner.provider_catalog.providers().await.ok()?;
-    let metadata = crate::provider_catalog::generation_metadata(
-        &providers,
-        model,
-        crate::provider_catalog::openai_codex_oauth(&state.inner.auth_store),
-    );
+    let metadata = state.inner.provider_service.model_metadata(model).await.ok()?;
     let limit = metadata.limit?;
     let usable = usable_context_tokens(&limit);
     (usable > 0).then_some(usable)
@@ -2300,18 +2295,8 @@ pub(crate) fn configured_text_verbosity(
 async fn provider_generation_metadata(
     state: &AppState,
     model: &UserModel,
-) -> crate::provider_catalog::GenerationMetadata {
-    let providers = state
-        .inner
-        .provider_catalog
-        .providers()
-        .await
-        .unwrap_or_default();
-    crate::provider_catalog::generation_metadata(
-        &providers,
-        model,
-        crate::provider_catalog::openai_codex_oauth(&state.inner.auth_store),
-    )
+) -> neoism_agent_plugin_api::ProviderModelMetadata {
+    state.inner.provider_service.model_metadata(model).await.unwrap_or_default()
 }
 
 async fn run_provider_stream_step_with_retry(

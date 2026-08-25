@@ -23,17 +23,17 @@ const CODEX_OPENAI_INPUT_LIMIT: u64 = 272_000;
 const CODEX_OPENAI_OUTPUT_LIMIT: u64 = 128_000;
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct GenerationMetadata {
-    pub(crate) api: Option<ProviderApiInfo>,
-    pub(crate) auth_env: Vec<String>,
-    pub(crate) limit: Option<ModelLimit>,
-    pub(crate) cost: Option<ModelCost>,
-    pub(crate) options: BTreeMap<String, Value>,
-    pub(crate) headers: BTreeMap<String, String>,
+pub struct GenerationMetadata {
+    pub api: Option<ProviderApiInfo>,
+    pub auth_env: Vec<String>,
+    pub limit: Option<ModelLimit>,
+    pub cost: Option<ModelCost>,
+    pub options: BTreeMap<String, Value>,
+    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]
-pub(crate) struct ProviderCatalog {
+pub struct ProviderCatalog {
     source: String,
     path_override: Option<PathBuf>,
     cache_path: PathBuf,
@@ -42,11 +42,11 @@ pub(crate) struct ProviderCatalog {
 }
 
 impl ProviderCatalog {
-    pub(crate) fn from_env() -> Self {
+    pub fn from_env() -> Self {
         let source = std::env::var("NEOISM_AGENT_MODELS_URL")
             .unwrap_or_else(|_| DEFAULT_SOURCE.to_string());
         let cache_path =
-            PathBuf::from(crate::default_cache_dir()).join(if source == DEFAULT_SOURCE {
+            crate::default_cache_dir().join(if source == DEFAULT_SOURCE {
                 "models.json".to_string()
             } else {
                 format!("models-{}.json", stable_hash(&source))
@@ -62,7 +62,7 @@ impl ProviderCatalog {
         }
     }
 
-    pub(crate) async fn providers(&self) -> anyhow::Result<Vec<ProviderInfo>> {
+    pub async fn providers(&self) -> anyhow::Result<Vec<ProviderInfo>> {
         if let Some(providers) = self.cached.read().await.as_ref().cloned() {
             return Ok(providers);
         }
@@ -72,7 +72,7 @@ impl ProviderCatalog {
         Ok(providers)
     }
 
-    pub(crate) async fn refresh(&self, force: bool) -> anyhow::Result<()> {
+    pub async fn refresh(&self, force: bool) -> anyhow::Result<()> {
         if !force && self.cache_fresh() {
             return Ok(());
         }
@@ -449,7 +449,7 @@ fn modalities(values: Option<&Vec<Modality>>) -> ProviderModalities {
     }
 }
 
-pub(crate) fn default_model_ids(providers: &[ProviderInfo]) -> BTreeMap<String, String> {
+pub fn default_model_ids(providers: &[ProviderInfo]) -> BTreeMap<String, String> {
     providers
         .iter()
         .filter_map(|provider| {
@@ -460,7 +460,7 @@ pub(crate) fn default_model_ids(providers: &[ProviderInfo]) -> BTreeMap<String, 
         .collect()
 }
 
-pub(crate) fn effective_provider_catalog(
+pub fn effective_provider_catalog(
     providers: &[ProviderInfo],
     codex_oauth: bool,
 ) -> Vec<ProviderInfo> {
@@ -484,7 +484,7 @@ pub(crate) fn effective_provider_catalog(
     output
 }
 
-pub(crate) fn usable_provider_catalog(
+pub fn usable_provider_catalog(
     providers: &[ProviderInfo],
     connected_ids: &[String],
     codex_oauth: bool,
@@ -528,7 +528,7 @@ fn model_supported_in_picker(provider_id: &str, model: &ModelInfo) -> bool {
 /// least one model neoism can actually stream through (a supported adapter).
 /// Used to gate the `/connect` list: there's no point offering to connect a
 /// provider we can't use (e.g. `google`/Gemini, `amazon-bedrock`).
-pub(crate) fn provider_connectable(provider: &ProviderInfo) -> bool {
+pub fn provider_connectable(provider: &ProviderInfo) -> bool {
     provider
         .models
         .values()
@@ -539,7 +539,7 @@ fn public_free_model(model: &ModelInfo) -> bool {
     model.cost.input == 0.0 && model.cost.output == 0.0
 }
 
-pub(crate) fn generation_metadata(
+pub fn generation_metadata(
     providers: &[ProviderInfo],
     model: &UserModel,
     codex_oauth: bool,
@@ -592,7 +592,7 @@ pub(crate) fn generation_metadata(
 /// far smaller context windows than the platform API for the same model ids
 /// (gpt-5.6-sol: ~372k vs 1.05M), so limit resolution must follow the same
 /// dispatch rule the runtime uses.
-pub(crate) fn openai_codex_oauth(auth_store: &crate::auth_store::AuthStore) -> bool {
+pub fn openai_codex_oauth(auth_store: &crate::auth_store::AuthStore) -> bool {
     matches!(
         auth_store.get("openai"),
         Ok(Some(neoism_agent_core::AuthInfo::OAuth { .. }))

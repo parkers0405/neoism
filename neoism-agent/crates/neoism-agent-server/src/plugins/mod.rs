@@ -45,9 +45,8 @@ pub(crate) fn build_host(
         plugins.push(Box::new(neoism_agent_builtins::plugin::ProvidersPlugin::new(
             vec![(
                 "runtime".into(),
-                std::sync::Arc::new(plugin_adapters::Provider(state.inner.providers.clone())),
+                state.inner.provider_service.clone(),
             )],
-            std::sync::Arc::new(plugin_adapters::ProviderAdmin(state.clone())),
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::semantic::ID) {

@@ -294,9 +294,12 @@ impl WorkspaceRuntime {
 
     pub(crate) async fn enable_semantic(&self, state: crate::state::AppState) {
         let semantic = self.lifecycle().state::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID);
+        let auth = if let Some(provider_id) = crate::semantic::EmbeddingsClient::configured_provider_id() {
+            state.inner.provider_service.auth(&provider_id).await.ok().flatten()
+        } else { None };
         let client = {
             let mut client = semantic.client.lock().expect("semantic client lock poisoned");
-            client.get_or_insert_with(|| crate::semantic::EmbeddingsClient::from_env(&state.inner.auth_store)).clone()
+            client.get_or_insert_with(|| crate::semantic::EmbeddingsClient::from_env(auth)).clone()
         };
         let mut indexer = semantic.indexer.lock().await;
         if indexer.is_none() {
@@ -304,10 +307,10 @@ impl WorkspaceRuntime {
         }
     }
 
-    pub(crate) fn semantic_client(&self, state: &crate::state::AppState) -> Option<crate::semantic::EmbeddingsClient> {
+    pub(crate) fn semantic_client(&self) -> Option<crate::semantic::EmbeddingsClient> {
         let semantic = self.lifecycle().state::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID);
-        let mut client = semantic.client.lock().expect("semantic client lock poisoned");
-        client.get_or_insert_with(|| crate::semantic::EmbeddingsClient::from_env(&state.inner.auth_store)).clone()
+        let client = semantic.client.lock().expect("semantic client lock poisoned").clone().flatten();
+        client
     }
 }
 

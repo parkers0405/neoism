@@ -7,7 +7,7 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use super::provider_auth_util::{neoism_user_agent, normalize_domain};
-use crate::state::ProviderOAuthPending;
+use crate::ProviderOAuthPending;
 
 const COPILOT_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
 const COPILOT_POLLING_SAFETY_MARGIN_MS: u64 = 3_000;

@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use futures_core::Stream;
 use neoism_agent_core::{
-    AgentInfo, CommandInfo, ProviderGenerationRequest, ProviderStreamEvent, SkillInfo,
+    AgentInfo, AuthInfo, CommandInfo, ModelCost, ModelLimit, ProviderApiInfo,
+    ProviderGenerationRequest, ProviderStreamEvent, SkillInfo, UserModel,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -73,12 +74,70 @@ pub struct ProviderStream {
     pub events: ProviderEventStream,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelMetadata {
+    pub api: Option<ProviderApiInfo>,
+    #[serde(default)]
+    pub auth_env: Vec<String>,
+    pub limit: Option<ModelLimit>,
+    pub cost: Option<ModelCost>,
+    #[serde(default)]
+    pub options: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderRouteAction {
+    List,
+    Configured,
+    AuthMethods,
+    AuthGet,
+    AuthSet,
+    AuthRemove,
+    OAuthAuthorize,
+    OAuthCallback,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRouteRequest {
+    pub action: ProviderRouteAction,
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub body: Value,
+}
+
 pub trait ProviderService: Send + Sync + 'static {
     fn descriptor(&self) -> ProviderDescriptor;
     fn stream(
         &self,
         request: ProviderGenerationRequest,
     ) -> Result<ProviderStream, crate::PluginRuntimeError>;
+
+    fn model_metadata<'a>(
+        &'a self,
+        _model: &'a UserModel,
+    ) -> PluginFuture<'a, ProviderModelMetadata> {
+        Box::pin(async { Ok(ProviderModelMetadata::default()) })
+    }
+
+    fn auth<'a>(&'a self, _provider_id: &'a str) -> PluginFuture<'a, Option<AuthInfo>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn route<'a>(
+        &'a self,
+        _request: ProviderRouteRequest,
+    ) -> PluginFuture<'a, crate::RouteResponse> {
+        Box::pin(async {
+            Err(crate::PluginRuntimeError::new(
+                "provider does not expose administration routes",
+            ))
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

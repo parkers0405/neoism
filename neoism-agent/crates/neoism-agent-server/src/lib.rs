@@ -13,7 +13,6 @@ mod agent_tool_registry;
 mod artifact_routes;
 mod app_router;
 pub mod auth_cli;
-mod auth_store;
 mod audit_routes;
 mod background_job;
 mod caller;
@@ -49,16 +48,15 @@ mod plugin_adapters;
 mod plugins;
 mod project;
 mod project_routes;
-mod provider;
-mod provider_auth;
-mod provider_auth_browser;
-mod provider_catalog;
-mod provider_error;
-mod provider_responses;
-mod provider_routes;
 mod provider_stream_message;
 mod provider_stream_processor;
-mod provider_transform;
+
+mod provider {
+    pub(crate) use neoism_agent_builtins::provider::{estimate_tokens, ProviderEventStream, ProviderStream};
+}
+mod provider_error {
+    pub(crate) use neoism_agent_builtins::provider_error::ProviderError;
+}
 mod pty;
 mod pty_routes;
 mod route_query;
@@ -92,8 +90,6 @@ mod tool_selection;
 mod utility_runtime;
 mod v2_routes;
 mod vcs;
-#[cfg(windows)]
-mod windows_acl;
 pub(crate) mod windows_process;
 mod workflow;
 mod workspace_runtime;
@@ -142,7 +138,7 @@ use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
 pub(crate) use server_util::{
-    default_cache_dir, default_state_dir, now_millis,
+    default_state_dir, now_millis,
     resolve_directory, slug,
 };
 #[cfg(test)]

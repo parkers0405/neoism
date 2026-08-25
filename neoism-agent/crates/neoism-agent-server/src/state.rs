@@ -15,9 +15,6 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use turso::Value as SqlValue;
 
-use crate::auth_store::AuthStore;
-use crate::provider::ProviderRegistry;
-use crate::provider_catalog::ProviderCatalog;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,12 +25,9 @@ pub(crate) struct InnerState {
     pub(crate) services: AgentServices,
     pub(crate) store: SessionStore,
     pub(crate) artifact_root: PathBuf,
-    pub(crate) auth_store: AuthStore,
-    pub(crate) providers: ProviderRegistry,
-    pub(crate) provider_catalog: ProviderCatalog,
+    pub(crate) provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService>,
     pub(crate) caller_policy: crate::caller::CallerPolicy,
     pub(crate) utilities: Arc<crate::utility_runtime::UtilityRuntime>,
-    pub(crate) provider_oauth: RwLock<HashMap<String, ProviderOAuthPending>>,
     pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
     pub(crate) workspace_plugin_generations:
         Mutex<HashMap<PathBuf, (u64, BTreeSet<String>)>>,
@@ -75,42 +69,6 @@ pub(crate) struct SessionRun {
     pub(crate) id: String,
     pub(crate) started_at: u64,
     pub(crate) cancel: Arc<AtomicBool>,
-}
-
-pub(crate) enum ProviderOAuthPending {
-    OpenAiBrowser {
-        issuer: String,
-        redirect_uri: String,
-        code_verifier: String,
-        state: String,
-        receiver: Arc<Mutex<Option<oneshot::Receiver<Result<String, String>>>>>,
-    },
-    OpenAiHeadless {
-        issuer: String,
-        device_auth_id: String,
-        user_code: String,
-        interval_ms: u64,
-    },
-    GithubCopilot {
-        access_token_url: String,
-        device_code: String,
-        interval_ms: u64,
-        enterprise_url: Option<String>,
-    },
-    /// xAI Grok "SuperGrok" OAuth: the browser redirects to
-    /// `127.0.0.1:56121/callback?code=…`; the user copies that `code` and
-    /// pastes it, and we exchange it with the stored PKCE verifier +
-    /// redirect_uri.
-    XaiLoopback {
-        redirect_uri: String,
-        code_verifier: String,
-    },
-    /// xAI Grok headless device-code OAuth: poll the token endpoint until the
-    /// user finishes authorizing on another device.
-    XaiDevice {
-        device_code: String,
-        interval_ms: u64,
-    },
 }
 
 #[derive(Clone)]
@@ -413,7 +371,8 @@ impl AppState {
         tokio::fs::create_dir_all(&artifact_root).await?;
         let (events, _) = broadcast::channel(1024);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
-        let auth_store = AuthStore::from_env();
+        let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> =
+            Arc::new(neoism_agent_builtins::ProviderPlatform::from_env());
         let caller_policy = crate::caller::CallerPolicy::from_env();
         let utilities = crate::utility_runtime::UtilityRuntime::new(&services);
         let permission_approvals = store.list_permission_approvals().await?;
@@ -425,12 +384,9 @@ impl AppState {
                 services,
                 store,
                 artifact_root,
-                providers: ProviderRegistry::from_env(auth_store.clone()),
-                auth_store,
-                provider_catalog: ProviderCatalog::from_env(),
+                provider_service,
                 caller_policy,
                 utilities,
-                provider_oauth: RwLock::new(HashMap::new()),
                 workspace_runtimes: Default::default(),
                 workspace_plugin_generations: Mutex::new(HashMap::new()),
                 statuses: RwLock::new(HashMap::new()),
@@ -547,7 +503,7 @@ impl AppState {
             runtime.enable_semantic(self.clone()).await;
             if let Some(memory) = self.inner.services.memory.as_ref() {
                 memory.set_semantic_index(Some(Arc::new(crate::semantic::AgentSemanticMemoryIndex::new(
-                    self.inner.store.clone(), runtime.semantic_client(self),
+                    self.inner.store.clone(), runtime.semantic_client(),
                 ))));
             }
         } else {

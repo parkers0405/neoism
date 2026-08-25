@@ -1,7 +1,7 @@
 use super::read_group::read_tool_group_at;
 use super::render::{
     cached_message_height, display_timeline_message, f32_measure_bucket,
-    is_edit_tool_message,
+    is_edit_tool_message, is_subagent_runtime_notification,
 };
 use super::*;
 
@@ -1093,15 +1093,20 @@ pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
     messages
         .iter()
         .enumerate()
-        .map(|(index, message)| match message.kind() {
-            AgentTimelineMessageKind::System => message.tool() == "location_notice",
-            AgentTimelineMessageKind::Reasoning
-            | AgentTimelineMessageKind::Tool
-            | AgentTimelineMessageKind::Subtask
-            | AgentTimelineMessageKind::Compaction => {
-                index >= live_start || is_background_completion_result_card(message)
+        .map(|(index, message)| {
+            if is_subagent_runtime_notification(message) {
+                return false;
             }
-            AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => true,
+            match message.kind() {
+                AgentTimelineMessageKind::System => message.tool() == "location_notice",
+                AgentTimelineMessageKind::Reasoning
+                | AgentTimelineMessageKind::Tool
+                | AgentTimelineMessageKind::Subtask
+                | AgentTimelineMessageKind::Compaction => {
+                    index >= live_start || is_background_completion_result_card(message)
+                }
+                AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => true,
+            }
         })
         .collect()
 }

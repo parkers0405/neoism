@@ -271,6 +271,22 @@ fn runtime_system_rows_stay_hidden_even_inside_the_live_window() {
 }
 
 #[test]
+fn subagent_runtime_notification_never_paints_during_role_races() {
+    let text = "Subagent finished.\ntask_id: ses_child\nstatus: completed";
+    let messages = vec![
+        text_message("live-user", NeoismAgentMessageKind::User, text),
+        text_message("live-assistant", NeoismAgentMessageKind::Assistant, text),
+    ];
+
+    assert_eq!(
+        timeline_message_visibility(&messages, Some(0)),
+        vec![false, false]
+    );
+    assert!(super::render::display_timeline_message(&messages[0], false).is_none());
+    assert!(super::render::display_timeline_message(&messages[1], false).is_none());
+}
+
+#[test]
 fn subtasks_and_compaction_are_visible_live_and_hidden_after_reload() {
     let messages = vec![
         text_message("u1", NeoismAgentMessageKind::User, "work"),

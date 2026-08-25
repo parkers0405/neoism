@@ -484,6 +484,9 @@ pub(crate) fn display_timeline_message<M: AgentTimelineMessage>(
     message: &M,
     previous_visible_was_edit_tool: bool,
 ) -> Option<M> {
+    if is_subagent_runtime_notification(message) {
+        return None;
+    }
     if message.kind() == AgentTimelineMessageKind::System
         && message.tool() != "location_notice"
     {
@@ -517,6 +520,13 @@ pub(crate) fn display_timeline_message<M: AgentTimelineMessage>(
         }
     }
     Some(display_message)
+}
+
+pub(crate) fn is_subagent_runtime_notification<M: AgentTimelineMessage>(message: &M) -> bool {
+    // This is provider context injected by the runtime, never a human or
+    // assistant transcript row. Check the reserved opening immediately so a
+    // partial live delta cannot flash before its role/system metadata lands.
+    message.text().trim_start().starts_with("Subagent finished.")
 }
 
 fn strip_redundant_edit_recap_code(text: &str) -> Option<String> {

@@ -30,21 +30,37 @@ pub(in crate::lsp) fn adapters_for_root_with(
     cache: &AdapterCache,
     services: &neoism_agent_service_api::AgentServices,
     root: &Path,
+    generation_config: Option<&neoism_agent_core::AgentConfigDocument>,
 ) -> Vec<LanguageAdapter> {
     let capability_snapshot = services.language_capabilities.snapshot();
     let capability_generation = capability_snapshot.generation;
-    let snapshot_identity = crate::config::snapshot(services, &root.to_string_lossy()).map(|snapshot| snapshot.identity).unwrap_or_default();
+    let loaded_config = generation_config.cloned().map(Ok).unwrap_or_else(|| {
+        neoism_agent_builtins::plugin::config::load(services, &root.to_string_lossy())
+            .map(|(config, _)| config)
+    });
+    let configuration_valid = loaded_config.is_ok();
+    let snapshot_identity = loaded_config
+        .as_ref()
+        .ok()
+        .and_then(|config| serde_json::to_string(config).ok())
+        .unwrap_or_default();
     if let Ok(cache) = cache.entries.lock() {
         if let Some(cached) = cache.get(root) {
-            if cached.loaded_at.elapsed() < ADAPTER_CACHE_TTL
+            if !configuration_valid
+                || (cached.loaded_at.elapsed() < ADAPTER_CACHE_TTL
                 && cached.snapshot_identity == snapshot_identity
-                && cached.capability_generation == capability_generation
+                && cached.capability_generation == capability_generation)
             {
                 return cached.adapters.clone();
             }
         }
     }
-    let adapters = resolve_adapters_uncached(services, root, &capability_snapshot);
+    let adapters = resolve_adapters_uncached(
+        services,
+        root,
+        &capability_snapshot,
+        loaded_config.ok().as_ref(),
+    );
     if let Ok(mut cache) = cache.entries.lock() {
         if cache.len() >= MAX_CACHED_ROOTS && !cache.contains_key(root) {
             if let Some(oldest) = cache
@@ -79,12 +95,18 @@ fn resolve_adapters_uncached(
     services: &neoism_agent_service_api::AgentServices,
     root: &Path,
     capability_snapshot: &neoism_agent_service_api::LanguageCapabilitySnapshot,
+    generation_config: Option<&neoism_agent_core::AgentConfigDocument>,
 ) -> Vec<LanguageAdapter> {
     let mut adapters = capability_snapshot.languages
         .iter()
         .map(LanguageAdapter::from_capability)
         .collect::<Vec<_>>();
-    let Ok((info, _)) = neoism_agent_builtins::plugin::config::load(services, &root.to_string_lossy()) else {
+    let info = generation_config.cloned().or_else(|| {
+        neoism_agent_builtins::plugin::config::load(services, &root.to_string_lossy())
+            .ok()
+            .map(|(config, _)| config)
+    });
+    let Some(info) = info else {
         return adapters;
     };
     let servers = match info.lsp {

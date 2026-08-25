@@ -16,12 +16,14 @@ pub use catalog::AgentCatalog;
 pub const ID: &str = "dev.neoism.agents";
 
 pub struct AgentsPlugin {
-    services: neoism_agent_service_api::AgentServices,
+    catalog: AgentCatalog,
 }
 
 impl AgentsPlugin {
-    pub fn new(services: neoism_agent_service_api::AgentServices) -> Self {
-        Self { services }
+    pub fn new(config: &neoism_agent_core::AgentConfigDocument) -> Self {
+        Self {
+            catalog: AgentCatalog::from_config(config),
+        }
     }
 }
 
@@ -42,7 +44,7 @@ impl AgentPlugin for AgentsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        let source = Arc::new(BuiltinAgentSource(self.services.clone()));
+        let source = Arc::new(BuiltinAgentSource(self.catalog.clone()));
         registrar.agent_source_runtime("workspace-agents", source.clone());
         registrar.agent_service_runtime("workspace-agents", source.clone());
         for (id, suffix, action) in [
@@ -69,24 +71,20 @@ impl AgentPlugin for AgentsPlugin {
     }
 }
 
-struct BuiltinAgentSource(neoism_agent_service_api::AgentServices);
+struct BuiltinAgentSource(AgentCatalog);
 
 impl AgentSource for BuiltinAgentSource {
-    fn load(&self, directory: &str) -> Result<AgentSourceSnapshot, PluginRuntimeError> {
-        Ok(AgentCatalog::load(&self.0, directory)?.snapshot())
+    fn load(&self, _directory: &str) -> Result<AgentSourceSnapshot, PluginRuntimeError> {
+        Ok(self.0.snapshot())
     }
 }
 
 impl AgentService for BuiltinAgentSource {
-    fn list<'a>(&'a self, request: ServiceRequest) -> PluginFuture<'a, ServiceAgentCatalog> {
+    fn list<'a>(&'a self, _request: ServiceRequest) -> PluginFuture<'a, ServiceAgentCatalog> {
         Box::pin(async move {
-            let catalog = AgentCatalog::load(
-                &self.0,
-                request.directory.as_deref().unwrap_or_default(),
-            )?;
             Ok(ServiceAgentCatalog {
-                agents: catalog.list(),
-                default_agent: Some(catalog.default_agent().to_string()),
+                agents: self.0.list(),
+                default_agent: Some(self.0.default_agent().to_string()),
             })
         })
     }

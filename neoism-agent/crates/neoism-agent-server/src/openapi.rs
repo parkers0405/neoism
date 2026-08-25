@@ -79,7 +79,7 @@ pub fn canonical_openapi() -> Value {
         "tags": ["plugins"], "operationId": "v2.plugins.list", "parameters": [{ "$ref": "#/components/parameters/Directory" }],
         "responses": { "200": json_response("Plugin manifests", json!({ "type": "array", "items": { "$ref": "#/components/schemas/PluginManifest" } })) }
     }}));
-    paths.insert("/v2/plugins/{plugin_id}".into(), json!({
+    paths.insert("/v2/plugins/{plugin_id}/manifest".into(), json!({
         "parameters": [{ "$ref": "#/components/parameters/PluginId" }],
         "get": { "tags": ["plugins"], "operationId": "v2.plugins.get", "parameters": [{ "$ref": "#/components/parameters/Directory" }],
             "responses": merge_responses(json!({ "200": json_response("Plugin manifest", json!({ "$ref": "#/components/schemas/PluginManifest" })) }), errors()) }
@@ -400,7 +400,7 @@ fn apply_authoritative_contract(document: &mut Value) {
     add("/v2/config/validate", "get", op("v2.config.validate", "system", json!([directory()]), None, success("200", "Configuration validation", r("ConfigValidation"))));
     add("/v2/capabilities", "get", op("v2.capabilities.list", "plugins", json!([directory()]), None, success("200", "Capabilities", json!({ "type": "array", "items": r("Capability") }))));
     add("/v2/plugins", "get", op("v2.plugins.list", "plugins", json!([directory()]), None, success("200", "Plugin manifests", json!({ "type": "array", "items": r("PluginManifest") }))));
-    add("/v2/plugins/{plugin_id}", "get", op("v2.plugins.get", "plugins", json!([path("plugin_id"), directory()]), None, success("200", "Plugin manifest", r("PluginManifest"))));
+    add("/v2/plugins/{plugin_id}/manifest", "get", op("v2.plugins.get", "plugins", json!([path("plugin_id"), directory()]), None, success("200", "Plugin manifest", r("PluginManifest"))));
     add("/v2/events", "get", op("v2.events.subscribe", "events", json!([
         header("Last-Event-ID", false, json!({ "type": "integer", "minimum": 0 })),
         query("since", false, json!({ "type": "integer", "minimum": 0 })),

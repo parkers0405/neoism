@@ -6,15 +6,43 @@ use crate::plugin_adapters;
 
 pub(crate) mod subagents;
 
+pub(crate) struct PluginHostBuild {
+    pub(crate) host: PluginHost,
+    pub(crate) config: std::sync::Arc<neoism_agent_core::AgentConfigDocument>,
+}
+
 pub(crate) fn build_host(
     state: &crate::state::AppState,
     directory: &str,
-) -> Result<PluginHost, PluginHostError> {
+) -> Result<PluginHostBuild, PluginHostError> {
     let services = state.services();
     let host = PluginHost::default();
-    let config = neoism_agent_builtins::plugin::config::load(services, directory)
-        .map(|(config, _)| config)
-        .unwrap_or_default();
+    let (config, discovery_roots) = neoism_agent_builtins::plugin::config::load(services, directory)
+        .map_err(|error| PluginHostError::Registration(format!("invalid configuration: {error}")))?;
+    build_host_with_config(state, directory, config, discovery_roots, host)
+}
+
+pub(crate) fn build_default_host(
+    state: &crate::state::AppState,
+    directory: &str,
+) -> Result<PluginHostBuild, PluginHostError> {
+    build_host_with_config(
+        state,
+        directory,
+        neoism_agent_core::AgentConfigDocument::default(),
+        Vec::new(),
+        PluginHost::default(),
+    )
+}
+
+fn build_host_with_config(
+    state: &crate::state::AppState,
+    directory: &str,
+    config: neoism_agent_core::AgentConfigDocument,
+    discovery_roots: Vec<std::path::PathBuf>,
+    host: PluginHost,
+) -> Result<PluginHostBuild, PluginHostError> {
+    let services = state.services();
     let mut plugins = vec![
         Box::new(neoism_agent_builtins::plugin::ConfigPlugin::new(
             services.clone(),
@@ -93,17 +121,20 @@ pub(crate) fn build_host(
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::skills::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::SkillsPlugin::new(
-            services.clone(),
+            config.clone(),
+            discovery_roots.clone(),
             std::sync::Arc::new(plugin_adapters::Skills(state.clone())),
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::agents::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::AgentsPlugin::new(
-            services.clone(),
+            &config,
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::commands::ID) {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::CommandsPlugin::new(services.clone())));
+        plugins.push(Box::new(neoism_agent_builtins::plugin::CommandsPlugin::new(
+            &config,
+        )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::websearch::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::WebsearchPlugin));
@@ -134,7 +165,10 @@ pub(crate) fn build_host(
         directory,
     ));
     host.install(plugins, &[])?;
-    Ok(host)
+    Ok(PluginHostBuild {
+        host,
+        config: std::sync::Arc::new(config),
+    })
 }
 
 pub(crate) fn agent_catalog(
@@ -151,10 +185,11 @@ pub(crate) fn agent_catalog(
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-pub(crate) fn enabled(services: &neoism_agent_service_api::AgentServices, directory: &str, plugin_id: &str) -> bool {
-    neoism_agent_builtins::plugin::config::load(services, directory)
-        .map(|(config, _)| enabled_in(&config, plugin_id))
-        .unwrap_or(true)
+pub(crate) fn enabled(snapshot: &RegistrySnapshot, plugin_id: &str) -> bool {
+    snapshot
+        .manifests
+        .iter()
+        .any(|manifest| manifest.id == plugin_id)
 }
 
 fn enabled_in(config: &neoism_agent_core::AgentConfigDocument, plugin_id: &str) -> bool {

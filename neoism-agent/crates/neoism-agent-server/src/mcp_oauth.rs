@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -49,6 +50,7 @@ pub(super) async fn remote_auth_status_async(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn auth_start(
     services: &neoism_agent_service_api::AgentServices,
     directory: &str,
@@ -56,6 +58,15 @@ pub(crate) async fn auth_start(
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<McpAuthStartResponse> {
     let config = neoism_agent_builtins::plugin::config::load(services, directory)?.0.mcp;
+    auth_start_with_config(&config, directory, name, auth_store).await
+}
+
+pub(crate) async fn auth_start_with_config(
+    config: &BTreeMap<String, McpConfig>,
+    directory: &str,
+    name: &str,
+    auth_store: &McpAuthStore,
+) -> anyhow::Result<McpAuthStartResponse> {
     let remote = config
         .get(name)
         .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
@@ -112,15 +123,14 @@ pub(crate) async fn auth_start(
     })
 }
 
-pub(crate) async fn auth_callback(
-    services: &neoism_agent_service_api::AgentServices,
-    directory: &str,
+pub(crate) async fn auth_callback_with_config(
+    config: &BTreeMap<String, McpConfig>,
+    _directory: &str,
     name: &str,
     code: &str,
     state: Option<&str>,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<McpStatus> {
-    let config = neoism_agent_builtins::plugin::config::load(services, directory)?.0.mcp;
     let remote = config
         .get(name)
         .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
@@ -198,13 +208,11 @@ pub(crate) async fn auth_callback(
     Ok(super::status_for_entry(name, remote, auth_store))
 }
 
-pub(crate) fn authenticate_status(
-    services: &neoism_agent_service_api::AgentServices,
-    directory: &str,
+pub(crate) fn authenticate_status_with_config(
+    config: &BTreeMap<String, McpConfig>,
     name: &str,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<McpStatus> {
-    let config = neoism_agent_builtins::plugin::config::load(services, directory)?.0.mcp;
     let remote = config
         .get(name)
         .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;

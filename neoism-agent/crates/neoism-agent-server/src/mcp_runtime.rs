@@ -76,7 +76,7 @@ impl McpRuntimeManager {
     }
 
     pub(super) async fn connect_local(
-        &self,
+        self: &Arc<Self>,
         directory: &str,
         name: &str,
         command: &[String],
@@ -108,7 +108,7 @@ impl McpRuntimeManager {
                 command,
                 environment.cloned(),
                 request_timeout,
-                notification_handler(directory, name, state),
+                notification_handler(directory, name, state, Arc::downgrade(self)),
             )
             .await
             .with_context(|| format!("failed to start MCP server {name}"))?,
@@ -146,7 +146,7 @@ impl McpRuntimeManager {
     }
 
     pub(super) async fn connect_remote(
-        &self,
+        self: &Arc<Self>,
         directory: &str,
         name: &str,
         url: &str,
@@ -179,7 +179,7 @@ impl McpRuntimeManager {
             headers,
             bearer_token_for_url(name, url, auth_store)?,
             request_timeout,
-            notification_handler(directory, name, state),
+            notification_handler(directory, name, state, Arc::downgrade(self)),
         )?);
         let (tools, resources, prompts) = load_remote_snapshot(name, &client).await?;
 
@@ -624,6 +624,7 @@ fn notification_handler(
     directory: &str,
     name: &str,
     state: AppState,
+    manager: std::sync::Weak<McpRuntimeManager>,
 ) -> Option<NotificationHandler> {
     let weak_state = Arc::downgrade(&state.inner);
     let directory = directory.to_string();
@@ -642,12 +643,16 @@ fn notification_handler(
         let directory = directory.clone();
         let name = name.clone();
         let weak_state = weak_state.clone();
+        let manager = manager.clone();
         tokio::spawn(async move {
             let Some(inner) = weak_state.upgrade() else {
                 return;
             };
             let state = AppState { inner };
-            match state.workspace_runtime(&directory).await.mcp().refresh_lists(&directory, &name).await {
+            let Some(manager) = manager.upgrade() else {
+                return;
+            };
+            match manager.refresh_lists(&directory, &name).await {
                 Ok(()) => {
                     state.publish(EventPayload::new(
                         event_type::MCP_TOOLS_CHANGED,

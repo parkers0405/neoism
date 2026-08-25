@@ -64,7 +64,7 @@ pub(crate) async fn session_create(
     claims: Option<Extension<crate::caller::CallerClaims>>,
     body: Option<Json<CreateSessionRequest>>,
 ) -> Result<Json<SessionInfo>, ApiError> {
-    let request = body.map(|Json(body)| body).unwrap_or(CreateSessionRequest {
+    let mut request = body.map(|Json(body)| body).unwrap_or(CreateSessionRequest {
         parent_id: None,
         title: None,
         agent: None,
@@ -95,10 +95,31 @@ pub(crate) async fn session_create(
         }
         extra.insert(
             crate::caller::TENANT_EXTRA_KEY.to_string(),
-            Value::String(claims.tenant_id),
+            Value::String(claims.tenant_id.clone()),
         );
+        bind_authenticated_workspace(&mut request, &claims)?;
     }
     Ok(Json(create_session_in_directory(&state, &directory, request, extra).await?))
+}
+
+fn bind_authenticated_workspace(
+    request: &mut CreateSessionRequest,
+    claims: &crate::caller::CallerClaims,
+) -> Result<(), ApiError> {
+    let Some(workspace_id) = claims.workspace_id.as_deref() else {
+        return Ok(());
+    };
+    if request
+        .workspace_id
+        .as_ref()
+        .is_some_and(|requested| requested != workspace_id)
+    {
+        return Err(ApiError::forbidden(
+            "Requested workspace does not match the authenticated workspace",
+        ));
+    }
+    request.workspace_id = Some(workspace_id.to_string());
+    Ok(())
 }
 
 pub(crate) async fn create_session_in_directory(
@@ -122,8 +143,8 @@ pub(crate) async fn create_session_in_directory(
     }
     let project_context = project::discover(state.services(), directory);
     let directory = project_context.directory.clone();
-    let (loaded_config, _) = neoism_agent_builtins::plugin::config::load(state.services(), &directory)?;
     let snapshot = state.plugin_snapshot(&directory).await;
+    let loaded_config = snapshot.config();
     let agents = crate::plugins::agent_catalog(&snapshot, &directory)?;
     let is_child = request.parent_id.is_some();
     if let Some(parent_id) = request.parent_id.as_ref() {
@@ -289,7 +310,8 @@ pub(crate) async fn session_directory_options(
         .get_session(&session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
-    if !crate::plugins::enabled(state.services(), &info.directory, neoism_agent_builtins::plugin::workspace_tools::ID) {
+    let plugins = state.plugin_snapshot(&info.directory).await;
+    if !crate::plugins::enabled(&plugins, neoism_agent_builtins::plugin::workspace_tools::ID) {
         return Err(ApiError::not_found("workspace filesystem tools are disabled"));
     }
     let current = PathBuf::from(info.directory);
@@ -675,5 +697,36 @@ mod directory_tests {
             );
         }
         assert!(expand_home_path("~someone/projects").is_err());
+    }
+
+    #[test]
+    fn authenticated_workspace_is_authoritative_for_session_creation() {
+        let workspace_id = "3c3f94da-6409-463d-a132-e03f1a0920d4".to_string();
+        let claims = crate::caller::CallerClaims {
+            subject: "actor".into(),
+            workspace_id: Some(workspace_id.to_string()),
+            tenant_id: "tenant".into(),
+            directory_prefixes: Vec::new(),
+            hosted: false,
+            max_sessions: None,
+            max_artifacts: None,
+            max_artifact_bytes: None,
+            artifact_retention_days: None,
+            requests_per_minute: None,
+            max_in_flight: None,
+        };
+        let mut request = CreateSessionRequest {
+            parent_id: None,
+            title: None,
+            agent: None,
+            model: None,
+            permission: None,
+            workspace_id: None,
+        };
+        bind_authenticated_workspace(&mut request, &claims).unwrap();
+        assert_eq!(request.workspace_id.as_ref(), Some(&workspace_id));
+
+        request.workspace_id = Some("other-workspace".to_string());
+        assert!(bind_authenticated_workspace(&mut request, &claims).is_err());
     }
 }

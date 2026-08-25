@@ -1351,13 +1351,13 @@ async fn execute_run_inner(
 ) -> Result<(), ApiError> {
     let mut prompt = projection.definition.prompt.clone();
     if let Some(skill_name) = projection.definition.skill.as_deref() {
-        let skills = crate::skill::load_async(state.services(), &projection.workspace_root).await?;
-        let skill = skills
-            .into_iter()
-            .find(|skill| {
-                skill.info.name == skill_name
-                    || skill.info.path.as_deref() == Some(skill_name)
-            })
+        let plugins = state.plugin_snapshot(&projection.workspace_root).await;
+        let skill = crate::skill::resolve_from_snapshot(
+            &plugins,
+            &projection.workspace_root,
+            skill_name,
+        )
+            .await?
             .ok_or_else(|| {
                 ApiError::bad_request(format!(
                     "workflow skill `{skill_name}` was not found"
@@ -1372,7 +1372,8 @@ async fn execute_run_inner(
     extra.insert("workflowScheduledAt".to_string(), json!(run.scheduled_at));
     extra.insert("workflowTrigger".to_string(), json!(run.trigger));
     let execution_directory = workflow_execution_directory(state.services(), projection)?;
-    if !crate::plugins::enabled(state.services(), &execution_directory, neoism_agent_builtins::plugin::workflows::ID) {
+    let plugins = state.plugin_snapshot(&execution_directory).await;
+    if !crate::plugins::enabled(&plugins, neoism_agent_builtins::plugin::workflows::ID) {
         return Err(ApiError::not_found(
             "Workflow plugin is disabled for the workspace",
         ));

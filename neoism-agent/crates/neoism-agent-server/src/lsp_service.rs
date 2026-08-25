@@ -29,6 +29,7 @@ pub(super) struct LspService {
     pub(super) services: neoism_agent_service_api::AgentServices,
     pub(super) diagnostics_bus: tokio::sync::broadcast::Sender<super::DiagnosticsEvent>,
     pub(super) adapter_cache: super::lsp_adapters::AdapterCache,
+    pub(super) generation_config: Option<Arc<neoism_agent_core::AgentConfigDocument>>,
     pub(super) cargo_roots: Mutex<super::lsp_scan::CargoRootCache>,
     self_weak: std::sync::Weak<LspService>,
     clients: Mutex<HashMap<LspClientKey, Arc<Mutex<PersistentLspClient>>>>,
@@ -48,7 +49,12 @@ pub(super) struct LspService {
 impl Default for LspService {
     fn default() -> Self {
         let (diagnostics_bus, _) = tokio::sync::broadcast::channel(512);
-        Self::new(crate::standard_services(), diagnostics_bus, std::sync::Weak::new())
+        Self::new(
+            crate::standard_services(),
+            diagnostics_bus,
+            std::sync::Weak::new(),
+            None,
+        )
     }
 }
 
@@ -57,11 +63,13 @@ impl LspService {
         services: neoism_agent_service_api::AgentServices,
         diagnostics_bus: tokio::sync::broadcast::Sender<super::DiagnosticsEvent>,
         self_weak: std::sync::Weak<LspService>,
+        generation_config: Option<Arc<neoism_agent_core::AgentConfigDocument>>,
     ) -> Self {
         Self {
             services,
             diagnostics_bus,
             adapter_cache: Default::default(),
+            generation_config,
             cargo_roots: Default::default(),
             self_weak,
             clients: Mutex::new(HashMap::new()),

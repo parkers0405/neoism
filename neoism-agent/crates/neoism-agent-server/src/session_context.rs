@@ -447,14 +447,14 @@ async fn generate_model_compaction_summary(
     }
     let mut provider_messages = message_model::compaction_provider_messages(&head);
     provider_messages.push(ProviderMessage::text(ProviderRole::User, prompt));
+    let runtime = state.workspace_runtime(&info.directory).await;
+    let snapshot = runtime.snapshot();
     let request = ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),
         model_id: model.model_id.clone(),
         session_id: Some(session_id.to_string()),
         variant: model.variant.clone(),
-        text_verbosity: crate::session_prompt::configured_text_verbosity(state.services(), Some(
-            &info.directory,
-        )),
+        text_verbosity: snapshot.config().text_verbosity,
         api: metadata.api,
         auth_env: metadata.auth_env,
         messages: provider_messages,
@@ -465,8 +465,6 @@ async fn generate_model_compaction_summary(
     if cancel.load(Ordering::SeqCst) {
         return None;
     }
-    let runtime = state.workspace_runtime(&info.directory).await;
-    let snapshot = runtime.snapshot();
     let provider = snapshot.provider_services.values().next()?;
     let stream = provider.stream(request).ok()?;
     let mut events = stream.events;

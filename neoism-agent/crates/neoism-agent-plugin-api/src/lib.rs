@@ -73,6 +73,19 @@ pub type PluginFuture<'a, T> =
 
 pub trait SkillSource: Send + Sync + 'static {
     fn list<'a>(&'a self, directory: &'a str) -> PluginFuture<'a, Vec<SkillInfo>>;
+    fn get<'a>(
+        &'a self,
+        _directory: &'a str,
+        _id: &'a str,
+    ) -> PluginFuture<'a, Option<SkillDocument>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SkillDocument {
+    pub info: SkillInfo,
+    pub content: String,
 }
 
 pub trait CommandSource: Send + Sync + 'static {
@@ -139,6 +152,7 @@ pub struct PluginToolInvocation {
     pub env: BTreeMap<String, String>,
     pub cancel: Option<Arc<AtomicBool>>,
     pub formatter: Option<Value>,
+    pub generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

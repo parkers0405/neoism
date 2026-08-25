@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -128,6 +129,7 @@ pub(crate) struct BackgroundJobStopResponse {
 
 pub(crate) async fn start_background_task_tool(
     state: &AppState,
+    generation: crate::workspace_runtime::PluginGenerationLease,
     session_id: &Id,
     permissions: &[PermissionRule],
     input: Value,
@@ -145,8 +147,7 @@ pub(crate) async fn start_background_task_tool(
     let description = string_arg(&input, "description")
         .unwrap_or_else(|| command.chars().take(80).collect::<String>());
     let cwd = resolve_job_cwd(&parent.directory, optional_cwd(&input), permissions)?;
-    let workspace = state.workspace_runtime(&parent.directory).await;
-    let background = workspace.background();
+    let background = generation.background();
     let project_root =
         crate::windows_process::canonicalize_path(Path::new(&parent.directory))
             .map_err(|error| format!("failed to resolve project directory: {error}"))?;
@@ -232,6 +233,7 @@ pub(crate) async fn start_background_task_tool(
         job.clone(),
         child,
         cancel_rx,
+        generation,
     ));
 
     Ok(tool::ToolExecutionResult {
@@ -242,12 +244,12 @@ pub(crate) async fn start_background_task_tool(
 }
 
 pub(crate) async fn background_task_result_tool(
-    state: &AppState,
+    background: Arc<BackgroundWorkspaceRuntime>,
     session_id: &Id,
     input: Value,
 ) -> Result<tool::ToolExecutionResult, String> {
     if let Some(job_id) = string_arg(&input, "job_id") {
-        let (_, job) = find_job(state, &job_id).await.ok_or_else(|| {
+        let job = background.jobs.read().await.get(&job_id).cloned().ok_or_else(|| {
                 format!(
                     "background job {job_id} not found; background task state is only retained during this server lifetime"
                 )
@@ -261,11 +263,15 @@ pub(crate) async fn background_task_result_tool(
     }
 
     let mut jobs = Vec::new();
-    for runtime in state.inner.workspace_runtimes.runtimes().await {
-        if let Some(background) = runtime.background_if_allocated() {
-            jobs.extend(background.jobs.read().await.values().filter(|job| job.session_id == session_id.to_string()).cloned());
-        }
-    }
+    jobs.extend(
+        background
+            .jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| job.session_id == session_id.to_string())
+            .cloned(),
+    );
     jobs.sort_by(|left, right| right.started_at.cmp(&left.started_at));
     if jobs.is_empty() {
         return Ok(tool::ToolExecutionResult {
@@ -335,6 +341,7 @@ async fn run_background_job(
     mut job: BackgroundJob,
     mut child: tokio::process::Child,
     cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    generation: crate::workspace_runtime::PluginGenerationLease,
 ) {
     let finish = wait_for_background_job(&mut child, &job, cancel_rx).await;
     background.cancellations.write()
@@ -348,6 +355,7 @@ async fn run_background_job(
     job.output_truncated = finish.output_truncated;
     job.error = finish.error;
     finish_background_job(&state, &background, job).await;
+    drop(generation);
 }
 
 async fn wait_for_background_job(

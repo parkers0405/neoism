@@ -15,11 +15,13 @@ use super::config;
 pub const ID: &str = "dev.neoism.commands";
 
 pub struct CommandsPlugin {
-    services: AgentServices,
+    commands: Vec<CommandInfo>,
 }
 
 impl CommandsPlugin {
-    pub fn new(services: AgentServices) -> Self { Self { services } }
+    pub fn new(config: &neoism_agent_core::AgentConfigDocument) -> Self {
+        Self { commands: commands_from_config(config) }
+    }
 }
 
 impl AgentPlugin for CommandsPlugin {
@@ -43,34 +45,30 @@ impl AgentPlugin for CommandsPlugin {
                 response_schema: None,
             },
             metadata: ContributionMetadata::new("v2.plugins.commands.list", ID, PluginScope::Workspace),
-            handler: Arc::new(CommandsRoute(self.services.clone())),
+            handler: Arc::new(CommandsRoute(self.commands.clone())),
         });
-        registrar.command_source_runtime("workspace-commands", Arc::new(WorkspaceCommands(self.services.clone())));
+        registrar.command_source_runtime("workspace-commands", Arc::new(WorkspaceCommands(self.commands.clone())));
         Ok(())
     }
 }
 
-struct CommandsRoute(AgentServices);
+struct CommandsRoute(Vec<CommandInfo>);
 
 impl RouteHandler for CommandsRoute {
-    fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
+    fn handle<'a>(&'a self, _request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
         Box::pin(async move {
-            let directory = request.workspace.unwrap_or_default();
-            let directory = directory.to_string_lossy();
-            let commands = load(&self.0, &directory)
-                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-            let body = serde_json::to_value(commands)
+            let body = serde_json::to_value(&self.0)
                 .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
             Ok(RouteResponse::json(200, body))
         })
     }
 }
 
-struct WorkspaceCommands(AgentServices);
+struct WorkspaceCommands(Vec<CommandInfo>);
 
 impl CommandSource for WorkspaceCommands {
-    fn list(&self, directory: &str) -> Result<Vec<CommandInfo>, PluginRuntimeError> {
-        load(&self.0, directory).map_err(|error| PluginRuntimeError::new(error.to_string()))
+    fn list(&self, _directory: &str) -> Result<Vec<CommandInfo>, PluginRuntimeError> {
+        Ok(self.0.clone())
     }
 }
 
@@ -98,6 +96,21 @@ pub fn load(services: &AgentServices, directory: &str) -> anyhow::Result<Vec<Com
         }
     }
     Ok(commands.into_values().collect())
+}
+
+fn commands_from_config(document: &neoism_agent_core::AgentConfigDocument) -> Vec<CommandInfo> {
+    let mut commands = builtin_commands()
+        .into_iter()
+        .map(|command| (command.name.clone(), command))
+        .collect::<BTreeMap<_, _>>();
+    commands.extend(document.command.iter().map(|(name, command)| {
+        let mut command = command.clone();
+        if command.name.is_empty() {
+            command.name = name.clone();
+        }
+        (name.clone(), command)
+    }));
+    commands.into_values().collect()
 }
 
 fn builtin_commands() -> Vec<CommandInfo> {
@@ -178,22 +191,9 @@ mod tests {
 
     #[test]
     fn manifest_and_registration_are_owned_here() {
-        let plugin = CommandsPlugin::new(test_services());
+        let plugin = CommandsPlugin::new(&neoism_agent_core::AgentConfigDocument::default());
         assert_eq!(plugin.manifest().id, ID);
         let mut registrar = PluginRegistrar::default();
         plugin.register(&mut registrar).unwrap();
-    }
-
-    fn test_services() -> AgentServices {
-        AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), Arc::new(NoSearch))
-    }
-
-    struct NoSearch;
-    impl neoism_agent_service_api::WorkspaceSearchService for NoSearch {
-        fn warm(&self, _: &Path) -> Result<(), neoism_agent_service_api::ServiceError> { Ok(()) }
-        fn pin_root(&self, _: &Path) -> Result<Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
-        fn find_files(&self, _: &neoism_agent_service_api::FindFilesRequest) -> Result<neoism_agent_service_api::FindFilesResult, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
-        fn grep(&self, _: &neoism_agent_service_api::GrepWorkspaceRequest) -> Result<neoism_agent_service_api::GrepWorkspaceResult, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
-        fn search_directories(&self, _: &neoism_agent_service_api::DirectorySearchRequest) -> Result<neoism_agent_service_api::DirectorySearchResult, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
     }
 }

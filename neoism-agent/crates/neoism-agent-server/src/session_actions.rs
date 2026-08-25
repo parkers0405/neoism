@@ -65,10 +65,6 @@ pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> boo
     abort_session_run_impl(state, session_id, true).await
 }
 
-pub(crate) async fn cancel_session_run_for_teardown(state: &AppState, session_id: &str) -> bool {
-    abort_session_run_impl(state, session_id, false).await
-}
-
 pub(crate) async fn clear_subtask_completion_for_teardown(state: &AppState, session_id: &str) {
     if let Ok(Some(mut child)) = state.inner.store.get_session(session_id).await {
         if child.extra.remove(SUBTASK_NOTIFY_ON_IDLE_KEY).is_some() {
@@ -240,8 +236,10 @@ pub(crate) fn spawn_background_subtask_prompt(
     prompt: String,
     agent: String,
     model: Option<UserModel>,
+    _plugin_generation: Option<crate::workspace_runtime::PluginGenerationLease>,
 ) {
     tokio::spawn(async move {
+        let plugin_generation = _plugin_generation;
         match append_child_subtask_prompt(
             &state,
             &child_id,
@@ -280,6 +278,7 @@ pub(crate) fn spawn_background_subtask_prompt(
                 .await;
             }
         }
+        drop(plugin_generation);
     });
 }
 

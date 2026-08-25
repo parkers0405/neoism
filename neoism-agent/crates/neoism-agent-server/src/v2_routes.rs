@@ -524,6 +524,11 @@ pub(crate) async fn v2_wait(
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     ensure_session(&state, &session_id).await?;
+    state
+        .inner
+        .session_coordinator
+        .wait_until_settled(&session_id)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 

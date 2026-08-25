@@ -175,12 +175,12 @@ pub(crate) async fn pty_connect_token(
     Ok(Json(tokens.issue(pty_id, now)))
 }
 
-pub(crate) async fn prepare_connection(
+pub(crate) async fn prepare_connection_with_runtime(
     state: AppState,
+    runtime: std::sync::Arc<pty::PtyWorkspaceRuntime>,
     pty_id: String,
     query: PtyConnectQuery,
 ) -> Result<std::sync::Arc<dyn neoism_agent_plugin_api::WebSocketSession>, ApiError> {
-    let runtime = find_pty_runtime(&state, &pty_id).await.ok_or_else(|| ApiError::not_found("PTY session not found"))?;
     let info = {
         let ptys = runtime.infos.read().await;
         pty::get_pty(&*ptys, &pty_id)

@@ -6,13 +6,37 @@ use serde_json::{json, Value};
 
 use crate::tool::{ToolContext, ToolExecutionResult};
 
-pub(crate) use neoism_agent_builtins::plugin::skills::Skill;
-
-pub(crate) async fn load_async(
-    services: &neoism_agent_service_api::AgentServices,
+pub(crate) async fn get_from_snapshot(
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
     directory: &str,
-) -> anyhow::Result<Vec<Skill>> {
-    neoism_agent_builtins::plugin::skills::load(services, directory).await
+) -> anyhow::Result<Vec<neoism_agent_core::SkillInfo>> {
+    let mut skills = Vec::new();
+    for source in snapshot.skill_sources.values() {
+        skills.extend(
+            source
+                .list(directory)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        );
+    }
+    Ok(skills)
+}
+
+pub(crate) async fn resolve_from_snapshot(
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    directory: &str,
+    id: &str,
+) -> anyhow::Result<Option<neoism_agent_plugin_api::SkillDocument>> {
+    for source in snapshot.skill_sources.values().rev() {
+        if let Some(skill) = source
+            .get(directory, id)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        {
+            return Ok(Some(skill));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn skill_tool(
@@ -23,16 +47,16 @@ pub(crate) fn skill_tool(
         let name = arguments.get("name").and_then(Value::as_str).map(str::trim)
             .filter(|value| !value.is_empty()).ok_or_else(|| anyhow::anyhow!("tool argument name is required"))?;
         context.ensure_allowed("skill", name)?;
-        let services = context.state().map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
-        let skills = load_async(&services, &context.cwd.to_string_lossy()).await?;
-        let available = skills.iter().map(|skill| skill.info.name.as_str()).collect::<Vec<_>>().join(", ");
-        let skill = skills.into_iter().find(|skill| skill.info.name == name || skill.info.path.as_deref() == Some(name))
+        let directory = context.cwd.to_string_lossy();
+        let skills = get_from_snapshot(context.plugin_snapshot(), &directory).await?;
+        let available = skills.iter().map(|skill| skill.id.as_str()).collect::<Vec<_>>().join(", ");
+        let skill = resolve_from_snapshot(context.plugin_snapshot(), &directory, name).await?
             .ok_or_else(|| anyhow::anyhow!("Skill \"{name}\" not found. Available skills: {}", if available.is_empty() { "none" } else { &available }))?;
         render_skill(skill)
     }
 }
 
-fn render_skill(skill: Skill) -> anyhow::Result<ToolExecutionResult> {
+fn render_skill(skill: neoism_agent_plugin_api::SkillDocument) -> anyhow::Result<ToolExecutionResult> {
     let base_dir = skill.info.path.as_deref().and_then(|path| Path::new(path).parent()).map(Path::to_path_buf);
     let files = base_dir.as_deref().map(sample_skill_files).transpose()?.unwrap_or_default()
         .into_iter().map(|path| format!("<file>{}</file>", path.display())).collect::<Vec<_>>().join("\n");

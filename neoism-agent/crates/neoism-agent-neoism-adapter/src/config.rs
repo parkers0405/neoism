@@ -45,6 +45,7 @@ impl NeoismConfigSourceService {
 
     fn project_gui(value: &Value) -> Value {
         let mut agent = value.get("agent").and_then(Value::as_object).cloned().unwrap_or_default();
+        canonicalize_gui_agent(&mut agent);
         if !agent.contains_key("shell") {
             if let Some(shell) = value
                 .get("terminal")
@@ -78,6 +79,50 @@ impl NeoismConfigSourceService {
             MCP_SOURCE => Ok((self.user_root().join("mcp.json"), Vec::new())),
             PROJECT_SOURCE => Ok((project.join("neoism.json"), Vec::new())),
             _ => Err(ServiceError::new(format!("config source `{source_id}` is not writable"))),
+        }
+    }
+}
+
+fn canonicalize_gui_agent(agent: &mut serde_json::Map<String, Value>) {
+    for (legacy, canonical) in [
+        ("disabled-providers", "disabledProviders"),
+        ("enabled-providers", "enabledProviders"),
+        ("reasoning-effort", "variant"),
+        ("text-verbosity", "textVerbosity"),
+        ("small-model", "smallModel"),
+        ("default-agent", "defaultAgent"),
+        ("dangerously-skip-permissions", "dangerouslySkipPermissions"),
+    ] {
+        move_legacy_key(agent, legacy, canonical);
+    }
+
+    if let Some(experimental) = agent.get_mut("experimental").and_then(Value::as_object_mut) {
+        for (legacy, canonical) in [
+            ("disable-paste-summary", "disablePasteSummary"),
+            ("batch-tool", "batchTool"),
+            ("open-telemetry", "openTelemetry"),
+            ("primary-tools", "primaryTools"),
+        ] {
+            move_legacy_key(experimental, legacy, canonical);
+        }
+    }
+
+    for group in ["agent", "mode"] {
+        let Some(profiles) = agent.get_mut(group).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for profile in profiles.values_mut().filter_map(Value::as_object_mut) {
+            move_legacy_key(profile, "top-p", "topP");
+            move_legacy_key(profile, "max-steps", "maxSteps");
+        }
+    }
+}
+
+fn move_legacy_key(map: &mut serde_json::Map<String, Value>, legacy: &str, canonical: &str) {
+    let legacy_value = map.remove(legacy);
+    if !map.contains_key(canonical) {
+        if let Some(value) = legacy_value {
+            map.insert(canonical.to_string(), value);
         }
     }
 }
@@ -230,6 +275,30 @@ mod tests {
         assert!(snapshot.layers[0].document.get("terminal").is_none());
         assert!(snapshot.layers[0].document.get("appearance").is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn projects_persisted_neoism_agent_keys_without_weakening_canonical_json() {
+        let projected = NeoismConfigSourceService::project_gui(&json!({
+            "agent": {
+                "reasoning-effort": "medium",
+                "variant": "high",
+                "small-model": "p/s",
+                "dangerously-skip-permissions": true,
+                "experimental": { "batch-tool": true },
+                "agent": {
+                    "review": { "top-p": 0.8, "max-steps": 12 }
+                }
+            }
+        }));
+
+        assert_eq!(projected["variant"], "high");
+        assert_eq!(projected["smallModel"], "p/s");
+        assert_eq!(projected["dangerouslySkipPermissions"], true);
+        assert_eq!(projected["experimental"]["batchTool"], true);
+        assert_eq!(projected["agent"]["review"]["topP"], 0.8);
+        assert_eq!(projected["agent"]["review"]["maxSteps"], 12);
+        assert!(projected.get("reasoning-effort").is_none());
     }
 
     #[test]

@@ -21,14 +21,6 @@ struct InternalPlugin {
 
 const INTERNAL_PLUGINS: &[InternalPlugin] = &[
     InternalPlugin {
-        id: "dev.neoism.mcp",
-        name: "MCP",
-        capability: "neoism.mcp",
-        event_namespace: "mcp",
-        contribution: "mcp",
-        disableable: true,
-    },
-    InternalPlugin {
         id: "dev.neoism.pty",
         name: "Pseudo terminals",
         capability: "neoism.pty",
@@ -78,10 +70,6 @@ impl AgentPlugin for BuiltinPlugin {
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
         match self.definition.contribution {
-            "mcp" => {
-                registrar.route("mcp");
-                registrar.tool("execute", None);
-            }
             "pty" => registrar.route("pty"),
             "workspace-tools" => crate::tool::register_workspace_tools(registrar, &self.state),
             "notes-tools" => crate::tool::register_notes_tools(registrar, &self.state),
@@ -180,6 +168,11 @@ pub(crate) fn build_host(
     if enabled_in(&config, neoism_agent_builtins::plugin::lsp::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::LspPlugin::new(
             std::sync::Arc::new(plugin_adapters::Lsp(state.clone())),
+        )));
+    }
+    if enabled_in(&config, neoism_agent_builtins::plugin::mcp::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::McpPlugin::new(
+            std::sync::Arc::new(plugin_adapters::Mcp(state.clone())),
         )));
     }
     plugins.extend(INTERNAL_PLUGINS

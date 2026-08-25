@@ -3,7 +3,7 @@ use axum::extract::State;
 use axum::http::{header, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tower::ServiceExt;
 use tower_http::cors::{Any, CorsLayer};
@@ -17,11 +17,6 @@ use crate::audit_routes::audit_list;
 use crate::global_routes::global_health;
 use crate::interaction::{
     permission_list, permission_reply, question_list, question_reject, question_reply,
-};
-use crate::mcp_routes::{
-    mcp_add, mcp_auth_authenticate, mcp_auth_callback, mcp_auth_callback_get,
-    mcp_auth_remove, mcp_auth_start, mcp_catalog, mcp_config_patch, mcp_connect,
-    mcp_disconnect, mcp_prompts, mcp_resources, mcp_status, mcp_tool_call, mcp_tools,
 };
 use crate::openapi::canonical_openapi_doc;
 use crate::pty_routes::{
@@ -208,7 +203,6 @@ fn plugin_router(snapshot: &neoism_agent_plugin_api::RegistrySnapshot, state: Ap
     let route = |id: &str| snapshot.contributions.contains_key(&format!("Route:{id}"));
     let mut router = Router::new();
     if route("pty") { router = router.route("/v2/plugins/dev.neoism.pty/shells", get(pty_shells)).route("/v2/plugins/dev.neoism.pty", get(pty_list).post(pty_create)).route("/v2/plugins/dev.neoism.pty/:pty_id", get(pty_get).put(pty_update).delete(pty_remove)).route("/v2/plugins/dev.neoism.pty/:pty_id/connect-token", post(pty_connect_token)).route("/v2/plugins/dev.neoism.pty/:pty_id/connect", get(pty_connect)); }
-    if route("mcp") { router = router.route("/v2/plugins/dev.neoism.mcp", get(mcp_status).post(mcp_add)).route("/v2/plugins/dev.neoism.mcp/catalog", get(mcp_catalog)).route("/v2/plugins/dev.neoism.mcp/:name/auth", post(mcp_auth_start).delete(mcp_auth_remove)).route("/v2/plugins/dev.neoism.mcp/:name/auth/callback", get(mcp_auth_callback_get).post(mcp_auth_callback)).route("/v2/plugins/dev.neoism.mcp/:name/auth/authenticate", post(mcp_auth_authenticate)).route("/v2/plugins/dev.neoism.mcp/:name/connect", post(mcp_connect)).route("/v2/plugins/dev.neoism.mcp/:name/disconnect", post(mcp_disconnect)).route("/v2/plugins/dev.neoism.mcp/:name/config", patch(mcp_config_patch)).route("/v2/plugins/dev.neoism.mcp/:name/tools", get(mcp_tools)).route("/v2/plugins/dev.neoism.mcp/:name/tools/:tool_name", post(mcp_tool_call)).route("/v2/plugins/dev.neoism.mcp/:name/resources", get(mcp_resources)).route("/v2/plugins/dev.neoism.mcp/:name/prompts", get(mcp_prompts)); }
     router.with_state(state)
 }
 

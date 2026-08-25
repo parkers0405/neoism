@@ -2580,6 +2580,25 @@ fn delayed_reasoning_end_uses_its_assistant_message_group_order() {
 }
 
 #[test]
+fn late_parent_metadata_repairs_live_reasoning_order_before_settle() {
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("Required release work").with_id("text-1"),
+    );
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Finalizing release and performance details")
+            .with_id("reason-1"),
+    );
+    assert_eq!(pane.messages[0].id, "text-1");
+
+    pane.remember_live_part_parent("text-1", Some("msg-response"));
+    pane.remember_live_part_parent("reason-1", Some("msg-response"));
+
+    assert_eq!(pane.messages[0].id, "reason-1");
+    assert_eq!(pane.messages[1].id, "text-1");
+}
+
+#[test]
 fn delayed_subagent_completion_stays_before_its_live_assistant_response() {
     let mut pane = NeoismAgentPane::default();
     pane.remember_live_part_parent("answer", Some("msg_03a800b6c001assistant"));

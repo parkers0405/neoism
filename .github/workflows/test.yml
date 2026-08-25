@@ -44,6 +44,8 @@ jobs:
       - name: Check Agent API contract drift
         if: runner.os == 'Linux'
         run: bash neoism-agent/scripts/openapi.sh check
+      - name: Guard Agent plugin architecture
+        run: cargo test -p neoism-agent-plugin-api --test architecture_guards --test plugin_conformance
       - run: cargo fmt -- --check --color always
       - run: cargo clippy --all-targets --all-features
       - name: Check Windows terminal/daemon packages

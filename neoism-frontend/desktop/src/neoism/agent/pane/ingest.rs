@@ -2410,6 +2410,13 @@ impl NeoismAgentPane {
             if let Some(parent_id) = parent_id.filter(|id| !id.is_empty()) {
                 self.live_part_parent_ids
                     .insert(part_id.to_string(), parent_id.to_string());
+                if normalize_grouped_assistant_reasoning_order(
+                    &mut self.messages,
+                    &self.live_part_parent_ids,
+                    parent_id,
+                ) {
+                    self.invalidate_timeline_layout();
+                }
             }
         }
     }
@@ -2481,6 +2488,28 @@ fn normalize_cached_live_reasoning_order(
     reasoning_id: &str,
 ) {
     let _ = move_grouped_assistant_after_reasoning(messages, parent_ids, reasoning_id);
+}
+
+fn normalize_grouped_assistant_reasoning_order(
+    messages: &mut Vec<NeoismAgentMessage>,
+    parent_ids: &HashMap<String, String>,
+    parent_id: &str,
+) -> bool {
+    let reasoning_ids = messages
+        .iter()
+        .filter(|message| {
+            message.kind == NeoismAgentMessageKind::Reasoning
+                && parent_ids.get(&message.id).is_some_and(|id| id == parent_id)
+        })
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+    let mut changed = false;
+    for reasoning_id in reasoning_ids {
+        while move_grouped_assistant_after_reasoning(messages, parent_ids, &reasoning_id) {
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// The durable background-task completion card (`api_mapping`'s

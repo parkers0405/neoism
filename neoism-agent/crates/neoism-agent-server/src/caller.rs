@@ -7,6 +7,10 @@ pub(crate) const TENANT_EXTRA_KEY: &str = "neoismTenantId";
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallerClaims {
+    /// Stable authenticated actor. Unlike `tenant_id`, this remains distinct
+    /// for every host/guest sharing a workspace namespace.
+    pub(crate) subject: String,
+    pub(crate) workspace_id: Option<String>,
     pub(crate) tenant_id: String,
     pub(crate) directory_prefixes: Vec<String>,
     pub(crate) hosted: bool,
@@ -92,6 +96,8 @@ impl CallerPolicy {
                 neoism_agent_service_api::daemon_credential::verify(token, key, now)
                     .map_err(str::to_string)?;
             return Ok(Some(CallerClaims {
+                subject: claims.subject,
+                workspace_id: Some(claims.workspace_id),
                 tenant_id: claims.tenant_id,
                 directory_prefixes: claims.directory_prefixes,
                 hosted: claims.hosted,
@@ -117,6 +123,8 @@ impl CallerPolicy {
                 return Err("hosted token tenantId is empty".to_string());
             }
             return Ok(Some(CallerClaims {
+                subject: format!("hosted:{}", token.tenant_id),
+                workspace_id: None,
                 tenant_id: token.tenant_id.clone(),
                 directory_prefixes: token.directory_prefixes.clone(),
                 hosted: true,
@@ -134,6 +142,8 @@ impl CallerPolicy {
         let supplied = supplied.ok_or_else(|| "missing bearer token".to_string())?;
         constant_time_eq(supplied.as_bytes(), expected.as_bytes())
             .then_some(Some(CallerClaims {
+                subject: "local-operator".to_string(),
+                workspace_id: None,
                 tenant_id: "local".to_string(),
                 directory_prefixes: Vec::new(),
                 hosted: false,
@@ -305,6 +315,8 @@ mod tests {
 
     fn claims(tenant_id: String) -> CallerClaims {
         CallerClaims {
+            subject: format!("subject:{tenant_id}"),
+            workspace_id: None,
             tenant_id,
             directory_prefixes: Vec::new(),
             hosted: true,

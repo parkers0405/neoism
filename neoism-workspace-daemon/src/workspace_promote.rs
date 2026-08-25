@@ -540,6 +540,7 @@ pub struct ExportSessionsResponse {
 pub struct ReceiveAgentRequest {
     #[serde(default)]
     pub bundles: Vec<serde_json::Value>,
+    pub workspace_id: String,
     pub target_workspace_root: String,
 }
 

@@ -124,6 +124,8 @@ pub struct ArtifactInfo {
 pub struct AuditEntry {
     pub id: String,
     pub tenant_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     pub method: String,
     pub path: String,
     pub status: u16,

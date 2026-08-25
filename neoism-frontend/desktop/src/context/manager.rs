@@ -78,6 +78,7 @@ pub struct ContextManager<T: EventListener> {
 struct AdoptedWorkspaceBinding {
     workspace_id: String,
     endpoint: String,
+    credential: Option<String>,
     is_peer: bool,
 }
 
@@ -100,6 +101,7 @@ pub struct ContextManagerDaemonLink {
     /// served over the same socket as the `/session` websocket. Empty when
     /// the link was built without an endpoint (legacy/test paths).
     endpoint: String,
+    credential: Option<String>,
 }
 
 impl ContextManagerDaemonLink {
@@ -109,6 +111,7 @@ impl ContextManagerDaemonLink {
             handle,
             runtime: None,
             endpoint: String::new(),
+            credential: None,
         }
     }
 
@@ -116,11 +119,13 @@ impl ContextManagerDaemonLink {
         handle: DaemonClientHandle,
         runtime: tokio::runtime::Handle,
         endpoint: String,
+        credential: Option<String>,
     ) -> Self {
         Self {
             handle,
             runtime: Some(runtime),
             endpoint,
+            credential,
         }
     }
 

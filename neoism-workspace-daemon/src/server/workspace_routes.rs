@@ -809,6 +809,8 @@ pub(crate) async fn workspace_promote_route(
     // (`received.path`) is where its `/sessions/import` rebases the bundles.
     let agent_ship = ship_agent_sessions(
         &source_root,
+        &workspace_id,
+        &subject,
         &target_base_url,
         target_bearer.as_deref(),
         &received.path,
@@ -873,6 +875,8 @@ pub(crate) async fn workspace_promote_route(
 /// summary (`exported: 0, imported: 0, errors: []`) — a clean no-op.
 pub(crate) async fn ship_agent_sessions(
     source_root: &std::path::Path,
+    workspace_id: &str,
+    subject: &str,
     target_url: &str,
     target_token: Option<&str>,
     target_workspace_root: &std::path::Path,
@@ -886,8 +890,19 @@ pub(crate) async fn ship_agent_sessions(
     let export_body = ExportSessionsRequest {
         workspace_root: source_root.to_string_lossy().to_string(),
     };
+    let source_credential = match super::mint_agent_credential(
+        subject.to_string(), workspace_id, source_root,
+    ) {
+        Ok(credential) => credential,
+        Err(_) => {
+            summary.errors.push("agent export authentication unavailable".to_string());
+            return summary;
+        }
+    };
     let export_resp = match client
         .post(&export_endpoint)
+        .bearer_auth(source_credential)
+        .header("x-neoism-directory", source_root.to_string_lossy().as_ref())
         .json(&export_body)
         .send()
         .await
@@ -931,6 +946,7 @@ pub(crate) async fn ship_agent_sessions(
     let receive_endpoint = workspace_promote::receive_agent_endpoint(target_url);
     let ship_body = ReceiveAgentRequest {
         bundles: exported.bundles,
+        workspace_id: workspace_id.to_string(),
         target_workspace_root: target_workspace_root.to_string_lossy().to_string(),
     };
     let mut request = client.post(&receive_endpoint).json(&ship_body);
@@ -992,6 +1008,19 @@ pub(crate) async fn workspace_receive_agent(
         Err(err) => return (err.status, err.message).into_response(),
     };
 
+    let Some(target_root) = super::agent_workspace_root(&state.workspaces, &req.workspace_id) else {
+        return (StatusCode::NOT_FOUND, "unknown target workspace").into_response();
+    };
+    let supplied_root = crate::path::canonicalize(std::path::Path::new(&req.target_workspace_root));
+    if supplied_root.as_ref().ok() != Some(&target_root) {
+        return (StatusCode::BAD_REQUEST, "target workspace root does not match workspace identity").into_response();
+    }
+    let agent_credential = match super::mint_agent_credential(
+        principal.subject.clone(), &req.workspace_id, &target_root,
+    ) {
+        Ok(credential) => credential,
+        Err(response) => return response,
+    };
     let agent_server = workspace_promote::agent_server_url();
     let import_endpoint = workspace_promote::agent_import_endpoint(&agent_server);
     let client = reqwest::Client::new();
@@ -1001,9 +1030,16 @@ pub(crate) async fn workspace_receive_agent(
     for (index, bundle) in req.bundles.into_iter().enumerate() {
         let body = ImportSessionRequest {
             bundle,
-            target_workspace_root: req.target_workspace_root.clone(),
+            target_workspace_root: target_root.to_string_lossy().into_owned(),
         };
-        let resp = match client.post(&import_endpoint).json(&body).send().await {
+        let resp = match client
+            .post(&import_endpoint)
+            .bearer_auth(&agent_credential)
+            .header("x-neoism-directory", target_root.to_string_lossy().as_ref())
+            .json(&body)
+            .send()
+            .await
+        {
             Ok(resp) => resp,
             Err(err) => {
                 errors.push(format!(

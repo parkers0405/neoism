@@ -13,7 +13,7 @@
 //! router-wide layer stack (CORS + tracing) rather than a per-route auth guard —
 //! the agent-server applies no separate request-auth scheme today.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -45,8 +45,14 @@ pub(crate) struct ExportSessionsResponse {
 /// list of portable [`SessionBundle`]s for the target host to import.
 pub(crate) async fn sessions_export(
     State(state): State<AppState>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
     Json(request): Json<ExportSessionsRequest>,
 ) -> Result<Json<ExportSessionsResponse>, ApiError> {
+    if let Some(Extension(claims)) = claims {
+        if !crate::caller::allows_directory(&claims, &request.workspace_root) {
+            return Err(ApiError::forbidden("The caller cannot export this workspace"));
+        }
+    }
     let bundles = export_sessions_under_workspace_root(&state, &request.workspace_root)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;

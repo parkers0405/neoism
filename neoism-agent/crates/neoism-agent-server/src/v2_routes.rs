@@ -233,8 +233,13 @@ pub(crate) async fn v2_message_list(
 pub(crate) async fn v2_prompt(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    Json(request): Json<V2PromptRequest>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
+    Json(mut request): Json<V2PromptRequest>,
 ) -> Result<Response, ApiError> {
+    if let Some(Extension(claims)) = claims {
+        // `author` is authenticated transport identity, never caller JSON.
+        bind_authenticated_author(&mut request, &claims);
+    }
     let delivery = request.delivery.as_deref().unwrap_or("steer").to_string();
     if !matches!(delivery.as_str(), "steer" | "queue") {
         return Err(ApiError::bad_request(
@@ -253,11 +258,56 @@ pub(crate) async fn v2_prompt(
 pub(crate) async fn v2_prompt_async(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    Json(request): Json<V2PromptRequest>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
+    Json(mut request): Json<V2PromptRequest>,
 ) -> Result<StatusCode, ApiError> {
+    if let Some(Extension(claims)) = claims {
+        bind_authenticated_author(&mut request, &claims);
+    }
     enqueue_v2_prompt(&state, &session_id, request.into_prompt_request()?, "queue")
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn bind_authenticated_author(request: &mut V2PromptRequest, claims: &crate::caller::CallerClaims) {
+    request.author = Some(claims.subject.clone());
+}
+
+#[cfg(test)]
+mod authenticated_author_tests {
+    use super::*;
+
+    #[test]
+    fn caller_json_cannot_spoof_message_author() {
+        let mut request = V2PromptRequest {
+            prompt: Some("hello".into()),
+            delivery: None,
+            message_id: None,
+            model: None,
+            agent: None,
+            no_reply: false,
+            system: None,
+            tools: None,
+            author: Some("forged-author".into()),
+            parts: None,
+            variant: None,
+        };
+        let claims = crate::caller::CallerClaims {
+            subject: "device:authenticated".into(),
+            workspace_id: Some("workspace-a".into()),
+            tenant_id: "workspace:workspace-a".into(),
+            directory_prefixes: Vec::new(),
+            hosted: true,
+            max_sessions: None,
+            max_artifacts: None,
+            max_artifact_bytes: None,
+            artifact_retention_days: None,
+            requests_per_minute: None,
+            max_in_flight: None,
+        };
+        bind_authenticated_author(&mut request, &claims);
+        assert_eq!(request.author.as_deref(), Some("device:authenticated"));
+    }
 }
 
 async fn enqueue_v2_prompt(

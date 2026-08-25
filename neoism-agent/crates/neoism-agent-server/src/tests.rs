@@ -2966,6 +2966,7 @@ async fn v2_artifacts_round_trip_binary_content() {
     let audit = neoism_agent_core::AuditEntry {
         id: Id::ascending(IdKind::Audit).to_string(),
         tenant_id: "local".to_string(),
+        subject: Some("local-operator".to_string()),
         method: "POST".to_string(),
         path: "/v2/artifacts".to_string(),
         status: StatusCode::CREATED.as_u16(),

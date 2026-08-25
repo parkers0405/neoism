@@ -30,10 +30,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         handle: DaemonClientHandle,
         runtime: tokio::runtime::Handle,
         endpoint: String,
+        credential: Option<String>,
         link_is_home: bool,
     ) {
         self.daemon.link = Some(ContextManagerDaemonLink::new_with_runtime(
-            handle, runtime, endpoint,
+            handle, runtime, endpoint, credential,
         ));
         self.daemon.link_is_peer = !link_is_home;
         // A server connection may have been parked while another workspace
@@ -424,23 +425,30 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         self.daemon.link_is_peer
     }
 
-    /// HTTP base for the HOST's agent-server when the CURRENT
-    /// workspace is remote-joined: the host daemon reverse-proxies its
+    /// HTTP base for the workspace Agent namespace. Both a host using its
+    /// own served workspace and its guests go through this authenticated
+    /// route, so they share sessions without collapsing their actor subjects.
+    /// The host daemon reverse-proxies its
     /// loopback agent-server at `/agent`, so the guest's agent pane
     /// can read the same chats/threads/SSE the host sees. `None` when
     /// the current workspace is local (use the local default).
     pub fn agent_server_override_for_current(&self) -> Option<String> {
+        let stable = self.current_grid().workspace_route_id();
+        let binding = stable.and_then(|stable| self.adopted_workspaces.get(&stable));
         let joined = self.current_workspace_is_remote_joined();
-        let endpoint = self
-            .current_adopted_workspace_endpoint()
-            .map(str::to_string);
-        let resolved = if joined {
-            endpoint
-                .as_deref()
-                .and_then(crate::neoism::agent::agent_reverse_proxy_for_daemon_endpoint)
-        } else {
-            None
-        };
+        let collaborative = self.current_workspace_is_collaborative();
+        let endpoint = binding.map(|binding| binding.endpoint.clone());
+        let resolved = collaborative.then_some(binding).flatten().and_then(|binding| {
+            let server = crate::neoism::agent::agent_reverse_proxy_for_daemon_workspace(
+                &binding.endpoint,
+                &binding.workspace_id,
+            )?;
+            crate::neoism::agent::register_agent_server_credential(
+                &server,
+                binding.credential.as_deref(),
+            );
+            Some(server)
+        });
         tracing::info!(
             target: "neoism::agent_server",
             joined,

@@ -206,6 +206,7 @@ impl Application<'_> {
                 session.connection.handle(),
                 session.connection.runtime_handle(),
                 session.connection.endpoint().to_string(),
+                session.connection.token().map(str::to_string),
                 is_home,
             );
         }

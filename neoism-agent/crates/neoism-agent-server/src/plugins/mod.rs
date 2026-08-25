@@ -29,14 +29,6 @@ const INTERNAL_PLUGINS: &[InternalPlugin] = &[
         disableable: true,
     },
     InternalPlugin {
-        id: "dev.neoism.lsp",
-        name: "Language servers",
-        capability: "neoism.lsp",
-        event_namespace: "lsp",
-        contribution: "lsp",
-        disableable: true,
-    },
-    InternalPlugin {
         id: "dev.neoism.pty",
         name: "Pseudo terminals",
         capability: "neoism.pty",
@@ -89,10 +81,6 @@ impl AgentPlugin for BuiltinPlugin {
             "mcp" => {
                 registrar.route("mcp");
                 registrar.tool("execute", None);
-            }
-            "lsp" => {
-                registrar.route("lsp");
-                crate::tool::register_lsp_tools(registrar, &self.state);
             }
             "pty" => registrar.route("pty"),
             "workspace-tools" => crate::tool::register_workspace_tools(registrar, &self.state),
@@ -187,6 +175,11 @@ pub(crate) fn build_host(
     if enabled_in(&config, neoism_agent_builtins::plugin::subagents::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::SubagentsPlugin::new(
             std::sync::Arc::new(plugin_adapters::Subagents(state.clone())),
+        )));
+    }
+    if enabled_in(&config, neoism_agent_builtins::plugin::lsp::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::LspPlugin::new(
+            std::sync::Arc::new(plugin_adapters::Lsp(state.clone())),
         )));
     }
     plugins.extend(INTERNAL_PLUGINS

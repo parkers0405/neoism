@@ -30,10 +30,6 @@ use crate::mcp_routes::{
     mcp_disconnect, mcp_prompts, mcp_resources, mcp_status, mcp_tool_call, mcp_tools,
 };
 use crate::openapi::canonical_openapi_doc;
-use crate::provider_routes::{
-    auth_get, auth_remove, auth_set, config_providers, provider_auth_methods,
-    provider_list, provider_oauth_authorize, provider_oauth_callback,
-};
 use crate::pty_routes::{
     pty_connect, pty_connect_token, pty_create, pty_get, pty_list, pty_remove,
     pty_shells, pty_update,
@@ -99,21 +95,6 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route(
             "/v2/interactions/questions/:request_id/reject",
             post(question_reject),
-        )
-        .route("/v2/providers", get(provider_list))
-        .route("/v2/providers/configured", get(config_providers))
-        .route("/v2/providers/auth-methods", get(provider_auth_methods))
-        .route(
-            "/v2/providers/:provider_id/auth",
-            get(auth_get).put(auth_set).delete(auth_remove),
-        )
-        .route(
-            "/v2/providers/:provider_id/oauth/authorize",
-            post(provider_oauth_authorize),
-        )
-        .route(
-            "/v2/providers/:provider_id/oauth/callback",
-            post(provider_oauth_callback),
         )
         .route("/v2/tools", get(tool_list))
         .route("/v2/sessions", get(v2_session_list).post(session_create))

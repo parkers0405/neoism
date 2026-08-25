@@ -1,11 +1,11 @@
 use axum::body::{to_bytes, Body};
-use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{FromRequestParts, State};
 use axum::http::{header, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
-use tower::ServiceExt;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;
@@ -19,10 +19,6 @@ use crate::interaction::{
     permission_list, permission_reply, question_list, question_reject, question_reply,
 };
 use crate::openapi::canonical_openapi_doc;
-use crate::pty_routes::{
-    pty_connect, pty_connect_token, pty_create, pty_get, pty_list, pty_remove,
-    pty_shells, pty_update,
-};
 use crate::session_actions::{session_command, session_shell};
 use crate::session_export_route::sessions_export;
 use crate::session_import_route::session_import;
@@ -184,6 +180,15 @@ async fn plugin_route_dispatch(
         std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned()
     };
     let snapshot = state.plugin_snapshot(&directory).await;
+    let websocket_route = snapshot.runtime_websocket_routes.values().find_map(|registered| {
+        (registered.route.descriptor.method.as_str() == request.method().as_str())
+            .then(|| match_plugin_path(&registered.route.descriptor.path, request.uri().path()))
+            .flatten()
+            .map(|params| (registered, params))
+    });
+    if let Some((registered, path_params)) = websocket_route {
+        return dispatch_websocket_route(registered, path_params, directory, request).await;
+    }
     let runtime_route = snapshot.runtime_routes.values().find_map(|registered| {
         (registered.route.descriptor.method.as_str() == request.method().as_str())
             .then(|| match_plugin_path(&registered.route.descriptor.path, request.uri().path()))
@@ -193,17 +198,76 @@ async fn plugin_route_dispatch(
     if let Some((registered, path_params)) = runtime_route {
         return dispatch_runtime_route(registered, path_params, directory, request).await;
     }
-    plugin_router(&snapshot, state)
-        .oneshot(request)
-        .await
-        .unwrap_or_else(|never| match never {})
+    StatusCode::NOT_FOUND.into_response()
 }
 
-fn plugin_router(snapshot: &neoism_agent_plugin_api::RegistrySnapshot, state: AppState) -> Router {
-    let route = |id: &str| snapshot.contributions.contains_key(&format!("Route:{id}"));
-    let mut router = Router::new();
-    if route("pty") { router = router.route("/v2/plugins/dev.neoism.pty/shells", get(pty_shells)).route("/v2/plugins/dev.neoism.pty", get(pty_list).post(pty_create)).route("/v2/plugins/dev.neoism.pty/:pty_id", get(pty_get).put(pty_update).delete(pty_remove)).route("/v2/plugins/dev.neoism.pty/:pty_id/connect-token", post(pty_connect_token)).route("/v2/plugins/dev.neoism.pty/:pty_id/connect", get(pty_connect)); }
-    router.with_state(state)
+struct HostWebSocket(WebSocket);
+
+impl neoism_agent_plugin_api::PluginWebSocket for HostWebSocket {
+    fn receive<'a>(&'a mut self) -> neoism_agent_plugin_api::PluginFuture<'a, Option<neoism_agent_plugin_api::WebSocketMessage>> {
+        Box::pin(async move {
+            use neoism_agent_plugin_api::WebSocketMessage as PluginMessage;
+            Ok(match self.0.recv().await {
+                Some(Ok(Message::Text(value))) => Some(PluginMessage::Text(value.to_string())),
+                Some(Ok(Message::Binary(value))) => Some(PluginMessage::Binary(value.to_vec())),
+                Some(Ok(Message::Ping(value))) => Some(PluginMessage::Ping(value.to_vec())),
+                Some(Ok(Message::Pong(value))) => Some(PluginMessage::Pong(value.to_vec())),
+                Some(Ok(Message::Close(_))) | None => Some(PluginMessage::Close),
+                Some(Err(error)) => return Err(neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string())),
+            })
+        })
+    }
+
+    fn send<'a>(&'a mut self, message: neoism_agent_plugin_api::WebSocketMessage) -> neoism_agent_plugin_api::PluginFuture<'a, ()> {
+        Box::pin(async move {
+            use neoism_agent_plugin_api::WebSocketMessage as PluginMessage;
+            let message = match message {
+                PluginMessage::Text(value) => Message::Text(value.into()),
+                PluginMessage::Binary(value) => Message::Binary(value.into()),
+                PluginMessage::Ping(value) => Message::Ping(value.into()),
+                PluginMessage::Pong(value) => Message::Pong(value.into()),
+                PluginMessage::Close => Message::Close(None),
+            };
+            self.0.send(message).await.map_err(|error| neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string()))
+        })
+    }
+}
+
+async fn dispatch_websocket_route(
+    registered: &neoism_agent_plugin_api::RegisteredWebSocketRouteContribution,
+    path: std::collections::BTreeMap<String, String>,
+    directory: String,
+    request: Request<Body>,
+) -> Response {
+    let (mut parts, _) = request.into_parts();
+    let query = url::form_urlencoded::parse(parts.uri.query().unwrap_or_default().as_bytes())
+        .fold(std::collections::BTreeMap::<String, Vec<String>>::new(), |mut output, (key, value)| {
+            output.entry(key.into_owned()).or_default().push(value.into_owned());
+            output
+        });
+    let headers = parts.headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.to_string(), value.to_string()))).collect();
+    let claims = parts.extensions.get::<crate::caller::CallerClaims>();
+    let route_request = neoism_agent_plugin_api::RouteRequest {
+        workspace_id: claims.and_then(|claims| claims.workspace_id.clone()),
+        workspace: Some(directory.into()),
+        session_id: path.get("session_id").cloned(),
+        actor: claims.map(|claims| claims.subject.clone()),
+        path,
+        query,
+        headers,
+        body: serde_json::Value::Null,
+    };
+    let session = match registered.route.handler.prepare(route_request).await {
+        Ok(session) => session,
+        Err(error) => return auth_error(StatusCode::BAD_REQUEST, "plugin.websocket_rejected", &error.to_string()),
+    };
+    let upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+        Ok(upgrade) => upgrade,
+        Err(error) => return error.into_response(),
+    };
+    upgrade.on_upgrade(move |socket| async move {
+        let _ = session.run(Box::new(HostWebSocket(socket))).await;
+    }).into_response()
 }
 
 async fn dispatch_runtime_route(

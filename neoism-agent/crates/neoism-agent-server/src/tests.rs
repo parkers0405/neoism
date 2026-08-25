@@ -1925,6 +1925,8 @@ async fn runtime_source_plugins_are_workspace_disableable() {
             "dev.neoism.tools.workspace": { "enabled": false },
             "dev.neoism.semantic": { "enabled": false },
             "dev.neoism.goals": { "enabled": false },
+            "dev.neoism.artifacts": { "enabled": false },
+            "dev.neoism.interactions": { "enabled": false },
             "dev.neoism.subagents": { "enabled": false },
             "dev.neoism.vcs": { "enabled": false },
             "dev.neoism.pty": { "enabled": false }
@@ -1954,6 +1956,7 @@ async fn runtime_source_plugins_are_workspace_disableable() {
         "dev.neoism.workflows", "dev.neoism.tools.notes",
         "dev.neoism.tools.workspace", "dev.neoism.semantic", "dev.neoism.goals",
         "dev.neoism.subagents", "dev.neoism.vcs", "dev.neoism.pty",
+        "dev.neoism.artifacts", "dev.neoism.interactions",
     ];
     assert!(snapshot.manifests.iter().all(|manifest| !disabled_ids.contains(&manifest.id.as_str())));
     assert!(snapshot.capabilities.iter().all(|capability| capability.plugin_id.as_deref().is_none_or(|id| !disabled_ids.contains(&id))));

@@ -1,7 +1,5 @@
-use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
 use neoism_agent_core::{event_type, EventPayload, PtyInfo, ShellItem};
 use serde::Deserialize;
@@ -177,12 +175,11 @@ pub(crate) async fn pty_connect_token(
     Ok(Json(tokens.issue(pty_id, now)))
 }
 
-pub(crate) async fn pty_connect(
-    State(state): State<AppState>,
-    Path(pty_id): Path<String>,
-    Query(query): Query<PtyConnectQuery>,
-    ws: WebSocketUpgrade,
-) -> Result<Response, ApiError> {
+pub(crate) async fn prepare_connection(
+    state: AppState,
+    pty_id: String,
+    query: PtyConnectQuery,
+) -> Result<std::sync::Arc<dyn neoism_agent_plugin_api::WebSocketSession>, ApiError> {
     let runtime = find_pty_runtime(&state, &pty_id).await.ok_or_else(|| ApiError::not_found("PTY session not found"))?;
     let info = {
         let ptys = runtime.infos.read().await;
@@ -203,9 +200,21 @@ pub(crate) async fn pty_connect(
     let cursor = query.cursor;
     let processes = runtime.processes.clone();
     let publish_state = std::sync::Arc::downgrade(&state.inner);
-    Ok(ws
-        .on_upgrade(move |socket| async move {
-            pty::serve_websocket(processes, info, cursor, socket, move |id, exit_status| {
+    Ok(std::sync::Arc::new(PtySocketSession { processes, info, cursor, publish_state }))
+}
+
+struct PtySocketSession {
+    processes: std::sync::Arc<pty::PtyProcessRegistry>,
+    info: PtyInfo,
+    cursor: Option<i64>,
+    publish_state: std::sync::Weak<crate::state::InnerState>,
+}
+
+impl neoism_agent_plugin_api::WebSocketSession for PtySocketSession {
+    fn run<'a>(&'a self, socket: Box<dyn neoism_agent_plugin_api::PluginWebSocket>) -> neoism_agent_plugin_api::PluginFuture<'a, ()> {
+        Box::pin(async move {
+            let publish_state = self.publish_state.clone();
+            pty::serve_websocket(self.processes.clone(), self.info.clone(), self.cursor, socket, move |id, exit_status| {
                 let Some(inner) = publish_state.upgrade() else {
                     return;
                 };
@@ -213,10 +222,10 @@ pub(crate) async fn pty_connect(
                     event_type::PTY_EXITED,
                     json!({ "id": id, "ptyID": id, "exitStatus": exit_status }),
                 ));
-            })
-            .await;
+            }).await;
+            Ok(())
         })
-        .into_response())
+    }
 }
 
 async fn find_pty_runtime(state: &AppState, pty_id: &str) -> Option<std::sync::Arc<pty::PtyWorkspaceRuntime>> {

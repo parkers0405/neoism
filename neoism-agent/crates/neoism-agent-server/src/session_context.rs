@@ -1278,6 +1278,30 @@ fn plugin_run_system_message(
 mod tests {
     use super::*;
 
+    fn system_prompt_snapshot() -> std::sync::Arc<neoism_agent_plugin_api::RegistrySnapshot> {
+        neoism_agent_plugin_api::PluginHost::default()
+            .install(
+                vec![Box::new(
+                    neoism_agent_builtins::plugin::SystemPromptPlugin,
+                )],
+                &[],
+            )
+            .expect("install system prompt plugin")
+    }
+
+    fn workspace_system_message(info: &SessionInfo, model_id: &str) -> ProviderMessage {
+        plugin_system_messages(&system_prompt_snapshot(), info, model_id, true)
+            .into_iter()
+            .next()
+            .expect("workspace context")
+    }
+
+    fn goal_system_message(info: &SessionInfo) -> Option<ProviderMessage> {
+        plugin_system_messages(&system_prompt_snapshot(), info, "stub", true)
+            .into_iter()
+            .find(|message| message.content.contains("Persistent goal"))
+    }
+
     #[test]
     fn model_compaction_cleanup_strips_thinking_and_fences() {
         let raw = "<think>hidden</think>\n```markdown\n## Goal\n- Fix tools\n```";

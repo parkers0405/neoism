@@ -21,14 +21,6 @@ struct InternalPlugin {
 
 const INTERNAL_PLUGINS: &[InternalPlugin] = &[
     InternalPlugin {
-        id: "dev.neoism.pty",
-        name: "Pseudo terminals",
-        capability: "neoism.pty",
-        event_namespace: "pty",
-        contribution: "pty",
-        disableable: true,
-    },
-    InternalPlugin {
         id: "dev.neoism.tools.workspace",
         name: "Workspace tools",
         capability: "neoism.tools.workspace",
@@ -70,7 +62,6 @@ impl AgentPlugin for BuiltinPlugin {
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
         match self.definition.contribution {
-            "pty" => registrar.route("pty"),
             "workspace-tools" => crate::tool::register_workspace_tools(registrar, &self.state),
             "notes-tools" => crate::tool::register_notes_tools(registrar, &self.state),
             _ => return Err(PluginHostError::Registration("unknown built-in contribution".to_string())),
@@ -173,6 +164,11 @@ pub(crate) fn build_host(
     if enabled_in(&config, neoism_agent_builtins::plugin::mcp::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::McpPlugin::new(
             std::sync::Arc::new(plugin_adapters::Mcp(state.clone())),
+        )));
+    }
+    if enabled_in(&config, neoism_agent_builtins::plugin::pty::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::PtyPlugin::new(
+            std::sync::Arc::new(plugin_adapters::Pty(state.clone())),
         )));
     }
     plugins.extend(INTERNAL_PLUGINS

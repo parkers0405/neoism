@@ -90,6 +90,41 @@ pub trait RouteHandler: Send + Sync + 'static {
     fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse>;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WebSocketMessage {
+    Text(String),
+    Binary(Vec<u8>),
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
+    Close,
+}
+
+pub trait PluginWebSocket: Send + 'static {
+    fn receive<'a>(&'a mut self) -> PluginFuture<'a, Option<WebSocketMessage>>;
+    fn send<'a>(&'a mut self, message: WebSocketMessage) -> PluginFuture<'a, ()>;
+}
+
+pub trait WebSocketSession: Send + Sync + 'static {
+    fn run<'a>(&'a self, socket: Box<dyn PluginWebSocket>) -> PluginFuture<'a, ()>;
+}
+
+pub trait WebSocketRouteHandler: Send + Sync + 'static {
+    fn prepare<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, Arc<dyn WebSocketSession>>;
+}
+
+#[derive(Clone)]
+pub struct WebSocketRouteContribution {
+    pub metadata: crate::ContributionMetadata,
+    pub descriptor: RouteDescriptor,
+    pub handler: Arc<dyn WebSocketRouteHandler>,
+}
+
+#[derive(Clone)]
+pub struct RegisteredWebSocketRouteContribution {
+    pub plugin_id: String,
+    pub route: WebSocketRouteContribution,
+}
+
 #[derive(Clone)]
 pub struct RouteContribution {
     pub metadata: crate::ContributionMetadata,

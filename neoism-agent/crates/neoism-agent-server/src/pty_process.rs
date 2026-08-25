@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket};
 use neoism_agent_core::PtyInfo;
+use neoism_agent_plugin_api::{PluginRuntimeError, PluginWebSocket, WebSocketMessage};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 #[cfg(not(unix))]
 use tokio::process::ChildStdin;
@@ -27,7 +27,7 @@ pub(crate) async fn serve_websocket(
     registry: Arc<PtyProcessRegistry>,
     info: PtyInfo,
     cursor: Option<i64>,
-    mut socket: WebSocket,
+    mut socket: Box<dyn PluginWebSocket>,
     on_exit: impl Fn(String, Option<i32>) + Send + Sync + 'static,
 ) {
     let process = match registry
@@ -37,11 +37,11 @@ pub(crate) async fn serve_websocket(
         Ok(process) => process,
         Err(error) => {
             let _ = socket
-                .send(Message::Text(format!(
+                .send(WebSocketMessage::Text(format!(
                     "failed to start PTY process: {error:?}"
                 )))
                 .await;
-            let _ = socket.send(Message::Close(None)).await;
+            let _ = socket.send(WebSocketMessage::Close).await;
             return;
         }
     };
@@ -71,22 +71,22 @@ pub(crate) async fn serve_websocket(
 
     let mut output = process.output.subscribe();
     if process.exited.load(Ordering::SeqCst) {
-        let _ = socket.send(Message::Close(None)).await;
+        let _ = socket.send(WebSocketMessage::Close).await;
         return;
     }
     loop {
         tokio::select! {
-            message = socket.recv() => {
-                let Some(message) = message else {
+            message = socket.receive() => {
+                let Ok(Some(message)) = message else {
                     break;
                 };
                 match message {
-                    Ok(Message::Text(data)) => {
+                    WebSocketMessage::Text(data) => {
                         if write_stdin(&process.stdin, data.as_bytes()).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Message::Binary(data)) => {
+                    WebSocketMessage::Binary(data) => {
                         if data.first() == Some(&0) {
                             continue;
                         }
@@ -94,14 +94,13 @@ pub(crate) async fn serve_websocket(
                             break;
                         }
                     }
-                    Ok(Message::Ping(data)) => {
-                        if socket.send(Message::Pong(data)).await.is_err() {
+                    WebSocketMessage::Ping(data) => {
+                        if socket.send(WebSocketMessage::Pong(data)).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Message::Pong(_)) => {}
-                    Ok(Message::Close(_)) => break,
-                    Err(_) => break,
+                    WebSocketMessage::Pong(_) => {}
+                    WebSocketMessage::Close => break,
                 }
             }
             event = output.recv() => {
@@ -116,7 +115,7 @@ pub(crate) async fn serve_websocket(
                         output_cursor = chunk.cursor;
                     }
                     Ok(PtyOutputEvent::Exited) => {
-                        let _ = socket.send(Message::Close(None)).await;
+                        let _ = socket.send(WebSocketMessage::Close).await;
                         break;
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -1146,17 +1145,17 @@ mod tests {
 }
 
 async fn send_output(
-    socket: &mut WebSocket,
+    socket: &mut Box<dyn PluginWebSocket>,
     data: &str,
     cursor: u64,
-) -> Result<(), axum::Error> {
-    socket.send(Message::Text(data.to_string())).await?;
+) -> Result<(), PluginRuntimeError> {
+    socket.send(WebSocketMessage::Text(data.to_string())).await?;
     send_cursor(socket, cursor).await
 }
 
-async fn send_cursor(socket: &mut WebSocket, cursor: u64) -> Result<(), axum::Error> {
+async fn send_cursor(socket: &mut Box<dyn PluginWebSocket>, cursor: u64) -> Result<(), PluginRuntimeError> {
     let mut payload = Vec::with_capacity(32);
     payload.push(0);
     payload.extend_from_slice(format!(r#"{{"cursor":{cursor}}}"#).as_bytes());
-    socket.send(Message::Binary(payload)).await
+    socket.send(WebSocketMessage::Binary(payload)).await
 }

@@ -278,16 +278,7 @@ fn user_visible_kernel_tools_are_forbidden() {
 
 #[test]
 fn hardcoded_plugin_route_switches_are_allowlisted_and_decreasing() {
-    let expected = [
-        "lsp",
-        "mcp",
-        "pty",
-        "semantic-search",
-        "subagents",
-        "workflows",
-    ]
-    .into_iter()
-    .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::<&str>::new();
     let mut actual = BTreeMap::new();
     for (path, source) in production_rust_sources() {
         let switches = quoted_arguments(&source, "if route(\"");
@@ -300,10 +291,7 @@ fn hardcoded_plugin_route_switches_are_allowlisted_and_decreasing() {
     assert_ratchet(
         "hardcoded plugin route switches",
         &actual,
-        &[(
-            "neoism-agent/crates/neoism-agent-server/src/app_router.rs",
-            6,
-        )],
+        &[],
     );
 }
 

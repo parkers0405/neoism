@@ -243,6 +243,7 @@ pub struct PluginRegistrar {
     agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
     runtime_hooks: Vec<Arc<dyn RuntimeHook>>,
     runtime_routes: Vec<RouteContribution>,
+    runtime_websocket_routes: Vec<WebSocketRouteContribution>,
     config_services: BTreeMap<String, Arc<dyn ConfigService>>,
     system_context_services: BTreeMap<String, Arc<dyn SystemContextService>>,
     prompt_services: BTreeMap<String, Arc<dyn PromptService>>,
@@ -341,6 +342,11 @@ impl PluginRegistrar {
         self.runtime_routes.push(route);
     }
 
+    pub fn runtime_websocket_route(&mut self, route: WebSocketRouteContribution) {
+        self.route(route.descriptor.id.clone());
+        self.runtime_websocket_routes.push(route);
+    }
+
     pub fn event(&mut self, id: impl Into<String>, schema: Option<Value>) {
         self.contributions.push(Contribution {
             kind: ContributionKind::Event,
@@ -424,6 +430,7 @@ pub struct RegistrySnapshot {
     pub agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
     pub runtime_hooks: Vec<RegisteredRuntimeHook>,
     pub runtime_routes: BTreeMap<String, RegisteredRouteContribution>,
+    pub runtime_websocket_routes: BTreeMap<String, RegisteredWebSocketRouteContribution>,
     pub config_services: BTreeMap<String, Arc<dyn ConfigService>>,
     pub system_context_services: BTreeMap<String, Arc<dyn SystemContextService>>,
     pub prompt_services: BTreeMap<String, Arc<dyn PromptService>>,
@@ -443,6 +450,7 @@ impl RegistrySnapshot {
             agent_sources: BTreeMap::new(),
             runtime_hooks: Vec::new(),
             runtime_routes: BTreeMap::new(),
+            runtime_websocket_routes: BTreeMap::new(),
             config_services: BTreeMap::new(),
             system_context_services: BTreeMap::new(),
             prompt_services: BTreeMap::new(),
@@ -514,6 +522,7 @@ impl PluginHost {
         let mut agent_sources = BTreeMap::new();
         let mut runtime_hooks = Vec::new();
         let mut runtime_routes = BTreeMap::new();
+        let mut runtime_websocket_routes = BTreeMap::new();
         let mut config_services = BTreeMap::new();
         let mut system_context_services = BTreeMap::new();
         let mut prompt_services = BTreeMap::new();
@@ -605,6 +614,16 @@ impl PluginHost {
                         )));
                     }
                 }
+                for route in registrar.runtime_websocket_routes {
+                    let key = format!("{} {}", route.descriptor.method.as_str(), route.descriptor.path);
+                    if runtime_routes.contains_key(&key)
+                        || runtime_websocket_routes.insert(key.clone(), RegisteredWebSocketRouteContribution {
+                            plugin_id: id.clone(), route,
+                        }).is_some()
+                    {
+                        return Err(PluginHostError::ContributionConflict(format!("Route:{key}")));
+                    }
+                }
                 merge_runtime_services(
                     &mut config_services,
                     registrar.config_services,
@@ -674,6 +693,7 @@ impl PluginHost {
             agent_sources,
             runtime_hooks,
             runtime_routes,
+            runtime_websocket_routes,
             config_services,
             system_context_services,
             prompt_services,

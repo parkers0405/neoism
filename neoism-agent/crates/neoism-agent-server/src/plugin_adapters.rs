@@ -52,6 +52,48 @@ impl neoism_agent_builtins::plugin::subagents::SubagentsHost for Subagents {
     }
 }
 
+pub(crate) struct Lsp(pub(crate) crate::state::AppState);
+
+impl neoism_agent_builtins::plugin::lsp::LspHost for Lsp {
+    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+        crate::tool::register_lsp_tools(registrar, &self.0);
+    }
+
+    fn execute<'a>(&'a self, action: neoism_agent_builtins::plugin::lsp::LspAction, request: neoism_agent_plugin_api::RouteRequest) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
+        Box::pin(async move {
+            use axum::extract::{Query, State};
+            use axum::Json;
+            use neoism_agent_builtins::plugin::lsp::LspAction;
+            let query = route_query(&request);
+            let state = State(self.0.clone());
+            let headers = axum::http::HeaderMap::new();
+            let value = match action {
+                LspAction::Status => serde_json::to_value(crate::lsp_routes::lsp_status(state, Query(query_value(query)?), headers).await.0),
+                LspAction::Hover => serde_json::to_value(crate::lsp_routes::lsp_hover(state, Query(query_value(query)?), headers).await.0),
+                LspAction::SignatureHelp => serde_json::to_value(crate::lsp_routes::lsp_signature_help(state, Query(query_value(query)?), headers).await.0),
+                LspAction::InlayHints => serde_json::to_value(crate::lsp_routes::lsp_inlay_hints(state, Query(query_value(query)?), headers).await.0),
+                LspAction::DocumentHighlights => serde_json::to_value(crate::lsp_routes::lsp_document_highlights(state, Query(query_value(query)?), headers).await.0),
+                LspAction::Definition => serde_json::to_value(crate::lsp_routes::lsp_definition(state, Query(query_value(query)?), headers).await.0),
+                LspAction::References => serde_json::to_value(crate::lsp_routes::lsp_references(state, Query(query_value(query)?), headers).await.0),
+                LspAction::Implementation => serde_json::to_value(crate::lsp_routes::lsp_implementation(state, Query(query_value(query)?), headers).await.0),
+                LspAction::PrepareCallHierarchy => serde_json::to_value(crate::lsp_routes::lsp_prepare_call_hierarchy(state, Query(query_value(query)?), headers).await.0),
+                LspAction::IncomingCalls => serde_json::to_value(crate::lsp_routes::lsp_incoming_calls(state, Query(query_value(query)?), headers).await.0),
+                LspAction::OutgoingCalls => serde_json::to_value(crate::lsp_routes::lsp_outgoing_calls(state, Query(query_value(query)?), headers).await.0),
+                LspAction::Diagnostics => serde_json::to_value(crate::lsp_routes::lsp_diagnostics(state, Query(query_value(query)?), headers).await.0),
+                LspAction::DocumentSymbols => serde_json::to_value(crate::lsp_routes::lsp_document_symbols(state, Query(query_value(query)?), headers).await.0),
+                LspAction::Formatting => serde_json::to_value(crate::lsp_routes::lsp_formatting(state, Query(query_value(query)?), headers).await.0),
+                LspAction::CodeActions => serde_json::to_value(crate::lsp_routes::lsp_code_actions(state, Query(query_value(query)?), headers).await.0),
+                LspAction::Touch => {
+                    let body = serde_json::from_value(request.body).map_err(runtime_error)?;
+                    serde_json::to_value(crate::lsp_routes::lsp_touch(state, headers, Json(body)).await.0)
+                }
+                LspAction::Shutdown => serde_json::to_value(crate::lsp_routes::lsp_shutdown(state).await.0),
+            }.map_err(runtime_error)?;
+            Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
+        })
+    }
+}
+
 pub(crate) struct ConfigAdmin(pub(crate) crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {

@@ -363,7 +363,7 @@ pub(crate) async fn finish_provider_stream_with_error(
     message: String,
 ) -> Result<(), ApiError> {
     let interrupted = message == "Session aborted";
-    let mut interrupted_parts = Vec::new();
+    let mut interrupted_parts;
     let mut step_finish_part = None;
     {
         let mut assistant_message = live_message.lock().await;

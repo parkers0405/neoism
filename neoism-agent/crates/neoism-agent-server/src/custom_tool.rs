@@ -55,7 +55,7 @@ pub(crate) struct CustomTool {
 }
 
 impl CustomTool {
-    fn item(&self) -> ToolListItem {
+    pub(crate) fn item(&self) -> ToolListItem {
         ToolListItem {
             id: self.id.clone(),
             description: self.definition.description.clone().unwrap_or_else(|| {
@@ -100,10 +100,8 @@ pub(crate) async fn execute(
         anyhow::bail!("custom tool {tool_id} aborted before start");
     }
     let input = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
-    let mut process = tokio::process::Command::new(program);
+    let mut process = custom_tool_command(services, Path::new(directory), program, args)?;
     process
-        .args(args)
-        .current_dir(directory)
         .envs(env)
         .envs(tool.definition.env.clone())
         .env("NEOISM_TOOL_ID", tool_id)
@@ -161,7 +159,25 @@ pub(crate) async fn execute(
     }))
 }
 
-fn load(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<CustomTool> {
+fn custom_tool_command(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &Path,
+    program: &str,
+    args: &[String],
+) -> anyhow::Result<tokio::process::Command> {
+    let requested_program = crate::executable::in_directory(program, directory);
+    let resolved = crate::executable::resolve_command(
+        services,
+        requested_program,
+        neoism_agent_service_api::ExecutablePurpose::Other("custom-tool".to_string()),
+        "custom tool",
+    )?;
+    let mut process = tokio::process::Command::new(resolved);
+    process.args(args).current_dir(directory);
+    Ok(process)
+}
+
+pub(crate) fn load(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<CustomTool> {
     let mut tools = Vec::new();
     for root in crate::config::roots(services, directory) {
         for folder in ["tools", "tool"] {
@@ -252,6 +268,28 @@ fn argument_env(arguments: &Value) -> BTreeMap<String, String> {
         }
     }
     env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executable::test_support::FakeExecutableService;
+
+    #[test]
+    fn custom_tool_honors_injected_path_and_reports_missing_executable() {
+        let injected = PathBuf::from("/injected/custom-tool");
+        let mut services = crate::standard_services();
+        services.executables = Arc::new(FakeExecutableService::with("custom-tool", &injected));
+        let command = custom_tool_command(&services, Path::new("."), "custom-tool", &[]).unwrap();
+        assert_eq!(command.as_std().get_program(), injected.as_os_str());
+
+        services.executables = Arc::new(FakeExecutableService::default());
+        let error = custom_tool_command(&services, Path::new("."), "custom-tool", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("custom tool executable `custom-tool` is unavailable"));
+        assert!(error.contains("install it"));
+    }
 }
 
 fn scalar_env_value(value: &Value) -> Option<String> {

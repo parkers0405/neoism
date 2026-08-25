@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, env, path::Path};
 
 use serde_json::Value;
 
-use super::super::lsp_languages::{
-    LanguageSpec as BuiltinLanguageSpec, LspTransportSpec, WorkspaceRootStrategySpec,
+use neoism_agent_service_api::{
+    LanguageRootPolicy, LanguageServerCapability, LanguageServerTransport,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,26 +103,28 @@ pub(in crate::lsp) struct LanguageAdapter {
 }
 
 impl LanguageAdapter {
-    pub(in crate::lsp) fn from_builtin(spec: &BuiltinLanguageSpec) -> Self {
-        let transport = match spec.transport {
-            LspTransportSpec::Stdio { command } => ResolvedLspTransport::Stdio {
-                command: command.iter().map(|part| (*part).to_string()).collect(),
+    pub(in crate::lsp) fn from_capability(spec: &LanguageServerCapability) -> Self {
+        let transport = match &spec.transport {
+            LanguageServerTransport::Stdio { command } => ResolvedLspTransport::Stdio {
+                command: command.clone(),
                 env: BTreeMap::new(),
             },
-            LspTransportSpec::Tcp {
+            LanguageServerTransport::Tcp {
                 default_host,
                 default_port,
                 host_env,
                 port_env,
             } => {
                 let host = host_env
+                    .as_deref()
                     .and_then(|name| env::var(name).ok())
                     .filter(|host| !host.trim().is_empty())
-                    .unwrap_or_else(|| default_host.to_string());
+                    .unwrap_or_else(|| default_host.clone());
                 let port = port_env
+                    .as_deref()
                     .and_then(|name| env::var(name).ok())
                     .and_then(|port| port.parse::<u16>().ok())
-                    .unwrap_or(default_port);
+                    .unwrap_or(*default_port);
                 ResolvedLspTransport::Tcp {
                     host,
                     port,
@@ -146,47 +148,35 @@ impl LanguageAdapter {
                 .routes
                 .iter()
                 .map(|route| ResolvedLanguageRoute {
-                    id: route.id.to_string(),
-                    document_language_id: route.document_language_id.to_string(),
-                    extensions: route
-                        .extensions
-                        .iter()
-                        .map(|extension| (*extension).to_string())
-                        .collect(),
-                    filename_patterns: route
-                        .filename_patterns
-                        .iter()
-                        .map(|pattern| (*pattern).to_string())
-                        .collect(),
+                    id: route.id.clone(),
+                    document_language_id: route.document_language_id.clone(),
+                    extensions: route.extensions.clone(),
+                    filename_patterns: route.filename_patterns.clone(),
                 })
                 .collect(),
-            markers: spec
-                .markers
-                .iter()
-                .map(|marker| (*marker).to_string())
-                .collect(),
-            root_strategy: match spec.root_strategy {
-                WorkspaceRootStrategySpec::NearestMarker => {
+            markers: spec.markers.clone(),
+            root_strategy: match &spec.root_policy {
+                LanguageRootPolicy::NearestMarker => {
                     WorkspaceRootStrategy::NearestMarker
                 }
-                WorkspaceRootStrategySpec::CargoMetadata { manifest } => {
+                LanguageRootPolicy::CargoMetadata { manifest } => {
                     WorkspaceRootStrategy::CargoMetadata {
-                        manifest: manifest.to_string(),
+                        manifest: manifest.clone(),
                     }
                 }
             },
-            workspace_symbols: spec.workspace_symbols,
-            completion: spec.completion,
-            hover: spec.hover,
-            definition: spec.definition,
-            references: spec.references,
-            implementation: spec.implementation,
-            call_hierarchy: spec.call_hierarchy,
-            diagnostics: spec.diagnostics,
-            document_symbols: spec.document_symbols,
-            formatting: spec.formatting,
-            code_actions: spec.code_actions,
-            rename: spec.rename,
+            workspace_symbols: spec.capabilities.workspace_symbols,
+            completion: spec.capabilities.completion,
+            hover: spec.capabilities.hover,
+            definition: spec.capabilities.definition,
+            references: spec.capabilities.references,
+            implementation: spec.capabilities.implementation,
+            call_hierarchy: spec.capabilities.call_hierarchy,
+            diagnostics: spec.capabilities.diagnostics,
+            document_symbols: spec.capabilities.document_symbols,
+            formatting: spec.capabilities.formatting,
+            code_actions: spec.capabilities.code_actions,
+            rename: spec.capabilities.rename,
             initialization_options: None,
             settings: None,
             origin: AdapterOrigin::BuiltIn,

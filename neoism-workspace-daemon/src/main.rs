@@ -145,6 +145,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // opportunistic per-paste sweep keeps the cap enforced afterwards.
     neoism_workspace_daemon::workspace::sweep_clipboard_dir_on_startup();
     let app = server::router(server::AppState {
+        lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+            neoism_agent_neoism_adapter::neoism_services(),
+        ),
         auth: auth_service,
         sessions: neoism_workspace_daemon::sessions::SessionRegistry::shared(),
         workspaces: workspaces.clone(),

@@ -58,7 +58,7 @@ Most users should install servers through **Extensions**. The `lsp` block is for
 
 Project `neoism.json` uses the direct `"lsp"` block.
 
-Set an adapter ID to `false`, or use `"enabled": false`, to disable it. A configured definition can reference and override a built-in adapter with `adapter`/`adapterId`; custom definitions must provide a valid route and stdio command or TCP endpoint.
+Set an adapter ID to `false`, or use `"enabled": false`, to disable it. A configured definition can reference and override a built-in adapter with `adapter`; custom definitions must provide a valid route and stdio command or TCP endpoint.
 
 ## Diagnostics and code actions
 

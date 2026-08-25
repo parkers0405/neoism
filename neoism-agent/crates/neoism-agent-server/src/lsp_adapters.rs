@@ -5,7 +5,7 @@ mod config;
 #[path = "lsp_adapters/types.rs"]
 mod types;
 
-pub(super) use cache::{adapters_for_root, adapters_for_root_with};
+pub(super) use cache::{adapters_for_root_with, AdapterCache};
 #[cfg(test)]
 pub(super) use cache::invalidate_adapter_cache;
 pub(super) use types::{

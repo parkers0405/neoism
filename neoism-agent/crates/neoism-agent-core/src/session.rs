@@ -9,9 +9,7 @@ use crate::permission::PermissionAction;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRef {
-    #[serde(alias = "modelId", alias = "modelID")]
     pub id: String,
-    #[serde(alias = "providerId", alias = "providerID")]
     pub provider_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
@@ -108,8 +106,8 @@ pub struct UserMessage {
     /// Display name of the human who sent this turn (the sender's presence
     /// name), stamped by the agent-server from the prompt request so history
     /// reload attributes shared-session prompts to their true sender. `None`
-    /// = attribute to the local presence name / "You" (legacy behavior).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// attributes the message to the local presence name.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
 }
 
@@ -136,9 +134,7 @@ pub struct AssistantMessage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserModel {
-    #[serde(alias = "providerId", alias = "providerID")]
     pub provider_id: String,
-    #[serde(alias = "modelId", alias = "modelID")]
     pub model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
@@ -365,10 +361,9 @@ pub struct PromptRequest {
     /// Display name of the human who actually sent this prompt (the sender's
     /// presence name). In a shared/joined session a guest sends its own name
     /// so the host's agent-server can attribute the turn to the true sender
-    /// rather than a generic "You". Optional + `#[serde(default)]` for
-    /// backward compatibility: an older client omits it and it resolves to
-    /// the local presence name at render time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// rather than a generic "You". An omitted author resolves to the local
+    /// presence name at render time.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
     pub parts: Vec<PromptPart>,
 }

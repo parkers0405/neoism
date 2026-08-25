@@ -119,10 +119,10 @@ pub(crate) async fn create_session_in_directory(
             "workflow directory is not a directory",
         ));
     }
-    let project_context = project::discover(directory);
+    let project_context = project::discover(state.services(), directory);
     let directory = project_context.directory.clone();
     let loaded_config = config::load(state.services(), &directory)?;
-    let agents = crate::plugins::agent_catalog(state, &directory)?;
+    let agents = crate::plugins::agent_catalog(state, &directory).await?;
     let is_child = request.parent_id.is_some();
     if let Some(parent_id) = request.parent_id.as_ref() {
         let parent = state
@@ -248,7 +248,8 @@ pub(crate) async fn session_update(
                 "cannot change directory while the session is running",
             ));
         }
-        let project_context = resolve_session_directory(&info.directory, &directory)?;
+        let project_context =
+            resolve_session_directory(state.services(), &info.directory, &directory)?;
         if claims.as_ref().is_some_and(|Extension(claims)| {
             !crate::caller::allows_directory(claims, &project_context.directory)
         }) {
@@ -303,6 +304,7 @@ pub(crate) async fn session_directory_options(
 }
 
 fn resolve_session_directory(
+    services: &neoism_agent_service_api::AgentServices,
     current: &str,
     requested: &str,
 ) -> Result<project::ProjectContext, ApiError> {
@@ -339,7 +341,7 @@ fn resolve_session_directory(
             canonical.display()
         )));
     }
-    Ok(project::discover(canonical))
+    Ok(project::discover(services, canonical))
 }
 
 fn expand_home_path(path: &str) -> Result<PathBuf, ApiError> {
@@ -563,7 +565,7 @@ pub(crate) async fn session_diff(
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<VcsFileDiff>>, ApiError> {
     let info = crate::ensure_session(&state, &session_id).await?;
-    Ok(Json(vcs::diff(&info.directory)))
+    Ok(Json(vcs::diff(state.services(), &info.directory)))
 }
 
 fn retarget_message(
@@ -649,6 +651,7 @@ mod directory_tests {
         std::fs::create_dir_all(&target).unwrap();
 
         let resolved = resolve_session_directory(
+            &crate::standard_services(),
             current.to_string_lossy().as_ref(),
             "'../to with spaces'",
         )

@@ -4830,6 +4830,7 @@ dependencies = [
  "neoism-agent-neoism-adapter",
  "neoism-agent-server",
  "neoism-agent-service-api",
+ "neoism-agent-workspace-search-fff",
  "neoism-backend",
  "neoism-extensions",
  "neoism-neoworld",
@@ -4889,6 +4890,7 @@ dependencies = [
  "neoism-agent-core",
  "neoism-agent-server",
  "neoism-agent-service-api",
+ "neoism-agent-workspace-search-fff",
  "reqwest",
  "serde",
  "serde_json",
@@ -4915,8 +4917,8 @@ dependencies = [
 name = "neoism-agent-neoism-adapter"
 version = "0.7.55"
 dependencies = [
- "neoism-agent-server",
  "neoism-agent-service-api",
+ "neoism-agent-workspace-search-fff",
  "neoism-extensions",
  "neoism-product-docs",
  "neoism-workspace-index",
@@ -4949,20 +4951,16 @@ dependencies = [
  "clap",
  "dirs 6.0.0",
  "dunce",
- "fff-search",
  "futures",
  "futures-core",
  "git2",
- "globset",
  "iana-time-zone",
- "ignore",
  "libc",
  "neoism-agent-core",
  "neoism-agent-plugin-api",
  "neoism-agent-service-api",
  "notify 8.2.0",
  "rand 0.8.5",
- "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -4987,6 +4985,21 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+]
+
+[[package]]
+name = "neoism-agent-workspace-search-fff"
+version = "0.7.55"
+dependencies = [
+ "anyhow",
+ "dirs 6.0.0",
+ "dunce",
+ "fff-search",
+ "git2",
+ "globset",
+ "ignore",
+ "neoism-agent-service-api",
+ "regex",
 ]
 
 [[package]]

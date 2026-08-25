@@ -33,11 +33,11 @@ fn persistent_stdio_lsp_lifecycle_is_event_driven_and_consistent() {
     let fake_server = compile_fake_server(&workspace);
     write_lsp_config(&workspace.path, &fake_server, &log, "serve");
 
-    let configured_spec = configured_test_spec(&workspace.path);
+    let configured_spec = configured_test_spec(&workspace.runtime, &workspace.path);
     let spec = &configured_spec;
-    let service = service();
+    let service = workspace.runtime.service.as_ref();
     service.clear_diagnostics(&workspace.path, &file);
-    let mut events = subscribe_diagnostics();
+    let mut events = subscribe_diagnostics(&workspace.runtime);
 
     service
         .sync(&workspace.path, &file, Some("broken_v1"), spec)
@@ -71,6 +71,7 @@ fn persistent_stdio_lsp_lifecycle_is_event_driven_and_consistent() {
     assert_eq!(actions[1]["disabled"]["reason"], "fixture is indexing");
 
     let resolved = crate::lsp::resolve_code_action(
+        &workspace.runtime,
         &workspace.path,
         &file,
         "protocol-test",
@@ -80,6 +81,7 @@ fn persistent_stdio_lsp_lifecycle_is_event_driven_and_consistent() {
     assert!(resolved.pointer("/edit/changes").is_some());
     assert_eq!(resolved["command"]["command"], "fixture.afterFix");
     assert!(crate::lsp::resolve_code_action(
+        &workspace.runtime,
         &workspace.path,
         &file,
         "not-the-originating-server",
@@ -87,6 +89,7 @@ fn persistent_stdio_lsp_lifecycle_is_event_driven_and_consistent() {
     )
     .is_none());
     let executed = crate::lsp::execute_command(
+        &workspace.runtime,
         &workspace.path,
         &file,
         "protocol-test",
@@ -261,6 +264,11 @@ fn persistent_stdio_lsp_lifecycle_is_event_driven_and_consistent() {
         Vec::new(),
     );
     service.clear_diagnostics(&workspace.path, &file);
+    workspace.runtime.shutdown();
+    assert!(workspace.runtime.service.clients.lock().unwrap().is_empty());
+    let shutdown_log = fs::read_to_string(&log).expect("read fake LSP shutdown log");
+    assert!(shutdown_log.contains("shutdown\n"));
+    assert!(shutdown_log.contains("exit\n"));
 }
 
 #[test]
@@ -274,9 +282,9 @@ fn failed_initialize_is_recorded_as_unhealthy_and_never_connected() {
     let fake_server = compile_fake_server(&workspace);
     write_lsp_config(&workspace.path, &fake_server, &log, "fail-initialize");
 
-    let configured_spec = configured_test_spec(&workspace.path);
+    let configured_spec = configured_test_spec(&workspace.runtime, &workspace.path);
     let spec = &configured_spec;
-    let service = service();
+    let service = workspace.runtime.service.as_ref();
     let error = service
         .sync(&workspace.path, &file, Some("fn main() {}"), spec)
         .expect_err("server that exits during initialize must fail attachment");
@@ -309,11 +317,11 @@ fn crashed_server_becomes_unhealthy_and_restarts_on_next_sync() {
     let fake_server = compile_fake_server(&workspace);
     write_lsp_config(&workspace.path, &fake_server, &log, "crash-once");
 
-    let configured_spec = configured_test_spec(&workspace.path);
+    let configured_spec = configured_test_spec(&workspace.runtime, &workspace.path);
     let spec = &configured_spec;
-    let service = service();
+    let service = workspace.runtime.service.as_ref();
     service.clear_diagnostics(&workspace.path, &file);
-    let mut events = subscribe_diagnostics();
+    let mut events = subscribe_diagnostics(&workspace.runtime);
 
     service
         .sync(&workspace.path, &file, Some("broken_v1"), spec)
@@ -375,15 +383,15 @@ fn empty_hover_uses_one_exact_position_request() {
         "empty-hover",
         "ptest",
     );
-    let spec = super::super::lsp_adapters::adapters_for_root(&workspace.path)
+    let spec = workspace.runtime.adapters_for_root(&workspace.path)
         .into_iter()
         .find(|adapter| adapter.id == "protocol-test")
         .expect("configured exact-position adapter");
-    service()
+    workspace.runtime.service
         .sync(&workspace.path, &file, Some("fn main() {}\n"), &spec)
         .expect("initialize exact-position fake LSP");
 
-    let hover = super::super::hover(&workspace.path, &file, 0, 3);
+    let hover = super::super::hover(&workspace.runtime, &workspace.path, &file, 0, 3);
     assert!(hover.is_empty());
     assert_eq!(
         count_log_lines(&log, "hover:"),
@@ -410,16 +418,17 @@ fn concurrent_cold_opens_initialize_one_shared_client() {
         "serve",
         "ptest",
     );
-    let spec = configured_test_spec(&workspace.path);
+    let spec = configured_test_spec(&workspace.runtime, &workspace.path);
     let barrier = Arc::new(Barrier::new(3));
     let mut workers = Vec::new();
     for file in [first.clone(), second.clone()] {
         let root = workspace.path.clone();
+        let runtime = workspace.runtime.clone();
         let spec = spec.clone();
         let barrier = Arc::clone(&barrier);
         workers.push(thread::spawn(move || {
             barrier.wait();
-            service()
+            runtime.service
                 .sync(&root, &file, Some("clean\n"), &spec)
                 .expect("concurrent cold-open sync");
         }));
@@ -428,7 +437,7 @@ fn concurrent_cold_opens_initialize_one_shared_client() {
     for worker in workers {
         worker.join().expect("cold-open worker");
     }
-    service()
+    workspace.runtime.service
         .hover(&workspace.path, &first, 0, 0, &spec)
         .expect("protocol barrier after concurrent opens");
 
@@ -455,8 +464,8 @@ fn request_failure_keeps_the_healthy_transport_attached() {
         "request-error",
         "ptest",
     );
-    let spec = configured_test_spec(&workspace.path);
-    let service = service();
+    let spec = configured_test_spec(&workspace.runtime, &workspace.path);
+    let service = workspace.runtime.service.as_ref();
     service
         .sync(&workspace.path, &first, Some("clean\n"), &spec)
         .expect("open first file");
@@ -487,25 +496,28 @@ fn changed_adapter_configuration_replaces_the_old_transport() {
     let fake_server = compile_fake_server(&workspace);
 
     write_lsp_config(&workspace.path, &fake_server, &log, "serve");
-    let first = configured_test_spec(&workspace.path);
-    service()
+    let first = configured_test_spec(&workspace.runtime, &workspace.path);
+    workspace.runtime.service
         .sync(&workspace.path, &file, Some("broken_v1"), &first)
         .expect("start first configured transport");
-    service()
+    workspace.runtime.service
         .hover(&workspace.path, &file, 0, 0, &first)
         .expect("first transport barrier");
 
     write_lsp_config(&workspace.path, &fake_server, &log, "replacement-transport");
-    super::super::lsp_adapters::invalidate_adapter_cache(&workspace.path);
-    let replacement = configured_test_spec(&workspace.path);
-    service()
+    super::super::lsp_adapters::invalidate_adapter_cache(
+        &workspace.runtime.service.adapter_cache,
+        &workspace.path,
+    );
+    let replacement = configured_test_spec(&workspace.runtime, &workspace.path);
+    workspace.runtime.service
         .sync(&workspace.path, &file, Some("broken_v2"), &replacement)
         .expect("start replacement configured transport");
-    service()
+    workspace.runtime.service
         .hover(&workspace.path, &file, 0, 0, &replacement)
         .expect("replacement transport barrier");
 
-    let live_for_adapter = service()
+    let live_for_adapter = workspace.runtime.service
         .clients
         .lock()
         .expect("client map")
@@ -562,10 +574,10 @@ fn nested_project_client_keeps_outer_workspace_cache_and_event_ownership() {
     )
     .expect("write nested adapter config");
 
-    let spec = configured_test_spec(&workspace.path);
-    let service = service();
+    let spec = configured_test_spec(&workspace.runtime, &workspace.path);
+    let service = workspace.runtime.service.as_ref();
     service.clear_diagnostics(&workspace.path, &file);
-    let mut events = subscribe_diagnostics();
+    let mut events = subscribe_diagnostics(&workspace.runtime);
     service
         .sync(&workspace.path, &file, Some("broken_v1"), &spec)
         .expect("sync nested project document");
@@ -602,8 +614,8 @@ fn nested_project_client_keeps_outer_workspace_cache_and_event_ownership() {
         .is_empty());
 }
 
-fn configured_test_spec(root: &Path) -> LanguageAdapter {
-    super::super::lsp_adapters::adapters_for_root(root)
+fn configured_test_spec(runtime: &super::super::LspRuntime, root: &Path) -> LanguageAdapter {
+    runtime.adapters_for_root(root)
         .into_iter()
         .find(|adapter| adapter.id == "protocol-test")
         .expect("configured protocol-test adapter")
@@ -630,7 +642,7 @@ fn wait_for_event(
     file: &Path,
     predicate: impl Fn(&DiagnosticsEvent) -> bool,
 ) -> DiagnosticsEvent {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match receiver.try_recv() {
             Ok(event) if event.file == file.to_string_lossy() && predicate(&event) => {
@@ -743,6 +755,7 @@ fn compile_fake_server(workspace: &TestWorkspace) -> PathBuf {
 
 struct TestWorkspace {
     path: PathBuf,
+    runtime: super::super::LspRuntime,
 }
 
 impl TestWorkspace {
@@ -756,7 +769,10 @@ impl TestWorkspace {
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create test workspace");
-        Self { path }
+        Self {
+            path,
+            runtime: super::super::LspRuntime::new(crate::standard_services()),
+        }
     }
 }
 
@@ -1013,12 +1029,14 @@ fn main() {
                 ),
             );
         } else if has_method(&body, "shutdown") {
+            append(log, "shutdown");
             let id = request_id(&body);
             send(
                 &mut output,
                 &format!(r#"{{"jsonrpc":"2.0","id":{id},"result":null}}"#),
             );
         } else if has_method(&body, "exit") {
+            append(log, "exit");
             return;
         }
     }

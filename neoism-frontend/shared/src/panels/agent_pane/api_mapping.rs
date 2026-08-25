@@ -257,7 +257,7 @@ pub fn model_context_limit_from_providers_json(
 
 pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
     let agent = value
-        .get("default-agent")
+        .get("defaultAgent")
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|s| !s.is_empty());
@@ -1051,7 +1051,7 @@ mod tests {
     #[test]
     fn config_json_uses_canonical_keys_and_session_migrations_remain() {
         let config = config_defaults_from_json(&json!({
-            "default-agent": "build",
+            "defaultAgent": "build",
             "model": "openai/gpt-5",
             "variant": "high",
             "input-hints": false

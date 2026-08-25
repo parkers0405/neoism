@@ -26,7 +26,7 @@ Use `/agent` to switch the current session.
         "variant": "high",
         "prompt": "Find correctness bugs, regressions, and missing tests.",
         "temperature": 0.2,
-        "max-steps": 20,
+        "maxSteps": 20,
         "tools": { "write": false, "edit": false, "apply_patch": false },
         "permission": { "*": "allow", "edit": "deny", "bash": "ask" }
       }
@@ -35,7 +35,7 @@ Use `/agent` to switch the current session.
 }
 ```
 
-`mode` may be `primary`, `subagent`, or `all`. Other fields include `top-p`, `hidden`, `disable`, and optional UI `color` metadata.
+`mode` may be `primary`, `subagent`, or `all`. Other fields include `topP`, `hidden`, `disable`, and optional UI `color` metadata.
 
 ## Delegate work
 

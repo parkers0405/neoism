@@ -16,7 +16,7 @@ Neoism supervises the Agent server. A failed child should be reported and restar
 
 - Open the provider/model picker and complete a connection.
 - Confirm the API-key environment variable exists in the Agent server process.
-- Check `enabled-providers` and `disabled-providers`.
+- Check `enabledProviders` and `disabledProviders`.
 - Confirm Models.dev is reachable or a local catalog cache/path exists.
 - Verify the configured ID uses `provider/model` and still exists.
 - Subscription connections may expose only a subset of public models.

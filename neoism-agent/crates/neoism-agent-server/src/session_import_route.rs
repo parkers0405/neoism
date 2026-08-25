@@ -4,7 +4,7 @@
 //! A workspace *promote* relocates a workspace's home to another host and ships
 //! the agent along with it. The source host exports the session with
 //! [`crate::export_session`] into a portable [`SessionBundle`]; this route is
-//! how the *target* host receives it. `POST /sessions/import` takes the bundle
+//! how the *target* host receives it. `POST /v2/sessions/import` takes the bundle
 //! plus the importing host's workspace checkout root and hands both to
 //! [`crate::import_session`], which writes the rebound session into this host's
 //! store so the existing resume path picks the conversation back up.
@@ -21,7 +21,7 @@ use crate::error::ApiError;
 use crate::session_transfer::{import_session, SessionBundle};
 use crate::state::AppState;
 
-/// Request body for `POST /sessions/import`.
+/// Request body for `POST /v2/sessions/import`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportSessionRequest {
@@ -33,7 +33,7 @@ pub(crate) struct ImportSessionRequest {
     pub(crate) target_workspace_root: String,
 }
 
-/// Response body for `POST /sessions/import`: the imported session's id.
+/// Response body for `POST /v2/sessions/import`: the imported session's id.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportSessionResponse {
@@ -42,7 +42,7 @@ pub(crate) struct ImportSessionResponse {
     pub(crate) session_id: String,
 }
 
-/// `POST /sessions/import` — write a transferred [`SessionBundle`] into this
+/// `POST /v2/sessions/import` — write a transferred [`SessionBundle`] into this
 /// host's store, rebinding its workspace paths to `targetWorkspaceRoot`, so a
 /// subsequent resume continues the conversation here.
 pub(crate) async fn session_import(

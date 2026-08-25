@@ -1,21 +1,30 @@
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use neoism_agent_core::NeoismConfig;
-use serde_json::{json, Value};
+use neoism_agent_core::AgentConfigDocument;
+use serde::Serialize;
 
 use crate::error::ApiError;
 use crate::{config, resolve_directory, InstanceQuery};
 
-pub(crate) async fn global_health() -> Json<Value> {
-    Json(json!({ "healthy": true, "version": env!("CARGO_PKG_VERSION") }))
+#[derive(Debug, Serialize)]
+pub(crate) struct HealthResponse {
+    healthy: bool,
+    version: String,
+}
+
+pub(crate) async fn global_health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        healthy: true,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
 }
 
 pub(crate) async fn config_get(
     State(state): State<crate::state::AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
-) -> Result<Json<NeoismConfig>, ApiError> {
+) -> Result<Json<AgentConfigDocument>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     let mut info = config::load(state.services(), &directory)?.info;
     config::inject_builtin_mcp(&mut info, state.services());
@@ -35,8 +44,8 @@ pub(crate) async fn config_update(
     State(state): State<crate::state::AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
-    Json(config): Json<NeoismConfig>,
-) -> Result<Json<NeoismConfig>, ApiError> {
+    Json(config): Json<AgentConfigDocument>,
+) -> Result<Json<AgentConfigDocument>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     let snapshot = crate::config::snapshot(state.services(), &directory)?;
     state.services().config.update(&neoism_agent_service_api::ConfigUpdateRequest {

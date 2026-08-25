@@ -39,8 +39,13 @@ pub(crate) struct V2EventQuery {
     pub session_id: Option<String>,
 }
 
-pub(crate) async fn v2_meta(State(state): State<AppState>) -> Json<ApiMeta> {
-    let snapshot = state.inner.plugin_host.snapshot();
+pub(crate) async fn v2_meta(
+    State(state): State<AppState>,
+    Query(query): Query<InstanceQuery>,
+    headers: HeaderMap,
+) -> Json<ApiMeta> {
+    let directory = resolve_directory(query.directory, &headers);
+    let snapshot = state.plugin_snapshot(&directory).await;
     Json(ApiMeta {
         api_version: API_VERSION.to_string(),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -57,14 +62,8 @@ pub(crate) async fn v2_capabilities(
     headers: HeaderMap,
 ) -> Json<Vec<CapabilityInfo>> {
     let directory = resolve_directory(query.directory, &headers);
-    let mut capabilities = crate::plugins::capabilities(&state.inner.plugin_host.snapshot());
-    for capability in capabilities.iter_mut().filter(|capability| capability.disableable) {
-        let Some(plugin_id) = capability.plugin_id.as_deref() else { continue };
-        let enabled = crate::plugins::enabled(state.services(), &directory, plugin_id);
-        capability.enabled = enabled;
-        capability.reason = (!enabled).then(|| "disabled by workspace config".to_string());
-    }
-    Json(capabilities)
+    let snapshot = state.plugin_snapshot(&directory).await;
+    Json(crate::plugins::capabilities(snapshot.as_ref()))
 }
 
 pub(crate) async fn v2_plugins(
@@ -73,9 +72,8 @@ pub(crate) async fn v2_plugins(
     headers: HeaderMap,
 ) -> Json<Vec<PluginManifestInfo>> {
     let directory = resolve_directory(query.directory, &headers);
-    let mut manifests = crate::plugins::manifests(&state.inner.plugin_host.snapshot());
-    apply_workspace_plugin_status(state.services(), &mut manifests, &directory);
-    Json(manifests)
+    let snapshot = state.plugin_snapshot(&directory).await;
+    Json(crate::plugins::manifests(snapshot.as_ref()))
 }
 
 pub(crate) async fn v2_plugin(
@@ -85,22 +83,13 @@ pub(crate) async fn v2_plugin(
     Path(plugin_id): Path<String>,
 ) -> Result<Json<PluginManifestInfo>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    let mut manifests = crate::plugins::manifests(&state.inner.plugin_host.snapshot());
-    apply_workspace_plugin_status(state.services(), &mut manifests, &directory);
+    let snapshot = state.plugin_snapshot(&directory).await;
+    let manifests = crate::plugins::manifests(snapshot.as_ref());
     manifests
         .into_iter()
         .find(|plugin| plugin.id == plugin_id)
         .map(Json)
         .ok_or_else(|| ApiError::not_found("Plugin not found"))
-}
-
-fn apply_workspace_plugin_status(services: &neoism_agent_service_api::AgentServices, manifests: &mut [PluginManifestInfo], directory: &str) {
-    for plugin in manifests.iter_mut().filter(|plugin| plugin.disableable) {
-        let enabled = crate::plugins::enabled(services, directory, &plugin.id);
-        plugin.enabled = enabled;
-        plugin.active = enabled;
-        plugin.reason = (!enabled).then(|| "disabled by workspace config".to_string());
-    }
 }
 
 pub(crate) async fn v2_events(
@@ -159,7 +148,6 @@ fn persisted_event_envelope(event: crate::state::PersistedEvent) -> EventEnvelop
         .payload
         .properties
         .get("sessionID")
-        .or_else(|| event.payload.properties.get("sessionId"))
         .and_then(Value::as_str)
         .map(str::to_string);
     let kind = event.payload.kind;

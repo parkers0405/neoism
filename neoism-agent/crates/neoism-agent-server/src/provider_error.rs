@@ -6,13 +6,11 @@ use reqwest::StatusCode;
 use serde_json::Value;
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub(crate) struct ProviderError {
     pub(crate) provider: String,
     pub(crate) status: Option<u16>,
     pub(crate) message: String,
     pub(crate) body: Option<String>,
-    pub(crate) headers: BTreeMap<String, String>,
     pub(crate) retryable: bool,
     pub(crate) retry_after_ms: Option<u64>,
     pub(crate) context_overflow: bool,
@@ -38,7 +36,6 @@ impl ProviderError {
             status: Some(status.as_u16()),
             message,
             body: (!body.trim().is_empty()).then_some(body),
-            headers,
             retryable,
             retry_after_ms,
             context_overflow,

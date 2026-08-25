@@ -43,7 +43,10 @@ pub fn required_permission(
     }
 }
 
-pub async fn handle(message: ConfigClientMessage) -> Vec<ConfigServerMessage> {
+pub async fn handle(
+    runtime: &neoism_agent_server::language_server::LspRuntime,
+    message: ConfigClientMessage,
+) -> Vec<ConfigServerMessage> {
     match message {
         ConfigClientMessage::GetConfig => {
             let value = tokio::task::spawn_blocking(
@@ -55,12 +58,13 @@ pub async fn handle(message: ConfigClientMessage) -> Vec<ConfigServerMessage> {
         }
         ConfigClientMessage::GetConfigSchema => {
             let root = files_handler::workspace_root();
+            let runtime = runtime.clone();
             let descriptors = tokio::task::spawn_blocking(move || {
                 let mut descriptors =
                     neoism_backend::config::intelligence::config_descriptors();
                 if let Some(lsp) = descriptors.iter_mut().find(|row| row.path == "agent.lsp") {
                     let adapters =
-                        neoism_agent_server::language_server::language_server_adapters_for(&root);
+                        neoism_agent_server::language_server::language_server_adapters_for(&runtime, &root);
                     lsp.runtime_suggestions.extend(adapters.iter().flat_map(|adapter| {
                         std::iter::once(adapter.id.clone())
                             .chain(adapter.routes.iter().map(|route| route.id.clone()))
@@ -140,8 +144,9 @@ pub async fn handle(message: ConfigClientMessage) -> Vec<ConfigServerMessage> {
         }
         ConfigClientMessage::ListExtensions => {
             let root = files_handler::workspace_root();
+            let runtime = runtime.clone();
             let entries =
-                tokio::task::spawn_blocking(move || collect_extension_entries(&root))
+                tokio::task::spawn_blocking(move || collect_extension_entries(&runtime, &root))
                     .await
                     .unwrap_or_default();
             vec![ConfigServerMessage::Extensions { entries }]
@@ -187,7 +192,10 @@ fn document_result(
 // managed kernels, live language-server adapter rows, and compiled-in
 // grammar rows.
 
-fn collect_extension_entries(workspace_root: &std::path::Path) -> Vec<ExtensionSummary> {
+fn collect_extension_entries(
+    runtime: &neoism_agent_server::language_server::LspRuntime,
+    workspace_root: &std::path::Path,
+) -> Vec<ExtensionSummary> {
     let installed = neoism_extensions::InstalledIndex::load().ok();
     let installed_version = |id: &str| -> Option<String> {
         installed
@@ -314,7 +322,7 @@ fn collect_extension_entries(workspace_root: &std::path::Path) -> Vec<ExtensionS
         });
     }
 
-    entries.extend(language_server_entries(workspace_root, &installed));
+    entries.extend(language_server_entries(runtime, workspace_root, &installed));
     entries.extend(built_in_grammar_entries());
     entries
 }
@@ -323,6 +331,7 @@ fn collect_extension_entries(workspace_root: &std::path::Path) -> Vec<ExtensionS
 /// daemon's Rust-owned LSP engine reports (connected / managed /
 /// $PATH / missing). Read-only mirror of the desktop builder.
 fn language_server_entries(
+    runtime: &neoism_agent_server::language_server::LspRuntime,
     workspace_root: &std::path::Path,
     installed: &Option<neoism_extensions::InstalledIndex>,
 ) -> Vec<ExtensionSummary> {
@@ -331,8 +340,8 @@ fn language_server_entries(
         LspAdapterTransport, LspCommandSource,
     };
 
-    let adapters = language_server_adapters_for(workspace_root);
-    let live = live_languages(workspace_root);
+    let adapters = language_server_adapters_for(runtime, workspace_root);
+    let live = live_languages(runtime, workspace_root);
 
     adapters
         .into_iter()
@@ -379,7 +388,7 @@ fn language_server_entries(
                 }
                 LspAdapterTransport::Stdio { command } => {
                     let executable = command.first().cloned().unwrap_or_default();
-                    let source = command_source(&adapter.id, command.clone());
+                    let source = command_source(runtime, &adapter.id, command.clone());
                     let package_id = adapter
                         .catalog_packages
                         .first()

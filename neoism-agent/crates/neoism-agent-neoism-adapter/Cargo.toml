@@ -7,7 +7,7 @@ repository.workspace = true
 
 [dependencies]
 neoism-agent-service-api.workspace = true
-neoism-agent-server.workspace = true
+neoism-agent-workspace-search-fff.workspace = true
 neoism-extensions.workspace = true
 neoism-product-docs.workspace = true
 neoism-workspace-index.workspace = true

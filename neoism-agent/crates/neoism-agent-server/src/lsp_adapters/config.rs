@@ -44,16 +44,13 @@ pub(super) fn apply_config(adapter: &mut LanguageAdapter, object: &Map<String, V
         );
     }
 
-    if let Some(markers) = object.get("markers").or_else(|| object.get("rootMarkers")) {
+    if let Some(markers) = object.get("markers") {
         match string_array(markers, false) {
             Ok(markers) => adapter.markers = markers,
             Err(error) => set_error(adapter, format!("invalid root markers: {error}")),
         }
     }
-    if let Some(strategy) = object
-        .get("rootStrategy")
-        .or_else(|| object.get("root_strategy"))
-    {
+    if let Some(strategy) = object.get("rootStrategy") {
         match configured_root_strategy(strategy) {
             Ok(strategy) => adapter.root_strategy = strategy,
             Err(error) => set_error(adapter, format!("invalid root strategy: {error}")),
@@ -63,8 +60,6 @@ pub(super) fn apply_config(adapter: &mut LanguageAdapter, object: &Map<String, V
     apply_capabilities(adapter, object.get("capabilities"));
     adapter.initialization_options = object
         .get("initializationOptions")
-        .or_else(|| object.get("initialization_options"))
-        .or_else(|| object.get("initialization"))
         .cloned()
         .or_else(|| adapter.initialization_options.clone());
     if let Some(settings) = object.get("settings") {
@@ -87,8 +82,6 @@ fn configured_root_strategy(value: &Value) -> Result<WorkspaceRootStrategy, Stri
         Value::Object(object) => {
             let kind = object
                 .get("kind")
-                .or_else(|| object.get("type"))
-                .or_else(|| object.get("strategy"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| "object must declare `kind`".to_string())?;
             let manifest = object.get("manifest").and_then(Value::as_str);
@@ -163,13 +156,9 @@ fn configured_routes(
         return Ok(Some(parsed));
     }
 
-    let has_route_matchers = ["extensions", "filenamePatterns", "filenames"]
+    let has_route_matchers = ["extensions", "filenamePatterns"]
         .iter()
         .any(|key| object.contains_key(*key));
-    // `language`/`languageId` historically selected a built-in adapter. They
-    // do not replace that adapter's complete route table unless matchers are
-    // also supplied. New adapters, which have no inherited routes, still use
-    // these fields to declare their first route.
     let has_top_level_route = has_route_matchers || adapter.routes.is_empty();
     if !has_top_level_route {
         return Ok(None);
@@ -181,8 +170,6 @@ fn configured_routes(
         .unwrap_or(adapter.id.as_str());
     let document_id = object
         .get("documentLanguageId")
-        .or_else(|| object.get("document_language_id"))
-        .or_else(|| object.get("languageId"))
         .and_then(Value::as_str)
         .unwrap_or(logical_id);
     let extensions = object
@@ -192,8 +179,6 @@ fn configured_routes(
         .unwrap_or_default();
     let filename_patterns = object
         .get("filenamePatterns")
-        .or_else(|| object.get("filename_patterns"))
-        .or_else(|| object.get("filenames"))
         .map(|value| string_array(value, false))
         .transpose()?
         .unwrap_or_default();
@@ -210,14 +195,11 @@ fn parse_route(
         .ok_or_else(|| "must be an object".to_string())?;
     let logical_id = object
         .get("id")
-        .or_else(|| object.get("language"))
         .and_then(Value::as_str)
         .or(map_id)
         .ok_or_else(|| "missing logical `id`".to_string())?;
     let document_id = object
         .get("documentLanguageId")
-        .or_else(|| object.get("document_language_id"))
-        .or_else(|| object.get("languageId"))
         .and_then(Value::as_str)
         .unwrap_or(logical_id);
     let extensions = object
@@ -227,8 +209,6 @@ fn parse_route(
         .unwrap_or_default();
     let filename_patterns = object
         .get("filenamePatterns")
-        .or_else(|| object.get("filename_patterns"))
-        .or_else(|| object.get("filenames"))
         .map(|value| string_array(value, false))
         .transpose()?
         .unwrap_or_default();
@@ -266,7 +246,6 @@ fn configured_transport(
         transport_object.and_then(|transport| {
             transport
                 .get("kind")
-                .or_else(|| transport.get("type"))
                 .and_then(Value::as_str)
         })
     });
@@ -422,35 +401,24 @@ fn apply_capabilities(adapter: &mut LanguageAdapter, value: Option<&Value>) {
     let Some(capabilities) = value.and_then(Value::as_object) else {
         return;
     };
-    let enabled = |camel: &str, snake: &str, current: bool| {
+    let enabled = |name: &str, current: bool| {
         capabilities
-            .get(camel)
-            .or_else(|| capabilities.get(snake))
+            .get(name)
             .and_then(Value::as_bool)
             .unwrap_or(current)
     };
-    adapter.workspace_symbols = enabled(
-        "workspaceSymbols",
-        "workspace_symbols",
-        adapter.workspace_symbols,
-    );
-    adapter.completion = enabled("completion", "completion", adapter.completion);
-    adapter.hover = enabled("hover", "hover", adapter.hover);
-    adapter.definition = enabled("definition", "definition", adapter.definition);
-    adapter.references = enabled("references", "references", adapter.references);
-    adapter.implementation =
-        enabled("implementation", "implementation", adapter.implementation);
-    adapter.call_hierarchy =
-        enabled("callHierarchy", "call_hierarchy", adapter.call_hierarchy);
-    adapter.diagnostics = enabled("diagnostics", "diagnostics", adapter.diagnostics);
-    adapter.document_symbols = enabled(
-        "documentSymbols",
-        "document_symbols",
-        adapter.document_symbols,
-    );
-    adapter.formatting = enabled("formatting", "formatting", adapter.formatting);
-    adapter.code_actions = enabled("codeActions", "code_actions", adapter.code_actions);
-    adapter.rename = enabled("rename", "rename", adapter.rename);
+    adapter.workspace_symbols = enabled("workspaceSymbols", adapter.workspace_symbols);
+    adapter.completion = enabled("completion", adapter.completion);
+    adapter.hover = enabled("hover", adapter.hover);
+    adapter.definition = enabled("definition", adapter.definition);
+    adapter.references = enabled("references", adapter.references);
+    adapter.implementation = enabled("implementation", adapter.implementation);
+    adapter.call_hierarchy = enabled("callHierarchy", adapter.call_hierarchy);
+    adapter.diagnostics = enabled("diagnostics", adapter.diagnostics);
+    adapter.document_symbols = enabled("documentSymbols", adapter.document_symbols);
+    adapter.formatting = enabled("formatting", adapter.formatting);
+    adapter.code_actions = enabled("codeActions", adapter.code_actions);
+    adapter.rename = enabled("rename", adapter.rename);
 }
 
 fn set_error(adapter: &mut LanguageAdapter, error: impl Into<String>) {
@@ -463,18 +431,47 @@ fn set_error(adapter: &mut LanguageAdapter, error: impl Into<String>) {
 
 #[cfg(test)]
 mod tests {
+    use neoism_agent_service_api::{
+        LanguageRootPolicy, LanguageRouteCapability, LanguageServerCapability,
+        LanguageServerOperations, LanguageServerTransport,
+    };
     use serde_json::json;
 
     use super::*;
-    use crate::lsp::lsp_languages::LANGUAGE_SPECS;
 
     fn rust_adapter() -> LanguageAdapter {
-        LanguageAdapter::from_builtin(
-            LANGUAGE_SPECS
-                .iter()
-                .find(|spec| spec.id == "rust")
-                .expect("built-in Rust adapter"),
-        )
+        LanguageAdapter::from_capability(&LanguageServerCapability {
+            id: "fake-rust".to_string(),
+            name: "Fake Rust".to_string(),
+            catalog_packages: Vec::new(),
+            transport: LanguageServerTransport::Stdio {
+                command: vec!["fake-rust-server".to_string()],
+            },
+            routes: vec![LanguageRouteCapability {
+                id: "rust".to_string(),
+                document_language_id: "rust".to_string(),
+                extensions: vec!["rs".to_string()],
+                filename_patterns: Vec::new(),
+            }],
+            markers: vec!["Cargo.toml".to_string()],
+            root_policy: LanguageRootPolicy::CargoMetadata {
+                manifest: "Cargo.toml".to_string(),
+            },
+            capabilities: LanguageServerOperations {
+                workspace_symbols: true,
+                completion: true,
+                hover: true,
+                definition: true,
+                references: true,
+                implementation: true,
+                call_hierarchy: true,
+                diagnostics: true,
+                document_symbols: true,
+                formatting: true,
+                code_actions: true,
+                rename: true,
+            },
+        })
     }
 
     #[test]

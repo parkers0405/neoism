@@ -586,7 +586,7 @@ pub(crate) fn generation_metadata(
     }
 }
 
-/// Whether openai requests will ride the codex (ChatGPT subscription) backend:
+/// Whether OpenAI requests will use the Codex ChatGPT-subscription service:
 /// `OpenAiRuntime::stream` sends every request over the OAuth Responses path
 /// whenever the stored auth is OAuth, regardless of any API key. Codex enforces
 /// far smaller context windows than the platform API for the same model ids
@@ -615,7 +615,7 @@ fn apply_codex_openai_effective_metadata(
     }
     // models.dev advertises the platform-API window (1.05M context / 922k
     // input) for the gpt-5.6 family under `github-copilot` too, but the codex
-    // backend enforces a far smaller, product-side cap (~372k for gpt-5.6-sol,
+    // service enforces a far smaller, product-side cap (~372k for gpt-5.6-sol,
     // and OpenAI has cut it further since — openai/codex#31860, #32806). A
     // session that grew past it had every request rejected with a context-
     // overflow error while auto-compaction, keyed off this limit, never fired.

@@ -60,13 +60,13 @@ Advanced overrides:
 ```jsonc
 {
   "agent": {
-    "enabled-providers": ["anthropic", "openai"],
-    "disabled-providers": ["openrouter"]
+    "enabledProviders": ["anthropic", "openai"],
+    "disabledProviders": ["openrouter"]
   }
 }
 ```
 
-`enabled-providers` is an allowlist. `disabled-providers` removes matching IDs afterward. IDs come from the catalog and model picker.
+`enabledProviders` is an allowlist. `disabledProviders` removes matching IDs afterward. IDs come from the catalog and model picker.
 
 ## Compatible endpoints
 

@@ -54,6 +54,7 @@ jupyter-zmq-client = { version = "1", features = ["tokio-runtime"] }
 jupyter-protocol = "2"
 neoism-agent-server = { workspace = true }
 neoism-agent-service-api = { workspace = true }
+neoism-agent-workspace-search-fff = { workspace = true }
 tokio = { workspace = true }
 corcovado = { workspace = true }
 regex = { workspace = true }

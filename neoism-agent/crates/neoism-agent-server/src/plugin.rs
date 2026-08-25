@@ -2,23 +2,23 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use neoism_agent_core::{
-    EventPayload, NeoismConfig, PluginConfig, PluginScope, PluginSource,
-    PluginStatusInfo, ProviderMessage, ToolListItem,
+    AgentConfigDocument, EventPayload, PluginConfig, ProviderMessage, ToolListItem,
 };
 use neoism_agent_plugin_api::{
-    ProcessHookRequest, ProcessHookResponse, PROCESS_PLUGIN_PROTOCOL,
+    AgentPlugin, PluginHostError, PluginManifest, PluginRegistrar, PluginRuntimeError,
+    ProcessHookRequest, ProcessHookResponse, RegistrySnapshot, RuntimeHook,
+    PROCESS_PLUGIN_PROTOCOL,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::tool::ToolExecutionResult;
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChatHookContext {
@@ -28,7 +28,6 @@ pub(crate) struct ChatHookContext {
     pub(crate) model_id: String,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ShellEnvContext {
@@ -37,14 +36,12 @@ pub(crate) struct ShellEnvContext {
     pub(crate) call_id: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ToolDefinitionContext {
     pub(crate) tool_id: String,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ToolExecutionContext {
@@ -53,95 +50,6 @@ pub(crate) struct ToolExecutionContext {
     pub(crate) session_id: Option<String>,
     pub(crate) message_id: Option<String>,
     pub(crate) call_id: Option<String>,
-}
-
-pub(crate) trait NativePlugin: Send + Sync {
-    fn name(&self) -> &str;
-
-    fn event(&self, _event: &EventPayload) {}
-
-    fn chat_messages_transform(
-        &self,
-        _ctx: &ChatHookContext,
-        _messages: &mut Vec<ProviderMessage>,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn chat_headers(
-        &self,
-        _ctx: &ChatHookContext,
-        _headers: &mut BTreeMap<String, String>,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn chat_options(
-        &self,
-        _ctx: &ChatHookContext,
-        _options: &mut BTreeMap<String, Value>,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn tool_definition(
-        &self,
-        _ctx: &ToolDefinitionContext,
-        _tool: &mut ToolListItem,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn tool_execute_before(
-        &self,
-        _ctx: &ToolExecutionContext,
-        _args: &mut Value,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn tool_execute_after(
-        &self,
-        _ctx: &ToolExecutionContext,
-        _result: &mut ToolExecutionResult,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn shell_env(
-        &self,
-        _ctx: &ShellEnvContext,
-        _env: &mut BTreeMap<String, String>,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy)]
-struct InternalPluginDefinition {
-    id: &'static str,
-    name: &'static str,
-}
-
-const INTERNAL_PLUGIN_DEFINITIONS: &[InternalPluginDefinition] = &[
-    InternalPluginDefinition {
-        id: "neoism.internal.noop",
-        name: "Neoism internal no-op",
-    },
-    InternalPluginDefinition {
-        id: "neoism.internal.config",
-        name: "Neoism internal config",
-    },
-];
-
-struct ConfiguredInternalPlugin {
-    definition: InternalPluginDefinition,
-}
-
-impl NativePlugin for ConfiguredInternalPlugin {
-    fn name(&self) -> &str {
-        self.definition.id
-    }
 }
 
 struct DeclarativePlugin {
@@ -154,6 +62,7 @@ struct DeclarativePlugin {
 
 #[derive(Clone)]
 struct ProcessPlugin {
+    executables: Arc<dyn neoism_agent_service_api::ExecutableService>,
     command: Vec<String>,
     timeout: Duration,
     working_directory: PathBuf,
@@ -168,108 +77,58 @@ enum SandboxPolicy {
     Required,
 }
 
-impl NativePlugin for DeclarativePlugin {
-    fn name(&self) -> &str {
-        &self.id
+impl AgentPlugin for DeclarativePlugin {
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest {
+            id: self.id.clone(),
+            name: self.id.clone(),
+            version: "1.0.0".to_string(),
+            internal: false,
+            disableable: true,
+            capabilities: Vec::new(),
+            requires: Vec::new(),
+            event_namespaces: Vec::new(),
+            api_prefix: None,
+            config: BTreeMap::new(),
+        }
     }
 
-    fn chat_headers(
-        &self,
-        _ctx: &ChatHookContext,
-        headers: &mut BTreeMap<String, String>,
-    ) -> anyhow::Result<()> {
-        headers.extend(self.headers.clone());
-        if let Some(value) = self.invoke("chat.headers", _ctx, &*headers)? {
-            *headers = serde_json::from_value(value)?;
-        }
-        Ok(())
-    }
-
-    fn chat_options(
-        &self,
-        _ctx: &ChatHookContext,
-        options: &mut BTreeMap<String, Value>,
-    ) -> anyhow::Result<()> {
-        options.extend(self.options.clone());
-        if let Some(value) = self.invoke("chat.options", _ctx, &*options)? {
-            *options = serde_json::from_value(value)?;
-        }
-        Ok(())
-    }
-
-    fn shell_env(
-        &self,
-        _ctx: &ShellEnvContext,
-        env: &mut BTreeMap<String, String>,
-    ) -> anyhow::Result<()> {
-        env.extend(self.shell_env.clone());
-        if let Some(value) = self.invoke("shell.env", _ctx, &*env)? {
-            *env = serde_json::from_value(value)?;
-        }
-        Ok(())
-    }
-
-    fn chat_messages_transform(
-        &self,
-        ctx: &ChatHookContext,
-        messages: &mut Vec<ProviderMessage>,
-    ) -> anyhow::Result<()> {
-        if let Some(value) = self.invoke("chat.messages", ctx, &*messages)? {
-            *messages = serde_json::from_value(value)?;
-        }
-        Ok(())
-    }
-
-    fn tool_definition(
-        &self,
-        ctx: &ToolDefinitionContext,
-        tool: &mut ToolListItem,
-    ) -> anyhow::Result<()> {
-        if let Some(value) = self.invoke("tool.definition", ctx, &*tool)? {
-            *tool = serde_json::from_value(value)?;
-        }
-        Ok(())
-    }
-
-    fn tool_execute_before(
-        &self,
-        ctx: &ToolExecutionContext,
-        args: &mut Value,
-    ) -> anyhow::Result<()> {
-        if let Some(value) = self.invoke("tool.before", ctx, &*args)? {
-            *args = value;
-        }
-        Ok(())
-    }
-
-    fn tool_execute_after(
-        &self,
-        ctx: &ToolExecutionContext,
-        result: &mut ToolExecutionResult,
-    ) -> anyhow::Result<()> {
-        if let Some(value) = self.invoke("tool.after", ctx, &*result)? {
-            *result = serde_json::from_value(value)?;
-        }
+    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+        registrar.hook(self.id.clone());
+        registrar.runtime_hook(Arc::new(self.clone()));
         Ok(())
     }
 }
 
-impl DeclarativePlugin {
-    fn invoke<C: Serialize, T: Serialize>(
-        &self,
-        hook: &str,
-        context: &C,
-        value: &T,
-    ) -> anyhow::Result<Option<Value>> {
-        let Some(process) = &self.process else {
-            return Ok(None);
-        };
+impl Clone for DeclarativePlugin {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            headers: self.headers.clone(),
+            options: self.options.clone(),
+            shell_env: self.shell_env.clone(),
+            process: self.process.clone(),
+        }
+    }
+}
+
+impl RuntimeHook for DeclarativePlugin {
+    fn invoke(&self, hook: &str, context: Value, mut value: Value) -> Result<Value, PluginRuntimeError> {
+        let configured = match hook {
+            "chat.headers" => serde_json::to_value(merge_string_map(value, &self.headers)),
+            "chat.options" => serde_json::to_value(merge_value_map(value, &self.options)),
+            "shell.env" => serde_json::to_value(merge_string_map(value, &self.shell_env)),
+            _ => Ok(value),
+        }
+        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+        value = configured;
+        let Some(process) = &self.process else { return Ok(value) };
         process.invoke(ProcessHookRequest {
             protocol: PROCESS_PLUGIN_PROTOCOL.to_string(),
             hook: hook.to_string(),
-            context: serde_json::to_value(context)?,
-            value: serde_json::to_value(value)?,
-        }).map(Some)
+            context,
+            value,
+        }).map_err(|error| PluginRuntimeError::new(error.to_string()))
     }
 }
 
@@ -331,10 +190,34 @@ impl ProcessPlugin {
     }
 
     fn command(&self, program: &str, arguments: &[String]) -> anyhow::Result<Command> {
+        let requested_program = crate::executable::in_directory(program, &self.working_directory);
+        let program = if Path::new(&requested_program).is_absolute() {
+            PathBuf::from(&requested_program)
+        } else {
+            self.executables
+                .resolve(&neoism_agent_service_api::ExecutableRequest::new(
+                    &requested_program,
+                    neoism_agent_service_api::ExecutablePurpose::Plugin,
+                ))
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "plugin executable `{}` is unavailable: {error}; configure the host executable resolver or install it",
+                        requested_program.to_string_lossy()
+                    )
+                })?
+                .path
+        };
         #[cfg(target_os = "linux")]
         if !matches!(self.sandbox, SandboxPolicy::Off) {
-            if let Some(bwrap) = find_executable("bwrap") {
-                let mut command = Command::new(bwrap);
+            let bwrap = self.executables.resolve(
+                &neoism_agent_service_api::ExecutableRequest::new(
+                    "bwrap",
+                    neoism_agent_service_api::ExecutablePurpose::Sandbox,
+                ),
+            );
+            let bwrap_error = bwrap.as_ref().err().map(ToString::to_string);
+            if let Ok(bwrap) = bwrap {
+                let mut command = Command::new(bwrap.path);
                 command.args([
                     "--die-with-parent",
                     "--new-session",
@@ -374,7 +257,7 @@ impl ProcessPlugin {
                 }
                 let directory = self.working_directory.to_string_lossy();
                 command.args(["--ro-bind", directory.as_ref(), directory.as_ref()]);
-                if let Some(parent) = Path::new(program).parent().filter(|path| {
+                if let Some(parent) = program.parent().filter(|path| {
                     path.is_absolute()
                         && !path.starts_with(&self.working_directory)
                         && !["/usr", "/bin", "/lib", "/lib64"]
@@ -403,12 +286,19 @@ impl ProcessPlugin {
                     "--chdir",
                     directory.as_ref(),
                     "--",
-                    program,
+                    program.to_string_lossy().as_ref(),
                 ]);
                 command.args(arguments);
                 return Ok(command);
             }
+            if matches!(self.sandbox, SandboxPolicy::Required) {
+                anyhow::bail!(
+                    "plugin sandbox executable `bwrap` is unavailable: {}; configure the host executable resolver or install bubblewrap",
+                    bwrap_error.unwrap_or_else(|| "not found".to_string())
+                );
+            }
         }
+        #[cfg(not(target_os = "linux"))]
         if matches!(self.sandbox, SandboxPolicy::Required) {
             anyhow::bail!("plugin sandbox is required but bubblewrap is unavailable");
         }
@@ -418,351 +308,97 @@ impl ProcessPlugin {
     }
 }
 
-fn find_executable(name: &str) -> Option<PathBuf> {
-    let request = neoism_agent_service_api::ExecutableRequest::new(
-        name,
-        neoism_agent_service_api::ExecutablePurpose::Sandbox,
-    );
-    crate::lsp::agent_services()
-        .executables
-        .resolve(&request)
-        .ok()
-        .map(|result| result.path)
-}
-
-#[derive(Clone)]
-struct RegisteredPlugin {
-    id: String,
-    name: String,
-    source: PluginSource,
-    scope: PluginScope,
-    options: BTreeMap<String, Value>,
-    plugin: Arc<dyn NativePlugin>,
-}
-
-impl RegisteredPlugin {
-    fn status(&self) -> PluginStatusInfo {
-        PluginStatusInfo {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            source: self.source.clone(),
-            scope: self.scope.clone(),
-            enabled: true,
-            active: true,
-            reason: None,
-            options: self.options.clone(),
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct PluginRegistry {
-    plugins: Arc<RwLock<Vec<RegisteredPlugin>>>,
-    statuses: Arc<RwLock<BTreeMap<String, PluginStatusInfo>>>,
-}
-
-impl PluginRegistry {
-    /// Create an independent registry seeded with runtime registrations. This
-    /// is used as the base for one workspace so configured plugins never leak
-    /// into unrelated locations.
-    pub(crate) fn fork(&self) -> Self {
-        Self {
-            plugins: Arc::new(RwLock::new(
-                self.plugins
-                    .read()
-                    .expect("plugin registry lock poisoned")
-                    .clone(),
-            )),
-            statuses: Arc::new(RwLock::new(
-                self.statuses
-                    .read()
-                    .expect("plugin registry lock poisoned")
-                    .clone(),
-            )),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn register<P>(&self, plugin: P)
-    where
-        P: NativePlugin + 'static,
-    {
-        let id = plugin.name().to_string();
-        let name = plugin.name().to_string();
-        self.register_entry(RegisteredPlugin {
-            id,
-            name,
-            source: PluginSource::Runtime,
-            scope: PluginScope::Session,
-            options: BTreeMap::new(),
-            plugin: Arc::new(plugin),
-        });
-    }
-
-    pub(crate) fn register_configured_plugins(
-        &self,
-        services: &neoism_agent_service_api::AgentServices,
-        config: &NeoismConfig,
-        directory: &str,
-    ) -> Vec<PluginStatusInfo> {
-        let mut statuses = Vec::new();
-        for plugin in configured_plugins(config)
-            .into_iter()
-            .chain(discovered_plugin_configs(services, directory))
-        {
-            let Some(id) = plugin_id(&plugin) else {
-                continue;
-            };
-            let scope = plugin.scope.clone().unwrap_or_default();
-            let options = plugin_options(&plugin);
-            let definition = internal_plugin_definition(&id);
-
-            if !plugin.enabled {
-                self.remove_active(&id);
-                let status = PluginStatusInfo {
-                    id: id.clone(),
-                    name: definition
-                        .map(|definition| definition.name)
-                        .unwrap_or(id.as_str())
-                        .to_string(),
-                    source: definition
-                        .map(|_| PluginSource::Internal)
-                        .unwrap_or(PluginSource::Unknown),
-                    scope,
-                    enabled: false,
-                    active: false,
-                    reason: Some("disabled by config".to_string()),
-                    options,
-                };
-                self.record_status(status.clone());
-                statuses.push(status);
-                continue;
-            }
-
-            let entry = if let Some(definition) = definition {
-                RegisteredPlugin {
-                    id,
-                    name: definition.name.to_string(),
-                    source: PluginSource::Internal,
-                    scope,
-                    options,
-                    plugin: Arc::new(ConfiguredInternalPlugin { definition }),
+pub(crate) fn configured_agent_plugins(
+    services: &neoism_agent_service_api::AgentServices,
+    config: &AgentConfigDocument,
+    directory: &str,
+) -> Vec<Box<dyn AgentPlugin>> {
+    configured_plugins(config)
+        .into_iter()
+        .chain(discovered_plugin_configs(services, directory))
+        .filter(|plugin| plugin.enabled)
+        .filter_map(|plugin| {
+            let id = plugin_id(&plugin)?;
+            match load_declarative_plugin(services, directory, &id, &plugin_options(&plugin)) {
+                Ok(plugin) => Some(Box::new(plugin) as Box<dyn AgentPlugin>),
+                Err(error) => {
+                    tracing::warn!(plugin = %id, %error, "failed to load configured plugin");
+                    None
                 }
-            } else {
-                match load_declarative_plugin(services, directory, &id, &options) {
-                    Ok(plugin) => RegisteredPlugin {
-                        id: plugin.id.clone(),
-                        name: plugin.id.clone(),
-                        source: PluginSource::External,
-                        scope,
-                        options,
-                        plugin: Arc::new(plugin),
-                    },
-                    Err(error) => {
-                        self.remove_active(&id);
-                        let status = PluginStatusInfo {
-                            id: id.clone(),
-                            name: id.clone(),
-                            source: PluginSource::Unknown,
-                            scope,
-                            enabled: true,
-                            active: false,
-                            reason: Some(error.to_string()),
-                            options,
-                        };
-                        self.record_status(status.clone());
-                        statuses.push(status);
-                        continue;
-                    }
-                }
-            };
-            let status = entry.status();
-            self.register_entry(entry);
-            statuses.push(status);
-        }
-        statuses
-    }
-
-    #[cfg(test)]
-    pub(crate) fn statuses(&self) -> Vec<PluginStatusInfo> {
-        self.statuses
-            .read()
-            .expect("plugin registry lock poisoned")
-            .values()
-            .cloned()
-            .collect()
-    }
-
-    fn register_entry(&self, entry: RegisteredPlugin) {
-        let status = entry.status();
-        let mut plugins = self.plugins.write().expect("plugin registry lock poisoned");
-        if let Some(existing) = plugins.iter_mut().find(|plugin| plugin.id == entry.id) {
-            *existing = entry;
-        } else {
-            plugins.push(entry);
-        }
-        drop(plugins);
-        self.record_status(status);
-    }
-
-    fn record_status(&self, status: PluginStatusInfo) {
-        self.statuses
-            .write()
-            .expect("plugin registry lock poisoned")
-            .insert(status.id.clone(), status);
-    }
-
-    fn remove_active(&self, id: &str) {
-        self.plugins
-            .write()
-            .expect("plugin registry lock poisoned")
-            .retain(|plugin| plugin.id != id);
-    }
-
-    fn entries(&self) -> Vec<RegisteredPlugin> {
-        self.plugins
-            .read()
-            .expect("plugin registry lock poisoned")
-            .clone()
-    }
-
-    fn observe<T>(
-        &self,
-        entry: &RegisteredPlugin,
-        hook: &str,
-        result: anyhow::Result<T>,
-    ) -> anyhow::Result<T> {
-        match result {
-            Ok(value) => {
-                self.record_status(entry.status());
-                Ok(value)
             }
-            Err(error) => {
-                let mut status = entry.status();
-                status.active = false;
-                status.reason = Some(format!("{hook} failed: {error}"));
-                self.record_status(status);
-                Err(error).with_context(|| format!("plugin {} {hook} failed", entry.id))
-            }
-        }
-    }
-
-    pub(crate) fn publish_event(&self, event: &EventPayload) {
-        for entry in self.entries() {
-            entry.plugin.event(event);
-        }
-    }
-
-    pub(crate) fn chat_messages_transform(
-        &self,
-        ctx: &ChatHookContext,
-        messages: &mut Vec<ProviderMessage>,
-    ) -> anyhow::Result<()> {
-        for entry in self.entries() {
-            self.observe(
-                &entry,
-                "chat_messages_transform",
-                entry.plugin.chat_messages_transform(ctx, messages),
-            )?;
-        }
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn chat_headers(
-        &self,
-        ctx: &ChatHookContext,
-        headers: &mut BTreeMap<String, String>,
-    ) -> anyhow::Result<()> {
-        for entry in self.entries() {
-            self.observe(&entry, "chat_headers", entry.plugin.chat_headers(ctx, headers))?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn chat_options(
-        &self,
-        ctx: &ChatHookContext,
-        options: &mut BTreeMap<String, Value>,
-    ) -> anyhow::Result<()> {
-        for entry in self.entries() {
-            self.observe(&entry, "chat_options", entry.plugin.chat_options(ctx, options))?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn tool_definition(&self, tool: &mut ToolListItem) -> anyhow::Result<()> {
-        let ctx = ToolDefinitionContext {
-            tool_id: tool.id.clone(),
-        };
-        for entry in self.entries() {
-            self.observe(
-                &entry,
-                "tool_definition",
-                entry.plugin.tool_definition(&ctx, tool),
-            )?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn tool_execute_before(
-        &self,
-        ctx: &ToolExecutionContext,
-        args: &mut Value,
-    ) -> anyhow::Result<()> {
-        for entry in self.entries() {
-            self.observe(
-                &entry,
-                "tool_execute_before",
-                entry.plugin.tool_execute_before(ctx, args),
-            )?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn tool_execute_after(
-        &self,
-        ctx: &ToolExecutionContext,
-        result: &mut ToolExecutionResult,
-    ) -> anyhow::Result<()> {
-        for entry in self.entries() {
-            self.observe(
-                &entry,
-                "tool_execute_after",
-                entry.plugin.tool_execute_after(ctx, result),
-            )?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn shell_env(
-        &self,
-        ctx: &ShellEnvContext,
-        env: &mut BTreeMap<String, String>,
-    ) -> anyhow::Result<()> {
-        for entry in self.entries() {
-            self.observe(&entry, "shell_env", entry.plugin.shell_env(ctx, env))?;
-        }
-        Ok(())
-    }
+        })
+        .collect()
 }
 
-fn configured_plugins(config: &NeoismConfig) -> Vec<PluginConfig> {
-    let mut plugins = config.plugin.clone();
-    for (id, plugin) in &config.plugins {
+fn invoke<T: Serialize + serde::de::DeserializeOwned>(
+    snapshot: &RegistrySnapshot,
+    hook: &str,
+    context: &impl Serialize,
+    value: &mut T,
+) -> anyhow::Result<()> {
+    let context = serde_json::to_value(context)?;
+    let mut next = serde_json::to_value(&*value)?;
+    for runtime in &snapshot.runtime_hooks {
+        next = runtime
+            .invoke(hook, context.clone(), next)
+            .map_err(|error| anyhow::anyhow!("plugin {} {hook} failed: {error}", runtime.plugin_id))?;
+    }
+    *value = serde_json::from_value(next)?;
+    Ok(())
+}
+
+pub(crate) fn publish_event(snapshot: &RegistrySnapshot, event: &EventPayload) {
+    let mut value = Value::Null;
+    let _ = invoke(snapshot, "event", event, &mut value);
+}
+
+pub(crate) fn chat_messages_transform(snapshot: &RegistrySnapshot, ctx: &ChatHookContext, value: &mut Vec<ProviderMessage>) -> anyhow::Result<()> {
+    invoke(snapshot, "chat.messages", ctx, value)
+}
+
+pub(crate) fn chat_options(snapshot: &RegistrySnapshot, ctx: &ChatHookContext, value: &mut BTreeMap<String, Value>) -> anyhow::Result<()> {
+    invoke(snapshot, "chat.options", ctx, value)
+}
+
+pub(crate) fn chat_headers(snapshot: &RegistrySnapshot, ctx: &ChatHookContext, value: &mut BTreeMap<String, String>) -> anyhow::Result<()> {
+    invoke(snapshot, "chat.headers", ctx, value)
+}
+
+pub(crate) fn tool_definition(snapshot: &RegistrySnapshot, value: &mut ToolListItem) -> anyhow::Result<()> {
+    let ctx = ToolDefinitionContext { tool_id: value.id.clone() };
+    invoke(snapshot, "tool.definition", &ctx, value)
+}
+
+pub(crate) fn tool_execute_before(snapshot: &RegistrySnapshot, ctx: &ToolExecutionContext, value: &mut Value) -> anyhow::Result<()> {
+    invoke(snapshot, "tool.before", ctx, value)
+}
+
+pub(crate) fn tool_execute_after(snapshot: &RegistrySnapshot, ctx: &ToolExecutionContext, value: &mut ToolExecutionResult) -> anyhow::Result<()> {
+    invoke(snapshot, "tool.after", ctx, value)
+}
+
+pub(crate) fn shell_env(snapshot: &RegistrySnapshot, ctx: &ShellEnvContext, value: &mut BTreeMap<String, String>) -> anyhow::Result<()> {
+    invoke(snapshot, "shell.env", ctx, value)
+}
+
+fn merge_string_map(value: Value, configured: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut value: BTreeMap<String, String> = serde_json::from_value(value).unwrap_or_default();
+    value.extend(configured.clone());
+    value
+}
+
+fn merge_value_map(value: Value, configured: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    let mut value: BTreeMap<String, Value> = serde_json::from_value(value).unwrap_or_default();
+    value.extend(configured.clone());
+    value
+}
+
+fn configured_plugins(config: &AgentConfigDocument) -> Vec<PluginConfig> {
+    config.plugins.iter().map(|(id, plugin)| {
         let mut plugin = plugin.clone();
-        if plugin
-            .id
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-        {
-            plugin.id = Some(id.clone());
-        }
-        plugins.push(plugin);
-    }
-    plugins
+        plugin.id = Some(id.clone());
+        plugin
+    }).collect()
 }
 
 fn plugin_id(plugin: &PluginConfig) -> Option<String> {
@@ -775,18 +411,7 @@ fn plugin_id(plugin: &PluginConfig) -> Option<String> {
 }
 
 fn plugin_options(plugin: &PluginConfig) -> BTreeMap<String, Value> {
-    let mut options = plugin.options.clone();
-    for (key, value) in &plugin.extra {
-        options.entry(key.clone()).or_insert_with(|| value.clone());
-    }
-    options
-}
-
-fn internal_plugin_definition(id: &str) -> Option<InternalPluginDefinition> {
-    INTERNAL_PLUGIN_DEFINITIONS
-        .iter()
-        .copied()
-        .find(|definition| definition.id == id)
+    plugin.options.clone()
 }
 
 #[derive(Deserialize)]
@@ -796,19 +421,9 @@ struct DeclarativePluginFile {
     #[serde(default)]
     chat_headers: BTreeMap<String, String>,
     #[serde(default)]
-    provider_headers: BTreeMap<String, String>,
-    #[serde(default)]
     chat_options: BTreeMap<String, Value>,
     #[serde(default)]
-    provider_options: BTreeMap<String, Value>,
-    #[serde(default)]
     shell_env: BTreeMap<String, String>,
-    #[serde(default)]
-    chat: BTreeMap<String, Value>,
-    #[serde(default)]
-    provider: BTreeMap<String, Value>,
-    #[serde(default)]
-    shell: BTreeMap<String, Value>,
     #[serde(default)]
     command: Option<Value>,
     #[serde(default)]
@@ -827,38 +442,23 @@ fn load_declarative_plugin(
 ) -> anyhow::Result<DeclarativePlugin> {
     let path = resolve_plugin_manifest(services, directory, id, options).ok_or_else(|| {
         anyhow::anyhow!(
-            "unsupported plugin id; configure a JSON manifest path or place {id}.json under plugin(s)/"
+            "unsupported plugin id; configure a JSON manifest path or place {id}.json under plugins/"
         )
     })?;
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read plugin manifest {}", path.display()))?;
     let manifest: DeclarativePluginFile = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse plugin manifest {}", path.display()))?;
-    let mut headers = manifest.chat_headers;
-    headers.extend(manifest.provider_headers);
-    headers.extend(string_map(
-        manifest
-            .chat
-            .get("headers")
-            .or_else(|| manifest.provider.get("headers")),
-    ));
-    let mut chat_options = manifest.chat_options;
-    chat_options.extend(manifest.provider_options);
-    chat_options.extend(value_map(
-        manifest
-            .chat
-            .get("options")
-            .or_else(|| manifest.chat.get("params"))
-            .or_else(|| manifest.provider.get("options")),
-    ));
-    let mut shell_env = manifest.shell_env;
-    shell_env.extend(string_map(manifest.shell.get("env")));
+    let headers = manifest.chat_headers;
+    let chat_options = manifest.chat_options;
+    let shell_env = manifest.shell_env;
     let process = manifest
         .command
         .as_ref()
         .map(process_plugin)
         .transpose()?
         .map(|command| ProcessPlugin {
+            executables: Arc::clone(&services.executables),
             command,
             timeout: Duration::from_millis(manifest.timeout_ms.unwrap_or(10_000).clamp(100, 120_000)),
             working_directory: path
@@ -921,8 +521,6 @@ fn resolve_plugin_manifest(
 ) -> Option<PathBuf> {
     let explicit = options
         .get("path")
-        .or_else(|| options.get("file"))
-        .or_else(|| options.get("source"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
     let mut candidates = Vec::new();
@@ -934,7 +532,6 @@ fn resolve_plugin_manifest(
     }
     for root in crate::config::roots(services, directory) {
         candidates.push(root.join("plugins").join(format!("{id}.json")));
-        candidates.push(root.join("plugin").join(format!("{id}.json")));
     }
     candidates.into_iter().find(|path| path.is_file())
 }
@@ -954,8 +551,7 @@ fn resolve_path_candidates(services: &neoism_agent_service_api::AgentServices, d
 fn discovered_plugin_configs(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<PluginConfig> {
     let mut configs = Vec::new();
     for root in crate::config::roots(services, directory) {
-        for folder in ["plugins", "plugin"] {
-            let dir = root.join(folder);
+            let dir = root.join("plugins");
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -978,7 +574,6 @@ fn discovered_plugin_configs(services: &neoism_agent_service_api::AgentServices,
                     ..PluginConfig::default()
                 });
             }
-        }
     }
     configs
 }
@@ -989,17 +584,46 @@ mod process_tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    fn standard_executables() -> Arc<dyn neoism_agent_service_api::ExecutableService> {
+        Arc::new(neoism_agent_service_api::StandardExecutableService)
+    }
+
+    #[test]
+    fn plugin_process_honors_injected_path_and_reports_missing_executable() {
+        use crate::executable::test_support::FakeExecutableService;
+
+        let injected = PathBuf::from("/injected/plugin-runtime");
+        let process = ProcessPlugin {
+            executables: Arc::new(FakeExecutableService::with("plugin-runtime", &injected)),
+            command: vec!["plugin-runtime".to_string()],
+            timeout: Duration::from_secs(1),
+            working_directory: std::env::current_dir().unwrap(),
+            sandbox: SandboxPolicy::Off,
+            network: false,
+        };
+        assert_eq!(
+            process.command("plugin-runtime", &[]).unwrap().get_program(),
+            injected.as_os_str()
+        );
+
+        let missing = ProcessPlugin {
+            executables: Arc::new(FakeExecutableService::default()),
+            ..process
+        };
+        let error = missing.command("plugin-runtime", &[]).unwrap_err().to_string();
+        assert!(error.contains("plugin executable `plugin-runtime` is unavailable"));
+        assert!(error.contains("install it"));
+    }
+
     #[test]
     fn declarative_manifest_uses_only_camel_case_public_fields() {
         let canonical: DeclarativePluginFile = serde_json::from_value(json!({
             "chatHeaders": { "X-Chat": "yes" },
-            "providerHeaders": { "X-Provider": "yes" },
             "chatOptions": { "temperature": 0 },
             "timeoutMs": 500
         }))
         .unwrap();
         assert_eq!(canonical.chat_headers["X-Chat"], "yes");
-        assert_eq!(canonical.provider_headers["X-Provider"], "yes");
         assert_eq!(canonical.chat_options["temperature"], 0);
         assert_eq!(canonical.timeout_ms, Some(500));
 
@@ -1017,6 +641,7 @@ mod process_tests {
     #[test]
     fn subprocess_hook_uses_versioned_json_protocol() {
         let process = ProcessPlugin {
+            executables: standard_executables(),
             command: vec![
                 "sh".to_string(),
                 "-c".to_string(),
@@ -1041,10 +666,14 @@ mod process_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn subprocess_hook_runs_in_required_bubblewrap_sandbox() {
-        if find_executable("bwrap").is_none() {
+        if standard_executables().resolve(&neoism_agent_service_api::ExecutableRequest::new(
+            "bwrap",
+            neoism_agent_service_api::ExecutablePurpose::Sandbox,
+        )).is_err() {
             return;
         }
         let process = ProcessPlugin {
+            executables: standard_executables(),
             command: vec![
                 "sh".to_string(),
                 "-c".to_string(),
@@ -1070,64 +699,29 @@ mod process_tests {
         failing: Arc<AtomicBool>,
     }
 
-    impl NativePlugin for RecoveringPlugin {
-        fn name(&self) -> &str {
-            "test.recovering"
-        }
-
-        fn shell_env(
-            &self,
-            _ctx: &ShellEnvContext,
-            _env: &mut BTreeMap<String, String>,
-        ) -> anyhow::Result<()> {
+    impl RuntimeHook for RecoveringPlugin {
+        fn invoke(&self, _hook: &str, _context: Value, value: Value) -> Result<Value, PluginRuntimeError> {
             if self.failing.load(Ordering::SeqCst) {
-                anyhow::bail!("intentional failure");
+                return Err(PluginRuntimeError::new("intentional failure"));
             }
-            Ok(())
+            Ok(value)
         }
     }
 
     #[test]
     fn hook_failures_update_health_and_success_recovers() {
-        let registry = PluginRegistry::default();
         let failing = Arc::new(AtomicBool::new(true));
-        registry.register(RecoveringPlugin {
-            failing: failing.clone(),
-        });
-        let context = ShellEnvContext {
-            cwd: "/tmp".to_string(),
-            session_id: None,
-            call_id: None,
-        };
-        assert!(registry.shell_env(&context, &mut BTreeMap::new()).is_err());
-        let status = registry.statuses().pop().unwrap();
-        assert!(!status.active);
-        assert!(status.reason.unwrap().contains("intentional failure"));
+        let hook = neoism_agent_plugin_api::RegisteredRuntimeHook::for_test(
+            "dev.neoism.test",
+            Arc::new(RecoveringPlugin { failing: failing.clone() }),
+        );
+        assert!(hook.invoke("shell.env", Value::Null, Value::Null).is_err());
+        assert!(!hook.lifecycle().active);
+        assert!(hook.lifecycle().reason.unwrap().contains("intentional failure"));
 
         failing.store(false, Ordering::SeqCst);
-        registry.shell_env(&context, &mut BTreeMap::new()).unwrap();
-        let status = registry.statuses().pop().unwrap();
-        assert!(status.active);
-        assert!(status.reason.is_none());
+        hook.invoke("shell.env", Value::Null, Value::Null).unwrap();
+        assert!(hook.lifecycle().active);
+        assert!(hook.lifecycle().reason.is_none());
     }
-}
-
-fn string_map(value: Option<&Value>) -> BTreeMap<String, String> {
-    value
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-        .filter_map(|(key, value)| {
-            value.as_str().map(|value| (key.clone(), value.to_string()))
-        })
-        .collect()
-}
-
-fn value_map(value: Option<&Value>) -> BTreeMap<String, Value> {
-    value
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
 }

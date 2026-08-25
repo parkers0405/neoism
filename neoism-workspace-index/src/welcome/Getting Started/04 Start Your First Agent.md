@@ -25,12 +25,12 @@ Global permission defaults live in the `agent.permission` block of `config.json`
       "edit": "ask",
       "bash": "ask",
     },
-    "dangerously-skip-permissions": false,
+    "dangerouslySkipPermissions": false,
   },
 }
 ```
 
-`/yolo` auto-approves prompts for the current session until toggled again. The persistent `dangerously-skip-permissions` setting is broader. Both are intentionally explicit; neither is needed for normal onboarding.
+`/yolo` auto-approves prompts for the current session until toggled again. The persistent `dangerouslySkipPermissions` setting is broader. Both are intentionally explicit; neither is needed for normal onboarding.
 
 ## Choose a model and provider
 

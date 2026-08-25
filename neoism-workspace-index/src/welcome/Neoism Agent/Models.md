@@ -17,16 +17,16 @@ Use `/model` in an agent pane or open the model picker from the agent header. Th
 {
   "agent": {
     "model": "anthropic/claude-sonnet-4-5",
-    "small-model": "anthropic/claude-haiku-4-5",
+    "smallModel": "anthropic/claude-haiku-4-5",
     "variant": "high",
-    "text-verbosity": "low"
+    "textVerbosity": "low"
   }
 }
 ```
 
-`model` is the normal default. `small-model` is available for lightweight internal work. `variant` selects a provider/model variant when one exists.
+`model` is the normal default. `smallModel` is available for lightweight internal work. `variant` selects a provider/model variant when one exists.
 
-`text-verbosity` controls response length for supported models. Valid values are `low`, `medium`, and `high`. Neoism defaults compatible non-chat GPT-5.x models to `low`, matching OpenCode v2.
+`textVerbosity` controls response length for supported models. Valid values are `low`, `medium`, and `high`. Neoism defaults compatible non-chat GPT-5.x models to `low`, matching OpenCode v2.
 
 ## Resolution order
 
@@ -49,7 +49,7 @@ Use `/variant` for the current session:
 }
 ```
 
-Values are model-specific. Neoism accepts compatible aliases such as `reasoning-effort`, `thinking`, and `reasoning`, but `variant` is canonical.
+Values are model-specific. Use the canonical `variant` field.
 
 ## Per-agent models
 
@@ -69,7 +69,7 @@ Values are model-specific. Neoism accepts compatible aliases such as `reasoning-
 }
 ```
 
-An agent can also set `temperature`, `top-p`, and `max-steps` where supported.
+An agent can also set `temperature`, `topP`, and `maxSteps` where supported.
 
 ## Missing models
 

@@ -43,7 +43,7 @@ const DEFAULT_MAX_AGENT_STEPS: u64 = u64::MAX;
 const CONTINUE_AFTER_LENGTH_MESSAGE: &str =
     "Continue exactly where the previous response stopped. Do not repeat completed content.";
 const CONTINUE_AFTER_COMPACTION_MESSAGE: &str =
-    "The earlier conversation was compacted into the summary above. Continue the task from where it left off using that summary as context. Do not restart or repeat already-completed work. If the summary lists Durable Memory Candidates, persist any that are not already in memory with the memory tools before continuing.";
+    "The earlier conversation was compacted into the summary above. Continue the task from where it left off using that summary as context. Do not restart or repeat already-completed work.";
 const CONTINUE_ACTIVE_GOAL_MESSAGE: &str =
     "Continue working toward the active persistent goal. Do not stop just because one batch of work is done; keep going until the goal is genuinely accomplished. When it is fully done, call the complete_goal tool (status=complete) with a thorough summary instead of replying with plain text — that is the only way to end this loop. If you are truly stuck and need the user, call complete_goal with status=blocked and explain exactly what you need.";
 const COMPACTION_BUFFER_TOKENS: u64 = 20_000;
@@ -79,11 +79,29 @@ pub(crate) async fn append_prompt(
     let session_id = Id::parse(IdKind::Session, session_id.to_string())
         .map_err(|_| ApiError::not_found("Session not found"))?;
     let session_id_text = session_id.to_string();
-    let workspace = state
-        .inner
-        .workspace_runtimes
-        .acquire(&info.directory, &state.inner.plugins, state.services())
-        .await;
+    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+        state,
+        &info.directory,
+    )
+    .await;
+    let goals_enabled = crate::agent_tool_registry::plugin_present(
+        &workspace.snapshot,
+        "dev.neoism.goals",
+    );
+    if request
+        .parts
+        .iter()
+        .any(|part| matches!(part, PromptPart::Subtask { .. }))
+        && !workspace
+            .snapshot
+            .contributions
+            .contains_key("Part:dev.neoism.subagents/task")
+    {
+        return Err(ApiError::bad_request(
+            "Subtask parts are disabled for this workspace",
+        ));
+    }
+    let workspace = workspace.runtime;
     if create_stub_reply && state.inner.runs.read().await.contains_key(&session_id_text) {
         return Err(ApiError::conflict(SESSION_RUNNING_CONFLICT));
     }
@@ -107,7 +125,7 @@ pub(crate) async fn append_prompt(
         let trimmed = name.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     });
-    let agents = crate::plugins::agent_catalog(state, &info.directory)?;
+    let agents = crate::plugins::agent_catalog(state, &info.directory).await?;
     let agent_name = agent
         .or_else(|| info.agent.clone())
         .unwrap_or_else(|| agents.default_agent().to_string());
@@ -374,6 +392,7 @@ pub(crate) async fn append_prompt(
         &history,
         &reply_model.model_id,
         run_system.as_deref(),
+        goals_enabled,
     );
     if compacted_before_first_step {
         push_compaction_continuation(&mut provider_messages, &history);
@@ -391,9 +410,7 @@ pub(crate) async fn append_prompt(
             MAX_STEPS_REMINDER,
         ));
     }
-    workspace
-        .plugins
-        .chat_messages_transform(&chat_hook_ctx, &mut provider_messages)
+    plugin::chat_messages_transform(&workspace.snapshot(), &chat_hook_ctx, &mut provider_messages)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let started = start_assistant_step(
         state,
@@ -476,10 +493,18 @@ pub(crate) async fn append_prompt(
         // deciding whether to keep going, otherwise `active_goal_should_continue`
         // reads the stale `Active` goal and re-prods the model forever, looping
         // on a goal it already resolved.
-        refresh_persisted_goal(state, &session_id_text, &mut info).await;
+        if goals_enabled {
+            refresh_persisted_goal(state, &session_id_text, &mut info).await;
+        }
         let Some(followup) =
             (steered > 0).then_some(FollowupReason::Steer).or_else(|| {
-                followup_reason(&info, &final_assistant_message, step_number, step_limit)
+                followup_reason(
+                    &info,
+                    &final_assistant_message,
+                    step_number,
+                    step_limit,
+                    goals_enabled,
+                )
             })
         else {
             break;
@@ -509,6 +534,7 @@ pub(crate) async fn append_prompt(
             &history,
             &reply_model.model_id,
             run_system.as_deref(),
+            goals_enabled,
         );
         if compacted_before_followup {
             push_compaction_continuation(&mut provider_messages, &history);
@@ -531,9 +557,7 @@ pub(crate) async fn append_prompt(
                 CONTINUE_ACTIVE_GOAL_MESSAGE,
             ));
         }
-        workspace
-            .plugins
-            .chat_messages_transform(&chat_hook_ctx, &mut provider_messages)
+            plugin::chat_messages_transform(&workspace.snapshot(), &chat_hook_ctx, &mut provider_messages)
             .map_err(|error| ApiError::internal(error.to_string()))?;
         final_assistant_message = run_followup_assistant_step(
             state,
@@ -721,6 +745,7 @@ fn followup_reason(
     message: &MessageWithParts,
     step_number: u64,
     step_limit: u64,
+    goals_enabled: bool,
 ) -> Option<FollowupReason> {
     if message
         .parts
@@ -738,7 +763,7 @@ fn followup_reason(
     if finish_requires_text_continuation(message) {
         return Some(FollowupReason::TextContinuation);
     }
-    if active_goal_should_continue(info, message, step_number, step_limit) {
+    if goals_enabled && active_goal_should_continue(info, message, step_number, step_limit) {
         return Some(FollowupReason::ActiveGoal);
     }
     None
@@ -1583,7 +1608,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(root.join(".agent")).unwrap();
-        std::fs::write(root.join(".agent/agent.json"), r#"{ "text-verbosity": "high" }"#)
+        std::fs::write(root.join(".agent/agent.json"), r#"{ "textVerbosity": "high" }"#)
             .unwrap();
 
         assert_eq!(
@@ -1644,7 +1669,7 @@ mod tests {
 
         let info = test_session_info(None);
         assert_eq!(
-            followup_reason(&info, &message, 1, 8),
+            followup_reason(&info, &message, 1, 8, true),
             Some(FollowupReason::Tool)
         );
     }
@@ -1655,7 +1680,7 @@ mod tests {
         let info = test_session_info(Some("finish all tasks"));
 
         assert_eq!(
-            followup_reason(&info, &message, 1, 8),
+            followup_reason(&info, &message, 1, 8, true),
             Some(FollowupReason::ActiveGoal)
         );
     }
@@ -1665,7 +1690,7 @@ mod tests {
         let message = assistant_message_with_finish("stop");
         let info = test_session_info(Some("finish all tasks"));
 
-        assert_eq!(followup_reason(&info, &message, 8, 8), None);
+        assert_eq!(followup_reason(&info, &message, 8, 8, true), None);
     }
 
     #[test]
@@ -1678,7 +1703,7 @@ mod tests {
 
         // The agent marked the goal complete, so a normal stop ends the loop
         // instead of being prodded to keep going.
-        assert_eq!(followup_reason(&info, &message, 1, 8), None);
+        assert_eq!(followup_reason(&info, &message, 1, 8, true), None);
     }
 
     #[test]
@@ -1689,7 +1714,7 @@ mod tests {
         goal.status = neoism_agent_core::GoalStatus::Blocked;
         info.set_goal(&goal);
 
-        assert_eq!(followup_reason(&info, &message, 1, 8), None);
+        assert_eq!(followup_reason(&info, &message, 1, 8, true), None);
     }
 
     #[tokio::test]
@@ -1718,7 +1743,7 @@ mod tests {
         let mut info = stored.clone();
         let message = assistant_message_with_finish("stop");
         assert_eq!(
-            followup_reason(&info, &message, 1, 8),
+            followup_reason(&info, &message, 1, 8, true),
             Some(FollowupReason::ActiveGoal)
         );
 
@@ -1731,7 +1756,7 @@ mod tests {
 
         // The stale snapshot would still loop...
         assert_eq!(
-            followup_reason(&info, &message, 1, 8),
+            followup_reason(&info, &message, 1, 8, true),
             Some(FollowupReason::ActiveGoal)
         );
         // ...until the refresh pulls the resolved status in, ending the loop.
@@ -1740,7 +1765,13 @@ mod tests {
             info.goal().unwrap().status,
             neoism_agent_core::GoalStatus::Complete
         );
-        assert_eq!(followup_reason(&info, &message, 1, 8), None);
+        assert_eq!(followup_reason(&info, &message, 1, 8, true), None);
+
+        assert_eq!(
+            followup_reason(&test_session_info(Some("finish all tasks")), &message, 1, 8, false),
+            None,
+            "disabled goals must not trigger autonomous follow-up",
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2019,6 +2050,7 @@ mod tests {
             provider_messages[0].content,
             CONTINUE_AFTER_COMPACTION_MESSAGE
         );
+        assert!(!provider_messages[0].content.to_ascii_lowercase().contains("memory"));
     }
 
     fn user_message(session_id: Id, text: &str) -> MessageWithParts {
@@ -2187,21 +2219,16 @@ async fn build_provider_generation_request(
     if let Some(hook_ctx) = hook_ctx {
         let workspace = if let Some(directory) = directory {
             Some(
-                state
-                    .inner
-                    .workspace_runtimes
-                    .acquire(directory, &state.inner.plugins, state.services())
-                    .await,
+                state.workspace_runtime(directory).await,
             )
         } else {
             None
         };
-        let plugins = workspace
-            .as_ref()
-            .map(|runtime| &runtime.plugins)
-            .unwrap_or(&state.inner.plugins);
-        let _ = plugins.chat_options(hook_ctx, &mut options);
-        let _ = plugins.chat_headers(hook_ctx, &mut headers);
+        if let Some(runtime) = workspace.as_ref() {
+            let snapshot = runtime.snapshot();
+            let _ = plugin::chat_options(&snapshot, hook_ctx, &mut options);
+            let _ = plugin::chat_headers(&snapshot, hook_ctx, &mut headers);
+        }
     }
     ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),

@@ -1,14 +1,13 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
 use neoism_agent_core::LspConfig;
 use serde_json::Value;
 
-use super::super::lsp_languages::LANGUAGE_SPECS;
 use super::{config::apply_config, AdapterOrigin, LanguageAdapter};
 
 const ADAPTER_CACHE_TTL: Duration = Duration::from_millis(250);
@@ -18,27 +17,35 @@ const MAX_CACHED_ROOTS: usize = 64;
 struct CachedAdapters {
     loaded_at: Instant,
     snapshot_identity: String,
+    capability_generation: u64,
     adapters: Vec<LanguageAdapter>,
 }
 
-static ADAPTER_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedAdapters>>> = OnceLock::new();
-pub(in crate::lsp) fn adapters_for_root(root: &Path) -> Vec<LanguageAdapter> {
-    let services = crate::standard_services();
-    adapters_for_root_with(&services, root)
+#[derive(Default)]
+pub(in crate::lsp) struct AdapterCache {
+    entries: Mutex<HashMap<PathBuf, CachedAdapters>>,
 }
 
-pub(in crate::lsp) fn adapters_for_root_with(services: &neoism_agent_service_api::AgentServices, root: &Path) -> Vec<LanguageAdapter> {
+pub(in crate::lsp) fn adapters_for_root_with(
+    cache: &AdapterCache,
+    services: &neoism_agent_service_api::AgentServices,
+    root: &Path,
+) -> Vec<LanguageAdapter> {
+    let capability_snapshot = services.language_capabilities.snapshot();
+    let capability_generation = capability_snapshot.generation;
     let snapshot_identity = crate::config::snapshot(services, &root.to_string_lossy()).map(|snapshot| snapshot.identity).unwrap_or_default();
-    let cache = ADAPTER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(cache) = cache.lock() {
+    if let Ok(cache) = cache.entries.lock() {
         if let Some(cached) = cache.get(root) {
-            if cached.loaded_at.elapsed() < ADAPTER_CACHE_TTL && cached.snapshot_identity == snapshot_identity {
+            if cached.loaded_at.elapsed() < ADAPTER_CACHE_TTL
+                && cached.snapshot_identity == snapshot_identity
+                && cached.capability_generation == capability_generation
+            {
                 return cached.adapters.clone();
             }
         }
     }
-    let adapters = resolve_adapters_uncached(services, root);
-    if let Ok(mut cache) = cache.lock() {
+    let adapters = resolve_adapters_uncached(services, root, &capability_snapshot);
+    if let Ok(mut cache) = cache.entries.lock() {
         if cache.len() >= MAX_CACHED_ROOTS && !cache.contains_key(root) {
             if let Some(oldest) = cache
                 .iter()
@@ -53,6 +60,7 @@ pub(in crate::lsp) fn adapters_for_root_with(services: &neoism_agent_service_api
             CachedAdapters {
                 loaded_at: Instant::now(),
                 snapshot_identity,
+                capability_generation,
                 adapters: adapters.clone(),
             },
         );
@@ -61,18 +69,20 @@ pub(in crate::lsp) fn adapters_for_root_with(services: &neoism_agent_service_api
 }
 
 #[cfg(test)]
-pub(in crate::lsp) fn invalidate_adapter_cache(root: &Path) {
-    if let Some(cache) = ADAPTER_CACHE.get() {
-        if let Ok(mut cache) = cache.lock() {
-            cache.remove(root);
-        }
+pub(in crate::lsp) fn invalidate_adapter_cache(cache: &AdapterCache, root: &Path) {
+    if let Ok(mut cache) = cache.entries.lock() {
+        cache.remove(root);
     }
 }
 
-fn resolve_adapters_uncached(services: &neoism_agent_service_api::AgentServices, root: &Path) -> Vec<LanguageAdapter> {
-    let mut adapters = LANGUAGE_SPECS
+fn resolve_adapters_uncached(
+    services: &neoism_agent_service_api::AgentServices,
+    root: &Path,
+    capability_snapshot: &neoism_agent_service_api::LanguageCapabilitySnapshot,
+) -> Vec<LanguageAdapter> {
+    let mut adapters = capability_snapshot.languages
         .iter()
-        .map(LanguageAdapter::from_builtin)
+        .map(LanguageAdapter::from_capability)
         .collect::<Vec<_>>();
     let Ok(loaded) = crate::config::load(services, &root.to_string_lossy()) else {
         return adapters;
@@ -97,10 +107,8 @@ fn resolve_adapters_uncached(services: &neoism_agent_service_api::AgentServices,
         };
         let referenced_adapter = object
             .get("adapter")
-            .or_else(|| object.get("adapterId"))
             .and_then(Value::as_str);
-        let disabled = object.get("enabled").and_then(Value::as_bool) == Some(false)
-            || object.get("disabled").and_then(Value::as_bool) == Some(true);
+        let disabled = object.get("enabled").and_then(Value::as_bool) == Some(false);
         if disabled {
             adapters.retain(|adapter| {
                 adapter.id != id && referenced_adapter != Some(adapter.id.as_str())

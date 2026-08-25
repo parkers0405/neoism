@@ -6,10 +6,11 @@ use std::process::{Command, Stdio};
 use neoism_agent_core::{VcsApplyResult, VcsFileDiff, VcsFileStatus, VcsInfo};
 use serde_json::{json, Value};
 
-pub fn info(directory: &str) -> VcsInfo {
+pub fn info(services: &neoism_agent_service_api::AgentServices, directory: &str) -> VcsInfo {
     VcsInfo {
-        branch: git_output(directory, &["branch", "--show-current"]),
+        branch: git_output(services, directory, &["branch", "--show-current"]),
         default_branch: git_output(
+            services,
             directory,
             &["symbolic-ref", "refs/remotes/origin/HEAD"],
         )
@@ -17,13 +18,13 @@ pub fn info(directory: &str) -> VcsInfo {
     }
 }
 
-pub fn status(directory: &str) -> Vec<VcsFileStatus> {
-    let Some(output) = git_output_raw(directory, &["status", "--porcelain=v1", "-z"])
+pub fn status(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<VcsFileStatus> {
+    let Some(output) = git_output_raw(services, directory, &["status", "--porcelain=v1", "-z"])
     else {
         return Vec::new();
     };
 
-    let mut stats = diff_stats(directory);
+    let mut stats = diff_stats(services, directory);
     let mut statuses = Vec::new();
     let mut fields = output
         .split(|byte| *byte == 0)
@@ -38,7 +39,7 @@ pub fn status(directory: &str) -> Vec<VcsFileStatus> {
             fields.next();
         }
         let (additions, deletions) = stats.remove(&path).unwrap_or_else(|| {
-            if normalize_status(&code) == "added" && is_untracked(directory, &path) {
+            if normalize_status(&code) == "added" && is_untracked(services, directory, &path) {
                 stat_untracked(directory, &path)
             } else {
                 (0, 0)
@@ -56,16 +57,16 @@ pub fn status(directory: &str) -> Vec<VcsFileStatus> {
     statuses
 }
 
-pub fn diff(directory: &str) -> Vec<VcsFileDiff> {
-    let statuses = status(directory);
-    let mut stats = diff_stats(directory);
+pub fn diff(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<VcsFileDiff> {
+    let statuses = status(services, directory);
+    let mut stats = diff_stats(services, directory);
     statuses
         .into_iter()
         .filter_map(|file| {
-            let patch = if file.status == "added" && is_untracked(directory, &file.path) {
+            let patch = if file.status == "added" && is_untracked(services, directory, &file.path) {
                 untracked_patch(directory, &file.path)
             } else {
-                git_output(directory, &["diff", "HEAD", "--", &file.path])
+                git_output(services, directory, &["diff", "HEAD", "--", &file.path])
             };
             let (added, removed) = stats.remove(&file.path).unwrap_or_else(|| {
                 patch
@@ -92,11 +93,11 @@ pub fn diff(directory: &str) -> Vec<VcsFileDiff> {
         .collect()
 }
 
-pub fn diff_raw(directory: &str) -> String {
-    git_output(directory, &["diff", "HEAD"]).unwrap_or_default()
+pub fn diff_raw(services: &neoism_agent_service_api::AgentServices, directory: &str) -> String {
+    git_output(services, directory, &["diff", "HEAD"]).unwrap_or_default()
 }
 
-pub fn apply(directory: &str, patch: &str) -> VcsApplyResult {
+pub fn apply(services: &neoism_agent_service_api::AgentServices, directory: &str, patch: &str) -> VcsApplyResult {
     if patch.trim().is_empty() {
         return VcsApplyResult {
             success: false,
@@ -104,7 +105,11 @@ pub fn apply(directory: &str, patch: &str) -> VcsApplyResult {
         };
     }
 
-    let mut child = match crate::windows_process::std_command("git")
+    let git = match resolve_git(services) {
+        Ok(git) => git,
+        Err(error) => return VcsApplyResult { success: false, error: Some(error.to_string()) },
+    };
+    let mut child = match crate::windows_process::std_command(git)
         .args(["apply", "--whitespace=nowarn", "--"])
         .current_dir(directory)
         .stdin(Stdio::piped())
@@ -150,8 +155,8 @@ pub fn apply(directory: &str, patch: &str) -> VcsApplyResult {
     }
 }
 
-fn diff_stats(directory: &str) -> BTreeMap<String, (u64, u64)> {
-    let Some(output) = git_output(directory, &["diff", "--numstat", "HEAD"]) else {
+fn diff_stats(services: &neoism_agent_service_api::AgentServices, directory: &str) -> BTreeMap<String, (u64, u64)> {
+    let Some(output) = git_output(services, directory, &["diff", "--numstat", "HEAD"]) else {
         return BTreeMap::new();
     };
     output
@@ -166,18 +171,27 @@ fn diff_stats(directory: &str) -> BTreeMap<String, (u64, u64)> {
         .collect()
 }
 
-fn git_output(directory: &str, args: &[&str]) -> Option<String> {
-    let output = git_output_raw(directory, args)?;
+fn git_output(services: &neoism_agent_service_api::AgentServices, directory: &str, args: &[&str]) -> Option<String> {
+    let output = git_output_raw(services, directory, args)?;
     let text = String::from_utf8_lossy(&output).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 
-fn git_output_raw(directory: &str, args: &[&str]) -> Option<Vec<u8>> {
-    let mut command = Command::new("git");
+fn git_output_raw(services: &neoism_agent_service_api::AgentServices, directory: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let mut command = Command::new(resolve_git(services).ok()?);
     command.args(args).current_dir(directory);
     crate::tool::process::set_new_process_group_std(&mut command);
     let output = command.output().ok()?;
     output.status.success().then_some(output.stdout)
+}
+
+fn resolve_git(services: &neoism_agent_service_api::AgentServices) -> anyhow::Result<PathBuf> {
+    crate::executable::resolve(
+        services,
+        "git",
+        neoism_agent_service_api::ExecutablePurpose::VersionControl,
+        "Git version-control",
+    )
 }
 
 fn normalize_status(code: &str) -> &'static str {
@@ -190,8 +204,9 @@ fn normalize_status(code: &str) -> &'static str {
     }
 }
 
-fn is_untracked(directory: &str, path: &str) -> bool {
+fn is_untracked(services: &neoism_agent_service_api::AgentServices, directory: &str, path: &str) -> bool {
     git_output(
+        services,
         directory,
         &["ls-files", "--others", "--exclude-standard", "--", path],
     )
@@ -277,6 +292,26 @@ mod tests {
 
     use super::*;
 
+    fn services() -> neoism_agent_service_api::AgentServices {
+        crate::standard_services()
+    }
+
+    #[test]
+    fn git_resolution_honors_injected_path_and_reports_missing_git() {
+        use crate::executable::test_support::FakeExecutableService;
+        use std::sync::Arc;
+
+        let injected = PathBuf::from("/injected/tools/git");
+        let mut services = services();
+        services.executables = Arc::new(FakeExecutableService::with("git", &injected));
+        assert_eq!(resolve_git(&services).unwrap(), injected);
+
+        services.executables = Arc::new(FakeExecutableService::default());
+        let error = resolve_git(&services).unwrap_err().to_string();
+        assert!(error.contains("Git version-control executable `git` is unavailable"));
+        assert!(error.contains("install it"));
+    }
+
     struct TempRepo {
         path: PathBuf,
     }
@@ -318,7 +353,7 @@ mod tests {
 
         fs::write(repo.path.join("file.txt"), "one\nthree\nfour\n").unwrap();
 
-        let diffs = diff(repo.dir());
+        let diffs = diff(&services(), repo.dir());
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].path, "file.txt");
         assert_eq!(diffs[0].file, "file.txt");
@@ -339,7 +374,7 @@ mod tests {
         let repo = TempRepo::new();
         fs::write(repo.path.join("new.txt"), "alpha\nbeta\n").unwrap();
 
-        let diffs = diff(repo.dir());
+        let diffs = diff(&services(), repo.dir());
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].path, "new.txt");
         assert_eq!(diffs[0].file, "new.txt");
@@ -364,7 +399,7 @@ mod tests {
         fs::write(repo.path.join("file.txt"), "one\nthree\n").unwrap();
         fs::write(repo.path.join("new.txt"), "alpha\nbeta\n").unwrap();
 
-        let statuses = status(repo.dir());
+        let statuses = status(&services(), repo.dir());
         let modified = statuses
             .iter()
             .find(|status| status.file == "file.txt")
@@ -400,14 +435,14 @@ index 5626abf..814f4a4 100644
 -one
 +two
 ";
-        let result = apply(repo.dir(), patch);
+        let result = apply(&services(), repo.dir(), patch);
         assert!(result.success, "{:?}", result.error);
         assert_eq!(
             fs::read_to_string(repo.path.join("file.txt")).unwrap(),
             "two\n"
         );
 
-        let result = apply(repo.dir(), patch);
+        let result = apply(&services(), repo.dir(), patch);
         assert!(!result.success);
         assert!(result
             .error

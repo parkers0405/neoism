@@ -84,9 +84,8 @@ impl TextDocumentSyncCapabilities {
         };
         if let Some(kind) = value.as_u64() {
             let change = TextDocumentSyncKind::from_number(kind);
-            // The legacy numeric form predates TextDocumentSyncOptions. A
-            // non-None kind still establishes a didOpen/didClose lifecycle,
-            // but it does not advertise didSave.
+            // The protocol's numeric shorthand establishes didOpen/didClose
+            // for a non-None kind but does not advertise didSave.
             return Self {
                 change,
                 open_close: change != TextDocumentSyncKind::None,
@@ -172,17 +171,25 @@ pub(crate) type StdioLspClient = LspClient;
 /// On unix the program goes straight to exec (the command's PATH already
 /// carries the managed entries).
 #[cfg(not(windows))]
-fn build_lsp_command(program: &str, args: &[String]) -> Command {
+fn build_lsp_command(
+    _services: &neoism_agent_service_api::AgentServices,
+    program: &str,
+    args: &[String],
+) -> Result<Command> {
     let mut command = Command::new(program);
     command.args(args);
-    command
+    Ok(command)
 }
 
 /// Windows `CreateProcess` cannot exec `.cmd`/`.bat` npm shims directly, so
 /// resolve the concrete PATHEXT target first and route batch shims through
 /// `cmd /C`.
 #[cfg(windows)]
-fn build_lsp_command(program: &str, args: &[String]) -> Command {
+fn build_lsp_command(
+    services: &neoism_agent_service_api::AgentServices,
+    program: &str,
+    args: &[String],
+) -> Result<Command> {
     let resolved = PathBuf::from(program);
     let is_batch =
         resolved
@@ -193,23 +200,41 @@ fn build_lsp_command(program: &str, args: &[String]) -> Command {
                     || extension.eq_ignore_ascii_case("bat")
             });
     let mut command = if is_batch {
-        let mut command = Command::new("cmd");
+        let cmd = crate::executable::resolve(
+            services,
+            "cmd",
+            neoism_agent_service_api::ExecutablePurpose::PlatformShell,
+            "Windows command interpreter",
+        )?;
+        let mut command = Command::new(cmd);
         command.arg("/C").arg(&resolved);
         command
     } else {
         Command::new(&resolved)
     };
     command.args(args);
-    command
+    Ok(command)
 }
 
 impl LspClient {
     #[cfg(test)]
     pub(crate) fn spawn(root: &Path, command: &[String]) -> Result<Self> {
-        Self::spawn_with_env(root, root, "", "", &[], command, &BTreeMap::new())
+        Self::spawn_with_env(
+            &crate::standard_services(),
+            std::sync::Weak::new(),
+            root,
+            root,
+            "",
+            "",
+            &[],
+            command,
+            &BTreeMap::new(),
+        )
     }
 
     pub(crate) fn spawn_with_env(
+        services: &neoism_agent_service_api::AgentServices,
+        service: std::sync::Weak<super::lsp_service::LspService>,
         project_root: &Path,
         workspace_root: &Path,
         server_id: &str,
@@ -221,7 +246,7 @@ impl LspClient {
         let (program, args) = command
             .split_first()
             .ok_or_else(|| anyhow!("LSP command is empty"))?;
-        let mut command_proc = build_lsp_command(program, args);
+        let mut command_proc = build_lsp_command(services, program, args)?;
         command_proc.current_dir(project_root).envs(env);
         // Own process group/tree so helpers the server forks (rust-analyzer
         // proc-macro servers, npm shim children) can be reaped with it on
@@ -292,6 +317,7 @@ impl LspClient {
             Box::new(BufReader::new(stdout)),
             Box::new(stdin),
             LspTransportHandle::Stdio { child, stderr_tail },
+            service,
         )
     }
 
@@ -299,6 +325,7 @@ impl LspClient {
     /// loss is recorded by the shared reader and causes the service to evict
     /// this client; the next operation creates a fresh connection.
     pub(crate) fn connect_tcp(
+        service: std::sync::Weak<super::lsp_service::LspService>,
         project_root: &Path,
         workspace_root: &Path,
         server_id: &str,
@@ -359,6 +386,7 @@ impl LspClient {
                 socket: stream,
                 address: address_label,
             },
+            service,
         )
     }
 
@@ -372,6 +400,7 @@ impl LspClient {
         mut reader: Box<dyn BufRead + Send>,
         writer: Box<dyn Write + Send>,
         transport: LspTransportHandle,
+        service: std::sync::Weak<super::lsp_service::LspService>,
     ) -> Result<Self> {
         let writer = Arc::new(Mutex::new(writer));
         let configuration = Arc::new(Mutex::new(None));
@@ -480,12 +509,15 @@ impl LspClient {
                         if method.as_deref() == Some("textDocument/publishDiagnostics") {
                             if !reader_server_id.is_empty() {
                                 if let Some(params) = message.get("params") {
-                                    crate::lsp::dispatch_diagnostics(
-                                        &reader_root,
-                                        &reader_server_id,
-                                        &reader_routes,
-                                        params,
-                                    );
+                                    if let Some(service) = service.upgrade() {
+                                        crate::lsp::dispatch_diagnostics(
+                                            &service,
+                                            &reader_root,
+                                            &reader_server_id,
+                                            &reader_routes,
+                                            params,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1235,8 +1267,18 @@ impl LspClient {
         }))?;
         let _ = wait_for_response(&self.responses, id, SHUTDOWN_TIMEOUT);
         let result = self.notify("exit", Value::Null);
-        if let LspTransportHandle::Tcp { socket, .. } = &self.transport {
-            let _ = socket.shutdown(Shutdown::Both);
+        match &mut self.transport {
+            LspTransportHandle::Stdio { child, .. } => {
+                // Give the server a bounded opportunity to consume `exit` and
+                // terminate itself before Drop enforces process-group cleanup.
+                let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+                while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            LspTransportHandle::Tcp { socket, .. } => {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
         }
         result
     }

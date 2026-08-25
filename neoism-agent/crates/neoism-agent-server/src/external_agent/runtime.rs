@@ -45,12 +45,12 @@ impl ExternalRuntime {
         self,
         cwd: &str,
         services: &neoism_agent_service_api::AgentServices,
-    ) -> AcpServerConfig {
-        match self {
+    ) -> Result<AcpServerConfig, String> {
+        Ok(match self {
             Self::OpenCode => AcpServerConfig::new(
                 "opencode",
                 "OpenCode",
-                resolve_runtime(services, "opencode"),
+                resolve_runtime(services, "opencode")?,
                 PathBuf::from(cwd),
             )
             .args(["acp", "--cwd", cwd]),
@@ -60,7 +60,7 @@ impl ExternalRuntime {
                 "Codex",
                 "@zed-industries/codex-acp@latest",
                 cwd,
-            ),
+            )?,
             Self::Claude => {
                 let mut config = package_acp_config(
                     services,
@@ -68,17 +68,15 @@ impl ExternalRuntime {
                     "Claude",
                     "@agentclientprotocol/claude-agent-acp@latest",
                     cwd,
-                );
+                )?;
                 if std::env::var_os("CLAUDE_CODE_EXECUTABLE").is_none() {
                     if let Some(path) = resolve_runtime_path(services, "claude") {
-                        config
-                            .env
-                            .push(("CLAUDE_CODE_EXECUTABLE".to_string(), path));
+                        config.env.push(("CLAUDE_CODE_EXECUTABLE".to_string(), path));
                     }
                 }
                 config
             }
-        }
+        })
     }
 }
 
@@ -92,16 +90,21 @@ fn package_acp_config(
     name: &'static str,
     package: &'static str,
     cwd: &str,
-) -> AcpServerConfig {
-    AcpServerConfig::new(id, name, resolve_runtime(services, "npx"), PathBuf::from(cwd))
+) -> Result<AcpServerConfig, String> {
+    Ok(AcpServerConfig::new(id, name, resolve_runtime(services, "npx")?, PathBuf::from(cwd))
         .args(["--yes", package])
+    )
 }
 
 fn resolve_runtime(
     services: &neoism_agent_service_api::AgentServices,
     name: &str,
-) -> String {
-    resolve_runtime_path(services, name).unwrap_or_else(|| name.to_string())
+) -> Result<String, String> {
+    resolve_runtime_path(services, name).ok_or_else(|| {
+        format!(
+            "external Agent executable `{name}` is unavailable; configure the host executable resolver or install it"
+        )
+    })
 }
 
 fn resolve_runtime_path(

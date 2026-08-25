@@ -169,6 +169,7 @@ pub(crate) struct HttpJsonRpcClient {
     next_id: Mutex<u64>,
     session_id: Mutex<Option<HeaderValue>>,
     notifications: Option<NotificationHandler>,
+    sse_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl HttpJsonRpcClient {
@@ -208,6 +209,7 @@ impl HttpJsonRpcClient {
             next_id: Mutex::new(1),
             session_id: Mutex::new(None),
             notifications,
+            sse_task: std::sync::Mutex::new(None),
         })
     }
 
@@ -353,9 +355,29 @@ impl HttpJsonRpcClient {
 
     pub(crate) fn spawn_sse_listener(self: &Arc<Self>) {
         let client = self.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             client.run_sse_listener().await;
         });
+        if let Some(previous) = self
+            .sse_task
+            .lock()
+            .expect("MCP SSE task lock poisoned")
+            .replace(task)
+        {
+            previous.abort();
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        let task = self
+            .sse_task
+            .lock()
+            .expect("MCP SSE task lock poisoned")
+            .take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     async fn run_sse_listener(self: Arc<Self>) {

@@ -25,22 +25,7 @@ struct InternalPlugin {
     disableable: bool,
 }
 
-macro_rules! plugin {
-    ($id:literal, $name:literal, $capability:literal, $events:literal, $contribution:literal) => {
-        InternalPlugin {
-            id: $id,
-            name: $name,
-            capability: $capability,
-            event_namespace: $events,
-            contribution: $contribution,
-            disableable: false,
-        }
-    };
-}
-
 const INTERNAL_PLUGINS: &[InternalPlugin] = &[
-    plugin!("dev.neoism.providers", "Model providers", "neoism.providers", "provider", "providers"),
-    plugin!("dev.neoism.system-prompts", "System prompts", "neoism.system-prompts", "prompt", "system-prompts"),
     InternalPlugin {
         id: "dev.neoism.subagents",
         name: "Subagents",
@@ -123,83 +108,92 @@ const INTERNAL_PLUGINS: &[InternalPlugin] = &[
     },
 ];
 
-impl AgentPlugin for InternalPlugin {
+struct BuiltinPlugin {
+    definition: InternalPlugin,
+    state: crate::state::AppState,
+}
+
+impl AgentPlugin for BuiltinPlugin {
     fn manifest(&self) -> PluginManifest {
+        let plugin = self.definition;
         PluginManifest {
-            id: self.id.to_string(),
-            name: self.name.to_string(),
+            id: plugin.id.to_string(),
+            name: plugin.name.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             internal: true,
-            disableable: self.disableable,
-            capabilities: vec![self.capability.to_string()],
+            disableable: plugin.disableable,
+            capabilities: vec![plugin.capability.to_string()],
             requires: Vec::new(),
-            event_namespaces: vec![self.event_namespace.to_string()],
-            api_prefix: Some(format!("/v2/plugins/{}", self.id)),
+            event_namespaces: vec![plugin.event_namespace.to_string()],
+            api_prefix: Some(format!("/v2/plugins/{}", plugin.id)),
             config: BTreeMap::new(),
         }
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        match self.contribution {
+        match self.definition.contribution {
             "agents" => registrar.agent("builtin-agents"),
             "commands" => registrar.command("workspace-commands"),
-            "providers" => registrar.provider("provider-runtime"),
             "skills" => registrar.skill_source("workspace-skills"),
-            "system-prompts" => registrar.system_prompt("default-system-prompt"),
             "websearch" => registrar.tool("websearch", None),
             "subagents" => {
-                registrar.tool("task", None);
-                registrar.tool("task_result", None);
-                registrar.tool("stop_task", None);
+                registrar.route("subagents");
+                crate::tool::register_subagent_tools(registrar, &self.state);
                 registrar.event("subagent.*", None);
                 registrar.part("dev.neoism.subagents/task", None);
             }
-            "mcp" => registrar.route("mcp"),
-            "lsp" => registrar.route("lsp"),
+            "mcp" => {
+                registrar.route("mcp");
+                registrar.tool("execute", None);
+            }
+            "lsp" => {
+                registrar.route("lsp");
+                crate::tool::register_lsp_tools(registrar, &self.state);
+            }
             "vcs" => registrar.route("vcs"),
             "workflows" => registrar.route("workflows"),
             "pty" => registrar.route("pty"),
-            "workspace-tools" => registrar.tool("workspace/*", None),
-            "notes-tools" => registrar.tool("notes", None),
+            "workspace-tools" => crate::tool::register_workspace_tools(registrar, &self.state),
+            "notes-tools" => crate::tool::register_notes_tools(registrar, &self.state),
             "semantic" => registrar.route("semantic-search"),
-            "goals" => registrar.route("goals"),
+            "goals" => {
+                registrar.route("goals");
+                crate::tool::register_goal_tools(registrar, &self.state);
+            }
             _ => return Err(PluginHostError::Registration("unknown built-in contribution".to_string())),
         }
         Ok(())
     }
 }
 
-pub(crate) const WORKSPACE_TOOL_IDS: &[&str] = &[
-    "bash",
-    "background_task",
-    "background_task_result",
-    "read",
-    "write",
-    "edit",
-    "grep",
-    "glob",
-    "apply_patch",
-    "webfetch",
-    "artifact_read",
-    "artifact_search",
-    "session_search",
-];
+struct CustomToolsPlugin(Vec<crate::custom_tool::CustomTool>);
 
-pub(crate) fn builtin_tool_plugin(id: &str) -> Option<&'static str> {
-    if WORKSPACE_TOOL_IDS.contains(&id) {
-        Some("dev.neoism.tools.workspace")
-    } else {
-        match id {
-            "skill" => Some("dev.neoism.skills"),
-            "lsp" => Some("dev.neoism.lsp"),
-            "notes" => Some("dev.neoism.tools.notes"),
-            "complete_goal" => Some("dev.neoism.goals"),
-            _ => None,
+impl AgentPlugin for CustomToolsPlugin {
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest {
+            id: "dev.neoism.custom-tools".to_string(),
+            name: "Workspace custom tools".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            internal: true,
+            disableable: true,
+            capabilities: Vec::new(),
+            requires: Vec::new(),
+            event_namespaces: Vec::new(),
+            api_prefix: None,
+            config: BTreeMap::new(),
         }
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+        for tool in &self.0 {
+            let item = tool.item();
+            registrar.tool(item.id, Some(item.parameters));
+        }
+        Ok(())
     }
 }
 
-struct SkillsPlugin(neoism_agent_service_api::AgentServices);
+struct SkillsPlugin(crate::state::AppState);
 
 impl AgentPlugin for SkillsPlugin {
     fn manifest(&self) -> PluginManifest {
@@ -218,7 +212,9 @@ impl AgentPlugin for SkillsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        registrar.skill_source_runtime("workspace-skills", std::sync::Arc::new(WorkspaceSkills(self.0.clone())));
+        registrar.route("skills");
+        registrar.skill_source_runtime("workspace-skills", std::sync::Arc::new(WorkspaceSkills(self.0.services().clone())));
+        crate::tool::register_skill_tools(registrar, &self.0);
         Ok(())
     }
 }
@@ -242,6 +238,7 @@ impl AgentPlugin for AgentsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+        registrar.route("agents");
         registrar.agent_source_runtime("workspace-agents", std::sync::Arc::new(WorkspaceAgents(self.0.clone())));
         Ok(())
     }
@@ -273,12 +270,13 @@ impl AgentPlugin for CommandsPlugin {
             capabilities: vec!["neoism.commands".to_string()],
             requires: Vec::new(),
             event_namespaces: vec!["command".to_string()],
-            api_prefix: Some("/command".to_string()),
+            api_prefix: Some("/v2/commands".to_string()),
             config: BTreeMap::new(),
         }
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+        registrar.route("commands");
         registrar.command_source_runtime(
             "workspace-commands",
             std::sync::Arc::new(WorkspaceCommands(self.0.clone())),
@@ -376,31 +374,52 @@ impl SkillSource for WorkspaceSkills {
 }
 
 pub(crate) fn build_host(
-    services: &neoism_agent_service_api::AgentServices,
+    state: &crate::state::AppState,
+    directory: &str,
 ) -> Result<PluginHost, PluginHostError> {
+    let services = state.services();
     let host = PluginHost::default();
     let mut plugins = INTERNAL_PLUGINS
             .iter()
             .copied()
             .filter(|plugin| plugin.id != "dev.neoism.tools.notes" || services.notes.is_some())
-            .map(|plugin| Box::new(plugin) as Box<dyn AgentPlugin>)
+            .filter(|plugin| enabled(services, directory, plugin.id))
+            .map(|definition| Box::new(BuiltinPlugin { definition, state: state.clone() }) as Box<dyn AgentPlugin>)
             .collect::<Vec<_>>();
-    plugins.push(Box::new(SkillsPlugin(services.clone())));
-    plugins.push(Box::new(AgentsPlugin(services.clone())));
-    plugins.push(Box::new(CommandsPlugin(services.clone())));
-    plugins.push(Box::new(WebsearchPlugin));
+    if enabled(services, directory, SKILLS_PLUGIN_ID) {
+        plugins.push(Box::new(SkillsPlugin(state.clone())));
+    }
+    if enabled(services, directory, AGENTS_PLUGIN_ID) {
+        plugins.push(Box::new(AgentsPlugin(services.clone())));
+    }
+    if enabled(services, directory, COMMANDS_PLUGIN_ID) {
+        plugins.push(Box::new(CommandsPlugin(services.clone())));
+    }
+    if enabled(services, directory, WEBSEARCH_PLUGIN_ID) {
+        plugins.push(Box::new(WebsearchPlugin));
+    }
+    if enabled(services, directory, "dev.neoism.tools.workspace") {
+        let custom_tools = crate::custom_tool::load(services, directory);
+        if !custom_tools.is_empty() {
+            plugins.push(Box::new(CustomToolsPlugin(custom_tools)));
+        }
+    }
+    plugins.extend(crate::plugin::configured_agent_plugins(
+        services,
+        &crate::config::load(services, directory)
+            .map(|loaded| loaded.info)
+            .unwrap_or_default(),
+        directory,
+    ));
     host.install(plugins, &[])?;
     Ok(host)
 }
 
-pub(crate) fn agent_catalog(
+pub(crate) async fn agent_catalog(
     state: &crate::state::AppState,
     directory: &str,
 ) -> anyhow::Result<crate::agent::AgentCatalog> {
-    if !enabled(state.services(), directory, AGENTS_PLUGIN_ID) {
-        anyhow::bail!("plugin {AGENTS_PLUGIN_ID} is disabled for this workspace");
-    }
-    let snapshot = state.inner.plugin_host.snapshot();
+    let snapshot = state.plugin_snapshot(directory).await;
     let source = snapshot
         .agent_sources
         .values()
@@ -418,25 +437,21 @@ pub(crate) fn agent_catalog(
 pub(crate) fn enabled(services: &neoism_agent_service_api::AgentServices, directory: &str, plugin_id: &str) -> bool {
     crate::config::load(services, directory)
         .map(|loaded| {
-            if let Some(plugin) = loaded.info.plugins.get(plugin_id) {
-                return plugin.enabled;
-            }
-            let mut enabled = true;
-            for plugin in &loaded.info.plugin {
-                let Some(id) = plugin.id.as_deref() else { continue };
-                if id == plugin_id {
-                    enabled = plugin.enabled;
-                } else if id == format!("-{plugin_id}") || id == "-*" {
-                    enabled = false;
-                }
-            }
-            enabled
+            loaded.info.plugins.get(plugin_id).is_none_or(|plugin| plugin.enabled)
         })
         .unwrap_or(true)
 }
 
 pub(crate) fn manifests(snapshot: &RegistrySnapshot) -> Vec<PluginManifestInfo> {
-    snapshot.manifests.clone()
+    let mut manifests = snapshot.manifests.clone();
+    for hook in &snapshot.runtime_hooks {
+        if let Some(manifest) = manifests.iter_mut().find(|manifest| manifest.id == hook.plugin_id) {
+            let lifecycle = hook.lifecycle();
+            manifest.active = lifecycle.active;
+            manifest.reason = lifecycle.reason;
+        }
+    }
+    manifests
 }
 
 pub(crate) fn capabilities(snapshot: &RegistrySnapshot) -> Vec<CapabilityInfo> {

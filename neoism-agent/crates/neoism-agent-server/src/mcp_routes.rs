@@ -91,7 +91,7 @@ pub(crate) async fn mcp_config_patch(
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if !request.enabled {
-        let _ = mcp::disconnect(&directory, &name).await;
+        let _ = mcp::disconnect(&state, &directory, &name).await;
     }
     mcp::catalog_with_state(&directory, &mcp_auth::McpAuthStore::from_env(), Some(&state))?
         .remove(&name)
@@ -183,13 +183,14 @@ pub(crate) async fn mcp_auth_authenticate(
 }
 
 pub(crate) async fn mcp_auth_remove(
+    State(state): State<AppState>,
     Query(query): Query<InstanceQuery>,
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<McpAuthRemoveResponse>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     mcp_auth::McpAuthStore::from_env().remove(&name)?;
-    let disconnected = mcp::disconnect(&directory, &name).await.unwrap_or(false);
+    let disconnected = mcp::disconnect(&state, &directory, &name).await.unwrap_or(false);
     tracing::info!(
         mcp = %name,
         directory = %directory,
@@ -210,7 +211,7 @@ pub(crate) async fn mcp_connect(
         &directory,
         &name,
         &mcp_auth::McpAuthStore::from_env(),
-        Some(state),
+        state,
     )
     .await
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
@@ -218,12 +219,13 @@ pub(crate) async fn mcp_connect(
 }
 
 pub(crate) async fn mcp_disconnect(
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<bool>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(mcp::disconnect(&directory, &name).await?))
+    Ok(Json(mcp::disconnect(&state, &directory, &name).await?))
 }
 
 pub(crate) async fn mcp_tools(
@@ -238,7 +240,7 @@ pub(crate) async fn mcp_tools(
             &directory,
             &name,
             &mcp_auth::McpAuthStore::from_env(),
-            Some(state),
+            state,
         )
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?,
@@ -260,7 +262,7 @@ pub(crate) async fn mcp_tool_call(
             &tool_name,
             arguments,
             &mcp_auth::McpAuthStore::from_env(),
-            Some(state),
+            state,
         )
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?,
@@ -279,7 +281,7 @@ pub(crate) async fn mcp_resources(
             &directory,
             &name,
             &mcp_auth::McpAuthStore::from_env(),
-            Some(state),
+            state,
         )
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?,
@@ -298,7 +300,7 @@ pub(crate) async fn mcp_prompts(
             &directory,
             &name,
             &mcp_auth::McpAuthStore::from_env(),
-            Some(state),
+            state,
         )
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?,

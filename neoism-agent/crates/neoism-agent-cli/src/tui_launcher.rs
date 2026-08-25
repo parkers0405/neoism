@@ -13,13 +13,16 @@ pub(crate) struct TuiOptions {
     pub(crate) variant: Option<String>,
 }
 
-pub(crate) async fn run(options: TuiOptions) -> anyhow::Result<()> {
+pub(crate) async fn run(
+    options: TuiOptions,
+    services: &neoism_agent_service_api::AgentServices,
+) -> anyhow::Result<()> {
     let app_dir = opentui_app_dir()?;
     let entry = app_dir.join("src/index.ts");
     if !entry.exists() {
         anyhow::bail!("Neoism OpenTUI entrypoint is missing: {}", entry.display());
     }
-    let bun = std::env::var("BUN").unwrap_or_else(|_| "bun".to_string());
+    let bun = resolve_bun(services)?;
     if !app_dir.join("node_modules/@opentui/core").exists() {
         install_dependencies(&bun, &app_dir)?;
     }
@@ -51,7 +54,68 @@ pub(crate) async fn run(options: TuiOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_dependencies(bun: &str, app_dir: &Path) -> anyhow::Result<()> {
+fn resolve_bun(services: &neoism_agent_service_api::AgentServices) -> anyhow::Result<PathBuf> {
+    let bun = std::env::var_os("BUN").unwrap_or_else(|| "bun".into());
+    resolve_bun_program(services, bun)
+}
+
+fn resolve_bun_program(
+    services: &neoism_agent_service_api::AgentServices,
+    bun: std::ffi::OsString,
+) -> anyhow::Result<PathBuf> {
+    services
+        .executables
+        .resolve(&neoism_agent_service_api::ExecutableRequest::new(
+            &bun,
+            neoism_agent_service_api::ExecutablePurpose::Other("cli-runtime".to_string()),
+        ))
+        .map(|result| result.path)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "Bun executable `{}` is unavailable: {error}; set BUN or install Bun",
+                bun.to_string_lossy()
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neoism_agent_service_api::{
+        ExecutableError, ExecutableRequest, ExecutableResult, ExecutableService,
+        ExecutableSource,
+    };
+    use std::sync::Arc;
+
+    struct Fake(Option<PathBuf>);
+
+    impl ExecutableService for Fake {
+        fn resolve(&self, request: &ExecutableRequest) -> Result<ExecutableResult, ExecutableError> {
+            self.0
+                .clone()
+                .map(|path| ExecutableResult {
+                    path,
+                    source: ExecutableSource::Managed { provider: "test".into() },
+                })
+                .ok_or_else(|| ExecutableError::NotFound { program: request.program.clone() })
+        }
+    }
+
+    #[test]
+    fn bun_runtime_honors_injected_path_and_reports_missing_bun() {
+        let injected = PathBuf::from("/injected/bun");
+        let mut services = neoism_agent_server::standard_services();
+        services.executables = Arc::new(Fake(Some(injected.clone())));
+        assert_eq!(resolve_bun_program(&services, "bun".into()).unwrap(), injected);
+
+        services.executables = Arc::new(Fake(None));
+        let error = resolve_bun_program(&services, "bun".into()).unwrap_err().to_string();
+        assert!(error.contains("Bun executable `bun` is unavailable"));
+        assert!(error.contains("install Bun"));
+    }
+}
+
+fn install_dependencies(bun: &Path, app_dir: &Path) -> anyhow::Result<()> {
     eprintln!(
         "installing Neoism OpenTUI dependencies in {}",
         app_dir.display()

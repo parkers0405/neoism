@@ -38,22 +38,7 @@ pub fn hide_std_command(command: &mut std::process::Command) {
     let _ = command;
 }
 
-pub fn hide_tokio_command(command: &mut tokio::process::Command) {
-    #[cfg(windows)]
-    command.creation_flags(HIDDEN_CONSOLE);
-    let _ = command;
-}
-
-pub fn detach_std_command(command: &mut std::process::Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(DETACHED_HIDDEN);
-    }
-    let _ = command;
-}
-
-/// Canonicalize without the Windows `\\?\` verbatim prefix. FFF, git, and
+/// Canonicalize without the Windows `\\?\` verbatim prefix. Git and
 /// most command-line tools join `/`-separated relatives onto this base.
 pub fn canonicalize_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     dunce::canonicalize(path)
@@ -77,6 +62,7 @@ pub fn strip_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
 /// Drive roots (`C:\`) and verbatim drive roots (`\\?\C:\`) both count as
 /// filesystem roots. `\\?\C:\`.parent()` is `\\?\C:`, so a raw `parent()`
 /// check misses them.
+#[cfg(windows)]
 pub fn is_filesystem_root(path: &std::path::Path) -> bool {
     use std::path::Component;
     let stripped = strip_verbatim_prefix(path);
@@ -108,6 +94,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn detects_drive_and_verbatim_roots() {
         assert!(is_filesystem_root(Path::new(r"C:\")));

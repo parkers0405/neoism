@@ -12,8 +12,7 @@ use std::{
 use serde_json::Value;
 
 use super::lsp_adapters::{
-    adapters_for_root, AdapterOrigin, LanguageAdapter, ResolvedLspTransport,
-    WorkspaceRootStrategy,
+    AdapterOrigin, LanguageAdapter, ResolvedLspTransport, WorkspaceRootStrategy,
 };
 use super::lsp_languages::{LspOperation, WorkspaceScan};
 use super::lsp_uri::path_to_file_uri;
@@ -32,7 +31,7 @@ struct CargoRootCacheKey {
 }
 
 #[derive(Default)]
-struct CargoRootCache {
+pub(super) struct CargoRootCache {
     entries: HashMap<CargoRootCacheKey, Arc<OnceLock<CargoRootResolution>>>,
     insertion_order: VecDeque<CargoRootCacheKey>,
 }
@@ -75,9 +74,8 @@ impl CargoRootCache {
     }
 }
 
-static CARGO_ROOT_CACHE: OnceLock<Mutex<CargoRootCache>> = OnceLock::new();
-
 pub(super) fn detected_servers(
+    runtime: &super::LspRuntime,
     root: &Path,
     scan: &WorkspaceScan,
     adapters: &[LanguageAdapter],
@@ -88,7 +86,7 @@ pub(super) fn detected_servers(
             language_detected(adapter, scan)
                 || adapter.origin == AdapterOrigin::Configured
         })
-        .map(|adapter| server_status(root, scan, adapter))
+        .map(|adapter| server_status(runtime, root, scan, adapter))
         .collect()
 }
 
@@ -123,6 +121,7 @@ pub(super) fn normalized_file(root: &Path, file: &Path) -> PathBuf {
 /// marker. Cargo-backed adapters first ask Cargo for the workspace containing
 /// the nearest manifest, so sibling members share one rust-analyzer process.
 pub(super) fn server_root_for_file(
+    runtime: &super::LspRuntime,
     workspace_root: &Path,
     file: &Path,
     adapter: &LanguageAdapter,
@@ -132,7 +131,7 @@ pub(super) fn server_root_for_file(
         WorkspaceRootStrategy::NearestMarker => nearest,
         WorkspaceRootStrategy::CargoMetadata { manifest } => {
             nearest_manifest(workspace_root, file, manifest)
-                .and_then(|manifest| cached_cargo_workspace_root(&manifest))
+                .and_then(|manifest| cached_cargo_workspace_root(runtime, &manifest))
                 .unwrap_or(nearest)
         }
     }
@@ -183,9 +182,13 @@ fn bounded_ancestors<'a>(
         .take_while(move |directory| !bounded || directory.starts_with(workspace_root))
 }
 
-fn cached_cargo_workspace_root(manifest: &Path) -> Option<PathBuf> {
-    let cache = CARGO_ROOT_CACHE.get_or_init(|| Mutex::new(CargoRootCache::default()));
-    cached_cargo_workspace_root_with(cache, manifest, cargo_workspace_root_uncached)
+fn cached_cargo_workspace_root(
+    runtime: &super::LspRuntime,
+    manifest: &Path,
+) -> Option<PathBuf> {
+    cached_cargo_workspace_root_with(&runtime.service.cargo_roots, manifest, |manifest| {
+        cargo_workspace_root_uncached_with(runtime.services(), manifest)
+    })
 }
 
 fn cached_cargo_workspace_root_with<F>(
@@ -211,15 +214,11 @@ where
     .clone()
 }
 
-fn cargo_workspace_root_uncached(manifest: &Path) -> Option<PathBuf> {
-    let mut command = Command::new("cargo");
-    command
-        .arg("metadata")
-        .arg("--no-deps")
-        .arg("--format-version")
-        .arg("1")
-        .arg("--manifest-path")
-        .arg(manifest);
+fn cargo_workspace_root_uncached_with(
+    services: &neoism_agent_service_api::AgentServices,
+    manifest: &Path,
+) -> Option<PathBuf> {
+    let mut command = cargo_metadata_command(services, manifest).ok()?;
     crate::tool::process::set_new_process_group_std(&mut command);
     let output = command.output().ok()?;
     if !output.status.success() {
@@ -228,6 +227,27 @@ fn cargo_workspace_root_uncached(manifest: &Path) -> Option<PathBuf> {
     let metadata: Value = serde_json::from_slice(&output.stdout).ok()?;
     let workspace_root = metadata.get("workspace_root")?.as_str()?;
     crate::windows_process::canonicalize_path(Path::new(workspace_root)).ok()
+}
+
+fn cargo_metadata_command(
+    services: &neoism_agent_service_api::AgentServices,
+    manifest: &Path,
+) -> anyhow::Result<Command> {
+    let cargo = crate::executable::resolve(
+        services,
+        "cargo",
+        neoism_agent_service_api::ExecutablePurpose::ProjectMetadata,
+        "Cargo workspace metadata",
+    )?;
+    let mut command = Command::new(cargo);
+    command
+        .arg("metadata")
+        .arg("--no-deps")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(manifest);
+    Ok(command)
 }
 
 fn directory_has_marker(directory: &Path, marker: &str) -> bool {
@@ -249,11 +269,12 @@ fn directory_has_marker(directory: &Path, marker: &str) -> bool {
 }
 
 pub(super) fn file_query_specs(
+    runtime: &super::LspRuntime,
     root: &Path,
     file: &Path,
     operation: LspOperation,
 ) -> Vec<LanguageAdapter> {
-    let adapters = adapters_for_root(root);
+    let adapters = runtime.adapters_for_root(root);
     let strongest_match = adapters
         .iter()
         .filter(|adapter| operation_supported(adapter, operation))
@@ -268,7 +289,7 @@ pub(super) fn file_query_specs(
             strongest_match
                 .is_some_and(|score| adapter.match_priority(file) == Some(score))
         })
-        .filter(|adapter| adapter.is_valid() && adapter_endpoint_available(adapter))
+        .filter(|adapter| adapter.is_valid() && adapter_endpoint_available(runtime, adapter))
         .take(MAX_LSP_SERVERS_PER_QUERY)
         .collect()
 }
@@ -278,8 +299,12 @@ pub(super) fn file_query_specs(
 /// completion, rename, diagnostics, and every other textDocument feature; a
 /// completion-only server must not receive stale disk text merely because it
 /// does not advertise diagnostics.
-pub(super) fn file_lifecycle_specs(root: &Path, file: &Path) -> Vec<LanguageAdapter> {
-    let adapters = adapters_for_root(root);
+pub(super) fn file_lifecycle_specs(
+    runtime: &super::LspRuntime,
+    root: &Path,
+    file: &Path,
+) -> Vec<LanguageAdapter> {
+    let adapters = runtime.adapters_for_root(root);
     let strongest_match = adapters
         .iter()
         .filter_map(|adapter| adapter.match_priority(file))
@@ -292,7 +317,7 @@ pub(super) fn file_lifecycle_specs(root: &Path, file: &Path) -> Vec<LanguageAdap
             strongest_match
                 .is_some_and(|score| adapter.match_priority(file) == Some(score))
         })
-        .filter(|adapter| adapter.is_valid() && adapter_endpoint_available(adapter))
+        .filter(|adapter| adapter.is_valid() && adapter_endpoint_available(runtime, adapter))
         .take(MAX_LSP_SERVERS_PER_QUERY)
         .collect()
 }
@@ -323,10 +348,13 @@ pub(super) fn operation_supported(
     }
 }
 
-pub(super) fn adapter_endpoint_available(adapter: &LanguageAdapter) -> bool {
+pub(super) fn adapter_endpoint_available(
+    runtime: &super::LspRuntime,
+    adapter: &LanguageAdapter,
+) -> bool {
     match &adapter.transport {
         ResolvedLspTransport::Stdio { command, .. } => {
-            crate::lsp::resolve_lsp_command(&adapter.id, command.clone()).1
+            runtime.resolve_lsp_command(&adapter.id, command.clone()).1
                 != LspCommandSource::Missing
         }
         ResolvedLspTransport::Tcp { .. } => true,
@@ -335,24 +363,27 @@ pub(super) fn adapter_endpoint_available(adapter: &LanguageAdapter) -> bool {
 }
 
 pub(super) fn server_status(
+    runtime: &super::LspRuntime,
     root: &Path,
     scan: &WorkspaceScan,
     adapter: &LanguageAdapter,
 ) -> LspStatus {
-    server_status_at(root, root, None, scan, adapter)
+    server_status_at(runtime, root, root, None, scan, adapter)
 }
 
 pub(super) fn server_status_for_file(
+    runtime: &super::LspRuntime,
     workspace_root: &Path,
     file: &Path,
     scan: &WorkspaceScan,
     adapter: &LanguageAdapter,
 ) -> LspStatus {
-    let project_root = server_root_for_file(workspace_root, file, adapter);
-    server_status_at(workspace_root, &project_root, Some(file), scan, adapter)
+    let project_root = server_root_for_file(runtime, workspace_root, file, adapter);
+    server_status_at(runtime, workspace_root, &project_root, Some(file), scan, adapter)
 }
 
 fn server_status_at(
+    runtime: &super::LspRuntime,
     workspace_root: &Path,
     project_root: &Path,
     file: Option<&Path>,
@@ -362,7 +393,7 @@ fn server_status_at(
     let (command, command_source, endpoint_available) = match &adapter.transport {
         ResolvedLspTransport::Stdio { command, .. } => {
             let (command, source) =
-                crate::lsp::resolve_lsp_command(&adapter.id, command.clone());
+                runtime.resolve_lsp_command(&adapter.id, command.clone());
             let available = source != LspCommandSource::Missing;
             (command, source, available)
         }
@@ -384,12 +415,12 @@ fn server_status_at(
     let usable = adapter.is_valid() && endpoint_available;
     let broken_reason = usable
         .then(|| match file {
-            Some(file) => super::lsp_service::service().broken_reason_for_file(
+            Some(file) => runtime.service.broken_reason_for_file(
                 workspace_root,
                 file,
                 adapter,
             ),
-            None => super::lsp_service::service().broken_reason(workspace_root, adapter),
+            None => runtime.service.broken_reason(workspace_root, adapter),
         })
         .flatten();
     let message = adapter.configuration_error.clone().or(broken_reason).or_else(|| {
@@ -430,7 +461,7 @@ fn server_status_at(
         id: adapter.id.clone(),
         name: adapter.name.clone(),
         status: if usable && message.is_none() {
-            if super::lsp_service::service().client_connected_at(
+            if runtime.service.client_connected_at(
                 workspace_root,
                 project_root,
                 adapter,
@@ -626,6 +657,25 @@ fn is_ignored_dir_name(name: &OsStr) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cargo_metadata_honors_injected_path_and_reports_missing_cargo() {
+        use crate::executable::test_support::FakeExecutableService;
+        use std::sync::Arc;
+
+        let injected = PathBuf::from("/injected/cargo");
+        let mut services = crate::standard_services();
+        services.executables = Arc::new(FakeExecutableService::with("cargo", &injected));
+        let command = cargo_metadata_command(&services, Path::new("Cargo.toml")).unwrap();
+        assert_eq!(command.get_program(), injected.as_os_str());
+
+        services.executables = Arc::new(FakeExecutableService::default());
+        let error = cargo_metadata_command(&services, Path::new("Cargo.toml"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Cargo workspace metadata executable `cargo` is unavailable"));
+        assert!(error.contains("install it"));
+    }
+
     struct TempWorkspace {
         path: PathBuf,
     }
@@ -661,15 +711,62 @@ mod tests {
     }
 
     fn rust_adapter() -> LanguageAdapter {
-        let spec = crate::lsp::lsp_languages::LANGUAGE_SPECS
-            .iter()
-            .find(|spec| spec.id == "rust")
-            .expect("built-in Rust adapter");
-        LanguageAdapter::from_builtin(spec)
+        LanguageAdapter::from_capability(&rust_capability())
+    }
+
+    fn rust_capability() -> neoism_agent_service_api::LanguageServerCapability {
+        use neoism_agent_service_api::{
+            LanguageRootPolicy, LanguageRouteCapability, LanguageServerCapability,
+            LanguageServerOperations, LanguageServerTransport,
+        };
+        LanguageServerCapability {
+            id: "fake-rust".to_string(),
+            name: "Fake Rust".to_string(),
+            catalog_packages: Vec::new(),
+            transport: LanguageServerTransport::Stdio {
+                command: vec!["fake-rust-server".to_string()],
+            },
+            routes: vec![LanguageRouteCapability {
+                id: "rust".to_string(),
+                document_language_id: "rust".to_string(),
+                extensions: vec!["rs".to_string()],
+                filename_patterns: Vec::new(),
+            }],
+            markers: vec!["Cargo.toml".to_string()],
+            root_policy: LanguageRootPolicy::CargoMetadata {
+                manifest: "Cargo.toml".to_string(),
+            },
+            capabilities: LanguageServerOperations {
+                workspace_symbols: true,
+                completion: true,
+                hover: true,
+                definition: true,
+                references: true,
+                implementation: true,
+                call_hierarchy: true,
+                diagnostics: true,
+                document_symbols: true,
+                formatting: true,
+                code_actions: true,
+                rename: true,
+            },
+        }
+    }
+
+    fn test_runtime() -> super::super::LspRuntime {
+        let snapshot = neoism_agent_service_api::LanguageCapabilitySnapshot {
+            generation: 1,
+            languages: std::sync::Arc::from(vec![rust_capability()]),
+        };
+        let services = crate::standard_services().with_language_capabilities(std::sync::Arc::new(
+            neoism_agent_service_api::StaticLanguageCapabilityService::new(snapshot),
+        ));
+        super::super::LspRuntime::new(services)
     }
 
     #[test]
     fn cargo_metadata_maps_sibling_members_to_the_outer_workspace() {
+        let runtime = test_runtime();
         let workspace = TempWorkspace::new("siblings");
         workspace.write(
             "Cargo.toml",
@@ -689,17 +786,18 @@ mod tests {
         let adapter = rust_adapter();
 
         assert_eq!(
-            server_root_for_file(&workspace.path, &first, &adapter),
+            server_root_for_file(&runtime, &workspace.path, &first, &adapter),
             expected
         );
         assert_eq!(
-            server_root_for_file(&workspace.path, &second, &adapter),
+            server_root_for_file(&runtime, &workspace.path, &second, &adapter),
             expected
         );
     }
 
     #[test]
     fn nested_cargo_workspace_manifest_resolves_to_itself() {
+        let runtime = test_runtime();
         let workspace = TempWorkspace::new("nested");
         workspace.write(
             "nested/Cargo.toml",
@@ -710,13 +808,14 @@ mod tests {
             .expect("canonical nested root");
 
         assert_eq!(
-            server_root_for_file(&workspace.path, &file, &rust_adapter()),
+            server_root_for_file(&runtime, &workspace.path, &file, &rust_adapter()),
             expected
         );
     }
 
     #[test]
     fn cargo_metadata_failure_falls_back_to_the_nearest_marker() {
+        let runtime = test_runtime();
         let workspace = TempWorkspace::new("invalid");
         workspace.write("nested/Cargo.toml", "this is not valid TOML\n");
         let file = workspace.write("nested/src/lib.rs", "pub fn nested() {}\n");
@@ -724,7 +823,7 @@ mod tests {
             .expect("canonical nested root");
 
         assert_eq!(
-            server_root_for_file(&workspace.path, &file, &rust_adapter()),
+            server_root_for_file(&runtime, &workspace.path, &file, &rust_adapter()),
             expected
         );
     }

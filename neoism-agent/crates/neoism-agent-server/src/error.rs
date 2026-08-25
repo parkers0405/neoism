@@ -45,17 +45,6 @@ impl ApiError {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn not_implemented(feature: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::NOT_IMPLEMENTED,
-            message: format!(
-                "{} is not implemented yet in the Rust runtime",
-                feature.into()
-            ),
-        }
-    }
-
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

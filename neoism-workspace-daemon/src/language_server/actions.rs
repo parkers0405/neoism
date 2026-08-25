@@ -14,6 +14,7 @@ const NO_ACTIVE_BUFFER: &str =
     "LSP request needs the active editor buffer; text source returns with the native editor";
 
 pub(crate) fn run_action(
+    runtime: &language_server::LspRuntime,
     workspace_root: &Path,
     action: EditorLspAction,
     text: Option<&str>,
@@ -27,7 +28,7 @@ pub(crate) fn run_action(
                     "Neoism LSP workspace symbols need a search query".to_string(),
                 )
             } else {
-                let result = language_server::workspace_symbols(workspace_root, query);
+                let result = language_server::workspace_symbols(runtime, workspace_root, query);
                 let symbols: Vec<EditorLspSymbol> =
                     result.into_iter().map(map_workspace_symbol).collect();
                 let summary = format!(

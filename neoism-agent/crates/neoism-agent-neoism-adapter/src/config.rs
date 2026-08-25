@@ -46,11 +46,24 @@ impl NeoismConfigSourceService {
     fn project_gui(value: &Value) -> Value {
         let mut agent = value.get("agent").and_then(Value::as_object).cloned().unwrap_or_default();
         if !agent.contains_key("shell") {
-            if let Some(shell) = value.get("terminal").and_then(|terminal| terminal.get("shell")) {
-                agent.insert("shell".into(), shell.clone());
+            if let Some(shell) = value
+                .get("terminal")
+                .and_then(|terminal| terminal.get("shell"))
+                .and_then(project_shell)
+            {
+                agent.insert("shell".into(), Value::String(shell));
             }
         }
         Value::Object(agent)
+    }
+
+    fn project_document(value: Value) -> Value {
+        let grouped = value.as_object().is_some_and(|root| {
+            ["appearance", "editor", "terminal", "ui", "presence", "keybinds", "renderer", "developer", "platform"]
+                .iter()
+                .any(|key| root.contains_key(*key))
+        });
+        if grouped { Self::project_gui(&value) } else { value }
     }
 
     fn mcp_document(value: &Value) -> Value {
@@ -62,11 +75,7 @@ impl NeoismConfigSourceService {
         let project = Self::project_root(workspace);
         match source_id {
             GUI_SOURCE => Ok((self.gui_path.clone(), vec!["agent".into()])),
-            // mcp.json remains adapter-owned because the Neoism extensions
-            // manager currently persists its canonical MCP catalog there.
             MCP_SOURCE => Ok((self.user_root().join("mcp.json"), Vec::new())),
-            // neoism.json is retained only for existing Neoism project config;
-            // standalone Agent uses .agent/agent.json and never sees this name.
             PROJECT_SOURCE => Ok((project.join("neoism.json"), Vec::new())),
             _ => Err(ServiceError::new(format!("config source `{source_id}` is not writable"))),
         }
@@ -85,7 +94,7 @@ impl ConfigSourceService for NeoismConfigSourceService {
         let project = Self::project_root(&workspace);
         let gui = Self::read(&self.gui_path)?;
         let mcp = Self::read(&self.user_root().join("mcp.json"))?;
-        let project_document = Self::read(&project.join("neoism.json"))?;
+        let project_document = Self::project_document(Self::read(&project.join("neoism.json"))?);
         let layers = vec![
             ConfigLayer { source_id: GUI_SOURCE.into(), document: Self::project_gui(&gui), writable: true },
             ConfigLayer { source_id: MCP_SOURCE.into(), document: Self::mcp_document(&mcp), writable: true },
@@ -137,6 +146,23 @@ fn set_value(document: &mut Value, path: &[String], value: Value) {
     current.as_object_mut().expect("object initialized").insert(path.last().unwrap().clone(), value);
 }
 
+fn project_shell(value: &Value) -> Option<String> {
+    match value {
+        Value::String(shell) => {
+            let shell = shell.trim();
+            (!shell.is_empty()).then(|| shell.to_string())
+        }
+        Value::Object(shell) => {
+            let program = shell.get("program")?.as_str()?.trim();
+            if program.is_empty() { return None; }
+            let args = shell.get("args").and_then(Value::as_array).into_iter().flatten()
+                .filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
+            Some(if args.is_empty() { program.to_string() } else { format!("{program} {args}") })
+        }
+        _ => None,
+    }
+}
+
 fn parse_jsonc(text: &str) -> Result<Value, serde_json::Error> {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -184,18 +210,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projects_only_agent_and_terminal_shell() {
+    fn projects_grouped_gui_config_to_canonical_agent_json() {
         let root = std::env::temp_dir().join(format!("neoism-config-adapter-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let gui = root.join("config.json");
-        std::fs::write(&gui, r#"{"appearance":{"theme":"x"},"terminal":{"shell":"fish"},"agent":{"model":"p/m"}}"#).unwrap();
+        std::fs::write(&gui, r#"{
+            // Product JSONC stays adapter-owned.
+            "appearance":{"theme":"x"},
+            "terminal":{"shell":{"program":"/bin/zsh","args":["--login"]}},
+            "agent":{"model":"p/m","smallModel":"p/s","variant":"high","textVerbosity":"low"},
+        }"#).unwrap();
         let service = NeoismConfigSourceService::at(gui);
         let snapshot = service.snapshot(&ConfigSnapshotRequest::new(&root)).unwrap();
         assert_eq!(snapshot.layers[0].document["model"], "p/m");
-        assert_eq!(snapshot.layers[0].document["shell"], "fish");
+        assert_eq!(snapshot.layers[0].document["shell"], "/bin/zsh --login");
+        assert_eq!(snapshot.layers[0].document["smallModel"], "p/s");
+        assert_eq!(snapshot.layers[0].document["variant"], "high");
+        assert_eq!(snapshot.layers[0].document["textVerbosity"], "low");
         assert!(snapshot.layers[0].document.get("terminal").is_none());
         assert!(snapshot.layers[0].document.get("appearance").is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_file_is_projected_but_canonical_agent_file_is_not_unwrapped() {
+        let product = json!({
+            "terminal": { "shell": "fish" },
+            "agent": { "defaultAgent": "build" }
+        });
+        assert_eq!(NeoismConfigSourceService::project_document(product), json!({
+            "shell": "fish", "defaultAgent": "build"
+        }));
+
+        let canonical = json!({
+            "defaultAgent": "build",
+            "agent": { "build": { "topP": 0.8 } }
+        });
+        assert_eq!(NeoismConfigSourceService::project_document(canonical.clone()), canonical);
     }
 
     #[tokio::test]

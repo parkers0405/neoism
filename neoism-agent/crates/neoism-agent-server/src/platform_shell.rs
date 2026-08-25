@@ -1,11 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use tokio::process::Command;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(windows, allow(dead_code))]
 pub(crate) enum ShellKind {
+    #[cfg(not(windows))]
     Posix,
     PowerShell,
     Cmd,
@@ -17,13 +16,11 @@ pub(crate) struct ShellRuntime {
     program: PathBuf,
 }
 
-static RUNTIME: OnceLock<ShellRuntime> = OnceLock::new();
-
-pub(crate) fn runtime() -> &'static ShellRuntime {
-    RUNTIME.get_or_init(resolve)
-}
-
 impl ShellRuntime {
+    pub(crate) fn resolve(services: &neoism_agent_service_api::AgentServices) -> Self {
+        resolve(services)
+    }
+
     pub(crate) fn kind(&self) -> ShellKind {
         self.kind
     }
@@ -37,18 +34,6 @@ impl ShellRuntime {
             ShellKind::Posix => "shell",
             ShellKind::PowerShell => "PowerShell",
             ShellKind::Cmd => "Command Prompt",
-        }
-    }
-
-    pub(crate) fn tool_description(&self) -> &'static str {
-        match self.kind {
-            ShellKind::Posix => "Run shell commands",
-            ShellKind::PowerShell => {
-                "Run PowerShell commands on Windows. Use PowerShell syntax and cmdlets, quote Windows paths, and use registry providers such as HKCU:. Do not emit bash-only commands such as export, sed, or rm."
-            }
-            ShellKind::Cmd => {
-                "Run Command Prompt commands on Windows. Use cmd.exe syntax and Windows paths."
-            }
         }
     }
 
@@ -84,7 +69,7 @@ impl ShellRuntime {
     }
 }
 
-fn resolve() -> ShellRuntime {
+fn resolve(services: &neoism_agent_service_api::AgentServices) -> ShellRuntime {
     #[cfg(windows)]
     {
         for (name, kind) in [
@@ -92,7 +77,7 @@ fn resolve() -> ShellRuntime {
             ("powershell.exe", ShellKind::PowerShell),
             ("cmd.exe", ShellKind::Cmd),
         ] {
-            if let Some(program) = resolve_command(name) {
+            if let Some(program) = resolve_command(services, name) {
                 return ShellRuntime { kind, program };
             }
         }
@@ -111,18 +96,21 @@ fn resolve() -> ShellRuntime {
             kind: ShellKind::Posix,
             program: std::env::var_os("SHELL")
                 .filter(|value| !value.is_empty())
-                .and_then(|value| resolve_command(&value.to_string_lossy()))
+                .and_then(|value| resolve_command(services, &value.to_string_lossy()))
                 .unwrap_or_else(|| PathBuf::from("/bin/sh")),
         }
     }
 }
 
-pub(crate) fn resolve_command(name: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_command(
+    services: &neoism_agent_service_api::AgentServices,
+    name: &str,
+) -> Option<PathBuf> {
     let request = neoism_agent_service_api::ExecutableRequest::new(
         name,
         neoism_agent_service_api::ExecutablePurpose::PlatformShell,
     );
-    crate::lsp::agent_services()
+    services
         .executables
         .resolve(&request)
         .ok()
@@ -130,11 +118,10 @@ pub(crate) fn resolve_command(name: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn program() -> String {
-    runtime().program().to_string_lossy().into_owned()
-}
-
-pub(crate) fn tool_description() -> &'static str {
-    runtime().tool_description()
+    resolve(&crate::standard_services())
+        .program()
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -142,9 +129,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn platform_shell_has_a_program_and_description() {
-        assert!(!runtime().program().as_os_str().is_empty());
-        assert!(!runtime().tool_description().is_empty());
+    fn platform_shell_has_a_program_and_name() {
+        let runtime = ShellRuntime::resolve(&crate::standard_services());
+        assert!(!runtime.program().as_os_str().is_empty());
+        assert!(!runtime.display_name().is_empty());
     }
 
     #[test]

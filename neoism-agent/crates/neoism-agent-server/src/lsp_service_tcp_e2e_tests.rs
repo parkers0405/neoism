@@ -13,8 +13,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast::error::TryRecvError;
 
 use super::super::{
-    lsp_adapters::adapters_for_root, path_to_file_uri, subscribe_diagnostics,
-    DiagnosticsEvent,
+    path_to_file_uri, subscribe_diagnostics, DiagnosticsEvent,
 };
 
 /// Service-level proof that a TCP adapter follows the same persistent-client,
@@ -33,13 +32,13 @@ fn configured_tcp_adapter_reconnects_without_stale_diagnostic_versions() {
     let expected_uri = path_to_file_uri(&file);
     let server = thread::spawn(move || run_reconnecting_server(listener, expected_uri));
 
-    let adapter = adapters_for_root(&workspace.path)
+    let adapter = workspace.runtime.adapters_for_root(&workspace.path)
         .into_iter()
         .find(|adapter| adapter.id == "protocol-tcp")
         .expect("configured TCP adapter");
-    let service = service();
+    let service = workspace.runtime.service.as_ref();
     service.clear_diagnostics(&workspace.path, &file);
-    let mut events = subscribe_diagnostics();
+    let mut events = subscribe_diagnostics(&workspace.runtime);
 
     service
         .sync(
@@ -321,6 +320,7 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
 
 struct TestWorkspace {
     path: PathBuf,
+    runtime: super::super::LspRuntime,
 }
 
 impl TestWorkspace {
@@ -334,7 +334,10 @@ impl TestWorkspace {
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create TCP service workspace");
-        Self { path }
+        Self {
+            path,
+            runtime: super::super::LspRuntime::new(crate::standard_services()),
+        }
     }
 }
 

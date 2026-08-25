@@ -93,6 +93,7 @@ fn resolve_request_workspace_root(
 ///
 #[derive(Clone)]
 pub struct AppState {
+    pub lsp_runtime: neoism_agent_server::language_server::LspRuntime,
     pub auth: AuthService,
     /// Daemon-owned PTY/session registry. Shared by every websocket so
     /// reconnecting or roaming clients see the same live sessions and
@@ -346,6 +347,9 @@ pub fn router_from_registry(sessions: SessionRegistry) -> Router {
     // pairing-tokens file under the operator's `$HOME`.
     let pairing_tokens = PairingTokenStore::in_memory();
     router(AppState {
+        lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+            neoism_agent_neoism_adapter::neoism_services(),
+        ),
         auth,
         sessions,
         workspaces,
@@ -429,6 +433,9 @@ mod agent_proxy_auth_tests {
 
     fn test_state(auth: AuthService) -> AppState {
         AppState {
+            lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+                neoism_agent_neoism_adapter::neoism_services(),
+            ),
             auth,
             sessions: SessionRegistry::shared(),
             workspaces: WorkspaceManager::bootstrap(),

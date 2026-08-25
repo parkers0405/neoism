@@ -1,4 +1,4 @@
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -8,39 +8,44 @@ use serde_json::Value;
 use crate::{resolve_directory, vcs, InstanceQuery};
 
 pub(crate) async fn vcs_get(
+    State(state): State<crate::state::AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Json<VcsInfo> {
     let directory = resolve_directory(query.directory, &headers);
-    Json(vcs::info(&directory))
+    Json(vcs::info(state.services(), &directory))
 }
 
 pub(crate) async fn vcs_status(
+    State(state): State<crate::state::AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Json<Vec<VcsFileStatus>> {
     let directory = resolve_directory(query.directory, &headers);
-    Json(vcs::status(&directory))
+    Json(vcs::status(state.services(), &directory))
 }
 
 pub(crate) async fn vcs_diff(
+    State(state): State<crate::state::AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Json<Vec<VcsFileDiff>> {
     let directory = resolve_directory(query.directory, &headers);
-    Json(vcs::diff(&directory))
+    Json(vcs::diff(state.services(), &directory))
 }
 
 pub(crate) async fn vcs_diff_raw(
+    State(state): State<crate::state::AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Response {
     let directory = resolve_directory(query.directory, &headers);
-    let body = vcs::diff_raw(&directory);
+    let body = vcs::diff_raw(state.services(), &directory);
     ([("content-type", "text/x-diff; charset=utf-8")], body).into_response()
 }
 
 pub(crate) async fn vcs_apply(
+    State(state): State<crate::state::AppState>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Json<VcsApplyResult> {
@@ -56,5 +61,5 @@ pub(crate) async fn vcs_apply(
             error: Some("missing patch".to_string()),
         });
     };
-    Json(vcs::apply(&directory, patch))
+    Json(vcs::apply(state.services(), &directory, patch))
 }

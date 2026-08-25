@@ -2,10 +2,8 @@ use std::pin::Pin;
 
 use futures_core::Stream;
 use neoism_agent_core::{
-    AuthInfo, ProviderApiInfo, ProviderGenerationRequest, ProviderGenerationResponse,
-    ProviderInfo, ProviderStreamEvent,
+    AuthInfo, ProviderApiInfo, ProviderGenerationRequest, ProviderInfo, ProviderStreamEvent,
 };
-use tokio_stream::StreamExt;
 
 use crate::auth_store::AuthStore;
 
@@ -134,7 +132,6 @@ impl ProviderRegistry {
                         let runtime = AnthropicRuntime {
                             client: AnthropicClient::with_base_url(adapter.base_url),
                             auth,
-                            auth_store: self.auth_store.clone(),
                         };
                         Ok(ProviderStream {
                             provider_id,
@@ -162,64 +159,6 @@ impl ProviderRegistry {
             model_id,
             events: StubRuntime.stream(request),
         })
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn generate(
-        &self,
-        request: ProviderGenerationRequest,
-    ) -> anyhow::Result<ProviderGenerationResponse> {
-        let mut stream = self.stream(request)?;
-        let provider_id = stream.provider_id.clone();
-        let model_id = stream.model_id.clone();
-        let mut response = ProviderGenerationResponse {
-            provider_id,
-            model_id,
-            text: String::new(),
-            finish: None,
-            total_tokens: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        };
-        while let Some(event) = stream.events.next().await {
-            match event? {
-                ProviderStreamEvent::TextDelta { delta, .. } => {
-                    response.text.push_str(&delta)
-                }
-                ProviderStreamEvent::FinishStep {
-                    finish,
-                    total_tokens,
-                    input_tokens,
-                    output_tokens,
-                    reasoning_tokens,
-                    cache_read_tokens,
-                    cache_write_tokens,
-                }
-                | ProviderStreamEvent::Finish {
-                    finish,
-                    total_tokens,
-                    input_tokens,
-                    output_tokens,
-                    reasoning_tokens,
-                    cache_read_tokens,
-                    cache_write_tokens,
-                } => {
-                    response.finish = finish;
-                    response.total_tokens = total_tokens;
-                    response.input_tokens = input_tokens;
-                    response.output_tokens = output_tokens;
-                    response.reasoning_tokens = reasoning_tokens;
-                    response.cache_read_tokens = cache_read_tokens;
-                    response.cache_write_tokens = cache_write_tokens;
-                }
-                ProviderStreamEvent::Error { message } => anyhow::bail!(message),
-                _ => {}
-            }
-        }
-        Ok(response)
     }
 
     fn provider_auth(

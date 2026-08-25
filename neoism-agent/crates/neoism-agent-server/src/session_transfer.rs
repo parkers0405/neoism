@@ -508,7 +508,11 @@ mod tests {
         source
             .inner
             .store
-            .enqueue_prompt(session_id.as_str(), &text_prompt("continue please"))
+            .enqueue_prompt_with_delivery(
+                session_id.as_str(),
+                &text_prompt("continue please"),
+                "queue",
+            )
             .await
             .unwrap();
 
@@ -577,7 +581,7 @@ mod tests {
         let queued = target
             .inner
             .store
-            .list_queued_prompts(session_id.as_str())
+            .list_queued_prompt_entries(session_id.as_str())
             .await
             .unwrap();
         assert_eq!(queued.len(), 1);

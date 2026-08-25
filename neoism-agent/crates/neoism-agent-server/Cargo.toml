@@ -13,12 +13,9 @@ chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10.4"
 clap.workspace = true
 base64.workspace = true
-fff-search.workspace = true
 futures-core.workspace = true
 futures.workspace = true
 git2.workspace = true
-globset.workspace = true
-ignore.workspace = true
 iana-time-zone = "0.1.65"
 libc.workspace = true
 neoism-agent-core.workspace = true
@@ -26,7 +23,6 @@ neoism-agent-service-api.workspace = true
 neoism-agent-plugin-api.workspace = true
 notify = "8.2.0"
 rand.workspace = true
-regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -36,6 +32,7 @@ tokio.workspace = true
 turso.workspace = true
 tokio-stream.workspace = true
 tower-http.workspace = true
+tower.workspace = true
 tracing.workspace = true
 url.workspace = true
 dirs = "6"
@@ -52,6 +49,3 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
-
-[dev-dependencies]
-tower.workspace = true

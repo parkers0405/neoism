@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
@@ -14,6 +14,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::{oneshot, RwLock};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -21,10 +22,29 @@ use crate::tool::{self, process, shell_scan};
 use crate::{ensure_tool_permission, now_millis};
 
 const BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER: &str =
-    "Neoism runtime notification: background shell task completion.";
+    "Agent runtime notification: background shell task completion.";
 const DEFAULT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
 const BACKGROUND_TASK_RESULT_INLINE_CHARS: usize = 32_000;
+
+/// Lazily allocated background-process state for one workspace generation.
+#[derive(Default)]
+pub(crate) struct BackgroundWorkspaceRuntime {
+    pub(crate) jobs: RwLock<HashMap<String, BackgroundJob>>,
+    pub(crate) cancellations: RwLock<HashMap<String, oneshot::Sender<()>>>,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl BackgroundWorkspaceRuntime {
+    pub(crate) async fn cancel_and_clear(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let cancellations = std::mem::take(&mut *self.cancellations.write().await);
+        for (_, cancel) in cancellations {
+            let _ = cancel.send(());
+        }
+        self.jobs.write().await.clear();
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,6 +119,13 @@ struct LimitedOutput {
     truncated: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackgroundJobStopResponse {
+    job_id: String,
+    status: &'static str,
+}
+
 pub(crate) async fn start_background_task_tool(
     state: &AppState,
     session_id: &Id,
@@ -118,6 +145,8 @@ pub(crate) async fn start_background_task_tool(
     let description = string_arg(&input, "description")
         .unwrap_or_else(|| command.chars().take(80).collect::<String>());
     let cwd = resolve_job_cwd(&parent.directory, optional_cwd(&input), permissions)?;
+    let workspace = state.workspace_runtime(&parent.directory).await;
+    let background = workspace.background();
     let project_root =
         crate::windows_process::canonicalize_path(Path::new(&parent.directory))
             .map_err(|error| format!("failed to resolve project directory: {error}"))?;
@@ -125,7 +154,7 @@ pub(crate) async fn start_background_task_tool(
         &command,
         &cwd,
         &project_root,
-        crate::platform_shell::runtime().kind(),
+        state.inner.utilities.shell.kind(),
     );
     for dir in &scan.external_dirs {
         ensure_tool_permission(permissions, "external_directory", dir)?;
@@ -147,7 +176,7 @@ pub(crate) async fn start_background_task_tool(
         .or_else(|| usize_arg(&input, "maxOutputBytes"))
         .unwrap_or(DEFAULT_OUTPUT_LIMIT_BYTES)
         .max(1);
-    let runtime = crate::platform_shell::runtime();
+    let runtime = &state.inner.utilities.shell;
     let shell = runtime.program().to_string_lossy().into_owned();
     let mut command_proc = Command::new(&shell);
     runtime.apply_command(&mut command_proc, &command, true);
@@ -189,22 +218,17 @@ pub(crate) async fn start_background_task_tool(
         always_patterns: scan.always_patterns.iter().cloned().collect(),
         external_dirs: scan.external_dirs.iter().cloned().collect(),
     };
-    state
-        .inner
-        .background_jobs
-        .write()
+    background.jobs.write()
         .await
         .insert(job_id.clone(), job.clone());
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-    state
-        .inner
-        .background_job_cancellations
-        .write()
+    background.cancellations.write()
         .await
         .insert(job_id.clone(), cancel_tx);
     tokio::spawn(run_background_job(
         state.clone(),
+        background,
         job.clone(),
         child,
         cancel_rx,
@@ -223,14 +247,7 @@ pub(crate) async fn background_task_result_tool(
     input: Value,
 ) -> Result<tool::ToolExecutionResult, String> {
     if let Some(job_id) = string_arg(&input, "job_id") {
-        let job = state
-            .inner
-            .background_jobs
-            .read()
-            .await
-            .get(&job_id)
-            .cloned()
-            .ok_or_else(|| {
+        let (_, job) = find_job(state, &job_id).await.ok_or_else(|| {
                 format!(
                     "background job {job_id} not found; background task state is only retained during this server lifetime"
                 )
@@ -243,15 +260,12 @@ pub(crate) async fn background_task_result_tool(
         });
     }
 
-    let mut jobs = state
-        .inner
-        .background_jobs
-        .read()
-        .await
-        .values()
-        .filter(|job| job.session_id == session_id.to_string())
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut jobs = Vec::new();
+    for runtime in state.inner.workspace_runtimes.runtimes().await {
+        if let Some(background) = runtime.background_if_allocated() {
+            jobs.extend(background.jobs.read().await.values().filter(|job| job.session_id == session_id.to_string()).cloned());
+        }
+    }
     jobs.sort_by(|left, right| right.started_at.cmp(&left.started_at));
     if jobs.is_empty() {
         return Ok(tool::ToolExecutionResult {
@@ -285,9 +299,8 @@ pub(crate) async fn background_task_result_tool(
 pub(crate) async fn stop_background_task(
     State(state): State<AppState>,
     AxumPath((session_id, job_id)): AxumPath<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
-    let jobs = state.inner.background_jobs.read().await;
-    let job = jobs.get(&job_id).ok_or_else(|| {
+) -> Result<Json<BackgroundJobStopResponse>, ApiError> {
+    let (background, job) = find_job(&state, &job_id).await.ok_or_else(|| {
         ApiError::not_found(format!("background job {job_id} not found"))
     })?;
     if job.session_id != session_id {
@@ -301,11 +314,7 @@ pub(crate) async fn stop_background_task(
             job.status.as_str()
         )));
     }
-    drop(jobs);
-    let cancel = state
-        .inner
-        .background_job_cancellations
-        .write()
+    let cancel = background.cancellations.write()
         .await
         .remove(&job_id)
         .ok_or_else(|| {
@@ -314,20 +323,21 @@ pub(crate) async fn stop_background_task(
     cancel.send(()).map_err(|_| {
         ApiError::conflict(format!("background job {job_id} is already finishing"))
     })?;
-    Ok(Json(json!({ "jobId": job_id, "status": "stopping" })))
+    Ok(Json(BackgroundJobStopResponse {
+        job_id,
+        status: "stopping",
+    }))
 }
 
 async fn run_background_job(
     state: AppState,
+    background: std::sync::Arc<BackgroundWorkspaceRuntime>,
     mut job: BackgroundJob,
     mut child: tokio::process::Child,
     cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let finish = wait_for_background_job(&mut child, &job, cancel_rx).await;
-    state
-        .inner
-        .background_job_cancellations
-        .write()
+    background.cancellations.write()
         .await
         .remove(&job.id);
     job.status = finish.status;
@@ -337,7 +347,7 @@ async fn run_background_job(
     job.output = finish.output;
     job.output_truncated = finish.output_truncated;
     job.error = finish.error;
-    finish_background_job(&state, job).await;
+    finish_background_job(&state, &background, job).await;
 }
 
 async fn wait_for_background_job(
@@ -430,11 +440,11 @@ async fn wait_for_background_job(
     }
 }
 
-async fn finish_background_job(state: &AppState, job: BackgroundJob) {
-    state
-        .inner
-        .background_jobs
-        .write()
+async fn finish_background_job(state: &AppState, background: &BackgroundWorkspaceRuntime, job: BackgroundJob) {
+    if background.closed.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    background.jobs.write()
         .await
         .insert(job.id.clone(), job.clone());
     state.publish(EventPayload::new(
@@ -462,6 +472,17 @@ async fn finish_background_job(state: &AppState, job: BackgroundJob) {
             "failed to notify session about completed background task"
         );
     }
+}
+
+async fn find_job(state: &AppState, job_id: &str) -> Option<(std::sync::Arc<BackgroundWorkspaceRuntime>, BackgroundJob)> {
+    for runtime in state.inner.workspace_runtimes.runtimes().await {
+        let Some(background) = runtime.background_if_allocated() else { continue; };
+        let job = background.jobs.read().await.get(job_id).cloned();
+        if let Some(job) = job {
+            return Some((background, job));
+        }
+    }
+    None
 }
 
 async fn enqueue_parent_background_task_completion_prompt(
@@ -535,7 +556,7 @@ fn background_task_completion_request(job: &BackgroundJob) -> PromptRequest {
 fn background_task_completion_system() -> String {
     [
         BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER.to_string(),
-        "This message is generated by the runtime, not by the user. Treat it as session state."
+        "This message is generated by the Agent runtime, not by the user. Treat it as session state."
             .to_string(),
         "A background shell task has finished.".to_string(),
         "The job_id in the paired message is the in-memory handle for this server lifetime."

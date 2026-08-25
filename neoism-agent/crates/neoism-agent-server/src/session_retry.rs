@@ -245,7 +245,6 @@ mod tests {
             status: Some(429),
             message: "rate limit".to_string(),
             body: None,
-            headers: Default::default(),
             retryable: true,
             retry_after_ms: Some(4_200),
             context_overflow: false,

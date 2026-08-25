@@ -46,6 +46,12 @@ pub(crate) const CYAN: &str = "\x1b[38;2;92;156;245m"; // #5c9cf5 secondary blue
 pub(crate) const YELLOW: &str = "\x1b[38;2;229;192;123m"; // #e5c07b
 pub(crate) const WHITE: &str = "\x1b[38;2;238;238;238m"; // #eeeeee text
 pub(crate) const CLEAR_LINE: &str = "\x1b[2K";
+
+pub(crate) fn standalone_services() -> neoism_agent_service_api::AgentServices {
+    neoism_agent_server::services_with_workspace_search(std::sync::Arc::new(
+        neoism_agent_workspace_search_fff::FffWorkspaceSearchService::new(),
+    ))
+}
 pub(crate) const SPINNER_FRAMES: &[&str] = &["■", "▣", "□", "▣"];
 
 pub(crate) fn provider_id(provider: &serde_json::Value) -> String {
@@ -195,7 +201,7 @@ enum AuthCommand {
         #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
     },
-    #[command(name = "login-codex", alias = "login-openai", alias = "login-chatgpt")]
+    #[command(name = "login-codex")]
     LoginCodex {
         #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
@@ -363,7 +369,7 @@ async fn main() -> anyhow::Result<()> {
             println!("neoism agent listening on http://{hostname}:{port}");
             neoism_agent_server::listen(
                 options,
-                neoism_agent_server::standard_services(),
+                standalone_services(),
             )
             .await?;
         }
@@ -421,7 +427,7 @@ async fn main() -> anyhow::Result<()> {
                 provider,
                 agent,
                 variant,
-            })
+            }, &standalone_services())
             .await?
         }
         Command::Doctor { server, dir } => {

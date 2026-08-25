@@ -4,10 +4,10 @@ use neoism_agent_core::{
 };
 use serde_json::Value;
 
-const SUBTASK_COMPLETION_SYSTEM_MARKER: &str =
-    "Neoism runtime notification: background subagent completion.";
-const BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER: &str =
-    "Neoism runtime notification: background shell task completion.";
+const SUBTASK_COMPLETION_NOTIFICATION_KIND: &str =
+    "runtime notification: background subagent completion.";
+const BACKGROUND_TASK_COMPLETION_NOTIFICATION_KIND: &str =
+    "runtime notification: background shell task completion.";
 // Matches opencode's TOOL_OUTPUT_MAX_CHARS for compaction requests. The
 // request that triggers compaction is already near the context limit, so tool
 // outputs must be aggressively truncated or the summarize request itself
@@ -20,8 +20,8 @@ const COMPACTION_TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
 const NORMAL_TOOL_OUTPUT_MAX_CHARS: usize = 51_200;
 
 pub(crate) fn is_runtime_system_notification(system: &str) -> bool {
-    system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER)
-        || system.contains(BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER)
+    system.contains(SUBTASK_COMPLETION_NOTIFICATION_KIND)
+        || system.contains(BACKGROUND_TASK_COMPLETION_NOTIFICATION_KIND)
 }
 
 pub(crate) fn provider_messages(messages: &[MessageWithParts]) -> Vec<ProviderMessage> {
@@ -1037,7 +1037,7 @@ mod tests {
                     model_id: "gpt-5.5".to_string(),
                     variant: None,
                 },
-                system: Some(SUBTASK_COMPLETION_SYSTEM_MARKER.to_string()),
+                system: Some("Agent runtime notification: background subagent completion.".to_string()),
                 tools: None,
                 author: None,
             }),
@@ -1056,7 +1056,7 @@ mod tests {
         assert!(matches!(messages[0].role, ProviderRole::User));
         assert!(messages[0]
             .content
-            .contains(SUBTASK_COMPLETION_SYSTEM_MARKER));
+            .contains(SUBTASK_COMPLETION_NOTIFICATION_KIND));
         assert!(messages[0].content.contains("full summary"));
     }
 

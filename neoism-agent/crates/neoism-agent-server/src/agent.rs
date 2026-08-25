@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use neoism_agent_core::{AgentConfig, AgentInfo, ModelRef, NeoismConfig};
+use neoism_agent_core::{AgentConfig, AgentConfigDocument, AgentInfo, ModelRef};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
@@ -22,7 +22,7 @@ impl AgentCatalog {
         Ok(Self::from_config(&loaded.info))
     }
 
-    pub(crate) fn from_config(config: &NeoismConfig) -> Self {
+    pub(crate) fn from_config(config: &AgentConfigDocument) -> Self {
         let mut agents = native_agents();
 
         for agent in agents.values_mut() {
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn per_agent_permission_overrides_global_permission() {
-        let mut config = NeoismConfig::default();
+        let mut config = AgentConfigDocument::default();
         config.permission.insert("bash".to_string(), json!("deny"));
         config.agent.insert(
             "build".to_string(),
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn agent_name_override_keeps_key_and_display_lookup() {
-        let mut config = NeoismConfig::default();
+        let mut config = AgentConfigDocument::default();
         config.agent.insert(
             "build".to_string(),
             AgentConfig {
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn native_build_and_plan_include_ported_prompts() {
-        let catalog = AgentCatalog::from_config(&NeoismConfig::default());
+        let catalog = AgentCatalog::from_config(&AgentConfigDocument::default());
 
         let build = catalog.get("build").unwrap();
         let plan = catalog.get("plan").unwrap();
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn plan_agent_asks_for_general_edits_but_allows_plan_files() {
-        let catalog = AgentCatalog::from_config(&NeoismConfig::default());
+        let catalog = AgentCatalog::from_config(&AgentConfigDocument::default());
         let rules =
             crate::permission::from_config_map(&catalog.get("plan").unwrap().permission);
 
@@ -248,12 +248,31 @@ mod tests {
             PermissionAction::Ask
         );
         assert_eq!(
-            crate::permission::evaluate("edit", ".opencode/plans/next.md", &rules).action,
+            crate::permission::evaluate("edit", ".agent/plans/next.md", &rules).action,
             PermissionAction::Allow
         );
-        assert_eq!(
-            crate::permission::evaluate("edit", ".neoism/plans/next.md", &rules).action,
-            PermissionAction::Allow
-        );
+    }
+
+    #[test]
+    fn native_prompts_are_product_neutral() {
+        let catalog = AgentCatalog::from_config(&AgentConfigDocument::default());
+        let prompts = ["build", "plan", "general", "explore"]
+            .into_iter()
+            .filter_map(|name| catalog.get(name).and_then(|agent| agent.prompt))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lower = prompts.to_ascii_lowercase();
+
+        for assumption in [
+            "neoism",
+            "vault",
+            "product documentation",
+            "durable memory",
+        ] {
+            assert!(
+                !lower.contains(assumption),
+                "provider prompt contains {assumption}"
+            );
+        }
     }
 }

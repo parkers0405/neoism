@@ -351,7 +351,7 @@ fn remote_lsp_focus_store() -> &'static Mutex<HashMap<WindowId, (String, PathBuf
     STORE.get_or_init(Default::default)
 }
 
-fn refresh_lsp_pill(root: &Path, file: &Path) {
+fn refresh_lsp_pill(runtime: &engine::LspRuntime, root: &Path, file: &Path) {
     use neoism_ui::panels::status_line::LspStatus as Pill;
     // engine::status() WALKS the workspace (up to 10k files) — running
     // it per keystroke-sync starves the worker and delays didChange
@@ -371,7 +371,7 @@ fn refresh_lsp_pill(root: &Path, file: &Path) {
             }
         }
     }
-    let statuses = engine::status(root, Some(file));
+    let statuses = engine::status(runtime, root, Some(file));
     let connected: Vec<&str> = statuses
         .iter()
         .filter(|s| s.status == engine::LspServerState::Connected)
@@ -933,6 +933,11 @@ fn hover_card_lines(hovers: &[engine::LspHover]) -> Vec<String> {
 
 fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspShared {
     CODE_LSP.get_or_init(move || {
+        let runtime = engine::LspRuntime::new(
+            neoism_agent_neoism_adapter::neoism_services(),
+        );
+        let query_runtime = runtime.clone();
+        let diagnostics_runtime = runtime;
         let (tx, rx) = mpsc::channel::<CodeLspJob>();
         let query_proxy = proxy.clone();
         let _ = std::thread::Builder::new()
@@ -993,7 +998,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                             CodeLspJob::Sync { root, file, text } => {
                                 if newest_sync.get(file) == Some(&ix) {
                                     let _ =
-                                        engine::sync_document(root, file, Some(text));
+                                        engine::sync_document(&query_runtime, root, file, Some(text));
                                     // Trigger characters piggyback on the
                                     // sync lane: fetch until the server
                                     // reports a non-empty set.
@@ -1009,7 +1014,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     if missing {
                                         let chars =
                                             engine::completion_trigger_characters(
-                                                root, file,
+                                                &query_runtime, root, file,
                                             );
                                         if !chars.is_empty() {
                                             let mut store =
@@ -1022,11 +1027,11 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                             store.insert(file.clone(), chars);
                                         }
                                     }
-                                    refresh_lsp_pill(root, file);
+                                    refresh_lsp_pill(&query_runtime, root, file);
                                 }
                             }
                             CodeLspJob::Save { root, file } => {
-                                let _ = engine::save_document(root, file);
+                                let _ = engine::save_document(&query_runtime, root, file);
                             }
                             CodeLspJob::Completion {
                                 root,
@@ -1044,6 +1049,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     config_completion_items(text, *line, *character)
                                 } else {
                                     engine::completion_with_trigger(
+                                        &query_runtime,
                                         root,
                                         file,
                                         *line,
@@ -1099,7 +1105,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     })
                                     .unwrap_or_default()
                                 } else {
-                                    engine::hover(root, file, *line, *character)
+                                    engine::hover(&query_runtime, root, file, *line, *character)
                                 };
                                 if lsp_log() {
                                     eprintln!(
@@ -1125,6 +1131,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     continue;
                                 }
                                 let helps = engine::signature_help(
+                                    &query_runtime,
                                     root, file, *line, *character,
                                 );
                                 // One synthetic hover carrying the active
@@ -1203,6 +1210,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     continue;
                                 }
                                 let highlights = engine::document_highlight(
+                                    &query_runtime,
                                     root, file, *line, *character,
                                 );
                                 // Engine query outputs are ONE-based
@@ -1250,7 +1258,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     continue;
                                 }
                                 let locations =
-                                    engine::definition(root, file, *line, *character);
+                                    engine::definition(&query_runtime, root, file, *line, *character);
                                 if lsp_log() {
                                     eprintln!(
                                         "neoism::lsp code definition result: seq={seq} locations={} at {line}:{character}",
@@ -1269,7 +1277,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 file,
                                 revision,
                             } => {
-                                let edits = engine::formatting(root, file);
+                                let edits = engine::formatting(&query_runtime, root, file);
                                 let mut results = match results_store().lock() {
                                     Ok(results) => results,
                                     Err(poisoned) => poisoned.into_inner(),
@@ -1283,7 +1291,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 if newest_symbols != Some(ix) {
                                     continue;
                                 }
-                                let symbols = engine::document_symbols(root, file);
+                                let symbols = engine::document_symbols(&query_runtime, root, file);
                                 fn flatten(
                                     out: &mut Vec<neoism_ui::panels::finder::SymbolRow>,
                                     nodes: &[engine::LspDocumentSymbol],
@@ -1323,6 +1331,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 command,
                             } => {
                                 let _ = engine::execute_completion_command(
+                                    &query_runtime,
                                     root,
                                     file,
                                     server_id,
@@ -1340,7 +1349,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     continue;
                                 }
                                 let groups =
-                                    engine::code_actions(root, file, *line, *character);
+                                    engine::code_actions(&query_runtime, root, file, *line, *character);
                                 let items = flatten_code_actions(&groups);
                                 if lsp_log() {
                                     eprintln!(
@@ -1371,6 +1380,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     .is_some_and(|c| c.is_string());
                                 let (edit, ran_command) = if is_bare_command {
                                     let _ = engine::execute_command(
+                                        &query_runtime,
                                         root,
                                         file,
                                         server_id,
@@ -1384,6 +1394,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     if action.get("edit").is_none() {
                                         if let Some(resolved) =
                                             engine::resolve_code_action(
+                                                &query_runtime,
                                                 root,
                                                 file,
                                                 server_id,
@@ -1400,6 +1411,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     let ran_command = match action.get("command") {
                                         Some(command) if !command.is_null() => {
                                             let _ = engine::execute_command(
+                                                &query_runtime,
                                                 root,
                                                 file,
                                                 server_id,
@@ -1436,7 +1448,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     continue;
                                 }
                                 let locations =
-                                    engine::references(root, file, *line, *character);
+                                    engine::references(&query_runtime, root, file, *line, *character);
                                 if lsp_log() {
                                     eprintln!(
                                         "neoism::lsp code references result: seq={seq} locations={} at {line}:{character}",
@@ -1524,6 +1536,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     continue;
                                 }
                                 let groups = engine::rename(
+                                    &query_runtime,
                                     root, file, *line, *character, new_name,
                                 );
                                 if lsp_log() {
@@ -1552,7 +1565,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
         let _ = std::thread::Builder::new()
             .name("code-lsp-diags".into())
             .spawn(move || {
-                let mut rx = engine::subscribe_diagnostics();
+                let mut rx = engine::subscribe_diagnostics(&diagnostics_runtime);
                 loop {
                     match rx.blocking_recv() {
                         Ok(event) => {

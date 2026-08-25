@@ -8,7 +8,6 @@ use neoism_agent_core::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth_store::AuthStore;
 use crate::provider_error::ProviderError;
 
 use super::provider_openai_stream::{estimate_tokens, neoism_user_agent};
@@ -27,8 +26,6 @@ pub(super) struct AnthropicClient {
 pub(super) struct AnthropicRuntime {
     pub(super) client: AnthropicClient,
     pub(super) auth: Option<AuthInfo>,
-    #[allow(dead_code)]
-    pub(super) auth_store: AuthStore,
 }
 
 impl AnthropicClient {

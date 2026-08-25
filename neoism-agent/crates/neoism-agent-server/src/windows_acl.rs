@@ -159,7 +159,6 @@ pub fn harden_owner_only(path: &Path) -> io::Result<()> {
 /// rejecting them would false-positive on default user-profile ACLs.
 // Kept for parity with the daemon's copy of this helper; only the daemon
 // wires a load-time permission check today.
-#[allow(dead_code)]
 pub fn check_owner_only(path: &Path) -> io::Result<bool> {
     let wide = wide_path(path);
     unsafe {

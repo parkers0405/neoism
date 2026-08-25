@@ -1,15 +1,5 @@
 use std::path::Path;
 
-/// Resolve the protocol languageId through adapter metadata. Unknown adapter /
-/// file combinations return `None`; silently opening them as `plaintext`
-/// makes an attached server look healthy while guaranteeing bad results.
-pub(super) fn language_id_for_path(
-    adapter_id: &str,
-    file: &Path,
-) -> Option<&'static str> {
-    super::lsp_languages::adapter_by_id(adapter_id)?.language_id_for_path(file)
-}
-
 #[cfg(test)]
 pub(super) fn query_workspace_symbols_with_command(
     root: &Path,

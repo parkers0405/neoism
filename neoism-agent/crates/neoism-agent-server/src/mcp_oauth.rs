@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -534,9 +533,6 @@ struct OAuthClientRegistrationResponse {
     client_id_issued_at: Option<u64>,
     #[serde(default)]
     client_secret_expires_at: Option<u64>,
-    #[allow(dead_code)]
-    #[serde(flatten)]
-    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -550,12 +546,6 @@ struct OAuthTokenResponse {
     expires_at: Option<u64>,
     #[serde(default)]
     scope: Option<String>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    token_type: Option<String>,
-    #[allow(dead_code)]
-    #[serde(flatten)]
-    extra: BTreeMap<String, Value>,
 }
 
 #[cfg(test)]

@@ -205,31 +205,28 @@ pub(crate) fn spawn_scheduler(state: AppState) {
     let workflow_notify = state.inner.workflow_notify.clone();
     tokio::spawn(async move {
         let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
-        {
-            let Some(inner) = weak_state.upgrade() else {
-                return;
-            };
-            let state = AppState { inner };
-            if let Ok(directory) = std::env::current_dir() {
-                if let Ok(workspace) = workspace_root(directory.display().to_string()) {
-                    track_workspace(&state, &workspace).await;
-                }
-            }
-            if let Ok(workflows) = state.inner.store.list_workflows().await {
-                for workflow in workflows {
-                    track_workspace(&state, &workflow.workspace_root).await;
-                }
-            }
-            if let Err(error) = recover_unfinished_runs(&state).await {
+        if let Some(inner) = weak_state.upgrade() {
+            if let Err(error) = recover_unfinished_runs(&AppState { inner }).await {
                 tracing::warn!(%error, "failed to recover workflow runs");
             }
         }
-        let mut watcher = None;
+        let mut watcher: Option<notify::RecommendedWatcher>;
         loop {
             let Some(inner) = weak_state.upgrade() else {
                 return;
             };
             let state = AppState { inner };
+            if state.inner.workflow_workspaces.read().await.is_empty() {
+                state.inner.workflow_scheduler_started.store(false, std::sync::atomic::Ordering::SeqCst);
+                // Close the race where participation was added while the flag
+                // still said the old scheduler was alive.
+                if !state.inner.workflow_workspaces.read().await.is_empty()
+                    && state.inner.workflow_scheduler_started.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok()
+                {
+                    spawn_scheduler(state);
+                }
+                return;
+            }
             if let Err(error) = schedule_due_workflows(&state).await {
                 tracing::warn!(%error, "workflow scheduler pass failed");
             }
@@ -244,6 +241,7 @@ pub(crate) fn spawn_scheduler(state: AppState) {
             match install_workflow_watches(state.services(), &workspaces, watch_tx.clone()) {
                 Ok(replacement) => watcher = Some(replacement),
                 Err(error) => {
+                    watcher = None;
                     tracing::warn!(%error, "failed to install workflow filesystem watches");
                 }
             }
@@ -277,6 +275,10 @@ fn install_workflow_watches(
     workspaces: &[String],
     event_tx: tokio::sync::mpsc::UnboundedSender<()>,
 ) -> anyhow::Result<notify::RecommendedWatcher> {
+    let paths = workflow_watch_paths(services, workspaces);
+    if paths.is_empty() {
+        bail!("no enabled workflow workspace paths to watch");
+    }
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             match event {
@@ -290,7 +292,7 @@ fn install_workflow_watches(
                 }
             }
         })?;
-    for (path, mode) in workflow_watch_paths(services, workspaces) {
+    for (path, mode) in paths {
         if let Err(error) = watcher.watch(&path, mode) {
             tracing::warn!(path = %path.display(), %error, "failed to watch workflow path");
         }
@@ -541,9 +543,15 @@ async fn discover_async(services: neoism_agent_service_api::AgentServices, works
 }
 
 async fn track_workspace(state: &AppState, workspace: &str) {
-    if !crate::plugins::enabled(state.services(), workspace, "dev.neoism.workflows") {
+    let snapshot = state.plugin_snapshot(workspace).await;
+    if !snapshot.manifests.iter().any(|plugin| plugin.id == "dev.neoism.workflows") {
         return;
     }
+    workspace_enabled(state, crate::workspace_runtime::canonical_location(workspace)).await;
+}
+
+pub(crate) async fn workspace_enabled(state: &AppState, workspace: PathBuf) {
+    let workspace = workspace.to_string_lossy().into_owned();
     if state
         .inner
         .workflow_workspaces
@@ -551,8 +559,19 @@ async fn track_workspace(state: &AppState, workspace: &str) {
         .await
         .insert(workspace.to_string())
     {
+        if state.inner.workflow_scheduler_started
+            .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+            .is_ok()
+        {
+            spawn_scheduler(state.clone());
+        }
         state.inner.workflow_notify.notify_one();
     }
+}
+
+pub(crate) async fn workspace_disabled(state: &AppState, workspace: &FsPath) {
+    state.inner.workflow_workspaces.write().await.remove(workspace.to_string_lossy().as_ref());
+    state.inner.workflow_notify.notify_waiters();
 }
 
 async fn reconcile_workspaces(state: &AppState) -> anyhow::Result<()> {

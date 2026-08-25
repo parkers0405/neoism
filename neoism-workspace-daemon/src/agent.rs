@@ -82,7 +82,6 @@ pub fn ensure_agent_server_started() {
         return;
     }
     let services = neoism_agent_neoism_adapter::neoism_services();
-    neoism_agent_server::language_server::configure_services(services.clone());
     // Supervisor rather than a one-shot: when another process (usually
     // the desktop app) already owns the port, `listen` exits with
     // AddrInUse immediately — that's fine while the desktop serves the

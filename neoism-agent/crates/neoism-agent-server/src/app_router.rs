@@ -5,6 +5,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
+use tower::ServiceExt;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;
@@ -105,9 +106,6 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             "/v2/interactions/questions/:request_id/reject",
             post(question_reject),
         )
-        .route("/v2/agents", get(agent_list))
-        .route("/v2/agents/:name", get(agent_get))
-        .route("/v2/commands", get(command_list))
         .route("/v2/providers", get(provider_list))
         .route("/v2/providers/configured", get(config_providers))
         .route("/v2/providers/auth-methods", get(provider_auth_methods))
@@ -123,7 +121,6 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             "/v2/providers/:provider_id/oauth/callback",
             post(provider_oauth_callback),
         )
-        .route("/v2/skills", get(skill_list))
         .route("/v2/tools", get(tool_list))
         .route("/v2/sessions", get(v2_session_list).post(session_create))
         .route("/v2/sessions/status", get(session_status))
@@ -174,119 +171,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             "/v2/sessions/:session_id/jobs/:job_id",
             delete(crate::background_job::stop_background_task),
         )
-        .route(
-            "/v2/plugins/dev.neoism.subagents/sessions/:session_id/tasks",
-            get(crate::plugins::subagents::list_tasks),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.subagents/sessions/:session_id/stop",
-            post(crate::plugins::subagents::stop_tasks),
-        )
-        .route("/v2/plugins/dev.neoism.vcs", get(vcs_get))
-        .route("/v2/plugins/dev.neoism.vcs/diff", get(vcs_diff))
-        .route("/v2/plugins/dev.neoism.vcs/status", get(vcs_status))
-        .route("/v2/plugins/dev.neoism.vcs/diff/raw", get(vcs_diff_raw))
-        .route("/v2/plugins/dev.neoism.vcs/apply", post(vcs_apply))
-        .route("/v2/plugins/dev.neoism.workflows", get(workflow_list))
-        .route("/v2/plugins/dev.neoism.workflows/:workflow_id", get(workflow_get))
-        .route("/v2/plugins/dev.neoism.workflows/:workflow_id/activate", post(workflow_activate))
-        .route("/v2/plugins/dev.neoism.workflows/:workflow_id/pause", post(workflow_pause))
-        .route("/v2/plugins/dev.neoism.workflows/:workflow_id/run", post(workflow_run_now))
-        .route("/v2/plugins/dev.neoism.workflows/:workflow_id/preview", get(workflow_preview))
-        .route("/v2/plugins/dev.neoism.workflows/:workflow_id/runs", get(workflow_history))
-        .route("/v2/plugins/dev.neoism.lsp", get(lsp_status))
-        .route("/v2/plugins/dev.neoism.lsp/hover", get(lsp_hover))
-        .route("/v2/plugins/dev.neoism.lsp/signature-help", get(lsp_signature_help))
-        .route("/v2/plugins/dev.neoism.lsp/inlay-hints", get(lsp_inlay_hints))
-        .route("/v2/plugins/dev.neoism.lsp/document-highlights", get(lsp_document_highlights))
-        .route("/v2/plugins/dev.neoism.lsp/definition", get(lsp_definition))
-        .route("/v2/plugins/dev.neoism.lsp/references", get(lsp_references))
-        .route("/v2/plugins/dev.neoism.lsp/implementation", get(lsp_implementation))
-        .route("/v2/plugins/dev.neoism.lsp/prepare-call-hierarchy", get(lsp_prepare_call_hierarchy))
-        .route("/v2/plugins/dev.neoism.lsp/incoming-calls", get(lsp_incoming_calls))
-        .route("/v2/plugins/dev.neoism.lsp/outgoing-calls", get(lsp_outgoing_calls))
-        .route("/v2/plugins/dev.neoism.lsp/diagnostics", get(lsp_diagnostics))
-        .route("/v2/plugins/dev.neoism.lsp/document-symbols", get(lsp_document_symbols))
-        .route("/v2/plugins/dev.neoism.lsp/formatting", get(lsp_formatting))
-        .route("/v2/plugins/dev.neoism.lsp/code-actions", get(lsp_code_actions))
-        .route("/v2/plugins/dev.neoism.lsp/touch", post(lsp_touch))
-        .route("/v2/plugins/dev.neoism.lsp/shutdown", post(lsp_shutdown))
-        .route(
-            "/v2/plugins/dev.neoism.semantic/search",
-            get(crate::semantic::semantic_search_route),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.pty/shells",
-            get(pty_shells),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.pty",
-            get(pty_list).post(pty_create),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.pty/:pty_id",
-            get(pty_get).put(pty_update).delete(pty_remove),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.pty/:pty_id/connect-token",
-            post(pty_connect_token),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.pty/:pty_id/connect",
-            get(pty_connect),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.goals/:session_id",
-            get(session_goal_get)
-                .post(session_goal_set)
-                .delete(session_goal_clear),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.goals/:session_id/research",
-            post(session_goal_research),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.mcp",
-            get(mcp_status).post(mcp_add),
-        )
-        .route("/v2/plugins/dev.neoism.mcp/catalog", get(mcp_catalog))
-        .route(
-            "/v2/plugins/dev.neoism.mcp/:name/auth",
-            post(mcp_auth_start).delete(mcp_auth_remove),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.mcp/:name/auth/callback",
-            get(mcp_auth_callback_get).post(mcp_auth_callback),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.mcp/:name/auth/authenticate",
-            post(mcp_auth_authenticate),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.mcp/:name/connect",
-            post(mcp_connect),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.mcp/:name/disconnect",
-            post(mcp_disconnect),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.mcp/:name/config",
-            patch(mcp_config_patch),
-        )
-        .route("/v2/plugins/dev.neoism.mcp/:name/tools", get(mcp_tools))
-        .route(
-            "/v2/plugins/dev.neoism.mcp/:name/tools/:tool_name",
-            post(mcp_tool_call),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.mcp/:name/resources",
-            get(mcp_resources),
-        )
-        .route(
-            "/v2/plugins/dev.neoism.mcp/:name/prompts",
-            get(mcp_prompts),
-        )
+        .fallback(plugin_route_dispatch)
         .with_state(state)
         .layer(
             TraceLayer::new_for_http()
@@ -326,6 +211,44 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
     }
 }
 
+async fn plugin_route_dispatch(
+    State(state): State<AppState>,
+    request: Request<Body>,
+) -> Response {
+    let directory = if let Some(directory) = request_directory(&request) {
+        directory
+    } else if let Some(session_id) = session_id_from_path(request.uri().path()) {
+        match state.inner.store.get_session(session_id).await {
+            Ok(Some(session)) => session.directory,
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        }
+    } else {
+        std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned()
+    };
+    let snapshot = state.plugin_snapshot(&directory).await;
+    plugin_router(&snapshot, state)
+        .oneshot(request)
+        .await
+        .unwrap_or_else(|never| match never {})
+}
+
+fn plugin_router(snapshot: &neoism_agent_plugin_api::RegistrySnapshot, state: AppState) -> Router {
+    let route = |id: &str| snapshot.contributions.contains_key(&format!("Route:{id}"));
+    let mut router = Router::new();
+    if route("agents") { router = router.route("/v2/agents", get(agent_list)).route("/v2/agents/:name", get(agent_get)); }
+    if route("commands") { router = router.route("/v2/commands", get(command_list)); }
+    if route("skills") { router = router.route("/v2/skills", get(skill_list)); }
+    if route("subagents") { router = router.route("/v2/plugins/dev.neoism.subagents/sessions/:session_id/tasks", get(crate::plugins::subagents::list_tasks)).route("/v2/plugins/dev.neoism.subagents/sessions/:session_id/stop", post(crate::plugins::subagents::stop_tasks)); }
+    if route("vcs") { router = router.route("/v2/plugins/dev.neoism.vcs", get(vcs_get)).route("/v2/plugins/dev.neoism.vcs/diff", get(vcs_diff)).route("/v2/plugins/dev.neoism.vcs/status", get(vcs_status)).route("/v2/plugins/dev.neoism.vcs/diff/raw", get(vcs_diff_raw)).route("/v2/plugins/dev.neoism.vcs/apply", post(vcs_apply)); }
+    if route("workflows") { router = router.route("/v2/plugins/dev.neoism.workflows", get(workflow_list)).route("/v2/plugins/dev.neoism.workflows/:workflow_id", get(workflow_get)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/activate", post(workflow_activate)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/pause", post(workflow_pause)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/run", post(workflow_run_now)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/preview", get(workflow_preview)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/runs", get(workflow_history)); }
+    if route("lsp") { router = router.route("/v2/plugins/dev.neoism.lsp", get(lsp_status)).route("/v2/plugins/dev.neoism.lsp/hover", get(lsp_hover)).route("/v2/plugins/dev.neoism.lsp/signature-help", get(lsp_signature_help)).route("/v2/plugins/dev.neoism.lsp/inlay-hints", get(lsp_inlay_hints)).route("/v2/plugins/dev.neoism.lsp/document-highlights", get(lsp_document_highlights)).route("/v2/plugins/dev.neoism.lsp/definition", get(lsp_definition)).route("/v2/plugins/dev.neoism.lsp/references", get(lsp_references)).route("/v2/plugins/dev.neoism.lsp/implementation", get(lsp_implementation)).route("/v2/plugins/dev.neoism.lsp/prepare-call-hierarchy", get(lsp_prepare_call_hierarchy)).route("/v2/plugins/dev.neoism.lsp/incoming-calls", get(lsp_incoming_calls)).route("/v2/plugins/dev.neoism.lsp/outgoing-calls", get(lsp_outgoing_calls)).route("/v2/plugins/dev.neoism.lsp/diagnostics", get(lsp_diagnostics)).route("/v2/plugins/dev.neoism.lsp/document-symbols", get(lsp_document_symbols)).route("/v2/plugins/dev.neoism.lsp/formatting", get(lsp_formatting)).route("/v2/plugins/dev.neoism.lsp/code-actions", get(lsp_code_actions)).route("/v2/plugins/dev.neoism.lsp/touch", post(lsp_touch)).route("/v2/plugins/dev.neoism.lsp/shutdown", post(lsp_shutdown)); }
+    if route("semantic-search") { router = router.route("/v2/plugins/dev.neoism.semantic/search", get(crate::semantic::semantic_search_route)); }
+    if route("pty") { router = router.route("/v2/plugins/dev.neoism.pty/shells", get(pty_shells)).route("/v2/plugins/dev.neoism.pty", get(pty_list).post(pty_create)).route("/v2/plugins/dev.neoism.pty/:pty_id", get(pty_get).put(pty_update).delete(pty_remove)).route("/v2/plugins/dev.neoism.pty/:pty_id/connect-token", post(pty_connect_token)).route("/v2/plugins/dev.neoism.pty/:pty_id/connect", get(pty_connect)); }
+    if route("goals") { router = router.route("/v2/plugins/dev.neoism.goals/:session_id", get(session_goal_get).post(session_goal_set).delete(session_goal_clear)).route("/v2/plugins/dev.neoism.goals/:session_id/research", post(session_goal_research)); }
+    if route("mcp") { router = router.route("/v2/plugins/dev.neoism.mcp", get(mcp_status).post(mcp_add)).route("/v2/plugins/dev.neoism.mcp/catalog", get(mcp_catalog)).route("/v2/plugins/dev.neoism.mcp/:name/auth", post(mcp_auth_start).delete(mcp_auth_remove)).route("/v2/plugins/dev.neoism.mcp/:name/auth/callback", get(mcp_auth_callback_get).post(mcp_auth_callback)).route("/v2/plugins/dev.neoism.mcp/:name/auth/authenticate", post(mcp_auth_authenticate)).route("/v2/plugins/dev.neoism.mcp/:name/connect", post(mcp_connect)).route("/v2/plugins/dev.neoism.mcp/:name/disconnect", post(mcp_disconnect)).route("/v2/plugins/dev.neoism.mcp/:name/config", patch(mcp_config_patch)).route("/v2/plugins/dev.neoism.mcp/:name/tools", get(mcp_tools)).route("/v2/plugins/dev.neoism.mcp/:name/tools/:tool_name", post(mcp_tool_call)).route("/v2/plugins/dev.neoism.mcp/:name/resources", get(mcp_resources)).route("/v2/plugins/dev.neoism.mcp/:name/prompts", get(mcp_prompts)); }
+    router.with_state(state)
+}
+
 async fn authenticate_request(
     State(state): State<AppState>,
     mut request: Request<Body>,
@@ -339,14 +262,14 @@ async fn authenticate_request(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let claims = match crate::caller::authenticate(supplied) {
+    let claims = match state.inner.caller_policy.authenticate(supplied) {
         Ok(claims) => claims,
         Err(message) => return auth_error(StatusCode::UNAUTHORIZED, "auth.invalid_token", &message),
     };
     let mut request_guard = None;
     let mut audit_tenant = None;
     if let Some(claims) = claims {
-        request_guard = match crate::caller::begin_request(&claims) {
+        request_guard = match state.inner.caller_policy.begin_request(&claims) {
             Ok(guard) => Some(guard),
             Err(message) => {
                 return auth_error(StatusCode::TOO_MANY_REQUESTS, "quota.exceeded", message)
@@ -432,21 +355,6 @@ async fn authenticate_request(
         }
         request.extensions_mut().insert(claims);
     }
-    if let Some(plugin_id) = route_plugin(request.uri().path()) {
-        let directory = request_directory(&request).unwrap_or_else(|| {
-            std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        });
-        if !crate::plugins::enabled(state.services(), &directory, plugin_id) {
-            return auth_error(
-                StatusCode::NOT_FOUND,
-                "plugin.disabled",
-                "This plugin is disabled for the workspace",
-            );
-        }
-    }
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let response = next.run(request).await;
@@ -465,42 +373,6 @@ async fn authenticate_request(
     }
     drop(request_guard);
     response
-}
-
-fn route_plugin(path: &str) -> Option<&'static str> {
-    if path == "/v2/plugins/dev.neoism.goals"
-        || path.starts_with("/v2/plugins/dev.neoism.goals/")
-    {
-        Some("dev.neoism.goals")
-    } else if path == "/v2/plugins/dev.neoism.subagents"
-        || path.starts_with("/v2/plugins/dev.neoism.subagents/")
-    {
-        Some("dev.neoism.subagents")
-    } else if path == "/v2/plugins/dev.neoism.semantic/search" {
-        Some("dev.neoism.semantic")
-    } else if path == "/v2/plugins/dev.neoism.workflows"
-        || path.starts_with("/v2/plugins/dev.neoism.workflows/")
-    {
-        Some("dev.neoism.workflows")
-    } else if path == "/v2/plugins/dev.neoism.lsp"
-        || path.starts_with("/v2/plugins/dev.neoism.lsp/")
-    {
-        Some("dev.neoism.lsp")
-    } else if path == "/v2/plugins/dev.neoism.mcp"
-        || path.starts_with("/v2/plugins/dev.neoism.mcp/")
-    {
-        Some("dev.neoism.mcp")
-    } else if path == "/v2/plugins/dev.neoism.vcs"
-        || path.starts_with("/v2/plugins/dev.neoism.vcs/")
-    {
-        Some("dev.neoism.vcs")
-    } else if path == "/v2/plugins/dev.neoism.pty"
-        || path.starts_with("/v2/plugins/dev.neoism.pty/")
-    {
-        Some("dev.neoism.pty")
-    } else {
-        None
-    }
 }
 
 fn auth_error(status: StatusCode, code: &str, message: &str) -> Response {

@@ -13,6 +13,7 @@ libc.workspace = true
 neoism-agent-core.workspace = true
 neoism-agent-service-api.workspace = true
 neoism-agent-server.workspace = true
+neoism-agent-workspace-search-fff.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

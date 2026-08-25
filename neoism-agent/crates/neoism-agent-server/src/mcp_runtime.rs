@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
@@ -20,14 +21,10 @@ use super::mcp_wire::{parse_prompts, parse_resources, parse_tools};
 
 pub(crate) const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
-pub(super) fn runtime_manager() -> &'static McpRuntimeManager {
-    static MANAGER: OnceLock<McpRuntimeManager> = OnceLock::new();
-    MANAGER.get_or_init(McpRuntimeManager::default)
-}
-
 #[derive(Default)]
-pub(super) struct McpRuntimeManager {
+pub(crate) struct McpRuntimeManager {
     clients: RwLock<HashMap<String, Arc<McpRuntimeEntry>>>,
+    closed: AtomicBool,
 }
 
 enum McpRuntimeEntry {
@@ -68,6 +65,16 @@ struct RemoteMcpRuntimeSpec {
 }
 
 impl McpRuntimeManager {
+    pub(crate) async fn shutdown_workspace(&self, directory: &str) {
+        let prefix = format!("{}\0", canonical_directory(directory));
+        let removed = {
+            let mut clients = self.clients.write().expect("mcp runtime lock poisoned");
+            let keys = clients.keys().filter(|key| key.starts_with(&prefix)).cloned().collect::<Vec<_>>();
+            keys.into_iter().filter_map(|key| clients.remove(&key)).collect::<Vec<_>>()
+        };
+        for runtime in removed { shutdown_runtime(&runtime).await; }
+    }
+
     pub(super) async fn connect_local(
         &self,
         directory: &str,
@@ -75,8 +82,11 @@ impl McpRuntimeManager {
         command: &[String],
         environment: Option<&BTreeMap<String, String>>,
         request_timeout: Duration,
-        state: Option<AppState>,
+        state: AppState,
     ) -> anyhow::Result<McpStatus> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(anyhow!("MCP runtime is shut down"));
+        }
         let spec = LocalMcpRuntimeSpec {
             command: command.to_vec(),
             environment: environment.cloned(),
@@ -119,10 +129,19 @@ impl McpRuntimeManager {
             resources,
             prompts,
         }));
-        self.clients
-            .write()
-            .expect("mcp runtime lock poisoned")
-            .insert(runtime_key(directory, name), runtime);
+        let inserted = {
+            let mut clients = self.clients.write().expect("mcp runtime lock poisoned");
+            if self.closed.load(Ordering::SeqCst) {
+                false
+            } else {
+                clients.insert(runtime_key(directory, name), runtime.clone());
+                true
+            }
+        };
+        if !inserted {
+            shutdown_runtime(&runtime).await;
+            return Err(anyhow!("MCP runtime is shut down"));
+        }
         Ok(McpStatus::Connected)
     }
 
@@ -134,8 +153,11 @@ impl McpRuntimeManager {
         headers: Option<&BTreeMap<String, String>>,
         auth_store: &McpAuthStore,
         request_timeout: Duration,
-        state: Option<AppState>,
+        state: AppState,
     ) -> anyhow::Result<McpStatus> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(anyhow!("MCP runtime is shut down"));
+        }
         let spec = RemoteMcpRuntimeSpec {
             url: url.to_string(),
             headers: headers.cloned(),
@@ -170,10 +192,19 @@ impl McpRuntimeManager {
             prompts,
             status: McpStatus::Connected,
         }));
-        self.clients
-            .write()
-            .expect("mcp runtime lock poisoned")
-            .insert(runtime_key(directory, name), runtime);
+        let inserted = {
+            let mut clients = self.clients.write().expect("mcp runtime lock poisoned");
+            if self.closed.load(Ordering::SeqCst) {
+                false
+            } else {
+                clients.insert(runtime_key(directory, name), runtime.clone());
+                true
+            }
+        };
+        if !inserted {
+            shutdown_runtime(&runtime).await;
+            return Err(anyhow!("MCP runtime is shut down"));
+        }
         client.spawn_sse_listener();
         Ok(McpStatus::Connected)
     }
@@ -185,6 +216,9 @@ impl McpRuntimeManager {
         url: &str,
         status: McpStatus,
     ) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
         let runtime = Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
             spec: None,
             url: url.to_string(),
@@ -194,10 +228,10 @@ impl McpRuntimeManager {
             prompts: Vec::new(),
             status,
         }));
-        self.clients
-            .write()
-            .expect("mcp runtime lock poisoned")
-            .insert(runtime_key(directory, name), runtime);
+        let mut clients = self.clients.write().expect("mcp runtime lock poisoned");
+        if !self.closed.load(Ordering::SeqCst) {
+            clients.insert(runtime_key(directory, name), runtime);
+        }
     }
 
     pub(super) async fn disconnect(
@@ -211,9 +245,7 @@ impl McpRuntimeManager {
             .expect("mcp runtime lock poisoned")
             .remove(&runtime_key(directory, name));
         if let Some(runtime) = runtime {
-            if let McpRuntimeEntry::Local(local) = runtime.as_ref() {
-                local.client.shutdown().await;
-            }
+            shutdown_runtime(&runtime).await;
             return Ok(true);
         }
         Ok(false)
@@ -233,7 +265,7 @@ impl McpRuntimeManager {
         directory: &str,
         configured: &BTreeSet<String>,
     ) {
-        let prefix = format!("{directory}\0");
+        let prefix = format!("{}\0", canonical_directory(directory));
         let removed = {
             let mut clients = self.clients.write().expect("mcp runtime lock poisoned");
             let keys = clients
@@ -249,9 +281,7 @@ impl McpRuntimeManager {
                 .collect::<Vec<_>>()
         };
         for runtime in removed {
-            if let McpRuntimeEntry::Local(local) = runtime.as_ref() {
-                local.client.shutdown().await;
-            }
+            shutdown_runtime(&runtime).await;
         }
     }
 
@@ -417,10 +447,15 @@ impl McpRuntimeManager {
                 }))
             }
         };
-        self.clients
-            .write()
-            .expect("mcp runtime lock poisoned")
-            .insert(runtime_key(directory, name), refreshed);
+        let mut clients = self.clients.write().expect("mcp runtime lock poisoned");
+        let key = runtime_key(directory, name);
+        if !self.closed.load(Ordering::SeqCst)
+            && clients
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+        {
+            clients.insert(key, refreshed);
+        }
         Ok(())
     }
 
@@ -451,15 +486,28 @@ impl McpRuntimeManager {
             }
         };
         if let Some(runtime) = removed {
-            if let McpRuntimeEntry::Local(local) = runtime.as_ref() {
-                local.client.shutdown().await;
+            shutdown_runtime(&runtime).await;
+        }
+    }
+}
+
+async fn shutdown_runtime(runtime: &McpRuntimeEntry) {
+    match runtime {
+        McpRuntimeEntry::Local(local) => local.client.shutdown().await,
+        McpRuntimeEntry::Remote(remote) => {
+            if let Some(client) = &remote.client {
+                client.shutdown().await;
             }
         }
     }
 }
 
 fn runtime_key(directory: &str, name: &str) -> String {
-    format!("{directory}\0{name}")
+    format!("{}\0{name}", canonical_directory(directory))
+}
+
+fn canonical_directory(directory: &str) -> String {
+    crate::workspace_runtime::canonical_location(directory).to_string_lossy().into_owned()
 }
 
 type McpSnapshot = (Vec<McpToolInfo>, Vec<McpResource>, Vec<McpPromptInfo>);
@@ -575,9 +623,9 @@ where
 fn notification_handler(
     directory: &str,
     name: &str,
-    state: Option<AppState>,
+    state: AppState,
 ) -> Option<NotificationHandler> {
-    let state = state?;
+    let weak_state = Arc::downgrade(&state.inner);
     let directory = directory.to_string();
     let name = name.to_string();
     Some(Arc::new(move |notification: McpNotification| {
@@ -593,9 +641,13 @@ fn notification_handler(
         );
         let directory = directory.clone();
         let name = name.clone();
-        let state = state.clone();
+        let weak_state = weak_state.clone();
         tokio::spawn(async move {
-            match runtime_manager().refresh_lists(&directory, &name).await {
+            let Some(inner) = weak_state.upgrade() else {
+                return;
+            };
+            let state = AppState { inner };
+            match state.workspace_runtime(&directory).await.mcp().refresh_lists(&directory, &name).await {
                 Ok(()) => {
                     state.publish(EventPayload::new(
                         event_type::MCP_TOOLS_CHANGED,

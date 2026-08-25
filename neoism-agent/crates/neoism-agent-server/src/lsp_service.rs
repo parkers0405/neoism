@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -26,7 +26,11 @@ use super::{
 };
 
 pub(super) struct LspService {
-    services: RwLock<neoism_agent_service_api::AgentServices>,
+    pub(super) services: neoism_agent_service_api::AgentServices,
+    pub(super) diagnostics_bus: tokio::sync::broadcast::Sender<super::DiagnosticsEvent>,
+    pub(super) adapter_cache: super::lsp_adapters::AdapterCache,
+    pub(super) cargo_roots: Mutex<super::lsp_scan::CargoRootCache>,
+    self_weak: std::sync::Weak<LspService>,
     clients: Mutex<HashMap<LspClientKey, Arc<Mutex<PersistentLspClient>>>>,
     /// Per-client initialization gates. Spawning and initializing happens
     /// outside `clients`, so unrelated servers never block each other, while
@@ -43,8 +47,23 @@ pub(super) struct LspService {
 
 impl Default for LspService {
     fn default() -> Self {
+        let (diagnostics_bus, _) = tokio::sync::broadcast::channel(512);
+        Self::new(crate::standard_services(), diagnostics_bus, std::sync::Weak::new())
+    }
+}
+
+impl LspService {
+    pub(super) fn new(
+        services: neoism_agent_service_api::AgentServices,
+        diagnostics_bus: tokio::sync::broadcast::Sender<super::DiagnosticsEvent>,
+        self_weak: std::sync::Weak<LspService>,
+    ) -> Self {
         Self {
-            services: RwLock::new(crate::standard_services()),
+            services,
+            diagnostics_bus,
+            adapter_cache: Default::default(),
+            cargo_roots: Default::default(),
+            self_weak,
             clients: Mutex::new(HashMap::new()),
             initialization_gates: Mutex::new(HashMap::new()),
             diagnostics: Mutex::new(HashMap::new()),
@@ -112,6 +131,7 @@ enum LspEndpointKey {
 }
 
 struct PersistentLspClient {
+    service: std::sync::Weak<LspService>,
     client: LspClient,
     initialized: InitializeResult,
     root: PathBuf,
@@ -146,24 +166,15 @@ enum LspEndpoint {
     },
 }
 
-pub(super) fn service() -> &'static LspService {
-    static SERVICE: OnceLock<LspService> = OnceLock::new();
-    SERVICE.get_or_init(LspService::default)
-}
 
 impl LspService {
-    pub(super) fn configure_services(
-        &self,
-        services: neoism_agent_service_api::AgentServices,
-    ) {
-        *self.services.write().expect("LSP services lock poisoned") = services;
-    }
-
-    pub(super) fn services(&self) -> neoism_agent_service_api::AgentServices {
-        self.services
-            .read()
-            .expect("LSP services lock poisoned")
-            .clone()
+    fn runtime(&self) -> super::LspRuntime {
+        super::LspRuntime {
+            service: self
+                .self_weak
+                .upgrade()
+                .expect("LSP service must be owned by an LspRuntime"),
+        }
     }
 
     /// Language ids that currently have a live (spawned + initialized) client
@@ -230,7 +241,7 @@ impl LspService {
         file: &Path,
         spec: &LanguageAdapter,
     ) -> Option<String> {
-        let project_root = server_root_for_file(workspace_root, file, spec);
+        let project_root = server_root_for_file(&self.runtime(), workspace_root, file, spec);
         self.broken_reason_at(workspace_root, &project_root, spec)
     }
 
@@ -244,7 +255,7 @@ impl LspService {
         project_root: &Path,
         spec: &LanguageAdapter,
     ) -> bool {
-        let launch = launch_config(spec);
+        let launch = launch_config(&self.runtime(), spec);
         let key = LspClientKey::new(workspace_root, project_root, &launch);
         let client = self
             .clients
@@ -274,7 +285,7 @@ impl LspService {
         project_root: &Path,
         spec: &LanguageAdapter,
     ) -> Option<String> {
-        let launch = launch_config(spec);
+        let launch = launch_config(&self.runtime(), spec);
         let key = LspClientKey::new(workspace_root, project_root, &launch);
         let client = self
             .clients
@@ -1134,6 +1145,26 @@ impl LspService {
         }
     }
 
+    pub(super) fn shutdown_root(&self, root: &Path) {
+        let root = crate::lsp::normalized_root(root);
+        let clients = {
+            let mut clients = self.clients.lock().expect("lsp client map lock poisoned");
+            let keys = clients.keys().filter(|key| key.root == root).cloned().collect::<Vec<_>>();
+            keys.into_iter().filter_map(|key| clients.remove(&key)).collect::<Vec<_>>()
+        };
+        for client in clients {
+            if let Ok(mut client) = client.lock() {
+                let _ = client.client.shutdown();
+            }
+        }
+        self.diagnostics.lock().expect("lsp diagnostics lock poisoned").retain(|key, _| key.root != root);
+        self.document_versions.lock().expect("lsp document version lock poisoned").retain(|key, _| key.root != root);
+        self.diagnostic_versions.lock().expect("lsp diagnostic version lock poisoned").retain(|key, _| key.root != root);
+        self.initialization_gates.lock().expect("lsp initialization gate lock poisoned").retain(|key, _| key.root != root);
+        self.broken.lock().expect("lsp broken map lock poisoned").retain(|key, _| key.root != root);
+        *self.cargo_roots.lock().expect("lsp cargo root cache lock poisoned") = Default::default();
+    }
+
     fn position_locations(
         &self,
         root: &Path,
@@ -1174,7 +1205,7 @@ impl LspService {
         spec: &LanguageAdapter,
         operation: impl FnOnce(&mut PersistentLspClient) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        let project_root = server_root_for_file(workspace_root, file, spec);
+        let project_root = server_root_for_file(&self.runtime(), workspace_root, file, spec);
         self.with_client(workspace_root, &project_root, spec, operation)
     }
 
@@ -1185,7 +1216,7 @@ impl LspService {
         spec: &LanguageAdapter,
         operation: impl FnOnce(&mut PersistentLspClient) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        let launch = launch_config(spec);
+        let launch = launch_config(&self.runtime(), spec);
         let key = LspClientKey::new(workspace_root, project_root, &launch);
         // `client()` records only real connect/spawn/initialize failures. Do
         // not record its backoff sentinel here: resetting `retry_after` on
@@ -1274,6 +1305,8 @@ impl LspService {
         // reads in the same process.
         let spawned = match &launch.endpoint {
             LspEndpoint::Stdio { command, env } => LspClient::spawn_with_env(
+                &self.services,
+                self.self_weak.clone(),
                 project_root,
                 workspace_root,
                 &launch.id,
@@ -1290,6 +1323,7 @@ impl LspService {
                     );
                 }
                 LspClient::connect_tcp(
+                    self.self_weak.clone(),
                     project_root,
                     workspace_root,
                     &launch.id,
@@ -1320,6 +1354,7 @@ impl LspService {
             }
         };
         let persistent = Arc::new(Mutex::new(PersistentLspClient {
+            service: self.self_weak.clone(),
             client,
             initialized,
             root: workspace_root.to_path_buf(),
@@ -1584,6 +1619,49 @@ mod diagnostic_cache_tests {
     }
 
     #[test]
+    fn runtimes_isolate_diagnostics_events_and_all_mutable_caches() {
+        let first = super::super::LspRuntime::new(crate::standard_services());
+        let second = super::super::LspRuntime::new(crate::standard_services());
+        let root = Path::new("/tmp/lsp-runtime-isolation");
+        let file = Path::new("src/main.rs");
+        let mut first_events = first.subscribe_diagnostics();
+        let mut second_events = second.subscribe_diagnostics();
+
+        first.service.store_diagnostics(
+            root,
+            file,
+            "server-a",
+            "rust",
+            vec![diagnostic("first only")],
+        );
+        let _ = first.service.diagnostics_bus.send(super::super::DiagnosticsEvent {
+            root: root.to_path_buf(),
+            server_id: "server-a".into(),
+            language: "rust".into(),
+            file: file.display().to_string(),
+            diagnostics: first.service.cached_diagnostics(root, file),
+        });
+
+        assert_eq!(first.service.cached_diagnostics(root, file).len(), 1);
+        assert!(second.service.cached_diagnostics(root, file).is_empty());
+        assert_eq!(first_events.try_recv().unwrap().diagnostics.len(), 1);
+        assert!(matches!(
+            second_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(!std::ptr::eq(
+            &first.service.adapter_cache,
+            &second.service.adapter_cache,
+        ));
+        assert!(!std::ptr::eq(
+            &first.service.cargo_roots,
+            &second.service.cargo_roots,
+        ));
+        assert!(first.service.clients.lock().unwrap().is_empty());
+        assert!(second.service.clients.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn code_action_context_preserves_server_diagnostic_identity() {
         let root = Path::new("/workspace");
         let diagnostic = super::super::LspDiagnostic {
@@ -1823,12 +1901,52 @@ mod diagnostic_cache_tests {
 
     #[test]
     fn failed_client_reason_is_available_to_status_reporting() {
-        let service = LspService::default();
+        use neoism_agent_service_api::{
+            LanguageCapabilitySnapshot, LanguageRootPolicy, LanguageRouteCapability,
+            LanguageServerCapability, LanguageServerOperations, LanguageServerTransport,
+            StaticLanguageCapabilityService,
+        };
+        let capability = LanguageServerCapability {
+            id: "fake-language".to_string(),
+            name: "Fake Language".to_string(),
+            catalog_packages: Vec::new(),
+            transport: LanguageServerTransport::Stdio {
+                command: vec!["fake-language-server".to_string()],
+            },
+            routes: vec![LanguageRouteCapability {
+                id: "fake-language".to_string(),
+                document_language_id: "fake-language".to_string(),
+                extensions: vec!["fake".to_string()],
+                filename_patterns: Vec::new(),
+            }],
+            markers: Vec::new(),
+            root_policy: LanguageRootPolicy::NearestMarker,
+            capabilities: LanguageServerOperations {
+                workspace_symbols: true,
+                completion: true,
+                hover: true,
+                definition: true,
+                references: true,
+                implementation: true,
+                call_hierarchy: true,
+                diagnostics: true,
+                document_symbols: true,
+                formatting: true,
+                code_actions: true,
+                rename: true,
+            },
+        };
+        let services = crate::standard_services().with_language_capabilities(std::sync::Arc::new(
+            StaticLanguageCapabilityService::new(LanguageCapabilitySnapshot {
+                generation: 1,
+                languages: std::sync::Arc::from(vec![capability.clone()]),
+            }),
+        ));
+        let runtime = super::super::LspRuntime::new(services);
+        let service = runtime.service.as_ref();
         let root = Path::new("/tmp/neoism-broken-lsp-status");
-        let spec = LanguageAdapter::from_builtin(
-            &super::super::lsp_languages::LANGUAGE_SPECS[0],
-        );
-        let launch = launch_config(&spec);
+        let spec = LanguageAdapter::from_capability(&capability);
+        let launch = launch_config(&runtime, &spec);
         let key = LspClientKey::new(root, root, &launch);
         service.record_broken(&key, "server exited during initialize".to_string());
 
@@ -1841,6 +1959,9 @@ mod diagnostic_cache_tests {
 
 impl PersistentLspClient {
     fn ensure_open(&mut self, file: &Path, text: Option<&str>) -> anyhow::Result<()> {
+        let service = self.service.clone();
+        let root = self.root.clone();
+        let server_id = self.server_id.clone();
         let (language_id, logical_language) = self.language_ids_for_path(file)?;
         match self.open_versions.get_mut(file) {
             Some(version) => {
@@ -1863,36 +1984,18 @@ impl PersistentLspClient {
                         // this call; recording afterward leaves a window where
                         // that stale payload is accepted and briefly flickers
                         // back into the UI.
-                        service().record_document_version(
-                            &self.root,
-                            file,
-                            &self.server_id,
-                            &logical_language,
-                            next_version,
-                        );
+                        record_document_version(&service, &root, file, &server_id, &logical_language, next_version);
                         if let Err(error) =
                             self.client.change_document(file, next_version, text)
                         {
-                            service().record_document_version(
-                                &self.root,
-                                file,
-                                &self.server_id,
-                                &logical_language,
-                                *version,
-                            );
+                            record_document_version(&service, &root, file, &server_id, &logical_language, *version);
                             return Err(error);
                         }
                         *version = next_version;
                         self.synced_hashes.insert(file.to_path_buf(), hash);
                     }
                 }
-                service().record_document_version(
-                    &self.root,
-                    file,
-                    &self.server_id,
-                    &logical_language,
-                    *version,
-                );
+                record_document_version(&service, &root, file, &server_id, &logical_language, *version);
                 Ok(())
             }
             None => {
@@ -1908,13 +2011,7 @@ impl PersistentLspClient {
                 self.open_versions.insert(file.to_path_buf(), 0);
                 self.synced_hashes
                     .insert(file.to_path_buf(), text_hash(&text));
-                service().record_document_version(
-                    &self.root,
-                    file,
-                    &self.server_id,
-                    &logical_language,
-                    0,
-                );
+                record_document_version(&service, &root, file, &server_id, &logical_language, 0);
                 Ok(())
             }
         }
@@ -1952,6 +2049,19 @@ impl PersistentLspClient {
     }
 }
 
+fn record_document_version(
+    service: &std::sync::Weak<LspService>,
+    root: &Path,
+    file: &Path,
+    server_id: &str,
+    language: &str,
+    version: i32,
+) {
+    if let Some(service) = service.upgrade() {
+        service.record_document_version(root, file, server_id, language, version);
+    }
+}
+
 impl LspClientKey {
     fn new(root: &Path, project_root: &Path, launch: &LspLaunchConfig) -> Self {
         let endpoint = match &launch.endpoint {
@@ -1982,11 +2092,11 @@ impl LspClientKey {
     }
 }
 
-fn launch_config(adapter: &LanguageAdapter) -> LspLaunchConfig {
+fn launch_config(runtime: &super::LspRuntime, adapter: &LanguageAdapter) -> LspLaunchConfig {
     let endpoint = match &adapter.transport {
         ResolvedLspTransport::Stdio { command, env } => {
             let (command, source) =
-                crate::lsp::resolve_lsp_command(&adapter.id, command.clone());
+                runtime.resolve_lsp_command(&adapter.id, command.clone());
             if std::env::var_os("NEOISM_LSP_LOG").is_some() {
                 eprintln!(
                     "neoism::lsp resolve[{}]: source={source:?} endpoint=stdio:{}",

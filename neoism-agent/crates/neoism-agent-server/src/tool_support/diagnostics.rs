@@ -21,10 +21,14 @@ const MAX_REPORTED_ERRORS_PER_FILE: usize = 20;
 ///
 /// NOTE: this performs blocking LSP I/O (it can wait for `publishDiagnostics`).
 /// Callers MUST invoke it off the async executor — see [`attach_lsp_diagnostics`].
-pub(super) fn touch_paths(cwd: &Path, paths: impl IntoIterator<Item = PathBuf>) -> Value {
+pub(super) fn touch_paths(
+    runtime: &lsp::LspRuntime,
+    cwd: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Value {
     let mut entries = Vec::new();
     for path in resolve_existing(cwd, paths) {
-        let notified = lsp::touch_document(cwd, &path, None);
+        let notified = lsp::touch_document(runtime, cwd, &path, None);
         entries.push(json!({
             "path": display_path(cwd, &path),
             "notified": notified,
@@ -45,6 +49,7 @@ pub(super) fn touch_paths(cwd: &Path, paths: impl IntoIterator<Item = PathBuf>) 
 /// populated. It is cheap, but stays inside the same `spawn_blocking` as
 /// `touch_paths` for simplicity.
 pub(super) fn attach_lsp_diagnostics(
+    runtime: &lsp::LspRuntime,
     cwd: &Path,
     paths: impl IntoIterator<Item = PathBuf>,
     metadata: &mut Value,
@@ -58,7 +63,7 @@ pub(super) fn attach_lsp_diagnostics(
 
     for path in &touched {
         touched_keys.insert(path.clone());
-        let diagnostics = lsp::cached_diagnostics(cwd, path);
+        let diagnostics = lsp::cached_diagnostics(runtime, cwd, path);
         total += diagnostics.len();
         let display = display_path(cwd, path);
         if let Some(section) = error_report(&display, &diagnostics) {
@@ -72,7 +77,7 @@ pub(super) fn attach_lsp_diagnostics(
     // returns the full diagnostics record; we cap files/diagnostics to stay
     // cheap and never spawn a server here.
     let mut project_files = 0usize;
-    for (path, diagnostics) in lsp::cached_project_diagnostics(cwd) {
+    for (path, diagnostics) in lsp::cached_project_diagnostics(runtime, cwd) {
         if touched_keys.contains(&path) || diagnostics.is_empty() {
             continue;
         }

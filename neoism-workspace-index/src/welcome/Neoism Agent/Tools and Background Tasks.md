@@ -72,7 +72,7 @@ All map to the `edit` permission. Agents are instructed not to overwrite unrelat
 
 ## Tool loops and limits
 
-An agent can set `max-steps`. When the limit is reached, Neoism disables further tools for that turn and requires a text summary. Repeated behavior can trigger the `doom_loop` permission.
+An agent can set `maxSteps`. When the limit is reached, Neoism disables further tools for that turn and requires a text summary. Repeated behavior can trigger the `doom_loop` permission.
 
 ## Permissions and side effects
 

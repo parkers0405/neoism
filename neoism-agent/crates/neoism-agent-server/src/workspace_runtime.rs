@@ -36,6 +36,10 @@ impl PluginLifecycleHandle {
             teardown();
         }
     }
+
+    fn disarm(&self) {
+        self.teardown.lock().expect("plugin lifecycle lock poisoned").take();
+    }
 }
 
 impl Drop for PluginLifecycleHandle {
@@ -52,6 +56,10 @@ pub(crate) struct PluginLifecycleRegistry {
 impl PluginLifecycleRegistry {
     fn len(&self) -> usize {
         self.handles.len()
+    }
+
+    fn disarm(&self) {
+        for handle in self.handles.values() { handle.disarm(); }
     }
 
     #[cfg(test)]
@@ -80,6 +88,7 @@ impl PluginGeneration {
         }))
     }
 
+    #[cfg(test)]
     fn empty(snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>) -> Arc<Self> {
         let plugin_ids = snapshot
             .manifests
@@ -93,6 +102,32 @@ impl PluginGeneration {
             Ok(())
         })
         .expect("installed plugin generation is ready")
+    }
+
+    fn workspace(
+        snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>,
+        lifecycle: Arc<WorkspaceLifecycle>,
+        state: &crate::state::AppState,
+        root: PathBuf,
+    ) -> Arc<Self> {
+        let plugin_ids = snapshot.manifests.iter().map(|manifest| manifest.id.clone()).collect::<Vec<_>>();
+        let weak_state = Arc::downgrade(&state.inner);
+        Self::build(snapshot, |builder| {
+            for plugin_id in plugin_ids {
+                let lifecycle = lifecycle.clone();
+                let weak_state = weak_state.clone();
+                let root = root.clone();
+                let teardown_id = plugin_id.clone();
+                builder.register(plugin_id, || Ok(()), move || {
+                    let Some(inner) = weak_state.upgrade() else { return; };
+                    let state = crate::state::AppState { inner };
+                    tokio::spawn(async move {
+                        lifecycle.teardown_plugin(&teardown_id, &state, &root).await;
+                    });
+                })?;
+            }
+            Ok(())
+        }).expect("workspace plugin generation is ready")
     }
 
     pub(crate) fn snapshot(&self) -> Arc<neoism_agent_plugin_api::RegistrySnapshot> {
@@ -184,6 +219,31 @@ impl WorkspaceLifecycle {
         let state = self.states.lock().expect("workspace plugin state lock poisoned").get(plugin_id).cloned()?;
         Some(state.downcast::<T>().unwrap_or_else(|_| panic!("plugin state type mismatch for {plugin_id}")))
     }
+
+    async fn teardown_plugin(&self, plugin_id: &str, state: &crate::state::AppState, root: &Path) {
+        if plugin_id == neoism_agent_builtins::plugin::mcp::ID {
+            if let Some(runtime) = self.state_if_allocated::<crate::mcp::McpRuntimeManager>(plugin_id) {
+                runtime.shutdown_workspace(root.to_string_lossy().as_ref()).await;
+            }
+        } else if plugin_id == neoism_agent_builtins::plugin::lsp::ID {
+            if let Some(runtime) = self.state_if_allocated::<crate::lsp::LspRuntime>(plugin_id) { runtime.shutdown_root(root); }
+        } else if plugin_id == neoism_agent_builtins::plugin::pty::ID {
+            if let Some(runtime) = self.state_if_allocated::<crate::pty::PtyWorkspaceRuntime>(plugin_id) { runtime.shutdown().await; }
+        } else if plugin_id == neoism_agent_builtins::plugin::workspace_tools::ID {
+            if let Some(runtime) = self.state_if_allocated::<crate::background_job::BackgroundWorkspaceRuntime>(plugin_id) { runtime.cancel_and_clear().await; }
+        } else if plugin_id == neoism_agent_builtins::plugin::subagents::ID {
+            if let Some(runtime) = self.state_if_allocated::<crate::plugins::subagents::SubagentWorkspaceRuntime>(plugin_id) { runtime.teardown(state, root).await; }
+        } else if plugin_id == neoism_agent_builtins::plugin::semantic::ID {
+            if let Some(runtime) = self.state_if_allocated::<SemanticLifecycle>(plugin_id) {
+                if let Some(indexer) = runtime.indexer.lock().await.take() { indexer.shutdown().await; }
+            }
+        } else if plugin_id == neoism_agent_builtins::plugin::workflows::ID {
+            if let Some(runtime) = self.state_if_allocated::<WorkflowLifecycle>(plugin_id) {
+                runtime.workflow_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+                crate::workflow::workspace_disabled(state, root).await;
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -261,35 +321,10 @@ impl WorkspaceRuntime {
 
     pub(crate) async fn teardown(&self, state: &crate::state::AppState) {
         let lifecycle = self.lifecycle();
-        if let Some(mcp) = lifecycle.state_if_allocated::<crate::mcp::McpRuntimeManager>(neoism_agent_builtins::plugin::mcp::ID) {
-            mcp.shutdown_workspace(self.root.to_string_lossy().as_ref()).await;
+        for plugin_id in self.snapshot().manifests.iter().map(|manifest| manifest.id.as_str()) {
+            lifecycle.teardown_plugin(plugin_id, state, &self.root).await;
         }
-        if let Some(lsp) = lifecycle.state_if_allocated::<crate::lsp::LspRuntime>(neoism_agent_builtins::plugin::lsp::ID) {
-            lsp.shutdown_root(&self.root);
-        }
-        if let Some(pty) = lifecycle.state_if_allocated::<crate::pty::PtyWorkspaceRuntime>(neoism_agent_builtins::plugin::pty::ID) {
-            pty.shutdown().await;
-        }
-        if let Some(background) = lifecycle.state_if_allocated::<crate::background_job::BackgroundWorkspaceRuntime>(neoism_agent_builtins::plugin::workspace_tools::ID) {
-            background.cancel_and_clear().await;
-        }
-        if let Some(subagents) = lifecycle.state_if_allocated::<crate::plugins::subagents::SubagentWorkspaceRuntime>(neoism_agent_builtins::plugin::subagents::ID) {
-            subagents.teardown(state, &self.root).await;
-        }
-        if let Some(semantic) = lifecycle.state_if_allocated::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID) {
-            if let Some(indexer) = semantic.indexer.lock().await.take() {
-                indexer.shutdown().await;
-            }
-        }
-        if let Some(workflow) = lifecycle.state_if_allocated::<WorkflowLifecycle>(neoism_agent_builtins::plugin::workflows::ID) {
-            workflow.workflow_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
-            crate::workflow::workspace_disabled(state, &self.root).await;
-        }
-    }
-
-    pub(crate) async fn replace_generation(&self, state: &crate::state::AppState) {
-        self.teardown(state).await;
-        *self.lifecycle.write().expect("workspace lifecycle lock poisoned") = Arc::new(WorkspaceLifecycle::default());
+        self.plugin_generation().lifecycles.disarm();
     }
 
     pub(crate) async fn enable_semantic(&self, state: crate::state::AppState) {
@@ -359,11 +394,14 @@ impl WorkspaceRuntimeRegistry {
         let signature = config_signature(services, &root);
         let host = crate::plugins::build_host(state, &root.to_string_lossy())
             .expect("built-in workspace plugin registration must be valid");
+        let lifecycle = Arc::new(WorkspaceLifecycle::default());
+        let snapshot = host.snapshot();
+        let generation = PluginGeneration::workspace(snapshot, lifecycle.clone(), state, root.clone());
         let runtime = Arc::new(WorkspaceRuntime {
             root: root.clone(),
             services: services.clone(),
-            lifecycle: RwLock::new(Arc::new(WorkspaceLifecycle::default())),
-            generation: PluginGenerationSlot::new(PluginGeneration::empty(host.snapshot())),
+            lifecycle: RwLock::new(lifecycle),
+            generation: PluginGenerationSlot::new(generation),
             signature: RwLock::new(signature),
         });
         entries.insert(
@@ -405,7 +443,9 @@ fn refresh_plugins(runtime: &WorkspaceRuntime, state: &crate::state::AppState) {
             let old_generation = runtime.snapshot().generation;
             let mut next = (*host.snapshot()).clone();
             next.generation = old_generation.saturating_add(1);
-            let candidate = PluginGeneration::empty(Arc::new(next));
+            let lifecycle = Arc::new(WorkspaceLifecycle::default());
+            let candidate = PluginGeneration::workspace(Arc::new(next), lifecycle.clone(), state, runtime.root.clone());
+            *runtime.lifecycle.write().expect("workspace lifecycle lock poisoned") = lifecycle;
             runtime.generation.publish(candidate);
             *runtime.signature.write().expect("workspace signature lock poisoned") = signature;
         }

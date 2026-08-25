@@ -479,7 +479,7 @@ impl AppState {
             .iter()
             .map(|manifest| manifest.id.clone())
             .collect::<BTreeSet<_>>();
-        let previous = {
+        {
             let mut generations = self.inner.workspace_plugin_generations.lock().await;
             if generations
                 .get(&runtime.root)
@@ -487,12 +487,7 @@ impl AppState {
             {
                 return;
             }
-            generations
-                .insert(runtime.root.clone(), (snapshot.generation, enabled.clone()))
-                .map(|(_, plugins)| plugins)
-        };
-        if previous.is_some() {
-            runtime.replace_generation(self).await;
+            generations.insert(runtime.root.clone(), (snapshot.generation, enabled.clone()));
         }
         let workflow = enabled.contains(neoism_agent_builtins::plugin::workflows::ID);
         runtime.set_workflow_enabled(workflow);

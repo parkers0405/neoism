@@ -152,6 +152,43 @@ impl neoism_agent_builtins::plugin::mcp::McpHost for Mcp {
     }
 }
 
+pub(crate) struct Pty(pub(crate) crate::state::AppState);
+
+impl neoism_agent_builtins::plugin::pty::PtyHost for Pty {
+    fn execute<'a>(&'a self, action: neoism_agent_builtins::plugin::pty::PtyAction, request: neoism_agent_plugin_api::RouteRequest) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
+        Box::pin(async move {
+            use axum::extract::{Path, Query, State};
+            use axum::Json;
+            use neoism_agent_builtins::plugin::pty::PtyAction;
+            let query = route_query(&request);
+            let state = State(self.0.clone());
+            let headers = header_map(&request.headers);
+            let pty_id = request.path.get("pty_id").cloned().unwrap_or_default();
+            let value = match action {
+                PtyAction::Shells => serde_json::to_value(crate::pty_routes::pty_shells().await.0),
+                PtyAction::List => serde_json::to_value(crate::pty_routes::pty_list(state).await.0),
+                PtyAction::Create => serde_json::to_value(crate::pty_routes::pty_create(state, Query(query_value(query)?), headers, Json(request.body)).await.map_err(api_error)?.0),
+                PtyAction::Get => serde_json::to_value(crate::pty_routes::pty_get(state, Path(pty_id)).await.map_err(api_error)?.0),
+                PtyAction::Update => {
+                    let body = serde_json::from_value(request.body).map_err(runtime_error)?;
+                    serde_json::to_value(crate::pty_routes::pty_update(state, Path(pty_id), Json(body)).await.map_err(api_error)?.0)
+                }
+                PtyAction::Remove => serde_json::to_value(crate::pty_routes::pty_remove(state, Path(pty_id)).await.map_err(api_error)?.0),
+                PtyAction::ConnectToken => serde_json::to_value(crate::pty_routes::pty_connect_token(state, Path(pty_id), headers).await.map_err(api_error)?.0),
+            }.map_err(runtime_error)?;
+            Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
+        })
+    }
+
+    fn connect<'a>(&'a self, request: neoism_agent_plugin_api::RouteRequest) -> PluginFuture<'a, std::sync::Arc<dyn neoism_agent_plugin_api::WebSocketSession>> {
+        Box::pin(async move {
+            let pty_id = request.path.get("pty_id").cloned().unwrap_or_default();
+            let query = query_value(route_query(&request))?;
+            crate::pty_routes::prepare_connection(self.0.clone(), pty_id, query).await.map_err(api_error)
+        })
+    }
+}
+
 pub(crate) struct ConfigAdmin(pub(crate) crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {
@@ -326,6 +363,12 @@ fn route_query(request: &neoism_agent_plugin_api::RouteRequest) -> serde_json::V
 
 fn query_value<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, PluginRuntimeError> {
     serde_json::from_value(value).map_err(runtime_error)
+}
+
+fn header_map(headers: &std::collections::BTreeMap<String, String>) -> axum::http::HeaderMap {
+    headers.iter().filter_map(|(name, value)| {
+        Some((name.parse::<axum::http::HeaderName>().ok()?, value.parse::<axum::http::HeaderValue>().ok()?))
+    }).collect()
 }
 
 fn api_error(error: crate::error::ApiError) -> PluginRuntimeError { PluginRuntimeError::new(error.to_string()) }

@@ -23,6 +23,35 @@ impl neoism_agent_builtins::plugin::skills::SkillsHost for Skills {
     }
 }
 
+pub(crate) struct Subagents(pub(crate) crate::state::AppState);
+
+impl neoism_agent_builtins::plugin::subagents::SubagentsHost for Subagents {
+    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+        crate::tool::register_subagent_tools(registrar, &self.0);
+    }
+
+    fn execute<'a>(&'a self, action: neoism_agent_builtins::plugin::subagents::SubagentAction, request: neoism_agent_plugin_api::RouteRequest) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
+        Box::pin(async move {
+            use axum::extract::{Path, State};
+            use axum::Json;
+            use neoism_agent_builtins::plugin::subagents::SubagentAction;
+            let session_id = request.path.get("session_id").cloned().unwrap_or_default();
+            let value = match action {
+                SubagentAction::List => serde_json::to_value(
+                    crate::plugins::subagents::list_tasks(State(self.0.clone()), Path(session_id)).await.map_err(api_error)?.0,
+                ),
+                SubagentAction::Stop => {
+                    let body = serde_json::from_value(request.body).map_err(runtime_error)?;
+                    serde_json::to_value(
+                        crate::plugins::subagents::stop_tasks(State(self.0.clone()), Path(session_id), Json(body)).await.map_err(api_error)?.0,
+                    )
+                }
+            }.map_err(runtime_error)?;
+            Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
+        })
+    }
+}
+
 pub(crate) struct ConfigAdmin(pub(crate) crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {

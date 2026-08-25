@@ -8,13 +8,6 @@ use crate::tool::{ToolContext, ToolExecutionResult};
 
 pub(crate) use neoism_agent_builtins::plugin::skills::Skill;
 
-pub(crate) async fn list_async(
-    services: &neoism_agent_service_api::AgentServices,
-    directory: &str,
-) -> anyhow::Result<Vec<neoism_agent_core::SkillInfo>> {
-    neoism_agent_builtins::plugin::skills::list(services, directory).await
-}
-
 pub(crate) async fn load_async(
     services: &neoism_agent_service_api::AgentServices,
     directory: &str,

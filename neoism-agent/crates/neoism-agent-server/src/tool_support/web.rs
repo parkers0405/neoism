@@ -74,12 +74,6 @@ pub(super) async fn webfetch_tool(
     })
 }
 
-pub(crate) async fn websearch(arguments: Value) -> anyhow::Result<ToolExecutionResult> {
-    let query = required_string(&arguments, "query")?;
-    let result = neoism_agent_builtins::plugin::websearch::search(query).await?;
-    Ok(ToolExecutionResult { title: result.title, output: result.output, metadata: result.metadata })
-}
-
 fn web_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(120))

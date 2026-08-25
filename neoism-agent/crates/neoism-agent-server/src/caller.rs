@@ -292,7 +292,12 @@ pub(crate) fn allows_session(
     claims: &CallerClaims,
     session: &neoism_agent_core::SessionInfo,
 ) -> bool {
-    allows_session_scope(claims, session_tenant(session), &session.directory)
+    claims.workspace_id.as_ref().is_none_or(|workspace_id| {
+        session
+            .workspace_id
+            .as_ref()
+            .is_some_and(|session_workspace| session_workspace.to_string() == *workspace_id)
+    }) && allows_session_scope(claims, session_tenant(session), &session.directory)
 }
 
 fn allows_session_scope(claims: &CallerClaims, tenant_id: &str, directory: &str) -> bool {

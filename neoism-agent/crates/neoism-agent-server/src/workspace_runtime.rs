@@ -49,6 +49,11 @@ pub(crate) struct PluginLifecycleRegistry {
 }
 
 impl PluginLifecycleRegistry {
+    fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    #[cfg(test)]
     pub(crate) fn get(&self, plugin_id: &str) -> Option<Arc<PluginLifecycleHandle>> {
         self.handles.get(plugin_id).cloned()
     }
@@ -75,13 +80,25 @@ impl PluginGeneration {
     }
 
     fn empty(snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>) -> Arc<Self> {
-        Self::build(snapshot, |_| Ok(())).expect("empty plugin generation is ready")
+        let plugin_ids = snapshot
+            .manifests
+            .iter()
+            .map(|manifest| manifest.id.clone())
+            .collect::<Vec<_>>();
+        Self::build(snapshot, |builder| {
+            for plugin_id in plugin_ids {
+                builder.register(plugin_id, || Ok(()), || {})?;
+            }
+            Ok(())
+        })
+        .expect("installed plugin generation is ready")
     }
 
     pub(crate) fn snapshot(&self) -> Arc<neoism_agent_plugin_api::RegistrySnapshot> {
         self.snapshot.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn lifecycle(&self, plugin_id: &str) -> Option<Arc<PluginLifecycleHandle>> {
         self.lifecycles.get(plugin_id)
     }
@@ -126,6 +143,11 @@ impl PluginGenerationSlot {
     /// The only publication point. The fully-built candidate becomes visible
     /// in one write; the old generation retires when its final Arc lease ends.
     fn publish(&self, candidate: Arc<PluginGeneration>) {
+        tracing::debug!(
+            generation = candidate.snapshot.generation,
+            plugins = candidate.lifecycles.len(),
+            "publishing ready plugin generation"
+        );
         *self.published.write().expect("plugin generation lock poisoned") = candidate;
     }
 }

@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::{
-    config, message_id_of, model_ref_from_config_with_variant,
+    message_id_of, model_ref_from_config_with_variant,
     now_millis, project, resolve_directory, slug, vcs, InstanceQuery,
 };
 
@@ -121,7 +121,7 @@ pub(crate) async fn create_session_in_directory(
     }
     let project_context = project::discover(state.services(), directory);
     let directory = project_context.directory.clone();
-    let loaded_config = config::load(state.services(), &directory)?;
+    let (loaded_config, _) = neoism_agent_builtins::plugin::config::load(state.services(), &directory)?;
     let agents = crate::plugins::agent_catalog(state, &directory).await?;
     let is_child = request.parent_id.is_some();
     if let Some(parent_id) = request.parent_id.as_ref() {
@@ -163,10 +163,10 @@ pub(crate) async fn create_session_in_directory(
                 .unwrap_or_else(|| agents.default_agent().to_string()),
         ),
         model: request.model.or_else(|| {
-            loaded_config.info.model.as_deref().and_then(|model| {
+            loaded_config.model.as_deref().and_then(|model| {
                 model_ref_from_config_with_variant(
                     model,
-                    loaded_config.info.variant.clone(),
+                    loaded_config.variant.clone(),
                 )
             })
         }),
@@ -287,7 +287,7 @@ pub(crate) async fn session_directory_options(
         .get_session(&session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
-    if !crate::plugins::enabled(state.services(), &info.directory, "dev.neoism.tools.workspace") {
+    if !crate::plugins::enabled(state.services(), &info.directory, neoism_agent_builtins::plugin::workspace_tools::ID) {
         return Err(ApiError::not_found("workspace filesystem tools are disabled"));
     }
     let current = PathBuf::from(info.directory);

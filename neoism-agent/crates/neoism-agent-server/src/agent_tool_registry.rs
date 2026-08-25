@@ -11,7 +11,7 @@ use crate::error::ApiError;
 use crate::session_loop::wait_for_cancellation;
 use crate::state::AppState;
 use crate::{
-    config, ensure_tool_permission, mcp, mcp_auth, permission, tool,
+    ensure_tool_permission, mcp, mcp_auth, permission, tool,
     tool_allowed_for_model,
 };
 
@@ -456,9 +456,8 @@ pub(crate) async fn execute_mcp_gateway(
                     .map(|(namespace, _)| namespace.to_string())
                     .or_else(|| mcp_path(path).map(|(namespace, _)| namespace));
                 let services = state.as_ref().map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
-                if let Some(name) = config::load(&services, directory).ok().and_then(|loaded| {
-                    loaded
-                        .info
+                if let Some(name) = neoism_agent_builtins::plugin::config::load(&services, directory).ok().and_then(|(config, _)| {
+                    config
                         .mcp
                         .keys()
                         .find(|name| {

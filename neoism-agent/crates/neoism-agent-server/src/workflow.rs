@@ -544,7 +544,7 @@ async fn discover_async(services: neoism_agent_service_api::AgentServices, works
 
 async fn track_workspace(state: &AppState, workspace: &str) {
     let snapshot = state.plugin_snapshot(workspace).await;
-    if !snapshot.manifests.iter().any(|plugin| plugin.id == "dev.neoism.workflows") {
+    if !snapshot.manifests.iter().any(|plugin| plugin.id == neoism_agent_builtins::plugin::workflows::ID) {
         return;
     }
     workspace_enabled(state, crate::workspace_runtime::canonical_location(workspace)).await;
@@ -1372,7 +1372,7 @@ async fn execute_run_inner(
     extra.insert("workflowScheduledAt".to_string(), json!(run.scheduled_at));
     extra.insert("workflowTrigger".to_string(), json!(run.trigger));
     let execution_directory = workflow_execution_directory(state.services(), projection)?;
-    if !crate::plugins::enabled(state.services(), &execution_directory, "dev.neoism.workflows") {
+    if !crate::plugins::enabled(state.services(), &execution_directory, neoism_agent_builtins::plugin::workflows::ID) {
         return Err(ApiError::not_found(
             "Workflow plugin is disabled for the workspace",
         ));

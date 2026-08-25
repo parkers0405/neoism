@@ -533,7 +533,7 @@ pub(crate) fn configured_servers(
     state: Option<&AppState>,
 ) -> anyhow::Result<BTreeMap<String, McpConfig>> {
     let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
-    let mut info = crate::config::load(&services, directory)?.info;
+    let mut info = neoism_agent_builtins::plugin::config::load(&services, directory)?.0;
     if let Some(state) = state {
         crate::config::inject_builtin_mcp(&mut info, state.services());
     }
@@ -597,7 +597,7 @@ async fn refresh_remote_credentials_after_auth_error(
         return Ok(false);
     }
     let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
-    let config = crate::config::load(&services, directory)?.info.mcp;
+    let config = neoism_agent_builtins::plugin::config::load(&services, directory)?.0.mcp;
     let Some(McpConfig::Remote { url, oauth, .. }) = config.get(name) else {
         return Ok(false);
     };

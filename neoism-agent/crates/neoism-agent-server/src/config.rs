@@ -1,14 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-
+use std::collections::BTreeSet;
 use anyhow::Context;
+use std::path::PathBuf;
+
 use neoism_agent_core::{AgentConfigDocument, FormatterConfig, McpConfig};
 use serde::Serialize;
-use serde_json::{json, Map, Value};
-
-#[path = "config_parse.rs"]
-mod config_parse;
-use config_parse::parse_markdown;
+use serde_json::Value;
 use neoism_agent_service_api::{
     AgentServices, ConfigSnapshot, ConfigSnapshotRequest, ConfigUpdate, ConfigUpdateRequest,
 };
@@ -49,17 +45,7 @@ pub(crate) fn load(services: &AgentServices, directory: &str) -> anyhow::Result<
 }
 
 pub(crate) fn load_snapshot(snapshot: &ConfigSnapshot) -> anyhow::Result<LoadedConfig> {
-    let mut raw = json!({});
-    for layer in &snapshot.layers {
-        merge_value(&mut raw, layer.document.clone());
-    }
-    for root in &snapshot.discovery_roots {
-        merge_markdown_entries(&mut raw, &root.path)?;
-    }
-
-    let mut info: AgentConfigDocument =
-        serde_json::from_value(raw).context("failed to decode Agent config")?;
-    normalize_config(&mut info);
+    let (info, _) = neoism_agent_builtins::plugin::config::load_snapshot(snapshot)?;
     Ok(LoadedConfig { info })
 }
 
@@ -349,190 +335,6 @@ fn warning(path: impl Into<String>, message: impl Into<String>) -> ConfigDiagnos
     }
 }
 
-fn merge_markdown_entries(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
-    for root_name in ["agent", "agents"] {
-        let root = dir.join(root_name);
-        for file in markdown_files(&root)? {
-            let (mut data, content) = parse_markdown(&file).with_context(|| {
-                format!("failed to parse agent file {}", file.display())
-            })?;
-            let name = data
-                .get("name")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| entry_name(&root, &file));
-            data.insert(
-                "prompt".to_string(),
-                Value::String(content.trim().to_string()),
-            );
-            set_named_entry(raw, "agent", &name, Value::Object(data));
-        }
-    }
-
-    for root_name in ["mode", "modes"] {
-        let root = dir.join(root_name);
-        for file in markdown_files(&root)? {
-            let (mut data, content) = parse_markdown(&file).with_context(|| {
-                format!("failed to parse mode file {}", file.display())
-            })?;
-            let name = data
-                .get("name")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| entry_name(&root, &file));
-            data.insert(
-                "prompt".to_string(),
-                Value::String(content.trim().to_string()),
-            );
-            data.insert("mode".to_string(), Value::String("primary".to_string()));
-            set_named_entry(raw, "mode", &name, Value::Object(data));
-        }
-    }
-
-    for root_name in ["command", "commands"] {
-        let root = dir.join(root_name);
-        for file in markdown_files(&root)? {
-            let (mut data, content) = parse_markdown(&file).with_context(|| {
-                format!("failed to parse command file {}", file.display())
-            })?;
-            let name = data
-                .get("name")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| entry_name(&root, &file));
-            data.insert("name".to_string(), Value::String(name.clone()));
-            data.insert(
-                "template".to_string(),
-                Value::String(content.trim().to_string()),
-            );
-            set_named_entry(raw, "command", &name, Value::Object(data));
-        }
-    }
-    Ok(())
-}
-
-fn markdown_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    fn collect(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
-            if path.is_dir() { collect(&path, files)?; }
-            else if path.extension().and_then(|ext| ext.to_str()) == Some("md") { files.push(path); }
-        }
-        Ok(())
-    }
-    let mut files = Vec::new();
-    if root.is_dir() { collect(root, &mut files)?; }
-    files.sort();
-    Ok(files)
-}
-
-fn entry_name(root: &Path, file: &Path) -> String {
-    file.strip_prefix(root).unwrap_or(file).with_extension("").components()
-        .map(|component| component.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
-}
-
-fn set_named_entry(raw: &mut Value, field: &str, name: &str, value: Value) {
-    if !raw.is_object() {
-        *raw = json!({});
-    }
-    let root = raw.as_object_mut().expect("object initialized above");
-    let entry = root
-        .entry(field.to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !entry.is_object() {
-        *entry = Value::Object(Map::new());
-    }
-    entry
-        .as_object_mut()
-        .expect("object initialized above")
-        .insert(name.to_string(), value);
-}
-
-fn merge_value(target: &mut Value, source: Value) {
-    match (target, source) {
-        (Value::Object(target), Value::Object(source)) => {
-            for (key, value) in source {
-                if key == "instructions" {
-                    merge_unique_array(
-                        target.entry(key).or_insert(Value::Array(Vec::new())),
-                        value,
-                    );
-                    continue;
-                }
-                merge_value(target.entry(key).or_insert(Value::Null), value);
-            }
-        }
-        (target, source) => *target = source,
-    }
-}
-
-fn merge_unique_array(target: &mut Value, source: Value) {
-    let source = match source {
-        Value::Array(source) => source,
-        other => {
-            *target = other;
-            return;
-        }
-    };
-    let target_items = match target {
-        Value::Array(target) => target,
-        _ => {
-            *target = Value::Array(source);
-            return;
-        }
-    };
-    let mut seen = target_items
-        .iter()
-        .filter_map(Value::as_str)
-        .map(ToOwned::to_owned)
-        .collect::<BTreeSet<_>>();
-    for item in source {
-        if let Some(text) = item.as_str() {
-            if !seen.insert(text.to_string()) {
-                continue;
-            }
-        }
-        target_items.push(item);
-    }
-}
-
-fn normalize_config(info: &mut AgentConfigDocument) {
-    for (name, mut config) in std::mem::take(&mut info.mode) {
-        config.mode = Some("primary".to_string());
-        info.agent.insert(name, config);
-    }
-
-    let tool_permissions = permissions_from_tools(&info.tools);
-    merge_permission_maps(&mut info.permission, tool_permissions);
-
-    // `dangerouslySkipPermissions` is handled at permission-ask time
-    // (see `execute_tool_call_with_permission_wait`): anything that would
-    // ASK is auto-granted, while explicit DENY rules keep denying. It must
-    // NOT inject a global `"*": "allow"` rule here — that map entry
-    // overwrote same-key agent rules (e.g. explore's `"*": "deny"`),
-    // silently handing sub-agents the `task` tool, and it still failed to
-    // suppress asks for permissions with more specific rules
-    // (external_directory) because those out-rank `*` in last-match-wins.
-
-    for (name, command) in info.command.iter_mut() {
-        if command.name.is_empty() {
-            command.name = name.clone();
-        }
-    }
-
-    for (id, plugin) in &mut info.plugins {
-        plugin.id = Some(id.clone());
-    }
-
-    for agent in info.agent.values_mut() {
-        if agent.steps.is_none() {
-            agent.steps = agent.max_steps;
-        }
-        let tool_permissions = permissions_from_tools(&agent.tools);
-        merge_permission_maps(&mut agent.permission, tool_permissions);
-    }
-}
-
 pub(crate) fn builtin_mcp_config(id: &str) -> McpConfig {
     McpConfig::Local {
         command: vec!["builtin".to_string(), id.to_string()],
@@ -551,31 +353,5 @@ pub(crate) fn inject_builtin_mcp(
         info.mcp
             .entry(id.to_string())
             .or_insert_with(|| builtin_mcp_config(id));
-    }
-}
-
-fn permissions_from_tools(tools: &BTreeMap<String, bool>) -> BTreeMap<String, Value> {
-    tools
-        .iter()
-        .map(|(tool, enabled)| {
-            let key = if matches!(tool.as_str(), "write" | "edit") {
-                "edit".to_string()
-            } else {
-                tool.clone()
-            };
-            (
-                key,
-                Value::String(if *enabled { "allow" } else { "deny" }.to_string()),
-            )
-        })
-        .collect()
-}
-
-fn merge_permission_maps(
-    target: &mut BTreeMap<String, Value>,
-    source: BTreeMap<String, Value>,
-) {
-    for (key, value) in source {
-        target.entry(key).or_insert(value);
     }
 }

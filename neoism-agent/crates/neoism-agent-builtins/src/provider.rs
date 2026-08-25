@@ -20,31 +20,31 @@ mod provider_stub;
 use provider_anthropic::{AnthropicClient, AnthropicRuntime};
 pub(crate) use provider_chat_completion::reasoning_effort;
 use provider_openai::{OpenAiClient, OpenAiRuntime};
-pub(crate) use provider_openai_stream::estimate_tokens;
+pub use provider_openai_stream::estimate_tokens;
 use provider_stub::StubRuntime;
 
-pub(crate) type ProviderEventStream =
+pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = anyhow::Result<ProviderStreamEvent>> + Send>>;
 
 pub(crate) trait ProviderRuntime: Send + Sync {
     fn stream(&self, request: ProviderGenerationRequest) -> ProviderEventStream;
 }
 
-pub(crate) struct ProviderStream {
-    pub(crate) provider_id: String,
-    pub(crate) model_id: String,
-    pub(crate) events: ProviderEventStream,
+pub struct ProviderStream {
+    pub provider_id: String,
+    pub model_id: String,
+    pub events: ProviderEventStream,
 }
 
 #[derive(Clone)]
-pub(crate) struct ProviderRegistry {
+pub struct ProviderRegistry {
     default_provider: Option<String>,
     auth_store: AuthStore,
     openai: OpenAiClient,
 }
 
 impl ProviderRegistry {
-    pub(crate) fn from_env(auth_store: AuthStore) -> Self {
+    pub fn from_env(auth_store: AuthStore) -> Self {
         Self {
             default_provider: std::env::var("NEOISM_AGENT_PROVIDER").ok(),
             auth_store,
@@ -52,7 +52,7 @@ impl ProviderRegistry {
         }
     }
 
-    pub(crate) fn connected_ids(
+    pub fn connected_ids(
         &self,
         providers: &[ProviderInfo],
     ) -> anyhow::Result<Vec<String>> {
@@ -72,7 +72,7 @@ impl ProviderRegistry {
         Ok(connected)
     }
 
-    pub(crate) fn stream(
+    pub fn stream(
         &self,
         mut request: ProviderGenerationRequest,
     ) -> anyhow::Result<ProviderStream> {
@@ -216,7 +216,7 @@ impl ProviderAdapter {
     }
 }
 
-pub(crate) fn provider_api_supported(api: &ProviderApiInfo) -> bool {
+pub fn provider_api_supported(api: &ProviderApiInfo) -> bool {
     ProviderAdapter::from_api(api).is_some()
 }
 

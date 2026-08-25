@@ -10,7 +10,6 @@ use anyhow::Context;
 use axum::extract::{Query, State};
 use axum::Json;
 
-use crate::auth_store::AuthStore;
 use crate::error::ApiError;
 use crate::state::{AppState, SemanticSearchHit};
 use neoism_agent_core::AuthInfo;
@@ -52,7 +51,15 @@ impl EmbeddingsClient {
     /// Resolve the embeddings provider from env + the auth store. Returns
     /// `None` (semantic search disabled) when embeddings are turned off or no
     /// API key is available for the configured provider.
-    pub(crate) fn from_env(auth: &AuthStore) -> Option<Self> {
+    pub(crate) fn configured_provider_id() -> Option<String> {
+        let spec = std::env::var("NEOISM_AGENT_EMBEDDINGS_MODEL")
+            .ok().filter(|spec| !spec.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        spec.split_once('/').and_then(|(provider, model)|
+            (!provider.is_empty() && !model.is_empty()).then(|| provider.to_string()))
+    }
+
+    pub(crate) fn from_env(auth: Option<AuthInfo>) -> Option<Self> {
         if std::env::var_os("NEOISM_AGENT_DISABLE_EMBEDDINGS").is_some() {
             return None;
         }
@@ -79,8 +86,8 @@ impl EmbeddingsClient {
         ))
         .ok()
         .filter(|key| !key.trim().is_empty());
-        let auth_key = match auth.get(&provider_id) {
-            Ok(Some(AuthInfo::Api { key, .. })) => Some(key),
+        let auth_key = match auth {
+            Some(AuthInfo::Api { key, .. }) => Some(key),
             _ => None,
         };
         let Some(api_key) = env_key.or(auth_key) else {
@@ -272,7 +279,10 @@ pub(crate) async fn semantic_search_route(
     Query(query): Query<SemanticSearchQuery>,
 ) -> Result<Json<SemanticSearchResponse>, ApiError> {
     let store = &state.inner.store;
-    let Some(client) = EmbeddingsClient::from_env(&state.inner.auth_store) else {
+    let auth = if let Some(provider_id) = EmbeddingsClient::configured_provider_id() {
+        state.inner.provider_service.auth(&provider_id).await.ok().flatten()
+    } else { None };
+    let Some(client) = EmbeddingsClient::from_env(auth) else {
         return Ok(Json(SemanticSearchResponse {
             available: false,
             hits: Vec::new(),

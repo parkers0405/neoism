@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 use super::provider_auth_util::{
     form_escape, neoism_user_agent, now_millis, pkce_challenge, random_oauth_string,
 };
-use crate::state::ProviderOAuthPending;
+use crate::ProviderOAuthPending;
 
 const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const XAI_AUTHORIZE_URL: &str = "https://auth.x.ai/oauth2/authorize";

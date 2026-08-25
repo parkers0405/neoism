@@ -7,26 +7,24 @@ use anyhow::Context;
 use neoism_agent_core::AuthInfo;
 
 #[derive(Clone)]
-pub(crate) struct AuthStore {
+pub struct AuthStore {
     path: PathBuf,
 }
 
 impl AuthStore {
     #[cfg(test)]
-    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
-    pub(crate) fn from_env() -> Self {
+    pub fn from_env() -> Self {
         let path = std::env::var("NEOISM_AGENT_AUTH_PATH")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                PathBuf::from(crate::default_state_dir()).join("auth.json")
-            });
+            .unwrap_or_else(|_| crate::default_state_dir().join("auth.json"));
         Self { path }
     }
 
-    pub(crate) fn all(&self) -> anyhow::Result<BTreeMap<String, AuthInfo>> {
+    pub fn all(&self) -> anyhow::Result<BTreeMap<String, AuthInfo>> {
         if let Ok(content) = std::env::var("NEOISM_AGENT_AUTH_CONTENT") {
             return decode_auth(&content)
                 .context("failed to parse NEOISM_AGENT_AUTH_CONTENT");
@@ -38,11 +36,11 @@ impl AuthStore {
             .with_context(|| format!("failed to parse {}", self.path.display()))
     }
 
-    pub(crate) fn get(&self, provider_id: &str) -> anyhow::Result<Option<AuthInfo>> {
+    pub fn get(&self, provider_id: &str) -> anyhow::Result<Option<AuthInfo>> {
         Ok(self.all()?.remove(normalize_key(provider_id).as_str()))
     }
 
-    pub(crate) fn set(&self, provider_id: &str, info: AuthInfo) -> anyhow::Result<()> {
+    pub fn set(&self, provider_id: &str, info: AuthInfo) -> anyhow::Result<()> {
         let key = normalize_key(provider_id);
         let mut all = self.all()?;
         all.remove(provider_id);
@@ -51,7 +49,7 @@ impl AuthStore {
         self.write(&all)
     }
 
-    pub(crate) fn remove(&self, provider_id: &str) -> anyhow::Result<()> {
+    pub fn remove(&self, provider_id: &str) -> anyhow::Result<()> {
         let key = normalize_key(provider_id);
         let mut all = self.all()?;
         all.remove(provider_id);

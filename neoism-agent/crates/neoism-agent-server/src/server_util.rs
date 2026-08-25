@@ -51,25 +51,6 @@ pub(crate) fn default_state_dir() -> String {
     }
 }
 
-pub(crate) fn default_cache_dir() -> String {
-    if let Ok(dir) = std::env::var("NEOISM_AGENT_CACHE_DIR") {
-        if !dir.trim().is_empty() {
-            return dir;
-        }
-    }
-    #[cfg(windows)]
-    {
-        return windows_neoism_dir("cache", ".neoism/cache");
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var("XDG_CACHE_HOME")
-            .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.cache")))
-            .map(|base| format!("{base}/neoism"))
-            .unwrap_or_else(|_| ".neoism/cache".to_string())
-    }
-}
-
 /// Windows state/cache trees use the application-local data root in place of
 /// Unix's separate XDG state and cache roots.
 #[cfg(windows)]

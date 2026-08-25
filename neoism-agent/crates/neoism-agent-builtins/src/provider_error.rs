@@ -6,18 +6,18 @@ use reqwest::StatusCode;
 use serde_json::Value;
 
 #[derive(Clone, Debug)]
-pub(crate) struct ProviderError {
-    pub(crate) provider: String,
-    pub(crate) status: Option<u16>,
-    pub(crate) message: String,
-    pub(crate) body: Option<String>,
-    pub(crate) retryable: bool,
-    pub(crate) retry_after_ms: Option<u64>,
-    pub(crate) context_overflow: bool,
+pub struct ProviderError {
+    pub provider: String,
+    pub status: Option<u16>,
+    pub message: String,
+    pub body: Option<String>,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+    pub context_overflow: bool,
 }
 
 impl ProviderError {
-    pub(crate) fn from_response(
+    pub fn from_response(
         provider: impl Into<String>,
         status: StatusCode,
         headers: &HeaderMap,
@@ -59,7 +59,7 @@ impl fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
-pub(crate) fn retry_after_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
+pub fn retry_after_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
     if let Some(value) = headers.get("retry-after-ms") {
         if let Ok(ms) = value.trim().parse::<f64>() {
             if ms.is_finite() && ms >= 0.0 {

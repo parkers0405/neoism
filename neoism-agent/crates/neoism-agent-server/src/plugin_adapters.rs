@@ -1,6 +1,5 @@
 use neoism_agent_plugin_api::{
     AgentSource, AgentSourceSnapshot, PluginFuture, PluginRegistrar, PluginRuntimeError,
-    ProviderService,
 };
 
 pub(crate) struct Agents(pub(crate) neoism_agent_service_api::AgentServices);
@@ -238,58 +237,6 @@ impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {
                 }
             }.map_err(runtime_error)?;
             Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
-        })
-    }
-}
-
-pub(crate) struct Provider(pub(crate) crate::provider::ProviderRegistry);
-
-impl ProviderService for Provider {
-    fn descriptor(&self) -> neoism_agent_plugin_api::ProviderDescriptor {
-        neoism_agent_plugin_api::ProviderDescriptor { id: "runtime".into(), name: "Configured providers".into(), models: Vec::new(), config_schema: None }
-    }
-
-    fn stream(&self, request: neoism_agent_core::ProviderGenerationRequest) -> Result<neoism_agent_plugin_api::ProviderStream, PluginRuntimeError> {
-        use futures::StreamExt;
-        let stream = self.0.stream(request).map_err(runtime_error)?;
-        Ok(neoism_agent_plugin_api::ProviderStream {
-            provider_id: stream.provider_id,
-            model_id: stream.model_id,
-            events: Box::pin(stream.events.map(|event| event.map_err(runtime_error))),
-        })
-    }
-}
-
-pub(crate) struct ProviderAdmin(pub(crate) crate::state::AppState);
-
-impl neoism_agent_builtins::plugin::providers::ProviderAdminHost for ProviderAdmin {
-    fn execute<'a>(&'a self, action: neoism_agent_builtins::plugin::providers::ProviderAdminAction, provider_id: Option<&'a str>, body: serde_json::Value) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
-        Box::pin(async move {
-            use axum::extract::{Path, State};
-            use axum::Json;
-            use neoism_agent_builtins::plugin::providers::ProviderAdminAction;
-            let state = State(self.0.clone());
-            let provider_id = provider_id.unwrap_or_default().to_string();
-            let value = match action {
-                ProviderAdminAction::List => serde_json::to_value(crate::provider_routes::provider_list(state).await.map_err(api_error)?.0),
-                ProviderAdminAction::Configured => serde_json::to_value(crate::provider_routes::config_providers(state).await.map_err(api_error)?.0),
-                ProviderAdminAction::AuthMethods => serde_json::to_value(crate::provider_routes::provider_auth_methods(state).await.map_err(api_error)?.0),
-                ProviderAdminAction::AuthGet => serde_json::to_value(crate::provider_routes::auth_get(state, Path(provider_id)).await.map_err(api_error)?.0),
-                ProviderAdminAction::AuthSet => {
-                    let info = serde_json::from_value(body).map_err(runtime_error)?;
-                    serde_json::to_value(crate::provider_routes::auth_set(state, Path(provider_id), Json(info)).await.map_err(api_error)?.0)
-                }
-                ProviderAdminAction::AuthRemove => serde_json::to_value(crate::provider_routes::auth_remove(state, Path(provider_id)).await.map_err(api_error)?.0),
-                ProviderAdminAction::OAuthAuthorize => {
-                    let request = serde_json::from_value(body).map_err(runtime_error)?;
-                    serde_json::to_value(crate::provider_routes::provider_oauth_authorize(state, Path(provider_id), Json(request)).await.map_err(api_error)?.0)
-                }
-                ProviderAdminAction::OAuthCallback => {
-                    let request = serde_json::from_value(body).map_err(runtime_error)?;
-                    serde_json::to_value(crate::provider_routes::provider_oauth_callback(state, Path(provider_id), Json(request)).await.map_err(api_error)?.0)
-                }
-            }.map_err(runtime_error)?;
-            Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
         })
     }
 }

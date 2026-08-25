@@ -276,6 +276,6 @@ pub(super) struct OpenAiToolCallState {
     finished: bool,
 }
 
-pub(crate) fn estimate_tokens(text: &str) -> u64 {
+pub fn estimate_tokens(text: &str) -> u64 {
     text.chars().count().saturating_add(3) as u64 / 4
 }

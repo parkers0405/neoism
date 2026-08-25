@@ -26,18 +26,10 @@ async fn calculate_usage_cost(
     // via Meridian, …) are flat-rate, not pay-per-token — a per-token dollar
     // figure would be misleading, so report zero cost. Token usage / context %
     // is tracked and shown regardless.
-    if matches!(
-        state.inner.auth_store.get(&model.provider_id),
-        Ok(Some(AuthInfo::OAuth { .. }))
-    ) {
+    if matches!(state.inner.provider_service.auth(&model.provider_id).await, Ok(Some(AuthInfo::OAuth { .. }))) {
         return Some(0.0);
     }
-    let providers = state.inner.provider_catalog.providers().await.ok()?;
-    let metadata = crate::provider_catalog::generation_metadata(
-        &providers,
-        model,
-        crate::provider_catalog::openai_codex_oauth(&state.inner.auth_store),
-    );
+    let metadata = state.inner.provider_service.model_metadata(model).await.ok()?;
     let cost = metadata.cost.as_ref()?;
     Some(calculate_usage_cost_with_model_cost(cost, tokens))
 }

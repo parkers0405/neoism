@@ -243,7 +243,7 @@ impl McpAuthStore {
         // Windows counterpart of the 0o600 above: owner+SYSTEM-only DACL.
         // Warn-and-go — ACL-less filesystems must not fail token writes.
         #[cfg(windows)]
-        if let Err(error) = crate::windows_acl::harden_owner_only(&self.path) {
+        if let Err(error) = neoism_agent_builtins::windows_acl::harden_owner_only(&self.path) {
             tracing::warn!(
                 error = %error,
                 path = %self.path.display(),

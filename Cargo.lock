@@ -4908,14 +4908,23 @@ name = "neoism-agent-builtins"
 version = "0.7.55"
 dependencies = [
  "anyhow",
+ "async-stream",
+ "base64",
+ "dirs 6.0.0",
  "futures",
+ "futures-core",
  "neoism-agent-core",
  "neoism-agent-plugin-api",
  "neoism-agent-service-api",
+ "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
  "windows-sys 0.60.2",
 ]
 

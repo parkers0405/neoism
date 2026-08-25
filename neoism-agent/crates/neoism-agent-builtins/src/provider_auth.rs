@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::auth_store::AuthStore;
-use crate::state::ProviderOAuthPending;
+use crate::ProviderOAuthPending;
 
 #[path = "provider_auth_copilot.rs"]
 mod provider_auth_copilot;
@@ -30,7 +30,7 @@ use provider_auth_openai::{
     poll_openai_headless,
 };
 
-pub(crate) fn methods(
+pub fn methods(
     providers: &[ProviderInfo],
 ) -> BTreeMap<String, Vec<ProviderAuthMethod>> {
     providers
@@ -39,7 +39,7 @@ pub(crate) fn methods(
         .collect()
 }
 
-pub(crate) async fn authorize(
+pub async fn authorize(
     provider_id: &str,
     method: &Value,
     inputs: &BTreeMap<String, String>,
@@ -98,7 +98,7 @@ pub(crate) async fn authorize(
     }
 }
 
-pub(crate) async fn callback(
+pub async fn callback(
     provider_id: &str,
     method: &Value,
     code: Option<&str>,
@@ -175,7 +175,7 @@ pub(crate) async fn callback(
 /// unchanged for everything else, or when the token is still valid. On refresh
 /// failure the original (expired) token is returned so the request surfaces a
 /// real auth error rather than silently doing nothing.
-pub(crate) async fn refresh_oauth_if_needed(
+pub async fn refresh_oauth_if_needed(
     provider_id: &str,
     auth: Option<AuthInfo>,
     auth_store: &AuthStore,

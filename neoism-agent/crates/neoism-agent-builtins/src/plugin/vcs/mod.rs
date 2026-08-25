@@ -2,15 +2,28 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use neoism_agent_core::{VcsApplyResult, VcsFileDiff, VcsFileStatus, VcsInfo};
-use neoism_agent_plugin_api::{AgentPlugin, PluginHostError, PluginManifest, PluginRegistrar};
+use neoism_agent_plugin_api::{
+    AgentPlugin, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar,
+    ContributionMetadata, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
+    RouteRequest, RouteResponse, RouteScope,
+};
 use neoism_agent_service_api::{AgentServices, ExecutablePurpose, ExecutableRequest};
 use serde_json::{json, Value};
 
 pub const ID: &str = "dev.neoism.vcs";
 
-pub struct VcsPlugin;
+pub struct VcsPlugin {
+    services: AgentServices,
+}
+
+impl VcsPlugin {
+    pub fn new(services: AgentServices) -> Self {
+        Self { services }
+    }
+}
 
 impl AgentPlugin for VcsPlugin {
     fn manifest(&self) -> PluginManifest {
@@ -23,8 +36,70 @@ impl AgentPlugin for VcsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        registrar.route("vcs");
+        for (operation_id, method, suffix, action) in [
+            ("v2.plugins.vcs.get", RouteMethod::Get, "", VcsRouteAction::Info),
+            ("v2.plugins.vcs.diff", RouteMethod::Get, "/diff", VcsRouteAction::Diff),
+            ("v2.plugins.vcs.status", RouteMethod::Get, "/status", VcsRouteAction::Status),
+            ("v2.plugins.vcs.diffRaw", RouteMethod::Get, "/diff/raw", VcsRouteAction::DiffRaw),
+            ("v2.plugins.vcs.apply", RouteMethod::Post, "/apply", VcsRouteAction::Apply),
+        ] {
+            registrar.runtime_route(RouteContribution {
+                descriptor: RouteDescriptor {
+                    id: operation_id.into(),
+                    method,
+                    path: format!("/v2/plugins/{ID}{suffix}"),
+                    scope: RouteScope::Workspace,
+                    request_schema: None,
+                    response_schema: None,
+                },
+                metadata: ContributionMetadata::default(),
+                handler: Arc::new(VcsRoute { services: self.services.clone(), action }),
+            });
+        }
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum VcsRouteAction {
+    Info,
+    Diff,
+    Status,
+    DiffRaw,
+    Apply,
+}
+
+struct VcsRoute {
+    services: AgentServices,
+    action: VcsRouteAction,
+}
+
+impl RouteHandler for VcsRoute {
+    fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
+        Box::pin(async move {
+            let directory = request.workspace.unwrap_or_default();
+            let directory = directory.to_string_lossy();
+            let body = match self.action {
+                VcsRouteAction::Info => serde_json::to_value(info(&self.services, &directory)),
+                VcsRouteAction::Diff => serde_json::to_value(diff(&self.services, &directory)),
+                VcsRouteAction::Status => serde_json::to_value(status(&self.services, &directory)),
+                VcsRouteAction::DiffRaw => Ok(serde_json::Value::String(diff_raw(&self.services, &directory))),
+                VcsRouteAction::Apply => serde_json::to_value(apply(
+                    &self.services,
+                    &directory,
+                    patch_from_body(&request.body).unwrap_or_default(),
+                )),
+            };
+            let body = match body {
+                Ok(body) => body,
+                Err(error) => return Err(neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string())),
+            };
+            let mut response = RouteResponse::json(200, body);
+            if matches!(self.action, VcsRouteAction::DiffRaw) {
+                response.headers.insert("content-type".into(), "text/plain; charset=utf-8".into());
+            }
+            Ok(response)
+        })
     }
 }
 
@@ -196,7 +271,25 @@ mod tests {
 
     #[test]
     fn plugin_registers_canonical_route() {
-        assert_eq!(VcsPlugin.manifest().id, ID);
-        VcsPlugin.register(&mut PluginRegistrar::default()).unwrap();
+        let plugin = VcsPlugin::new(test_services());
+        assert_eq!(plugin.manifest().id, ID);
+        plugin.register(&mut PluginRegistrar::default()).unwrap();
+    }
+
+    fn test_services() -> AgentServices {
+        use std::sync::Arc;
+        AgentServices::new(
+            Arc::new(neoism_agent_service_api::StandardExecutableService),
+            Arc::new(NoSearch),
+        )
+    }
+
+    struct NoSearch;
+    impl neoism_agent_service_api::WorkspaceSearchService for NoSearch {
+        fn warm(&self, _: &Path) -> Result<(), neoism_agent_service_api::ServiceError> { Ok(()) }
+        fn pin_root(&self, _: &Path) -> Result<Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
+        fn find_files(&self, _: &neoism_agent_service_api::FindFilesRequest) -> Result<neoism_agent_service_api::FindFilesResult, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
+        fn grep(&self, _: &neoism_agent_service_api::GrepWorkspaceRequest) -> Result<neoism_agent_service_api::GrepWorkspaceResult, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
+        fn search_directories(&self, _: &neoism_agent_service_api::DirectorySearchRequest) -> Result<neoism_agent_service_api::DirectorySearchResult, neoism_agent_service_api::ServiceError> { Err(neoism_agent_service_api::ServiceError::new("unused")) }
     }
 }

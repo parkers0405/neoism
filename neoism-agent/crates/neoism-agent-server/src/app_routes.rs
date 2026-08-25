@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use neoism_agent_core::{AgentInfo, SkillInfo};
+use neoism_agent_core::AgentInfo;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -27,23 +27,4 @@ pub(crate) async fn agent_get(
         .get(&name)
         .map(Json)
         .ok_or_else(|| ApiError::not_found("Agent not found"))
-}
-
-pub(crate) async fn skill_list(
-    State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<SkillInfo>>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
-    let snapshot = state.plugin_snapshot(&directory).await;
-    let mut skills = Vec::new();
-    for source in snapshot.skill_sources.values() {
-        skills.extend(
-            source
-                .list(&directory)
-                .await
-                .map_err(|error| ApiError::internal(error.to_string()))?,
-        );
-    }
-    Ok(Json(skills))
 }

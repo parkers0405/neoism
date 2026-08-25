@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use neoism_agent_core::{CapabilityInfo, PluginManifestInfo};
 use neoism_agent_plugin_api::{
-    AgentPlugin, AgentSource, AgentSourceSnapshot, PluginHost, PluginHostError, PluginManifest,
-    PluginRegistrar, PluginRuntimeError, RegistrySnapshot,
+    AgentPlugin, AgentSource, AgentSourceSnapshot, PluginFuture, PluginHost, PluginHostError,
+    PluginManifest, PluginRegistrar, PluginRuntimeError, RegistrySnapshot,
 };
 
 pub(crate) mod subagents;
@@ -216,6 +216,49 @@ impl neoism_agent_builtins::plugin::goals::GoalsHost for ServerGoalsHost {
     fn register_tools(&self, registrar: &mut PluginRegistrar) {
         crate::tool::register_goal_tools(registrar, &self.0);
     }
+
+    fn load<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> PluginFuture<'a, Option<neoism_agent_core::SessionGoal>> {
+        Box::pin(async move {
+            crate::ensure_session(&self.0, session_id)
+                .await
+                .map(|session| session.goal())
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))
+        })
+    }
+
+    fn save<'a>(
+        &'a self,
+        session_id: &'a str,
+        goal: Option<neoism_agent_core::SessionGoal>,
+    ) -> PluginFuture<'a, Option<neoism_agent_core::SessionGoal>> {
+        Box::pin(async move {
+            let mut session = crate::ensure_session(&self.0, session_id)
+                .await
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            if let Some(goal) = &goal {
+                session.set_goal(goal);
+            } else {
+                session.clear_goal();
+            }
+            session.time.updated = crate::now_millis()
+                .max(session.time.updated.saturating_add(1))
+                .max(goal.as_ref().map(|goal| goal.updated).unwrap_or_default());
+            self.0
+                .inner
+                .store
+                .update_session(&session)
+                .await
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            self.0.publish(neoism_agent_core::EventPayload::new(
+                neoism_agent_core::event_type::SESSION_UPDATED,
+                serde_json::json!({ "sessionID": session.id.to_string(), "info": session }),
+            ));
+            Ok(goal)
+        })
+    }
 }
 
 pub(crate) fn build_host(
@@ -247,7 +290,9 @@ pub(crate) fn build_host(
         plugins.push(Box::new(neoism_agent_builtins::plugin::WebsearchPlugin));
     }
     if enabled(services, directory, neoism_agent_builtins::plugin::vcs::ID) {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::VcsPlugin));
+        plugins.push(Box::new(neoism_agent_builtins::plugin::VcsPlugin::new(
+            services.clone(),
+        )));
     }
     if enabled(services, directory, neoism_agent_builtins::plugin::goals::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::GoalsPlugin::new(

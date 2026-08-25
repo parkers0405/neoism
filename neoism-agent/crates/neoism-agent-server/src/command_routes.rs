@@ -1,31 +1,6 @@
-use axum::extract::{Query, State};
-use axum::http::HeaderMap;
-use axum::Json;
 use neoism_agent_core::CommandInfo;
 
-use crate::error::ApiError;
 use crate::state::AppState;
-use crate::{resolve_directory, InstanceQuery};
-
-pub(crate) async fn command_list(
-    State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<CommandInfo>>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
-    let mut commands = Vec::new();
-    {
-        for source in state.plugin_snapshot(&directory).await.command_sources.values() {
-            commands.extend(
-                source
-                    .list(&directory)
-                    .map_err(|error| ApiError::internal(error.to_string()))?,
-            );
-        }
-    }
-    commands.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(Json(commands))
-}
 
 pub(crate) async fn find_command(
     state: &AppState,

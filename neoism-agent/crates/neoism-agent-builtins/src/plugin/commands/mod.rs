@@ -3,7 +3,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use neoism_agent_core::CommandInfo;
-use neoism_agent_plugin_api::{AgentPlugin, CommandSource, PluginHostError, PluginManifest, PluginRegistrar, PluginRuntimeError};
+use neoism_agent_plugin_api::{
+    AgentPlugin, CommandSource, PluginFuture, PluginHostError, PluginManifest,
+    PluginRegistrar, PluginRuntimeError, RouteContribution, RouteHandler, RouteMethod,
+    ContributionMetadata, RouteDescriptor, RouteRequest, RouteResponse, RouteScope,
+};
 use neoism_agent_service_api::AgentServices;
 
 use super::config;
@@ -29,9 +33,36 @@ impl AgentPlugin for CommandsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        registrar.route("commands");
+        registrar.runtime_route(RouteContribution {
+            descriptor: RouteDescriptor {
+                id: "v2.commands.list".into(),
+                method: RouteMethod::Get,
+                path: "/v2/commands".into(),
+                scope: RouteScope::Workspace,
+                request_schema: None,
+                response_schema: None,
+            },
+            metadata: ContributionMetadata::default(),
+            handler: Arc::new(CommandsRoute(self.services.clone())),
+        });
         registrar.command_source_runtime("workspace-commands", Arc::new(WorkspaceCommands(self.services.clone())));
         Ok(())
+    }
+}
+
+struct CommandsRoute(AgentServices);
+
+impl RouteHandler for CommandsRoute {
+    fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
+        Box::pin(async move {
+            let directory = request.workspace.unwrap_or_default();
+            let directory = directory.to_string_lossy();
+            let commands = load(&self.0, &directory)
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            let body = serde_json::to_value(commands)
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            Ok(RouteResponse::json(200, body))
+        })
     }
 }
 

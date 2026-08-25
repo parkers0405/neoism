@@ -1,4 +1,4 @@
-use axum::body::Body;
+use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{header, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
@@ -10,16 +10,12 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
-use crate::app_routes::{agent_get, agent_list, skill_list};
+use crate::app_routes::{agent_get, agent_list};
 use crate::artifact_routes::{
     artifact_content, artifact_create, artifact_delete, artifact_get, artifact_list,
 };
 use crate::audit_routes::audit_list;
-use crate::command_routes::command_list;
 use crate::global_routes::{config_get, config_update, config_validate, global_health};
-use crate::goal_routes::{
-    session_goal_clear, session_goal_get, session_goal_research, session_goal_set,
-};
 use crate::interaction::{
     permission_list, permission_reply, question_list, question_reject, question_reply,
 };
@@ -63,7 +59,6 @@ use crate::v2_routes::{
     v2_plugin, v2_plugins, v2_prompt, v2_prompt_async, v2_session_children, v2_session_list,
     v2_wait,
 };
-use crate::vcs_routes::{vcs_apply, vcs_diff, vcs_diff_raw, vcs_get, vcs_status};
 use crate::workflow::{
     workflow_activate, workflow_get, workflow_history, workflow_list, workflow_pause,
     workflow_preview, workflow_run_now,
@@ -226,6 +221,15 @@ async fn plugin_route_dispatch(
         std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned()
     };
     let snapshot = state.plugin_snapshot(&directory).await;
+    let runtime_route = snapshot.runtime_routes.values().find_map(|registered| {
+        (registered.route.descriptor.method.as_str() == request.method().as_str())
+            .then(|| match_plugin_path(&registered.route.descriptor.path, request.uri().path()))
+            .flatten()
+            .map(|params| (registered, params))
+    });
+    if let Some((registered, path_params)) = runtime_route {
+        return dispatch_runtime_route(registered, path_params, directory, request).await;
+    }
     plugin_router(&snapshot, state)
         .oneshot(request)
         .await
@@ -236,17 +240,126 @@ fn plugin_router(snapshot: &neoism_agent_plugin_api::RegistrySnapshot, state: Ap
     let route = |id: &str| snapshot.contributions.contains_key(&format!("Route:{id}"));
     let mut router = Router::new();
     if route("agents") { router = router.route("/v2/agents", get(agent_list)).route("/v2/agents/:name", get(agent_get)); }
-    if route("commands") { router = router.route("/v2/commands", get(command_list)); }
-    if route("skills") { router = router.route("/v2/skills", get(skill_list)); }
     if route("subagents") { router = router.route("/v2/plugins/dev.neoism.subagents/sessions/:session_id/tasks", get(crate::plugins::subagents::list_tasks)).route("/v2/plugins/dev.neoism.subagents/sessions/:session_id/stop", post(crate::plugins::subagents::stop_tasks)); }
-    if route("vcs") { router = router.route("/v2/plugins/dev.neoism.vcs", get(vcs_get)).route("/v2/plugins/dev.neoism.vcs/diff", get(vcs_diff)).route("/v2/plugins/dev.neoism.vcs/status", get(vcs_status)).route("/v2/plugins/dev.neoism.vcs/diff/raw", get(vcs_diff_raw)).route("/v2/plugins/dev.neoism.vcs/apply", post(vcs_apply)); }
     if route("workflows") { router = router.route("/v2/plugins/dev.neoism.workflows", get(workflow_list)).route("/v2/plugins/dev.neoism.workflows/:workflow_id", get(workflow_get)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/activate", post(workflow_activate)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/pause", post(workflow_pause)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/run", post(workflow_run_now)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/preview", get(workflow_preview)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/runs", get(workflow_history)); }
     if route("lsp") { router = router.route("/v2/plugins/dev.neoism.lsp", get(lsp_status)).route("/v2/plugins/dev.neoism.lsp/hover", get(lsp_hover)).route("/v2/plugins/dev.neoism.lsp/signature-help", get(lsp_signature_help)).route("/v2/plugins/dev.neoism.lsp/inlay-hints", get(lsp_inlay_hints)).route("/v2/plugins/dev.neoism.lsp/document-highlights", get(lsp_document_highlights)).route("/v2/plugins/dev.neoism.lsp/definition", get(lsp_definition)).route("/v2/plugins/dev.neoism.lsp/references", get(lsp_references)).route("/v2/plugins/dev.neoism.lsp/implementation", get(lsp_implementation)).route("/v2/plugins/dev.neoism.lsp/prepare-call-hierarchy", get(lsp_prepare_call_hierarchy)).route("/v2/plugins/dev.neoism.lsp/incoming-calls", get(lsp_incoming_calls)).route("/v2/plugins/dev.neoism.lsp/outgoing-calls", get(lsp_outgoing_calls)).route("/v2/plugins/dev.neoism.lsp/diagnostics", get(lsp_diagnostics)).route("/v2/plugins/dev.neoism.lsp/document-symbols", get(lsp_document_symbols)).route("/v2/plugins/dev.neoism.lsp/formatting", get(lsp_formatting)).route("/v2/plugins/dev.neoism.lsp/code-actions", get(lsp_code_actions)).route("/v2/plugins/dev.neoism.lsp/touch", post(lsp_touch)).route("/v2/plugins/dev.neoism.lsp/shutdown", post(lsp_shutdown)); }
     if route("semantic-search") { router = router.route("/v2/plugins/dev.neoism.semantic/search", get(crate::semantic::semantic_search_route)); }
     if route("pty") { router = router.route("/v2/plugins/dev.neoism.pty/shells", get(pty_shells)).route("/v2/plugins/dev.neoism.pty", get(pty_list).post(pty_create)).route("/v2/plugins/dev.neoism.pty/:pty_id", get(pty_get).put(pty_update).delete(pty_remove)).route("/v2/plugins/dev.neoism.pty/:pty_id/connect-token", post(pty_connect_token)).route("/v2/plugins/dev.neoism.pty/:pty_id/connect", get(pty_connect)); }
-    if route("goals") { router = router.route("/v2/plugins/dev.neoism.goals/:session_id", get(session_goal_get).post(session_goal_set).delete(session_goal_clear)).route("/v2/plugins/dev.neoism.goals/:session_id/research", post(session_goal_research)); }
     if route("mcp") { router = router.route("/v2/plugins/dev.neoism.mcp", get(mcp_status).post(mcp_add)).route("/v2/plugins/dev.neoism.mcp/catalog", get(mcp_catalog)).route("/v2/plugins/dev.neoism.mcp/:name/auth", post(mcp_auth_start).delete(mcp_auth_remove)).route("/v2/plugins/dev.neoism.mcp/:name/auth/callback", get(mcp_auth_callback_get).post(mcp_auth_callback)).route("/v2/plugins/dev.neoism.mcp/:name/auth/authenticate", post(mcp_auth_authenticate)).route("/v2/plugins/dev.neoism.mcp/:name/connect", post(mcp_connect)).route("/v2/plugins/dev.neoism.mcp/:name/disconnect", post(mcp_disconnect)).route("/v2/plugins/dev.neoism.mcp/:name/config", patch(mcp_config_patch)).route("/v2/plugins/dev.neoism.mcp/:name/tools", get(mcp_tools)).route("/v2/plugins/dev.neoism.mcp/:name/tools/:tool_name", post(mcp_tool_call)).route("/v2/plugins/dev.neoism.mcp/:name/resources", get(mcp_resources)).route("/v2/plugins/dev.neoism.mcp/:name/prompts", get(mcp_prompts)); }
     router.with_state(state)
+}
+
+async fn dispatch_runtime_route(
+    registered: &neoism_agent_plugin_api::RegisteredRouteContribution,
+    path_params: std::collections::BTreeMap<String, String>,
+    directory: String,
+    request: Request<Body>,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let mut query = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for (key, value) in
+        url::form_urlencoded::parse(parts.uri.query().unwrap_or_default().as_bytes())
+    {
+        query.entry(key.into_owned()).or_default().push(value.into_owned());
+    }
+    let headers = parts
+        .headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect();
+    let body = match to_bytes(body, 16 * 1024 * 1024).await {
+        Ok(bytes) if bytes.is_empty() => serde_json::Value::Null,
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                return auth_error(
+                    StatusCode::BAD_REQUEST,
+                    "request.invalid_json",
+                    &error.to_string(),
+                )
+            }
+        },
+        Err(error) => {
+            return auth_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request.body_too_large",
+                &error.to_string(),
+            )
+        }
+    };
+    let claims = parts
+        .extensions
+        .get::<crate::caller::CallerClaims>();
+    let actor = claims.map(|claims| claims.subject.clone());
+    let workspace_id = claims.and_then(|claims| claims.workspace_id.clone());
+    let session_id = path_params.get("session_id").cloned();
+    let request = neoism_agent_plugin_api::RouteRequest {
+        workspace_id,
+        workspace: Some(directory.into()),
+        session_id,
+        actor,
+        path: path_params,
+        query,
+        headers,
+        body,
+    };
+    match registered.route.handler.handle(request).await {
+        Ok(plugin_response) => {
+            let status = StatusCode::from_u16(plugin_response.status)
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let content_type = plugin_response
+                .headers
+                .get("content-type")
+                .map(String::as_str)
+                .unwrap_or("application/json");
+            let body = if content_type.starts_with("text/") {
+                plugin_response.body.as_str().unwrap_or_default().to_string()
+            } else {
+                plugin_response.body.to_string()
+            };
+            let mut response = Response::builder().status(status);
+            for (name, value) in plugin_response.headers {
+                response = response.header(name, value);
+            }
+            response.body(Body::from(body)).unwrap_or_else(|error| {
+                auth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "plugin.invalid_response",
+                    &error.to_string(),
+                )
+            })
+        }
+        Err(error) => auth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "plugin.route_failed",
+            &error.to_string(),
+        ),
+    }
+}
+
+fn match_plugin_path(
+    pattern: &str,
+    path: &str,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let pattern = pattern.trim_matches('/').split('/').collect::<Vec<_>>();
+    let path = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    if pattern.len() != path.len() {
+        return None;
+    }
+    let mut params = std::collections::BTreeMap::new();
+    for (pattern, value) in pattern.into_iter().zip(path) {
+        if let Some(name) = pattern.strip_prefix(':') {
+            params.insert(name.to_string(), value.to_string());
+        } else if pattern != value {
+            return None;
+        }
+    }
+    Some(params)
 }
 
 async fn authenticate_request(

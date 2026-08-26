@@ -123,7 +123,7 @@ neoism mcp logout webflow
 The default local callback is:
 
 ```text
-http://127.0.0.1:4096/mcp/<name>/auth/callback
+http://127.0.0.1:4096/v2/plugins/dev.neoism.mcp/<name>/auth/callback
 ```
 
 After authorization, Neoism exchanges the code, stores the credentials, and displays a page that can be closed. A remote daemon or custom deployment may need an explicit externally reachable `redirectUri` in the OAuth object.

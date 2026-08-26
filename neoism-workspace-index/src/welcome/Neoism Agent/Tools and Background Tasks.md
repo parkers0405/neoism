@@ -82,4 +82,8 @@ Tool availability is not a safety guarantee. A shell command, browser action, AP
 
 Delegated agents are child sessions managed through `task`, `task_result`, and `stop_task`. Shell background tasks are OS processes managed through `background_task`. They have different lifecycle and persistence semantics.
 
+## Custom tools
+
+Your own tools register through plugins: a serve plugin declares them at handshake and they join the same permission pipeline as native tools. See [[Plugins]].
+
 See [[Agents and Subagents]] and [[Sessions and Sharing]].

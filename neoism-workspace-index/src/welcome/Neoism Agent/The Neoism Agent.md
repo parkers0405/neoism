@@ -14,6 +14,15 @@ Neoism has three cooperating parts:
 
 Agent sessions survive a pane closing because they are server-owned rather than widget-owned. Opening the same session on another connected client replays its stored messages and then follows live events.
 
+## Architecture
+
+The agent is a versioned HTTP server with a plugin-first core:
+
+- **One API.** Everything speaks `/v2/` — the desktop pane, the browser, the SDK, and your own scripts hit the same endpoints. The contract is a committed OpenAPI document. See [[Server and API]].
+- **One event bus.** Every event — token deltas, part snapshots, status, permissions — is delivered over SSE in strict publish order, as a typed union.
+- **Plugin-first.** Providers, tools, MCP, LSP, PTY, VCS, and workflows are plugins in per-workspace generations that reload live on config changes. Third-party plugins install from npm and register tools and hooks through the same runtime. See [[Plugins]].
+- **Durable by default.** State changes and their events commit in one transaction to the local store; runs, queues, and execution activity survive restarts.
+
 ## A turn
 
 A normal turn is:
@@ -67,5 +76,8 @@ Prompts, attachments, tool results, and any instructions included in model conte
 - [[Providers]] and [[Models]] for connecting a model.
 - [[Agents and Subagents]] for delegation.
 - [[Sessions and Sharing]] for persistence and cross-device behavior.
+- [[Server and API]] for the HTTP surface, events, and hosted mode.
+- [[Plugins]] for extending the runtime, including third-party serve plugins.
+- [[SDK]] for typed TypeScript clients.
 - [[Scheduled Workflows]] for date-driven and recurring agent automations.
 - [[Troubleshooting]] when startup, authentication, or tools fail.

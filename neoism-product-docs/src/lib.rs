@@ -32,6 +32,7 @@ pub static BUNDLED_DOCS: &[BundledDoc] = docs![
     "Neoism Agent/MCP Servers.md", "Neoism Agent/Attachments.md", "Neoism Agent/Compaction.md",
     "Neoism Agent/Tools and Background Tasks.md", "Neoism Agent/Memory.md",
     "Neoism Agent/Formatters, LSP, and References.md", "Neoism Agent/Troubleshooting.md",
+    "Neoism Agent/Server and API.md", "Neoism Agent/Plugins.md", "Neoism Agent/SDK.md",
     "Neoism Daemon/The Neoism Daemon.md", "Neoism Daemon/Sessions and Persistence.md",
     "Neoism Daemon/Remote Devices and Pairing.md", "Neoism Daemon/Multiplayer and Sync.md",
     "Neoism Daemon/Troubleshooting.md",

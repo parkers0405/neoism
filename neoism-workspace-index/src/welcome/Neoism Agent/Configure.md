@@ -75,6 +75,7 @@ MCP definitions may also live in a dedicated `mcp.json` or `mcp.jsonc`. A dedica
 | `permission` | Global permission rules. |
 | `tools` | Global tool enable/disable map. |
 | `mcp` | Named MCP server definitions. |
+| `plugins` | Named plugin entries — serve plugins (`serve`/`entry`/`npm`) and declarative hook plugins. See [[Plugins]]. |
 | `formatter` | Formatter definitions used by formatting tools. |
 | `lsp` | Language-server definitions. |
 | `share` / `autoshare` | Session-sharing policy. |

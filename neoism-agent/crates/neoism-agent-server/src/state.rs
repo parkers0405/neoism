@@ -949,6 +949,20 @@ impl SessionStore {
         self.db
             .execute(
                 r#"
+            CREATE TABLE IF NOT EXISTS execution_session_activity (
+                root_session_id TEXT NOT NULL,
+                execution_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                completed_ms INTEGER NOT NULL,
+                PRIMARY KEY (root_session_id, execution_id, session_id)
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
             CREATE TABLE IF NOT EXISTS execution_activity (
                 root_session_id TEXT PRIMARY KEY,
                 execution_id TEXT NOT NULL,
@@ -1012,6 +1026,26 @@ impl SessionStore {
         self.db
             .execute(
                 "UPDATE execution_activity_segments SET execution_id = COALESCE((SELECT execution_id FROM execution_activity WHERE execution_activity.root_session_id = execution_activity_segments.root_session_id), '') WHERE execution_id = ''",
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                "UPDATE execution_activity_segments SET session_id = root_session_id WHERE session_id = ''",
+                Vec::new(),
+            )
+            .await?;
+        // Preserve aggregate history on upgrade and seed every in-flight
+        // segment owner before completion can depend on the new table.
+        self.db
+            .execute(
+                "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT root_session_id, execution_id, root_session_id, completed_ms FROM execution_activity",
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT root_session_id, execution_id, session_id, 0 FROM execution_activity_segments",
                 Vec::new(),
             )
             .await?;
@@ -2153,6 +2187,14 @@ impl SessionStore {
                 "INSERT OR IGNORE INTO execution_activity (root_session_id, execution_id, root_message_id, completed_ms, revision, family_revision, finished, updated) SELECT ?, ?, ?, 0, 1, 1, 0, ? WHERE NOT EXISTS (SELECT 1 FROM session_runs r WHERE r.session_id = ? AND r.status = 'running' AND r.id <> ?)".to_string(),
                 vec![text(root_session_id), text(execution_id), text(root_message_id), int(store_i64(now)), text(root_session_id), text(allowed_run_id)],
             ),
+            (
+                "DELETE FROM execution_session_activity WHERE root_session_id = ? AND execution_id <> (SELECT execution_id FROM execution_activity WHERE root_session_id = ?)".to_string(),
+                vec![text(root_session_id), text(root_session_id)],
+            ),
+            (
+                "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT root_session_id, execution_id, root_session_id, 0 FROM execution_activity WHERE root_session_id = ?".to_string(),
+                vec![text(root_session_id)],
+            ),
         ]).await?;
         let snapshot = self.get_execution_activity(root_session_id).await?;
         Ok(snapshot.filter(|snapshot| snapshot.root_message_id == root_message_id))
@@ -2175,16 +2217,33 @@ impl SessionStore {
         let segment_rows = self
             .db
             .fetch_all(
-                "SELECT segment_id, started_at FROM execution_activity_segments WHERE root_session_id = ? AND execution_id = ?",
+                "SELECT segment_id, session_id, started_at FROM execution_activity_segments WHERE root_session_id = ? AND execution_id = ?",
                 vec![text(root_session_id), text(row.get_str("execution_id")?)],
             )
             .await?;
         let mut active_segments = std::collections::BTreeMap::new();
-        for segment in segment_rows {
-            active_segments.insert(
-                segment.get_str("segment_id")?,
-                segment.get_i64("started_at")?.max(0) as u64,
+        let mut session_activities = std::collections::BTreeMap::new();
+        for activity in self.db.fetch_all(
+            "SELECT session_id, completed_ms FROM execution_session_activity WHERE root_session_id = ? AND execution_id = ?",
+            vec![text(root_session_id), text(row.get_str("execution_id")?)],
+        ).await? {
+            session_activities.insert(
+                activity.get_str("session_id")?,
+                neoism_agent_core::ProviderActivitySnapshot {
+                    completed_ms: activity.get_i64("completed_ms")?.max(0) as u64,
+                    active_segments: std::collections::BTreeMap::new(),
+                },
             );
+        }
+        for segment in segment_rows {
+            let segment_id = segment.get_str("segment_id")?;
+            let started_at = segment.get_i64("started_at")?.max(0) as u64;
+            active_segments.insert(segment_id.clone(), started_at);
+            session_activities
+                .entry(segment.get_str("session_id")?)
+                .or_insert_with(neoism_agent_core::ProviderActivitySnapshot::default)
+                .active_segments
+                .insert(segment_id, started_at);
         }
         Ok(Some(neoism_agent_core::ExecutionActivitySnapshot {
             execution_id: row.get_str("execution_id")?,
@@ -2192,6 +2251,7 @@ impl SessionStore {
             root_message_id: row.get_str("root_message_id")?,
             completed_ms: row.get_i64("completed_ms")?.max(0) as u64,
             active_segments,
+            session_activities,
             revision: row.get_i64("revision")?.max(0) as u64,
             finished: row.get_i64("finished")? != 0,
         }))
@@ -2216,6 +2276,10 @@ impl SessionStore {
                     "UPDATE execution_activity SET revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND changes() > 0".to_string(),
                     vec![int(store_i64(crate::now_millis())), text(root_session_id), text(execution_id)],
                 ),
+                (
+                    "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT ?, ?, ?, 0 WHERE EXISTS (SELECT 1 FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?)".to_string(),
+                    vec![text(root_session_id), text(execution_id), text(session_id), text(segment_id), text(root_session_id), text(execution_id)],
+                ),
             ])
             .await?;
         Ok(results.first().copied().unwrap_or(0) > 0)
@@ -2231,7 +2295,15 @@ impl SessionStore {
         let results = self.db
             .execute_transaction_with_results(vec![
                 (
-                    "UPDATE execution_activity SET completed_ms = completed_ms + MAX(0, ? - (SELECT started_at FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?)), revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND EXISTS (SELECT 1 FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?)".to_string(),
+                    "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT root_session_id, execution_id, session_id, 0 FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?".to_string(),
+                    vec![text(segment_id), text(root_session_id), text(execution_id)],
+                ),
+                (
+                    "UPDATE execution_session_activity SET completed_ms = completed_ms + MAX(0, ? - (SELECT started_at FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?)) WHERE root_session_id = ? AND execution_id = ? AND session_id = (SELECT session_id FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?) AND EXISTS (SELECT 1 FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?)".to_string(),
+                    vec![int(store_i64(ended_at)), text(segment_id), text(root_session_id), text(execution_id), text(root_session_id), text(execution_id), text(segment_id), text(root_session_id), text(execution_id), text(segment_id), text(root_session_id), text(execution_id)],
+                ),
+                (
+                    "UPDATE execution_activity SET completed_ms = completed_ms + MAX(0, ? - (SELECT started_at FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?)), revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND changes() > 0 AND EXISTS (SELECT 1 FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?)".to_string(),
                     vec![int(store_i64(ended_at)), text(segment_id), text(root_session_id), text(execution_id), int(store_i64(ended_at)), text(root_session_id), text(execution_id), text(segment_id), text(root_session_id), text(execution_id)],
                 ),
                 (
@@ -2240,7 +2312,7 @@ impl SessionStore {
                 ),
             ])
             .await?;
-        Ok(results.first().copied().unwrap_or(0) > 0)
+        Ok(results.get(1).copied().unwrap_or(0) > 0)
     }
 
     pub(crate) async fn mark_execution_finished(
@@ -2421,7 +2493,7 @@ impl SessionStore {
             .db
             .fetch_all(
                 r#"SELECT s.segment_id, s.root_session_id, s.execution_id,
-                          s.owner_instance_id, s.started_at,
+                           s.owner_instance_id, s.session_id, s.started_at,
                           COALESCE(o.heartbeat_at, s.started_at) AS heartbeat_at
                    FROM execution_activity_segments s
                    LEFT JOIN execution_activity_owners o
@@ -2436,13 +2508,22 @@ impl SessionStore {
             let root = row.get_str("root_session_id")?;
             let execution = row.get_str("execution_id")?;
             let owner = row.get_str("owner_instance_id")?;
+            let session = row.get_str("session_id")?;
             let started = row.get_i64("started_at")?.max(0) as u64;
             let ended = row.get_i64("heartbeat_at")?.max(0) as u64;
             let results = self
                 .db
                 .execute_transaction_with_results(vec![
                     (
-                        "UPDATE execution_activity SET completed_ms = completed_ms + MAX(0, ? - ?), revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND EXISTS (SELECT 1 FROM execution_activity_segments s LEFT JOIN execution_activity_owners o ON o.owner_instance_id = s.owner_instance_id WHERE s.segment_id = ? AND s.root_session_id = ? AND s.execution_id = ? AND s.owner_instance_id = ? AND (o.owner_instance_id IS NULL OR o.heartbeat_at < ?))".to_string(),
+                        "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT root_session_id, execution_id, session_id, 0 FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?".to_string(),
+                        vec![text(&segment), text(&root), text(&execution)],
+                    ),
+                    (
+                        "UPDATE execution_session_activity SET completed_ms = completed_ms + MAX(0, ? - ?) WHERE root_session_id = ? AND execution_id = ? AND session_id = ? AND EXISTS (SELECT 1 FROM execution_activity_segments s LEFT JOIN execution_activity_owners o ON o.owner_instance_id = s.owner_instance_id WHERE s.segment_id = ? AND s.root_session_id = ? AND s.execution_id = ? AND s.owner_instance_id = ? AND (o.owner_instance_id IS NULL OR o.heartbeat_at < ?))".to_string(),
+                        vec![int(store_i64(ended.max(started))), int(store_i64(started)), text(&root), text(&execution), text(&session), text(&segment), text(&root), text(&execution), text(&owner), int(store_i64(stale_before))],
+                    ),
+                    (
+                        "UPDATE execution_activity SET completed_ms = completed_ms + MAX(0, ? - ?), revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND changes() > 0 AND EXISTS (SELECT 1 FROM execution_activity_segments s LEFT JOIN execution_activity_owners o ON o.owner_instance_id = s.owner_instance_id WHERE s.segment_id = ? AND s.root_session_id = ? AND s.execution_id = ? AND s.owner_instance_id = ? AND (o.owner_instance_id IS NULL OR o.heartbeat_at < ?))".to_string(),
                         vec![int(store_i64(ended.max(started))), int(store_i64(started)), int(store_i64(ended.max(started))), text(&root), text(&execution), text(&segment), text(&root), text(&execution), text(&owner), int(store_i64(stale_before))],
                     ),
                     (
@@ -2451,7 +2532,7 @@ impl SessionStore {
                     ),
                 ])
                 .await?;
-            reconciled += usize::from(results.first().copied().unwrap_or(0) > 0);
+            reconciled += usize::from(results.get(1).copied().unwrap_or(0) > 0);
         }
         Ok(reconciled)
     }
@@ -2465,20 +2546,33 @@ impl SessionStore {
         let rows = self
             .db
             .fetch_all(
-                r#"SELECT ea.execution_id, ea.root_session_id, ea.root_message_id,
-                          ea.completed_ms, ea.revision, ea.family_revision, ea.finished,
-                          seg.segment_id AS active_segment_id,
-                          seg.started_at AS active_segment_started_at,
-                          task.child_session_id, task.parent_session_id,
-                          task.status AS task_status, task.started_at AS task_started_at
-                   FROM execution_activity ea
-                   LEFT JOIN execution_activity_segments seg
-                     ON seg.root_session_id = ea.root_session_id
-                    AND seg.execution_id = ea.execution_id
-                   LEFT JOIN execution_subtasks task
-                     ON task.execution_id = ea.execution_id
-                   WHERE ea.root_session_id = ?
-                   ORDER BY task.started_at, task.child_session_id"#,
+                r#"WITH current AS (
+                       SELECT execution_id, root_session_id, root_message_id,
+                              completed_ms, revision, family_revision, finished
+                       FROM execution_activity WHERE root_session_id = ?
+                   )
+                   SELECT current.*, 0 AS row_order, 'execution' AS row_kind,
+                          NULL AS item_id, NULL AS item_parent, NULL AS item_status,
+                          NULL AS item_started_at, NULL AS item_completed_ms
+                   FROM current
+                   UNION ALL
+                   SELECT current.*, 1, 'segment', seg.segment_id, seg.session_id, NULL,
+                          seg.started_at, NULL
+                   FROM current JOIN execution_activity_segments seg
+                     ON seg.root_session_id = current.root_session_id
+                    AND seg.execution_id = current.execution_id
+                   UNION ALL
+                   SELECT current.*, 2, 'activity', activity.session_id, NULL, NULL,
+                          NULL, activity.completed_ms
+                   FROM current JOIN execution_session_activity activity
+                     ON activity.root_session_id = current.root_session_id
+                    AND activity.execution_id = current.execution_id
+                   UNION ALL
+                   SELECT current.*, 3, 'task', task.child_session_id,
+                          task.parent_session_id, task.status, task.started_at, NULL
+                   FROM current JOIN execution_subtasks task
+                     ON task.execution_id = current.execution_id
+                   ORDER BY row_order, item_started_at, item_id"#,
                 vec![text(root_session_id)],
             )
             .await?;
@@ -2492,29 +2586,47 @@ impl SessionStore {
         };
         let execution_id = first.get_str("execution_id")?;
         let mut active_segments = std::collections::BTreeMap::new();
+        let mut session_activities = std::collections::BTreeMap::new();
         let mut branches = std::collections::BTreeMap::new();
         for row in &rows {
-            if let Some(segment_id) = row.get_opt_str("active_segment_id")? {
-                active_segments.insert(
-                    segment_id,
-                    row.get_opt_i64("active_segment_started_at")?
-                        .unwrap_or_default()
-                        .max(0) as u64,
-                );
-            }
-            if let Some(child_session_id) = row.get_opt_str("child_session_id")? {
-                branches.entry(child_session_id.clone()).or_insert(
+            match row.get_str("row_kind")?.as_str() {
+                "segment" => {
+                    let segment_id = row.get_str("item_id")?;
+                    let started_at = row.get_opt_i64("item_started_at")?
+                        .unwrap_or_default().max(0) as u64;
+                    active_segments.insert(segment_id.clone(), started_at);
+                    if let Some(session_id) = row.get_opt_str("item_parent")? {
+                        session_activities
+                            .entry(session_id)
+                            .or_insert_with(neoism_agent_core::ProviderActivitySnapshot::default)
+                            .active_segments
+                            .insert(segment_id, started_at);
+                    }
+                }
+                "activity" => {
+                    let session_id = row.get_str("item_id")?;
+                    session_activities
+                        .entry(session_id)
+                        .or_insert_with(neoism_agent_core::ProviderActivitySnapshot::default)
+                        .completed_ms = row.get_opt_i64("item_completed_ms")?
+                        .unwrap_or_default().max(0) as u64;
+                }
+                "task" => {
+                    let child_session_id = row.get_str("item_id")?;
+                    branches.entry(child_session_id.clone()).or_insert(
                     neoism_agent_core::SubtaskLifecycleSnapshot {
                         session_id: child_session_id,
                         parent_session_id: row
-                            .get_opt_str("parent_session_id")?
+                            .get_opt_str("item_parent")?
                             .unwrap_or_default(),
-                        status: row.get_opt_str("task_status")?.unwrap_or_default(),
+                        status: row.get_opt_str("item_status")?.unwrap_or_default(),
                         started_at: row
-                            .get_opt_i64("task_started_at")?
+                            .get_opt_i64("item_started_at")?
                             .map(|value| value.max(0) as u64),
                     },
                 );
+                }
+                _ => {}
             }
         }
         Ok(neoism_agent_core::SessionRuntimeSnapshot {
@@ -2527,6 +2639,7 @@ impl SessionStore {
                 root_message_id: first.get_str("root_message_id")?,
                 completed_ms: first.get_i64("completed_ms")?.max(0) as u64,
                 active_segments,
+                session_activities,
                 revision: first.get_i64("revision")?.max(0) as u64,
                 finished: first.get_i64("finished")? != 0,
             }),
@@ -2537,14 +2650,20 @@ impl SessionStore {
         let now = crate::now_millis();
         let mut statements = vec![
             (
+                "UPDATE execution_session_activity SET completed_ms = completed_ms + COALESCE((SELECT SUM(MAX(0, ? - started_at)) FROM execution_activity_segments s WHERE s.session_id = ? AND s.root_session_id = execution_session_activity.root_session_id AND s.execution_id = execution_session_activity.execution_id), 0) WHERE session_id = ? AND EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.session_id = ? AND s.root_session_id = execution_session_activity.root_session_id AND s.execution_id = execution_session_activity.execution_id)".to_string(),
+                vec![int(store_i64(now)), text(session_id), text(session_id), text(session_id)],
+            ),
+            (
                 "UPDATE execution_activity SET completed_ms = completed_ms + COALESCE((SELECT SUM(MAX(0, ? - started_at)) FROM execution_activity_segments s WHERE s.session_id = ? AND s.root_session_id = execution_activity.root_session_id AND s.execution_id = execution_activity.execution_id), 0), revision = revision + 1, updated = ? WHERE EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.session_id = ? AND s.root_session_id = execution_activity.root_session_id AND s.execution_id = execution_activity.execution_id)".to_string(),
                 vec![int(store_i64(now)), text(session_id), int(store_i64(now)), text(session_id)],
             ),
             ("DELETE FROM execution_activity_segments WHERE session_id = ?".to_string(), vec![text(session_id)]),
+            ("DELETE FROM execution_session_activity WHERE session_id = ?".to_string(), vec![text(session_id)]),
             ("UPDATE execution_activity SET family_revision = family_revision + 1, updated = ? WHERE EXISTS (SELECT 1 FROM execution_subtasks t WHERE t.child_session_id = ? AND t.execution_id = execution_activity.execution_id)".to_string(), vec![int(store_i64(now)), text(session_id)]),
             ("DELETE FROM execution_subtasks WHERE child_session_id = ?".to_string(), vec![text(session_id)]),
             ("DELETE FROM execution_subtasks WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
             ("DELETE FROM execution_activity_segments WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
+            ("DELETE FROM execution_session_activity WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
             ("DELETE FROM execution_activity WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
             ("DELETE FROM execution_activity_owners WHERE NOT EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.owner_instance_id = execution_activity_owners.owner_instance_id)".to_string(), Vec::new()),
         ];

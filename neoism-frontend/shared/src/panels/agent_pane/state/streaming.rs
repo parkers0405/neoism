@@ -98,7 +98,10 @@ impl NeoismAgentPane {
 
     pub fn has_status_activity(&self) -> bool {
         self.is_streaming()
-            || self.execution_activity.is_some()
+            || self
+                .execution_activity
+                .as_ref()
+                .is_some_and(|activity| self.execution_status_live(activity))
             || self.active_subagent_count() > 0
             || self.running_background_task_count() > 0
             // The grace hold counts as activity so the status row's
@@ -106,6 +109,30 @@ impl NeoismAgentPane {
             // collapse-and-return around a transient idle reading —
             // that one-frame reflow was the visible "bounce".
             || self.side_panel.held_status_display().is_some()
+    }
+
+    fn viewed_subagent_outstanding(&self) -> bool {
+        self.is_subagent_session()
+            && self.session_id.as_deref().is_some_and(|session_id| {
+                self.side_panel.branch_activity(session_id).is_some_and(|activity| {
+                    matches!(activity.status, BranchStatus::Active | BranchStatus::WaitingPermission)
+                })
+            })
+    }
+
+    fn execution_status_live(&self, activity: &ExecutionActivityState) -> bool {
+        if activity.finished {
+            return false;
+        }
+        let Some(session_id) = self.session_id.as_deref() else {
+            return true;
+        };
+        session_id == activity.root_session_id
+            || self.viewed_subagent_outstanding()
+            || activity
+                .session_activities
+                .get(session_id)
+                .is_some_and(|session| !session.active_segments.is_empty())
     }
 
     /// Raw, hold-free status derivation. The viewed session's own live
@@ -120,6 +147,9 @@ impl NeoismAgentPane {
     fn raw_streaming_status(&self) -> NeoismAgentStreamingState {
         if self.is_streaming() {
             return self.streaming_state;
+        }
+        if self.viewed_subagent_outstanding() {
+            return NeoismAgentStreamingState::Working;
         }
         if self.active_subagent_count() > 0 {
             return NeoismAgentStreamingState::WaitingSubagents;
@@ -152,14 +182,6 @@ impl NeoismAgentPane {
 
     pub fn streaming_label(&self) -> String {
         let state = self.streaming_state();
-        if state == NeoismAgentStreamingState::Idle
-            && self
-                .execution_activity
-                .as_ref()
-                .is_some_and(|activity| activity.finished)
-        {
-            return "Completed".to_string();
-        }
         if state == NeoismAgentStreamingState::Retrying {
             if let Some(reason) = self
                 .streaming_tool_label
@@ -176,10 +198,15 @@ impl NeoismAgentPane {
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
         if let Some(activity) = &self.execution_activity {
-            let elapsed = self.execution_timer_anchor.as_ref().map_or_else(
-                || activity.elapsed_ms_at(unix_millis()),
-                |anchor| anchor.elapsed_ms_at(Instant::now()),
-            );
+            let viewed = self.session_id.as_deref().unwrap_or(&activity.root_session_id);
+            let elapsed = self
+                .execution_timer_anchor
+                .as_ref()
+                .filter(|anchor| anchor.matches(&activity.execution_id, viewed))
+                .map_or_else(
+                    || activity.elapsed_ms_for_session(Some(viewed), unix_millis()),
+                    |anchor| anchor.elapsed_ms_at(Instant::now()),
+                );
             return Some(elapsed as f32 / 1000.0);
         }
         // Display clock: raw clocks while active, then the held clock so
@@ -191,12 +218,13 @@ impl NeoismAgentPane {
 
     pub fn apply_execution_activity(&mut self, mut incoming: ExecutionActivityState) -> bool {
         let now = Instant::now();
+        let viewed = self.session_id.as_deref().unwrap_or(&incoming.root_session_id);
         let current_floor = self
             .execution_timer_anchor
             .as_ref()
             .and_then(|anchor| {
                 anchor
-                    .matches(&incoming.execution_id)
+                    .matches(&incoming.execution_id, viewed)
                     .then(|| anchor.elapsed_ms_at(now))
             })
             .unwrap_or(0);
@@ -223,10 +251,14 @@ impl NeoismAgentPane {
         if let Some(activity) = self.execution_activity.as_ref() {
             self.execution_timer_anchor = Some(ExecutionTimerAnchor::from_snapshot(
                 activity,
+                self.session_id.as_deref(),
                 unix_millis(),
                 now,
                 current_floor,
             ));
+        }
+        if self.execution_activity.as_ref().is_some_and(|activity| activity.finished) {
+            self.side_panel.clear_status_display_hold();
         }
         if replaced {
             self.active_subagent_ids.clear();
@@ -262,6 +294,8 @@ impl NeoismAgentPane {
         }
         self.runtime_snapshot_revision = revision;
         let branches = branches.into_iter().collect::<Vec<_>>();
+        let viewed_session_id = self.session_id.clone();
+        let mut viewed_terminal = false;
         let branch_ids = branches
             .iter()
             .map(|(session_id, _, _)| session_id.clone())
@@ -291,7 +325,11 @@ impl NeoismAgentPane {
             } else {
                 self.active_subagent_ids.remove(&session_id);
                 self.active_subagent_started_at.remove(&session_id);
+                viewed_terminal |= viewed_session_id.as_deref() == Some(session_id.as_str());
             }
+        }
+        if viewed_terminal {
+            self.side_panel.clear_status_display_hold();
         }
         self.sync_subagent_waiting_clock();
         true
@@ -336,10 +374,12 @@ impl NeoismAgentPane {
         let mut active_ids = self
             .side_panel
             .active_child_ids(self.session_id.as_deref());
-        active_ids.extend(self.active_subagent_ids.iter().filter(|session_id| {
-                Some(session_id.as_str()) != self.session_id.as_deref()
-                    && !self.side_panel.branch_terminal_locked(session_id)
-            }).cloned());
+        active_ids.extend(
+            self.active_subagent_ids
+                .iter()
+                .filter(|session_id| Some(session_id.as_str()) != self.session_id.as_deref())
+                .cloned(),
+        );
         active_ids.len()
     }
 
@@ -424,9 +464,6 @@ impl NeoismAgentPane {
                 self.active_subagent_started_at
                     .insert(session_id, started_at);
             }
-        } else {
-            self.active_subagent_ids.remove(&session_id);
-            self.active_subagent_started_at.remove(&session_id);
         }
         true
     }
@@ -460,12 +497,10 @@ impl NeoismAgentPane {
             // authoritatively must not resurrect its row.
             return false;
         }
-        let status = if active {
-            BranchStatus::Active
-        } else {
-            BranchStatus::Completed
-        };
-        self.note_subagent_runtime(session_id.to_string(), status, None);
+        if !active {
+            return true;
+        }
+        self.note_subagent_runtime(session_id.to_string(), BranchStatus::Active, None);
         self.sync_subagent_waiting_clock();
         true
     }

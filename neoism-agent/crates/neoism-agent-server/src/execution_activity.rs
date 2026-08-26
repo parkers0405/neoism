@@ -347,6 +347,7 @@ pub(crate) async fn register_subtask(
             anyhow::bail!("subtask {child_session_id} is already terminal for execution {execution_id}");
         }
     }
+    publish_snapshot(state, &root).await;
     Ok(true)
 }
 
@@ -381,23 +382,29 @@ async fn try_finish_subtask_for_child(
     } else {
         "failed"
     };
-    state
+    let changed = state
         .inner
         .store
         .finish_execution_subtask(execution_id, child_session_id, terminal)
         .await?;
+    if changed {
+        publish_snapshot(state, &root).await;
+    }
     drop(_guard);
     finish_if_quiescent(state, &root).await;
     Ok(())
 }
 
 async fn publish_snapshot(state: &AppState, root: &str) {
-    let Ok(Some(snapshot)) = state.inner.store.get_execution_activity(root).await else {
+    let Ok(runtime) = state.inner.store.get_session_runtime_snapshot(root).await else {
+        return;
+    };
+    let Some(snapshot) = runtime.execution.clone() else {
         return;
     };
     state.publish(EventPayload::new(
         event_type::SESSION_EXECUTION_UPDATED,
-        json!({ "sessionID": root, "snapshot": snapshot }),
+        json!({ "sessionID": root, "snapshot": snapshot, "runtime": runtime }),
     ));
 }
 
@@ -577,6 +584,20 @@ mod tests {
             .unwrap();
         assert_eq!(restored.completed_ms, 1_000);
         assert_eq!(restored.active_segments.get("child"), Some(&1_500));
+        assert_eq!(
+            restored
+                .session_activities
+                .get("root")
+                .map(|activity| activity.completed_ms),
+            Some(1_000)
+        );
+        assert_eq!(
+            restored
+                .session_activities
+                .get("child")
+                .map(|activity| activity.elapsed_ms_at(2_000)),
+            Some(500)
+        );
         reopened
             .inner
             .store
@@ -662,6 +683,115 @@ mod tests {
             "outstanding"
         );
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn migration_backfills_active_segment_owner_before_exact_once_finish() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-execution-migration-{}.sqlite3",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        let database = turso::Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE execution_activity (root_session_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL, root_message_id TEXT NOT NULL, completed_ms INTEGER NOT NULL, revision INTEGER NOT NULL, family_revision INTEGER NOT NULL DEFAULT 0, finished INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL)",
+                Vec::<turso::Value>::new(),
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "CREATE TABLE execution_activity_segments (segment_id TEXT PRIMARY KEY, root_session_id TEXT NOT NULL, execution_id TEXT NOT NULL, owner_instance_id TEXT NOT NULL, session_id TEXT NOT NULL, started_at INTEGER NOT NULL)",
+                Vec::<turso::Value>::new(),
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO execution_activity VALUES ('root', 'execution', 'message', 400, 1, 0, 0, 1000)",
+                Vec::<turso::Value>::new(),
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO execution_activity_segments VALUES ('segment', 'root', 'execution', 'old-owner', 'child', 1000)",
+                Vec::<turso::Value>::new(),
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        drop(database);
+
+        let state = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .inner
+                .store
+                .get_execution_activity("root")
+                .await
+                .unwrap()
+                .unwrap()
+                .session_activities["child"]
+                .completed_ms,
+            0
+        );
+        let database = turso::Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                "DELETE FROM execution_session_activity WHERE session_id = 'child'",
+                Vec::<turso::Value>::new(),
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        drop(database);
+        assert!(state
+            .inner
+            .store
+            .finish_execution_segment("root", "execution", "segment", 2_000)
+            .await
+            .unwrap());
+        assert!(!state
+            .inner
+            .store
+            .finish_execution_segment("root", "execution", "segment", 3_000)
+            .await
+            .unwrap());
+        let restored = state
+            .inner
+            .store
+            .get_execution_activity("root")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.completed_ms, 1_400);
+        assert_eq!(
+            restored
+                .session_activities
+                .get("root")
+                .map(|activity| activity.completed_ms),
+            Some(400)
+        );
+        assert_eq!(
+            restored
+                .session_activities
+                .get("child")
+                .map(|activity| activity.completed_ms),
+            Some(1_000)
+        );
+        drop(state);
         let _ = std::fs::remove_file(path);
     }
 

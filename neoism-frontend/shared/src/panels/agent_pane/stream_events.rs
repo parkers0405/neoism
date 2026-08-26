@@ -304,6 +304,7 @@ pub enum SessionEventUpdate {
         version: u64,
     },
     ExecutionUpdated(Value),
+    RuntimeUpdated(Value),
 }
 
 pub fn classify_session_event(
@@ -762,12 +763,16 @@ pub fn classify_session_event(
                     .map(str::to_string),
             }]
         }
-        "session.execution.updated" => properties
-            .get("snapshot")
-            .cloned()
-            .map(SessionEventUpdate::ExecutionUpdated)
-            .into_iter()
-            .collect(),
+        "session.execution.updated" => {
+            let mut updates = Vec::with_capacity(2);
+            if let Some(snapshot) = properties.get("snapshot").cloned() {
+                updates.push(SessionEventUpdate::ExecutionUpdated(snapshot));
+            }
+            if let Some(runtime) = properties.get("runtime").cloned() {
+                updates.push(SessionEventUpdate::RuntimeUpdated(runtime));
+            }
+            updates
+        }
         "question.asked" => {
             let pending =
                 crate::panels::agent_pane::question_policy::question_request_from_event(
@@ -1167,6 +1172,25 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn execution_event_keeps_legacy_snapshot_when_runtime_is_malformed() {
+        let updates = classify_session_event(
+            json!({
+                "type": "session.execution.updated",
+                "properties": {
+                    "sessionID": "root",
+                    "snapshot": { "executionId": "execution" },
+                    "runtime": { "broken": true }
+                }
+            }),
+            "root",
+            &mut SessionEventUpdateState::default(),
+        );
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(updates[0], SessionEventUpdate::ExecutionUpdated(_)));
+        assert!(matches!(updates[1], SessionEventUpdate::RuntimeUpdated(_)));
+    }
 
     #[test]
     fn task_status_reads_metadata_or_output() {

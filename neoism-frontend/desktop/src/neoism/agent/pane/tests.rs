@@ -542,6 +542,75 @@ fn attached_session_counts_as_conversation_before_messages_load() {
 }
 
 #[test]
+fn execution_timer_uses_family_total_for_root_and_own_total_for_child() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.apply_execution_activity(
+        neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            execution_id: "execution".into(),
+            root_session_id: "root".into(),
+            completed_ms: 8_000,
+            session_activities: [(
+                "child".into(),
+                neoism_ui::panels::agent_pane::state::ProviderActivityState {
+                    completed_ms: 3_000,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            revision: 1,
+            ..Default::default()
+        },
+    );
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(8.0));
+    pane.session_id = Some("child".into());
+    pane.parent_session_id = Some("root".into());
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(3.0));
+}
+
+#[test]
+fn finished_execution_does_not_reserve_status_row() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_execution_activity(
+        neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            execution_id: "execution".into(),
+            root_session_id: "root".into(),
+            completed_ms: 8_000,
+            revision: 2,
+            finished: true,
+            ..Default::default()
+        },
+    );
+    assert!(!pane.has_status_activity());
+    assert_eq!(pane.streaming_label(), "");
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(8.0));
+}
+
+#[test]
+fn completed_child_does_not_reserve_status_row_for_active_family() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".into());
+    pane.parent_session_id = Some("root".into());
+    pane.apply_execution_activity(
+        neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            execution_id: "execution".into(),
+            root_session_id: "root".into(),
+            completed_ms: 8_000,
+            revision: 2,
+            finished: false,
+            ..Default::default()
+        },
+    );
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        1,
+        [("child".into(), "completed".into(), Some(10))],
+    ));
+    assert!(!pane.has_status_activity());
+    assert_eq!(pane.streaming_label(), "");
+}
+
+#[test]
 fn running_background_task_count_tracks_started_and_collected_jobs() {
     let mut pane = NeoismAgentPane::default();
     let mut started = NeoismAgentMessage::tool(

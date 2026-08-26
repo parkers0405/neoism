@@ -370,6 +370,7 @@ fn test_compaction_pair(
                 session_id: session_id.clone(),
                 time: CompletedTime {
                     created: 11,
+                    streamed: Some(12),
                     completed: Some(12),
                 },
                 parent_id: user_id,
@@ -2905,6 +2906,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
                     session_id: session_id.clone(),
                     time: CompletedTime {
                         created: 2,
+                        streamed: Some(3),
                         completed: Some(3),
                     },
                     parent_id: Id::ascending(IdKind::Message),
@@ -3236,6 +3238,7 @@ async fn append_snapshot_test_messages(
                     session_id: session.id.clone(),
                     time: CompletedTime {
                         created: now,
+                        streamed: Some(now),
                         completed: Some(now),
                     },
                     parent_id: user_id.clone(),

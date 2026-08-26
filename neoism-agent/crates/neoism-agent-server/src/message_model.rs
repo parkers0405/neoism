@@ -490,6 +490,7 @@ mod tests {
                 session_id: session_id.clone(),
                 time: CompletedTime {
                     created: 1,
+                    streamed: Some(2),
                     completed: Some(2),
                 },
                 parent_id: Id::ascending(IdKind::Message),
@@ -774,6 +775,7 @@ mod tests {
                 session_id: session_id.clone(),
                 time: CompletedTime {
                     created: 1,
+                    streamed: Some(2),
                     completed: Some(2),
                 },
                 parent_id: Id::ascending(IdKind::Message),
@@ -832,6 +834,7 @@ mod tests {
             session_id,
             time: CompletedTime {
                 created: 1,
+                streamed: Some(2),
                 completed: Some(2),
             },
             parent_id: Id::ascending(IdKind::Message),
@@ -1072,6 +1075,7 @@ mod tests {
                     session_id: session_id.clone(),
                     time: CompletedTime {
                         created: index as u64,
+                        streamed: Some(index as u64 + 1),
                         completed: Some(index as u64 + 1),
                     },
                     parent_id: Id::ascending(IdKind::Message),

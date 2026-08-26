@@ -307,11 +307,19 @@ pub(crate) async fn run_provider_stream_step(
                 "provider stream progress"
             );
         }
+        let finishes_stream = provider_event_finishes_stream(&event);
         process_provider_stream_event(ctx, &mut stream_state, event)
             .await
             .map_err(|error| {
                 ProviderStreamStepError::unfinalized(error.to_string(), false)
             })?;
+        // `Finish` is the provider protocol's terminal edge. Some transports
+        // keep the underlying SSE connection open after sending it; waiting
+        // for EOF turns a completed answer into an idle-timeout retry and
+        // visibly streams the same answer a second time.
+        if finishes_stream {
+            break;
+        }
     }
 
     flush_pending_tool_calls(ctx, &mut stream_state)
@@ -385,6 +393,10 @@ fn event_is_progress(event: &ProviderStreamEvent) -> bool {
         | ProviderStreamEvent::ToolResult { .. }
         | ProviderStreamEvent::ToolError { .. } => true,
     }
+}
+
+fn provider_event_finishes_stream(event: &ProviderStreamEvent) -> bool {
+    matches!(event, ProviderStreamEvent::Finish { .. })
 }
 
 fn provider_stream_timeout_is_retryable(stream: &ProviderStreamStepState) -> bool {
@@ -963,7 +975,35 @@ async fn persist_queued_tool_results(
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_stream_timeout_is_retryable, ProviderStreamStepState};
+    use super::{
+        provider_event_finishes_stream, provider_stream_timeout_is_retryable,
+        ProviderStreamEvent, ProviderStreamStepState,
+    };
+
+    #[test]
+    fn finish_event_terminates_without_waiting_for_transport_eof() {
+        let finish = ProviderStreamEvent::Finish {
+            finish: Some("stop".to_string()),
+            total_tokens: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        let finish_step = ProviderStreamEvent::FinishStep {
+            finish: Some("tool-calls".to_string()),
+            total_tokens: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+
+        assert!(provider_event_finishes_stream(&finish));
+        assert!(!provider_event_finishes_stream(&finish_step));
+    }
 
     #[test]
     fn idle_timeout_retries_partial_reasoning_before_any_tool_call() {

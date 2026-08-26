@@ -899,6 +899,7 @@ async fn run_parent_subtasks(
             session_id: session_id.clone(),
             time: CompletedTime {
                 created: now_millis(),
+                streamed: None,
                 completed: None,
             },
             parent_id: parent_message_id.clone(),

@@ -4,6 +4,7 @@ set -euo pipefail
 mode="${1:-check}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 snapshot="$root/neoism-agent/openapi/v2.sha256"
+spec="$root/neoism-agent/openapi/v2.json"
 generated="$root/neoism-agent/sdk/typescript/packages/core/src/generated/contract.ts"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -17,11 +18,16 @@ case "$mode" in
   update)
     mkdir -p "$(dirname "$snapshot")" "$(dirname "$generated")"
     cp "$tmp/v2.sha256" "$snapshot"
+    cp "$tmp/v2.json" "$spec"
     cp "$tmp/contract.ts" "$generated"
     ;;
   check)
     cmp "$tmp/v2.sha256" "$snapshot" || {
       echo "canonical OpenAPI fingerprint drifted; run neoism-agent/scripts/openapi.sh update" >&2
+      exit 1
+    }
+    cmp "$tmp/v2.json" "$spec" || {
+      echo "committed OpenAPI document drifted; run neoism-agent/scripts/openapi.sh update" >&2
       exit 1
     }
     cmp "$tmp/contract.ts" "$generated" || {

@@ -39,7 +39,6 @@ pub mod event_type {
     pub const MESSAGE_PART_DELTA: &str = "message.part.delta";
     pub const MESSAGE_UPDATED: &str = "message.updated";
     pub const MESSAGE_REMOVED: &str = "message.removed";
-    pub const MCP_BROWSER_OPEN_FAILED: &str = "mcp.browser.open.failed";
     pub const MCP_TOOLS_CHANGED: &str = "mcp.tools.changed";
     pub const LSP_UPDATED: &str = "lsp.updated";
     pub const PERMISSION_ASKED: &str = "permission.asked";
@@ -47,9 +46,6 @@ pub mod event_type {
     pub const QUESTION_ASKED: &str = "question.asked";
     pub const QUESTION_REJECTED: &str = "question.rejected";
     pub const QUESTION_REPLIED: &str = "question.replied";
-    pub const SERVER_CONNECTED: &str = "server.connected";
-    pub const SERVER_HEARTBEAT: &str = "server.heartbeat";
-    pub const SERVER_INSTANCE_DISPOSED: &str = "server.instance.disposed";
     pub const PTY_CREATED: &str = "pty.created";
     pub const PTY_UPDATED: &str = "pty.updated";
     pub const PTY_DELETED: &str = "pty.deleted";
@@ -73,4 +69,44 @@ pub mod event_type {
     pub const TODO_UPDATED: &str = "todo.updated";
     pub const WORKFLOW_UPDATED: &str = "workflow.updated";
     pub const WORKFLOW_RUN_UPDATED: &str = "workflow.run.updated";
+
+    /// Every event type the server can publish, in one place, so the OpenAPI
+    /// contract (and anything else that must stay exhaustive) can be tested
+    /// against the authoritative list instead of a hand-copied one.
+    pub const ALL: &[&str] = &[
+        MESSAGE_PART_UPDATED,
+        MESSAGE_PART_REMOVED,
+        MESSAGE_PART_DELTA,
+        MESSAGE_UPDATED,
+        MESSAGE_REMOVED,
+        MCP_TOOLS_CHANGED,
+        LSP_UPDATED,
+        PERMISSION_ASKED,
+        PERMISSION_REPLIED,
+        QUESTION_ASKED,
+        QUESTION_REJECTED,
+        QUESTION_REPLIED,
+        PTY_CREATED,
+        PTY_UPDATED,
+        PTY_DELETED,
+        PTY_EXITED,
+        SESSION_COMPACTION_STARTED,
+        SESSION_COMPACTION_DELTA,
+        SESSION_COMPACTION_ENDED,
+        SESSION_COMPACTED,
+        SESSION_CONTEXT_UPDATED,
+        SESSION_CREATED,
+        SESSION_DELETED,
+        SESSION_ERROR,
+        SESSION_EXECUTION_UPDATED,
+        SESSION_BACKGROUND_TASK_COMPLETED,
+        SESSION_QUEUE_UPDATED,
+        SESSION_PROMPT_ADMITTED,
+        SESSION_STATUS,
+        SESSION_SUBTASK_COMPLETED,
+        SESSION_UPDATED,
+        TODO_UPDATED,
+        WORKFLOW_UPDATED,
+        WORKFLOW_RUN_UPDATED,
+    ];
 }

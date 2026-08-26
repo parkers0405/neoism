@@ -1,0 +1,30 @@
+name: Publish SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (defaults to the workspace Cargo version)"
+        required: false
+      dry-run:
+        description: "Build and pack without publishing"
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Publish @neoism/sdk-*
+        working-directory: neoism-agent/sdk/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: >
+          node scripts/publish.mjs
+          ${{ inputs.version && format('--version {0}', inputs.version) || '' }}
+          ${{ inputs.dry-run && '--dry-run' || '' }}

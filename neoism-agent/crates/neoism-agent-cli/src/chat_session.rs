@@ -322,7 +322,7 @@ fn latest_assistant_with_tokens(messages: &[Value]) -> Option<&Value> {
 }
 
 fn token_total(tokens: &Value) -> u64 {
-    // OpenCode's visible context metric sums the normalized token buckets.
+    // The visible context metric sums the normalized token buckets.
     tokens
         .get("input")
         .and_then(Value::as_u64)

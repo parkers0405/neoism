@@ -157,7 +157,7 @@ async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueI
         .into_iter()
         .filter_map(|(request, delivery)| (delivery != "continue").then_some(request))
         .collect::<Vec<_>>();
-    let running = state.inner.runs.read().await.contains_key(session_id);
+    let running = state.inner.session_coordinator.active_run(session_id).await.is_some();
     let worker = state
         .inner
         .session_coordinator
@@ -346,7 +346,7 @@ pub(crate) async fn publish_prompt_queue_status(
     let visible_queue_len = queued_prompt_count(state, session_id).await;
     let status = if active_worker
         || total_queue_len > 0
-        || state.inner.runs.read().await.contains_key(session_id)
+        || state.inner.session_coordinator.active_run(session_id).await.is_some()
     {
         busy_status(
             visible_queue_len,
@@ -430,16 +430,6 @@ pub(crate) async fn drain_queued_prompts_into_active_run(
 }
 
 async fn wait_until_session_not_running(state: &AppState, session_id: &str) {
-    // Adopt any run installed by recovery/tests/older internal callers so the
-    // coordinator remains compatible with durable run restoration while the
-    // map is phased behind the keyed owner API.
-    if let Some(run) = state.inner.runs.read().await.get(session_id).cloned() {
-        let _ = state
-            .inner
-            .session_coordinator
-            .try_start_run(session_id, run)
-            .await;
-    }
     state
         .inner
         .session_coordinator
@@ -549,6 +539,12 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
         &session_id,
     )
     .await;
+    // Same reasoning for execution activity: run teardown happens inside
+    // `append_prompt` on this worker's stack, so its quiescence check always
+    // sees this worker as active and bails. Settle here — the worker released
+    // ownership above — or the execution stays unfinished and the next
+    // top-level prompt inherits the previous run's timer.
+    crate::execution_activity::finish_if_quiescent(&state, &session_id).await;
 }
 
 pub(crate) fn spawn_drain_prompt_queue(state: AppState, session_id: String) {

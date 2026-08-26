@@ -8,7 +8,7 @@ async fn wait_for_session_message_count(
     let mut messages = Vec::new();
     for _ in 0..500 {
         messages = state.inner.store.list_messages(session_id).await.unwrap();
-        let running = state.inner.runs.read().await.contains_key(session_id);
+        let running = state.inner.session_coordinator.active_run(session_id).await.is_some();
         if messages.len() >= count && !running {
             return messages;
         }
@@ -468,12 +468,7 @@ async fn background_task_runs_shell_command_and_result_can_be_collected() {
     assert!(collected.output.contains("background-ok"));
 
     for _ in 0..50 {
-        if !state
-            .inner
-            .runs
-            .read()
-            .await
-            .contains_key(session.id.as_str())
+        if !state.inner.session_coordinator.active_run(session.id.as_str()).await.is_some()
         {
             break;
         }

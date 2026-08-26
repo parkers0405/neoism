@@ -1906,7 +1906,7 @@ fn usage_from_message(message: &MessageWithParts) -> Value {
     let MessageInfo::Assistant(info) = &message.info else {
         return Value::Null;
     };
-    // Match OpenCode's ACP usage: sum the normalized token buckets.
+    // ACP usage sums the normalized token buckets.
     let total = info
         .tokens
         .input

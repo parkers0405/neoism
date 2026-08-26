@@ -488,10 +488,8 @@ mod tests {
             .unwrap();
         state
             .inner
-            .runs
-            .write()
-            .await
-            .insert(session_id.clone(), run.clone());
+            .session_coordinator
+            .install_run(&session_id.clone(), run.clone()).await;
         state
             .inner
             .store
@@ -514,7 +512,7 @@ mod tests {
         drop(writer);
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while state.inner.runs.read().await.contains_key(&session_id) {
+            while state.inner.session_coordinator.active_run(&session_id).await.is_some() {
                 tokio::task::yield_now().await;
             }
         })

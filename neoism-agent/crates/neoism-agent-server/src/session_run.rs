@@ -47,12 +47,6 @@ pub(crate) async fn start_session_run(
         .write()
         .await
         .insert(session_key.clone(), status.clone());
-    state
-        .inner
-        .runs
-        .write()
-        .await
-        .insert(session_key.clone(), run.clone());
     publish_session_status(state, session_id.as_str(), &status).await;
     Ok(run)
 }
@@ -75,26 +69,14 @@ pub(crate) async fn try_finish_session_run(
         .store
         .finish_run(run_id, "completed", None)
         .await?;
-    let removed = {
-        let mut runs = state.inner.runs.write().await;
-        if runs
-            .get(session_id)
-            .is_some_and(|current| current.id == run_id)
-        {
-            runs.remove(session_id);
-            true
-        } else {
-            false
-        }
-    };
-    if !removed {
-        return Ok(());
-    }
-    state
+    if !state
         .inner
         .session_coordinator
         .finish_run(session_id, run_id)
-        .await;
+        .await
+    {
+        return Ok(());
+    }
     publish_idle_if_no_run(state, session_id).await;
     crate::session_actions::reconcile_parent_subtask_completions_for_child(
         state, session_id,
@@ -113,7 +95,13 @@ pub(crate) async fn try_finish_session_run(
 }
 
 pub(crate) async fn publish_idle_if_no_run(state: &AppState, session_id: &str) {
-    if state.inner.runs.read().await.contains_key(session_id) {
+    if state
+        .inner
+        .session_coordinator
+        .active_run(session_id)
+        .await
+        .is_some()
+    {
         return;
     }
     let queue_count = queued_prompt_count(state, session_id).await;
@@ -155,7 +143,12 @@ pub(crate) async fn session_status_payload(
     status: &SessionStatus,
 ) -> Value {
     let mut payload = json!({ "sessionID": session_id, "status": status });
-    if let Some(run) = state.inner.runs.read().await.get(session_id).cloned() {
+    if let Some(run) = state
+        .inner
+        .session_coordinator
+        .active_run(session_id)
+        .await
+    {
         payload["runID"] = json!(run.id.clone());
         payload["startedAt"] = json!(run.started_at);
         if let Some(status) = payload.get_mut("status") {

@@ -923,6 +923,65 @@ mod tests {
                 .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
     }
 
+    /// The other half of the parity contract: every route a production plugin
+    /// snapshot registers must be documented, and every plugin-owned operation
+    /// in the spec must still be served by a registered descriptor. Without
+    /// this, the ~half of the API dispatched through the plugin fallback could
+    /// be renamed or deleted with no test noticing.
+    #[tokio::test]
+    async fn every_plugin_route_descriptor_is_in_openapi_and_vice_versa() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-openapi-plugin-parity-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = crate::state::AppState::open_database(root.join("state.sqlite3"))
+            .await
+            .unwrap();
+        let snapshot = state
+            .plugin_snapshot(&root.to_string_lossy())
+            .await;
+
+        let mut descriptors = BTreeSet::new();
+        for registered in snapshot.runtime_routes.values() {
+            descriptors.insert((
+                registered.route.descriptor.method.as_str().to_string(),
+                normalize_path(&registered.route.descriptor.path),
+            ));
+        }
+        for registered in snapshot.runtime_websocket_routes.values() {
+            descriptors.insert((
+                registered.route.descriptor.method.as_str().to_string(),
+                normalize_path(&registered.route.descriptor.path),
+            ));
+        }
+        // Release the generation lease before shutdown or the drain times out.
+        drop(snapshot);
+
+        let document = canonical_openapi();
+        let mut spec = BTreeSet::new();
+        for (path, item) in document["paths"].as_object().unwrap() {
+            for method in ["get", "post", "put", "patch", "delete"] {
+                if item.get(method).is_some() {
+                    let path = normalize_path(path);
+                    if plugin_owned_path(&path) {
+                        spec.insert((method.to_uppercase(), path));
+                    }
+                }
+            }
+        }
+
+        let missing_from_spec = descriptors.difference(&spec).collect::<Vec<_>>();
+        let missing_from_snapshot = spec.difference(&descriptors).collect::<Vec<_>>();
+        assert!(
+            missing_from_spec.is_empty() && missing_from_snapshot.is_empty(),
+            "plugin routes and OpenAPI drifted.\nregistered but undocumented: {missing_from_spec:#?}\ndocumented but unregistered: {missing_from_snapshot:#?}"
+        );
+
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn canonical_document_contains_only_v2_paths() {
         let document = canonical_openapi();

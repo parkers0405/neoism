@@ -175,11 +175,15 @@ async fn plugin_route_dispatch(
     } else if let Some(matched) = request.extensions().get::<MatchedPluginSession>() {
         matched.directory.clone()
     } else if request.uri().path().starts_with("/v2/plugins/") {
-        let session = match session_id_from_path(request.uri().path()) {
-            Some(session_id) => state.inner.store.get_session(session_id).await.ok().flatten(),
-            None => None,
-        };
-        session.map(|session| session.directory).unwrap_or_else(|| std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned())
+        // Descriptor-validated only: a session may resolve the dispatching
+        // workspace solely through a route that declares RouteScope::Session
+        // and binds this segment as `session_id`. Guessing from the path let a
+        // plugin resource id that collides with a session id teleport dispatch
+        // into that session's workspace.
+        match find_scoped_plugin_session(&state, request.uri().path(), request.method().as_str()).await {
+            Some(session) => session.directory,
+            None => std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned(),
+        }
     } else if let Some(session_id) = session_id_from_path(request.uri().path()) {
         match state.inner.store.get_session(session_id).await {
             Ok(Some(session)) => session.directory,
@@ -235,25 +239,41 @@ struct MatchedPluginSession {
     directory: String,
 }
 
+/// Find the session a plugin route path is scoped to, accepting a path
+/// segment as a session id ONLY when a registered route descriptor declares
+/// `RouteScope::Session` and binds that exact segment as `session_id`. A
+/// plugin resource id that merely collides with a session id never matches:
+/// its route's descriptor binds a different parameter.
+async fn find_scoped_plugin_session(
+    state: &AppState,
+    path: &str,
+    method: &str,
+) -> Option<neoism_agent_core::SessionInfo> {
+    for candidate_id in path.split('/').filter(|segment| !segment.is_empty()).rev() {
+        let Some(session) = state.inner.store.get_session(candidate_id).await.ok().flatten() else { continue; };
+        let snapshot = state.plugin_snapshot(&session.directory).await;
+        if snapshot_matches_session_route(&snapshot, method, path, session.id.as_str()) {
+            return Some(session);
+        }
+    }
+    None
+}
+
 async fn resolve_scoped_plugin_session(
     state: &AppState,
     path: &str,
     method: &str,
     claims: &crate::caller::CallerClaims,
 ) -> Result<Option<MatchedPluginSession>, Response> {
-    for candidate_id in path.split('/').filter(|segment| !segment.is_empty()).rev() {
-        let Some(session) = state.inner.store.get_session(candidate_id).await.ok().flatten() else { continue; };
-        let snapshot = state.plugin_snapshot(&session.directory).await;
-        if snapshot_matches_session_route(&snapshot, method, path, session.id.as_str()) {
-            if !crate::caller::allows_session(claims, &session)
-                || !crate::caller::allows_directory(claims, &session.directory)
-            {
-                return Err(auth_error(StatusCode::FORBIDDEN, "auth.session_forbidden", "The caller is not authorized for this session or directory"));
-            }
-            return Ok(Some(MatchedPluginSession { session_id: session.id.to_string(), directory: session.directory }));
-        }
+    let Some(session) = find_scoped_plugin_session(state, path, method).await else {
+        return Ok(None);
+    };
+    if !crate::caller::allows_session(claims, &session)
+        || !crate::caller::allows_directory(claims, &session.directory)
+    {
+        return Err(auth_error(StatusCode::FORBIDDEN, "auth.session_forbidden", "The caller is not authorized for this session or directory"));
     }
-    Ok(None)
+    Ok(Some(MatchedPluginSession { session_id: session.id.to_string(), directory: session.directory }))
 }
 
 fn snapshot_matches_session_route(snapshot: &neoism_agent_plugin_api::RegistrySnapshot, method: &str, path: &str, session_id: &str) -> bool {
@@ -683,6 +703,13 @@ fn request_session_id(uri: &axum::http::Uri) -> Option<String> {
 }
 
 fn session_id_from_path(path: &str) -> Option<&str> {
+    // Plugin routes (/v2/plugins/...) are excluded on purpose: their session
+    // scope is resolved via `find_scoped_plugin_session`, which validates the
+    // segment against a RouteScope::Session descriptor instead of guessing
+    // from position. Core routes like /v2/sessions/{id}/... resolve here.
+    if path.starts_with("/v2/plugins/") {
+        return None;
+    }
     let parts = path
         .split('/')
         .filter(|part| !part.is_empty())
@@ -691,9 +718,7 @@ fn session_id_from_path(path: &str) -> Option<&str> {
         let id = *parts.get(index + 1)?;
         return (!matches!(id, "status" | "workspace" | "project")).then_some(id);
     }
-    // Plugin session routes are /v2/plugins/{plugin-id}/{session-id}/... .
-    // Non-session plugin resource IDs harmlessly miss the session store.
-    if let ["v2", "plugins", _, id, ..] = parts.as_slice() { Some(*id) } else { None }
+    None
 }
 
 fn interaction_id_from_path(path: &str) -> Option<&str> {
@@ -786,6 +811,45 @@ mod hosted_plugin_authorization_tests {
         };
         state.inner.store.insert_session(&session).await.unwrap();
         (state, session, root)
+    }
+
+    #[test]
+    fn session_id_from_path_never_guesses_on_plugin_routes() {
+        assert_eq!(session_id_from_path("/v2/plugins/dev.neoism.goals/ses_123"), None);
+        assert_eq!(
+            session_id_from_path("/v2/plugins/dev.neoism.mcp/ses_123/tools"),
+            None
+        );
+        assert_eq!(
+            session_id_from_path("/v2/plugins/dev.neoism.subagents/sessions/ses_123/tasks"),
+            None
+        );
+        assert_eq!(
+            session_id_from_path("/v2/sessions/ses_123/messages"),
+            Some("ses_123")
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_scoped_plugin_route_ignores_colliding_session_id_segment() {
+        let (state, session, root) = session_route_fixture().await;
+        // The MCP tools route binds `:name`, not `:session_id`, and is
+        // workspace-scoped — a server name that collides with a real session
+        // id must not resolve dispatch into that session's workspace.
+        let path = format!("/v2/plugins/dev.neoism.mcp/{}/tools", session.id);
+        assert!(find_scoped_plugin_session(&state, &path, "GET").await.is_none());
+        // The same session id on a genuinely session-scoped route resolves.
+        let scoped = format!(
+            "/v2/plugins/{}/{}",
+            neoism_agent_builtins::plugin::goals::ID,
+            session.id
+        );
+        let matched = find_scoped_plugin_session(&state, &scoped, "GET")
+            .await
+            .expect("session-scoped descriptor must resolve");
+        assert_eq!(matched.id, session.id);
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

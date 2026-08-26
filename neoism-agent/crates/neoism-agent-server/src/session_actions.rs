@@ -81,9 +81,8 @@ pub(crate) async fn clear_subtask_completion_for_teardown(state: &AppState, sess
 }
 
 async fn abort_session_run_impl(state: &AppState, session_id: &str, reconcile_completion: bool) -> bool {
-    let cancelled = state.inner.runs.write().await.remove(session_id);
-    let coordinated = state.inner.session_coordinator.abort_run(session_id).await;
-    if let Some(cancelled) = cancelled.as_ref().or(coordinated.as_ref()) {
+    let cancelled = state.inner.session_coordinator.abort_run(session_id).await;
+    if let Some(cancelled) = cancelled.as_ref() {
         cancelled.cancel.store(true, Ordering::SeqCst);
     }
     let was_busy = state
@@ -145,7 +144,7 @@ async fn abort_session_run_impl(state: &AppState, session_id: &str, reconcile_co
         reconcile_parent_subtask_completions_for_child(state, session_id).await;
     }
 
-    cancelled.is_some() || coordinated.is_some() || was_busy
+    cancelled.is_some() || was_busy
 }
 
 pub(crate) async fn create_subtask_session(
@@ -706,7 +705,13 @@ async fn latest_child_user_message_id(
 }
 
 async fn subtask_has_active_work(state: &AppState, session_id: &str) -> bool {
-    if state.inner.runs.read().await.contains_key(session_id) {
+    if state
+        .inner
+        .session_coordinator
+        .active_run(session_id)
+        .await
+        .is_some()
+    {
         return true;
     }
     if state
@@ -1294,10 +1299,8 @@ mod tests {
             .unwrap();
         state
             .inner
-            .runs
-            .write()
-            .await
-            .insert(parent.id.to_string(), run);
+            .session_coordinator
+            .install_run(&parent.id.to_string(), run).await;
     }
 
     fn completion_pending(child: &SessionInfo, index: usize) -> Option<bool> {
@@ -1395,14 +1398,14 @@ mod tests {
         insert_session(&state, &completed_child).await;
         insert_session(&state, &active_sibling).await;
         hold_parent_run(&state, &parent).await;
-        state.inner.runs.write().await.insert(
+        state.inner.session_coordinator.install_run(&
             active_sibling.id.to_string(),
             crate::state::SessionRun {
                 id: "sibling-active-run".to_string(),
                 started_at: 1,
                 cancel: Arc::new(AtomicBool::new(false)),
             },
-        );
+        ).await;
 
         let generation = owe_completion(&state, completed_child.id.as_str()).await;
         publish_background_subtask_finished(
@@ -1708,12 +1711,7 @@ mod tests {
         wrapper.await.unwrap();
         // Keep the run id live in the test assertion: abort must have removed
         // exactly the run that was racing the wrapper.
-        assert!(!state
-            .inner
-            .runs
-            .read()
-            .await
-            .contains_key(child.id.as_str()));
+        assert!(!state.inner.session_coordinator.active_run(child.id.as_str()).await.is_some());
         assert!(!run.id.is_empty());
         assert_eq!(
             state

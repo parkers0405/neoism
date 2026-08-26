@@ -23,6 +23,7 @@ export type CreateSessionRequest = { agent?: string; model?: ModelRef; parentId?
 export type EmptyObject = Record<string, unknown>;
 export type EventEnvelope = { data: unknown; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: string; };
 export type EventSubject = { id: string; kind: string; };
+export type ExecutionActivitySnapshot = { activeSegments: { [key: string]: number; }; completedMs: number; executionId: string; finished: boolean; revision: number; rootMessageId: string; rootSessionId: string; };
 export type ExportSessionsRequest = { workspaceRoot: string; };
 export type ExportSessionsResponse = { bundles: Array<SessionBundle>; };
 export type ForkSessionRequest = { messageId?: string; };
@@ -103,6 +104,7 @@ export type SessionPage = { cursor: PageCursor; items: Array<Session>; };
 export type SessionQueueInfo = { count: number; items: Array<SessionQueueItem>; running: boolean; sessionId: string; worker: boolean; };
 export type SessionQueueItem = { agent?: string | null; index: number; model?: (UserModel) | (null); noReply: boolean; partCount: number; text?: string | null; };
 export type SessionQueueMutation = { queue: SessionQueueInfo; removed: number; sessionId: string; };
+export type SessionRuntimeSnapshot = { branches: Array<SubtaskLifecycleSnapshot>; execution?: (ExecutionActivitySnapshot) | (null); revision: number; rootSessionId: string; };
 export type SessionShellRequest = { agent?: string; command: string; messageId?: string; model?: UserModel; };
 export type SessionStatus = { type: "idle" | "busy" | "retry"; [key: string]: unknown; };
 export type SessionStatusMap = { [key: string]: SessionStatus; };
@@ -116,6 +118,7 @@ export type SkillList = Array<Skill>;
 export type StopSubagentsRequest = { taskId?: string; };
 export type StopSubagentsResult = { clearedPrompts: number; stopped: Array<string>; };
 export type SubagentTask = { agent: string; childSessionId: string; description: string; id: string; nested: boolean; result?: string; sessionId: string; status: string; };
+export type SubtaskLifecycleSnapshot = { parentSessionId: string; sessionId: string; startedAt?: number | null; status: "outstanding" | "completed" | "failed"; };
 export type Todo = { content: string; priority: string; status: string; };
 export type Tool = { description: string; id: string; outputSchema?: unknown; parameters: unknown; [key: string]: unknown; };
 export type ToolList = Array<Tool>;
@@ -258,6 +261,7 @@ export interface ApiOperations {
   "v2.sessions.queue.pop": { method: "POST"; path: "/v2/sessions/{session_id}/queue/pop"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": SessionQueueMutation; }; response: SessionQueueMutation; };
   "v2.sessions.redo": { method: "POST"; path: "/v2/sessions/{session_id}/redo"; input: { path: { session_id: string; }; body?: RevertRequest; signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
   "v2.sessions.revert": { method: "POST"; path: "/v2/sessions/{session_id}/revert"; input: { path: { session_id: string; }; body: RevertRequest; signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
+  "v2.sessions.runtime": { method: "GET"; path: "/v2/sessions/{session_id}/runtime"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": SessionRuntimeSnapshot; }; response: SessionRuntimeSnapshot; };
   "v2.sessions.shell": { method: "POST"; path: "/v2/sessions/{session_id}/shell"; input: { path: { session_id: string; }; body: SessionShellRequest; signal?: AbortSignal; }; responses: { "200": Message; }; response: Message; };
   "v2.sessions.status": { method: "GET"; path: "/v2/sessions/status"; input: { signal?: AbortSignal; }; responses: { "200": SessionStatusMap; }; response: SessionStatusMap; };
   "v2.sessions.summarize": { method: "POST"; path: "/v2/sessions/{session_id}/summarize"; input: { path: { session_id: string; }; body: EmptyObject; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
@@ -405,6 +409,7 @@ export const operationDescriptors = {
   "v2.sessions.queue.pop": {"method":"POST","path":"/v2/sessions/{session_id}/queue/pop","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.redo": {"method":"POST","path":"/v2/sessions/{session_id}/redo","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.revert": {"method":"POST","path":"/v2/sessions/{session_id}/revert","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessions.runtime": {"method":"GET","path":"/v2/sessions/{session_id}/runtime","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.shell": {"method":"POST","path":"/v2/sessions/{session_id}/shell","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.status": {"method":"GET","path":"/v2/sessions/status","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.summarize": {"method":"POST","path":"/v2/sessions/{session_id}/summarize","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},

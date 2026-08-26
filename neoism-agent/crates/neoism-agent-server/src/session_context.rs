@@ -70,9 +70,6 @@ pub(crate) async fn compact_session_context(
     let admission = crate::execution_activity::admission_guard(state, session_id)
         .await
         .ok_or_else(|| ApiError::not_found(format!("session {session_id} not found")))?;
-    if state.inner.runs.read().await.contains_key(session_id) {
-        return Err(ApiError::conflict("Session is already running"));
-    }
     let started = now_millis();
     let run = SessionRun {
         id: Id::ascending(IdKind::Event).to_string(),
@@ -85,7 +82,6 @@ pub(crate) async fn compact_session_context(
         .try_start_run(session_id, run.clone())
         .await
         .map_err(|_| ApiError::conflict("Session is already running"))?;
-    state.inner.runs.write().await.insert(session_id.to_string(), run.clone());
     if let Err(error) = state.inner.store.start_run(&run.id, session_id).await {
         crate::session_run::finish_session_run(state, session_id, &run.id).await;
         return Err(ApiError::internal(error.to_string()));
@@ -127,7 +123,11 @@ async fn compact_session_context_inner(
     // agent loop (auto-compaction) a run already exists — reuse its cancel flag
     // so aborting the run also stops the summary. Otherwise (manual `/compact`)
     // register a transient run we own and tear down when done.
-    let existing = state.inner.runs.read().await.get(session_id).cloned();
+    let existing = state
+        .inner
+        .session_coordinator
+        .active_run(session_id)
+        .await;
     let (cancel, owned_run_id) = if let Some(run) = existing {
         (run.cancel, None)
     } else {
@@ -144,15 +144,7 @@ async fn compact_session_context_inner(
             .try_start_run(session_id, run.clone())
             .await
         {
-            Ok(()) => {
-                state
-                    .inner
-                    .runs
-                    .write()
-                    .await
-                    .insert(session_id.to_string(), run.clone());
-                (run.cancel, Some(run.id))
-            }
+            Ok(()) => (run.cancel, Some(run.id)),
             Err(active) => (active.cancel, None),
         }
     };
@@ -375,16 +367,11 @@ async fn release_owned_compaction_run(
     let Some(run_id) = owned_run_id else {
         return;
     };
-    let mut runs = state.inner.runs.write().await;
-    if runs.get(session_id).is_some_and(|run| run.id == run_id) {
-        runs.remove(session_id);
-        drop(runs);
-        state
-            .inner
-            .session_coordinator
-            .finish_run(session_id, &run_id)
-            .await;
-    }
+    state
+        .inner
+        .session_coordinator
+        .finish_run(session_id, &run_id)
+        .await;
     crate::execution_activity::finish_if_quiescent(state, session_id).await;
 }
 
@@ -456,7 +443,7 @@ async fn generate_model_compaction_summary(
     // Summarize only the head: messages since the last completed compaction,
     // minus the protected tail (the tail stays raw in post-compaction prompts,
     // so replaying it here is wasted context). Older context is carried by the
-    // previous summary, re-anchored via the prompt — mirrors opencode, which
+    // previous summary, re-anchored via the prompt, which
     // never replays the whole session into the summarize request.
     let mut head = compaction_head_messages(messages, tail_start_message_id);
     let previous_summary = previous_compaction_summary(messages);

@@ -101,7 +101,7 @@ pub(crate) async fn append_prompt(
     }
     let plugin_snapshot = workspace.snapshot.clone();
     let _workspace_lease = workspace;
-    if create_stub_reply && state.inner.runs.read().await.contains_key(&session_id_text) {
+    if create_stub_reply && state.inner.session_coordinator.active_run(&session_id_text).await.is_some() {
         return Err(ApiError::conflict(SESSION_RUNNING_CONFLICT));
     }
     let PromptRequest {
@@ -626,7 +626,7 @@ pub(crate) async fn append_prompt(
     }
 
     finish_session_run(state, session_id.as_str(), &run_id).await;
-    // Match OpenCode's latency behavior: the final cleanup is useful but must
+    // The final cleanup is useful but must not add user-visible latency:
     // not hold the completed prompt response open while it scans and persists
     // old tool parts.
     let prune_state = state.clone();

@@ -32,7 +32,6 @@ pub(crate) struct InnerState {
     pub(crate) workspace_plugin_generations:
         Mutex<HashMap<PathBuf, (u64, BTreeSet<String>)>>,
     pub(crate) statuses: RwLock<HashMap<String, SessionStatus>>,
-    pub(crate) runs: RwLock<HashMap<String, SessionRun>>,
     pub(crate) session_coordinator: crate::session_coordinator::SessionCoordinator,
     /// Keyed completion-state mutation locks. The map lock is held only long
     /// enough to clone a child's lock; callers never await storage while
@@ -56,9 +55,7 @@ pub(crate) struct InnerState {
     pub(crate) workflow_notify: Arc<Notify>,
     pub(crate) workflow_scheduler_started: AtomicBool,
     events: broadcast::Sender<EventPayload>,
-    durable_events: broadcast::Sender<()>,
-    live_events: broadcast::Sender<EventPayload>,
-    event_writer: mpsc::UnboundedSender<(EventPayload, bool)>,
+    event_writer: mpsc::UnboundedSender<EventPayload>,
 }
 
 struct ExecutionLeaseControl {
@@ -405,9 +402,10 @@ impl AppState {
         services: AgentServices,
     ) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&artifact_root).await?;
-        let (events, _) = broadcast::channel(1024);
-        let (durable_events, _) = broadcast::channel(1024);
-        let (live_events, _) = broadcast::channel(1024);
+        // Single ordered bus for every event (live deltas + committed edges).
+        // Capacity must absorb a full streaming burst per subscriber; lagging
+        // drops events for that subscriber only, reconciled by idle refresh.
+        let (events, _) = broadcast::channel(16_384);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
         let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> =
             Arc::new(neoism_agent_builtins::ProviderPlatform::from_env());
@@ -436,7 +434,6 @@ impl AppState {
                 workspace_runtimes: Default::default(),
                 workspace_plugin_generations: Mutex::new(HashMap::new()),
                 statuses: RwLock::new(HashMap::new()),
-                runs: RwLock::new(HashMap::new()),
                 session_coordinator: Default::default(),
                 subtask_completion_locks: Mutex::new(HashMap::new()),
                 subtask_parent_locks: Mutex::new(HashMap::new()),
@@ -465,8 +462,6 @@ impl AppState {
                 workflow_notify: Arc::new(Notify::new()),
                 workflow_scheduler_started: AtomicBool::new(false),
                 events,
-                durable_events,
-                live_events,
                 event_writer,
             }),
         };
@@ -502,19 +497,17 @@ impl AppState {
         });
         *state.inner.execution_lease_handle.lock().expect("execution lease handle poisoned") = Some(lease_handle);
         let durable_store = state.inner.store.clone();
-        let durable_events = state.inner.events.clone();
-        let durable_notifications = state.inner.durable_events.clone();
         let durable_state = state.clone();
         tokio::spawn(async move {
-            while let Some((event, broadcast)) = event_reader.recv().await {
+            // Persistence only. Delivery happens synchronously in `publish` so
+            // subscribers receive every event in publish order — a committed
+            // part snapshot must never lag behind live deltas published after
+            // it (out-of-order reasoning/tool rows in streaming timelines).
+            while let Some(event) = event_reader.recv().await {
                 match durable_store.append_event(&event).await {
                     Ok(()) => {
                         for runtime in durable_state.inner.workspace_runtimes.runtimes().await {
                             crate::plugin::publish_event(&runtime.snapshot(), &event);
-                        }
-                        if broadcast {
-                            let _ = durable_events.send(event);
-                            let _ = durable_notifications.send(());
                         }
                     }
                     Err(error) => {
@@ -674,19 +667,14 @@ impl AppState {
         self.inner.events.subscribe()
     }
 
-    pub(crate) fn subscribe_durable(&self) -> broadcast::Receiver<()> {
-        self.inner.durable_events.subscribe()
-    }
-
-    pub(crate) fn subscribe_live(&self) -> broadcast::Receiver<EventPayload> {
-        self.inner.live_events.subscribe()
-    }
-
     pub(crate) fn publish(&self, event: EventPayload) {
-        let broadcast = self.inner.events.receiver_count() > 0
-            || self.inner.durable_events.receiver_count() > 0;
-        if let Err(error) = self.inner.event_writer.send((event, broadcast)) {
-            tracing::error!(event = %error.0.0.kind, "durable event writer stopped");
+        // Opencode-model bus: broadcast in PUBLISH order, persist alongside.
+        // Routing delivery through the durable writer made committed events
+        // (reasoning/tool part snapshots) lag behind live token deltas
+        // published after them, so subscribers saw parts out of order.
+        let _ = self.inner.events.send(event.clone());
+        if let Err(error) = self.inner.event_writer.send(event) {
+            tracing::error!(event = %error.0.kind, "durable event writer stopped");
         }
     }
 
@@ -695,8 +683,7 @@ impl AppState {
     /// writing every provider delta here stalls the provider and amplifies the
     /// growing message into thousands of database writes.
     pub(crate) fn publish_live(&self, event: EventPayload) {
-        let _ = self.inner.events.send(event.clone());
-        let _ = self.inner.live_events.send(event);
+        let _ = self.inner.events.send(event);
     }
 
     #[cfg(test)]
@@ -709,7 +696,6 @@ impl AppState {
             crate::plugin::publish_event(&runtime.snapshot(), &event);
         }
         let _ = self.inner.events.send(event);
-        let _ = self.inner.durable_events.send(());
         Ok(())
     }
 
@@ -722,7 +708,6 @@ impl AppState {
             }
         });
         let _ = self.inner.events.send(event);
-        let _ = self.inner.durable_events.send(());
     }
 
     pub(crate) async fn update_session_with_event(
@@ -3214,6 +3199,7 @@ impl SessionStore {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) async fn latest_event_sequence(&self) -> anyhow::Result<u64> {
         Ok(self
             .db

@@ -241,7 +241,7 @@ mod tests {
                     "enabled": true,
                     "timeout": 1000
                 },
-                "local-opencode-style": {
+                "local-command": {
                     "type": "local",
                     "command": "node",
                     "args": ["server.js"],
@@ -261,7 +261,7 @@ mod tests {
             config.mcp["local-example"],
             McpConfig::Local { .. }
         ));
-        match &config.mcp["local-opencode-style"] {
+        match &config.mcp["local-command"] {
             McpConfig::Local {
                 command,
                 args,

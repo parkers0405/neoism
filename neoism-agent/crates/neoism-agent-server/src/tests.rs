@@ -1315,6 +1315,183 @@ async fn v2_root_event_stream_forwards_live_delta_from_child_created_after_conne
 }
 
 #[tokio::test]
+async fn v2_event_stream_flushes_live_deltas_before_durable_replay() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-live-before-durable-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let session = store_test_session(&session_id, now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v2/events?sessionId={}&tail=true&limit=10",
+                    session_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+
+    // A step's token deltas are published live before the full-part snapshot
+    // containing them is committed. Queue the deltas, then land the durable
+    // snapshot BEFORE the stream is first polled: the snapshot must not be
+    // replayed ahead of the queued deltas, or clients append the tail twice.
+    for delta in ["tail-delta-one", "tail-delta-two"] {
+        state.publish_live(EventPayload::new(
+            event_type::MESSAGE_PART_DELTA,
+            json!({
+                "sessionID": session_id,
+                "messageID": "message-live",
+                "partID": "part-live",
+                "field": "text",
+                "delta": delta
+            }),
+        ));
+    }
+    let sequence_before = state
+        .inner
+        .store
+        .latest_event_sequence()
+        .await
+        .unwrap_or_default();
+    state.publish(EventPayload::new(
+        event_type::MESSAGE_PART_UPDATED,
+        json!({
+            "sessionID": session_id,
+            "part": {
+                "id": "part-live",
+                "type": "text",
+                "messageID": "message-live",
+                "text": "full-snapshot-text"
+            }
+        }),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let sequence = state
+                .inner
+                .store
+                .latest_event_sequence()
+                .await
+                .unwrap_or_default();
+            if sequence > sequence_before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("durable snapshot should commit");
+
+    let mut received = String::new();
+    while !(received.contains("full-snapshot-text")
+        && received.contains("tail-delta-two"))
+    {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("stream should deliver deltas and snapshot")
+            .expect("SSE body should remain open")
+            .expect("SSE body chunk should be readable");
+        received.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    let first_delta = received.find("tail-delta-one").unwrap();
+    let second_delta = received.find("tail-delta-two").unwrap();
+    let snapshot = received.find("full-snapshot-text").unwrap();
+    assert!(
+        first_delta < snapshot && second_delta < snapshot,
+        "live deltas must precede the durable snapshot that contains them: {received}"
+    );
+
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn v2_event_stream_keeps_publish_order_for_committed_parts_before_deltas() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-publish-order-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let session = store_test_session(&session_id, now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v2/events?sessionId={}&tail=true&limit=10",
+                    session_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+
+    // A reasoning part opens (committed snapshot) BEFORE the answer's token
+    // deltas. The subscriber must see them in publish order — the snapshot
+    // lagging behind later deltas rendered thinking cards BELOW the streaming
+    // answer until the next full refresh reordered them.
+    state.publish(EventPayload::new(
+        event_type::MESSAGE_PART_UPDATED,
+        json!({
+            "sessionID": session_id,
+            "part": {
+                "id": "part-reasoning",
+                "type": "reasoning",
+                "messageID": "message-live",
+                "text": "reasoning-opens-first"
+            }
+        }),
+    ));
+    state.publish_live(EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({
+            "sessionID": session_id,
+            "messageID": "message-live",
+            "partID": "part-text",
+            "field": "text",
+            "delta": "answer-token-after"
+        }),
+    ));
+
+    let mut received = String::new();
+    while !(received.contains("reasoning-opens-first")
+        && received.contains("answer-token-after"))
+    {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("stream should deliver snapshot and delta")
+            .expect("SSE body should remain open")
+            .expect("SSE body chunk should be readable");
+        received.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    let snapshot = received.find("reasoning-opens-first").unwrap();
+    let delta = received.find("answer-token-after").unwrap();
+    assert!(
+        snapshot < delta,
+        "committed part snapshot must precede deltas published after it: {received}"
+    );
+
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn v2_root_stream_delivers_child_deletion_without_unrelated_leak() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-family-delete-events-{}.sqlite3",

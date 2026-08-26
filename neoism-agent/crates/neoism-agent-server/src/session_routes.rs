@@ -274,7 +274,7 @@ pub(crate) async fn session_update(
         info.model = Some(model);
     }
     if let Some(directory) = update.directory {
-        if state.inner.runs.read().await.contains_key(&session_id) {
+        if state.inner.session_coordinator.active_run(&session_id).await.is_some() {
             return Err(ApiError::conflict(
                 "cannot change directory while the session is running",
             ));
@@ -568,7 +568,7 @@ pub(crate) async fn session_status(
     State(state): State<AppState>,
 ) -> Json<HashMap<String, Value>> {
     let statuses = state.inner.statuses.read().await.clone();
-    let runs = state.inner.runs.read().await.clone();
+    let runs = state.inner.session_coordinator.active_runs().await;
     let mut out = HashMap::new();
     for (session_id, status) in statuses {
         let mut value = json!(status);

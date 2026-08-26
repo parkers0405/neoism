@@ -358,6 +358,26 @@ fn web_links_render_as_clickable_labels_or_blue_bare_urls() {
 }
 
 #[test]
+fn explicit_web_links_ignore_destination_edge_whitespace() {
+    for source in [
+        " [ZhangHanDong](https://github.com/ZhangHanDong) ",
+        "[ZhangHanDong]( https://github.com/ZhangHanDong )",
+    ] {
+        let segments = parsed_markdown_inline_line(source);
+        assert!(segments.iter().any(|segment| matches!(
+            segment,
+            MarkdownInlineSegment::MarkdownLink {
+                label,
+                source_target,
+                target: Some(target),
+            } if label == "ZhangHanDong"
+                && source_target == "https://github.com/ZhangHanDong"
+                && target == "https://github.com/ZhangHanDong"
+        )));
+    }
+}
+
+#[test]
 fn file_uri_links_render_as_clickable_labels() {
     let source = "[Report](file:///tmp/Patriot%20Nursing%20Report.md)";
     let segments = parsed_markdown_inline_line(source);

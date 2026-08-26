@@ -634,7 +634,7 @@ pub(crate) fn usage_from_value(value: Option<&Value>) -> Option<Usage> {
         .or_else(|| cache.get("write"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    // OpenCode's UI deliberately ignores the provider's `total` here and
+    // Deliberately ignore the provider's `total` here and
     // reconstructs context from its normalized buckets. Do the same for the
     // live workspace bridge so live UsageUpdate and hydrated history cannot
     // disagree about the same step.

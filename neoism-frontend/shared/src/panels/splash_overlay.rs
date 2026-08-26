@@ -13,7 +13,7 @@
 //      / Search / Command palette) inside the menu band, each with hover
 //      + click states and click-to-shortcut wired through the
 //      input layer.
-//   4. The opencode-style click "fidget" on the wordmark — a
+//   4. The click "fidget" on the wordmark — a
 //      brief image squash, staggered expanding rings, and a
 //      soft white burst at the click point.
 //
@@ -285,7 +285,7 @@ impl SplashOverlay {
         x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
     }
 
-    /// Pop the opencode-style fidget at (x, y). Replaces any
+    /// Pop the wordmark fidget at (x, y). Replaces any
     /// in-flight fidget — chained clicks just reset the
     /// animation.
     pub fn pop_click(&mut self, x: f32, y: f32) {

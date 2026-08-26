@@ -50,10 +50,11 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
             }
         }
         if let Some(link) = md::parse_markdown_link(rest) {
-            let target = md::rendered_link_target(link.target).map(str::to_string);
+            let source_target = link.target.trim();
+            let target = md::rendered_link_target(source_target).map(str::to_string);
             out.push(MarkdownInlineSegment::MarkdownLink {
                 label: markdown_link_visible_label(link.label).to_string(),
-                source_target: link.target.to_string(),
+                source_target: source_target.to_string(),
                 target,
             });
             rest = &rest[link.consumed..];

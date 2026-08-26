@@ -1177,7 +1177,7 @@ fn trim_outer_blank_blocks(blocks: &mut Vec<AssistantMarkdownBlock>) {
 /// Project CommonMark raw-HTML events into text that the retained canvas
 /// renderer can safely lay out.
 ///
-/// OpenCode's browser UI runs `marked` output through DOMPurify. Neoism's
+/// Browser Markdown renderers commonly sanitize generated HTML. Neoism's
 /// native/wasm canvas has no DOM, so its equivalent policy is:
 ///
 /// - HTML comments, declarations, processing instructions, and CDATA do not
@@ -2276,7 +2276,7 @@ pub(super) fn render_markdown_code_block(
             break;
         };
         let line_y = first_line_y + ix as f32 * line_h;
-        let diff = diff_line_kind(line);
+        let diff = diff_line_kind(lang, line);
         render_code_line_background(
             sugarloaf,
             x,

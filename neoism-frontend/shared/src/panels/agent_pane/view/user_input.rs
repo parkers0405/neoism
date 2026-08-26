@@ -1286,7 +1286,7 @@ pub fn render_input(
     }
 }
 
-/// Small OpenCode-style legend below the composer. The left side only
+/// Small keyboard legend below the composer. The left side only
 /// advertises interruption while a run is actually active; the right
 /// side mirrors the two composer shortcuts that are always available.
 fn render_input_help_strip(

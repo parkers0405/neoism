@@ -684,7 +684,7 @@ fn diff_section_fingerprint(lines: &[DiffLine], omitted: usize) -> u64 {
 }
 
 /// Pull LSP diagnostics out of the tool's `metadata.diagnostics` and hang them
-/// off the matching diff section, so the card can render an opencode-style
+/// off the matching diff section, so the card can render a compact
 /// diagnostics footer. Each metadata entry is `{ path, source, diagnostics: [..] }`;
 /// "touched" entries match the file the edit changed (their path == the section's
 /// link target), while "project" entries for other files simply don't match any

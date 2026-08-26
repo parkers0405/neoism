@@ -922,7 +922,7 @@ impl NeoismAgentPane {
         // Anchor by the user message's id, not its index: the marker must
         // stay on this SAME turn for the whole visit even as the list is
         // replaced or older pages are prepended. Trace collapses only when
-        // the session is left and re-entered (opencode-style), never because
+        // the session is left and re-entered, never because
         // a newer prompt was sent.
         self.timeline_live_trace_anchor =
             last_user.map(|index| self.messages[index].id.clone());

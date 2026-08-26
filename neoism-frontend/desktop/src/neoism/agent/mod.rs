@@ -1,5 +1,6 @@
 mod api;
 mod commands;
+pub(crate) mod transport;
 mod pane;
 pub(crate) mod picker;
 pub(crate) mod prompt_history;

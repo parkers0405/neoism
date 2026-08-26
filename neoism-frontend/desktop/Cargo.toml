@@ -72,6 +72,8 @@ parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = "1.0"
 reqwest = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+webpki-roots = "0.26"
 thiserror = { workspace = true }
 uuid = { workspace = true }
 taffy = { version = "0.9.2", features = ["flexbox", "grid"] }

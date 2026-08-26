@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -599,6 +599,23 @@ mod subagent_runtime_snapshot_tests {
         }
         let stripped_session = ["trim_end_matches(\"", "/session\")"].concat();
         assert!(!source.contains(&stripped_session));
+    }
+
+    #[test]
+    fn parse_http_server_supports_plain_and_tls_endpoints() {
+        assert_eq!(
+            parse_http_server("http://127.0.0.1:4096").unwrap(),
+            (false, "127.0.0.1".to_string(), 4096, String::new())
+        );
+        assert_eq!(
+            parse_http_server("https://agent.example.com").unwrap(),
+            (true, "agent.example.com".to_string(), 443, String::new())
+        );
+        assert_eq!(
+            parse_http_server("https://host.example:8443/agent").unwrap(),
+            (true, "host.example".to_string(), 8443, "agent".to_string())
+        );
+        assert!(parse_http_server("ftp://host.example").is_err());
     }
 
     #[test]
@@ -1270,7 +1287,7 @@ struct HttpResponse {
 }
 
 pub(super) struct EventStreamConnection {
-    pub stream: TcpStream,
+    pub stream: super::transport::AgentTransport,
     pub initial_body: Vec<u8>,
     pub chunked: bool,
 }
@@ -1281,18 +1298,23 @@ pub(super) fn open_event_stream(
 ) -> Result<EventStreamConnection, String> {
     crate::agent_server::ensure_started_for_request();
     let server = server.trim().trim_end_matches('/');
-    let (host, port, base_path) = parse_http_server(server)?;
+    let (tls, host, port, base_path) = parse_http_server(server)?;
     let addr = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|error| format!("failed to resolve Neoism Agent server: {error}"))?
         .next()
         .ok_or_else(|| "failed to resolve Neoism Agent server".to_string())?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(900))
-        .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
     // Bound shutdown/reconnect latency while the stream is quiet. Inbound
     // events wake winit explicitly after they are enqueued for the pane.
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(40)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
+    let mut stream = super::transport::AgentTransport::connect(
+        &addr,
+        &host,
+        tls,
+        Duration::from_millis(900),
+        Duration::from_millis(40),
+        Duration::from_millis(900),
+    )
+    .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
 
     let path = request_path(
         &base_path,
@@ -1383,16 +1405,21 @@ fn http_request(
     read_timeout: Duration,
 ) -> Result<HttpResponse, String> {
     let server = server.trim().trim_end_matches('/');
-    let (host, port, base_path) = parse_http_server(server)?;
+    let (tls, host, port, base_path) = parse_http_server(server)?;
     let addr = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|error| format!("failed to resolve Neoism Agent server: {error}"))?
         .next()
         .ok_or_else(|| "failed to resolve Neoism Agent server".to_string())?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(350))
-        .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
-    let _ = stream.set_read_timeout(Some(read_timeout));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
+    let mut stream = super::transport::AgentTransport::connect(
+        &addr,
+        &host,
+        tls,
+        Duration::from_millis(350),
+        read_timeout,
+        Duration::from_millis(900),
+    )
+    .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
 
     let request_path = request_path(&base_path, path);
     let body_text = body
@@ -1469,11 +1496,18 @@ fn authorization_header(server: &str) -> String {
         .unwrap_or_default()
 }
 
-fn parse_http_server(server: &str) -> Result<(String, u16, String), String> {
-    let rest = server.strip_prefix("http://").ok_or_else(|| {
-        format!("unsupported Neoism Agent server '{server}'; expected http://")
-    })?;
+fn parse_http_server(server: &str) -> Result<(bool, String, u16, String), String> {
+    let (tls, rest) = if let Some(rest) = server.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = server.strip_prefix("http://") {
+        (false, rest)
+    } else {
+        return Err(format!(
+            "unsupported Neoism Agent server '{server}'; expected http:// or https://"
+        ));
+    };
     let (host_port, base_path) = rest.split_once('/').unwrap_or((rest, ""));
+    let default_port = if tls { 443 } else { 80 };
     let (host, port) = host_port
         .split_once(':')
         .map(|(host, port)| {
@@ -1482,8 +1516,8 @@ fn parse_http_server(server: &str) -> Result<(String, u16, String), String> {
                 .map_err(|_| format!("invalid Neoism Agent port '{port}'"))?;
             Ok::<_, String>((host.to_string(), port))
         })
-        .unwrap_or_else(|| Ok((host_port.to_string(), 80)))?;
-    Ok((host, port, base_path.to_string()))
+        .unwrap_or_else(|| Ok((host_port.to_string(), default_port)))?;
+    Ok((tls, host, port, base_path.to_string()))
 }
 
 fn request_path(base_path: &str, path: &str) -> String {

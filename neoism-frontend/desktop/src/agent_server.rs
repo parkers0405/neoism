@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
 const DEFAULT_SERVER: &str = "http://127.0.0.1:4096";
@@ -59,16 +59,16 @@ fn wait_until_healthy(server: &str, timeout: Duration) -> bool {
 }
 
 fn http_get(server: &str, path: &str, timeout: Duration) -> Result<String, String> {
-    let (host, port, base_path) = parse_http_server(server)?;
+    let (tls, host, port, base_path) = parse_http_server(server)?;
     let addr = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|error| format!("failed to resolve Neoism Agent server: {error}"))?
         .next()
         .ok_or_else(|| "failed to resolve Neoism Agent server".to_string())?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout)
-        .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
+    let mut stream = crate::neoism::agent::transport::AgentTransport::connect(
+        &addr, &host, tls, timeout, timeout, timeout,
+    )
+    .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
 
     let request_path = request_path(&base_path, path);
     let request = format!(
@@ -84,11 +84,18 @@ fn http_get(server: &str, path: &str, timeout: Duration) -> Result<String, Strin
     Ok(response)
 }
 
-fn parse_http_server(server: &str) -> Result<(String, u16, String), String> {
-    let rest = server.strip_prefix("http://").ok_or_else(|| {
-        format!("unsupported Neoism Agent server '{server}'; expected http://")
-    })?;
+fn parse_http_server(server: &str) -> Result<(bool, String, u16, String), String> {
+    let (tls, rest) = if let Some(rest) = server.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = server.strip_prefix("http://") {
+        (false, rest)
+    } else {
+        return Err(format!(
+            "unsupported Neoism Agent server '{server}'; expected http:// or https://"
+        ));
+    };
     let (host_port, base_path) = rest.split_once('/').unwrap_or((rest, ""));
+    let default_port = if tls { 443 } else { DEFAULT_PORT };
     let (host, port) = host_port
         .rsplit_once(':')
         .map(|(host, port)| {
@@ -98,11 +105,11 @@ fn parse_http_server(server: &str) -> Result<(String, u16, String), String> {
             Ok::<_, String>((host.to_string(), port))
         })
         .transpose()?
-        .unwrap_or_else(|| (host_port.to_string(), DEFAULT_PORT));
+        .unwrap_or_else(|| (host_port.to_string(), default_port));
     if host.is_empty() {
         return Err("Neoism Agent server host is empty".to_string());
     }
-    Ok((host, port, base_path.trim_end_matches('/').to_string()))
+    Ok((tls, host, port, base_path.trim_end_matches('/').to_string()))
 }
 
 fn request_path(base_path: &str, path: &str) -> String {

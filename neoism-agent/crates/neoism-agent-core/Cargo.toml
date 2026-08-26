@@ -10,3 +10,8 @@ rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# rand's transitive getrandom needs the js backend on wasm32 (the shared UI
+# crate consumes these types in the browser build).
+getrandom = { version = "0.2", features = ["js"] }

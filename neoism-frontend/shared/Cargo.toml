@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 neoism-terminal-core = { workspace = true }
 neoism-protocol = { workspace = true }
+neoism-agent-core = { workspace = true }
 neoism-neoworld-core = { workspace = true }
 sugarloaf = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

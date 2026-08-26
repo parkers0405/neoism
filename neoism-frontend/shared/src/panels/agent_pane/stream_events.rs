@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use neoism_agent_core::event_type;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -341,7 +342,7 @@ pub fn classify_session_event(
     }
 
     match event_type {
-        "session.created" | "session.updated" => {
+        event_type::SESSION_CREATED | event_type::SESSION_UPDATED => {
             let mut out = Vec::new();
             if is_child_event {
                 if let Some(child_id) = source_session_id {
@@ -352,7 +353,7 @@ pub fn classify_session_event(
                     // active resurrected completed children and made the
                     // aggregate footer blink. A newly-created child is active
                     // by definition until its explicit status edge arrives.
-                    let status = if event_type == "session.created" {
+                    let status = if event_type == neoism_agent_core::event_type::SESSION_CREATED {
                         Some(session_runtime_status(info))
                     } else {
                         explicit_session_runtime_status(info)
@@ -409,7 +410,7 @@ pub fn classify_session_event(
             }
             out
         }
-        "message.part.delta" => {
+        event_type::MESSAGE_PART_DELTA => {
             state.idle_messages_refreshed = false;
             if properties.get("field").and_then(Value::as_str) != Some("text") {
                 return Vec::new();
@@ -455,7 +456,7 @@ pub fn classify_session_event(
                 }]
             }
         }
-        "message.part.updated" => {
+        event_type::MESSAGE_PART_UPDATED => {
             state.idle_messages_refreshed = false;
             let mut out = Vec::new();
             if let Some(part) = properties.get("part") {
@@ -495,7 +496,7 @@ pub fn classify_session_event(
             }
             out
         }
-        "message.part.removed" => {
+        event_type::MESSAGE_PART_REMOVED => {
             if is_child_event {
                 return match (source_session_id, event_part_id(properties)) {
                     (Some(session_id), Some(part_id)) => {
@@ -511,7 +512,7 @@ pub fn classify_session_event(
                 .map(|part_id| vec![SessionEventUpdate::PartRemoved(part_id.to_string())])
                 .unwrap_or_default()
         }
-        "session.background_task.completed" => {
+        event_type::SESSION_BACKGROUND_TASK_COMPLETED => {
             let owner_session_id =
                 source_session_id.unwrap_or_else(|| session_id.to_string());
             let job_id = properties
@@ -535,7 +536,7 @@ pub fn classify_session_event(
                 }]
             }
         }
-        "session.next.compaction.started" => {
+        event_type::SESSION_COMPACTION_STARTED => {
             vec![SessionEventUpdate::CompactionStarted {
                 session_id: source_session_id
                     .clone()
@@ -552,7 +553,7 @@ pub fn classify_session_event(
                     .to_string(),
             }]
         }
-        "session.next.compaction.delta" => {
+        event_type::SESSION_COMPACTION_DELTA => {
             let delta = properties
                 .get("text")
                 .and_then(Value::as_str)
@@ -568,7 +569,7 @@ pub fn classify_session_event(
                 }]
             }
         }
-        "session.next.compaction.ended" => {
+        event_type::SESSION_COMPACTION_ENDED => {
             let summary = properties
                 .get("text")
                 .and_then(Value::as_str)
@@ -600,7 +601,7 @@ pub fn classify_session_event(
                 kind,
             }]
         }
-        "session.compacted" => {
+        event_type::SESSION_COMPACTED => {
             let summary = properties
                 .get("summary")
                 .and_then(|summary| summary.get("text"))
@@ -622,7 +623,7 @@ pub fn classify_session_event(
                 kind,
             }]
         }
-        "session.status" => {
+        event_type::SESSION_STATUS => {
             let status = properties.get("status");
             let status_type = status
                 .and_then(|status| status.get("type"))
@@ -698,7 +699,7 @@ pub fn classify_session_event(
                 Vec::new()
             }
         }
-        "session.queue.updated" => {
+        event_type::SESSION_QUEUE_UPDATED => {
             if is_child_event {
                 return Vec::new();
             }
@@ -713,10 +714,10 @@ pub fn classify_session_event(
                 .map(|text| vec![SessionEventUpdate::DequeuedPrompt { text }])
                 .unwrap_or_default()
         }
-        "permission.asked" => vec![SessionEventUpdate::PermissionAsked(
+        event_type::PERMISSION_ASKED => vec![SessionEventUpdate::PermissionAsked(
             permission_request_from_event(properties),
         )],
-        "permission.replied" => {
+        event_type::PERMISSION_REPLIED => {
             let request_id = properties
                 .get("requestID")
                 .or_else(|| properties.get("requestId"))
@@ -732,7 +733,7 @@ pub fn classify_session_event(
                 }]
             }
         }
-        "session.subtask.completed" => {
+        event_type::SESSION_SUBTASK_COMPLETED => {
             let task_id = properties
                 .get("taskID")
                 .or_else(|| properties.get("taskId"))
@@ -763,7 +764,7 @@ pub fn classify_session_event(
                     .map(str::to_string),
             }]
         }
-        "session.execution.updated" => {
+        event_type::SESSION_EXECUTION_UPDATED => {
             let mut updates = Vec::with_capacity(2);
             if let Some(snapshot) = properties.get("snapshot").cloned() {
                 updates.push(SessionEventUpdate::ExecutionUpdated(snapshot));
@@ -773,7 +774,7 @@ pub fn classify_session_event(
             }
             updates
         }
-        "question.asked" => {
+        event_type::QUESTION_ASKED => {
             let pending =
                 crate::panels::agent_pane::question_policy::question_request_from_event(
                     properties,
@@ -784,7 +785,7 @@ pub fn classify_session_event(
                 vec![SessionEventUpdate::QuestionAsked(pending)]
             }
         }
-        "question.replied" | "question.rejected" => {
+        event_type::QUESTION_REPLIED | event_type::QUESTION_REJECTED => {
             let request_id = properties
                 .get("requestID")
                 .or_else(|| properties.get("requestId"))
@@ -802,8 +803,8 @@ pub fn classify_session_event(
         // to the GUI. Some runtimes still broadcast the abort through the
         // generic session.error channel after the abort endpoint succeeds;
         // discard that event while preserving real provider/runtime errors.
-        "session.error" if is_session_interruption(properties) => Vec::new(),
-        "session.error" => vec![SessionEventUpdate::System {
+        event_type::SESSION_ERROR if is_session_interruption(properties) => Vec::new(),
+        event_type::SESSION_ERROR => vec![SessionEventUpdate::System {
             title: "Neoism".to_string(),
             body: session_error_message(properties),
         }],

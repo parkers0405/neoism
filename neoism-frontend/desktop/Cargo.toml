@@ -34,6 +34,7 @@ neoism-ui = { workspace = true }
 neoism-neoworld = { workspace = true }
 neoism-neoworld-core = { workspace = true }
 neoism-protocol = { workspace = true }
+neoism-agent-core = { workspace = true }
 neoism-extensions = { workspace = true }
 neoism-agent-neoism-adapter = { workspace = true }
 neoism-remarkable = { workspace = true, optional = true }

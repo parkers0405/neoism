@@ -1,11 +1,20 @@
 use std::collections::HashMap;
 
+use neoism_agent_core::{AssistantMessage, MessageInfo, UserMessage};
 use serde_json::{json, Value};
 
 use super::state::{
     picker::NeoismAgentPickerOption, NeoismAgentImage, NeoismAgentMessage,
     NeoismAgentMessageKind, NeoismAgentOutputKind, NeoismAgentTodo, NeoismAgentUsage,
 };
+
+/// Typed view of a message's `info` envelope. The wire is always serialized
+/// from `neoism_agent_core` message types by the server, so a parse failure
+/// means a malformed message (rendered as a bare system row), never an
+/// alternate field casing.
+pub(crate) fn message_info(message: &Value) -> Option<MessageInfo> {
+    serde_json::from_value(message.get("info")?.clone()).ok()
+}
 
 const SUBTASK_COMPLETION_SYSTEM_MARKER: &str =
     "Neoism runtime notification: background subagent completion.";
@@ -471,18 +480,14 @@ pub fn message_blocks_from_response(
     // from the instant the provider-side assistant record happened to be
     // opened. Build the lookup before ordering the response so this remains
     // correct whether the endpoint returned newest-first or oldest-first.
-    let user_created = messages
+    let infos = messages.iter().map(message_info).collect::<Vec<_>>();
+    let user_created = infos
         .iter()
-        .filter_map(|message| {
-            let info = message.get("info")?;
-            (info.get("role").and_then(Value::as_str) == Some("user"))
-                .then(|| {
-                    Some((
-                        info.get("id")?.as_str()?.to_string(),
-                        info.get("time")?.get("created")?.as_u64()?,
-                    ))
-                })
-                .flatten()
+        .filter_map(|info| match info {
+            Some(MessageInfo::User(user)) => {
+                Some((user.id.to_string(), user.time.created))
+            }
+            _ => None,
         })
         .collect::<HashMap<_, _>>();
     // Background completion replies are parented to a synthetic runtime user
@@ -491,19 +496,15 @@ pub fn message_blocks_from_response(
     // the whole user-visible operation (including the subagent wait).
     let task_origins = messages
         .iter()
-        .filter_map(|message| {
-            let info = message.get("info")?;
-            (info.get("role").and_then(Value::as_str) == Some("assistant"))
-                .then_some(message)
+        .zip(&infos)
+        .filter_map(|(message, info)| match info {
+            Some(MessageInfo::Assistant(assistant)) => Some((message, assistant)),
+            _ => None,
         })
-        .flat_map(|message| {
-            let info = message.get("info").unwrap_or(&Value::Null);
-            let parent_id = info
-                .get("parentID")
-                .or_else(|| info.get("parentId"))
-                .or_else(|| info.get("parent_id"))
-                .and_then(Value::as_str);
-            let created = parent_id.and_then(|id| user_created.get(id)).copied();
+        .flat_map(|(message, assistant)| {
+            let created = user_created
+                .get(assistant.parent_id.as_str())
+                .copied();
             message
                 .get("parts")
                 .and_then(Value::as_array)
@@ -516,19 +517,19 @@ pub fn message_blocks_from_response(
         .collect::<HashMap<_, _>>();
     let runtime_origins = messages
         .iter()
-        .filter_map(|message| {
-            let info = message.get("info")?;
-            if info.get("role").and_then(Value::as_str) != Some("user")
-                || !info
-                    .get("system")
-                    .and_then(Value::as_str)
-                    .is_some_and(|system| {
-                        system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER)
-                    })
+        .zip(&infos)
+        .filter_map(|(message, info)| {
+            let Some(MessageInfo::User(user)) = info else {
+                return None;
+            };
+            if !user
+                .system
+                .as_deref()
+                .is_some_and(|system| system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER))
             {
                 return None;
             }
-            let message_id = info.get("id")?.as_str()?.to_string();
+            let message_id = user.id.to_string();
             let origin = message
                 .get("parts")
                 .and_then(Value::as_array)
@@ -548,23 +549,17 @@ pub fn message_blocks_from_response(
     let mut out = Vec::new();
     for (position, &index) in indexes.iter().enumerate() {
         let message = &messages[index];
-        let tokens_per_second = turn_tokens_per_second(messages, &indexes, position);
-        let response_started_at = message
-            .get("info")
-            .and_then(|info| {
-                info.get("parentID")
-                    .or_else(|| info.get("parentId"))
-                    .or_else(|| info.get("parent_id"))
-            })
-            .and_then(Value::as_str)
-            .and_then(|parent_id| {
-                runtime_origins
-                    .get(parent_id)
-                    .or_else(|| user_created.get(parent_id))
-            })
-            .copied();
+        let tokens_per_second = turn_tokens_per_second(&infos, &indexes, position);
+        let response_started_at = match &infos[index] {
+            Some(MessageInfo::Assistant(assistant)) => runtime_origins
+                .get(assistant.parent_id.as_str())
+                .or_else(|| user_created.get(assistant.parent_id.as_str()))
+                .copied(),
+            _ => None,
+        };
         out.extend(message_blocks_with_start(
             message,
+            infos[index].as_ref(),
             response_started_at,
             tokens_per_second,
         ));
@@ -610,19 +605,20 @@ fn task_ids_from_completion_text(text: &str) -> impl Iterator<Item = &str> {
 }
 
 pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
-    message_blocks_with_start(message, None, None)
+    message_blocks_with_start(message, message_info(message).as_ref(), None, None)
 }
 
 fn message_blocks_with_start(
     message: &Value,
+    info: Option<&MessageInfo>,
     response_started_at: Option<u64>,
     tokens_per_second: Option<f64>,
 ) -> Vec<NeoismAgentMessage> {
-    let role = message
-        .get("info")
-        .and_then(|info| info.get("role"))
-        .and_then(Value::as_str)
-        .unwrap_or("system");
+    let role = match info {
+        Some(MessageInfo::User(_)) => "user",
+        Some(MessageInfo::Assistant(_)) => "assistant",
+        None => "system",
+    };
     let parts = message
         .get("parts")
         .and_then(Value::as_array)
@@ -636,7 +632,9 @@ fn message_blocks_with_start(
         {
             return Vec::new();
         }
-        let info = message.get("info").unwrap_or(&Value::Null);
+        let Some(MessageInfo::User(user)) = info else {
+            return Vec::new();
+        };
         let text = parts
             .iter()
             .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
@@ -645,12 +643,7 @@ fn message_blocks_with_start(
             .join("\n")
             .trim()
             .to_string();
-        let id = message
-            .get("info")
-            .and_then(|info| info.get("id"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        let id = user.id.to_string();
         let images = parts
             .iter()
             .filter(|part| {
@@ -665,7 +658,7 @@ fn message_blocks_with_start(
         if text.is_empty() && images.is_empty() {
             return Vec::new();
         }
-        let system = info.get("system").and_then(Value::as_str).unwrap_or("");
+        let system = user.system.as_deref().unwrap_or("");
         if is_background_task_completion(system, &id) {
             // Injected as a user-role turn so the model sees the captured
             // output, but the user didn't send it. Map it to the durable
@@ -689,10 +682,7 @@ fn message_blocks_with_start(
         // on history reload. Absent (older client, or the local sender's own
         // message) → `None`, and the renderer falls back to the local
         // presence name / "You".
-        message.author = info
-            .get("author")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        message.author = user.author.clone();
         return vec![message];
     }
 
@@ -704,27 +694,24 @@ fn message_blocks_with_start(
             .collect::<Vec<_>>()
             .join("\n");
         let mut block = NeoismAgentMessage::compaction(text, "summary");
-        block.id = message
-            .get("info")
-            .and_then(|info| info.get("id"))
-            .and_then(Value::as_str)
-            .or_else(|| {
-                parts
-                    .iter()
-                    .find(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-                    .and_then(|part| part.get("id"))
-                    .and_then(Value::as_str)
-            })
-            .unwrap_or_default()
-            .to_string();
+        block.id = match info {
+            Some(MessageInfo::Assistant(assistant)) => assistant.id.to_string(),
+            _ => parts
+                .iter()
+                .find(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .and_then(|part| part.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        };
         return vec![block];
     }
 
     let mut blocks = parts.iter().filter_map(part_block).collect::<Vec<_>>();
-    if role == "assistant" {
+    if let Some(MessageInfo::Assistant(assistant)) = info {
         normalize_assistant_reasoning_order(&mut blocks);
         if let Some(footer) =
-            assistant_response_footer(message, response_started_at, tokens_per_second)
+            assistant_response_footer(assistant, response_started_at, tokens_per_second)
         {
             if let Some(answer) = blocks
                 .iter_mut()
@@ -741,9 +728,9 @@ fn message_blocks_with_start(
         // "errors that have to stop", which the user DOES want to see. Render
         // it here so it's visible even from a reloaded snapshot (the live
         // `session.error` broadcast is lost if the SSE dropped when it fired).
-        if let Some(text) = message
-            .get("info")
-            .and_then(|info| info.get("error"))
+        if let Some(text) = assistant
+            .error
+            .as_ref()
             .and_then(assistant_error_message)
         {
             blocks.push(agent_message_system("Agent error", text));
@@ -753,33 +740,26 @@ fn message_blocks_with_start(
 }
 
 fn assistant_response_footer(
-    message: &Value,
+    assistant: &AssistantMessage,
     response_started_at: Option<u64>,
     tokens_per_second: Option<f64>,
 ) -> Option<String> {
-    let info = message.get("info")?;
-    let intermediate_tool_step = info
-        .get("finish")
-        .and_then(Value::as_str)
+    let intermediate_tool_step = assistant
+        .finish
+        .as_deref()
         .is_some_and(|finish| matches!(finish, "tool-calls" | "unknown"));
-    if intermediate_tool_step && info.get("error").is_none_or(Value::is_null) {
+    if intermediate_tool_step && assistant.error.as_ref().is_none_or(Value::is_null) {
         return None;
     }
-    let time = info.get("time")?;
-    let completed = time.get("completed")?.as_u64()?;
-    let created = response_started_at.or_else(|| time.get("created")?.as_u64())?;
-    let agent = info
-        .get("agent")
-        .or_else(|| info.get("mode"))
-        .and_then(Value::as_str)
-        .map(display_agent_name)
-        .filter(|value| !value.is_empty())?;
-    let model = info
-        .get("modelId")
-        .or_else(|| info.get("modelID"))
-        .or_else(|| info.get("model_id"))
-        .and_then(Value::as_str)
-        .map(display_model_name)
+    let completed = assistant.time.completed?;
+    let created = response_started_at.unwrap_or(assistant.time.created);
+    let agent = Some(display_agent_name(if assistant.agent.is_empty() {
+        &assistant.mode
+    } else {
+        &assistant.agent
+    }))
+    .filter(|value| !value.is_empty())?;
+    let model = Some(display_model_name(&assistant.model_id))
         .filter(|value| !value.is_empty())?;
     let duration = display_response_duration(completed.saturating_sub(created));
     let throughput = tokens_per_second
@@ -789,45 +769,28 @@ fn assistant_response_footer(
 }
 
 fn turn_tokens_per_second(
-    messages: &[Value],
+    infos: &[Option<MessageInfo>],
     chronological_indices: &[usize],
     assistant_position: usize,
 ) -> Option<f64> {
     let assistant_index = *chronological_indices.get(assistant_position)?;
-    let info = messages.get(assistant_index)?.get("info")?;
-    if info.get("role").and_then(Value::as_str) != Some("assistant") {
+    if !matches!(infos.get(assistant_index)?, Some(MessageInfo::Assistant(_))) {
         return None;
     }
     let turn_start = chronological_indices[..=assistant_position]
         .iter()
-        .rposition(|index| {
-            messages[*index]
-                .get("info")
-                .and_then(|info| info.get("role"))
-                .and_then(Value::as_str)
-                .is_some_and(|role| matches!(role, "user" | "synthetic"))
-        })?;
+        .rposition(|index| matches!(&infos[*index], Some(MessageInfo::User(_))))?;
     let mut output = 0_u64;
     let mut duration_ms = 0_u64;
     let mut steps = 0_usize;
     for index in &chronological_indices[turn_start + 1..=assistant_position] {
-        let message = &messages[*index];
-        let Some(info) = message.get("info") else {
+        let Some(MessageInfo::Assistant(assistant)) = &infos[*index] else {
             continue;
         };
-        if info.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let time = info.get("time")?;
-        let created = time.get("created")?.as_u64()?;
-        let streamed = time.get("streamed")?.as_u64()?;
-        output = output.saturating_add(
-            info.get("tokens")
-                .and_then(|tokens| tokens.get("output"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        );
-        duration_ms = duration_ms.saturating_add(streamed.saturating_sub(created));
+        let streamed = assistant.time.streamed?;
+        output = output.saturating_add(assistant.tokens.output);
+        duration_ms =
+            duration_ms.saturating_add(streamed.saturating_sub(assistant.time.created));
         steps += 1;
     }
     (steps > 0 && output > 0 && duration_ms > 0)
@@ -956,6 +919,51 @@ fn is_compaction_summary_message(parts: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Canonical `info` envelopes: `message_info` parses the exact serde the
+    /// server emits, so fixtures must carry every required field — a lean
+    /// blob silently downgraded a message to a system row before this.
+    fn canonical_user_info(overrides: Value) -> Value {
+        let mut info = json!({
+            "role": "user",
+            "id": "msg-user",
+            "sessionId": "ses_test",
+            "time": { "created": 0 },
+            "agent": "build",
+            "model": { "providerId": "openai", "modelId": "gpt-5.6-sol" }
+        });
+        merge_info(&mut info, overrides);
+        info
+    }
+
+    fn canonical_assistant_info(overrides: Value) -> Value {
+        let mut info = json!({
+            "role": "assistant",
+            "id": "msg-assistant",
+            "sessionId": "ses_test",
+            "time": { "created": 0 },
+            "parentId": "msg-user",
+            "mode": "primary",
+            "agent": "build",
+            "path": { "cwd": "/tmp", "root": "/tmp" },
+            "cost": 0.0,
+            "tokens": { "input": 0, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "modelId": "gpt-5.6-sol",
+            "providerId": "openai"
+        });
+        merge_info(&mut info, overrides);
+        info
+    }
+
+    fn merge_info(base: &mut Value, overrides: Value) {
+        if let (Some(base), Some(overrides)) =
+            (base.as_object_mut(), overrides.as_object())
+        {
+            for (key, value) in overrides {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+    }
 
     #[test]
     fn context_usage_matches_opencode_normalized_bucket_sum() {
@@ -1164,11 +1172,11 @@ mod tests {
     #[test]
     fn newest_first_message_response_is_rendered_chronologically() {
         let newest = json!({
-            "info": { "id": "msg-new", "role": "assistant" },
+            "info": canonical_assistant_info(json!({ "id": "msg-new" })),
             "parts": [{ "id": "prt-new", "type": "text", "text": "new reply" }]
         });
         let oldest = json!({
-            "info": { "id": "msg-old", "role": "user" },
+            "info": canonical_user_info(json!({ "id": "msg-old" })),
             "parts": [{ "id": "prt-old", "type": "text", "text": "old prompt" }]
         });
 
@@ -1184,26 +1192,22 @@ mod tests {
     #[test]
     fn completed_answer_gets_opencode_style_agent_model_and_duration_footer() {
         let assistant = json!({
-            "info": {
+            "info": canonical_assistant_info(json!({
                 "id": "msg-answer",
-                "role": "assistant",
-                "parentID": "msg-prompt",
-                "agent": "build",
-                "modelId": "gpt-5.6-sol",
+                "parentId": "msg-prompt",
                 "time": { "created": 1_200, "streamed": 3_200, "completed": 219_000 },
-                "tokens": { "output": 64 }
-            },
+                "tokens": { "input": 0, "output": 64, "reasoning": 0, "cache": { "read": 0, "write": 0 } }
+            })),
             "parts": [
                 { "id": "prt-first", "type": "text", "text": "working" },
                 { "id": "prt-final", "type": "text", "text": "done" }
             ]
         });
         let user = json!({
-            "info": {
+            "info": canonical_user_info(json!({
                 "id": "msg-prompt",
-                "role": "user",
                 "time": { "created": 1_000 }
-            },
+            })),
             "parts": [{ "id": "prt-prompt", "type": "text", "text": "please fix it" }]
         });
 
@@ -1219,23 +1223,19 @@ mod tests {
     #[test]
     fn background_subagent_answer_duration_starts_at_human_request() {
         let final_answer = json!({
-            "info": {
+            "info": canonical_assistant_info(json!({
                 "id": "msg-final",
-                "role": "assistant",
-                "parentID": "msg-runtime-completion",
-                "agent": "build",
-                "modelId": "gpt-5.6-sol",
+                "parentId": "msg-runtime-completion",
                 "time": { "created": 180_000, "completed": 194_769 }
-            },
+            })),
             "parts": [{ "id": "prt-final", "type": "text", "text": "done" }]
         });
         let runtime_completion = json!({
-            "info": {
+            "info": canonical_user_info(json!({
                 "id": "msg-runtime-completion",
-                "role": "user",
                 "system": SUBTASK_COMPLETION_SYSTEM_MARKER,
                 "time": { "created": 171_000 }
-            },
+            })),
             "parts": [{
                 "id": "prt-runtime-completion",
                 "type": "text",
@@ -1243,13 +1243,12 @@ mod tests {
             }]
         });
         let task_launch = json!({
-            "info": {
+            "info": canonical_assistant_info(json!({
                 "id": "msg-launch",
-                "role": "assistant",
-                "parentID": "msg-human",
+                "parentId": "msg-human",
                 "finish": "tool-calls",
                 "time": { "created": 1_100, "completed": 2_000 }
-            },
+            })),
             "parts": [{
                 "id": "prt-task",
                 "type": "tool",
@@ -1262,11 +1261,10 @@ mod tests {
             }]
         });
         let human = json!({
-            "info": {
+            "info": canonical_user_info(json!({
                 "id": "msg-human",
-                "role": "user",
                 "time": { "created": 1_000 }
-            },
+            })),
             "parts": [{ "id": "prt-human", "type": "text", "text": "inspect it" }]
         });
 
@@ -1299,14 +1297,11 @@ mod tests {
     #[test]
     fn intermediate_tool_call_message_does_not_get_a_response_footer() {
         let blocks = message_blocks(&json!({
-            "info": {
+            "info": canonical_assistant_info(json!({
                 "id": "msg-tool-step",
-                "role": "assistant",
-                "agent": "build",
-                "modelId": "gpt-5.6-sol",
                 "finish": "tool-calls",
                 "time": { "created": 1_000, "completed": 2_000 }
-            },
+            })),
             "parts": [{ "id": "prt-progress", "type": "text", "text": "checking" }]
         }));
 
@@ -1317,11 +1312,10 @@ mod tests {
     #[test]
     fn subtask_completion_notification_renders_as_a_hidden_system_notice() {
         let message = json!({
-            "info": {
+            "info": canonical_user_info(json!({
                 "id": "msg-subtask-done",
-                "role": "user",
                 "system": SUBTASK_COMPLETION_SYSTEM_MARKER,
-            },
+            })),
             "parts": [{
                 "id": "prt-subtask-done",
                 "type": "text",
@@ -1367,11 +1361,10 @@ mod tests {
         .expect("live part maps to a block");
 
         let history = message_blocks(&json!({
-            "info": {
+            "info": canonical_user_info(json!({
                 "id": "msg_subtask_completion_ses_abc",
-                "role": "user",
                 "system": SUBTASK_COMPLETION_SYSTEM_MARKER,
-            },
+            })),
             "parts": [{"id": "prt-hist", "type": "text", "text": text}]
         }));
 
@@ -1396,10 +1389,9 @@ mod tests {
     #[test]
     fn background_completion_reserved_id_never_renders_as_a_user_message() {
         let message = json!({
-            "info": {
-                "id": "msg_background_completion_job_123",
-                "role": "user"
-            },
+            "info": canonical_user_info(json!({
+                "id": "msg_background_completion_job_123"
+            })),
             "parts": [{
                 "id": "prt-background-done",
                 "type": "text",
@@ -1443,10 +1435,9 @@ mod tests {
         // No job_id line in the text: the job id still recovers from the
         // reserved message id so the live/persisted identities stay equal.
         let message = json!({
-            "info": {
-                "id": "msg_background_completion_job_9",
-                "role": "user"
-            },
+            "info": canonical_user_info(json!({
+                "id": "msg_background_completion_job_9"
+            })),
             "parts": [{
                 "id": "prt-background-done",
                 "type": "text",
@@ -1559,7 +1550,7 @@ mod tests {
     #[test]
     fn assistant_reasoning_parts_render_before_final_text_on_refresh() {
         let message = json!({
-            "info": { "id": "msg-reasoning", "role": "assistant" },
+            "info": canonical_assistant_info(json!({ "id": "msg-reasoning" })),
             "parts": [
                 { "id": "text-final", "type": "text", "text": "final answer" },
                 { "id": "reason-1", "type": "reasoning", "text": "thought one" },
@@ -1578,7 +1569,7 @@ mod tests {
     #[test]
     fn assistant_reasoning_refresh_preserves_prior_tool_order() {
         let message = json!({
-            "info": { "id": "msg-reasoning-tools", "role": "assistant" },
+            "info": canonical_assistant_info(json!({ "id": "msg-reasoning-tools" })),
             "parts": [
                 { "id": "text-final", "type": "text", "text": "final answer" },
                 {
@@ -1605,7 +1596,7 @@ mod tests {
     #[test]
     fn assistant_compaction_summary_renders_as_compaction_card() {
         let message = json!({
-            "info": { "id": "msg-summary", "role": "assistant" },
+            "info": canonical_assistant_info(json!({ "id": "msg-summary" })),
             "parts": [
                 {
                     "id": "prt-marker",

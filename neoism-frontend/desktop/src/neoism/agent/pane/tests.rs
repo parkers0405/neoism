@@ -438,7 +438,11 @@ fn server_background_completion_copy_replaces_client_card_without_duplicate() {
     let server_copy = neoism_ui::panels::agent_pane::api_mapping::message_blocks(&json!({
         "info": {
             "id": "msg_background_completion_job-1",
-            "role": "user"
+            "role": "user",
+            "sessionId": "ses_test",
+            "time": { "created": 0 },
+            "agent": "build",
+            "model": { "providerId": "openai", "modelId": "gpt-5.6-sol" }
         },
         "parts": [{
             "id": "prt-background-done",
@@ -2082,7 +2086,11 @@ fn runtime_completion_rehydrate_does_not_append_cached_part_at_bottom() {
     let snapshot = neoism_ui::panels::agent_pane::api_mapping::message_blocks(&json!({
         "info": {
             "id": "msg_background_completion_job_123",
-            "role": "user"
+            "role": "user",
+            "sessionId": "ses_test",
+            "time": { "created": 0 },
+            "agent": "build",
+            "model": { "providerId": "openai", "modelId": "gpt-5.6-sol" }
         },
         "parts": [{
             "id": "prt-background-done",

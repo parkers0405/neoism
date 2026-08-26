@@ -44,6 +44,13 @@ jobs:
       - name: Check Agent API contract drift
         if: runner.os == 'Linux'
         run: bash neoism-agent/scripts/openapi.sh check
+      - name: Typecheck the TypeScript SDK
+        if: runner.os == 'Linux'
+        working-directory: neoism-agent/sdk/typescript
+        run: |
+          npm install --no-audit --no-fund
+          npm run typecheck
+          npm test
       - name: Guard Agent plugin architecture
         run: cargo test -p neoism-agent-plugin-api --test architecture_guards --test plugin_conformance
       - run: cargo fmt -- --check --color always

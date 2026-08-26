@@ -136,9 +136,10 @@ impl SessionCoordinator {
             .collect()
     }
 
-    /// Unconditionally install (or replace) a session's run. For recovery and
-    /// restore paths that re-establish durable ownership rather than claiming
-    /// a fresh slot; normal execution goes through `try_start_run`.
+    /// Unconditionally install (or replace) a session's run. Test fixtures
+    /// simulate pre-existing ownership with this; production claims runs
+    /// exclusively through `try_start_run`.
+    #[cfg(test)]
     pub(crate) async fn install_run(&self, session_id: &str, run: SessionRun) {
         let mut entries = self.entries.lock().await;
         let entry = entries.entry(session_id.to_string()).or_default();

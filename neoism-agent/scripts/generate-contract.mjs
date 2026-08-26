@@ -209,7 +209,7 @@ function schemaType(schema) {
   delete sibling.oneOf;
   delete sibling.anyOf;
   delete sibling.allOf;
-  const hasSibling = Object.keys(sibling).some((key) => !["nullable", "description", "title", "default", "example", "examples", "deprecated", "readOnly", "writeOnly"].includes(key));
+  const hasSibling = Object.keys(sibling).some((key) => !["nullable", "description", "title", "default", "example", "examples", "deprecated", "readOnly", "writeOnly", "discriminator"].includes(key));
   let type = hasSibling ? simpleSchemaType(sibling) : undefined;
   if (composition.length) type = type ? `${type} & (${composition.join(") & (")})` : composition.join(" & ");
   type ??= "unknown";

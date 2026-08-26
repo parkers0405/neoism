@@ -1,7 +1,7 @@
 import {
   createNeoismClient,
   type ApiErrorBody,
-  type EventEnvelope,
+  type Event,
   type EventOptions,
   type NeoismTransport,
   type RequestDescriptor,
@@ -77,7 +77,7 @@ async function* followEvents(
   headers: Record<string, string>,
   options: EventOptions,
   reconnect: HttpTransportOptions["reconnect"],
-): AsyncIterable<EventEnvelope> {
+): AsyncIterable<Event> {
   let cursor = options.since;
   let delay = reconnect?.initialDelayMs ?? 250;
   const maximumDelay = reconnect?.maximumDelayMs ?? 10_000;
@@ -111,7 +111,7 @@ async function* followEvents(
   }
 }
 
-async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterable<EventEnvelope> {
+async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterable<Event> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -129,7 +129,7 @@ async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterable<Even
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trimStart())
           .join("\n");
-        if (data) yield JSON.parse(data) as EventEnvelope;
+        if (data) yield JSON.parse(data) as Event;
       }
     }
   } finally {

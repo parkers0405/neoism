@@ -6,6 +6,7 @@ import type {
   AuditEntry as ContractAuditEntry,
   Capability,
   Command,
+  Event as ContractEvent,
   EventEnvelope as ContractEventEnvelope,
   Message,
   PageCursor,
@@ -36,6 +37,9 @@ export type PromptPart = ContractPromptPart;
 export type PromptRequest = ContractPromptRequest;
 
 export type EventEnvelope<T = unknown> = Omit<ContractEventEnvelope, "data"> & { data: T };
+/// Every SSE record, as the typed union discriminated by `type` — narrow with
+/// a `switch (event.type)` and `data` narrows with it.
+export type Event = ContractEvent;
 export type PartEnvelope<T = unknown> = Omit<ContractPartEnvelope, "data"> & { data: T };
 export interface Page<T> {
   items: T[];

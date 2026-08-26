@@ -20,7 +20,9 @@ pub fn canonical_openapi() -> Value {
         "openapi": "3.1.1",
         "info": {
             "title": "Neoism Agent API",
-            "version": env!("CARGO_PKG_VERSION"),
+            // The CONTRACT version, deliberately not the server build version:
+            // a release bump must not invalidate the committed spec snapshot.
+            "version": neoism_agent_core::API_VERSION,
             "description": "Canonical, versioned Neoism Agent contract. Unknown event and part payloads are intentionally open."
         },
         "tags": [
@@ -408,7 +410,7 @@ fn apply_authoritative_contract(document: &mut Value) {
         query("limit", false, json!({ "type": "integer", "minimum": 1, "maximum": 5000, "default": 1000 })),
         query("sessionId", false, json!({ "type": "string" }))
     ]), None, json!({ "200": { "description": "Resumable durable event stream", "content": {
-        "text/event-stream": { "schema": { "type": "string", "description": "SSE records whose data is an EventEnvelope" } }
+        "text/event-stream": { "schema": { "type": "string", "description": "SSE records whose data field is an Event (the typed, type-discriminated union in components/schemas/Event)" } }
     } } })));
 
     add("/v2/artifacts", "get", op("v2.artifacts.list", "artifacts", json!([
@@ -725,7 +727,214 @@ fn canonical_schemas() -> Value {
     schemas.as_object_mut().expect("schema object").extend(
         authoritative_schemas().as_object().expect("authoritative schema object").clone()
     );
+    schemas.as_object_mut().expect("schema object").extend(
+        typed_event_schemas().as_object().expect("typed event schema object").clone()
+    );
     schemas
+}
+
+/// PascalCase component name for one event type: "message.part.delta" →
+/// "EventMessagePartDelta".
+fn event_variant_name(event_type: &str) -> String {
+    let mut name = String::from("Event");
+    for segment in event_type.split(['.', '_']) {
+        let mut chars = segment.chars();
+        if let Some(first) = chars.next() {
+            name.extend(first.to_uppercase());
+            name.push_str(chars.as_str());
+        }
+    }
+    name
+}
+
+/// One `Event` union variant: the full SSE envelope with `type` pinned to a
+/// const and `data` typed to that event's payload.
+fn event_envelope_variant(event_type: &str, data: Value) -> Value {
+    json!({
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "sequence", "type", "source", "schemaVersion", "timestamp", "data"],
+        "properties": {
+            "id": { "type": "string" },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "type": { "const": event_type },
+            "source": { "type": "string" },
+            "schemaVersion": { "type": "string" },
+            "timestamp": { "type": "integer" },
+            "subject": { "$ref": "#/components/schemas/EventSubject" },
+            "data": data
+        }
+    })
+}
+
+/// Payload (`data`) schema for one published event type. Shapes follow the
+/// actual publish sites; a type with multiple publish shapes carries every
+/// varying key as optional. Unknown-extension objects stay open on purpose.
+fn event_data_schema(event_type: &str) -> Value {
+    use neoism_agent_core::event_type as et;
+    let r = |name: &str| json!({ "$ref": format!("#/components/schemas/{name}") });
+    let nullable = |schema: Value| json!({ "oneOf": [schema, { "type": "null" }] });
+    // Serialized core structs whose closed schemas would reject the extra
+    // keys some publish sites inject stay open objects.
+    let part = json!({ "type": "object", "additionalProperties": true, "required": ["id", "type"], "properties": {
+        "id": { "type": "string" }, "type": { "type": "string" },
+        "role": { "type": "string" }, "system": { "type": "string" }, "author": { "type": "string" }
+    }});
+    let message_info = json!({ "type": "object", "additionalProperties": true, "required": ["role", "id", "sessionId"], "properties": {
+        "role": { "type": "string" }, "id": { "type": "string" }, "sessionId": { "type": "string" }
+    }});
+    match event_type {
+        _ if event_type == et::MESSAGE_PART_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "part", "time"], "properties": {
+            "sessionID": { "type": "string" }, "part": part, "time": { "type": "integer" }
+        }}),
+        _ if event_type == et::MESSAGE_PART_REMOVED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "partID"], "properties": {
+            "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "partID": { "type": "string" }
+        }}),
+        _ if event_type == et::MESSAGE_PART_DELTA => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "partID", "partType", "field", "delta"], "properties": {
+            "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "partID": { "type": "string" },
+            "partType": { "type": "string" }, "field": { "type": "string" }, "delta": { "type": "string" }
+        }}),
+        _ if event_type == et::MESSAGE_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info"], "properties": {
+            "sessionID": { "type": "string" }, "info": message_info
+        }}),
+        _ if event_type == et::MESSAGE_REMOVED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID"], "properties": {
+            "sessionID": { "type": "string" }, "messageID": { "type": "string" }
+        }}),
+        _ if event_type == et::MCP_TOOLS_CHANGED => json!({ "type": "object", "additionalProperties": false, "required": ["server", "directory"], "properties": {
+            "server": { "type": "string" }, "directory": { "type": "string" }
+        }}),
+        _ if event_type == et::LSP_UPDATED => json!({ "type": "object", "additionalProperties": false }),
+        _ if event_type == et::PERMISSION_ASKED => json!({ "type": "object", "additionalProperties": true, "required": ["id", "sessionId", "messageId", "title", "permission", "patterns", "always"], "properties": {
+            "id": { "type": "string" }, "sessionId": { "type": "string" }, "messageId": { "type": "string" },
+            "title": { "type": "string" }, "permission": { "type": "string" },
+            "patterns": { "type": "array", "items": { "type": "string" } },
+            "always": { "type": "array", "items": { "type": "string" } },
+            "tool": { "type": "object", "additionalProperties": true },
+            "metadata": nullable(json!({ "type": "object", "additionalProperties": true })),
+            "sourceSessionID": { "type": "string" }, "sourceTitle": { "type": "string" },
+            "sourceAgent": { "type": "string" }, "parentSessionID": { "type": "string" }
+        }}),
+        _ if event_type == et::PERMISSION_REPLIED => json!({ "type": "object", "additionalProperties": true, "required": ["requestID", "reply"], "properties": {
+            "requestID": { "type": "string" }, "reply": { "type": "string" },
+            "info": nullable(r("PermissionRequest"))
+        }}),
+        _ if event_type == et::QUESTION_ASKED => r("QuestionRequest"),
+        _ if event_type == et::QUESTION_REJECTED => json!({ "type": "object", "additionalProperties": false, "required": ["requestID"], "properties": {
+            "requestID": { "type": "string" }, "reason": { "type": "string" },
+            "info": nullable(r("QuestionRequest"))
+        }}),
+        _ if event_type == et::QUESTION_REPLIED => json!({ "type": "object", "additionalProperties": false, "required": ["requestID", "reply"], "properties": {
+            "requestID": { "type": "string" },
+            "reply": { "type": "object", "additionalProperties": false, "required": ["answers"], "properties": {
+                "answers": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } }
+            }},
+            "info": nullable(r("QuestionRequest"))
+        }}),
+        _ if event_type == et::PTY_CREATED || event_type == et::PTY_UPDATED || event_type == et::PTY_DELETED => json!({ "type": "object", "additionalProperties": false, "required": ["id", "ptyID", "info"], "properties": {
+            "id": { "type": "string" }, "ptyID": { "type": "string" }, "info": r("Pty")
+        }}),
+        _ if event_type == et::PTY_EXITED => json!({ "type": "object", "additionalProperties": false, "required": ["id", "ptyID", "exitStatus"], "properties": {
+            "id": { "type": "string" }, "ptyID": { "type": "string" },
+            "exitStatus": nullable(json!({ "type": "integer" }))
+        }}),
+        _ if event_type == et::SESSION_COMPACTION_STARTED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "timestamp", "reason"], "properties": {
+            "sessionID": { "type": "string" }, "messageID": { "type": "string" },
+            "timestamp": { "type": "integer" }, "reason": { "type": "string" }
+        }}),
+        _ if event_type == et::SESSION_COMPACTION_DELTA => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "text"], "properties": {
+            "sessionID": { "type": "string" }, "text": { "type": "string" }
+        }}),
+        _ if event_type == et::SESSION_COMPACTION_ENDED => json!({ "type": "object", "additionalProperties": true, "required": ["sessionID"], "properties": {
+            "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "timestamp": { "type": "integer" },
+            "text": { "type": "string" }, "kind": { "type": "string" }, "status": { "type": "string" },
+            "summary": { "type": "object", "additionalProperties": true },
+            "error": { "type": "object", "additionalProperties": true }
+        }}),
+        _ if event_type == et::SESSION_COMPACTED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info", "summary"], "properties": {
+            "sessionID": { "type": "string" }, "info": r("Session"),
+            "summary": { "type": "object", "additionalProperties": false, "required": ["text", "messageID", "throughMessageID", "updated", "kind"], "properties": {
+                "text": { "type": "string" }, "messageID": { "type": "string" }, "throughMessageID": { "type": "string" },
+                "updated": { "type": "integer" }, "kind": { "type": "string" }
+            }}
+        }}),
+        _ if event_type == et::SESSION_CONTEXT_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "epoch"], "properties": {
+            "sessionID": { "type": "string" }, "epoch": { "type": "object", "additionalProperties": true }
+        }}),
+        _ if event_type == et::SESSION_CREATED || event_type == et::SESSION_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info"], "properties": {
+            "sessionID": { "type": "string" }, "info": r("Session")
+        }}),
+        _ if event_type == et::SESSION_DELETED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID"], "properties": {
+            "sessionID": { "type": "string" }
+        }}),
+        _ if event_type == et::SESSION_ERROR => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "error"], "properties": {
+            "sessionID": { "type": "string" }, "error": r("ApiError")
+        }}),
+        _ if event_type == et::SESSION_EXECUTION_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "snapshot", "runtime"], "properties": {
+            "sessionID": { "type": "string" },
+            "snapshot": r("ExecutionActivitySnapshot"), "runtime": r("SessionRuntimeSnapshot")
+        }}),
+        _ if event_type == et::SESSION_BACKGROUND_TASK_COMPLETED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "parentSessionID", "jobID", "taskID", "status", "title", "command", "cwd", "exitCode", "result"], "properties": {
+            "sessionID": { "type": "string" }, "parentSessionID": { "type": "string" },
+            "jobID": { "type": "string" }, "taskID": { "type": "string" },
+            "status": { "type": "string" }, "title": { "type": "string" },
+            "command": { "type": "string" }, "cwd": { "type": "string" },
+            "exitCode": nullable(json!({ "type": "integer" })), "result": { "type": "string" }
+        }}),
+        _ if event_type == et::SESSION_QUEUE_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "action", "removed", "queue"], "properties": {
+            "sessionID": { "type": "string" }, "action": { "type": "string" }, "removed": { "type": "integer" },
+            "queue": r("SessionQueueInfo"), "request": r("PromptRequest"),
+            "messageID": { "type": "string" }, "delivery": { "type": "string" }
+        }}),
+        _ if event_type == et::SESSION_PROMPT_ADMITTED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "delivery", "request"], "properties": {
+            "sessionID": { "type": "string" }, "delivery": { "type": "string" }, "request": r("PromptRequest")
+        }}),
+        _ if event_type == et::SESSION_STATUS => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "status"], "properties": {
+            "sessionID": { "type": "string" }, "status": r("SessionStatus"),
+            "runID": { "type": "string" }, "startedAt": { "type": "integer" }, "queue": { "type": "integer" },
+            "parentSessionID": { "type": "string" }, "sourceSessionID": { "type": "string" },
+            "sourceTitle": { "type": "string" }, "sourceAgent": { "type": "string" }
+        }}),
+        _ if event_type == et::SESSION_SUBTASK_COMPLETED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "parentSessionID", "childSessionID", "taskID", "status", "title", "result"], "properties": {
+            "sessionID": { "type": "string" }, "parentSessionID": { "type": "string" },
+            "childSessionID": { "type": "string" }, "taskID": { "type": "string" },
+            "status": { "type": "string" }, "title": { "type": "string" }, "result": { "type": "string" },
+            "agent": { "type": "string" }, "sourceAgent": { "type": "string" }
+        }}),
+        _ if event_type == et::TODO_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "todos"], "properties": {
+            "sessionID": { "type": "string" }, "todos": { "type": "array", "items": r("Todo") }
+        }}),
+        _ if event_type == et::WORKFLOW_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["aggregateID"], "properties": {
+            "aggregateID": { "type": "string" }, "workflow": r("WorkflowProjection"),
+            "workflowID": { "type": "string" }, "active": { "type": "boolean" }, "error": { "type": "string" }
+        }}),
+        _ if event_type == et::WORKFLOW_RUN_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["aggregateID", "run"], "properties": {
+            "aggregateID": { "type": "string" }, "run": r("WorkflowRun")
+        }}),
+        other => panic!("event type {other} has no payload schema; add one here"),
+    }
+}
+
+/// The typed `Event` union plus one envelope variant per published event
+/// type. Exhaustiveness against `event_type::ALL` is enforced by test.
+fn typed_event_schemas() -> Value {
+    let mut schemas = serde_json::Map::new();
+    let mut variants = Vec::new();
+    for event_type in neoism_agent_core::event_type::ALL {
+        let name = event_variant_name(event_type);
+        variants.push(json!({ "$ref": format!("#/components/schemas/{name}") }));
+        schemas.insert(
+            name,
+            event_envelope_variant(event_type, event_data_schema(event_type)),
+        );
+    }
+    schemas.insert(
+        "Event".to_string(),
+        json!({
+            "description": "Every SSE record's data field, discriminated by `type`.",
+            "oneOf": variants,
+            "discriminator": { "propertyName": "type" }
+        }),
+    );
+    Value::Object(schemas)
 }
 
 fn authoritative_schemas() -> Value {
@@ -980,6 +1189,45 @@ mod tests {
 
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_published_event_type_has_exactly_one_typed_union_variant() {
+        let document = canonical_openapi();
+        let schemas = document["components"]["schemas"]
+            .as_object()
+            .expect("schemas");
+        let union = schemas["Event"]["oneOf"].as_array().expect("Event oneOf");
+        let mut variant_types = BTreeSet::new();
+        for reference in union {
+            let name = reference["$ref"]
+                .as_str()
+                .expect("variant ref")
+                .split('/')
+                .next_back()
+                .expect("ref name");
+            let variant = &schemas[name];
+            let pinned = variant["properties"]["type"]["const"]
+                .as_str()
+                .unwrap_or_else(|| panic!("variant {name} does not pin `type`"));
+            assert!(
+                variant_types.insert(pinned.to_string()),
+                "duplicate Event variant for {pinned}"
+            );
+            let data = &variant["properties"]["data"];
+            assert!(
+                data.is_object() && !data.as_object().unwrap().is_empty(),
+                "variant {name} has an untyped data payload"
+            );
+        }
+        let published = neoism_agent_core::event_type::ALL
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            variant_types, published,
+            "the typed Event union and event_type::ALL drifted"
+        );
     }
 
     #[test]

@@ -645,6 +645,10 @@ impl Screen<'_> {
         let mut agent_animating = false;
         let mut agent_animating_reason = None;
         let mut agent_ui_events = Vec::new();
+        let agent_event_wake = crate::neoism::agent::AgentEventWake::new(
+            self.context_manager.event_proxy(),
+            self.context_manager.window_id(),
+        );
         for (key, item) in self
             .context_manager
             .current_grid_mut()
@@ -656,6 +660,7 @@ impl Screen<'_> {
                 continue;
             };
             let is_visible = visible_nodes.contains(key);
+            agent.set_event_wake(agent_event_wake.clone());
             agent.set_local_presence_name(Some(local_presence_name.clone()));
             let agent_changed = if is_visible {
                 agent.drain_server_updates()

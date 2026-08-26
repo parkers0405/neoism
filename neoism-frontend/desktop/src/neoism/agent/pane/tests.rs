@@ -569,6 +569,25 @@ fn execution_timer_uses_family_total_for_root_and_own_total_for_child() {
 }
 
 #[test]
+fn live_execution_owns_redraw_across_transient_run_idle() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    pane.apply_execution_activity(
+        neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            execution_id: "execution".into(),
+            root_session_id: "root".into(),
+            active_segments: [("provider".into(), 1_000)].into(),
+            revision: 1,
+            finished: false,
+            ..Default::default()
+        },
+    );
+    pane.note_session_run_idle("root");
+    assert_eq!(pane.animation_reason(), Some("streaming"));
+}
+
+#[test]
 fn finished_execution_does_not_reserve_status_row() {
     let mut pane = NeoismAgentPane::default();
     pane.apply_execution_activity(

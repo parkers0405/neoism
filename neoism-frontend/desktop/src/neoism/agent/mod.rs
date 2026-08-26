@@ -33,6 +33,7 @@ pub(crate) use api::{
     neoism_agent_server, register_agent_server_credential,
 };
 pub(crate) use pane::TimelineMeasureKey;
+pub(crate) use updates::AgentEventWake;
 pub use pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentNoticeLevel,
     NeoismAgentOutputKind, NeoismAgentPane, NeoismAgentPendingPermission,

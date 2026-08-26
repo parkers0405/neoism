@@ -926,6 +926,7 @@ impl NeoismAgentPane {
                 delivery,
                 author,
                 transcript_echo,
+                event_wake: self.event_wake(),
             });
         self.start_next_prompt_dispatch();
     }
@@ -1819,8 +1820,11 @@ fn dispatch_prompt_request(
             // queue updates while this worker waits for the POST response, so
             // a fast provider cannot emit the beginning of the turn before
             // the pane knows which fresh session it belongs to.
-            let event_stream =
+            let mut event_stream =
                 start_session_event_stream(request.server.clone(), session_id.clone());
+            if let Some(wake) = request.event_wake.clone() {
+                event_stream.set_wake(wake);
+            }
             (session_id, Some(event_stream))
         }
     };

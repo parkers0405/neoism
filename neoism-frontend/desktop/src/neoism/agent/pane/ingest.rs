@@ -1200,6 +1200,10 @@ impl NeoismAgentPane {
                                 .set_viewed_session_id(Some(session_id.clone()));
                         }
                         if let Some(event_stream) = event_stream {
+                            let mut event_stream = event_stream;
+                            if let Some(wake) = self.event_wake.clone() {
+                                event_stream.set_wake(wake);
+                            }
                             self.event_stream = Some(event_stream);
                         } else {
                             self.start_session_updates(&session_id);
@@ -1798,8 +1802,11 @@ impl NeoismAgentPane {
             }
             return;
         }
-        let event_stream =
+        let mut event_stream =
             start_session_event_stream(self.server.clone(), session_id.to_string());
+        if let Some(wake) = self.event_wake.clone() {
+            event_stream.set_wake(wake);
+        }
         event_stream.track_child_sessions(known_child_session_ids);
         self.event_stream = Some(event_stream);
         if crate::neoism::agent::perf::enabled() {
@@ -1811,6 +1818,17 @@ impl NeoismAgentPane {
                 "agent event stream start"
             );
         }
+    }
+
+    pub(crate) fn set_event_wake(&mut self, wake: AgentEventWake) {
+        self.event_wake = Some(wake.clone());
+        if let Some(stream) = self.event_stream.as_mut() {
+            stream.set_wake(wake);
+        }
+    }
+
+    pub(crate) fn event_wake(&self) -> Option<AgentEventWake> {
+        self.event_wake.clone()
     }
 
     pub(crate) fn fail_compaction_message(&mut self, error: impl Into<String>) {

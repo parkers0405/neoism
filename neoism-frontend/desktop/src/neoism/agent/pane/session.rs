@@ -61,9 +61,17 @@ impl NeoismAgentPane {
         if self.timeline_is_inertial() {
             return Some("timeline_inertia");
         }
-        // The derived display state includes background tasks. Those update
-        // through events and must not own the continuous redraw loop.
-        if self.streaming_state != NeoismAgentStreamingState::Idle {
+        // Provider time, status dots, and streamed deltas advance even across
+        // transient run-idle edges. Keep draining and painting until the
+        // durable execution/branch activity settles.
+        if self.streaming_state != NeoismAgentStreamingState::Idle
+            || self
+                .execution_activity
+                .as_ref()
+                .is_some_and(|activity| self.execution_status_live(activity))
+            || self.active_subagent_count() > 0
+            || self.viewed_subagent_outstanding()
+        {
             return Some("streaming");
         }
         // A transient idle gap keeps the last status label on screen

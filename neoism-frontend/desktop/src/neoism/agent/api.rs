@@ -1289,9 +1289,8 @@ pub(super) fn open_event_stream(
         .ok_or_else(|| "failed to resolve Neoism Agent server".to_string())?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(900))
         .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
-    // Short read timeout so the SSE reader wakes up on every brief lull
-    // — keeps the in-flight token deltas flushing into the pane each
-    // frame instead of bunching into a single burst after a long wait.
+    // Bound shutdown/reconnect latency while the stream is quiet. Inbound
+    // events wake winit explicitly after they are enqueued for the pane.
     let _ = stream.set_read_timeout(Some(Duration::from_millis(40)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
 

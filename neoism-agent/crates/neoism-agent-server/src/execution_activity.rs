@@ -148,9 +148,14 @@ pub(crate) async fn ensure_for_prompt(
 ) -> anyhow::Result<Option<ExecutionActivitySnapshot>> {
     // A prior run can become quiescent between its last cleanup edge and the
     // next durable user turn. Reconcile before admission so a genuinely new
-    // top-level prompt never inherits a settled execution's model time.
+    // top-level prompt never inherits a settled execution's model time. The
+    // admitting session's own worker/queue entries belong to THIS prompt (the
+    // queue worker calls `append_prompt` inline), so they must be exempt from
+    // the quiescence guards or the reconcile can never settle from inside a
+    // worker — every new run then inherits the previous execution's timer.
     if allow_new {
-        finish_if_quiescent(state, info.id.as_str()).await;
+        finish_if_quiescent_impl(state, info.id.as_str(), Some(info.id.as_str()))
+            .await;
     }
     let root = root_session_id(state, info).await;
     let lock = keyed_lock(state, &root).await;
@@ -418,6 +423,17 @@ async fn publish_snapshot(state: &AppState, root: &str) {
 }
 
 pub(crate) async fn finish_if_quiescent(state: &AppState, session_id: &str) {
+    finish_if_quiescent_impl(state, session_id, None).await;
+}
+
+/// `admitting_session`: a session whose worker/queue activity belongs to a NEW
+/// prompt being admitted rather than to the execution under reconciliation —
+/// its entries do not count against quiescence.
+async fn finish_if_quiescent_impl(
+    state: &AppState,
+    session_id: &str,
+    admitting_session: Option<&str>,
+) {
     let Ok(Some(session)) = state.inner.store.get_session(session_id).await else {
         return;
     };
@@ -447,12 +463,15 @@ pub(crate) async fn finish_if_quiescent(state: &AppState, session_id: &str) {
         .collect::<std::collections::BTreeSet<_>>();
     let mut family = children.clone();
     family.insert(root_id.clone());
-    let running = state.inner.runs.read().await;
+    let running = state.inner.session_coordinator.active_runs().await;
     if family.iter().any(|session| running.contains_key(session)) {
         return;
     }
     drop(running);
     for session in &family {
+        if admitting_session == Some(session.as_str()) {
+            continue;
+        }
         if state
             .inner
             .session_coordinator
@@ -552,6 +571,71 @@ mod tests {
             .await
             .unwrap()
             .is_some_and(|activity| activity.execution_id == next.execution_id));
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn new_top_level_prompt_settles_prior_execution_despite_own_worker() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-execution-own-worker-{}.sqlite3",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        let state = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        let now = crate::now_millis();
+        let mut session = SessionInfo {
+            id: neoism_agent_core::new_session_id(),
+            slug: "own-worker".into(),
+            project_id: "global".into(),
+            workspace_id: None,
+            directory: "/tmp".into(),
+            path: None,
+            parent_id: None,
+            title: "Own worker".into(),
+            agent: None,
+            model: None,
+            version: env!("CARGO_PKG_VERSION").into(),
+            time: TimeInfo {
+                created: now,
+                updated: now,
+                compacting: None,
+                archived: None,
+            },
+            permission: None,
+            extra: BTreeMap::new(),
+        };
+        state.inner.store.insert_session(&session).await.unwrap();
+        let root = session.id.to_string();
+        let previous = state
+            .inner
+            .store
+            .admit_execution_activity(&root, "execution-old", "message-old", "")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!previous.finished);
+        // Steady state after a finished run (or a daemon restart): the session
+        // still carries the previous execution id, and the NEW prompt reaches
+        // `ensure_for_prompt` from inside the queue worker, whose ownership
+        // flag is already set for this very prompt.
+        session.extra.insert(
+            EXECUTION_ID_KEY.to_string(),
+            json!(previous.execution_id.clone()),
+        );
+        assert!(state.inner.session_coordinator.wake(&root).await);
+
+        let next = ensure_for_prompt(&state, &mut session, "message-new", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            next.execution_id, previous.execution_id,
+            "a new top-level prompt must not inherit the settled execution's timer"
+        );
+        assert_eq!(next.root_message_id, "message-new");
+        assert_eq!(next.completed_ms, 0);
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_file(path);
     }

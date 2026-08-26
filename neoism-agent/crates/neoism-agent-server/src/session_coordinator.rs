@@ -111,6 +111,41 @@ impl SessionCoordinator {
         false
     }
 
+    /// The active run for a session, if any. This is the single in-memory
+    /// authority on run ownership.
+    pub(crate) async fn active_run(&self, session_id: &str) -> Option<SessionRun> {
+        self.entries
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|entry| entry.run.clone())
+    }
+
+    /// Snapshot of every session's active run, for status listings.
+    pub(crate) async fn active_runs(&self) -> HashMap<String, SessionRun> {
+        self.entries
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(session_id, entry)| {
+                entry
+                    .run
+                    .clone()
+                    .map(|run| (session_id.clone(), run))
+            })
+            .collect()
+    }
+
+    /// Unconditionally install (or replace) a session's run. For recovery and
+    /// restore paths that re-establish durable ownership rather than claiming
+    /// a fresh slot; normal execution goes through `try_start_run`.
+    pub(crate) async fn install_run(&self, session_id: &str, run: SessionRun) {
+        let mut entries = self.entries.lock().await;
+        let entry = entries.entry(session_id.to_string()).or_default();
+        entry.run = Some(run);
+        entry.changed.notify_waiters();
+    }
+
     pub(crate) async fn worker_active(&self, session_id: &str) -> bool {
         self.entries
             .lock()

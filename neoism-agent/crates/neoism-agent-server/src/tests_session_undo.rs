@@ -22,7 +22,7 @@ async fn submit_prompt_and_wait(app: &axum::Router, state: &AppState, session_id
         loop {
             let count = state.inner.store.list_messages(session_id).await.unwrap().len();
             if count >= previous_count + 1
-                && !state.inner.runs.read().await.contains_key(session_id)
+                && !state.inner.session_coordinator.active_run(session_id).await.is_some()
             {
                 break;
             }

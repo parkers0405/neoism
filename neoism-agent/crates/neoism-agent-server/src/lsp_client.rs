@@ -1089,7 +1089,7 @@ impl LspClient {
 
     /// Pull-model diagnostics (`textDocument/diagnostic`, LSP 3.17). Returns the
     /// report's `items` array so the caller can reuse `parse_diagnostics`. This is
-    /// the fast opencode-style path: it returns whatever the server has ready
+    /// the fast cached path: it returns whatever the server has ready
     /// *right now* instead of blocking on a `publishDiagnostics` push that, for
     /// servers like rust-analyzer, only arrives after `cargo check` finishes.
     pub(crate) fn pull_diagnostics(

@@ -557,7 +557,7 @@ mod tests {
                 "options": { "futureFlag": "kept" }
             }
         }))
-        .expect("OpenCode-style passive config keys should decode");
+        .expect("passive config keys should decode");
 
         assert_eq!(config.watcher.unwrap().ignore, vec!["target/**"]);
         assert_eq!(config.share, Some(ShareMode::Auto));

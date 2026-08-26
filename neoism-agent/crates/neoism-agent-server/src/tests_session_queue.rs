@@ -10,14 +10,14 @@ async fn session_abort_cancels_active_run() {
     let state = AppState::open_database(path.clone()).await.unwrap();
     let session_id = neoism_agent_core::new_session_id().to_string();
     let cancellation = Arc::new(AtomicBool::new(false));
-    state.inner.runs.write().await.insert(
+    state.inner.session_coordinator.install_run(&
         session_id.clone(),
         SessionRun {
             id: "test-run".to_string(),
             started_at: 0,
             cancel: cancellation.clone(),
         },
-    );
+    ).await;
     let busy = busy_status(0, None);
     state
         .inner
@@ -41,7 +41,7 @@ async fn session_abort_cancels_active_run() {
 
     assert!(cancelled);
     assert!(cancellation.load(Ordering::SeqCst));
-    assert!(!state.inner.runs.read().await.contains_key(&session_id));
+    assert!(!state.inner.session_coordinator.active_run(&session_id).await.is_some());
     assert!(!state.inner.statuses.read().await.contains_key(&session_id));
     cleanup_sqlite_files(&path);
 }
@@ -99,14 +99,14 @@ async fn session_abort_cancels_running_bash_tool() {
     let app = app(state.clone());
     let session_id = neoism_agent_core::new_session_id();
     let cancellation = Arc::new(AtomicBool::new(false));
-    state.inner.runs.write().await.insert(
+    state.inner.session_coordinator.install_run(&
         session_id.to_string(),
         SessionRun {
             id: "test-run".to_string(),
             started_at: 0,
             cancel: cancellation,
         },
-    );
+    ).await;
     let tool_state = state.clone();
     let tool_session_id = session_id.clone();
     let message_id = Id::ascending(IdKind::Message);
@@ -280,10 +280,9 @@ async fn prompt_async_queues_while_session_is_running() {
     };
     state
         .inner
-        .runs
-        .write()
-        .await
-        .insert(session.id.to_string(), run);
+        .session_coordinator
+        .install_run(&session.id.to_string(), run)
+        .await;
 
     let response = app
         .clone()
@@ -397,14 +396,14 @@ async fn queued_prompt_can_be_appended_to_active_run() {
             .unwrap(),
     )
     .await;
-    state.inner.runs.write().await.insert(
+    state.inner.session_coordinator.install_run(&
         session.id.to_string(),
         SessionRun {
             id: "active-run".to_string(),
             started_at: 0,
             cancel: Arc::new(AtomicBool::new(false)),
         },
-    );
+    ).await;
 
     let response = app
         .clone()
@@ -429,12 +428,7 @@ async fn queued_prompt_can_be_appended_to_active_run() {
     .await;
     assert_eq!(drained, 1);
     assert_eq!(queued_prompt_count(&state, session.id.as_str()).await, 0);
-    assert!(state
-        .inner
-        .runs
-        .read()
-        .await
-        .contains_key(session.id.as_str()));
+    assert!(state.inner.session_coordinator.active_run(session.id.as_str()).await.is_some());
 
     let messages = state
         .inner
@@ -499,14 +493,14 @@ async fn session_queue_routes_inspect_pop_and_clear() {
             .unwrap(),
     )
     .await;
-    state.inner.runs.write().await.insert(
+    state.inner.session_coordinator.install_run(&
         session.id.to_string(),
         SessionRun {
             id: "active-run".to_string(),
             started_at: 0,
             cancel: Arc::new(AtomicBool::new(false)),
         },
-    );
+    ).await;
 
     for text in ["first queued turn", "second queued turn"] {
         let response = app
@@ -567,12 +561,7 @@ async fn session_queue_routes_inspect_pop_and_clear() {
     .await;
     assert_eq!(cleared["removed"], 1);
     assert_eq!(cleared["queue"]["count"], 0);
-    assert!(state
-        .inner
-        .runs
-        .read()
-        .await
-        .contains_key(session.id.as_str()));
+    assert!(state.inner.session_coordinator.active_run(session.id.as_str()).await.is_some());
 
     finish_session_run(&state, session.id.as_str(), "active-run").await;
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -704,14 +693,14 @@ async fn prompt_steers_while_session_is_running() {
             .unwrap(),
     )
     .await;
-    state.inner.runs.write().await.insert(
+    state.inner.session_coordinator.install_run(&
         session.id.to_string(),
         SessionRun {
             id: "test-run".to_string(),
             started_at: 0,
             cancel: Arc::new(AtomicBool::new(false)),
         },
-    );
+    ).await;
 
     let response = app
         .clone()
@@ -897,14 +886,14 @@ async fn run_conflict_mid_drain_requeues_prompt_instead_of_dropping_it() {
     assert_eq!(delivery, "continue");
 
     // A run claims the session inside the pop->append window.
-    state.inner.runs.write().await.insert(
+    state.inner.session_coordinator.install_run(&
         session_id.clone(),
         SessionRun {
             id: "user-turn".to_string(),
             started_at: 0,
             cancel: Arc::new(AtomicBool::new(false)),
         },
-    );
+    ).await;
     let error = crate::session_prompt::append_prompt(
         &state,
         &session_id,
@@ -942,7 +931,7 @@ async fn run_conflict_mid_drain_requeues_prompt_instead_of_dropping_it() {
     // Run finishes; the requeued completion is the next prompt out, and a
     // plain append (no stub reply, so no provider round trip) lands it in
     // the transcript — nothing was lost.
-    state.inner.runs.write().await.remove(&session_id);
+    state.inner.session_coordinator.abort_run(&session_id).await;
     let (redelivered, redelivery) = state
         .inner
         .store
@@ -1059,14 +1048,14 @@ async fn held_subtask_completion_delivers_when_parent_turn_ends() {
         .insert(child_id.to_string(), busy_status(1, None));
 
     // Parent finishes a turn (the user was talking to the main agent).
-    state.inner.runs.write().await.insert(
+    state.inner.session_coordinator.install_run(&
         parent.id.to_string(),
         SessionRun {
             id: "parent-turn".to_string(),
             started_at: 0,
             cancel: Arc::new(AtomicBool::new(false)),
         },
-    );
+    ).await;
     finish_session_run(&state, parent.id.as_str(), "parent-turn").await;
 
     // The held completion is now queued for the parent as a "continue"

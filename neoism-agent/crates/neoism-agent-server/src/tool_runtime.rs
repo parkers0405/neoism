@@ -665,7 +665,7 @@ pub(crate) async fn descendant_sessions(
 }
 
 pub(crate) async fn session_is_running(state: &AppState, session_id: &str) -> bool {
-    state.inner.runs.read().await.contains_key(session_id)
+    state.inner.session_coordinator.active_run(session_id).await.is_some()
 }
 
 pub(crate) async fn steer_child_task_prompt(
@@ -938,11 +938,10 @@ pub(crate) async fn execute_tool_call_in_generation(
     }
     let cancel = state
         .inner
-        .runs
-        .read()
+        .session_coordinator
+        .active_run(session_id.as_str())
         .await
-        .get(session_id.as_str())
-        .map(|run| run.cancel.clone());
+        .map(|run| run.cancel);
     for _ in 0..4 {
         let mut effective = permissions.clone();
         effective.extend(

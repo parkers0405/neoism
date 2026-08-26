@@ -16,7 +16,7 @@ use neoism_agent_core::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio::sync::broadcast;
 
 use crate::error::ApiError;
 use crate::session_message_routes::{message_list, MessageListQuery};
@@ -102,7 +102,6 @@ pub(crate) async fn v2_events(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     let explicit_cursor = query.since.or(header_cursor);
-    let mut cursor = explicit_cursor.unwrap_or(0);
     let page_size = query.limit.unwrap_or(1_000).clamp(1, 5_000);
     let session_id = query.session_id;
     let family_root = match session_id.as_deref() {
@@ -112,101 +111,113 @@ pub(crate) async fn v2_events(
         },
         None => None,
     };
-    // Subscribe before replay so neither durable commits nor transient token
-    // deltas can land between the initial query and the live receivers.
-    let mut durable_receiver = BroadcastStream::new(state.subscribe_durable());
-    let mut live_receiver = BroadcastStream::new(state.subscribe_live());
+    // ONE ordered bus: every event — live token
+    // deltas and committed part/message edges alike — is broadcast in publish
+    // order by `AppState::publish{,_live,_committed}`. Delivering both kinds
+    // from this single subscription is what keeps a committed reasoning/tool
+    // part snapshot from ever overtaking (doubled text) or lagging behind
+    // (out-of-order timeline rows) the deltas around it. Subscribe BEFORE the
+    // catch-up replay so nothing slips between them.
+    let mut receiver = state.subscribe();
     let mut session_family = if let Some(root) = family_root.as_deref() {
         Some(session_family_ids(&state, root).await)
     } else {
         None
     };
-    if explicit_cursor.is_none() && query.tail.unwrap_or(false) {
-        cursor = state
-            .inner
-            .store
-            .latest_event_sequence()
-            .await
-            .unwrap_or_default();
-    }
+    // A cursor (`since` / Last-Event-ID) asks for durable catch-up first; the
+    // default `tail=true` connection is live-only and reconciles state over
+    // REST through the same ordered event stream.
+    let replay_from = if explicit_cursor.is_none() && query.tail.unwrap_or(false) {
+        None
+    } else {
+        Some(explicit_cursor.unwrap_or(0))
+    };
     let stream = async_stream::stream! {
-        loop {
-            // Read the global sequence when scoped, then filter in memory. An
-            // exact `events.session_id = root` query excludes every child and
-            // cannot represent the desktop's one-stream session-family model.
-            let replay = state
-                .inner
-                .store
-                .list_events_after(cursor as i64, page_size, None)
-                .await
-                .unwrap_or_default();
-            let replayed = replay.len();
-            // Merge current descendants into connection-owned membership.
-            // Missing members remain until their authoritative deletion event
-            // is replayed: DB deletion can precede durable event persistence.
-            let next_family = if let Some(root) = family_root.as_deref() {
-                Some(session_family_ids(&state, root).await)
-            } else {
-                None
-            };
-            if let (Some(family), Some(next)) = (session_family.as_mut(), next_family.as_ref()) {
-                family.extend(next.iter().cloned());
-            }
-            for event in replay {
-                cursor = event.seq.max(0) as u64;
-                let matched = event_matches_family(&event.payload, session_family.as_ref());
-                let deleted_session =
-                    (event.payload.kind == neoism_agent_core::event_type::SESSION_DELETED)
-                    .then(|| event_session_id(&event.payload).map(str::to_string))
-                    .flatten();
-                if matched {
-                    yield Ok(v2_sse_event(persisted_event_envelope(event)));
+        // Events committed while the catch-up replay ran are yielded by the
+        // replay AND buffered in the live subscription; remember replayed ids
+        // so the buffered copies are skipped instead of duplicated.
+        let mut replayed_ids: HashSet<String> = HashSet::new();
+        if let Some(mut cursor) = replay_from {
+            loop {
+                // Read the global sequence when scoped, then filter in memory.
+                // An exact `events.session_id = root` query excludes every
+                // child and cannot represent the desktop's one-stream
+                // session-family model.
+                let replay = state
+                    .inner
+                    .store
+                    .list_events_after(cursor as i64, page_size, None)
+                    .await
+                    .unwrap_or_default();
+                let replayed = replay.len();
+                // Merge current descendants into connection-owned membership.
+                // Missing members remain until their authoritative deletion
+                // event is replayed: DB deletion can precede durable event
+                // persistence.
+                let next_family = if let Some(root) = family_root.as_deref() {
+                    Some(session_family_ids(&state, root).await)
+                } else {
+                    None
+                };
+                if let (Some(family), Some(next)) = (session_family.as_mut(), next_family.as_ref()) {
+                    family.extend(next.iter().cloned());
                 }
-                if matched {
-                    if let (Some(family), Some(deleted)) =
-                        (session_family.as_mut(), deleted_session.as_deref())
-                    {
-                        family.remove(deleted);
+                if session_family.is_none() {
+                    session_family = next_family;
+                }
+                for event in replay {
+                    cursor = event.seq.max(0) as u64;
+                    // Only the replay TAIL can overlap the live buffer; keep
+                    // the set bounded on huge `since=0` catch-ups by shedding
+                    // older pages.
+                    if replayed_ids.len() >= 16_384 {
+                        replayed_ids.clear();
                     }
-                }
-            }
-            if session_family.is_none() {
-                session_family = next_family;
-            }
-            if replayed == page_size {
-                continue;
-            }
-            tokio::select! {
-                durable = tokio_stream::StreamExt::next(&mut durable_receiver) => {
-                    if durable.is_none() {
-                        break;
-                    }
-                    // The next replay merges newly discovered descendants;
-                    // deleted members remain until their event is delivered.
-                }
-                live = tokio_stream::StreamExt::next(&mut live_receiver) => {
-                    let live = match live {
-                        Some(Ok(live)) => live,
-                        Some(Err(_)) => continue,
-                        None => break,
-                    };
-                    if !event_matches_family(&live, session_family.as_ref()) {
-                        if let (Some(root), Some(event_session_id)) =
-                            (family_root.as_deref(), event_session_id(&live))
+                    replayed_ids.insert(event.payload.id.to_string());
+                    let matched = event_matches_family(&event.payload, session_family.as_ref());
+                    let deleted_session =
+                        (event.payload.kind == neoism_agent_core::event_type::SESSION_DELETED)
+                        .then(|| event_session_id(&event.payload).map(str::to_string))
+                        .flatten();
+                    if matched {
+                        yield Ok(v2_sse_event(persisted_event_envelope(event)));
+                        if let (Some(family), Some(deleted)) =
+                            (session_family.as_mut(), deleted_session.as_deref())
                         {
-                            if session_descends_from(&state, event_session_id, root).await {
-                                if let Some(family) = session_family.as_mut() {
-                                    family.insert(event_session_id.to_string());
-                                }
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue;
+                            family.remove(deleted);
                         }
                     }
-                    yield Ok(v2_live_sse_event(live));
                 }
+                if replayed < page_size {
+                    break;
+                }
+            }
+        }
+        loop {
+            let live = match receiver.recv().await {
+                Ok(live) => live,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    // Dropped events are reconciled by the client's idle
+                    // refresh; delivery order is preserved for what remains.
+                    tracing::warn!(skipped, "v2 event subscriber lagged; dropping events");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if !replayed_ids.is_empty() && replayed_ids.remove(live.id.as_str()) {
+                continue;
+            }
+            if !admit_live_event(&state, &live, family_root.as_deref(), &mut session_family).await {
+                continue;
+            }
+            let deleted_session = (live.kind == neoism_agent_core::event_type::SESSION_DELETED)
+                .then(|| event_session_id(&live).map(str::to_string))
+                .flatten();
+            yield Ok(v2_live_sse_event(live));
+            if let (Some(family), Some(deleted)) =
+                (session_family.as_mut(), deleted_session.as_deref())
+            {
+                family.remove(deleted);
             }
         }
     };
@@ -226,6 +237,30 @@ pub(crate) async fn v2_session_runtime(
             .get_session_runtime_snapshot(&root_id)
             .await?,
     ))
+}
+
+/// Whether a live event belongs on this connection's stream, growing the
+/// connection-owned family when the event reveals a new descendant session.
+async fn admit_live_event(
+    state: &AppState,
+    live: &neoism_agent_core::EventPayload,
+    family_root: Option<&str>,
+    session_family: &mut Option<HashSet<String>>,
+) -> bool {
+    if event_matches_family(live, session_family.as_ref()) {
+        return true;
+    }
+    let (Some(root), Some(live_session_id)) = (family_root, event_session_id(live))
+    else {
+        return false;
+    };
+    if !session_descends_from(state, live_session_id, root).await {
+        return false;
+    }
+    if let Some(family) = session_family.as_mut() {
+        family.insert(live_session_id.to_string());
+    }
+    true
 }
 
 async fn session_family_ids(state: &AppState, root: &str) -> HashSet<String> {
@@ -405,7 +440,7 @@ pub(crate) async fn v2_prompt(
         ));
     }
     let prompt = request.into_prompt_request()?;
-    if prompt.no_reply && !state.inner.runs.read().await.contains_key(&session_id) {
+    if prompt.no_reply && !state.inner.session_coordinator.active_run(&session_id).await.is_some() {
         crate::session_prompt::append_prompt(&state, &session_id, prompt, false).await?;
         crate::execution_activity::finish_if_quiescent(&state, &session_id).await;
         return Ok(StatusCode::NO_CONTENT.into_response());

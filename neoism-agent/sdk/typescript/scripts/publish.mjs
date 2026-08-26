@@ -18,7 +18,7 @@ const repoRoot = resolve(workspace, "../../..");
 
 // Dependency order: leaves first so a partially completed run never publishes
 // a package whose internal dependencies are missing from the registry.
-const PACKAGES = ["core", "http", "plugin-subagents", "node", "all"];
+const PACKAGES = ["core", "http", "plugin-subagents", "plugin", "node", "all"];
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");

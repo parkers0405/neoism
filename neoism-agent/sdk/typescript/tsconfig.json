@@ -1,10 +1,23 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/core" },
-    { "path": "packages/http" },
-    { "path": "packages/node" },
-    { "path": "packages/plugin-subagents" },
-    { "path": "packages/all" }
+    {
+      "path": "packages/core"
+    },
+    {
+      "path": "packages/http"
+    },
+    {
+      "path": "packages/plugin"
+    },
+    {
+      "path": "packages/node"
+    },
+    {
+      "path": "packages/plugin-subagents"
+    },
+    {
+      "path": "packages/all"
+    }
   ]
 }

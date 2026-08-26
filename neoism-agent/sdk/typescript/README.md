@@ -96,3 +96,55 @@ Set `sandbox: true` to require isolation locally or
 `NEOISM_AGENT_PLUGIN_SANDBOX=off` to explicitly disable automatic local use.
 Hook failures and timeouts mark plugin status unhealthy; a later successful
 invocation restores health.
+## Serve plugins (`neoism-plugin/2`) — the third-party plugin runtime
+
+A serve plugin is a long-lived process the agent server spawns once per
+workspace plugin generation. It declares tools, hooks, and event
+subscriptions at handshake, and they register into the same runtime registry
+native plugins use — tools run through the normal permission pipeline, hook
+failures surface in `/v2/plugins`, and generation reloads restart the
+process cleanly.
+
+Author one with `@neoism/plugin`:
+
+```ts
+import { definePlugin, runPlugin } from "@neoism/plugin";
+
+await runPlugin(definePlugin({
+  tools: [{
+    id: "todo_count",
+    description: "Count TODO markers",
+    parameters: { type: "object", properties: {} },
+    async execute(_input, context) {
+      // context.client is an SDK client bound to the local agent server.
+      return { output: `workspace: ${context.directory}` };
+    },
+  }],
+  hooks: { "chat.options": (_context, value) => ({ ...value, temperature: 0 }) },
+  events: { namespaces: ["session."], handler: (event) => console.error(event.type) },
+}));
+```
+
+Configure it in the workspace `plugins` map — any one of:
+
+```jsonc
+"plugins": {
+  "dev.example.local":   { "options": { "entry": "./plugins/todos" } },
+  "dev.example.npm":     { "options": { "npm": "@example/neoism-plugin@1.0.0" } },
+  "dev.example.custom":  { "options": { "serve": ["python3", "plugin.py"] } }
+}
+```
+
+`npm:` packages install into the server's plugin cache in the background;
+the plugin reports `Degraded ("installing …")` until the install lands, then
+the next generation refresh brings it live. Options: `config` (passed to the
+plugin's `initialize`), `env`, `timeoutMs` (per call), `network`
+(default `true` — SDK callbacks need loopback), and `sandbox` as above. A
+plugin that fails to spawn or handshake degrades with a reason instead of
+breaking the workspace.
+
+Any language works: speak newline-delimited JSON on stdio — reply to
+`initialize` with `{ protocol: "neoism-plugin/2", tools, hooks,
+eventNamespaces }`, answer `tool.invoke` / `hook.invoke` by echoing the
+request `id` with a `result` (or `error`), treat `event` frames as
+notifications, and exit on `shutdown`.

@@ -70,8 +70,8 @@ struct ProcessPlugin {
     network: bool,
 }
 
-#[derive(Clone, Copy)]
-enum SandboxPolicy {
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SandboxPolicy {
     Off,
     Auto,
     Required,
@@ -200,11 +200,38 @@ impl ProcessPlugin {
     }
 
     fn command(&self, program: &str, arguments: &[String]) -> anyhow::Result<Command> {
-        let requested_program = crate::executable::in_directory(program, &self.working_directory);
+        let mut command = Vec::with_capacity(arguments.len() + 1);
+        command.push(program.to_string());
+        command.extend(arguments.iter().cloned());
+        build_plugin_command(
+            &self.executables,
+            &command,
+            &self.working_directory,
+            self.sandbox,
+            self.network,
+        )
+    }
+
+}
+
+/// Resolve + (on Linux) bubblewrap-sandbox a plugin command line. Shared by
+/// the one-shot declarative hook path and the long-lived serve-plugin host.
+pub(crate) fn build_plugin_command(
+    executables: &Arc<dyn neoism_agent_service_api::ExecutableService>,
+    command: &[String],
+    working_directory: &Path,
+    sandbox: SandboxPolicy,
+    network: bool,
+) -> anyhow::Result<Command> {
+    let (program, arguments) = command
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("plugin command is empty"))?;
+    {
+        let requested_program = crate::executable::in_directory(program, working_directory);
         let program = if Path::new(&requested_program).is_absolute() {
             PathBuf::from(&requested_program)
         } else {
-            self.executables
+            executables
                 .resolve(&neoism_agent_service_api::ExecutableRequest::new(
                     &requested_program,
                     neoism_agent_service_api::ExecutablePurpose::Plugin,
@@ -218,8 +245,8 @@ impl ProcessPlugin {
                 .path
         };
         #[cfg(target_os = "linux")]
-        if !matches!(self.sandbox, SandboxPolicy::Off) {
-            let bwrap = self.executables.resolve(
+        if !matches!(sandbox, SandboxPolicy::Off) {
+            let bwrap = executables.resolve(
                 &neoism_agent_service_api::ExecutableRequest::new(
                     "bwrap",
                     neoism_agent_service_api::ExecutablePurpose::Sandbox,
@@ -240,7 +267,7 @@ impl ProcessPlugin {
                     "--dir",
                     "/etc",
                 ]);
-                if !self.network {
+                if !network {
                     command.arg("--unshare-net");
                 }
                 for path in [
@@ -255,8 +282,7 @@ impl ProcessPlugin {
                         command.args(["--ro-bind", path, path]);
                     }
                 }
-                let mut ancestors = self
-                    .working_directory
+                let mut ancestors = working_directory
                     .ancestors()
                     .skip(1)
                     .filter(|path| *path != Path::new("/"))
@@ -265,11 +291,11 @@ impl ProcessPlugin {
                 for ancestor in ancestors {
                     command.args(["--dir", ancestor.to_string_lossy().as_ref()]);
                 }
-                let directory = self.working_directory.to_string_lossy();
+                let directory = working_directory.to_string_lossy();
                 command.args(["--ro-bind", directory.as_ref(), directory.as_ref()]);
                 if let Some(parent) = program.parent().filter(|path| {
                     path.is_absolute()
-                        && !path.starts_with(&self.working_directory)
+                        && !path.starts_with(working_directory)
                         && !["/usr", "/bin", "/lib", "/lib64"]
                             .iter()
                             .any(|root| path.starts_with(root))
@@ -301,7 +327,7 @@ impl ProcessPlugin {
                 command.args(arguments);
                 return Ok(command);
             }
-            if matches!(self.sandbox, SandboxPolicy::Required) {
+            if matches!(sandbox, SandboxPolicy::Required) {
                 anyhow::bail!(
                     "plugin sandbox executable `bwrap` is unavailable: {}; configure the host executable resolver or install bubblewrap",
                     bwrap_error.unwrap_or_else(|| "not found".to_string())
@@ -309,11 +335,11 @@ impl ProcessPlugin {
             }
         }
         #[cfg(not(target_os = "linux"))]
-        if matches!(self.sandbox, SandboxPolicy::Required) {
+        if matches!(sandbox, SandboxPolicy::Required) {
             anyhow::bail!("plugin sandbox is required but bubblewrap is unavailable");
         }
         let mut command = Command::new(program);
-        command.args(arguments).current_dir(&self.working_directory);
+        command.args(arguments).current_dir(working_directory);
         Ok(command)
     }
 }
@@ -329,7 +355,18 @@ pub(crate) fn configured_agent_plugins(
         .filter(|plugin| plugin.enabled)
         .filter_map(|plugin| {
             let id = plugin_id(&plugin)?;
-            match load_declarative_plugin(services, directory, &id, &plugin_options(&plugin)) {
+            let options = plugin_options(&plugin);
+            // A serve-shaped entry is a long-lived third-party plugin host;
+            // everything else stays on the declarative one-shot path.
+            if let Some(spec) =
+                crate::plugin_host_process::serve_plugin_spec(&id, directory, &options)
+            {
+                return Some(Box::new(crate::plugin_host_process::ServePluginFactory::new(
+                    spec,
+                    Arc::clone(&services.executables),
+                )) as Box<dyn PluginFactory>);
+            }
+            match load_declarative_plugin(services, directory, &id, &options) {
                 Ok(plugin) => Some(Box::new(plugin) as Box<dyn PluginFactory>),
                 Err(error) => {
                     tracing::warn!(plugin = %id, %error, "failed to load configured plugin");
@@ -492,7 +529,7 @@ fn load_declarative_plugin(
     })
 }
 
-fn sandbox_policy(configured: Option<bool>) -> SandboxPolicy {
+pub(crate) fn sandbox_policy(configured: Option<bool>) -> SandboxPolicy {
     match configured {
         Some(false) => SandboxPolicy::Off,
         Some(true) => SandboxPolicy::Required,

@@ -1065,9 +1065,30 @@ fn config_signature(
     services: &neoism_agent_service_api::AgentServices,
     root: &Path,
 ) -> Result<Vec<u8>, String> {
-    neoism_agent_builtins::plugin::config::load(services, &root.to_string_lossy())
-        .map_err(|error| error.to_string())
-        .and_then(|(info, _)| serde_json::to_vec(&info).map_err(|error| error.to_string()))
+    let directory = root.to_string_lossy();
+    let (info, _) = neoism_agent_builtins::plugin::config::load(services, &directory)
+        .map_err(|error| error.to_string())?;
+    let mut signature =
+        serde_json::to_vec(&info).map_err(|error| error.to_string())?;
+    // A serve plugin's runnable entry appearing on disk (a finished background
+    // npm install) must read as a config change: the next acquire then
+    // rebuilds the generation with the plugin live instead of Degraded.
+    for (id, plugin) in &info.plugins {
+        if !plugin.enabled {
+            continue;
+        }
+        if let Some(spec) = crate::plugin_host_process::serve_plugin_spec(
+            id,
+            &directory,
+            &plugin.options,
+        ) {
+            signature.extend_from_slice(id.as_bytes());
+            signature.push(
+                crate::plugin_host_process::resolved_serve_entry(&spec).is_some() as u8,
+            );
+        }
+    }
+    Ok(signature)
 }
 
 pub(crate) fn canonical_location(directory: &str) -> PathBuf {

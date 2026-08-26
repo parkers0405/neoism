@@ -229,6 +229,11 @@ pub(crate) async fn session_delete(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<bool>, ApiError> {
+    let deleted_session = state.inner.store.get_session(&session_id).await?;
+    let execution_root = match deleted_session.as_ref() {
+        Some(session) => Some(crate::execution_activity::root_session_id(&state, session).await),
+        None => None,
+    };
     crate::interaction::cancel_session_interactions(&state, &session_id).await;
     if !state.inner.store.delete_session(&session_id).await? {
         return Err(ApiError::not_found("Session not found"));
@@ -238,6 +243,9 @@ pub(crate) async fn session_delete(
         event_type::SESSION_DELETED,
         json!({ "sessionID": session_id }),
     ));
+    if let Some(root) = execution_root.filter(|root| root != &session_id) {
+        crate::execution_activity::finish_if_quiescent(&state, &root).await;
+    }
     Ok(Json(true))
 }
 

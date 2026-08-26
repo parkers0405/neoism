@@ -21,6 +21,7 @@ use crate::{
 const DEFAULT_COMPACTION_TAIL_TURNS: usize = 2;
 const MIN_PRESERVE_RECENT_TOKENS: u64 = 2_000;
 const MAX_PRESERVE_RECENT_TOKENS: u64 = 8_000;
+const MANUAL_COMPACTION_REASON: &str = "manual";
 
 const COMPACTION_PROMPT_TEMPLATE: &str = r#"Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
@@ -66,10 +67,46 @@ pub(crate) async fn compact_session_context(
     state: &AppState,
     session_id: &str,
 ) -> Result<SessionInfo, ApiError> {
+    let admission = crate::execution_activity::admission_guard(state, session_id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("session {session_id} not found")))?;
     if state.inner.runs.read().await.contains_key(session_id) {
         return Err(ApiError::conflict("Session is already running"));
     }
-    compact_session_context_inner(state, session_id, "auto").await
+    let started = now_millis();
+    let run = SessionRun {
+        id: Id::ascending(IdKind::Event).to_string(),
+        started_at: started,
+        cancel: Arc::new(AtomicBool::new(false)),
+    };
+    state
+        .inner
+        .session_coordinator
+        .try_start_run(session_id, run.clone())
+        .await
+        .map_err(|_| ApiError::conflict("Session is already running"))?;
+    state.inner.runs.write().await.insert(session_id.to_string(), run.clone());
+    if let Err(error) = state.inner.store.start_run(&run.id, session_id).await {
+        crate::session_run::finish_session_run(state, session_id, &run.id).await;
+        return Err(ApiError::internal(error.to_string()));
+    }
+    if let Err(error) = crate::execution_activity::begin_manual_action(state, session_id, &run.id)
+        .await
+    {
+        crate::session_run::finish_session_run(state, session_id, &run.id).await;
+        return Err(ApiError::internal(error.to_string()));
+    }
+    drop(admission);
+    let result = run_compaction(
+        state,
+        session_id,
+        MANUAL_COMPACTION_REASON,
+        started,
+        &run.cancel,
+    )
+    .await;
+    release_owned_compaction_run(state, session_id, Some(run.id)).await;
+    result
 }
 
 pub(crate) async fn compact_session_context_for_run(
@@ -94,6 +131,8 @@ async fn compact_session_context_inner(
     let (cancel, owned_run_id) = if let Some(run) = existing {
         (run.cancel, None)
     } else {
+        let _execution_admission =
+            crate::execution_activity::admission_guard(state, session_id).await;
         let run = SessionRun {
             id: Id::ascending(IdKind::Event).to_string(),
             started_at: started,
@@ -346,6 +385,7 @@ async fn release_owned_compaction_run(
             .finish_run(session_id, &run_id)
             .await;
     }
+    crate::execution_activity::finish_if_quiescent(state, session_id).await;
 }
 
 pub(crate) fn is_default_session_title(title: &str) -> bool {
@@ -466,7 +506,15 @@ async fn generate_model_compaction_summary(
         return None;
     }
     let provider = snapshot.provider_services_by_priority().into_iter().next()?;
-    let stream = provider.stream(request).ok()?;
+    let activity_segment =
+        crate::execution_activity::begin_provider_segment(state, session_id).await;
+    let stream = match provider.stream(request) {
+        Ok(stream) => stream,
+        Err(_) => {
+            crate::execution_activity::end_provider_segment(activity_segment).await;
+            return None;
+        }
+    };
     let mut events = stream.events;
     let mut raw = String::new();
     loop {
@@ -478,14 +526,18 @@ async fn generate_model_compaction_summary(
         }
         let event = tokio::select! {
             biased;
-            _ = wait_for_cancellation(cancel.clone()) => return None,
+            _ = wait_for_cancellation(cancel.clone()) => {
+                return None;
+            },
             result = timeout(
                 Duration::from_secs(model_compaction_timeout_secs()),
                 events.next(),
             ) => match result {
                 Ok(Some(Ok(event))) => event,
                 Ok(Some(Err(_))) | Ok(None) => break,
-                Err(_) if raw.trim().is_empty() => return None,
+                Err(_) if raw.trim().is_empty() => {
+                    return None;
+                },
                 Err(_) => break,
             },
         };
@@ -508,6 +560,7 @@ async fn generate_model_compaction_summary(
             _ => {}
         }
     }
+    crate::execution_activity::end_provider_segment(activity_segment).await;
     clean_model_compaction_summary(&raw)
 }
 

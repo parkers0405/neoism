@@ -22,6 +22,8 @@ pub(crate) async fn start_session_run(
     state: &AppState,
     session_id: &Id,
 ) -> Result<SessionRun, SessionRun> {
+    let _execution_admission =
+        crate::execution_activity::admission_guard(state, session_id.as_str()).await;
     let run = SessionRun {
         id: Id::ascending(IdKind::Event).to_string(),
         started_at: crate::now_millis(),
@@ -56,6 +58,23 @@ pub(crate) async fn start_session_run(
 }
 
 pub(crate) async fn finish_session_run(state: &AppState, session_id: &str, run_id: &str) {
+    if let Err(error) = try_finish_session_run(state, session_id, run_id).await {
+        tracing::warn!(%error, %session_id, %run_id, "failed to durably finish session run");
+    }
+}
+
+pub(crate) async fn try_finish_session_run(
+    state: &AppState,
+    session_id: &str,
+    run_id: &str,
+) -> anyhow::Result<()> {
+    // Durable state goes first. Cancellation or an I/O error leaves in-memory
+    // ownership intact so a cleanup guard can retry the exact same run.
+    state
+        .inner
+        .store
+        .finish_run(run_id, "completed", None)
+        .await?;
     let removed = {
         let mut runs = state.inner.runs.write().await;
         if runs
@@ -69,17 +88,12 @@ pub(crate) async fn finish_session_run(state: &AppState, session_id: &str, run_i
         }
     };
     if !removed {
-        return;
+        return Ok(());
     }
     state
         .inner
         .session_coordinator
         .finish_run(session_id, run_id)
-        .await;
-    let _ = state
-        .inner
-        .store
-        .finish_run(run_id, "completed", None)
         .await;
     publish_idle_if_no_run(state, session_id).await;
     crate::session_actions::reconcile_parent_subtask_completions_for_child(
@@ -94,6 +108,8 @@ pub(crate) async fn finish_session_run(state: &AppState, session_id: &str, run_i
         state, session_id,
     )
     .await;
+    crate::execution_activity::finish_if_quiescent(state, session_id).await;
+    Ok(())
 }
 
 pub(crate) async fn publish_idle_if_no_run(state: &AppState, session_id: &str) {

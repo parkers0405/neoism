@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -41,6 +41,10 @@ pub(crate) struct InnerState {
     /// Serializes each parent's list/check/enqueue reconciliation so sibling
     /// completions cannot race through queue dedupe.
     pub(crate) subtask_parent_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) execution_activity_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) execution_owner_id: String,
+    execution_lease_control: Arc<ExecutionLeaseControl>,
+    execution_lease_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) permissions: RwLock<HashMap<String, PermissionRequestInfo>>,
     pub(crate) permission_waiters: RwLock<HashMap<String, PermissionPending>>,
     pub(crate) permission_approvals: RwLock<HashMap<String, Vec<PermissionRule>>>,
@@ -57,6 +61,21 @@ pub(crate) struct InnerState {
     event_writer: mpsc::UnboundedSender<(EventPayload, bool)>,
 }
 
+struct ExecutionLeaseControl {
+    stopping: AtomicBool,
+    notify: Notify,
+}
+
+impl Drop for InnerState {
+    fn drop(&mut self) {
+        if let Ok(handle) = self.execution_lease_handle.get_mut() {
+            if let Some(handle) = handle.take() {
+                handle.abort();
+            }
+        }
+    }
+}
+
 pub(crate) struct PermissionPending {
     pub(crate) request: PermissionRequestInfo,
     pub(crate) sender: oneshot::Sender<Result<Vec<PermissionRule>, String>>,
@@ -71,6 +90,13 @@ pub(crate) struct SessionRun {
     pub(crate) id: String,
     pub(crate) started_at: u64,
     pub(crate) cancel: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExecutionSubtaskRegistration {
+    Inserted,
+    AlreadyPresent,
+    Rejected,
 }
 
 #[derive(Clone)]
@@ -341,6 +367,14 @@ pub(crate) struct PersistedEvent {
 }
 
 impl AppState {
+    #[cfg(test)]
+    pub(crate) fn execution_lease_running(&self) -> bool {
+        self.inner
+            .execution_lease_handle
+            .lock()
+            .expect("execution lease handle poisoned")
+            .is_some()
+    }
     pub async fn open_default(services: AgentServices) -> anyhow::Result<Self> {
         let store = SessionStore::open_default().await?;
         let artifact_root = PathBuf::from(crate::default_state_dir()).join("artifacts");
@@ -383,6 +417,14 @@ impl AppState {
         let durable_permissions = store.list_pending_permissions().await?;
         let durable_questions = store.list_pending_questions().await?;
         store.interrupt_stale_runs().await?;
+        let execution_owner_id = Id::ascending(IdKind::Event).to_string();
+        let execution_lease_control = Arc::new(ExecutionLeaseControl {
+            stopping: AtomicBool::new(false),
+            notify: Notify::new(),
+        });
+        store
+            .heartbeat_execution_owner(&execution_owner_id, crate::now_millis())
+            .await?;
         let state = Self {
             inner: Arc::new(InnerState {
                 services,
@@ -398,6 +440,10 @@ impl AppState {
                 session_coordinator: Default::default(),
                 subtask_completion_locks: Mutex::new(HashMap::new()),
                 subtask_parent_locks: Mutex::new(HashMap::new()),
+                execution_activity_locks: Mutex::new(HashMap::new()),
+                execution_owner_id,
+                execution_lease_control: execution_lease_control.clone(),
+                execution_lease_handle: std::sync::Mutex::new(None),
                 permissions: RwLock::new(
                     durable_permissions
                         .into_iter()
@@ -424,6 +470,37 @@ impl AppState {
                 event_writer,
             }),
         };
+        let weak_state = Arc::downgrade(&state.inner);
+        let lease_control = execution_lease_control;
+        let lease_handle = tokio::spawn(async move {
+            loop {
+                if lease_control.stopping.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Some(inner) = weak_state.upgrade() else { break; };
+                let now = crate::now_millis();
+                let store = inner.store.clone();
+                let owner_id = inner.execution_owner_id.clone();
+                drop(inner);
+                if let Err(error) = store
+                    .heartbeat_execution_owner(&owner_id, now)
+                    .await
+                {
+                    tracing::warn!(%error, "failed to heartbeat execution activity owner");
+                }
+                if let Err(error) = store
+                    .reconcile_stale_execution_segments(now.saturating_sub(15_000))
+                    .await
+                {
+                    tracing::warn!(%error, "failed to reconcile stale execution activity segments");
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+                    _ = lease_control.notify.notified() => {},
+                }
+            }
+        });
+        *state.inner.execution_lease_handle.lock().expect("execution lease handle poisoned") = Some(lease_handle);
         let durable_store = state.inner.store.clone();
         let durable_events = state.inner.events.clone();
         let durable_notifications = state.inner.durable_events.clone();
@@ -562,6 +639,17 @@ impl AppState {
 
     /// Stop state-owned subprocesses and background transport tasks.
     pub async fn shutdown(&self) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
+        self.inner.execution_lease_control.stopping.store(true, Ordering::SeqCst);
+        self.inner.execution_lease_control.notify.notify_waiters();
+        let lease_handle = self
+            .inner
+            .execution_lease_handle
+            .lock()
+            .expect("execution lease handle poisoned")
+            .take();
+        if let Some(handle) = lease_handle {
+            let _ = handle.await;
+        }
         let mut errors = Vec::new();
         for runtime in self.inner.workspace_runtimes.close().await {
             if let Err(error) = runtime.teardown(self).await {
@@ -789,6 +877,10 @@ impl AppState {
 }
 
 impl SessionStore {
+    #[cfg(test)]
+    pub(crate) async fn lock_writer_for_test(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.db.write_gate.clone().lock_owned().await
+    }
     async fn commit_projection_event(
         &self,
         mut projection: Vec<(String, Vec<SqlValue>)>,
@@ -849,6 +941,102 @@ impl SessionStore {
                 id TEXT PRIMARY KEY,
                 info_json TEXT NOT NULL,
                 updated INTEGER NOT NULL
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS execution_activity (
+                root_session_id TEXT PRIMARY KEY,
+                execution_id TEXT NOT NULL,
+                root_message_id TEXT NOT NULL,
+                completed_ms INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                family_revision INTEGER NOT NULL DEFAULT 0,
+                finished INTEGER NOT NULL DEFAULT 0,
+                updated INTEGER NOT NULL
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS execution_activity_segments (
+                segment_id TEXT PRIMARY KEY,
+                root_session_id TEXT NOT NULL,
+                execution_id TEXT NOT NULL,
+                owner_instance_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                started_at INTEGER NOT NULL
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        // Additive migrations for databases created by the first execution
+        // timer implementation. Defaults are only migration scaffolding; new
+        // rows always carry an execution and owner identity.
+        let _ = self
+            .db
+            .execute(
+                "ALTER TABLE execution_activity ADD COLUMN family_revision INTEGER NOT NULL DEFAULT 0",
+                Vec::new(),
+            )
+            .await;
+        let _ = self
+            .db
+            .execute(
+                "ALTER TABLE execution_activity_segments ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
+                Vec::new(),
+            )
+            .await;
+        let _ = self
+            .db
+            .execute(
+                "ALTER TABLE execution_activity_segments ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''",
+                Vec::new(),
+            )
+            .await;
+        let _ = self
+            .db
+            .execute(
+                "ALTER TABLE execution_activity_segments ADD COLUMN owner_instance_id TEXT NOT NULL DEFAULT ''",
+                Vec::new(),
+            )
+            .await;
+        self.db
+            .execute(
+                "UPDATE execution_activity_segments SET execution_id = COALESCE((SELECT execution_id FROM execution_activity WHERE execution_activity.root_session_id = execution_activity_segments.root_session_id), '') WHERE execution_id = ''",
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS execution_activity_owners (
+                owner_instance_id TEXT PRIMARY KEY,
+                heartbeat_at INTEGER NOT NULL
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS execution_subtasks (
+                execution_id TEXT NOT NULL,
+                child_session_id TEXT NOT NULL,
+                root_session_id TEXT NOT NULL,
+                parent_session_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                PRIMARY KEY (execution_id, child_session_id)
             )
             "#,
                 Vec::new(),
@@ -1895,24 +2083,477 @@ impl SessionStore {
             .transpose()
     }
 
-    pub(crate) async fn delete_session(&self, session_id: &str) -> anyhow::Result<bool> {
-        // Delete children explicitly instead of leaning on the FK cascade:
-        // the cascade only fires where the foreign_keys pragma is on, and
-        // turso connections don't enable it. Same end state on both engines.
-        for sql in [
-            "DELETE FROM messages WHERE session_id = ?",
-            "DELETE FROM prompt_queue WHERE session_id = ?",
-            "DELETE FROM session_runs WHERE session_id = ?",
-            "DELETE FROM session_context_epochs WHERE session_id = ?",
-            "DELETE FROM message_embeddings WHERE session_id = ?",
-        ] {
-            self.db.execute(sql, vec![text(session_id)]).await?;
-        }
-        let affected = self
-            .db
-            .execute("DELETE FROM sessions WHERE id = ?", vec![text(session_id)])
+    #[cfg(test)]
+    pub(crate) async fn replace_execution_activity(
+        &self,
+        snapshot: &neoism_agent_core::ExecutionActivitySnapshot,
+    ) -> anyhow::Result<()> {
+        self.db
+            .execute_transaction_with_results(vec![
+                (
+                    "DELETE FROM execution_activity_segments WHERE root_session_id = ?".to_string(),
+                    vec![text(&snapshot.root_session_id)],
+                ),
+                (
+                    r#"INSERT INTO execution_activity
+                    (root_session_id, execution_id, root_message_id, completed_ms, revision, family_revision, finished, updated)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    ON CONFLICT(root_session_id) DO UPDATE SET
+                      execution_id = excluded.execution_id,
+                      root_message_id = excluded.root_message_id,
+                      completed_ms = excluded.completed_ms,
+                      revision = excluded.revision,
+                      family_revision = execution_activity.family_revision + 1,
+                      finished = excluded.finished,
+                      updated = excluded.updated"#
+                        .to_string(),
+                    vec![
+                        text(&snapshot.root_session_id),
+                        text(&snapshot.execution_id),
+                        text(&snapshot.root_message_id),
+                        int(store_i64(snapshot.completed_ms)),
+                        int(store_i64(snapshot.revision)),
+                        int(i64::from(snapshot.finished)),
+                        int(store_i64(crate::now_millis())),
+                    ],
+                ),
+            ])
             .await?;
-        Ok(affected > 0)
+        Ok(())
+    }
+
+    pub(crate) async fn admit_execution_activity(
+        &self,
+        root_session_id: &str,
+        execution_id: &str,
+        root_message_id: &str,
+        allowed_run_id: &str,
+    ) -> anyhow::Result<Option<neoism_agent_core::ExecutionActivitySnapshot>> {
+        let now = crate::now_millis();
+        self.db.execute_transaction(vec![
+            (
+                r#"UPDATE execution_activity SET
+                     execution_id = CASE WHEN root_message_id = ? THEN execution_id ELSE ? END,
+                     root_message_id = ?,
+                     completed_ms = CASE WHEN root_message_id = ? THEN completed_ms ELSE 0 END,
+                     revision = CASE WHEN root_message_id = ? THEN revision ELSE revision + 1 END,
+                     family_revision = CASE WHEN root_message_id = ? THEN family_revision ELSE family_revision + 1 END,
+                     finished = CASE WHEN root_message_id = ? THEN finished ELSE 0 END,
+                     updated = ?
+                   WHERE root_session_id = ? AND (root_message_id = ? OR (
+                     finished = 1
+                     AND NOT EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.root_session_id = ? AND s.execution_id = execution_activity.execution_id)
+                     AND NOT EXISTS (SELECT 1 FROM execution_subtasks t WHERE t.execution_id = execution_activity.execution_id AND t.status = 'outstanding')
+                     AND NOT EXISTS (SELECT 1 FROM session_runs r WHERE r.status = 'running' AND r.id <> ? AND (r.session_id = ? OR r.session_id IN (SELECT child_session_id FROM execution_subtasks WHERE execution_id = execution_activity.execution_id)))
+                     AND NOT EXISTS (SELECT 1 FROM prompt_queue q WHERE q.session_id = ? OR q.session_id IN (SELECT child_session_id FROM execution_subtasks WHERE execution_id = execution_activity.execution_id))
+                   ))"#.to_string(),
+                vec![text(root_message_id), text(execution_id), text(root_message_id), text(root_message_id), text(root_message_id), text(root_message_id), text(root_message_id), int(store_i64(now)), text(root_session_id), text(root_message_id), text(root_session_id), text(allowed_run_id), text(root_session_id), text(root_session_id)],
+            ),
+            (
+                "INSERT OR IGNORE INTO execution_activity (root_session_id, execution_id, root_message_id, completed_ms, revision, family_revision, finished, updated) SELECT ?, ?, ?, 0, 1, 1, 0, ? WHERE NOT EXISTS (SELECT 1 FROM session_runs r WHERE r.session_id = ? AND r.status = 'running' AND r.id <> ?)".to_string(),
+                vec![text(root_session_id), text(execution_id), text(root_message_id), int(store_i64(now)), text(root_session_id), text(allowed_run_id)],
+            ),
+        ]).await?;
+        let snapshot = self.get_execution_activity(root_session_id).await?;
+        Ok(snapshot.filter(|snapshot| snapshot.root_message_id == root_message_id))
+    }
+
+    pub(crate) async fn get_execution_activity(
+        &self,
+        root_session_id: &str,
+    ) -> anyhow::Result<Option<neoism_agent_core::ExecutionActivitySnapshot>> {
+        let Some(row) = self
+            .db
+            .fetch_optional(
+                "SELECT * FROM execution_activity WHERE root_session_id = ?",
+                vec![text(root_session_id)],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let segment_rows = self
+            .db
+            .fetch_all(
+                "SELECT segment_id, started_at FROM execution_activity_segments WHERE root_session_id = ? AND execution_id = ?",
+                vec![text(root_session_id), text(row.get_str("execution_id")?)],
+            )
+            .await?;
+        let mut active_segments = std::collections::BTreeMap::new();
+        for segment in segment_rows {
+            active_segments.insert(
+                segment.get_str("segment_id")?,
+                segment.get_i64("started_at")?.max(0) as u64,
+            );
+        }
+        Ok(Some(neoism_agent_core::ExecutionActivitySnapshot {
+            execution_id: row.get_str("execution_id")?,
+            root_session_id: row.get_str("root_session_id")?,
+            root_message_id: row.get_str("root_message_id")?,
+            completed_ms: row.get_i64("completed_ms")?.max(0) as u64,
+            active_segments,
+            revision: row.get_i64("revision")?.max(0) as u64,
+            finished: row.get_i64("finished")? != 0,
+        }))
+    }
+
+    pub(crate) async fn insert_execution_segment(
+        &self,
+        root_session_id: &str,
+        execution_id: &str,
+        segment_id: &str,
+        owner_instance_id: &str,
+        session_id: &str,
+        started_at: u64,
+    ) -> anyhow::Result<bool> {
+        let results = self.db
+            .execute_transaction_with_results(vec![
+                (
+                    "INSERT OR IGNORE INTO execution_activity_segments (segment_id, root_session_id, execution_id, owner_instance_id, session_id, started_at) SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM execution_activity WHERE root_session_id = ? AND execution_id = ? AND finished = 0)".to_string(),
+                    vec![text(segment_id), text(root_session_id), text(execution_id), text(owner_instance_id), text(session_id), int(store_i64(started_at)), text(root_session_id), text(execution_id)],
+                ),
+                (
+                    "UPDATE execution_activity SET revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND changes() > 0".to_string(),
+                    vec![int(store_i64(crate::now_millis())), text(root_session_id), text(execution_id)],
+                ),
+            ])
+            .await?;
+        Ok(results.first().copied().unwrap_or(0) > 0)
+    }
+
+    pub(crate) async fn finish_execution_segment(
+        &self,
+        root_session_id: &str,
+        execution_id: &str,
+        segment_id: &str,
+        ended_at: u64,
+    ) -> anyhow::Result<bool> {
+        let results = self.db
+            .execute_transaction_with_results(vec![
+                (
+                    "UPDATE execution_activity SET completed_ms = completed_ms + MAX(0, ? - (SELECT started_at FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?)), revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND EXISTS (SELECT 1 FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ?)".to_string(),
+                    vec![int(store_i64(ended_at)), text(segment_id), text(root_session_id), text(execution_id), int(store_i64(ended_at)), text(root_session_id), text(execution_id), text(segment_id), text(root_session_id), text(execution_id)],
+                ),
+                (
+                    "DELETE FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ? AND changes() > 0".to_string(),
+                    vec![text(segment_id), text(root_session_id), text(execution_id)],
+                ),
+            ])
+            .await?;
+        Ok(results.first().copied().unwrap_or(0) > 0)
+    }
+
+    pub(crate) async fn mark_execution_finished(
+        &self,
+        root_session_id: &str,
+        execution_id: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .db
+            .execute(
+                r#"UPDATE execution_activity
+                   SET finished = 1, revision = revision + 1, updated = ?
+                   WHERE root_session_id = ? AND execution_id = ? AND finished = 0
+                     AND NOT EXISTS (
+                       SELECT 1 FROM execution_activity_segments
+                       WHERE root_session_id = ? AND execution_id = ?
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM execution_subtasks
+                       WHERE execution_id = ? AND status = 'outstanding'
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM session_runs
+                       WHERE status = 'running' AND (
+                         session_id = ? OR session_id IN (
+                           SELECT child_session_id FROM execution_subtasks
+                           WHERE execution_id = ?
+                         )
+                       )
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM prompt_queue
+                       WHERE session_id = ? OR session_id IN (
+                         SELECT child_session_id FROM execution_subtasks
+                         WHERE execution_id = ?
+                       )
+                     )"#,
+                vec![
+                    int(store_i64(crate::now_millis())),
+                    text(root_session_id),
+                    text(execution_id),
+                    text(root_session_id),
+                    text(execution_id),
+                    text(execution_id),
+                    text(root_session_id),
+                    text(execution_id),
+                    text(root_session_id),
+                    text(execution_id),
+                ],
+            )
+            .await?
+            > 0)
+    }
+
+    pub(crate) async fn register_execution_subtask(
+        &self,
+        execution_id: &str,
+        root_session_id: &str,
+        parent_session_id: &str,
+        child_session_id: &str,
+        started_at: u64,
+    ) -> anyhow::Result<ExecutionSubtaskRegistration> {
+        let results = self.db
+            .execute_transaction_with_results(vec![
+                (
+                r#"INSERT OR IGNORE INTO execution_subtasks
+                (execution_id, child_session_id, root_session_id, parent_session_id, status, started_at)
+                SELECT ?, ?, ?, ?, 'outstanding', ?
+                WHERE EXISTS (
+                    SELECT 1 FROM execution_activity
+                    WHERE root_session_id = ? AND execution_id = ? AND finished = 0
+                )"#
+                        .to_string(),
+                vec![
+                    text(execution_id),
+                    text(child_session_id),
+                    text(root_session_id),
+                    text(parent_session_id),
+                    int(store_i64(started_at)),
+                    text(root_session_id),
+                    text(execution_id),
+                ]),
+                (
+                    "UPDATE execution_activity SET family_revision = family_revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND changes() > 0".to_string(),
+                    vec![int(store_i64(crate::now_millis())), text(root_session_id), text(execution_id)],
+                ),
+            ])
+            .await?;
+        if results.first().copied().unwrap_or(0) > 0 {
+            return Ok(ExecutionSubtaskRegistration::Inserted);
+        }
+        if self
+            .execution_subtask_status(execution_id, child_session_id)
+            .await?
+            .is_some()
+        {
+            Ok(ExecutionSubtaskRegistration::AlreadyPresent)
+        } else {
+            Ok(ExecutionSubtaskRegistration::Rejected)
+        }
+    }
+
+    pub(crate) async fn execution_subtask_status(
+        &self,
+        execution_id: &str,
+        child_session_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        self.db
+            .fetch_optional(
+                "SELECT status FROM execution_subtasks WHERE execution_id = ? AND child_session_id = ?",
+                vec![text(execution_id), text(child_session_id)],
+            )
+            .await?
+            .map(|row| row.get_str("status"))
+            .transpose()
+    }
+
+    pub(crate) async fn finish_execution_subtask(
+        &self,
+        execution_id: &str,
+        child_session_id: &str,
+        status: &str,
+    ) -> anyhow::Result<bool> {
+        let results = self.db.execute_transaction_with_results(vec![
+            (
+                "UPDATE execution_subtasks SET status = ? WHERE execution_id = ? AND child_session_id = ? AND status = 'outstanding'".to_string(),
+                vec![text(status), text(execution_id), text(child_session_id)],
+            ),
+            (
+                "UPDATE execution_activity SET family_revision = family_revision + 1, updated = ? WHERE execution_id = ? AND changes() > 0".to_string(),
+                vec![int(store_i64(crate::now_millis())), text(execution_id)],
+            ),
+        ]).await?;
+        Ok(results.first().copied().unwrap_or(0) > 0)
+    }
+
+    pub(crate) async fn list_execution_subtasks(
+        &self,
+        execution_id: &str,
+    ) -> anyhow::Result<Vec<neoism_agent_core::SubtaskLifecycleSnapshot>> {
+        self.db
+            .fetch_all(
+                "SELECT child_session_id, parent_session_id, status, started_at FROM execution_subtasks WHERE execution_id = ? ORDER BY started_at ASC, child_session_id ASC",
+                vec![text(execution_id)],
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(neoism_agent_core::SubtaskLifecycleSnapshot {
+                    session_id: row.get_str("child_session_id")?,
+                    parent_session_id: row.get_str("parent_session_id")?,
+                    status: row.get_str("status")?,
+                    started_at: Some(row.get_i64("started_at")?.max(0) as u64),
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) async fn heartbeat_execution_owner(
+        &self,
+        owner_instance_id: &str,
+        heartbeat_at: u64,
+    ) -> anyhow::Result<()> {
+        self.db
+            .execute(
+                "INSERT INTO execution_activity_owners (owner_instance_id, heartbeat_at) VALUES (?, ?) ON CONFLICT(owner_instance_id) DO UPDATE SET heartbeat_at = excluded.heartbeat_at",
+                vec![text(owner_instance_id), int(store_i64(heartbeat_at))],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn reconcile_stale_execution_segments(
+        &self,
+        stale_before: u64,
+    ) -> anyhow::Result<usize> {
+        let rows = self
+            .db
+            .fetch_all(
+                r#"SELECT s.segment_id, s.root_session_id, s.execution_id,
+                          s.owner_instance_id, s.started_at,
+                          COALESCE(o.heartbeat_at, s.started_at) AS heartbeat_at
+                   FROM execution_activity_segments s
+                   LEFT JOIN execution_activity_owners o
+                     ON o.owner_instance_id = s.owner_instance_id
+                   WHERE o.owner_instance_id IS NULL OR o.heartbeat_at < ?"#,
+                vec![int(store_i64(stale_before))],
+            )
+            .await?;
+        let mut reconciled = 0;
+        for row in rows {
+            let segment = row.get_str("segment_id")?;
+            let root = row.get_str("root_session_id")?;
+            let execution = row.get_str("execution_id")?;
+            let owner = row.get_str("owner_instance_id")?;
+            let started = row.get_i64("started_at")?.max(0) as u64;
+            let ended = row.get_i64("heartbeat_at")?.max(0) as u64;
+            let results = self
+                .db
+                .execute_transaction_with_results(vec![
+                    (
+                        "UPDATE execution_activity SET completed_ms = completed_ms + MAX(0, ? - ?), revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND EXISTS (SELECT 1 FROM execution_activity_segments s LEFT JOIN execution_activity_owners o ON o.owner_instance_id = s.owner_instance_id WHERE s.segment_id = ? AND s.root_session_id = ? AND s.execution_id = ? AND s.owner_instance_id = ? AND (o.owner_instance_id IS NULL OR o.heartbeat_at < ?))".to_string(),
+                        vec![int(store_i64(ended.max(started))), int(store_i64(started)), int(store_i64(ended.max(started))), text(&root), text(&execution), text(&segment), text(&root), text(&execution), text(&owner), int(store_i64(stale_before))],
+                    ),
+                    (
+                        "DELETE FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ? AND owner_instance_id = ? AND changes() > 0".to_string(),
+                        vec![text(&segment), text(&root), text(&execution), text(&owner)],
+                    ),
+                ])
+                .await?;
+            reconciled += usize::from(results.first().copied().unwrap_or(0) > 0);
+        }
+        Ok(reconciled)
+    }
+
+    /// Read timer segments and branch lifecycle in one SQL statement so a
+    /// reconnect cannot combine revisions from different database moments.
+    pub(crate) async fn get_session_runtime_snapshot(
+        &self,
+        root_session_id: &str,
+    ) -> anyhow::Result<neoism_agent_core::SessionRuntimeSnapshot> {
+        let rows = self
+            .db
+            .fetch_all(
+                r#"SELECT ea.execution_id, ea.root_session_id, ea.root_message_id,
+                          ea.completed_ms, ea.revision, ea.family_revision, ea.finished,
+                          seg.segment_id AS active_segment_id,
+                          seg.started_at AS active_segment_started_at,
+                          task.child_session_id, task.parent_session_id,
+                          task.status AS task_status, task.started_at AS task_started_at
+                   FROM execution_activity ea
+                   LEFT JOIN execution_activity_segments seg
+                     ON seg.root_session_id = ea.root_session_id
+                    AND seg.execution_id = ea.execution_id
+                   LEFT JOIN execution_subtasks task
+                     ON task.execution_id = ea.execution_id
+                   WHERE ea.root_session_id = ?
+                   ORDER BY task.started_at, task.child_session_id"#,
+                vec![text(root_session_id)],
+            )
+            .await?;
+        let Some(first) = rows.first() else {
+            return Ok(neoism_agent_core::SessionRuntimeSnapshot {
+                root_session_id: root_session_id.to_string(),
+                family_revision: 0,
+                branches: Vec::new(),
+                execution: None,
+            });
+        };
+        let execution_id = first.get_str("execution_id")?;
+        let mut active_segments = std::collections::BTreeMap::new();
+        let mut branches = std::collections::BTreeMap::new();
+        for row in &rows {
+            if let Some(segment_id) = row.get_opt_str("active_segment_id")? {
+                active_segments.insert(
+                    segment_id,
+                    row.get_opt_i64("active_segment_started_at")?
+                        .unwrap_or_default()
+                        .max(0) as u64,
+                );
+            }
+            if let Some(child_session_id) = row.get_opt_str("child_session_id")? {
+                branches.entry(child_session_id.clone()).or_insert(
+                    neoism_agent_core::SubtaskLifecycleSnapshot {
+                        session_id: child_session_id,
+                        parent_session_id: row
+                            .get_opt_str("parent_session_id")?
+                            .unwrap_or_default(),
+                        status: row.get_opt_str("task_status")?.unwrap_or_default(),
+                        started_at: row
+                            .get_opt_i64("task_started_at")?
+                            .map(|value| value.max(0) as u64),
+                    },
+                );
+            }
+        }
+        Ok(neoism_agent_core::SessionRuntimeSnapshot {
+            root_session_id: first.get_str("root_session_id")?,
+            family_revision: first.get_i64("family_revision")?.max(0) as u64,
+            branches: branches.into_values().collect(),
+            execution: Some(neoism_agent_core::ExecutionActivitySnapshot {
+                execution_id,
+                root_session_id: first.get_str("root_session_id")?,
+                root_message_id: first.get_str("root_message_id")?,
+                completed_ms: first.get_i64("completed_ms")?.max(0) as u64,
+                active_segments,
+                revision: first.get_i64("revision")?.max(0) as u64,
+                finished: first.get_i64("finished")? != 0,
+            }),
+        })
+    }
+
+    pub(crate) async fn delete_session(&self, session_id: &str) -> anyhow::Result<bool> {
+        let now = crate::now_millis();
+        let mut statements = vec![
+            (
+                "UPDATE execution_activity SET completed_ms = completed_ms + COALESCE((SELECT SUM(MAX(0, ? - started_at)) FROM execution_activity_segments s WHERE s.session_id = ? AND s.root_session_id = execution_activity.root_session_id AND s.execution_id = execution_activity.execution_id), 0), revision = revision + 1, updated = ? WHERE EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.session_id = ? AND s.root_session_id = execution_activity.root_session_id AND s.execution_id = execution_activity.execution_id)".to_string(),
+                vec![int(store_i64(now)), text(session_id), int(store_i64(now)), text(session_id)],
+            ),
+            ("DELETE FROM execution_activity_segments WHERE session_id = ?".to_string(), vec![text(session_id)]),
+            ("UPDATE execution_activity SET family_revision = family_revision + 1, updated = ? WHERE EXISTS (SELECT 1 FROM execution_subtasks t WHERE t.child_session_id = ? AND t.execution_id = execution_activity.execution_id)".to_string(), vec![int(store_i64(now)), text(session_id)]),
+            ("DELETE FROM execution_subtasks WHERE child_session_id = ?".to_string(), vec![text(session_id)]),
+            ("DELETE FROM execution_subtasks WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
+            ("DELETE FROM execution_activity_segments WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
+            ("DELETE FROM execution_activity WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
+            ("DELETE FROM execution_activity_owners WHERE NOT EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.owner_instance_id = execution_activity_owners.owner_instance_id)".to_string(), Vec::new()),
+        ];
+        for table in ["messages", "prompt_queue", "session_runs", "session_context_epochs", "message_embeddings"] {
+            statements.push((format!("DELETE FROM {table} WHERE session_id = ?"), vec![text(session_id)]));
+        }
+        statements.push(("DELETE FROM sessions WHERE id = ?".to_string(), vec![text(session_id)]));
+        let results = self.db.execute_transaction_with_results(statements).await?;
+        Ok(results.last().copied().unwrap_or(0) > 0)
     }
 
     pub(crate) async fn list_messages(

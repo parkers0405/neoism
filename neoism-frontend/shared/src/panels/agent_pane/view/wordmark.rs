@@ -132,10 +132,25 @@ pub fn format_elapsed(seconds: f32) -> String {
     let seconds = seconds.max(0.0);
     if seconds < 60.0 {
         format!("{seconds:.1}s")
-    } else {
+    } else if seconds < 3600.0 {
         let minutes = (seconds / 60.0).floor() as u32;
         let rem = (seconds - minutes as f32 * 60.0).max(0.0);
         format!("{minutes}m {rem:.0}s")
+    } else {
+        let hours = (seconds / 3600.0).floor() as u32;
+        let minutes = ((seconds - hours as f32 * 3600.0) / 60.0).floor() as u32;
+        format!("{hours}h {minutes}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_elapsed;
+
+    #[test]
+    fn elapsed_formats_hours_instead_of_unbounded_minutes() {
+        assert_eq!(format_elapsed(3_600.0), "1h 0m");
+        assert_eq!(format_elapsed(5_460.0), "1h 31m");
     }
 }
 

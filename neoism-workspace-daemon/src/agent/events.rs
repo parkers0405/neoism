@@ -199,6 +199,64 @@ pub(crate) fn forward_agent_server_event(
             });
             return;
         }
+        "session.execution.updated" => {
+            if let Some(snapshot) = properties.get("snapshot") {
+                if let Ok(snapshot) = serde_json::from_value::<neoism_protocol::agent::ExecutionActivity>(snapshot.clone()) {
+                    let _ = tx.send(AgentServerMessage::RuntimeSnapshot {
+                        session_id: source_session,
+                        snapshot: neoism_protocol::agent::AgentRuntimeSnapshot {
+                            root_session_id: snapshot.root_session_id.clone(),
+                            family_revision: 0,
+                            branches_authoritative: false,
+                            branches: Vec::new(),
+                            execution: Some(snapshot),
+                        },
+                    });
+                    return;
+                }
+            }
+        }
+        "session.subtask.completed" => {
+            let task_id = properties
+                .get("taskID")
+                .or_else(|| properties.get("taskId"))
+                .or_else(|| properties.get("childSessionID"))
+                .or_else(|| properties.get("childSessionId"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !task_id.is_empty() {
+                let status = if properties.get("status").and_then(Value::as_str)
+                    == Some("completed")
+                {
+                    SubagentStatus::Completed
+                } else {
+                    SubagentStatus::Failed
+                };
+                let _ = tx.send(AgentServerMessage::SubagentUpdate {
+                    session_id: task_id,
+                    status,
+                    title: properties
+                        .get("sourceTitle")
+                        .or_else(|| properties.get("title"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    agent: properties
+                        .get("sourceAgent")
+                        .or_else(|| properties.get("agent"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    current_tool: None,
+                    started_at: None,
+                    parent_session_id: properties
+                        .get("parentSessionID")
+                        .or_else(|| properties.get("parentSessionId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+                return;
+            }
+        }
         "session.idle" => {
             let _ = tx.send(AgentServerMessage::SessionIdle {
                 session_id: source_session,
@@ -612,5 +670,61 @@ mod tests {
 
         assert_eq!(usage.total, 73_087);
         assert_eq!(usage.cache_read, 70_064);
+    }
+
+    #[test]
+    fn execution_activity_event_maps_to_protocol_snapshot() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "session.execution.updated",
+                "properties": {
+                    "sessionID": "root",
+                    "snapshot": {
+                        "executionId": "execution-a",
+                        "rootSessionId": "root",
+                        "rootMessageId": "message-a",
+                        "completedMs": 2500,
+                        "activeSegments": { "provider-a": 1000 },
+                        "revision": 4,
+                        "finished": false
+                    }
+                }
+            }),
+        );
+        let AgentServerMessage::RuntimeSnapshot { snapshot, .. } = rx.try_recv().unwrap() else {
+            panic!("expected runtime snapshot");
+        };
+        assert!(!snapshot.branches_authoritative);
+        assert_eq!(snapshot.execution.unwrap().completed_ms, 2_500);
+    }
+
+    #[test]
+    fn terminal_subtask_event_maps_once_by_child_id() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "session.subtask.completed",
+                "properties": {
+                    "sessionID": "root",
+                    "parentSessionID": "root",
+                    "taskID": "child",
+                    "status": "completed"
+                }
+            }),
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentServerMessage::SubagentUpdate {
+                session_id,
+                status: SubagentStatus::Completed,
+                ..
+            } if session_id == "child"
+        ));
+        assert!(rx.try_recv().is_err());
     }
 }

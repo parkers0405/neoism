@@ -37,7 +37,7 @@ use crate::tool_routes::tool_list;
 use crate::v2_routes::{
     v2_capabilities, v2_compact, v2_context, v2_events, v2_message_list, v2_meta,
     v2_plugin, v2_plugins, v2_prompt, v2_prompt_async, v2_session_children, v2_session_list,
-    v2_wait,
+    v2_session_runtime, v2_wait,
 };
 
 pub fn app(state: AppState) -> Router {
@@ -94,6 +94,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             delete(part_delete).patch(part_update),
         )
         .route("/v2/sessions/:session_id/children", get(v2_session_children))
+        .route("/v2/sessions/:session_id/runtime", get(v2_session_runtime))
         .route(
             "/v2/sessions/:session_id/directory-options",
             get(session_directory_options),

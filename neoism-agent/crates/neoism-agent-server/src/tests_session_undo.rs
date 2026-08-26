@@ -11,7 +11,13 @@ async fn submit_prompt_and_wait(app: &axum::Router, state: &AppState, session_id
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let status = response.status();
+    if status != StatusCode::NO_CONTENT {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        panic!("prompt returned {status}: {}", String::from_utf8_lossy(&body));
+    }
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let count = state.inner.store.list_messages(session_id).await.unwrap().len();

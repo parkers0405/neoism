@@ -105,6 +105,8 @@ pub(crate) async fn enqueue_prompt_request_with_delivery(
             "delivery must be steer, queue, or continue, got {delivery}"
         )));
     }
+    let _execution_admission =
+        crate::execution_activity::admission_guard(state, session_id).await;
     if let Some(message_id) = request.message_id.as_ref() {
         let queued = state
             .inner

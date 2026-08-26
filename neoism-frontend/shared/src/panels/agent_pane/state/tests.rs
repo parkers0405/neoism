@@ -26,6 +26,229 @@ fn runtime_branch_status_policy_maps_daemon_statuses() {
 }
 
 #[test]
+fn execution_elapsed_survives_run_idle_and_subagent_transitions() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution-a".into(),
+        root_session_id: "root".into(),
+        completed_ms: 12_500,
+        revision: 3,
+        finished: false,
+        ..Default::default()
+    });
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.note_session_idle();
+    pane.note_subagent_event(
+        "child".into(),
+        BranchStatus::Active,
+        None,
+        None,
+        None,
+        None,
+    );
+    pane.note_subagent_event(
+        "child".into(),
+        BranchStatus::Completed,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(12.5));
+}
+
+#[test]
+fn execution_revision_cannot_rewind_and_replacement_resets() {
+    let mut pane = NeoismAgentPane::default();
+    let activity = |id: &str, revision: u64, completed_ms: u64| ExecutionActivityState {
+        execution_id: id.into(),
+        root_session_id: "root".into(),
+        completed_ms,
+        revision,
+        finished: false,
+        ..Default::default()
+    };
+    assert!(pane.apply_execution_activity(activity("execution-a", 5, 9_000)));
+    assert!(!pane.apply_execution_activity(activity("execution-a", 4, 1_000)));
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(9.0));
+    assert!(pane.apply_execution_activity(activity("execution-b", 6, 0)));
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+    assert!(!pane.apply_execution_activity(activity("execution-a", 5, 99_000)));
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+}
+
+#[test]
+fn execution_timer_anchor_does_not_rewind_with_wall_clock() {
+    let now = Instant::now();
+    let snapshot = ExecutionActivityState {
+        execution_id: "execution-a".into(),
+        active_segments: [("provider".into(), 900)].into(),
+        ..Default::default()
+    };
+    let first = ExecutionTimerAnchor::from_snapshot(&snapshot, 1_000, now, 0);
+    let floor = first.elapsed_ms_at(now);
+    let corrected = ExecutionTimerAnchor::from_snapshot(&snapshot, 800, now, floor);
+    assert_eq!(corrected.elapsed_ms_at(now), floor);
+}
+
+#[test]
+fn newer_execution_identity_is_accepted_even_with_lower_revision() {
+    let mut pane = NeoismAgentPane::default();
+    assert!(pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution-a".into(),
+        revision: 50,
+        ..Default::default()
+    }));
+    assert!(pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution-b".into(),
+        revision: 1,
+        ..Default::default()
+    }));
+}
+
+#[test]
+fn new_execution_clears_prior_execution_branch_lifecycle() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution-a".into(),
+        root_session_id: "root".into(),
+        revision: 1,
+        ..Default::default()
+    });
+    pane.note_subagent_runtime("child".into(), BranchStatus::Active, None);
+    assert_eq!(pane.active_subagent_count(), 1);
+    pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution-b".into(),
+        root_session_id: "root".into(),
+        revision: 2,
+        ..Default::default()
+    });
+    assert_eq!(pane.active_subagent_count(), 0);
+}
+
+#[test]
+fn branch_count_is_unique_union_and_terminal_decrements_once() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.side_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "main", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore"),
+    ]);
+    pane.note_subagent_runtime("child".into(), BranchStatus::Active, None);
+    assert_eq!(pane.active_subagent_count(), 1);
+    pane.note_subagent_runtime("child".into(), BranchStatus::Completed, None);
+    pane.note_subagent_runtime("child".into(), BranchStatus::Completed, None);
+    assert_eq!(pane.active_subagent_count(), 0);
+}
+
+#[test]
+fn busy_idle_busy_run_edges_do_not_flicker_outstanding_branch_count() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.note_subagent_runtime("child".into(), BranchStatus::Active, Some(10));
+    assert_eq!(pane.active_subagent_count(), 1);
+    pane.note_session_idle();
+    assert_eq!(pane.active_subagent_count(), 1);
+    pane.note_subagent_runtime("child".into(), BranchStatus::Active, Some(20));
+    assert_eq!(pane.active_subagent_count(), 1);
+}
+
+#[test]
+fn reconnect_snapshot_restores_outstanding_branch_and_stale_revision_cannot_rewind() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        7,
+        [("child".into(), "outstanding".into(), Some(10))],
+    ));
+    assert_eq!(pane.active_subagent_count(), 1);
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        8,
+        [("child".into(), "completed".into(), Some(10))],
+    ));
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(!pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        7,
+        [("child".into(), "outstanding".into(), Some(10))],
+    ));
+    assert_eq!(pane.active_subagent_count(), 0);
+}
+
+#[test]
+fn authoritative_runtime_snapshot_deletes_absent_branch_state() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.side_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "main", "return"),
+        NeoismAgentSessionEntry::new("child-a", "a", "explore"),
+        NeoismAgentSessionEntry::new("child-b", "b", "explore"),
+    ]);
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        1,
+        [
+            ("child-a".into(), "outstanding".into(), Some(10)),
+            ("child-b".into(), "completed".into(), Some(20)),
+        ],
+    ));
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        2,
+        [("child-a".into(), "completed".into(), Some(10))],
+    ));
+    assert!(pane.side_panel.branch_activity("child-b").is_none());
+    assert!(!pane.active_subagent_ids.contains("child-b"));
+    assert!(!pane.active_subagent_started_at.contains_key("child-b"));
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "child-b"));
+}
+
+#[test]
+fn finished_execution_keeps_nonblank_terminal_total_row() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution-a".into(),
+        root_session_id: "root".into(),
+        completed_ms: 65_000,
+        revision: 2,
+        finished: true,
+        ..Default::default()
+    });
+    assert!(pane.has_status_activity());
+    assert_eq!(pane.streaming_label(), "Completed");
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(65.0));
+}
+
+#[test]
+fn elapsed_persists_across_family_pane_switch_and_resets_outside_family() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("root".into()));
+    pane.side_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "main", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore"),
+    ]);
+    pane.note_subagent_runtime("child".into(), BranchStatus::Active, None);
+    pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution".into(),
+        root_session_id: "root".into(),
+        completed_ms: 4_000,
+        revision: 1,
+        ..Default::default()
+    });
+    pane.set_session_id(Some("child".into()));
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(4.0));
+    pane.set_session_id(Some("other-root".into()));
+    assert_eq!(pane.streaming_elapsed_seconds(), None);
+}
+
+#[test]
 fn runtime_task_message_status_policy_maps_known_statuses() {
     assert_eq!(
         task_message_status_from_runtime("completed"),

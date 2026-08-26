@@ -4,6 +4,8 @@ use super::draw::{
 };
 use super::*;
 
+pub(crate) const SECTION_GAP: f32 = 10.0;
+
 /// Compact token count for the context bar label (e.g. `32.1k`, `1.2m`).
 fn format_count_short(value: u64) -> String {
     if value >= 1_000_000 {
@@ -12,6 +14,29 @@ fn format_count_short(value: u64) -> String {
         format!("{:.1}k", value as f64 / 1_000.0)
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod task_height_tests {
+    use super::{
+        section_header_font_size, side_panel_task_row_height, tasks_section_height,
+        SECTION_GAP,
+    };
+
+    #[test]
+    fn task_section_height_includes_every_task_without_nested_cap() {
+        let scale = 1.0;
+        let count = 19;
+        let expected = section_header_font_size(scale) * 1.5
+            + count as f32 * side_panel_task_row_height(scale)
+            + SECTION_GAP
+            + 6.0;
+        assert_eq!(tasks_section_height(count, scale), expected);
+        assert!(tasks_section_height(19, scale) > tasks_section_height(8, scale));
+        let source = include_str!("sections.rs");
+        assert!(!source.contains(&["todos.iter().", "take("].concat()));
+        assert!(!source.contains("format!(\"+{extra} more\")"));
     }
 }
 
@@ -651,17 +676,11 @@ fn tasks_section_height(todos_len: usize, s: f32) -> f32 {
     if todos_len == 0 {
         return 0.0;
     }
-    let visible = todos_len.min(TASKS_MAX_VISIBLE);
     // Matches `render_section_header`'s H3 advance (`header_size * 1.5`).
     let header_h = section_header_font_size(s) * 1.5;
-    let rows_h = visible as f32 * side_panel_task_row_height(s);
-    let overflow_h = if todos_len > TASKS_MAX_VISIBLE {
-        FONT_SIZE * s * 1.45
-    } else {
-        0.0
-    };
-    // 6px breathing room above header, ~6px below the last row.
-    header_h + rows_h + overflow_h + 12.0 * s
+    let rows_h = todos_len as f32 * side_panel_task_row_height(s);
+    // Standard section gap above the header, plus ~6px below the last row.
+    header_h + rows_h + (SECTION_GAP + 6.0) * s
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -679,7 +698,7 @@ fn render_tasks_section(
     let text_x = rx + pad_x;
     let text_w = (rw - pad_x * 2.0).max(0.0);
 
-    let mut y = ry + 6.0 * s;
+    let mut y = ry + SECTION_GAP * s;
     y = render_section_header(
         sugarloaf,
         "Tasks",
@@ -692,8 +711,7 @@ fn render_tasks_section(
     );
 
     let row_h = side_panel_task_row_height(s);
-    let visible = todos.len().min(TASKS_MAX_VISIBLE);
-    for todo in todos.iter().take(visible) {
+    for todo in todos {
         render_task_row(
             sugarloaf,
             todo,
@@ -706,24 +724,6 @@ fn render_tasks_section(
             occlusion_rects,
         );
         y += row_h;
-    }
-    if todos.len() > TASKS_MAX_VISIBLE {
-        let extra = todos.len() - TASKS_MAX_VISIBLE;
-        let opts = DrawOpts {
-            font_size: FONT_SIZE * s * 0.82,
-            color: theme.u8(theme.dim),
-            italic: true,
-            clip_rect: Some(clip),
-            ..DrawOpts::default()
-        };
-        draw_text_with_occlusion(
-            sugarloaf,
-            text_x,
-            y + 2.0 * s,
-            &format!("+{extra} more"),
-            &opts,
-            occlusion_rects,
-        );
     }
 }
 

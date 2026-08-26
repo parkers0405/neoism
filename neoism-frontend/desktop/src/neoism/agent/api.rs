@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{OnceLock, RwLock};
@@ -426,10 +426,6 @@ fn apply_subagent_runtime_snapshot(
             .and_then(|status| normalize_explicit_runtime_status(&status.kind))
         {
             entry.runtime_status = Some(status.to_string());
-        } else {
-            // Successful `/session/status` is the live run set. A listed
-            // child omitted from it is idle, not unknown.
-            entry.runtime_status = Some("completed".to_string());
         }
     }
 }
@@ -665,7 +661,7 @@ mod subagent_runtime_snapshot_tests {
     }
 
     #[test]
-    fn listed_child_omitted_from_status_snapshot_is_completed() {
+    fn listed_child_omitted_from_live_run_snapshot_stays_outstanding() {
         let mut entries = vec![
             NeoismAgentSessionEntry::new("root", "main session", "return"),
             NeoismAgentSessionEntry::new("child", "child", "explore")
@@ -674,7 +670,7 @@ mod subagent_runtime_snapshot_tests {
 
         apply_subagent_runtime_snapshot(&mut entries, &HashMap::new());
 
-        assert_eq!(entries[1].runtime_status.as_deref(), Some("completed"));
+        assert_eq!(entries[1].runtime_status.as_deref(), Some("running"));
     }
 
     #[test]
@@ -698,6 +694,75 @@ pub(crate) struct SessionStatusSnapshot {
     pub queue_count: usize,
     pub preview: Option<String>,
     pub parent_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FamilyRuntimeSnapshot {
+    pub root_session_id: String,
+    pub family_revision: u64,
+    pub branches: Vec<(String, String, Option<u64>)>,
+    pub execution: Option<neoism_ui::panels::agent_pane::state::ExecutionActivityState>,
+}
+
+pub(super) fn fetch_family_runtime(
+    server: &str,
+    session_id: &str,
+) -> Result<FamilyRuntimeSnapshot, String> {
+    let value = api_request_json(
+        server,
+        "GET",
+        &format!("/v2/sessions/{session_id}/runtime"),
+        None,
+    )?
+    .ok_or_else(|| "Neoism Agent returned an empty runtime snapshot".to_string())?;
+    let root_session_id = value
+        .get("rootSessionId")
+        .and_then(Value::as_str)
+        .unwrap_or(session_id)
+        .to_string();
+    let branches = value
+        .get("branches")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|branch| {
+            Some((
+                branch.get("sessionId")?.as_str()?.to_string(),
+                branch.get("status")?.as_str()?.to_string(),
+                branch.get("startedAt").and_then(Value::as_u64),
+            ))
+        })
+        .collect();
+    let execution = value.get("execution").and_then(execution_activity_from_json);
+    Ok(FamilyRuntimeSnapshot {
+        root_session_id,
+        family_revision: value
+            .get("familyRevision")
+            .or_else(|| value.get("revision"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        branches,
+        execution,
+    })
+}
+
+pub(crate) fn execution_activity_from_json(
+    activity: &Value,
+) -> Option<neoism_ui::panels::agent_pane::state::ExecutionActivityState> {
+        let active_segments = activity
+            .get("activeSegments")?
+            .as_object()?
+            .iter()
+            .filter_map(|(id, started)| Some((id.clone(), started.as_u64()?)))
+            .collect::<BTreeMap<_, _>>();
+        Some(neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            execution_id: activity.get("executionId")?.as_str()?.to_string(),
+            root_session_id: activity.get("rootSessionId")?.as_str()?.to_string(),
+            completed_ms: activity.get("completedMs")?.as_u64()?,
+            active_segments,
+            revision: activity.get("revision")?.as_u64()?,
+            finished: activity.get("finished").and_then(Value::as_bool).unwrap_or(false),
+        })
 }
 
 pub(super) fn fetch_session_statuses(

@@ -199,6 +199,13 @@ pub(crate) async fn start_task_tool(
         crate::session_actions::mark_subtask_notify_on_idle(state, &child_session_id, &generation)
             .await
             .map_err(|error| error.to_string())?;
+        let admission = crate::execution_activity::SubtaskAdmissionGuard::admit(
+            state,
+            &parent,
+            &child_session_id,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         spawn_background_subtask_prompt(
             state.clone(),
             child_session_id.clone(),
@@ -207,6 +214,7 @@ pub(crate) async fn start_task_tool(
             agent.name.clone(),
             child_model,
             Some(snapshot.clone()),
+            admission,
         );
         return Ok(ToolExecutionResult {
             title: description,
@@ -219,6 +227,13 @@ pub(crate) async fn start_task_tool(
             )),
         });
     }
+    let admission = crate::execution_activity::SubtaskAdmissionGuard::admit(
+        state,
+        &parent,
+        &child_session_id,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let result = crate::tool_runtime::run_child_task_prompt_with_cancel(
         state,
         &child_session_id,
@@ -228,8 +243,17 @@ pub(crate) async fn start_task_tool(
         child_model,
         cancel,
     )
-    .await
-    .map_err(|error| error.to_string())?;
+    .await;
+    let result = match result {
+        Ok(result) => {
+            admission.complete("completed").await;
+            result
+        }
+        Err(error) => {
+            admission.complete("failed").await;
+            return Err(error.to_string());
+        }
+    };
     Ok(ToolExecutionResult {
         title: description,
         output: crate::tool_runtime::task_result_output(
@@ -428,8 +452,17 @@ async fn stop(
             crate::session_actions::abort_session_run(state, child.id.as_str()).await;
             stopped.push(child.id.to_string());
         }
-        cleared_prompts +=
+        let cleared =
             crate::session_queue::clear_session_prompt_queue(state, child.id.as_str()).await;
+        cleared_prompts += cleared;
+        if cleared > 0 {
+            crate::execution_activity::finish_subtask_for_child(
+                state,
+                child.id.as_str(),
+                "cancelled",
+            )
+            .await;
+        }
     }
     Ok(StopSubagentsResult {
         stopped,

@@ -62,6 +62,7 @@ pub mod event_type {
     pub const SESSION_CREATED: &str = "session.created";
     pub const SESSION_DELETED: &str = "session.deleted";
     pub const SESSION_ERROR: &str = "session.error";
+    pub const SESSION_EXECUTION_UPDATED: &str = "session.execution.updated";
     pub const SESSION_BACKGROUND_TASK_COMPLETED: &str =
         "session.background_task.completed";
     pub const SESSION_QUEUE_UPDATED: &str = "session.queue.updated";

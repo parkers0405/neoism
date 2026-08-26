@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
 
 use axum::extract::{Path, State};
@@ -62,7 +62,12 @@ pub(crate) struct SessionShellRequest {
 }
 
 pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> bool {
-    abort_session_run_impl(state, session_id, true).await
+    let aborted = abort_session_run_impl(state, session_id, true).await;
+    if aborted {
+        crate::execution_activity::finish_subtask_for_child(state, session_id, "cancelled")
+            .await;
+    }
+    aborted
 }
 
 pub(crate) async fn clear_subtask_completion_for_teardown(state: &AppState, session_id: &str) {
@@ -191,7 +196,13 @@ pub(crate) async fn create_subtask_session(
             archived: None,
         },
         permission: Some(subtask_permission(parent, &agent_info)),
-        extra: BTreeMap::new(),
+        extra: [
+            crate::execution_activity::EXECUTION_ID_KEY,
+            crate::execution_activity::EXECUTION_ROOT_KEY,
+        ]
+        .into_iter()
+        .filter_map(|key| parent.extra.get(key).cloned().map(|value| (key.to_string(), value)))
+        .collect(),
     };
     state.inner.store.insert_session(&child).await?;
     state.publish(EventPayload::new(
@@ -237,6 +248,7 @@ pub(crate) fn spawn_background_subtask_prompt(
     agent: String,
     model: Option<UserModel>,
     _plugin_generation: Option<crate::workspace_runtime::PluginGenerationLease>,
+    admission: crate::execution_activity::SubtaskAdmissionGuard,
 ) {
     tokio::spawn(async move {
         let plugin_generation = _plugin_generation;
@@ -251,6 +263,7 @@ pub(crate) fn spawn_background_subtask_prompt(
         .await
         {
             Ok(message) => {
+                admission.complete("completed").await;
                 let result = last_text_part(&message).unwrap_or_default();
                 publish_background_subtask_finished(
                     &state,
@@ -262,6 +275,7 @@ pub(crate) fn spawn_background_subtask_prompt(
                 .await;
             }
             Err(error) => {
+                admission.complete("failed").await;
                 let message = error.to_string();
                 tracing::warn!(
                     session_id = %child_id,
@@ -289,6 +303,9 @@ pub(crate) async fn publish_background_subtask_finished(
     status: &str,
     text: &str,
 ) {
+    // Execution lifecycle is authoritative and must not depend on whether the
+    // optional UI notification runtime is loaded or still tracks this child.
+    crate::execution_activity::finish_subtask_for_child(state, child_id, status).await;
     let tracked = match state.inner.store.get_session(child_id).await {
         Ok(Some(child)) => state.inner.workspace_runtimes.loaded(&child.directory).await
             .and_then(|runtime| runtime.subagents_if_allocated()),
@@ -1227,7 +1244,7 @@ mod tests {
                 archived: None,
             },
             permission: None,
-            extra: BTreeMap::new(),
+            extra: std::collections::BTreeMap::new(),
         }
     }
 

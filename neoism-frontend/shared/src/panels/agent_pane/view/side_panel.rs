@@ -36,10 +36,6 @@ use super::draw::{
     draw_status_dot_text, draw_text_clipped, push_image_overlay_clipped, wrap_text,
 };
 use super::tool_message::{draw_checkbox, TodoVisualState, TODO_ROW_HEIGHT};
-/// Cap on tasks rendered inside the side panel — anything past this
-/// shows as a "+N more" footer rather than overflowing the panel.
-const TASKS_MAX_VISIBLE: usize = 8;
-
 use super::{DEPTH, ORDER_PANEL};
 
 pub trait AgentSidePanelTodo {

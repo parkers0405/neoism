@@ -279,6 +279,10 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                 }
+                AgentSessionUpdate::ChildRunIdle { session_id } => {
+                    self.note_session_run_idle(&session_id);
+                    changed = true;
+                }
                 AgentSessionUpdate::SubagentStatus {
                     session_id,
                     status,
@@ -468,6 +472,12 @@ impl NeoismAgentPane {
                     // → active when a goal was set over a finished one.
                     self.side_panel.set_session_goal(goal, version);
                     changed = true;
+                }
+                AgentSessionUpdate::ExecutionUpdated(snapshot) => {
+                    if let Some(activity) = super::super::api::execution_activity_from_json(&snapshot)
+                    {
+                        changed |= self.apply_execution_activity(activity);
+                    }
                 }
                 AgentSessionUpdate::PartDelta {
                     message_id,
@@ -1437,6 +1447,7 @@ impl NeoismAgentPane {
                     request_generation,
                     runtime_revision,
                     result,
+                    runtime,
                 }) => {
                     let is_latest = self
                         .runtime_status_requests
@@ -1453,6 +1464,23 @@ impl NeoismAgentPane {
                     }
                     if let Ok(statuses) = result {
                         self.apply_runtime_status_for_session(&session_id, &statuses);
+                        changed = true;
+                    }
+                    if let Ok(runtime) = runtime {
+                        let mut execution_current = runtime.execution.is_none();
+                        if let Some(activity) = runtime.execution {
+                            let execution_id = activity.execution_id.clone();
+                            let revision = activity.revision;
+                            execution_current = self.apply_execution_activity(activity)
+                                || self.execution_activity_matches(&execution_id, revision);
+                        }
+                        if execution_current {
+                            self.apply_branch_lifecycle_snapshot(
+                                runtime.root_session_id,
+                                runtime.family_revision,
+                                runtime.branches,
+                            );
+                        }
                         changed = true;
                     }
                 }

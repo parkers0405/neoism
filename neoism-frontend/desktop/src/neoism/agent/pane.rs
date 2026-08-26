@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use super::api::{
     api_request_json, delete_session, fetch_agent_options, fetch_config_defaults,
     fetch_model_context_limit, fetch_model_options, fetch_session_entries,
-    fetch_session_goal, fetch_session_options, fetch_session_statuses,
+    fetch_family_runtime, fetch_session_goal, fetch_session_options, fetch_session_statuses,
     fetch_skill_options, fetch_subagent_entries, fetch_subagent_options,
     neoism_agent_server, rename_session, set_session_pinned, SessionStatusSnapshot,
 };
@@ -631,6 +631,7 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         request_generation: u64,
         runtime_revision: u64,
         result: Result<HashMap<String, SessionStatusSnapshot>, String>,
+        runtime: Result<super::api::FamilyRuntimeSnapshot, String>,
     },
     /// An older history page, fetched off the UI thread. `messages` is in
     /// ascending (oldest-first) order, ready to prepend. `raw_count` is the
@@ -933,6 +934,12 @@ pub struct NeoismAgentPane {
     running_background_task_count: usize,
     active_subagent_ids: BTreeSet<String>,
     active_subagent_started_at: HashMap<String, u64>,
+    pub(super) execution_activity:
+        Option<neoism_ui::panels::agent_pane::state::ExecutionActivityState>,
+    pub(super) execution_timer_anchor:
+        Option<neoism_ui::panels::agent_pane::state::ExecutionTimerAnchor>,
+    pub(super) runtime_snapshot_root: Option<String>,
+    pub(super) runtime_snapshot_revision: u64,
     pending_permission: Option<NeoismAgentPendingPermission>,
     pending_permission_queue: VecDeque<NeoismAgentPendingPermission>,
     /// `/yolo` — while true, every permission request auto-answers
@@ -1160,6 +1167,10 @@ impl Default for NeoismAgentPane {
             running_background_task_count: 0,
             active_subagent_ids: BTreeSet::new(),
             active_subagent_started_at: HashMap::new(),
+            execution_activity: None,
+            execution_timer_anchor: None,
+            runtime_snapshot_root: None,
+            runtime_snapshot_revision: 0,
             pending_permission: None,
             pending_permission_queue: VecDeque::new(),
             skip_permissions: false,
@@ -1764,6 +1775,13 @@ fn instant_from_epoch_millis(epoch_millis: u64) -> Instant {
     Instant::now()
         .checked_sub(Duration::from_millis(elapsed))
         .unwrap_or_else(Instant::now)
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn task_id_from_task_message(message: &NeoismAgentMessage) -> Option<String> {

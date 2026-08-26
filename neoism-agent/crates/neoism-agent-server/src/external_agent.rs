@@ -25,7 +25,7 @@ use crate::provider_stream_message::{
     start_assistant_step, StartedAssistantStep,
 };
 use crate::session_actions::publish_background_subtask_finished;
-use crate::session_run::{finish_session_run, start_session_run};
+use crate::session_run::start_session_run;
 use crate::state::AppState;
 use crate::{ask_permission_for_tool, now_millis, permission, slug, tool};
 

@@ -12,7 +12,7 @@ use futures_core::Stream;
 use neoism_agent_core::{
     ApiMeta, CapabilityInfo, EventEnvelope, EventSubject, MessageId, MessageWithParts,
     Page, PageCursor, PluginManifestInfo, PromptPart, PromptRequest, SessionInfo,
-    UserModel, API_VERSION, PLUGIN_API_VERSION,
+    SessionRuntimeSnapshot, UserModel, API_VERSION, PLUGIN_API_VERSION,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -105,11 +105,18 @@ pub(crate) async fn v2_events(
     let mut cursor = explicit_cursor.unwrap_or(0);
     let page_size = query.limit.unwrap_or(1_000).clamp(1, 5_000);
     let session_id = query.session_id;
+    let family_root = match session_id.as_deref() {
+        Some(requested) => match state.inner.store.get_session(requested).await {
+            Ok(Some(session)) => Some(crate::execution_activity::root_session_id(&state, &session).await),
+            _ => Some(requested.to_string()),
+        },
+        None => None,
+    };
     // Subscribe before replay so neither durable commits nor transient token
     // deltas can land between the initial query and the live receivers.
     let mut durable_receiver = BroadcastStream::new(state.subscribe_durable());
     let mut live_receiver = BroadcastStream::new(state.subscribe_live());
-    let mut session_family = if let Some(root) = session_id.as_deref() {
+    let mut session_family = if let Some(root) = family_root.as_deref() {
         Some(session_family_ids(&state, root).await)
     } else {
         None
@@ -134,11 +141,37 @@ pub(crate) async fn v2_events(
                 .await
                 .unwrap_or_default();
             let replayed = replay.len();
+            // Merge current descendants into connection-owned membership.
+            // Missing members remain until their authoritative deletion event
+            // is replayed: DB deletion can precede durable event persistence.
+            let next_family = if let Some(root) = family_root.as_deref() {
+                Some(session_family_ids(&state, root).await)
+            } else {
+                None
+            };
+            if let (Some(family), Some(next)) = (session_family.as_mut(), next_family.as_ref()) {
+                family.extend(next.iter().cloned());
+            }
             for event in replay {
                 cursor = event.seq.max(0) as u64;
-                if event_matches_family(&event.payload, session_family.as_ref()) {
+                let matched = event_matches_family(&event.payload, session_family.as_ref());
+                let deleted_session =
+                    (event.payload.kind == neoism_agent_core::event_type::SESSION_DELETED)
+                    .then(|| event_session_id(&event.payload).map(str::to_string))
+                    .flatten();
+                if matched {
                     yield Ok(v2_sse_event(persisted_event_envelope(event)));
                 }
+                if matched {
+                    if let (Some(family), Some(deleted)) =
+                        (session_family.as_mut(), deleted_session.as_deref())
+                    {
+                        family.remove(deleted);
+                    }
+                }
+            }
+            if session_family.is_none() {
+                session_family = next_family;
             }
             if replayed == page_size {
                 continue;
@@ -148,9 +181,8 @@ pub(crate) async fn v2_events(
                     if durable.is_none() {
                         break;
                     }
-                    if let Some(root) = session_id.as_deref() {
-                        session_family = Some(session_family_ids(&state, root).await);
-                    }
+                    // The next replay merges newly discovered descendants;
+                    // deleted members remain until their event is delivered.
                 }
                 live = tokio_stream::StreamExt::next(&mut live_receiver) => {
                     let live = match live {
@@ -160,7 +192,7 @@ pub(crate) async fn v2_events(
                     };
                     if !event_matches_family(&live, session_family.as_ref()) {
                         if let (Some(root), Some(event_session_id)) =
-                            (session_id.as_deref(), event_session_id(&live))
+                            (family_root.as_deref(), event_session_id(&live))
                         {
                             if session_descends_from(&state, event_session_id, root).await {
                                 if let Some(family) = session_family.as_mut() {
@@ -179,6 +211,21 @@ pub(crate) async fn v2_events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+}
+
+pub(crate) async fn v2_session_runtime(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionRuntimeSnapshot>, ApiError> {
+    let session = ensure_session(&state, &session_id).await?;
+    let root_id = crate::execution_activity::root_session_id(&state, &session).await;
+    Ok(Json(
+        state
+            .inner
+            .store
+            .get_session_runtime_snapshot(&root_id)
+            .await?,
+    ))
 }
 
 async fn session_family_ids(state: &AppState, root: &str) -> HashSet<String> {
@@ -360,6 +407,7 @@ pub(crate) async fn v2_prompt(
     let prompt = request.into_prompt_request()?;
     if prompt.no_reply && !state.inner.runs.read().await.contains_key(&session_id) {
         crate::session_prompt::append_prompt(&state, &session_id, prompt, false).await?;
+        crate::execution_activity::finish_if_quiescent(&state, &session_id).await;
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
     enqueue_v2_prompt(&state, &session_id, prompt, &delivery).await?;

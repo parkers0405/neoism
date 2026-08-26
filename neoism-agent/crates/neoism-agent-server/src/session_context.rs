@@ -1060,6 +1060,7 @@ fn compaction_assistant_message(
             session_id: session_id.clone(),
             time: CompletedTime {
                 created: started,
+                streamed: Some(completed),
                 completed: Some(completed),
             },
             parent_id,

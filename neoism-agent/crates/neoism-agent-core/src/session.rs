@@ -148,6 +148,8 @@ pub struct CreatedTime {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CompletedTime {
     pub created: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streamed: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed: Option<u64>,
 }

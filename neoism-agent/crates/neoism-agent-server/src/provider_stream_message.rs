@@ -108,6 +108,7 @@ pub(crate) async fn start_assistant_step(
         session_id: session_id.clone(),
         time: CompletedTime {
             created,
+            streamed: None,
             completed: None,
         },
         parent_id: parent_id.clone(),
@@ -297,7 +298,9 @@ pub(crate) async fn finish_provider_stream_success(
     let (assistant_message, final_text_part) = {
         let mut assistant_message = live_message.lock().await;
         if let MessageInfo::Assistant(assistant) = &mut assistant_message.info {
-            assistant.time.completed = Some(now_millis());
+            let streamed = now_millis();
+            assistant.time.streamed = Some(streamed);
+            assistant.time.completed = Some(streamed);
             assistant.tokens = tokens;
             assistant.cost += cost;
             assistant.model_id = provider_response.model_id;

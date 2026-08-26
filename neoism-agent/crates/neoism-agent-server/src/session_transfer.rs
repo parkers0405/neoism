@@ -382,6 +382,7 @@ mod tests {
                 session_id: session_id.clone(),
                 time: CompletedTime {
                     created: 2,
+                    streamed: Some(3),
                     completed: Some(3),
                 },
                 parent_id: Id::ascending(IdKind::Message),

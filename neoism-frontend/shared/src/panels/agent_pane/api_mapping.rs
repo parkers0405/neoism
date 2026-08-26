@@ -546,8 +546,9 @@ pub fn message_blocks_from_response(
         indexes.reverse();
     }
     let mut out = Vec::new();
-    for index in indexes {
+    for (position, &index) in indexes.iter().enumerate() {
         let message = &messages[index];
+        let tokens_per_second = turn_tokens_per_second(messages, &indexes, position);
         let response_started_at = message
             .get("info")
             .and_then(|info| {
@@ -562,7 +563,11 @@ pub fn message_blocks_from_response(
                     .or_else(|| user_created.get(parent_id))
             })
             .copied();
-        out.extend(message_blocks_with_start(message, response_started_at));
+        out.extend(message_blocks_with_start(
+            message,
+            response_started_at,
+            tokens_per_second,
+        ));
     }
     out
 }
@@ -605,12 +610,13 @@ fn task_ids_from_completion_text(text: &str) -> impl Iterator<Item = &str> {
 }
 
 pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
-    message_blocks_with_start(message, None)
+    message_blocks_with_start(message, None, None)
 }
 
 fn message_blocks_with_start(
     message: &Value,
     response_started_at: Option<u64>,
+    tokens_per_second: Option<f64>,
 ) -> Vec<NeoismAgentMessage> {
     let role = message
         .get("info")
@@ -717,7 +723,9 @@ fn message_blocks_with_start(
     let mut blocks = parts.iter().filter_map(part_block).collect::<Vec<_>>();
     if role == "assistant" {
         normalize_assistant_reasoning_order(&mut blocks);
-        if let Some(footer) = assistant_response_footer(message, response_started_at) {
+        if let Some(footer) =
+            assistant_response_footer(message, response_started_at, tokens_per_second)
+        {
             if let Some(answer) = blocks
                 .iter_mut()
                 .rfind(|block| block.kind == NeoismAgentMessageKind::Assistant)
@@ -747,6 +755,7 @@ fn message_blocks_with_start(
 fn assistant_response_footer(
     message: &Value,
     response_started_at: Option<u64>,
+    tokens_per_second: Option<f64>,
 ) -> Option<String> {
     let info = message.get("info")?;
     let intermediate_tool_step = info
@@ -773,7 +782,56 @@ fn assistant_response_footer(
         .map(display_model_name)
         .filter(|value| !value.is_empty())?;
     let duration = display_response_duration(completed.saturating_sub(created));
-    Some(format!("{agent} · {model} · {duration}"))
+    let throughput = tokens_per_second
+        .map(|value| format!(" · {value:.1} tok/s"))
+        .unwrap_or_default();
+    Some(format!("{agent} · {model} · {duration}{throughput}"))
+}
+
+fn turn_tokens_per_second(
+    messages: &[Value],
+    chronological_indices: &[usize],
+    assistant_position: usize,
+) -> Option<f64> {
+    let assistant_index = *chronological_indices.get(assistant_position)?;
+    let info = messages.get(assistant_index)?.get("info")?;
+    if info.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let turn_start = chronological_indices[..=assistant_position]
+        .iter()
+        .rposition(|index| {
+            messages[*index]
+                .get("info")
+                .and_then(|info| info.get("role"))
+                .and_then(Value::as_str)
+                .is_some_and(|role| matches!(role, "user" | "synthetic"))
+        })?;
+    let mut output = 0_u64;
+    let mut duration_ms = 0_u64;
+    let mut steps = 0_usize;
+    for index in &chronological_indices[turn_start + 1..=assistant_position] {
+        let message = &messages[*index];
+        let Some(info) = message.get("info") else {
+            continue;
+        };
+        if info.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let time = info.get("time")?;
+        let created = time.get("created")?.as_u64()?;
+        let streamed = time.get("streamed")?.as_u64()?;
+        output = output.saturating_add(
+            info.get("tokens")
+                .and_then(|tokens| tokens.get("output"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        );
+        duration_ms = duration_ms.saturating_add(streamed.saturating_sub(created));
+        steps += 1;
+    }
+    (steps > 0 && output > 0 && duration_ms > 0)
+        .then_some(output as f64 / (duration_ms as f64 / 1_000.0))
 }
 
 fn display_agent_name(value: &str) -> String {
@@ -1132,7 +1190,8 @@ mod tests {
                 "parentID": "msg-prompt",
                 "agent": "build",
                 "modelId": "gpt-5.6-sol",
-                "time": { "created": 1_200, "completed": 219_000 }
+                "time": { "created": 1_200, "streamed": 3_200, "completed": 219_000 },
+                "tokens": { "output": 64 }
             },
             "parts": [
                 { "id": "prt-first", "type": "text", "text": "working" },
@@ -1151,7 +1210,10 @@ mod tests {
         let blocks = message_blocks_from_response(&[assistant, user], true);
 
         assert_eq!(blocks[1].status, "");
-        assert_eq!(blocks[2].status, "Build · GPT-5.6 Sol · 3m 38s");
+        assert_eq!(
+            blocks[2].status,
+            "Build · GPT-5.6 Sol · 3m 38s · 32.0 tok/s"
+        );
     }
 
     #[test]

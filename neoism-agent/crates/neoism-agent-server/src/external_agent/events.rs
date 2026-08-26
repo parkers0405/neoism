@@ -482,6 +482,7 @@ async fn finish_nested_external_session(
             session_id: child.id.clone(),
             time: CompletedTime {
                 created: now,
+                streamed: Some(now),
                 completed: Some(now),
             },
             parent_id,

@@ -20,6 +20,7 @@ mod config;
 mod custom_tool;
 #[cfg(test)]
 mod edit_smoke_tests;
+mod execution_activity;
 mod error;
 mod executable;
 mod external_acp;

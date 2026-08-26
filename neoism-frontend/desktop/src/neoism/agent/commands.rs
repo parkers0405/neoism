@@ -781,6 +781,10 @@ impl NeoismAgentPane {
         self.side_panel.set_show_home_override(false);
         if !stays_in_family {
             self.side_panel.invalidate_subagent_refresh();
+            self.execution_activity = None;
+            self.execution_timer_anchor = None;
+            self.runtime_snapshot_root = None;
+            self.runtime_snapshot_revision = 0;
         }
         self.side_panel.reset_session_goal();
         if let Some((goal, version)) = self.session_goal_cache.get(session_id).cloned() {

@@ -1,5 +1,46 @@
 use super::*;
 
+struct ExternalRunGuard {
+    state: AppState,
+    session_id: String,
+    run_id: Option<String>,
+}
+
+impl ExternalRunGuard {
+    async fn finish(mut self) {
+        if let Some(run_id) = self.run_id.clone() {
+            if crate::session_run::try_finish_session_run(
+                &self.state,
+                &self.session_id,
+                &run_id,
+            )
+            .await
+            .is_ok()
+            {
+                self.run_id = None;
+            }
+        }
+    }
+}
+
+impl Drop for ExternalRunGuard {
+    fn drop(&mut self) {
+        let Some(run_id) = self.run_id.take() else { return; };
+        let state = self.state.clone();
+        let session_id = self.session_id.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = crate::session_run::try_finish_session_run(
+                    &state,
+                    &session_id,
+                    &run_id,
+                )
+                .await;
+            });
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_external_task(
     state: &AppState,
@@ -43,7 +84,6 @@ pub(crate) async fn execute_external_task(
                 .map_err(|error| error.to_string())?
         }
     };
-
     if session_is_running(state, child.id.as_str()).await {
         return Ok(tool::ToolExecutionResult {
             title: description.to_string(),
@@ -69,12 +109,20 @@ pub(crate) async fn execute_external_task(
         update_external_session_status(state, child.id.as_str(), runtime, "running")
             .await
             .map_err(|error| error.to_string())?;
+        let admission = crate::execution_activity::SubtaskAdmissionGuard::admit(
+            state,
+            parent,
+            child.id.as_str(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         spawn_background_external_subtask_prompt(
             state.clone(),
             child.id.to_string(),
             generation,
             prompt,
             runtime,
+            admission,
         );
         return Ok(tool::ToolExecutionResult {
             title: description.to_string(),
@@ -83,6 +131,13 @@ pub(crate) async fn execute_external_task(
         });
     }
 
+    let admission = crate::execution_activity::SubtaskAdmissionGuard::admit(
+        state,
+        parent,
+        child.id.as_str(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let result = run_external_subtask_prompt_with_cancel(
         state,
         child.id.as_str(),
@@ -93,20 +148,26 @@ pub(crate) async fn execute_external_task(
     )
     .await;
     match result {
-        Ok(message) => Ok(tool::ToolExecutionResult {
-            title: description.to_string(),
-            output: task_result_output(
-                child.id.as_str(),
-                assistant_text(&message).unwrap_or_default(),
-            ),
-            metadata: Some(task_metadata(
-                child.id.as_str(),
-                runtime,
-                "completed",
-                false,
-            )),
-        }),
-        Err(error) => Err(error.to_string()),
+        Ok(message) => {
+            admission.complete("completed").await;
+            Ok(tool::ToolExecutionResult {
+                title: description.to_string(),
+                output: task_result_output(
+                    child.id.as_str(),
+                    assistant_text(&message).unwrap_or_default(),
+                ),
+                metadata: Some(task_metadata(
+                    child.id.as_str(),
+                    runtime,
+                    "completed",
+                    false,
+                )),
+            })
+        }
+        Err(error) => {
+            admission.complete("failed").await;
+            Err(error.to_string())
+        }
     }
 }
 
@@ -129,6 +190,14 @@ async fn create_external_subtask_session(
         )
     };
     let mut extra = BTreeMap::new();
+    for key in [
+        crate::execution_activity::EXECUTION_ID_KEY,
+        crate::execution_activity::EXECUTION_ROOT_KEY,
+    ] {
+        if let Some(value) = parent.extra.get(key) {
+            extra.insert(key.to_string(), value.clone());
+        }
+    }
     extra.insert(
         "externalAgent".to_string(),
         json!({
@@ -177,6 +246,7 @@ fn spawn_background_external_subtask_prompt(
     generation: MessageId,
     prompt: String,
     runtime: ExternalRuntime,
+    admission: crate::execution_activity::SubtaskAdmissionGuard,
 ) {
     tokio::spawn(async move {
         match run_external_subtask_prompt(
@@ -189,6 +259,7 @@ fn spawn_background_external_subtask_prompt(
         .await
         {
             Ok(message) => {
+                admission.complete("completed").await;
                 let result = assistant_text(&message).unwrap_or_default();
                 publish_background_subtask_finished(
                     &state,
@@ -200,6 +271,7 @@ fn spawn_background_external_subtask_prompt(
                 .await;
             }
             Err(error) => {
+                admission.complete("failed").await;
                 let message = error.to_string();
                 tracing::warn!(
                     session_id = %child_id,
@@ -249,6 +321,12 @@ async fn run_external_subtask_prompt_with_cancel(
     let run = start_session_run(state, &child.id)
         .await
         .map_err(|_| ApiError::conflict("Session is already running"))?;
+    let run_guard = ExternalRunGuard {
+        state: state.clone(),
+        session_id: child.id.to_string(),
+        run_id: Some(run.id.clone()),
+    };
+    let result = async {
     let cancellation = cancel.unwrap_or_else(|| run.cancel.clone());
     let model = external_model(runtime);
     let user_message =
@@ -272,8 +350,11 @@ async fn run_external_subtask_prompt_with_cancel(
     )
     .await?;
 
+    let activity_segment =
+        crate::execution_activity::begin_provider_segment(state, child.id.as_str()).await;
     let acp_result =
         run_acp_prompt(state, &child, prompt, runtime, &step, &model, cancellation).await;
+    crate::execution_activity::end_provider_segment(activity_segment).await;
     match acp_result {
         Ok(result) => {
             let message = finish_provider_stream_success(
@@ -288,7 +369,6 @@ async fn run_external_subtask_prompt_with_cancel(
                 Default::default(),
             )
             .await?;
-            finish_session_run(state, child.id.as_str(), &run.id).await;
             if let Err(error) = update_external_session_status(
                 state,
                 child.id.as_str(),
@@ -330,6 +410,9 @@ async fn run_external_subtask_prompt_with_cancel(
             Err(ApiError::internal(message))
         }
     }
+    }.await;
+    run_guard.finish().await;
+    result
 }
 
 pub(crate) async fn append_external_user_message(
@@ -378,4 +461,66 @@ pub(crate) async fn append_external_user_message(
         json!({ "sessionID": child.id, "part": part, "time": now_millis() }),
     ));
     Ok(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_external_run_finish_keeps_guard_armed_for_retry() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-external-run-guard-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(path.clone()).await.unwrap();
+        let session_id = "external-child".to_string();
+        let run = crate::state::SessionRun {
+            id: "external-run".to_string(),
+            started_at: now_millis(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        state
+            .inner
+            .session_coordinator
+            .try_start_run(&session_id, run.clone())
+            .await
+            .unwrap();
+        state
+            .inner
+            .runs
+            .write()
+            .await
+            .insert(session_id.clone(), run.clone());
+        state
+            .inner
+            .store
+            .start_run(&run.id, &session_id)
+            .await
+            .unwrap();
+
+        let writer = state.inner.store.lock_writer_for_test().await;
+        let finish = tokio::spawn(
+            ExternalRunGuard {
+                state: state.clone(),
+                session_id: session_id.clone(),
+                run_id: Some(run.id.clone()),
+            }
+            .finish(),
+        );
+        tokio::task::yield_now().await;
+        finish.abort();
+        let _ = finish.await;
+        drop(writer);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while state.inner.runs.read().await.contains_key(&session_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop retry should durably finish the external run");
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_file(path);
+    }
 }

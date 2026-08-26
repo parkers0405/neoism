@@ -40,6 +40,9 @@ pub(super) enum AgentSessionUpdate {
     /// after this edge; there is no periodic active-state polling.
     EventStreamReconnected,
     SessionIdle,
+    ChildRunIdle {
+        session_id: String,
+    },
     PartDelta {
         message_id: Option<String>,
         part_id: Option<String>,
@@ -143,6 +146,7 @@ pub(super) enum AgentSessionUpdate {
         /// races this live update is dropped. See `SidePanel::set_session_goal`.
         version: u64,
     },
+    ExecutionUpdated(Value),
 }
 
 pub(crate) struct AgentSessionEventStream {
@@ -703,6 +707,9 @@ fn send_event_updates(
                 }
                 tx.send(AgentSessionUpdate::SessionIdle)?;
             }
+            SessionEventUpdate::ChildRunIdle { session_id } => {
+                tx.send(AgentSessionUpdate::ChildRunIdle { session_id })?;
+            }
             SessionEventUpdate::PartDelta {
                 message_id,
                 part_id,
@@ -893,6 +900,9 @@ fn send_event_updates(
             }
             SessionEventUpdate::GoalUpdated { goal, version } => {
                 tx.send(AgentSessionUpdate::GoalUpdated { goal, version })?;
+            }
+            SessionEventUpdate::ExecutionUpdated(snapshot) => {
+                tx.send(AgentSessionUpdate::ExecutionUpdated(snapshot))?;
             }
         }
     }

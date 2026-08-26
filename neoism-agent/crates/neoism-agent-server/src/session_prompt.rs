@@ -136,6 +136,7 @@ pub(crate) async fn append_prompt(
     }
     let message_id = message_id.unwrap_or_else(|| Id::ascending(IdKind::Message));
     let parent_message_id = message_id.clone();
+    let starts_top_level_execution = info.parent_id.is_none() && system.is_none();
     let model = model
         .or_else(|| info.model.as_ref().map(user_model_from_model_ref))
         .or_else(|| agent_info.model.as_ref().map(user_model_from_model_ref))
@@ -282,6 +283,25 @@ pub(crate) async fn append_prompt(
         }
         return Err(error.into());
     }
+    // Execution ownership begins only after the user turn is durably
+    // admitted. Validation failures, dedupe conflicts, and failed message
+    // writes therefore cannot create or replace the family's work cycle.
+    crate::execution_activity::ensure_for_prompt(
+        state,
+        &mut info,
+        message_id.as_str(),
+        starts_top_level_execution,
+    )
+    .await?;
+    state
+        .update_session_with_event(
+            &info,
+            EventPayload::new(
+                event_type::SESSION_UPDATED,
+                json!({ "sessionID": session_id, "info": info }),
+            ),
+        )
+        .await?;
     // Broadcast the user parts too so OTHER attached clients (a second
     // browser / desktop on the same session) see the prompt live.
     // `message.updated` only carries the info envelope — without the
@@ -318,12 +338,18 @@ pub(crate) async fn append_prompt(
     }
     if create_stub_reply {
         if let (Some(source), Some(fallback)) = (title_source, fallback_title) {
+            let activity_segment = crate::execution_activity::begin_provider_segment(
+                state,
+                &session_id_text,
+            )
+            .await;
             tokio::spawn(generate_model_title(
                 state.clone(),
                 session_id_text.clone(),
                 reply_model.clone(),
                 source,
                 fallback,
+                activity_segment,
             ));
         }
     }
@@ -964,6 +990,13 @@ async fn run_parent_subtasks(
                 &generation,
             )
             .await?;
+            let admission = crate::execution_activity::SubtaskAdmissionGuard::admit(
+                state,
+                info,
+                &child_session_id,
+            )
+            .await
+            .map_err(ApiError::from)?;
             crate::session_actions::spawn_background_subtask_prompt(
                 state.clone(),
                 child_session_id.clone(),
@@ -972,6 +1005,7 @@ async fn run_parent_subtasks(
                 subtask.agent.clone(),
                 Some(task_model.clone()),
                 Some(plugin_snapshot.clone()),
+                admission,
             );
             Ok::<_, ApiError>((child_session_id, metadata))
         }
@@ -1538,6 +1572,7 @@ async fn generate_model_title(
     model: UserModel,
     source: String,
     fallback_title: String,
+    activity_segment: Option<crate::execution_activity::ProviderSegmentGuard>,
 ) {
     let directory =
         if let Ok(Some(info)) = state.inner.store.get_session(&session_id).await {
@@ -1571,6 +1606,7 @@ async fn generate_model_title(
         return;
     };
     let Ok(stream) = provider.stream(request) else {
+        crate::execution_activity::end_provider_segment(activity_segment).await;
         return;
     };
     let mut output = String::new();
@@ -1579,10 +1615,14 @@ async fn generate_model_title(
         match event {
             Ok(ProviderStreamEvent::TextDelta { delta, .. }) => output.push_str(&delta),
             Ok(ProviderStreamEvent::Finish { .. }) => break,
-            Ok(ProviderStreamEvent::Error { .. }) | Err(_) => return,
+            Ok(ProviderStreamEvent::Error { .. }) | Err(_) => {
+                crate::execution_activity::end_provider_segment(activity_segment).await;
+                return;
+            }
             _ => {}
         }
     }
+    crate::execution_activity::end_provider_segment(activity_segment).await;
     let Some(title) = clean_model_title(&output) else {
         return;
     };
@@ -2302,9 +2342,15 @@ async fn run_provider_stream_step_with_retry(
     let max_retries = session_retry::max_retries();
     let mut attempt = 0_u64;
     loop {
+        let activity_segment = crate::execution_activity::begin_provider_segment(
+            ctx.state,
+            ctx.session_id_text,
+        )
+        .await;
         let provider_stream = match provider.stream(request.clone()) {
             Ok(stream) => stream,
             Err(error) => {
+                crate::execution_activity::end_provider_segment(activity_segment).await;
                 let error = anyhow::anyhow!(error.to_string());
                 if attempt < max_retries
                     && !cancellation.load(Ordering::SeqCst)
@@ -2358,7 +2404,9 @@ async fn run_provider_stream_step_with_retry(
                 event.map_err(|error| anyhow::anyhow!(error.to_string()))
             })),
         };
-        match run_provider_stream_step(ctx, provider_stream, cancellation).await {
+        let stream_result = run_provider_stream_step(ctx, provider_stream, cancellation).await;
+        crate::execution_activity::end_provider_segment(activity_segment).await;
+        match stream_result {
             Ok(message) => return Ok(message),
             Err(error)
                 if error.retryable

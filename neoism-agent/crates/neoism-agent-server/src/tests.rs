@@ -616,12 +616,153 @@ async fn store_persists_sessions_and_searches_with_like() {
         .is_empty());
 
     // delete_session removes child rows explicitly.
+    store
+        .admit_execution_activity(
+            session_id.as_str(),
+            "execution-delete",
+            "message-delete",
+            "",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .insert_execution_segment(
+            session_id.as_str(),
+            "execution-delete",
+            "segment-delete",
+            "owner-delete",
+            session_id.as_str(),
+            now,
+        )
+        .await
+        .unwrap();
     assert!(store.delete_session(session_id.as_str()).await.unwrap());
     assert!(store
         .list_messages(session_id.as_str())
         .await
         .unwrap()
         .is_empty());
+    assert!(store
+        .get_session_runtime_snapshot(session_id.as_str())
+        .await
+        .unwrap()
+        .execution
+        .is_none());
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn cancelled_subtask_completion_keeps_admission_armed_for_retry() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-subtask-admission-drop-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let parent_id = neoism_agent_core::new_session_id();
+    let child_id = neoism_agent_core::new_session_id();
+    let mut parent = store_test_session(&parent_id, now_millis());
+    let mut child = store_test_session(&child_id, now_millis());
+    child.parent_id = Some(parent_id.clone());
+    state.inner.store.insert_session(&parent).await.unwrap();
+    state.inner.store.insert_session(&child).await.unwrap();
+    let execution = state.inner.store
+        .admit_execution_activity(parent_id.as_str(), "execution-guard", "message-guard", "")
+        .await.unwrap().unwrap();
+    parent.extra.insert(crate::execution_activity::EXECUTION_ID_KEY.into(), json!(execution.execution_id));
+    parent.extra.insert(crate::execution_activity::EXECUTION_ROOT_KEY.into(), json!(parent_id.to_string()));
+    state.inner.store.update_session(&parent).await.unwrap();
+    let guard = crate::execution_activity::SubtaskAdmissionGuard::admit(
+        &state, &parent, child_id.as_str(),
+    ).await.unwrap();
+    let child_two_id = neoism_agent_core::new_session_id();
+    let mut child_two = store_test_session(&child_two_id, now_millis());
+    child_two.parent_id = Some(parent_id.clone());
+    state.inner.store.insert_session(&child_two).await.unwrap();
+    crate::execution_activity::register_subtask(&state, &parent, child_two_id.as_str())
+        .await
+        .unwrap();
+    let writer = state.inner.store.lock_writer_for_test().await;
+    let finish = tokio::spawn(guard.complete("completed"));
+    tokio::task::yield_now().await;
+    finish.abort();
+    let _ = finish.await;
+    drop(writer);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if state.inner.store
+                .execution_subtask_status("execution-guard", child_id.as_str())
+                .await.unwrap().as_deref() == Some("completed")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert!(crate::execution_activity::SubtaskAdmissionGuard::admit(
+        &state, &parent, child_id.as_str(),
+    ).await.is_err(), "terminal duplicate must not resurrect");
+    crate::session_actions::publish_background_subtask_finished(
+        &state,
+        child_two_id.as_str(),
+        &Id::ascending(IdKind::Message),
+        "completed",
+        "done",
+    ).await;
+    assert_eq!(
+        state.inner.store
+            .execution_subtask_status("execution-guard", child_two_id.as_str())
+            .await.unwrap().as_deref(),
+        Some("completed"),
+        "execution terminalization must not depend on notification tracking",
+    );
+    let child_three_id = neoism_agent_core::new_session_id();
+    let mut child_three = store_test_session(&child_three_id, now_millis());
+    child_three.parent_id = Some(parent_id.clone());
+    state.inner.store.insert_session(&child_three).await.unwrap();
+    assert!(crate::execution_activity::SubtaskAdmissionGuard::admit(
+        &state,
+        &parent,
+        child_three_id.as_str(),
+    )
+    .await
+    .is_err(), "finished execution must reject and prevent child launch");
+    assert!(state.inner.store
+        .execution_subtask_status("execution-guard", child_three_id.as_str())
+        .await.unwrap().is_none());
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn deleting_child_cleans_runtime_without_deleting_root_execution() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-delete-child-execution-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let store = SessionStore::open(path.clone()).await.unwrap();
+    let root_id = neoism_agent_core::new_session_id();
+    let child_id = neoism_agent_core::new_session_id();
+    let root = store_test_session(&root_id, now_millis());
+    let mut child = store_test_session(&child_id, now_millis());
+    child.parent_id = Some(root_id.clone());
+    store.insert_session(&root).await.unwrap();
+    store.insert_session(&child).await.unwrap();
+    store.admit_execution_activity(root_id.as_str(), "execution-delete-child", "message", "")
+        .await.unwrap().unwrap();
+    store.register_execution_subtask(
+        "execution-delete-child", root_id.as_str(), root_id.as_str(), child_id.as_str(), 10,
+    ).await.unwrap();
+    store.insert_execution_segment(
+        root_id.as_str(), "execution-delete-child", "child-segment", "owner", child_id.as_str(), 10,
+    ).await.unwrap();
+    assert!(store.delete_session(child_id.as_str()).await.unwrap());
+    let runtime = store.get_session_runtime_snapshot(root_id.as_str()).await.unwrap();
+    assert!(runtime.execution.is_some());
+    assert!(runtime.branches.is_empty());
+    assert!(runtime.execution.unwrap().active_segments.is_empty());
     cleanup_sqlite_files(&path);
 }
 
@@ -1169,6 +1310,137 @@ async fn v2_root_event_stream_forwards_live_delta_from_child_created_after_conne
     assert!(text.contains(child_id.as_str()), "{text}");
     assert!(!text.contains("must-not-leak"), "{text}");
 
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn v2_root_stream_delivers_child_deletion_without_unrelated_leak() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-family-delete-events-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let root_id = neoism_agent_core::new_session_id();
+    let child_id = neoism_agent_core::new_session_id();
+    let unrelated_id = neoism_agent_core::new_session_id();
+    let root = store_test_session(&root_id, now_millis());
+    let mut child = store_test_session(&child_id, now_millis());
+    child.parent_id = Some(root_id.clone());
+    let unrelated = store_test_session(&unrelated_id, now_millis());
+    state.inner.store.insert_session(&root).await.unwrap();
+    state.inner.store.insert_session(&child).await.unwrap();
+    state.inner.store.insert_session(&unrelated).await.unwrap();
+    state.inner.store
+        .admit_execution_activity(root_id.as_str(), "execution-delete-sse", "message", "")
+        .await.unwrap().unwrap();
+    state.inner.store.register_execution_subtask(
+        "execution-delete-sse", root_id.as_str(), root_id.as_str(), child_id.as_str(), 10,
+    ).await.unwrap();
+
+    let response = app(state.clone()).oneshot(
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v2/events?sessionId={}&tail=true&limit=10", root_id))
+            .body(Body::empty())
+            .unwrap(),
+    ).await.unwrap();
+    let mut body = response.into_body().into_data_stream();
+
+    for deleted in [&unrelated_id, &child_id] {
+        let response = app(state.clone()).oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2/sessions/{deleted}"))
+                .body(Body::empty())
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let mut received = String::new();
+    while !received.contains("session.deleted") {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("child deletion should reach root SSE stream")
+            .expect("SSE body should remain open")
+            .expect("SSE body chunk should be readable");
+        received.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    let text = received;
+    assert!(text.contains("session.deleted"), "{text}");
+    assert!(text.contains(child_id.as_str()), "{text}");
+    assert!(!text.contains(unrelated_id.as_str()), "{text}");
+
+    let runtime = state.inner.store
+        .get_session_runtime_snapshot(root_id.as_str())
+        .await.unwrap();
+    assert!(runtime.branches.is_empty(), "reconnect hydration must omit deleted child");
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn v2_child_event_stream_receives_root_and_sibling_execution_family_events() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-child-family-events-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let root_id = neoism_agent_core::new_session_id();
+    let child_id = neoism_agent_core::new_session_id();
+    let sibling_id = neoism_agent_core::new_session_id();
+    let root = store_test_session(&root_id, now_millis());
+    let mut child = store_test_session(&child_id, now_millis());
+    child.parent_id = Some(root_id.clone());
+    let mut sibling = store_test_session(&sibling_id, now_millis());
+    sibling.parent_id = Some(root_id.clone());
+    state.inner.store.insert_session(&root).await.unwrap();
+    state.inner.store.insert_session(&child).await.unwrap();
+    state.inner.store.insert_session(&sibling).await.unwrap();
+
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v2/events?sessionId={}&tail=true&limit=1",
+                    child_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = response.into_body().into_data_stream();
+    state.publish_live(EventPayload::new(
+        event_type::SESSION_EXECUTION_UPDATED,
+        json!({ "sessionID": root_id, "snapshot": { "executionId": "execution-a" } }),
+    ));
+    state.publish_live(EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({
+            "sessionID": sibling_id,
+            "messageID": "message-sibling",
+            "partID": "part-sibling",
+            "field": "text",
+            "delta": "sibling-token"
+        }),
+    ));
+
+    let mut received = String::new();
+    while !(received.contains("session.execution.updated")
+        && received.contains("sibling-token"))
+    {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("root and sibling events should reach child SSE stream")
+            .expect("SSE body should remain open")
+            .expect("SSE body chunk should be readable");
+        received.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(received.contains(root_id.as_str()), "{received}");
+    assert!(received.contains(sibling_id.as_str()), "{received}");
     cleanup_sqlite_files(&path);
 }
 

@@ -506,6 +506,12 @@ pub enum AgentServerMessage {
     SessionIdle {
         session_id: String,
     },
+    /// Authoritative reconnect/hydration state for one conversation family.
+    /// Branch lifecycle is independent from each child's transient run status.
+    RuntimeSnapshot {
+        session_id: String,
+        snapshot: AgentRuntimeSnapshot,
+    },
     /// Session emitted a non-fatal status line (badges like
     /// "Pondering", "Compacting", subagent counts).
     StreamingState {
@@ -948,6 +954,44 @@ pub enum SubagentStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRuntimeSnapshot {
+    pub root_session_id: String,
+    #[serde(default, alias = "revision")]
+    pub family_revision: u64,
+    #[serde(default)]
+    pub branches_authoritative: bool,
+    #[serde(default)]
+    pub branches: Vec<SubtaskLifecycle>,
+    #[serde(default)]
+    pub execution: Option<ExecutionActivity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtaskLifecycle {
+    pub session_id: String,
+    pub parent_session_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub started_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionActivity {
+    pub execution_id: String,
+    pub root_session_id: String,
+    pub root_message_id: String,
+    pub completed_ms: u64,
+    #[serde(default)]
+    pub active_segments: std::collections::BTreeMap<String, u64>,
+    pub revision: u64,
+    #[serde(default)]
+    pub finished: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CompactionPhase {
     Started,
@@ -1015,4 +1059,39 @@ pub struct Usage {
     pub cost_micros: u64,
     #[serde(default)]
     pub context_limit: Option<u64>,
+}
+
+#[cfg(test)]
+mod runtime_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_snapshot_protocol_round_trips_reconnect_state() {
+        let message = AgentServerMessage::RuntimeSnapshot {
+            session_id: "child".into(),
+            snapshot: AgentRuntimeSnapshot {
+                root_session_id: "root".into(),
+                family_revision: 9,
+                branches_authoritative: true,
+                branches: vec![SubtaskLifecycle {
+                    session_id: "child".into(),
+                    parent_session_id: "root".into(),
+                    status: "outstanding".into(),
+                    started_at: Some(123),
+                }],
+                execution: Some(ExecutionActivity {
+                    execution_id: "execution".into(),
+                    root_session_id: "root".into(),
+                    root_message_id: "message".into(),
+                    completed_ms: 5_000,
+                    active_segments: [("provider".into(), 10_000)].into(),
+                    revision: 4,
+                    finished: false,
+                }),
+            },
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        let decoded: AgentServerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, message);
+    }
 }

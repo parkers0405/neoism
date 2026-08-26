@@ -412,6 +412,61 @@ pub enum SessionStatus {
     },
 }
 
+/// Durable cumulative provider activity for one top-level work cycle.
+///
+/// `completed_ms` contains closed provider-stream segments. Active segments
+/// retain their unix-millisecond start epochs so reconnecting clients can add
+/// the still-running portions. Durations use **model-seconds semantics**: two
+/// concurrent provider requests contribute two seconds per wall-clock second.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionActivitySnapshot {
+    pub execution_id: String,
+    pub root_session_id: String,
+    pub root_message_id: String,
+    pub completed_ms: u64,
+    #[serde(default)]
+    pub active_segments: BTreeMap<String, u64>,
+    pub revision: u64,
+    #[serde(default)]
+    pub finished: bool,
+}
+
+impl ExecutionActivitySnapshot {
+    pub fn elapsed_ms_at(&self, now_ms: u64) -> u64 {
+        self.active_segments
+            .values()
+            .fold(self.completed_ms, |total, start| {
+                total.saturating_add(now_ms.saturating_sub(*start))
+            })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtaskLifecycleSnapshot {
+    pub session_id: String,
+    pub parent_session_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRuntimeSnapshot {
+    pub root_session_id: String,
+    /// Revision of the execution-scoped branch roster. This is deliberately
+    /// independent from `execution.revision`, which advances for timer-only
+    /// provider segment updates.
+    #[serde(default, alias = "revision")]
+    pub family_revision: u64,
+    #[serde(default)]
+    pub branches: Vec<SubtaskLifecycleSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionActivitySnapshot>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionQueueStatus {

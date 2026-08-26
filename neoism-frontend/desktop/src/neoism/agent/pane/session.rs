@@ -349,12 +349,14 @@ impl NeoismAgentPane {
             .name(format!("neoism-agent-runtime-{session_id}"))
             .spawn(move || {
                 let result = fetch_session_statuses(&server);
+                let runtime = fetch_family_runtime(&server, &worker_session_id);
                 let _ =
                     tx.send(NeoismAgentBackgroundUpdate::SessionRuntimeStatusRefreshed {
                         session_id: worker_session_id,
                         request_generation,
                         runtime_revision,
                         result,
+                        runtime,
                     });
             })
         {
@@ -373,8 +375,6 @@ impl NeoismAgentPane {
         // when reopening a session.
         self.background_tasks_started_at = None;
         self.background_task_details_expanded = false;
-        self.active_subagent_ids.clear();
-        self.active_subagent_started_at.clear();
         let active_status = statuses
             .get(session_id)
             .filter(|status| matches!(status.kind.as_str(), "busy" | "retry"));
@@ -418,16 +418,6 @@ impl NeoismAgentPane {
                     entry.id.clone(),
                     branch_status,
                     status.started_at,
-                );
-            } else if entry.id != session_id {
-                // `/session/status` is the live run set. A tracked child
-                // omitted from a successful snapshot is idle, not unknown —
-                // otherwise a missed terminal SSE leaves the footer/sidebar
-                // latched on "working" after the child has already finished.
-                self.note_subagent_runtime(
-                    entry.id.clone(),
-                    BranchStatus::Completed,
-                    None,
                 );
             }
         }
@@ -509,6 +499,19 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Settle only the child's current run chrome. This must not mutate the
+    /// parent-owned branch lifecycle/count.
+    pub(crate) fn note_session_run_idle(&mut self, session_id: &str) {
+        self.note_session_runtime_event(session_id);
+        if self.session_id.as_deref() == Some(session_id) {
+            self.note_streaming(NeoismAgentStreamingState::Idle, None);
+        } else if let Some(cached) = self.session_cache.get_mut(session_id) {
+            cached
+                .runtime
+                .note_streaming(NeoismAgentStreamingState::Idle, None);
+        }
+    }
+
     /// Switch to the side-panel-highlighted sub-agent (or back to the
     /// parent). Called from the click / Enter path when chat mode is
     /// showing the Sub Agents list.
@@ -530,6 +533,7 @@ impl NeoismAgentPane {
 
     pub fn has_status_activity(&self) -> bool {
         self.is_streaming()
+            || self.execution_activity.is_some()
             || self.active_subagent_count() > 0
             || self.running_background_task_count() > 0
             // The grace hold counts as activity so the status row's
@@ -599,6 +603,14 @@ impl NeoismAgentPane {
 
     pub fn streaming_label(&self) -> String {
         let state = self.streaming_state();
+        if state == NeoismAgentStreamingState::Idle
+            && self
+                .execution_activity
+                .as_ref()
+                .is_some_and(|activity| activity.finished)
+        {
+            return "Completed".to_string();
+        }
         if state == NeoismAgentStreamingState::Retrying {
             if let Some(reason) = self
                 .streaming_tool_label
@@ -614,11 +626,121 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
+        if let Some(activity) = &self.execution_activity {
+            let elapsed = self.execution_timer_anchor.as_ref().map_or_else(
+                || activity.elapsed_ms_at(unix_millis()),
+                |anchor| anchor.elapsed_ms_at(Instant::now()),
+            );
+            return Some(elapsed as f32 / 1000.0);
+        }
         // Display clock: raw clocks while active, then the held clock so
         // the timer/animation phase stays continuous through a transient
         // idle gap instead of snapping to zero.
         self.raw_streaming_elapsed_seconds()
             .or_else(|| self.side_panel.held_status_elapsed_seconds())
+    }
+
+    pub(crate) fn apply_execution_activity(
+        &mut self,
+        mut incoming: neoism_ui::panels::agent_pane::state::ExecutionActivityState,
+    ) -> bool {
+        let now = Instant::now();
+        let current_floor = self.execution_timer_anchor.as_ref().and_then(|anchor| {
+            anchor.matches(&incoming.execution_id).then(|| anchor.elapsed_ms_at(now))
+        }).unwrap_or(0);
+        if let Some(current) = self.execution_activity.as_ref() {
+            if current.execution_id == incoming.execution_id && current.revision > incoming.revision {
+                return false;
+            }
+            if current.execution_id != incoming.execution_id && incoming.execution_id <= current.execution_id {
+                return false;
+            }
+            if current.execution_id == incoming.execution_id {
+                incoming.completed_ms = incoming.completed_ms.max(current.completed_ms);
+            }
+        }
+        let replaced = self
+            .execution_activity
+            .as_ref()
+            .is_some_and(|current| current.execution_id != incoming.execution_id);
+        self.execution_activity = Some(incoming);
+        if let Some(activity) = self.execution_activity.as_ref() {
+            self.execution_timer_anchor = Some(
+                neoism_ui::panels::agent_pane::state::ExecutionTimerAnchor::from_snapshot(
+                    activity,
+                    unix_millis(),
+                    now,
+                    current_floor,
+                ),
+            );
+        }
+        if replaced {
+            self.active_subagent_ids.clear();
+            self.active_subagent_started_at.clear();
+            self.side_panel.reset_branch_lifecycle();
+        }
+        true
+    }
+
+    pub(crate) fn execution_activity_matches(&self, execution_id: &str, revision: u64) -> bool {
+        self.execution_activity.as_ref().is_some_and(|current| {
+            current.execution_id == execution_id && current.revision == revision
+        })
+    }
+
+    pub(crate) fn apply_branch_lifecycle_snapshot(
+        &mut self,
+        root_session_id: String,
+        revision: u64,
+        branches: impl IntoIterator<Item = (String, String, Option<u64>)>,
+    ) -> bool {
+        if self.runtime_snapshot_root.as_deref() == Some(root_session_id.as_str())
+            && revision <= self.runtime_snapshot_revision
+        {
+            return false;
+        }
+        if self.runtime_snapshot_root.as_deref() != Some(root_session_id.as_str()) {
+            self.runtime_snapshot_root = Some(root_session_id);
+            self.runtime_snapshot_revision = 0;
+            self.active_subagent_ids.clear();
+            self.active_subagent_started_at.clear();
+            self.side_panel.reset_branch_lifecycle();
+        }
+        self.runtime_snapshot_revision = revision;
+        let branches = branches.into_iter().collect::<Vec<_>>();
+        let branch_ids = branches
+            .iter()
+            .map(|(session_id, _, _)| session_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        self.active_subagent_ids
+            .retain(|session_id| branch_ids.contains(session_id));
+        self.active_subagent_started_at
+            .retain(|session_id, _| branch_ids.contains(session_id));
+        self.side_panel.retain_authoritative_branches(&branch_ids);
+        for (session_id, status, started_at) in branches {
+            let status = match status.as_str() {
+                "outstanding" => BranchStatus::Active,
+                "completed" => BranchStatus::Completed,
+                _ => BranchStatus::Stopped,
+            };
+            self.upsert_live_subagent_entry(&session_id, None, None);
+            let status = self
+                .side_panel
+                .reconcile_branch_lifecycle_snapshot(session_id.clone(), status);
+            self.side_panel
+                .set_branch_activity_started_at(session_id.clone(), started_at);
+            if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
+                self.active_subagent_ids.insert(session_id.clone());
+                if let Some(started_at) = started_at {
+                    self.active_subagent_started_at.insert(session_id, started_at);
+                }
+            } else {
+                self.active_subagent_ids.remove(&session_id);
+                self.active_subagent_started_at.remove(&session_id);
+            }
+        }
+        self.sync_subagent_waiting_clock();
+        true
     }
 
     fn raw_streaming_elapsed_seconds(&self) -> Option<f32> {
@@ -668,18 +790,14 @@ impl NeoismAgentPane {
         if self.is_subagent_session() {
             return 0;
         }
-        let sidebar_count = self
+        let mut active_ids = self
             .side_panel
-            .active_child_count(self.session_id.as_deref());
-        let runtime_count = self
-            .active_subagent_ids
-            .iter()
-            .filter(|session_id| {
+            .active_child_ids(self.session_id.as_deref());
+        active_ids.extend(self.active_subagent_ids.iter().filter(|session_id| {
                 Some(session_id.as_str()) != self.session_id.as_deref()
                     && !self.side_panel.branch_terminal_locked(session_id)
-            })
-            .count();
-        sidebar_count.max(runtime_count)
+            }).cloned());
+        active_ids.len()
     }
 
     pub(crate) fn note_subagent_runtime(

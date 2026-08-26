@@ -1741,7 +1741,7 @@ pub fn render_streaming_status_row(
         AgentStreamingStatus::Retrying => "backoff",
         AgentStreamingStatus::Idle => "idle",
     };
-    let time_label = format!("· {} · {detail}", format_elapsed(elapsed));
+    let time_label = format!("· {} model · {detail}", format_elapsed(elapsed));
     let time_opts = DrawOpts {
         font_size: 13.0 * s,
         color: theme.u8(theme.muted),

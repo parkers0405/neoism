@@ -47,6 +47,25 @@ impl BackgroundWorkspaceRuntime {
     }
 }
 
+pub(crate) async fn family_has_running_jobs(
+    state: &AppState,
+    descendants: &std::collections::BTreeSet<String>,
+    root_session_id: &str,
+) -> bool {
+    for runtime in state.inner.workspace_runtimes.runtimes().await {
+        let Some(background) = runtime.background_if_allocated() else {
+            continue;
+        };
+        if background.jobs.read().await.values().any(|job| {
+            job.status == BackgroundJobStatus::Running
+                && (job.session_id == root_session_id || descendants.contains(&job.session_id))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackgroundJob {
@@ -191,6 +210,8 @@ pub(crate) async fn start_background_task_tool(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     process::set_new_process_group(&mut command_proc);
+    let _execution_admission =
+        crate::execution_activity::admission_guard(state, session_id.as_str()).await;
     let child = command_proc
         .spawn()
         .with_context(|| format!("failed to spawn shell {shell}"))
@@ -480,6 +501,7 @@ async fn finish_background_job(state: &AppState, background: &BackgroundWorkspac
             "failed to notify session about completed background task"
         );
     }
+    crate::execution_activity::finish_if_quiescent(state, &job.session_id).await;
 }
 
 async fn find_job(

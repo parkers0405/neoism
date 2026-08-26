@@ -19,7 +19,7 @@ mod timeline;
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use web_time::Duration;
 
@@ -695,6 +695,10 @@ pub struct NeoismAgentPane {
     running_background_task_count: usize,
     active_subagent_ids: BTreeSet<String>,
     active_subagent_started_at: HashMap<String, u64>,
+    runtime_snapshot_root: Option<String>,
+    runtime_snapshot_revision: u64,
+    execution_activity: Option<ExecutionActivityState>,
+    execution_timer_anchor: Option<ExecutionTimerAnchor>,
     pending_permission: Option<NeoismAgentPendingPermission>,
     pending_permission_queue: VecDeque<NeoismAgentPendingPermission>,
     /// `/yolo` — while true, every permission request auto-answers
@@ -1039,6 +1043,10 @@ impl Default for NeoismAgentPane {
             running_background_task_count: 0,
             active_subagent_ids: BTreeSet::new(),
             active_subagent_started_at: HashMap::new(),
+            runtime_snapshot_root: None,
+            runtime_snapshot_revision: 0,
+            execution_activity: None,
+            execution_timer_anchor: None,
             pending_permission: None,
             pending_permission_queue: VecDeque::new(),
             skip_permissions: false,
@@ -1062,6 +1070,59 @@ impl Default for NeoismAgentPane {
             local_presence_name: None,
             visible_user_orb: false,
         }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExecutionActivityState {
+    pub execution_id: String,
+    pub root_session_id: String,
+    pub completed_ms: u64,
+    pub active_segments: BTreeMap<String, u64>,
+    pub revision: u64,
+    pub finished: bool,
+}
+
+impl ExecutionActivityState {
+    pub fn elapsed_ms_at(&self, now_ms: u64) -> u64 {
+        self.active_segments.values().fold(self.completed_ms, |total, started| {
+            total.saturating_add(now_ms.saturating_sub(*started))
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionTimerAnchor {
+    execution_id: String,
+    elapsed_ms: u64,
+    active_segments: usize,
+    observed_at: Instant,
+}
+
+impl ExecutionTimerAnchor {
+    pub fn from_snapshot(
+        snapshot: &ExecutionActivityState,
+        wall_ms: u64,
+        observed_at: Instant,
+        floor_ms: u64,
+    ) -> Self {
+        Self {
+            execution_id: snapshot.execution_id.clone(),
+            elapsed_ms: snapshot.elapsed_ms_at(wall_ms).max(floor_ms),
+            active_segments: snapshot.active_segments.len(),
+            observed_at,
+        }
+    }
+
+    pub fn elapsed_ms_at(&self, now: Instant) -> u64 {
+        self.elapsed_ms.saturating_add(
+            (now.saturating_duration_since(self.observed_at).as_millis() as u64)
+                .saturating_mul(self.active_segments as u64),
+        )
+    }
+
+    pub fn matches(&self, execution_id: &str) -> bool {
+        self.execution_id == execution_id
     }
 }
 
@@ -1151,7 +1212,23 @@ impl NeoismAgentPane {
     /// Acknowledge a freshly-created agent-server session id. Mirrors
     /// `ThreadCreated` / `ThreadSwitched`.
     pub fn set_session_id(&mut self, session_id: Option<String>) {
-        self.session_id = session_id.and_then(|id| (!id.trim().is_empty()).then_some(id));
+        let session_id = session_id.and_then(|id| (!id.trim().is_empty()).then_some(id));
+        let stays_in_family = session_id.as_deref().is_some_and(|target| {
+            self.runtime_snapshot_root.as_deref() == Some(target)
+                || self.active_subagent_ids.contains(target)
+                || self
+                    .side_panel
+                    .subagents()
+                    .iter()
+                    .any(|entry| entry.id == target)
+        });
+        if self.session_id != session_id && !stays_in_family {
+            self.execution_activity = None;
+            self.execution_timer_anchor = None;
+            self.runtime_snapshot_root = None;
+            self.runtime_snapshot_revision = 0;
+        }
+        self.session_id = session_id;
     }
 
     /// Clear the active session if it matches `session_id`. Mirrors
@@ -1939,6 +2016,13 @@ fn instant_from_epoch_millis(epoch_millis: u64) -> Instant {
             .checked_sub(Duration::from_millis(elapsed))
             .unwrap_or_else(Instant::now)
     }
+}
+
+fn unix_millis() -> u64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[allow(dead_code)]

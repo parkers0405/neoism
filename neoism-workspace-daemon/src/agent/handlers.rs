@@ -1203,6 +1203,23 @@ pub(crate) async fn push_session_running_state(
     });
 }
 
+pub(crate) async fn push_runtime_snapshot(inner: Arc<AgentInner>, session_id: String) {
+    let path = format!("/v2/sessions/{}/runtime", percent_encode(&session_id));
+    let Ok(value) = http_get_json(&inner, &path).await else {
+        return;
+    };
+    let Ok(mut snapshot) =
+        serde_json::from_value::<neoism_protocol::agent::AgentRuntimeSnapshot>(value)
+    else {
+        return;
+    };
+    snapshot.branches_authoritative = true;
+    let _ = inner.tx.send(AgentServerMessage::RuntimeSnapshot {
+        session_id,
+        snapshot,
+    });
+}
+
 pub(crate) async fn push_pending_questions(inner: Arc<AgentInner>, session_id: String) {
     let path = format!("/v2/interactions/questions?sessionId={}", percent_encode(&session_id));
     let Ok(value) = http_get_json(&inner, &path).await else {

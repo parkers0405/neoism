@@ -22,7 +22,7 @@
 //! analogue — same scroll/cursor primitives, same clamp/scrolloff
 //! pattern.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use web_time::Duration;
 use web_time::Instant;
 
@@ -159,11 +159,10 @@ fn preserve_specific_subagent_metadata(
     if incoming.agent_kind.is_none() {
         incoming.agent_kind = previous.agent_kind;
     }
-    // A listed child with no runtime_status was omitted from a successful
-    // `/session/status` snapshot. That map is the live run set, so unknown
-    // here means idle — not "keep last running forever".
+    // `/session/status` is only the live SessionRun set. Omission cannot
+    // terminalize the parent-owned subtask lifecycle.
     if incoming.runtime_status.is_none() {
-        incoming.runtime_status = Some("completed".to_string());
+        incoming.runtime_status = previous.runtime_status.clone();
     }
 }
 
@@ -1880,6 +1879,38 @@ impl NeoismAgentSidePanel {
         self.set_branch_activity_status(session_id, status);
     }
 
+    pub fn reconcile_branch_lifecycle_snapshot(
+        &mut self,
+        session_id: impl Into<String>,
+        status: BranchStatus,
+    ) -> BranchStatus {
+        let session_id = session_id.into();
+        self.reconcile_snapshot_branch_activity_status(session_id.clone(), status);
+        self.branch_activities
+            .get(&session_id)
+            .map(|activity| activity.status)
+            .unwrap_or(status)
+    }
+
+    pub fn reset_branch_lifecycle(&mut self) {
+        self.branch_activities.clear();
+        for entry in self.subagents.iter_mut().skip(1) {
+            entry.runtime_status = None;
+        }
+    }
+
+    pub fn retain_authoritative_branches(
+        &mut self,
+        branch_ids: &std::collections::HashSet<String>,
+    ) {
+        self.branch_activities
+            .retain(|session_id, _| branch_ids.contains(session_id));
+        let root_id = self.subagents.first().map(|entry| entry.id.clone());
+        self.subagents.retain(|entry| {
+            root_id.as_deref() == Some(entry.id.as_str()) || branch_ids.contains(&entry.id)
+        });
+    }
+
     pub fn set_branch_activity_started_at(
         &mut self,
         session_id: impl Into<String>,
@@ -1967,6 +1998,10 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn active_child_count(&self, current_session_id: Option<&str>) -> usize {
+        self.active_child_ids(current_session_id).len()
+    }
+
+    pub fn active_child_ids(&self, current_session_id: Option<&str>) -> BTreeSet<String> {
         self.branch_activities
             .iter()
             .filter(|(session_id, activity)| {
@@ -1980,7 +2015,8 @@ impl NeoismAgentSidePanel {
                         BranchStatus::Active | BranchStatus::WaitingPermission
                     )
             })
-            .count()
+            .map(|(session_id, _)| session_id.clone())
+            .collect()
     }
 
     pub fn active_child_started_at(

@@ -309,6 +309,32 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::SessionIdle { .. } => {
             pane.note_session_idle();
         }
+        AgentServerMessage::RuntimeSnapshot { snapshot, .. } => {
+            let mut execution_current = snapshot.execution.is_none();
+            if let Some(activity) = snapshot.execution {
+                let execution_id = activity.execution_id.clone();
+                let revision = activity.revision;
+                execution_current = pane.apply_execution_activity(
+                    neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+                        execution_id,
+                        root_session_id: activity.root_session_id,
+                        completed_ms: activity.completed_ms,
+                        active_segments: activity.active_segments,
+                        revision: activity.revision,
+                        finished: activity.finished,
+                    },
+                ) || pane.execution_activity_matches(&activity.execution_id, revision);
+            }
+            if snapshot.branches_authoritative && execution_current {
+                pane.apply_branch_lifecycle_snapshot(
+                    snapshot.root_session_id.clone(),
+                    snapshot.family_revision,
+                    snapshot.branches.into_iter().map(|branch| {
+                        (branch.session_id, branch.status, branch.started_at)
+                    }),
+                );
+            }
+        }
         AgentServerMessage::StreamingState { state, label, .. } => {
             pane.note_streaming(map_streaming(state), label);
         }
@@ -760,10 +786,37 @@ pub(crate) fn apply_agent_event_to_cache(
         }
         AgentServerMessage::SessionIdle { session_id } => {
             pane.cache_note_session_idle(&session_id);
-            // Authoritative idle edge for a tracked family member —
-            // flip its sidebar row to completed even though the viewed
-            // transcript is a different family session.
-            pane.note_family_session_streaming(&session_id, false);
+            // SessionRun idle is not a terminal parent-task lifecycle edge.
+            true
+        }
+        AgentServerMessage::RuntimeSnapshot {
+            session_id: _,
+            snapshot,
+        } => {
+            let mut execution_current = snapshot.execution.is_none();
+            if let Some(activity) = snapshot.execution {
+                let execution_id = activity.execution_id.clone();
+                let revision = activity.revision;
+                execution_current = pane.apply_execution_activity(
+                    neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+                        execution_id,
+                        root_session_id: activity.root_session_id,
+                        completed_ms: activity.completed_ms,
+                        active_segments: activity.active_segments,
+                        revision: activity.revision,
+                        finished: activity.finished,
+                    },
+                ) || pane.execution_activity_matches(&activity.execution_id, revision);
+            }
+            if snapshot.branches_authoritative && execution_current {
+                pane.apply_branch_lifecycle_snapshot(
+                    snapshot.root_session_id.clone(),
+                    snapshot.family_revision,
+                    snapshot.branches.into_iter().map(|branch| {
+                        (branch.session_id, branch.status, branch.started_at)
+                    }),
+                );
+            }
             true
         }
         AgentServerMessage::StreamingState {
@@ -903,6 +956,7 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::MessageUpdated { session_id, .. }
         | AgentServerMessage::PartRemoved { session_id, .. }
         | AgentServerMessage::SessionIdle { session_id, .. }
+        | AgentServerMessage::RuntimeSnapshot { session_id, .. }
         | AgentServerMessage::StreamingState { session_id, .. }
         | AgentServerMessage::Notice { session_id, .. }
         | AgentServerMessage::ToolUseRequest { session_id, .. }

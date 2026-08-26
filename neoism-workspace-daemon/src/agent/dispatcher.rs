@@ -70,6 +70,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 // so an attach during a live turn shows the activity
                 // indicator instead of looking idle.
                 push_session_running_state(inner.clone(), session_id.clone()).await;
+                push_runtime_snapshot(inner.clone(), session_id.clone()).await;
                 push_pending_questions(inner, session_id).await;
             });
         }

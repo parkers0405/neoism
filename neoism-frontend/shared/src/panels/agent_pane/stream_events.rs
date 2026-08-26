@@ -179,6 +179,11 @@ pub enum SessionEventUpdate {
     SessionIdle {
         refresh_messages: bool,
     },
+    /// The child's current SessionRun ended, but its parent task branch is
+    /// still outstanding until a terminal task/completion/abort edge.
+    ChildRunIdle {
+        session_id: String,
+    },
     PartDelta {
         message_id: Option<String>,
         part_id: Option<String>,
@@ -298,6 +303,7 @@ pub enum SessionEventUpdate {
         /// `SidePanel::set_session_goal`.
         version: u64,
     },
+    ExecutionUpdated(Value),
 }
 
 pub fn classify_session_event(
@@ -627,8 +633,12 @@ pub fn classify_session_event(
                             .and_then(|status| status.get("startedAt"))
                             .or_else(|| properties.get("startedAt"))
                             .and_then(Value::as_u64);
+                        if status_type == Some("idle") {
+                            return vec![SessionEventUpdate::ChildRunIdle {
+                                session_id: child_id,
+                            }];
+                        }
                         let status = match status_type {
-                            Some("idle") => "completed",
                             Some("retry") => "blocked",
                             Some("busy") => "active",
                             _ => "active",
@@ -752,6 +762,12 @@ pub fn classify_session_event(
                     .map(str::to_string),
             }]
         }
+        "session.execution.updated" => properties
+            .get("snapshot")
+            .cloned()
+            .map(SessionEventUpdate::ExecutionUpdated)
+            .into_iter()
+            .collect(),
         "question.asked" => {
             let pending =
                 crate::panels::agent_pane::question_policy::question_request_from_event(
@@ -1550,6 +1566,30 @@ mod tests {
             ),
             vec![SessionEventUpdate::SessionIdle {
                 refresh_messages: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn child_idle_only_ends_current_run_not_parent_task_branch() {
+        let mut state = SessionEventUpdateState::default();
+        state.track_child_sessions(["ses_child".to_string()]);
+        let updates = classify_session_event(
+            json!({
+                "type": "session.status",
+                "properties": {
+                    "sessionID": "ses_child",
+                    "parentSessionID": "ses_root",
+                    "status": { "type": "idle" }
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+        assert_eq!(
+            updates,
+            vec![SessionEventUpdate::ChildRunIdle {
+                session_id: "ses_child".to_string(),
             }]
         );
     }

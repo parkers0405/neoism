@@ -1100,6 +1100,7 @@ fn stale_runtime_poll_cannot_overwrite_newer_live_state() {
             request_generation: 7,
             runtime_revision: 0,
             result: Ok(statuses),
+            runtime: Err("not requested in this stale-poll test".to_string()),
         })
         .unwrap();
 
@@ -1110,7 +1111,7 @@ fn stale_runtime_poll_cannot_overwrite_newer_live_state() {
 }
 
 #[test]
-fn omitted_child_from_runtime_status_snapshot_settles_working_latch() {
+fn omitted_child_from_live_run_snapshot_remains_outstanding() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
     pane.side_panel.set_subagents(vec![
@@ -1128,16 +1129,14 @@ fn omitted_child_from_runtime_status_snapshot_settles_working_latch() {
 
     pane.apply_runtime_status_for_session("parent", &HashMap::new());
 
-    assert_eq!(pane.active_subagent_count(), 0);
-    assert!(pane.subagent_waiting_started_at.is_none());
-    pane.side_panel
-        .rewind_status_display_hold(STATUS_LABEL_GRACE);
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.active_subagent_count(), 1);
+    assert!(pane.subagent_waiting_started_at.is_some());
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::WaitingSubagents);
     assert_eq!(
         pane.side_panel
             .branch_activity("child")
             .map(|activity| activity.status),
-        Some(BranchStatus::Completed)
+        Some(BranchStatus::Active)
     );
 }
 

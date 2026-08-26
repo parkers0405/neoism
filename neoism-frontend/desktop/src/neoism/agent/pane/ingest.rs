@@ -476,7 +476,33 @@ impl NeoismAgentPane {
                 AgentSessionUpdate::ExecutionUpdated(snapshot) => {
                     if let Some(activity) = super::super::api::execution_activity_from_json(&snapshot)
                     {
+                        if !stream_is_active
+                            && !self.session_family_contains(&activity.root_session_id)
+                        {
+                            continue;
+                        }
                         changed |= self.apply_execution_activity(activity);
+                    }
+                }
+                AgentSessionUpdate::RuntimeUpdated(snapshot) => {
+                    if let Ok(runtime) = super::super::api::family_runtime_from_json(
+                        &snapshot,
+                        &stream_session_id,
+                    ) {
+                        if !stream_is_active
+                            && !self.session_family_contains(&runtime.root_session_id)
+                        {
+                            continue;
+                        }
+                        if let Some(activity) = runtime.execution {
+                            self.apply_execution_activity(activity);
+                        }
+                        self.apply_branch_lifecycle_snapshot(
+                            runtime.root_session_id,
+                            runtime.family_revision,
+                            runtime.branches,
+                        );
+                        changed = true;
                     }
                 }
                 AgentSessionUpdate::PartDelta {
@@ -1467,20 +1493,14 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                     if let Ok(runtime) = runtime {
-                        let mut execution_current = runtime.execution.is_none();
                         if let Some(activity) = runtime.execution {
-                            let execution_id = activity.execution_id.clone();
-                            let revision = activity.revision;
-                            execution_current = self.apply_execution_activity(activity)
-                                || self.execution_activity_matches(&execution_id, revision);
+                            self.apply_execution_activity(activity);
                         }
-                        if execution_current {
-                            self.apply_branch_lifecycle_snapshot(
-                                runtime.root_session_id,
-                                runtime.family_revision,
-                                runtime.branches,
-                            );
-                        }
+                        self.apply_branch_lifecycle_snapshot(
+                            runtime.root_session_id,
+                            runtime.family_revision,
+                            runtime.branches,
+                        );
                         changed = true;
                     }
                 }
@@ -2038,10 +2058,6 @@ impl NeoismAgentPane {
             running_background_task_count: std::mem::take(
                 &mut self.running_background_task_count,
             ),
-            active_subagent_ids: std::mem::take(&mut self.active_subagent_ids),
-            active_subagent_started_at: std::mem::take(
-                &mut self.active_subagent_started_at,
-            ),
             abort_requested_at: self.abort_requested_at.take(),
         }
     }
@@ -2056,8 +2072,6 @@ impl NeoismAgentPane {
         self.subagent_waiting_started_at = runtime.subagent_waiting_started_at;
         self.background_tasks_started_at = runtime.background_tasks_started_at;
         self.running_background_task_count = runtime.running_background_task_count;
-        self.active_subagent_ids = runtime.active_subagent_ids;
-        self.active_subagent_started_at = runtime.active_subagent_started_at;
         self.abort_requested_at = runtime.abort_requested_at;
         self.permission_choice_hit_rects.clear();
         self.question_option_hit_rects.clear();

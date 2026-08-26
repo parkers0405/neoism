@@ -85,9 +85,9 @@ fn execution_timer_anchor_does_not_rewind_with_wall_clock() {
         active_segments: [("provider".into(), 900)].into(),
         ..Default::default()
     };
-    let first = ExecutionTimerAnchor::from_snapshot(&snapshot, 1_000, now, 0);
+    let first = ExecutionTimerAnchor::from_snapshot(&snapshot, None, 1_000, now, 0);
     let floor = first.elapsed_ms_at(now);
-    let corrected = ExecutionTimerAnchor::from_snapshot(&snapshot, 800, now, floor);
+    let corrected = ExecutionTimerAnchor::from_snapshot(&snapshot, None, 800, now, floor);
     assert_eq!(corrected.elapsed_ms_at(now), floor);
 }
 
@@ -155,6 +155,30 @@ fn busy_idle_busy_run_edges_do_not_flicker_outstanding_branch_count() {
 }
 
 #[test]
+fn stale_idle_tree_refresh_cannot_terminalize_authoritative_outstanding_branch() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        1,
+        [("child".into(), "outstanding".into(), Some(10))],
+    ));
+    pane.side_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "main", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore")
+            .with_runtime_status(Some("idle".into())),
+    ]);
+    assert_eq!(pane.active_subagent_count(), 1);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::WaitingSubagents);
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        2,
+        [("child".into(), "completed".into(), Some(10))],
+    ));
+    assert_eq!(pane.active_subagent_count(), 0);
+}
+
+#[test]
 fn reconnect_snapshot_restores_outstanding_branch_and_stale_revision_cannot_rewind() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".into());
@@ -211,7 +235,7 @@ fn authoritative_runtime_snapshot_deletes_absent_branch_state() {
 }
 
 #[test]
-fn finished_execution_keeps_nonblank_terminal_total_row() {
+fn finished_execution_does_not_keep_terminal_status_chrome() {
     let mut pane = NeoismAgentPane::default();
     pane.apply_execution_activity(ExecutionActivityState {
         execution_id: "execution-a".into(),
@@ -221,13 +245,35 @@ fn finished_execution_keeps_nonblank_terminal_total_row() {
         finished: true,
         ..Default::default()
     });
-    assert!(pane.has_status_activity());
-    assert_eq!(pane.streaming_label(), "Completed");
+    assert!(!pane.has_status_activity());
+    assert_eq!(pane.streaming_label(), "");
     assert_eq!(pane.streaming_elapsed_seconds(), Some(65.0));
 }
 
 #[test]
-fn elapsed_persists_across_family_pane_switch_and_resets_outside_family() {
+fn completed_child_does_not_keep_status_chrome_for_active_family() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".into());
+    pane.parent_session_id = Some("root".into());
+    pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution-a".into(),
+        root_session_id: "root".into(),
+        completed_ms: 65_000,
+        revision: 2,
+        finished: false,
+        ..Default::default()
+    });
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        1,
+        [("child".into(), "completed".into(), Some(10))],
+    ));
+    assert!(!pane.has_status_activity());
+    assert_eq!(pane.streaming_label(), "");
+}
+
+#[test]
+fn elapsed_selects_family_aggregate_or_viewed_child_and_resets_outside_family() {
     let mut pane = NeoismAgentPane::default();
     pane.set_session_id(Some("root".into()));
     pane.side_panel.set_subagents(vec![
@@ -239,11 +285,19 @@ fn elapsed_persists_across_family_pane_switch_and_resets_outside_family() {
         execution_id: "execution".into(),
         root_session_id: "root".into(),
         completed_ms: 4_000,
+        session_activities: [(
+            "child".into(),
+            ProviderActivityState {
+                completed_ms: 1_500,
+                ..Default::default()
+            },
+        )]
+        .into(),
         revision: 1,
         ..Default::default()
     });
     pane.set_session_id(Some("child".into()));
-    assert_eq!(pane.streaming_elapsed_seconds(), Some(4.0));
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(1.5));
     pane.set_session_id(Some("other-root".into()));
     assert_eq!(pane.streaming_elapsed_seconds(), None);
 }
@@ -2227,7 +2281,7 @@ fn background_status_is_scoped_to_pane_session_messages() {
 }
 
 #[test]
-fn completed_subagents_do_not_leave_composer_status_stuck() {
+fn recovery_completed_status_cannot_clear_authoritative_active_set() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
     pane.active_subagent_ids.insert("child".to_string());
@@ -2240,10 +2294,9 @@ fn completed_subagents_do_not_leave_composer_status_stuck() {
         .with_runtime_status(Some("completed".to_string()))]);
     pane.sync_subagent_waiting_clock();
 
-    assert_eq!(pane.active_subagent_count(), 0);
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
-    assert!(!pane.has_status_activity());
-    assert_eq!(pane.streaming_state_changed_elapsed(), None);
+    assert_eq!(pane.active_subagent_count(), 1);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::WaitingSubagents);
+    assert!(pane.has_status_activity());
 }
 
 #[test]
@@ -2274,8 +2327,14 @@ fn active_subagent_part_updates_do_not_restart_waiting_clock() {
 fn subagent_composer_status_tracks_only_active_children() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
-    pane.active_subagent_ids.insert("done".to_string());
-    pane.active_subagent_ids.insert("running".to_string());
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "parent".into(),
+        1,
+        [
+            ("done".into(), "completed".into(), None),
+            ("running".into(), "outstanding".into(), None),
+        ],
+    ));
     pane.side_panel.set_subagents(vec![
         NeoismAgentSessionEntry::new("done", "done", "explore")
             .with_runtime_status(Some("completed".to_string())),
@@ -2291,12 +2350,14 @@ fn subagent_composer_status_tracks_only_active_children() {
     );
     assert!(pane.has_status_activity());
 
-    pane.side_panel.set_subagents(vec![
-        NeoismAgentSessionEntry::new("done", "done", "explore")
-            .with_runtime_status(Some("completed".to_string())),
-        NeoismAgentSessionEntry::new("running", "running", "explore")
-            .with_runtime_status(Some("completed".to_string())),
-    ]);
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "parent".into(),
+        2,
+        [
+            ("done".into(), "completed".into(), None),
+            ("running".into(), "completed".into(), None),
+        ],
+    ));
     pane.sync_subagent_waiting_clock();
 
     assert_eq!(pane.active_subagent_count(), 0);
@@ -2394,16 +2455,15 @@ fn roster_survives_entering_subagent_session() {
     // The sibling still reads as running from the child's viewpoint.
     assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 1);
 
-    // Sibling lifecycle updates keep applying to the roster while the
-    // child transcript is open.
+    // A sibling run-idle edge is not parent-task completion.
     assert!(pane.note_family_session_streaming("child-2", false));
     assert!(matches!(
         pane.side_panel
             .branch_activity("child-2")
             .map(|activity| activity.status),
-        Some(BranchStatus::Completed)
+        Some(BranchStatus::Active)
     ));
-    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 0);
+    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 1);
 }
 
 #[test]
@@ -2605,12 +2665,11 @@ fn family_streaming_edges_only_touch_tracked_rows() {
     assert!(pane.note_family_session_streaming("child-2", true));
     assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 1);
     assert!(pane.note_family_session_streaming("child-2", false));
-    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 0);
+    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 1);
 
-    // …but a straggler active edge cannot resurrect a sibling whose
-    // idle edge already latched the terminal lock.
-    assert!(!pane.note_family_session_streaming("child-2", true));
-    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 0);
+    // A run-idle edge is nonterminal, so the next active edge remains valid.
+    assert!(pane.note_family_session_streaming("child-2", true));
+    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 1);
 
     // The viewed session itself is never routed through the roster.
     assert!(!pane.note_family_session_streaming("child-1", true));

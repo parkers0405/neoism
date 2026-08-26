@@ -200,6 +200,18 @@ pub(crate) fn forward_agent_server_event(
             return;
         }
         "session.execution.updated" => {
+            if let Some(runtime) = properties.get("runtime") {
+                if let Ok(snapshot) = serde_json::from_value::<neoism_protocol::agent::AgentRuntimeSnapshot>(runtime.clone()) {
+                    let _ = tx.send(AgentServerMessage::RuntimeSnapshot {
+                        session_id: source_session,
+                        snapshot: neoism_protocol::agent::AgentRuntimeSnapshot {
+                            branches_authoritative: true,
+                            ..snapshot
+                        },
+                    });
+                    return;
+                }
+            }
             if let Some(snapshot) = properties.get("snapshot") {
                 if let Ok(snapshot) = serde_json::from_value::<neoism_protocol::agent::ExecutionActivity>(snapshot.clone()) {
                     let _ = tx.send(AgentServerMessage::RuntimeSnapshot {
@@ -699,6 +711,57 @@ mod tests {
         };
         assert!(!snapshot.branches_authoritative);
         assert_eq!(snapshot.execution.unwrap().completed_ms, 2_500);
+    }
+
+    #[test]
+    fn execution_runtime_event_maps_authoritative_branches_and_session_activity() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "session.execution.updated",
+                "properties": {
+                    "sessionID": "root",
+                    "runtime": {
+                        "rootSessionId": "root",
+                        "familyRevision": 7,
+                        "branches": [{
+                            "sessionId": "child",
+                            "parentSessionId": "root",
+                            "status": "outstanding",
+                            "startedAt": 1000
+                        }],
+                        "execution": {
+                            "executionId": "execution-a",
+                            "rootSessionId": "root",
+                            "rootMessageId": "message-a",
+                            "completedMs": 2500,
+                            "activeSegments": {},
+                            "sessionActivities": {
+                                "child": { "completedMs": 900, "activeSegments": {} }
+                            },
+                            "revision": 4,
+                            "finished": false
+                        }
+                    }
+                }
+            }),
+        );
+        let AgentServerMessage::RuntimeSnapshot { snapshot, .. } = rx.try_recv().unwrap() else {
+            panic!("expected runtime snapshot");
+        };
+        assert!(snapshot.branches_authoritative);
+        assert_eq!(snapshot.family_revision, 7);
+        assert_eq!(snapshot.branches[0].session_id, "child");
+        assert_eq!(
+            snapshot
+                .execution
+                .unwrap()
+                .session_activities["child"]
+                .completed_ms,
+            900
+        );
     }
 
     #[test]

@@ -1079,8 +1079,23 @@ pub struct ExecutionActivityState {
     pub root_session_id: String,
     pub completed_ms: u64,
     pub active_segments: BTreeMap<String, u64>,
+    pub session_activities: BTreeMap<String, ProviderActivityState>,
     pub revision: u64,
     pub finished: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderActivityState {
+    pub completed_ms: u64,
+    pub active_segments: BTreeMap<String, u64>,
+}
+
+impl ProviderActivityState {
+    pub fn elapsed_ms_at(&self, now_ms: u64) -> u64 {
+        self.active_segments.values().fold(self.completed_ms, |total, started| {
+            total.saturating_add(now_ms.saturating_sub(*started))
+        })
+    }
 }
 
 impl ExecutionActivityState {
@@ -1089,11 +1104,32 @@ impl ExecutionActivityState {
             total.saturating_add(now_ms.saturating_sub(*started))
         })
     }
+
+    pub fn elapsed_ms_for_session(&self, session_id: Option<&str>, now_ms: u64) -> u64 {
+        match session_id.filter(|session_id| *session_id != self.root_session_id) {
+            Some(session_id) => self
+                .session_activities
+                .get(session_id)
+                .map_or(0, |activity| activity.elapsed_ms_at(now_ms)),
+            None => self.elapsed_ms_at(now_ms),
+        }
+    }
+
+    pub fn active_segment_count_for_session(&self, session_id: Option<&str>) -> usize {
+        match session_id.filter(|session_id| *session_id != self.root_session_id) {
+            Some(session_id) => self
+                .session_activities
+                .get(session_id)
+                .map_or(0, |activity| activity.active_segments.len()),
+            None => self.active_segments.len(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct ExecutionTimerAnchor {
     execution_id: String,
+    session_id: String,
     elapsed_ms: u64,
     active_segments: usize,
     observed_at: Instant,
@@ -1102,14 +1138,18 @@ pub struct ExecutionTimerAnchor {
 impl ExecutionTimerAnchor {
     pub fn from_snapshot(
         snapshot: &ExecutionActivityState,
+        session_id: Option<&str>,
         wall_ms: u64,
         observed_at: Instant,
         floor_ms: u64,
     ) -> Self {
         Self {
             execution_id: snapshot.execution_id.clone(),
-            elapsed_ms: snapshot.elapsed_ms_at(wall_ms).max(floor_ms),
-            active_segments: snapshot.active_segments.len(),
+            session_id: session_id.unwrap_or(&snapshot.root_session_id).to_string(),
+            elapsed_ms: snapshot
+                .elapsed_ms_for_session(session_id, wall_ms)
+                .max(floor_ms),
+            active_segments: snapshot.active_segment_count_for_session(session_id),
             observed_at,
         }
     }
@@ -1121,8 +1161,8 @@ impl ExecutionTimerAnchor {
         )
     }
 
-    pub fn matches(&self, execution_id: &str) -> bool {
-        self.execution_id == execution_id
+    pub fn matches(&self, execution_id: &str, session_id: &str) -> bool {
+        self.execution_id == execution_id && self.session_id == session_id
     }
 }
 

@@ -715,10 +715,17 @@ pub(super) fn fetch_family_runtime(
         None,
     )?
     .ok_or_else(|| "Neoism Agent returned an empty runtime snapshot".to_string())?;
+    family_runtime_from_json(&value, session_id)
+}
+
+pub(crate) fn family_runtime_from_json(
+    value: &Value,
+    fallback_session_id: &str,
+) -> Result<FamilyRuntimeSnapshot, String> {
     let root_session_id = value
         .get("rootSessionId")
         .and_then(Value::as_str)
-        .unwrap_or(session_id)
+        .unwrap_or(fallback_session_id)
         .to_string();
     let branches = value
         .get("branches")
@@ -755,11 +762,30 @@ pub(crate) fn execution_activity_from_json(
             .iter()
             .filter_map(|(id, started)| Some((id.clone(), started.as_u64()?)))
             .collect::<BTreeMap<_, _>>();
+        let session_activities = activity
+            .get("sessionActivities")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(session_id, value)| {
+                let active_segments = value
+                    .get("activeSegments")?
+                    .as_object()?
+                    .iter()
+                    .filter_map(|(id, started)| Some((id.clone(), started.as_u64()?)))
+                    .collect();
+                Some((session_id.clone(), neoism_ui::panels::agent_pane::state::ProviderActivityState {
+                    completed_ms: value.get("completedMs")?.as_u64()?,
+                    active_segments,
+                }))
+            })
+            .collect();
         Some(neoism_ui::panels::agent_pane::state::ExecutionActivityState {
             execution_id: activity.get("executionId")?.as_str()?.to_string(),
             root_session_id: activity.get("rootSessionId")?.as_str()?.to_string(),
             completed_ms: activity.get("completedMs")?.as_u64()?,
             active_segments,
+            session_activities,
             revision: activity.get("revision")?.as_u64()?,
             finished: activity.get("finished").and_then(Value::as_bool).unwrap_or(false),
         })

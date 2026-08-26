@@ -987,9 +987,19 @@ pub struct ExecutionActivity {
     pub completed_ms: u64,
     #[serde(default)]
     pub active_segments: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    pub session_activities: std::collections::BTreeMap<String, ProviderActivity>,
     pub revision: u64,
     #[serde(default)]
     pub finished: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderActivity {
+    pub completed_ms: u64,
+    #[serde(default)]
+    pub active_segments: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1085,6 +1095,14 @@ mod runtime_snapshot_tests {
                     root_message_id: "message".into(),
                     completed_ms: 5_000,
                     active_segments: [("provider".into(), 10_000)].into(),
+                    session_activities: [(
+                        "child".into(),
+                        ProviderActivity {
+                            completed_ms: 2_000,
+                            active_segments: [("provider".into(), 10_000)].into(),
+                        },
+                    )]
+                    .into(),
                     revision: 4,
                     finished: false,
                 }),

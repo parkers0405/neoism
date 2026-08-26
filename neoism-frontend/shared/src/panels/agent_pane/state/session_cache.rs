@@ -29,8 +29,6 @@ pub(in crate::panels::agent_pane::state) struct CachedAgentRuntime {
     pub subagent_waiting_started_at: Option<Instant>,
     pub background_tasks_started_at: Option<Instant>,
     pub running_background_task_count: usize,
-    pub active_subagent_ids: BTreeSet<String>,
-    pub active_subagent_started_at: HashMap<String, u64>,
     pub abort_requested_at: Option<Instant>,
 }
 
@@ -46,8 +44,6 @@ impl Default for CachedAgentRuntime {
             subagent_waiting_started_at: None,
             background_tasks_started_at: None,
             running_background_task_count: 0,
-            active_subagent_ids: BTreeSet::new(),
-            active_subagent_started_at: HashMap::new(),
             abort_requested_at: None,
         }
     }
@@ -541,6 +537,8 @@ impl NeoismAgentPane {
         self.side_panel.set_show_home_override(false);
         if !stays_in_family {
             self.side_panel.invalidate_subagent_refresh();
+            self.active_subagent_ids.clear();
+            self.active_subagent_started_at.clear();
         }
         self.side_panel.reset_session_goal();
         self.side_panel.invalidate_goal_refresh();
@@ -638,10 +636,6 @@ impl NeoismAgentPane {
             running_background_task_count: std::mem::take(
                 &mut self.running_background_task_count,
             ),
-            active_subagent_ids: std::mem::take(&mut self.active_subagent_ids),
-            active_subagent_started_at: std::mem::take(
-                &mut self.active_subagent_started_at,
-            ),
             abort_requested_at: self.abort_requested_at.take(),
         }
     }
@@ -659,8 +653,6 @@ impl NeoismAgentPane {
         self.subagent_waiting_started_at = runtime.subagent_waiting_started_at;
         self.background_tasks_started_at = runtime.background_tasks_started_at;
         self.running_background_task_count = runtime.running_background_task_count;
-        self.active_subagent_ids = runtime.active_subagent_ids;
-        self.active_subagent_started_at = runtime.active_subagent_started_at;
         self.abort_requested_at = runtime.abort_requested_at;
         self.permission_choice_hit_rects.clear();
         self.question_option_hit_rects.clear();

@@ -1084,8 +1084,6 @@ impl NeoismAgentPane {
         self.streaming_state_changed_at = None;
         self.streaming_tool_label = None;
         self.subagent_waiting_started_at = None;
-        self.active_subagent_ids.clear();
-        self.active_subagent_started_at.clear();
         self.pending_permission = None;
         self.pending_permission_queue.clear();
         self.permission_choice_hit_rects.clear();

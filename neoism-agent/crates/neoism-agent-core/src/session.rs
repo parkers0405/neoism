@@ -427,9 +427,29 @@ pub struct ExecutionActivitySnapshot {
     pub completed_ms: u64,
     #[serde(default)]
     pub active_segments: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub session_activities: BTreeMap<String, ProviderActivitySnapshot>,
     pub revision: u64,
     #[serde(default)]
     pub finished: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderActivitySnapshot {
+    pub completed_ms: u64,
+    #[serde(default)]
+    pub active_segments: BTreeMap<String, u64>,
+}
+
+impl ProviderActivitySnapshot {
+    pub fn elapsed_ms_at(&self, now_ms: u64) -> u64 {
+        self.active_segments
+            .values()
+            .fold(self.completed_ms, |total, start| {
+                total.saturating_add(now_ms.saturating_sub(*start))
+            })
+    }
 }
 
 impl ExecutionActivitySnapshot {

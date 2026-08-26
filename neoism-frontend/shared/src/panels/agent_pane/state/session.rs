@@ -580,6 +580,10 @@ impl NeoismAgentPane {
         self.messages.clear();
         self.reset_transient_timeline_interactions();
         self.reset_session_runtime_ui();
+        self.active_subagent_ids.clear();
+        self.active_subagent_started_at.clear();
+        self.execution_activity = None;
+        self.execution_timer_anchor = None;
         self.invalidate_timeline_layout();
     }
 
@@ -638,6 +642,8 @@ impl NeoismAgentPane {
         };
         if !stays_in_family {
             self.side_panel.invalidate_subagent_refresh();
+            self.active_subagent_ids.clear();
+            self.active_subagent_started_at.clear();
         }
         self.side_panel.set_viewed_session_id(Some(trimmed.clone()));
         // Optimistic echoes belong to the session they were sent in.

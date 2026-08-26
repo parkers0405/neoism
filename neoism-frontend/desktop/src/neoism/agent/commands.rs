@@ -818,6 +818,9 @@ impl NeoismAgentPane {
         self.pending_user_prompts = cached.pending_user_prompts;
         self.prompt_echo_aliases = cached.prompt_echo_aliases;
         self.restore_session_runtime_ui(cached.runtime);
+        if !stays_in_family {
+            self.clear_family_activity();
+        }
         // A cold or previously settled ongoing child must immediately reveal
         // the activity it already emitted
         // (reasoning, tools, edits, and subtasks), not wait for one more SSE
@@ -1695,6 +1698,9 @@ impl NeoismAgentPane {
         self.reset_transient_timeline_interactions();
         self.invalidate_timeline_layout();
         self.reset_session_runtime_ui();
+        self.clear_family_activity();
+        self.execution_activity = None;
+        self.execution_timer_anchor = None;
         self.clear_composer();
         self.system_message("Session", "new draft");
     }

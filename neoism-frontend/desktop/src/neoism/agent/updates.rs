@@ -147,6 +147,7 @@ pub(super) enum AgentSessionUpdate {
         version: u64,
     },
     ExecutionUpdated(Value),
+    RuntimeUpdated(Value),
 }
 
 pub(crate) struct AgentSessionEventStream {
@@ -903,6 +904,9 @@ fn send_event_updates(
             }
             SessionEventUpdate::ExecutionUpdated(snapshot) => {
                 tx.send(AgentSessionUpdate::ExecutionUpdated(snapshot))?;
+            }
+            SessionEventUpdate::RuntimeUpdated(snapshot) => {
+                tx.send(AgentSessionUpdate::RuntimeUpdated(snapshot))?;
             }
         }
     }

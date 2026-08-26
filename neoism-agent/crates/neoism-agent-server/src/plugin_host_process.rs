@@ -190,7 +190,10 @@ pub(crate) fn resolved_serve_entry(spec: &ServePluginSpec) -> Option<PathBuf> {
     }
 }
 
-fn resolve_command(spec: &ServePluginSpec) -> Result<Vec<String>, String> {
+fn resolve_command(
+    spec: &ServePluginSpec,
+    executables: &Arc<dyn neoism_agent_service_api::ExecutableService>,
+) -> Result<Vec<String>, String> {
     match &spec.source {
         ServeSource::Command(command) if command.is_empty() => {
             Err("serve command is empty".to_string())
@@ -205,14 +208,17 @@ fn resolve_command(spec: &ServePluginSpec) -> Result<Vec<String>, String> {
                 entry.to_string_lossy().into_owned(),
             ]),
             None => {
-                start_background_npm_install(package_spec);
+                start_background_npm_install(package_spec, executables);
                 Err(format!("installing npm package {package_spec}"))
             }
         },
     }
 }
 
-fn start_background_npm_install(package_spec: &str) {
+fn start_background_npm_install(
+    package_spec: &str,
+    executables: &Arc<dyn neoism_agent_service_api::ExecutableService>,
+) {
     static IN_FLIGHT: OnceLock<Mutex<std::collections::BTreeSet<String>>> = OnceLock::new();
     let in_flight = IN_FLIGHT.get_or_init(Default::default);
     {
@@ -222,21 +228,43 @@ fn start_background_npm_install(package_spec: &str) {
         }
     }
     let spec = package_spec.to_string();
+    let executables = Arc::clone(executables);
     std::thread::Builder::new()
         .name(format!("neoism-plugin-npm-{spec}"))
         .spawn(move || {
             let slot = npm_cache_slot(&spec);
             let _ = std::fs::create_dir_all(&slot);
-            let result = std::process::Command::new("npm")
-                .args([
-                    "install",
-                    "--prefix",
-                    &slot.to_string_lossy(),
-                    "--no-audit",
-                    "--no-fund",
-                    "--no-update-notifier",
-                    &spec,
-                ])
+            // PATHEXT-aware resolution: on Windows `npm` is `npm.cmd`, which
+            // CreateProcess cannot exec directly — route through the shared
+            // batch-aware plugin command builder.
+            let install = build_plugin_command(
+                &executables,
+                &[
+                    "npm".to_string(),
+                    "install".to_string(),
+                    "--prefix".to_string(),
+                    slot.to_string_lossy().into_owned(),
+                    "--no-audit".to_string(),
+                    "--no-fund".to_string(),
+                    "--no-update-notifier".to_string(),
+                    spec.clone(),
+                ],
+                &slot,
+                SandboxPolicy::Off,
+                true,
+            );
+            let mut install = match install {
+                Ok(install) => install,
+                Err(error) => {
+                    tracing::warn!(package = %spec, %error, "npm is unavailable for serve plugin install");
+                    in_flight
+                        .lock()
+                        .expect("npm install set poisoned")
+                        .remove(&spec);
+                    return;
+                }
+            };
+            let result = install
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
@@ -330,7 +358,7 @@ impl ProcessHost {
     }
 
     fn spawn_and_initialize(&self) -> Result<PluginHandshake, String> {
-        let command = resolve_command(&self.spec)?;
+        let command = resolve_command(&self.spec, &self.executables)?;
         let mut built = build_plugin_command(
             &self.executables,
             &command,

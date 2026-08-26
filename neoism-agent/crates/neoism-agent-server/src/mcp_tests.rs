@@ -224,7 +224,7 @@ async fn local_stdio_runtime_lists_and_calls_tools() {
     let connected = connect(directory, "mock", &store, state.clone()).await.unwrap();
     assert!(matches!(connected, McpStatus::Connected));
     assert!(matches!(
-        status(directory, &store, &state).unwrap()["mock"],
+        status(directory, &store, &state).await.unwrap()["mock"],
         McpStatus::Connected
     ));
 
@@ -358,10 +358,10 @@ async fn app_states_isolate_and_shutdown_local_mcp_runtimes() {
     let pids = wait_for_pid_count(&pid_file, 2);
     assert_ne!(pids[0], pids[1]);
 
-    first.shutdown().await;
-    assert!(first.workspace_runtime(directory).await.mcp().status(directory, "mock").is_none());
+    first.shutdown().await.unwrap();
+    assert!(first.inner.workspace_runtimes.loaded(directory).await.is_none());
     assert!(matches!(
-        second.workspace_runtime(directory).await.mcp().status(directory, "mock"),
+        second.workspace_runtime(directory).await.unwrap().mcp().unwrap().status(directory, "mock"),
         Some(McpStatus::Connected)
     ));
     assert_eq!(
@@ -373,7 +373,7 @@ async fn app_states_isolate_and_shutdown_local_mcp_runtimes() {
         "isolated"
     );
 
-    second.shutdown().await;
+    second.shutdown().await.unwrap();
     for pid in pids {
         assert!(!process_is_alive(pid), "MCP child {pid} survived shutdown");
     }
@@ -438,7 +438,7 @@ async fn remote_http_runtime_lists_and_calls_tools_with_headers_and_bearer_token
     let connected = connect(directory, "remote", &store, state.clone()).await.unwrap();
     assert!(matches!(connected, McpStatus::Connected));
     assert!(matches!(
-        status(directory, &store, &state).unwrap()["remote"],
+        status(directory, &store, &state).await.unwrap()["remote"],
         McpStatus::Connected
     ));
 
@@ -529,7 +529,7 @@ async fn remote_tool_failure_keeps_connection_and_catalog() {
 
     assert!(format!("{error:#}").contains("forced tool failure"));
     assert!(matches!(
-        status(directory, &store, &state).unwrap()["remote"],
+        status(directory, &store, &state).await.unwrap()["remote"],
         McpStatus::Connected
     ));
     assert_eq!(

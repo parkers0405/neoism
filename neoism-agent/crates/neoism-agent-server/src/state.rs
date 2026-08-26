@@ -462,7 +462,10 @@ impl AppState {
         if let Some(generation) = crate::workspace_runtime::active_generation(directory) {
             return generation;
         }
-        self.workspace_runtime(directory).await.snapshot()
+        self.try_workspace_runtime(directory).await.map_or_else(
+            |_| crate::workspace_runtime::closed_snapshot(),
+            |runtime| runtime.snapshot(),
+        )
     }
 
     pub(crate) async fn refreshed_plugin_snapshot(
@@ -472,26 +475,32 @@ impl AppState {
         if let Some(generation) = crate::workspace_runtime::active_generation(directory) {
             return generation;
         }
-        let runtime = self.workspace_runtime(directory).await;
-        crate::workspace_runtime::refresh_plugins(&runtime, self);
+        let runtime = match self.try_workspace_runtime(directory).await {
+            Ok(runtime) => runtime,
+            Err(_) => return crate::workspace_runtime::closed_snapshot(),
+        };
+        let _ = crate::workspace_runtime::refresh_plugins(&runtime, self).await;
         let snapshot = runtime.published_snapshot();
         self.reconcile_workspace_plugins(&runtime, &snapshot).await;
         snapshot
     }
 
-    pub(crate) async fn workspace_runtime(&self, directory: &str) -> Arc<crate::workspace_runtime::WorkspaceRuntime> {
+    pub(crate) async fn workspace_runtime(&self, directory: &str) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
+        self.try_workspace_runtime(directory).await
+    }
+
+    pub(crate) async fn try_workspace_runtime(&self, directory: &str) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
         let (runtime, evicted) = self.inner
             .workspace_runtimes
             .acquire(directory, self)
-            .await;
+            .await?;
         for stale in evicted {
-            stale.teardown(self).await;
             self.inner.workspace_plugin_generations.lock().await.remove(&stale.root);
         }
         self.reconcile_semantic_service().await;
         let snapshot = runtime.published_snapshot();
         self.reconcile_workspace_plugins(&runtime, &snapshot).await;
-        runtime
+        Ok(runtime)
     }
 
     pub(crate) async fn reconcile_workspace_plugins(
@@ -516,7 +525,7 @@ impl AppState {
         }
         generations.insert(runtime.root.clone(), (snapshot.generation, enabled.clone()));
         let workflow = enabled.contains(neoism_agent_builtins::plugin::workflows::ID);
-        snapshot.set_workflow_enabled(workflow);
+        snapshot.set_workflow_enabled(workflow, self.clone());
         if workflow {
             crate::workflow::workspace_enabled(self, runtime.root.clone()).await;
         } else {
@@ -552,11 +561,25 @@ impl AppState {
     }
 
     /// Stop state-owned subprocesses and background transport tasks.
-    pub async fn shutdown(&self) {
-        for runtime in self.inner.workspace_runtimes.runtimes().await {
-            runtime.teardown(self).await;
+    pub async fn shutdown(&self) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
+        let mut errors = Vec::new();
+        for runtime in self.inner.workspace_runtimes.close().await {
+            if let Err(error) = runtime.teardown(self).await {
+                tracing::error!(%error, root = %runtime.root.display(), "workspace runtime shutdown failed");
+                errors.push(format!("{}: {error}", runtime.root.display()));
+                self.inner.workspace_runtimes.retain_failed_shutdown(runtime).await;
+            }
+        }
+        if let Err(error) = self.inner.workspace_runtimes.retry_quarantines().await {
+            tracing::error!(%error, "plugin cleanup quarantine still contains live ownership");
+            errors.push(format!("plugin cleanup quarantine: {error}"));
         }
         self.inner.workspace_plugin_generations.lock().await.clear();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(neoism_agent_plugin_api::PluginRuntimeError::new(errors.join("; ")))
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventPayload> {

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures::StreamExt;
-use neoism_agent_plugin_api::{AgentPlugin, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar, PluginRuntimeError, PluginToolDefinition, PluginToolInvocation, PluginToolPermission, PluginToolResult, RuntimeTool};
+use neoism_agent_plugin_api::{PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest, PluginRuntimeError, PluginToolDefinition, PluginToolInvocation, PluginToolPermission, PluginToolResult, RuntimeTool};
 use serde_json::json;
 
 pub const ID: &str = "dev.neoism.websearch";
@@ -13,7 +13,7 @@ const MAX_BODY_BYTES: usize = 200_000;
 
 pub struct WebsearchPlugin;
 
-impl AgentPlugin for WebsearchPlugin {
+impl PluginDefinition for WebsearchPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(), name: "Web search".into(), version: env!("CARGO_PKG_VERSION").into(),
@@ -23,7 +23,8 @@ impl AgentPlugin for WebsearchPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { vec![neoism_agent_plugin_api::HostCapability::Network] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         registrar.runtime_tool(Arc::new(WebsearchTool));
         Ok(())
     }

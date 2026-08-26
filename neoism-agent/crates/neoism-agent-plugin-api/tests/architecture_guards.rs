@@ -106,6 +106,36 @@ fn production_source_inventory_is_live_and_unique() {
 }
 
 #[test]
+fn trusted_native_install_has_no_server_timeout_or_detached_task_wrapper() {
+    let server = fs::read_to_string(
+        workspace_root().join("neoism-agent/crates/neoism-agent-server/src/plugins/mod.rs"),
+    ).expect("read server plugin host assembly");
+    for forbidden in ["install_with_timeout", "catch_unwind", "tokio::spawn"] {
+        assert!(!server.contains(forbidden), "trusted native install reacquired forbidden cancellation/detachment path `{forbidden}`");
+    }
+    let contract = fs::read_to_string(
+        workspace_root().join("neoism-agent/crates/neoism-agent-plugin-api/src/plugin.rs"),
+    ).expect("read native plugin contract");
+    assert!(contract.contains("Trusted in-process native extension point"));
+    assert!(contract.contains("forced cancellation"));
+}
+
+#[test]
+fn server_resource_accessors_are_generation_leased() {
+    let runtime = fs::read_to_string(
+        workspace_root().join("neoism-agent/crates/neoism-agent-server/src/workspace_runtime.rs"),
+    ).expect("read workspace runtime");
+    assert!(!runtime.contains("pub(crate) fn plugin_generation("), "unleased generation Arc accessor returned");
+    let runtime_accessors = &runtime[runtime.find("impl WorkspaceRuntime {").expect("workspace runtime implementation")..];
+    for accessor in ["mcp_if_allocated", "lsp_if_allocated", "pty_if_allocated", "background_if_allocated", "subagents_if_allocated"] {
+        let signature = format!("fn {accessor}");
+        let start = runtime_accessors.find(&signature).unwrap_or_else(|| panic!("missing accessor `{accessor}`"));
+        let body = &runtime_accessors[start..runtime_accessors.len().min(start + 500)];
+        assert!(body.contains("LeasedResource"), "accessor `{accessor}` does not retain a generation lease");
+    }
+}
+
+#[test]
 fn plugin_api_stays_transport_storage_and_product_independent() {
     let manifest = fs::read_to_string(
         workspace_root().join("neoism-agent/crates/neoism-agent-plugin-api/Cargo.toml"),
@@ -262,6 +292,23 @@ fn workspace_runtime_optional_lifecycle_is_a_decreasing_ratchet() {
         &actual,
         &[],
     );
+}
+
+#[test]
+fn canonical_factory_instance_lifecycle_has_zero_legacy_paths() {
+    for (path, source) in production_rust_sources() {
+        for forbidden in [
+            concat!("Agent", "Plugin"),
+            concat!("Plugin", "Registrar"),
+            concat!("PluginLifecycle", "Handle"),
+            concat!("PluginGeneration", "Builder"),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} retains legacy plugin lifecycle token `{forbidden}`; PluginFactory/PluginInstance is the only production lifecycle"
+            );
+        }
+    }
 }
 
 #[test]

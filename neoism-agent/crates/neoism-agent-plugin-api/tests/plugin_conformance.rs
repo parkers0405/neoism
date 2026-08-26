@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use neoism_agent_plugin_api::{
-    AgentPlugin, PluginHost, PluginHostError, PluginManifest, PluginRegistrar,
+    CapabilityGrants, PluginContributions, PluginContext, PluginDefinition, PluginFactory,
+    PluginHost, PluginHostError, PluginManifest, RuntimeScope, WorkspaceIdentity,
     PluginToolDefinition, PluginToolInvocation, PluginToolResult, RuntimeHook,
     RuntimeTool,
 };
@@ -15,7 +16,7 @@ const ID: &str = "dev.neoism.conformance-fixture";
 
 struct ConformingPlugin;
 
-impl AgentPlugin for ConformingPlugin {
+impl PluginDefinition for ConformingPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.to_string(),
@@ -31,7 +32,7 @@ impl AgentPlugin for ConformingPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         registrar.route("fixture");
         registrar.event("fixture.changed", Some(json!({ "type": "object" })));
         registrar.runtime_tool(Arc::new(EchoTool));
@@ -92,9 +93,10 @@ impl RuntimeHook for EchoHook {
 /// Minimal reusable harness for native plugins. It exercises only public
 /// plugin-api contracts, so internal and third-party plugins can copy the same
 /// checks without linking the server.
-fn assert_plugin_conforms(plugin: Box<dyn AgentPlugin>) {
+fn assert_plugin_conforms(plugin: Box<dyn PluginFactory>) {
     let host = PluginHost::default();
-    let snapshot = host.install(vec![plugin], &[]).expect("plugin installs");
+    let installed = block_on(host.install(vec![plugin], &[], context())).expect("plugin installs");
+    let snapshot = installed.snapshot();
     let manifest = snapshot
         .manifests
         .iter()
@@ -139,9 +141,12 @@ fn assert_plugin_conforms(plugin: Box<dyn AgentPlugin>) {
     );
     assert!(hook.lifecycle().active);
 
+    let disabled_ids = [ID.to_string()];
     let disabled = host
-        .install(vec![Box::new(ConformingPlugin)], &[ID.to_string()])
+        .install(vec![Box::new(ConformingPlugin)], &disabled_ids, context());
+    let disabled = block_on(disabled)
         .expect("disableable plugin can be disabled");
+    let disabled = disabled.snapshot();
     assert!(
         disabled.manifests.is_empty(),
         "disabled plugins are structurally absent"
@@ -149,6 +154,13 @@ fn assert_plugin_conforms(plugin: Box<dyn AgentPlugin>) {
     assert!(disabled.contributions.is_empty());
     assert!(disabled.runtime_tools.is_empty());
     assert!(disabled.runtime_hooks.is_empty());
+}
+
+fn context() -> PluginContext {
+    PluginContext::new(
+        RuntimeScope::Workspace(WorkspaceIdentity { id: "test".into(), root: ".".into() }),
+        CapabilityGrants::default(),
+    )
 }
 
 #[test]

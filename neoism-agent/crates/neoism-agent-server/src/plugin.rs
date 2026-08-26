@@ -10,7 +10,7 @@ use neoism_agent_core::{
     AgentConfigDocument, EventPayload, PluginConfig, ProviderMessage, ToolListItem,
 };
 use neoism_agent_plugin_api::{
-    AgentPlugin, PluginHostError, PluginManifest, PluginRegistrar, PluginRuntimeError,
+    PluginContributions, PluginDefinition, PluginFactory, PluginHostError, PluginManifest, PluginRuntimeError,
     ProcessHookRequest, ProcessHookResponse, RegistrySnapshot, RuntimeHook,
     PROCESS_PLUGIN_PROTOCOL,
 };
@@ -77,7 +77,7 @@ enum SandboxPolicy {
     Required,
 }
 
-impl AgentPlugin for DeclarativePlugin {
+impl PluginDefinition for DeclarativePlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: self.id.clone(),
@@ -93,7 +93,17 @@ impl AgentPlugin for DeclarativePlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> {
+        let Some(process) = &self.process else { return Vec::new() };
+        let mut capabilities = vec![
+            neoism_agent_plugin_api::HostCapability::ProcessSpawn,
+            neoism_agent_plugin_api::HostCapability::WorkspaceRead,
+        ];
+        if process.network { capabilities.push(neoism_agent_plugin_api::HostCapability::Network); }
+        capabilities
+    }
+
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         registrar.hook(self.id.clone());
         registrar.runtime_hook(Arc::new(self.clone()));
         Ok(())
@@ -312,7 +322,7 @@ pub(crate) fn configured_agent_plugins(
     services: &neoism_agent_service_api::AgentServices,
     config: &AgentConfigDocument,
     directory: &str,
-) -> Vec<Box<dyn AgentPlugin>> {
+) -> Vec<Box<dyn PluginFactory>> {
     configured_plugins(config)
         .into_iter()
         .chain(discovered_plugin_configs(services, directory))
@@ -320,7 +330,7 @@ pub(crate) fn configured_agent_plugins(
         .filter_map(|plugin| {
             let id = plugin_id(&plugin)?;
             match load_declarative_plugin(services, directory, &id, &plugin_options(&plugin)) {
-                Ok(plugin) => Some(Box::new(plugin) as Box<dyn AgentPlugin>),
+                Ok(plugin) => Some(Box::new(plugin) as Box<dyn PluginFactory>),
                 Err(error) => {
                     tracing::warn!(plugin = %id, %error, "failed to load configured plugin");
                     None
@@ -336,6 +346,7 @@ fn invoke<T: Serialize + serde::de::DeserializeOwned>(
     context: &impl Serialize,
     value: &mut T,
 ) -> anyhow::Result<()> {
+    snapshot.ensure_active().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let context = serde_json::to_value(context)?;
     let mut next = serde_json::to_value(&*value)?;
     for runtime in &snapshot.runtime_hooks {
@@ -636,6 +647,36 @@ mod process_tests {
         assert!(legacy.chat_headers.is_empty());
         assert!(legacy.chat_options.is_empty());
         assert_eq!(legacy.timeout_ms, None);
+    }
+
+    #[tokio::test]
+    async fn configured_process_factory_create_and_start_are_static_and_nonblocking() {
+        let plugin = DeclarativePlugin {
+            id: "dev.example.configured-process".into(),
+            headers: BTreeMap::new(),
+            options: BTreeMap::new(),
+            shell_env: BTreeMap::new(),
+            process: Some(ProcessPlugin {
+                executables: standard_executables(),
+                command: vec!["definitely-not-invoked-during-create".into()],
+                timeout: Duration::from_secs(1),
+                working_directory: std::env::current_dir().unwrap(),
+                sandbox: SandboxPolicy::Off,
+                network: false,
+            }),
+        };
+        let context = neoism_agent_plugin_api::PluginContext::new(
+            neoism_agent_plugin_api::RuntimeScope::Workspace(neoism_agent_plugin_api::WorkspaceIdentity {
+                id: "test".into(), root: PathBuf::from("."),
+            }),
+            neoism_agent_plugin_api::CapabilityGrants::default()
+                .allow(neoism_agent_plugin_api::HostCapability::ProcessSpawn)
+                .allow(neoism_agent_plugin_api::HostCapability::WorkspaceRead),
+        );
+        let instance = tokio::time::timeout(Duration::from_millis(20), neoism_agent_plugin_api::PluginFactory::create(&plugin, context))
+            .await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_millis(20), instance.start()).await.unwrap().unwrap();
+        assert_eq!(instance.contributions().runtime_hooks.len(), 1);
     }
 
     #[test]

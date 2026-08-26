@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use neoism_agent_plugin_api::{AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope};
+use neoism_agent_plugin_api::{ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope};
 
 pub const ID: &str = "dev.neoism.mcp";
 
@@ -9,19 +9,20 @@ pub const ID: &str = "dev.neoism.mcp";
 pub enum McpAction { Status, Add, Catalog, AuthStart, AuthRemove, AuthCallbackGet, AuthCallbackPost, Authenticate, Connect, Disconnect, Config, Tools, ToolCall, Resources, Prompts }
 
 pub trait McpHost: Send + Sync + 'static {
-    fn register_tools(&self, registrar: &mut PluginRegistrar);
+    fn register_tools(&self, registrar: &mut PluginContributions);
     fn execute<'a>(&'a self, action: McpAction, request: RouteRequest) -> PluginFuture<'a, RouteResponse>;
 }
 
 pub struct McpPlugin { host: Arc<dyn McpHost> }
 impl McpPlugin { pub fn new(host: Arc<dyn McpHost>) -> Self { Self { host } } }
 
-impl AgentPlugin for McpPlugin {
+impl PluginDefinition for McpPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest { id: ID.into(), name: "MCP".into(), version: env!("CARGO_PKG_VERSION").into(), internal: true, disableable: true, capabilities: vec!["neoism.mcp".into()], requires: vec![super::config::ID.into()], event_namespaces: vec!["mcp".into()], api_prefix: Some(format!("/v2/plugins/{ID}")), config: BTreeMap::new() }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![ConfigRead, Network, ProcessSpawn, SecretRead] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         self.host.register_tools(registrar);
         for (id, method, suffix, action) in [
             ("v2.plugins.mcp.status", RouteMethod::Get, "", McpAction::Status),

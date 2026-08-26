@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use neoism_agent_core::{VcsApplyResult, VcsFileDiff, VcsFileStatus, VcsInfo};
 use neoism_agent_plugin_api::{
-    AgentPlugin, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar,
+    PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest,
     ContributionMetadata, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
     RouteRequest, RouteResponse, RouteScope,
 };
@@ -25,7 +25,7 @@ impl VcsPlugin {
     }
 }
 
-impl AgentPlugin for VcsPlugin {
+impl PluginDefinition for VcsPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(), name: "Version control".into(), version: env!("CARGO_PKG_VERSION").into(),
@@ -35,7 +35,8 @@ impl AgentPlugin for VcsPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![WorkspaceRead, WorkspaceWrite, ProcessSpawn] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         for (operation_id, method, suffix, action) in [
             ("v2.plugins.vcs.get", RouteMethod::Get, "", VcsRouteAction::Info),
             ("v2.plugins.vcs.diff", RouteMethod::Get, "/diff", VcsRouteAction::Diff),
@@ -275,7 +276,7 @@ mod tests {
     fn plugin_registers_canonical_route() {
         let plugin = VcsPlugin::new(test_services());
         assert_eq!(plugin.manifest().id, ID);
-        plugin.register(&mut PluginRegistrar::default()).unwrap();
+        plugin.contributions(&mut PluginContributions::default()).unwrap();
     }
 
     fn test_services() -> AgentServices {

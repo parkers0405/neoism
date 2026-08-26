@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use neoism_agent_plugin_api::{
-    AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest,
-    PluginRegistrar, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
+    ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest,
+    PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
     RouteRequest, RouteResponse, RouteScope,
 };
 
@@ -19,7 +19,7 @@ pub trait WorkflowsHost: Send + Sync + 'static {
 pub struct WorkflowsPlugin { host: Arc<dyn WorkflowsHost> }
 impl WorkflowsPlugin { pub fn new(host: Arc<dyn WorkflowsHost>) -> Self { Self { host } } }
 
-impl AgentPlugin for WorkflowsPlugin {
+impl PluginDefinition for WorkflowsPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(), name: "Workflows".into(), version: env!("CARGO_PKG_VERSION").into(),
@@ -29,7 +29,8 @@ impl AgentPlugin for WorkflowsPlugin {
             config: BTreeMap::new(),
         }
     }
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![WorkspaceRead, WorkspaceWrite, EventPublish, Network, SecretRead] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         for (id, method, suffix, action) in [
             ("v2.plugins.workflows.list", RouteMethod::Get, "", WorkflowAction::List),
             ("v2.plugins.workflows.get", RouteMethod::Get, "/:workflow_id", WorkflowAction::Get),

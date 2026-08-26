@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const API_VERSION: &str = "2.0.0";
-pub const PLUGIN_API_VERSION: &str = "1.0.0";
+pub const PLUGIN_API_VERSION: &str = "2.0.0";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

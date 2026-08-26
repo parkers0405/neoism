@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use neoism_agent_core::AgentConfigDocument;
 use neoism_agent_plugin_api::{
-    AgentPlugin, ConfigDocument, ConfigService, ContributionMetadata, PluginFuture,
-    PluginHostError, PluginManifest, PluginRegistrar, PluginRuntimeError, RouteContribution,
+    ConfigDocument, ConfigService, ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture,
+    PluginHostError, PluginManifest, PluginRuntimeError, RouteContribution,
     PluginScope, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
     ServiceRequest,
 };
@@ -40,7 +40,7 @@ pub trait ConfigAdminHost: Send + Sync + 'static {
     ) -> PluginFuture<'a, RouteResponse>;
 }
 
-impl AgentPlugin for ConfigPlugin {
+impl PluginDefinition for ConfigPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(),
@@ -56,7 +56,8 @@ impl AgentPlugin for ConfigPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![ConfigRead, ConfigWrite, WorkspaceRead, WorkspaceWrite] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         registrar.config_service_runtime(
             "workspace-config",
             Arc::new(WorkspaceConfig(self.services.clone())),

@@ -352,7 +352,8 @@ fn write_tool_metadata(
 ) -> anyhow::Result<ToolExecutionResult> {
     let formatted =
         format::format_paths(&context.services(), &context.cwd, context.formatter(), [path.clone()]);
-    let lsp_touch = diagnostics::touch_paths(&context.lsp_runtime(), &context.cwd, [path.clone()]);
+    let lsp_runtime = context.lsp_runtime()?;
+    let lsp_touch = diagnostics::touch_paths(&lsp_runtime, &context.cwd, [path.clone()]);
 
     let mut metadata = json!({
         "path": mutation.display,
@@ -367,7 +368,7 @@ fn write_tool_metadata(
     }
     format::attach_formatted(&mut metadata, &formatted);
     let report =
-        diagnostics::attach_lsp_diagnostics(&context.lsp_runtime(), &context.cwd, [path.clone()], &mut metadata);
+        diagnostics::attach_lsp_diagnostics(&lsp_runtime, &context.cwd, [path.clone()], &mut metadata);
 
     let mut output = format!(
         "Wrote {} bytes to {} (previously {} bytes)",
@@ -473,7 +474,8 @@ fn edit_tool_metadata(
 ) -> anyhow::Result<ToolExecutionResult> {
     let formatted =
         format::format_paths(&context.services(), &context.cwd, context.formatter(), [path.clone()]);
-    let lsp_touch = diagnostics::touch_paths(&context.lsp_runtime(), &context.cwd, [path.clone()]);
+    let lsp_runtime = context.lsp_runtime()?;
+    let lsp_touch = diagnostics::touch_paths(&lsp_runtime, &context.cwd, [path.clone()]);
 
     let mut metadata = json!({
         "path": mutation.display,
@@ -488,7 +490,7 @@ fn edit_tool_metadata(
     }
     format::attach_formatted(&mut metadata, &formatted);
     let report =
-        diagnostics::attach_lsp_diagnostics(&context.lsp_runtime(), &context.cwd, [path.clone()], &mut metadata);
+        diagnostics::attach_lsp_diagnostics(&lsp_runtime, &context.cwd, [path.clone()], &mut metadata);
 
     let mut output = format!(
         "Replaced {} occurrence(s) in {}",

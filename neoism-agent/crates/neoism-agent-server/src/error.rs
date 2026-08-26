@@ -31,6 +31,10 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn gone(message: impl Into<String>) -> Self {
+        Self { status: StatusCode::GONE, message: message.into() }
+    }
+
     pub(crate) fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
@@ -75,6 +79,7 @@ impl IntoResponse for ApiError {
             StatusCode::BAD_REQUEST => "request.invalid",
             StatusCode::NOT_FOUND => "resource.not_found",
             StatusCode::CONFLICT => "resource.conflict",
+            StatusCode::GONE => "lifecycle.closed",
             StatusCode::FORBIDDEN => "request.forbidden",
             StatusCode::NOT_IMPLEMENTED => "feature.not_implemented",
             _ => "server.internal",

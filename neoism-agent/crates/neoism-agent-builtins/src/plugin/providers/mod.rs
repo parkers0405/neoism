@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use neoism_agent_plugin_api::{
-    AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest,
-    PluginRegistrar, ProviderRouteAction, ProviderRouteRequest, ProviderService, RouteContribution, RouteDescriptor, RouteHandler,
+    ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest,
+    ProviderRouteAction, ProviderRouteRequest, ProviderService, RouteContribution, RouteDescriptor, RouteHandler,
     PluginScope, RouteMethod, RouteRequest, RouteResponse, RouteScope,
 };
 
@@ -21,7 +21,7 @@ impl ProvidersPlugin {
     }
 }
 
-impl AgentPlugin for ProvidersPlugin {
+impl PluginDefinition for ProvidersPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(),
@@ -37,7 +37,8 @@ impl AgentPlugin for ProvidersPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![ConfigRead, ConfigWrite, Network, SecretRead] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         for (id, provider) in &self.providers {
             registrar.provider_service_runtime(id.clone(), provider.clone());
         }
@@ -57,7 +58,7 @@ impl AgentPlugin for ProvidersPlugin {
                     id: id.into(),
                     method,
                     path: path.into(),
-                    scope: RouteScope::Global,
+                    scope: RouteScope::Workspace,
                     request_schema: None,
                     response_schema: None,
                 },

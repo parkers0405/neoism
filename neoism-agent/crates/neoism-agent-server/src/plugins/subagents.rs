@@ -257,7 +257,7 @@ async fn create_child(
     let child = create_subtask_session(state, parent, command, description, agent, model)
         .await
         .map_err(|error| error.to_string())?;
-    snapshot.subagents().track(child.id.to_string()).await;
+    snapshot.subagents().map_err(|error| error.to_string())?.track(child.id.to_string()).await;
     Ok(child.id.to_string())
 }
 

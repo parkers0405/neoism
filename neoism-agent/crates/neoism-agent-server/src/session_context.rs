@@ -447,7 +447,7 @@ async fn generate_model_compaction_summary(
     }
     let mut provider_messages = message_model::compaction_provider_messages(&head);
     provider_messages.push(ProviderMessage::text(ProviderRole::User, prompt));
-    let runtime = state.workspace_runtime(&info.directory).await;
+    let Ok(runtime) = state.workspace_runtime(&info.directory).await else { return None; };
     let snapshot = runtime.snapshot();
     let request = ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),
@@ -465,7 +465,7 @@ async fn generate_model_compaction_summary(
     if cancel.load(Ordering::SeqCst) {
         return None;
     }
-    let provider = snapshot.provider_services.values().next()?;
+    let provider = snapshot.provider_services_by_priority().into_iter().next()?;
     let stream = provider.stream(request).ok()?;
     let mut events = stream.events;
     let mut raw = String::new();
@@ -1105,14 +1105,15 @@ pub(crate) fn provider_messages_for_session(
     goals_enabled: bool,
 ) -> Vec<ProviderMessage> {
     let host = neoism_agent_plugin_api::PluginHost::default();
-    let snapshot = host
-        .install(
+    let installed = futures::executor::block_on(host.install(
             vec![Box::new(
                 neoism_agent_builtins::plugin::SystemPromptPlugin,
             )],
             &[],
-        )
+            test_plugin_context(&info.directory),
+        ))
         .expect("test system prompt plugin installs");
+    let snapshot = installed.snapshot();
     provider_messages_for_session_with_plugins(
         &snapshot,
         info,
@@ -1120,6 +1121,19 @@ pub(crate) fn provider_messages_for_session(
         model_id,
         run_system,
         goals_enabled,
+    )
+}
+
+#[cfg(test)]
+fn test_plugin_context(directory: &str) -> neoism_agent_plugin_api::PluginContext {
+    neoism_agent_plugin_api::PluginContext::new(
+        neoism_agent_plugin_api::RuntimeScope::Workspace(neoism_agent_plugin_api::WorkspaceIdentity {
+            id: directory.to_string(),
+            root: directory.into(),
+        }),
+        neoism_agent_plugin_api::CapabilityGrants::default()
+            .allow(neoism_agent_plugin_api::HostCapability::ConfigRead)
+            .allow(neoism_agent_plugin_api::HostCapability::WorkspaceRead),
     )
 }
 
@@ -1228,8 +1242,8 @@ fn plugin_system_messages(
         options,
     };
     plugins
-        .system_context_services
-        .values()
+        .system_context_services_by_priority()
+        .into_iter()
         .flat_map(|service| service.sections(&request).unwrap_or_default())
         .map(|section| ProviderMessage::text(ProviderRole::System, section.content))
         .collect()
@@ -1256,7 +1270,7 @@ fn plugin_run_system_message(
             options: Default::default(),
         },
     };
-    plugins.prompt_services.values().find_map(|service| {
+    plugins.prompt_services_by_priority().into_iter().find_map(|service| {
         service.render(&request).ok().map(|prompt| {
             ProviderMessage::text(ProviderRole::System, prompt.content)
         })
@@ -1268,14 +1282,16 @@ mod tests {
     use super::*;
 
     fn system_prompt_snapshot() -> std::sync::Arc<neoism_agent_plugin_api::RegistrySnapshot> {
-        neoism_agent_plugin_api::PluginHost::default()
-            .install(
+        let host = neoism_agent_plugin_api::PluginHost::default();
+        futures::executor::block_on(host.install(
                 vec![Box::new(
                     neoism_agent_builtins::plugin::SystemPromptPlugin,
                 )],
                 &[],
-            )
+                test_plugin_context("."),
+            ))
             .expect("install system prompt plugin")
+            .snapshot()
     }
 
     fn workspace_system_message(info: &SessionInfo, model_id: &str) -> ProviderMessage {

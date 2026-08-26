@@ -276,7 +276,7 @@ pub async fn listen(
         "server state opened"
     );
     let result = axum::serve(listener, app_router::app_with_cors(state.clone(), &options.cors)).await;
-    state.shutdown().await;
+    state.shutdown().await?;
     tracing::warn!(
         target: "neoism_agent::perf",
         listen_addr = %actual,

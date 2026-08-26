@@ -1,17 +1,21 @@
 use neoism_agent_core::{CapabilityInfo, PluginManifestInfo};
 use neoism_agent_plugin_api::{
-    AgentPlugin, PluginHost, PluginHostError, RegistrySnapshot,
+    CapabilityGrants, HostCapability, InstalledPlugins, PluginFactory, PluginFactoryRegistration,
+    PluginHost, PluginHostError, PluginContext, RegistrySnapshot, RoutePrefixPolicy, RuntimeScope,
+    WorkspaceIdentity,
 };
 use crate::plugin_adapters;
+use crate::workspace_runtime::{managed_plugin_factory, WorkspaceLifecycle};
 
 pub(crate) mod subagents;
 
 pub(crate) struct PluginHostBuild {
-    pub(crate) host: PluginHost,
+    pub(crate) installed: InstalledPlugins,
     pub(crate) config: std::sync::Arc<neoism_agent_core::AgentConfigDocument>,
+    pub(crate) lifecycle: std::sync::Arc<WorkspaceLifecycle>,
 }
 
-pub(crate) fn build_host(
+pub(crate) async fn build_host(
     state: &crate::state::AppState,
     directory: &str,
 ) -> Result<PluginHostBuild, PluginHostError> {
@@ -19,10 +23,10 @@ pub(crate) fn build_host(
     let host = PluginHost::default();
     let (config, discovery_roots) = neoism_agent_builtins::plugin::config::load(services, directory)
         .map_err(|error| PluginHostError::Registration(format!("invalid configuration: {error}")))?;
-    build_host_with_config(state, directory, config, discovery_roots, host)
+    build_host_with_config(state, directory, config, discovery_roots, host).await
 }
 
-pub(crate) fn build_default_host(
+pub(crate) async fn build_default_host(
     state: &crate::state::AppState,
     directory: &str,
 ) -> Result<PluginHostBuild, PluginHostError> {
@@ -32,10 +36,31 @@ pub(crate) fn build_default_host(
         neoism_agent_core::AgentConfigDocument::default(),
         Vec::new(),
         PluginHost::default(),
-    )
+    ).await
 }
 
-fn build_host_with_config(
+fn first_party_legacy_prefix(plugin_id: &str) -> Option<&'static str> {
+    [
+        (neoism_agent_builtins::plugin::config::ID, "/v2/config"),
+        (neoism_agent_builtins::plugin::artifacts::ID, "/v2/artifacts"),
+        (neoism_agent_builtins::plugin::interactions::ID, "/v2/interactions"),
+        (neoism_agent_builtins::plugin::providers::ID, "/v2/providers"),
+        (neoism_agent_builtins::plugin::workflows::ID, "/v2/workflows"),
+        (neoism_agent_builtins::plugin::subagents::ID, "/v2/session"),
+        (neoism_agent_builtins::plugin::lsp::ID, "/v2/lsp"),
+        (neoism_agent_builtins::plugin::mcp::ID, "/v2/mcp"),
+        (neoism_agent_builtins::plugin::pty::ID, "/v2/pty"),
+        (neoism_agent_builtins::plugin::workspace_tools::ID, "/v2/tools"),
+        (neoism_agent_builtins::plugin::skills::ID, "/v2/skills"),
+        (neoism_agent_builtins::plugin::agents::ID, "/v2/agents"),
+        (neoism_agent_builtins::plugin::commands::ID, "/v2/commands"),
+        (neoism_agent_builtins::plugin::websearch::ID, "/v2/tools"),
+        (neoism_agent_builtins::plugin::vcs::ID, "/v2/vcs"),
+        (neoism_agent_builtins::plugin::goals::ID, "/v2/goals"),
+    ].into_iter().find_map(|(id, prefix)| (id == plugin_id).then_some(prefix))
+}
+
+async fn build_host_with_config(
     state: &crate::state::AppState,
     directory: &str,
     config: neoism_agent_core::AgentConfigDocument,
@@ -47,7 +72,7 @@ fn build_host_with_config(
         Box::new(neoism_agent_builtins::plugin::ConfigPlugin::new(
             services.clone(),
             std::sync::Arc::new(plugin_adapters::ConfigAdmin(state.clone())),
-        )) as Box<dyn AgentPlugin>,
+        )) as Box<dyn PluginFactory>,
     ];
     if enabled_in(
         &config,
@@ -159,16 +184,67 @@ fn build_host_with_config(
             )));
         }
     }
-    plugins.extend(crate::plugin::configured_agent_plugins(
+    let configured_plugins = crate::plugin::configured_agent_plugins(
         services,
         &config,
         directory,
-    ));
-    host.install(plugins, &[])?;
+    );
+    let lifecycle = std::sync::Arc::new(WorkspaceLifecycle::default());
+    let root = std::path::PathBuf::from(directory);
+    let mut registrations = plugins
+        .into_iter()
+        .map(|factory| {
+            let policy = first_party_legacy_prefix(&factory.descriptor().manifest.id)
+                .map_or_else(RoutePrefixPolicy::default, |prefix| RoutePrefixPolicy::default().allow_legacy(prefix));
+            PluginFactoryRegistration::new(managed_plugin_factory(factory, lifecycle.clone(), root.clone()))
+                .with_route_prefix_policy(policy)
+        })
+        .collect::<Vec<_>>();
+    registrations.extend(configured_plugins.into_iter().map(|factory| {
+        PluginFactoryRegistration::new(managed_plugin_factory(factory, lifecycle.clone(), root.clone()))
+    }));
+    let context = PluginContext::new(
+        RuntimeScope::Workspace(WorkspaceIdentity {
+            id: directory.to_string(),
+            root: std::path::PathBuf::from(directory),
+        }),
+        production_workspace_grants(),
+    );
+    let disabled = config.plugins.iter()
+        .filter(|(_, plugin)| !plugin.enabled)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let installed = match host.install_registered(registrations, &disabled, context).await {
+        Ok(installed) => installed,
+        Err(failure) => {
+            let (error, quarantine) = failure.into_parts();
+            if let Some(quarantine) = quarantine {
+                state.inner.workspace_runtimes.retain_plugin_quarantine(quarantine).await;
+            }
+            return Err(error);
+        }
+    };
     Ok(PluginHostBuild {
-        host,
+        installed,
         config: std::sync::Arc::new(config),
+        lifecycle,
     })
+}
+
+fn production_workspace_grants() -> CapabilityGrants {
+    // This is the explicit trusted-host policy. PluginHost attenuates this
+    // superset to each descriptor's declarations before create(), so a plugin
+    // cannot acquire an undeclared process/network/secret/workspace grant.
+    [
+        HostCapability::ConfigRead,
+        HostCapability::ConfigWrite,
+        HostCapability::WorkspaceRead,
+        HostCapability::WorkspaceWrite,
+        HostCapability::EventPublish,
+        HostCapability::Network,
+        HostCapability::ProcessSpawn,
+        HostCapability::SecretRead,
+    ].into_iter().fold(CapabilityGrants::default(), CapabilityGrants::allow)
 }
 
 pub(crate) fn agent_catalog(
@@ -198,6 +274,7 @@ fn enabled_in(config: &neoism_agent_core::AgentConfigDocument, plugin_id: &str) 
         .get(plugin_id)
         .is_none_or(|plugin| plugin.enabled)
 }
+
 
 pub(crate) fn manifests(snapshot: &RegistrySnapshot) -> Vec<PluginManifestInfo> {
     let mut manifests = snapshot.manifests.clone();

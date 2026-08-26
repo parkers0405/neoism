@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use neoism_agent_plugin_api::{
-    AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest,
-    PluginRegistrar, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
+    ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest,
+    PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
     RouteRequest, RouteResponse, RouteScope,
 };
 
@@ -23,7 +23,7 @@ impl SemanticPlugin {
     }
 }
 
-impl AgentPlugin for SemanticPlugin {
+impl PluginDefinition for SemanticPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(), name: "Semantic search".into(), version: env!("CARGO_PKG_VERSION").into(),
@@ -33,7 +33,8 @@ impl AgentPlugin for SemanticPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![WorkspaceRead, Network, SecretRead] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         registrar.runtime_route(RouteContribution {
             descriptor: RouteDescriptor {
                 id: "v2.plugins.semantic.search".into(), method: RouteMethod::Get,

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use neoism_agent_core::{GoalStatus, SessionGoal};
 use neoism_agent_plugin_api::{
-    AgentPlugin, PluginHostError, PluginManifest, PluginRegistrar, PluginRuntimeError,
+    PluginContributions, PluginDefinition, PluginHostError, PluginManifest, PluginRuntimeError,
     PromptRequest, PromptService, RenderedPrompt, ServiceRequest, SystemContextSection,
     SystemContextService,
 };
@@ -12,7 +12,7 @@ pub const ID: &str = "dev.neoism.system-prompt";
 
 pub struct SystemPromptPlugin;
 
-impl AgentPlugin for SystemPromptPlugin {
+impl PluginDefinition for SystemPromptPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(),
@@ -28,7 +28,8 @@ impl AgentPlugin for SystemPromptPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![ConfigRead, WorkspaceRead] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         registrar.system_context_service_runtime("workspace", Arc::new(WorkspaceContext));
         registrar.prompt_service_runtime("runtime", Arc::new(RuntimePrompts));
         Ok(())

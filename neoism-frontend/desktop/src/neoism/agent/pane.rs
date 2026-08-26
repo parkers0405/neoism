@@ -39,7 +39,7 @@ use super::side_panel::{
     SessionGoal,
 };
 use super::updates::{
-    start_session_event_stream, AgentSessionEventStream, AgentSessionUpdate,
+    start_session_event_stream, AgentEventWake, AgentSessionEventStream, AgentSessionUpdate,
 };
 
 const DEFAULT_AGENT: &str = "build";
@@ -691,6 +691,7 @@ pub(crate) struct PendingPromptDispatch {
     pub(crate) delivery: neoism_protocol::agent::PromptDelivery,
     pub(crate) author: Option<String>,
     pub(crate) transcript_echo: Option<String>,
+    pub(crate) event_wake: Option<AgentEventWake>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -764,6 +765,7 @@ pub struct NeoismAgentPane {
     file_mention_search: std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchService>,
     file_mention_root_pin: Mutex<Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
     event_stream: Option<AgentSessionEventStream>,
+    event_wake: Option<AgentEventWake>,
     /// Transcript/state caches keyed by real session id. Parent and child
     /// sessions remain resident while navigation only changes `session_id`,
     /// matching OpenCode's route-over-global-store model.
@@ -1061,6 +1063,7 @@ impl Default for NeoismAgentPane {
             ),
             file_mention_root_pin: Mutex::new(None),
             event_stream: None,
+            event_wake: None,
             session_cache: HashMap::new(),
             session_preloads_in_flight: BTreeSet::new(),
             session_preload_queue: VecDeque::new(),

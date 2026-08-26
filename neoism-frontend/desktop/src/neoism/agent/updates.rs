@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use neoism_backend::event::{EventProxy, RioEvent, RioEventType, WindowId};
+
 use neoism_ui::panels::agent_pane::stream_events::{
     classify_session_event, matches_session, ChunkedDecoder, SessionEventUpdate,
     SessionEventUpdateState, SseDecoder,
@@ -157,6 +159,44 @@ pub(crate) struct AgentSessionEventStream {
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
     stop: Arc<AtomicBool>,
     disconnected: bool,
+    wake: Arc<Mutex<Option<AgentEventWake>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct AgentEventWake {
+    callback: Arc<dyn Fn() + Send + Sync>,
+    pending: Arc<AtomicBool>,
+}
+
+impl AgentEventWake {
+    pub(crate) fn new(proxy: EventProxy, window_id: WindowId) -> Self {
+        Self {
+            callback: Arc::new(move || {
+                proxy.send_event(RioEventType::Rio(RioEvent::Render), window_id);
+            }),
+            pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn wake(&self) {
+        if !self.pending.swap(true, Ordering::AcqRel) {
+            (self.callback)();
+        }
+    }
+
+    fn begin_drain(&self) {
+        // Clear before draining. An event racing the drain then schedules the
+        // next frame instead of being stranded behind a late clear.
+        self.pending.store(false, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn for_test(callback: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            callback: Arc::new(callback),
+            pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl AgentSessionEventStream {
@@ -170,6 +210,7 @@ impl AgentSessionEventStream {
             known_child_session_ids: Arc::new(Mutex::new(HashSet::new())),
             stop: Arc::new(AtomicBool::new(false)),
             disconnected: false,
+            wake: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -189,6 +230,7 @@ impl AgentSessionEventStream {
             known_child_session_ids: Arc::new(Mutex::new(HashSet::new())),
             stop: Arc::new(AtomicBool::new(false)),
             disconnected: false,
+            wake: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -205,7 +247,18 @@ impl AgentSessionEventStream {
         }
     }
 
+    pub(crate) fn set_wake(&mut self, wake: AgentEventWake) {
+        if let Ok(mut current) = self.wake.lock() {
+            *current = Some(wake);
+        }
+    }
+
     pub(super) fn drain(&mut self, limit: usize) -> (Vec<AgentSessionUpdate>, bool) {
+        if let Ok(wake) = self.wake.lock() {
+            if let Some(wake) = wake.as_ref() {
+                wake.begin_drain();
+            }
+        }
         let limit = limit.max(1);
         let mut out = Vec::with_capacity(limit.min(64));
         let mut received = 0usize;
@@ -264,6 +317,8 @@ pub(super) fn start_session_event_stream(
     let stream_stop = stop.clone();
     let known_child_session_ids = Arc::new(Mutex::new(HashSet::new()));
     let stream_known_child_session_ids = known_child_session_ids.clone();
+    let wake = Arc::new(Mutex::new(None));
+    let stream_wake = wake.clone();
     let thread_session_id = session_id.clone();
     let thread_tx = tx.clone();
 
@@ -276,6 +331,7 @@ pub(super) fn start_session_event_stream(
                 thread_tx,
                 stream_stop,
                 stream_known_child_session_ids,
+                stream_wake,
             );
         })
     {
@@ -292,6 +348,7 @@ pub(super) fn start_session_event_stream(
         known_child_session_ids,
         stop,
         disconnected: false,
+        wake,
     }
 }
 
@@ -379,6 +436,7 @@ fn run_event_stream(
     tx: Sender<AgentSessionUpdate>,
     stop: Arc<AtomicBool>,
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
+    wake: Arc<Mutex<Option<AgentEventWake>>>,
 ) {
     let mut connected_once = false;
     while !stop.load(Ordering::Relaxed) {
@@ -474,6 +532,7 @@ fn run_event_stream(
                     tx.clone(),
                     stop.clone(),
                     known_child_session_ids.clone(),
+                    wake.clone(),
                 );
             }
             Err(error) if !connected_once && !stop.load(Ordering::Relaxed) => {
@@ -538,6 +597,7 @@ fn read_event_stream(
     tx: Sender<AgentSessionUpdate>,
     stop: Arc<AtomicBool>,
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
+    wake: Arc<Mutex<Option<AgentEventWake>>>,
 ) {
     let mut chunked = ChunkedDecoder::new(connection.chunked);
     let mut sse = SseDecoder::default();
@@ -558,6 +618,7 @@ fn read_event_stream(
                 &mut state,
                 &known_child_session_ids,
                 &mut pending_unknown_events,
+                &wake,
             ) {
                 return;
             }
@@ -579,6 +640,7 @@ fn read_event_stream(
                         &mut state,
                         &known_child_session_ids,
                         &mut pending_unknown_events,
+                        &wake,
                     ) {
                         return;
                     }
@@ -609,6 +671,7 @@ fn process_sse_bytes(
     state: &mut SessionEventUpdateState,
     known_child_session_ids: &Arc<Mutex<HashSet<String>>>,
     pending_unknown_events: &mut VecDeque<Value>,
+    wake: &Arc<Mutex<Option<AgentEventWake>>>,
 ) -> bool {
     for event in sse.feed(bytes) {
         sync_tracked_child_sessions(state, known_child_session_ids);
@@ -618,13 +681,14 @@ fn process_sse_bytes(
             session_id,
             tx,
             state,
+            wake,
         )
         .is_err()
         {
             return true;
         }
         if matches_session(&event, session_id, state.child_session_ids()) {
-            if send_event_updates(event, server, session_id, tx, state).is_err() {
+            if send_event_updates(event, server, session_id, tx, state, wake).is_err() {
                 return true;
             }
         } else {
@@ -642,6 +706,7 @@ fn process_sse_bytes(
             session_id,
             tx,
             state,
+            wake,
         )
         .is_err()
         {
@@ -666,11 +731,12 @@ fn replay_known_session_events(
     session_id: &str,
     tx: &Sender<AgentSessionUpdate>,
     state: &mut SessionEventUpdateState,
+    wake: &Arc<Mutex<Option<AgentEventWake>>>,
 ) -> Result<(), mpsc::SendError<AgentSessionUpdate>> {
     let mut still_unknown = VecDeque::with_capacity(pending.len());
     while let Some(event) = pending.pop_front() {
         if matches_session(&event, session_id, state.child_session_ids()) {
-            send_event_updates(event, server, session_id, tx, state)?;
+            send_event_updates(event, server, session_id, tx, state, wake)?;
         } else {
             still_unknown.push_back(event);
         }
@@ -685,6 +751,7 @@ fn send_event_updates(
     session_id: &str,
     tx: &Sender<AgentSessionUpdate>,
     state: &mut SessionEventUpdateState,
+    wake: &Arc<Mutex<Option<AgentEventWake>>>,
 ) -> Result<(), mpsc::SendError<AgentSessionUpdate>> {
     for update in classify_session_event(event, session_id, state) {
         match update {
@@ -703,6 +770,7 @@ fn send_event_updates(
                             oldest_cursor: page.oldest_cursor,
                         })?;
                         state.mark_idle_messages_refreshed();
+                        wake_event_loop(wake);
                         continue;
                     }
                 }
@@ -909,8 +977,17 @@ fn send_event_updates(
                 tx.send(AgentSessionUpdate::RuntimeUpdated(snapshot))?;
             }
         }
+        wake_event_loop(wake);
     }
     Ok(())
+}
+
+fn wake_event_loop(wake: &Arc<Mutex<Option<AgentEventWake>>>) {
+    if let Ok(wake) = wake.lock() {
+        if let Some(wake) = wake.as_ref() {
+            wake.wake();
+        }
+    }
 }
 
 fn part_parent_message_id(part: &Value) -> Option<String> {
@@ -957,6 +1034,10 @@ fn desktop_permission_from_shared(
 mod tests {
     use super::*;
 
+    fn no_wake() -> Arc<Mutex<Option<AgentEventWake>>> {
+        Arc::new(Mutex::new(None))
+    }
+
     #[test]
     fn unknown_child_event_replays_after_late_tree_discovery() {
         let event = serde_json::json!({
@@ -977,14 +1058,82 @@ mod tests {
 
         known.lock().unwrap().insert("child".to_string());
         sync_tracked_child_sessions(&mut state, &known);
-        replay_known_session_events(&mut pending, "", "root", &tx, &mut state).unwrap();
+        replay_known_session_events(
+            &mut pending,
+            "",
+            "root",
+            &tx,
+            &mut state,
+            &no_wake(),
+        )
+        .unwrap();
 
         assert!(pending.is_empty());
+        assert!(rx.try_iter().any(|update| matches!(
+            update,
+            AgentSessionUpdate::ChildPartDelta { session_id, delta, .. }
+                if session_id == "child" && delta == "live after discovery"
+        )));
+    }
+
+    #[test]
+    fn inbound_delta_wakes_desktop_event_loop_after_enqueue() {
+        let event = serde_json::json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionId": "root",
+                "messageID": "message",
+                "partID": "part",
+                "partType": "text",
+                "field": "text",
+                "delta": "token"
+            }
+        });
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_count_for_callback = wake_count.clone();
+        let wake = Arc::new(Mutex::new(Some(AgentEventWake::for_test(move || {
+            wake_count_for_callback.fetch_add(1, Ordering::Relaxed);
+        }))));
+        let (tx, rx) = mpsc::channel();
+
+        send_event_updates(
+            event,
+            "",
+            "root",
+            &tx,
+            &mut SessionEventUpdateState::default(),
+            &wake,
+        )
+        .unwrap();
+
         assert!(matches!(
             rx.try_recv(),
-            Ok(AgentSessionUpdate::ChildPartDelta { session_id, delta, .. })
-                if session_id == "child" && delta == "live after discovery"
+            Ok(AgentSessionUpdate::PartDelta { delta, .. }) if delta == "token"
         ));
+        assert_eq!(wake_count.load(Ordering::Relaxed), 1);
+        send_event_updates(
+            serde_json::json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionId": "root",
+                    "messageID": "message",
+                    "partID": "part",
+                    "partType": "text",
+                    "field": "text",
+                    "delta": "next"
+                }
+            }),
+            "",
+            "root",
+            &tx,
+            &mut SessionEventUpdateState::default(),
+            &wake,
+        )
+        .unwrap();
+        assert_eq!(wake_count.load(Ordering::Relaxed), 1);
+        wake.lock().unwrap().as_ref().unwrap().begin_drain();
+        wake_event_loop(&wake);
+        assert_eq!(wake_count.load(Ordering::Relaxed), 2);
     }
 
     #[test]

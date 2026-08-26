@@ -58,6 +58,23 @@ fn execution_elapsed_survives_run_idle_and_subagent_transitions() {
 }
 
 #[test]
+fn live_execution_owns_redraw_across_transient_run_idle() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution-a".into(),
+        root_session_id: "root".into(),
+        active_segments: [("provider".into(), 1_000)].into(),
+        revision: 1,
+        finished: false,
+        ..Default::default()
+    });
+    pane.note_session_idle();
+    assert_eq!(pane.animation_reason(), Some("streaming"));
+}
+
+#[test]
 fn execution_revision_cannot_rewind_and_replacement_resets() {
     let mut pane = NeoismAgentPane::default();
     let activity = |id: &str, revision: u64, completed_ms: u64| ExecutionActivityState {

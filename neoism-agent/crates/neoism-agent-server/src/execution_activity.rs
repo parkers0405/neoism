@@ -146,6 +146,12 @@ pub(crate) async fn ensure_for_prompt(
     message_id: &str,
     allow_new: bool,
 ) -> anyhow::Result<Option<ExecutionActivitySnapshot>> {
+    // A prior run can become quiescent between its last cleanup edge and the
+    // next durable user turn. Reconcile before admission so a genuinely new
+    // top-level prompt never inherits a settled execution's model time.
+    if allow_new {
+        finish_if_quiescent(state, info.id.as_str()).await;
+    }
     let root = root_session_id(state, info).await;
     let lock = keyed_lock(state, &root).await;
     let _guard = lock.lock().await;
@@ -183,6 +189,9 @@ pub(crate) async fn ensure_for_prompt(
         .insert(EXECUTION_ID_KEY.to_string(), json!(snapshot.execution_id));
     info.extra
         .insert(EXECUTION_ROOT_KEY.to_string(), json!(root));
+    if allow_new {
+        publish_snapshot(state, &root).await;
+    }
     Ok(Some(snapshot))
 }
 
@@ -474,7 +483,8 @@ pub(crate) async fn finish_if_quiescent(state: &AppState, session_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neoism_agent_core::ExecutionActivitySnapshot;
+    use neoism_agent_core::{ExecutionActivitySnapshot, SessionInfo, TimeInfo};
+    use std::collections::BTreeMap;
 
     #[test]
     fn concurrent_segments_use_model_seconds() {
@@ -484,6 +494,66 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(snapshot.elapsed_ms_at(2_000), 2_000);
+    }
+
+    #[tokio::test]
+    async fn new_top_level_prompt_reconciles_settled_execution_before_admission() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-execution-next-prompt-{}.sqlite3",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        let state = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        let now = crate::now_millis();
+        let mut session = SessionInfo {
+            id: neoism_agent_core::new_session_id(),
+            slug: "next-prompt".into(),
+            project_id: "global".into(),
+            workspace_id: None,
+            directory: "/tmp".into(),
+            path: None,
+            parent_id: None,
+            title: "Next prompt".into(),
+            agent: None,
+            model: None,
+            version: env!("CARGO_PKG_VERSION").into(),
+            time: TimeInfo {
+                created: now,
+                updated: now,
+                compacting: None,
+                archived: None,
+            },
+            permission: None,
+            extra: BTreeMap::new(),
+        };
+        state.inner.store.insert_session(&session).await.unwrap();
+        let root = session.id.to_string();
+        let previous = state
+            .inner
+            .store
+            .admit_execution_activity(&root, "execution-old", "message-old", "")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!previous.finished);
+
+        let next = ensure_for_prompt(&state, &mut session, "message-new", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(next.execution_id, previous.execution_id);
+        assert_eq!(next.root_message_id, "message-new");
+        assert_eq!(next.completed_ms, 0);
+        assert!(state
+            .inner
+            .store
+            .get_execution_activity(&root)
+            .await
+            .unwrap()
+            .is_some_and(|activity| activity.execution_id == next.execution_id));
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

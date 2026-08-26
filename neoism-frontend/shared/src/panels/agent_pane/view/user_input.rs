@@ -1321,13 +1321,12 @@ fn render_input_help_strip(
 
     let mut activity_guard = x;
     if !matches!(pane.streaming_state(), AgentStreamingStatus::Idle) {
-        let scanner_seconds = pane.streaming_elapsed_seconds().unwrap_or(now_seconds);
         let activity_w = draw_opencode_activity_scanner(
             sugarloaf,
             x,
             baseline_y,
             12.5 * s,
-            scanner_seconds,
+            now_seconds,
             theme,
             pane.streaming_state(),
             clip,
@@ -1539,7 +1538,7 @@ pub fn render_streaming_status_row(
     let accent = streaming_status_accent(theme, state);
     let elapsed = pane.streaming_elapsed_seconds().unwrap_or(0.0);
     let transition = pane.streaming_state_changed_elapsed().unwrap_or(2.0);
-    let live_phase = elapsed;
+    let live_phase = now_seconds;
     let queued_count = pane.queued_prompt_count();
     let status_line_h = STREAMING_STATUS_LINE_H * s;
     let primary_y = if queued_count > 0 || background_count > 0 {

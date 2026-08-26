@@ -111,7 +111,7 @@ impl NeoismAgentPane {
             || self.side_panel.held_status_display().is_some()
     }
 
-    fn viewed_subagent_outstanding(&self) -> bool {
+    pub(in crate::panels::agent_pane::state) fn viewed_subagent_outstanding(&self) -> bool {
         self.is_subagent_session()
             && self.session_id.as_deref().is_some_and(|session_id| {
                 self.side_panel.branch_activity(session_id).is_some_and(|activity| {
@@ -120,7 +120,10 @@ impl NeoismAgentPane {
             })
     }
 
-    fn execution_status_live(&self, activity: &ExecutionActivityState) -> bool {
+    pub(in crate::panels::agent_pane::state) fn execution_status_live(
+        &self,
+        activity: &ExecutionActivityState,
+    ) -> bool {
         if activity.finished {
             return false;
         }

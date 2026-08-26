@@ -555,7 +555,7 @@ pub struct ToolDiffSection {
     omitted: usize,
     fingerprint: u64,
     /// LSP diagnostics for this file, parsed from the tool's `metadata.diagnostics`
-    /// (opencode parity). Rendered as a footer beneath the diff card.
+    /// Rendered as a footer beneath the diff card.
     diagnostics: Vec<DiagLine>,
 }
 

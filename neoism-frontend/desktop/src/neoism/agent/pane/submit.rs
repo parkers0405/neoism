@@ -110,7 +110,8 @@ impl NeoismAgentPane {
         let message_id =
             neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
         if !was_streaming {
-            let mut message = NeoismAgentMessage::user(text).with_id(message_id.clone());
+            let mut message =
+                NeoismAgentMessage::user(text.clone()).with_id(message_id.clone());
             message.author = Some(crate::neoism::agent::commands::native_prompt_author(
                 self.local_presence_name(),
             ));
@@ -120,12 +121,18 @@ impl NeoismAgentPane {
         }
         self.abort_requested_at = None;
         // For a fresh run, show activity immediately. During an active run,
-        // keep the current state and show the queued-message line instead.
+        // keep the current state and show the queued-message line instead —
+        // optimistically, so the preview appears the instant Enter lands
+        // rather than after the server's queue.updated round trip (which
+        // reconciles the authoritative count afterwards).
         if !was_streaming {
             if let Some(session_id) = self.session_id.as_ref() {
                 self.terminal_idle_sessions.remove(session_id);
             }
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
+        } else {
+            self.queued_prompt_count += 1;
+            self.queued_prompt_preview = Some(text.clone());
         }
         // `expanded` may contain a large paste. Reuse the expansion already
         // computed for echo canonicalization instead of rebuilding it during
@@ -164,6 +171,11 @@ impl NeoismAgentPane {
                 self.terminal_idle_sessions.remove(session_id);
             }
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
+        } else {
+            // Mid-run, the goal's first turn queues: show the preview line
+            // immediately; the server's queue.updated reconciles the count.
+            self.queued_prompt_count += 1;
+            self.queued_prompt_preview = Some(prompt.clone());
         }
         self.abort_requested_at = None;
         let expanded = self.expand_text_attachments(&prompt);

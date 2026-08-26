@@ -108,7 +108,7 @@ pub enum OutboundAgentCommand {
         thinking: Option<String>,
     },
 
-    /// Persist the OpenCode-style helper-strip preference in the host's
+    /// Persist the helper-strip preference in the host's
     /// unified `config.json` (`agent-input-hints`).
     SetInputHelpVisible {
         visible: bool,

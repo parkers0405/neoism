@@ -348,7 +348,7 @@ pub fn render_code_block(
             .unwrap_or("");
         let visible_ix = ix.saturating_sub(line_offset);
         let line_y = first_line_y + visible_ix as f32 * line_h - intra_line_offset;
-        let diff = diff_line_kind(line);
+        let diff = diff_line_kind(message.lang(), line);
         render_code_line_background(
             sugarloaf,
             x,
@@ -405,7 +405,12 @@ pub enum DiffLineKind {
     Remove,
 }
 
-pub fn diff_line_kind(line: &str) -> Option<DiffLineKind> {
+pub fn diff_line_kind(lang: &str, line: &str) -> Option<DiffLineKind> {
+    if !lang.trim().eq_ignore_ascii_case("diff")
+        && !lang.trim().eq_ignore_ascii_case("patch")
+    {
+        return None;
+    }
     let trimmed = line.trim_start();
     if trimmed.starts_with("+++") || trimmed.starts_with("---") {
         return None;
@@ -416,6 +421,26 @@ pub fn diff_line_kind(line: &str) -> Option<DiffLineKind> {
         Some(DiffLineKind::Remove)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{diff_line_kind, DiffLineKind};
+
+    #[test]
+    fn diff_styling_requires_a_diff_language() {
+        assert!(diff_line_kind("code", "  - Desktop/Web").is_none());
+        assert!(diff_line_kind("", "- item").is_none());
+        assert!(diff_line_kind("rust", "+ value").is_none());
+        assert!(matches!(
+            diff_line_kind("diff", "-old"),
+            Some(DiffLineKind::Remove)
+        ));
+        assert!(matches!(
+            diff_line_kind(" PATCH ", "+new"),
+            Some(DiffLineKind::Add)
+        ));
     }
 }
 

@@ -609,7 +609,7 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         session_id: String,
         goal: Option<SessionGoal>,
     },
-    /// OpenCode-style background hydration for parent/child navigation. Live
+    /// Background hydration for parent/child navigation. Live
     /// events continue landing in the per-session cache while this request is
     /// in flight; the applier merges instead of replacing them.
     SessionPreloaded {
@@ -737,7 +737,7 @@ impl Default for NeoismWordmarkState {
 
 pub struct NeoismAgentPane {
     pub(super) input: String,
-    /// Whether the OpenCode-style keyboard/help strip below the composer is
+    /// Whether the keyboard/help strip below the composer is
     /// visible. `/hints` toggles this pane-local presentation preference.
     input_help_visible: bool,
     pub(super) messages: Vec<NeoismAgentMessage>,
@@ -768,7 +768,7 @@ pub struct NeoismAgentPane {
     event_wake: Option<AgentEventWake>,
     /// Transcript/state caches keyed by real session id. Parent and child
     /// sessions remain resident while navigation only changes `session_id`,
-    /// matching OpenCode's route-over-global-store model.
+    /// matching the route-over-global-store model.
     pub(super) session_cache: HashMap<String, CachedAgentSession>,
     pub(super) session_preloads_in_flight: BTreeSet<String>,
     pub(super) session_preload_queue: VecDeque<(String, bool)>,
@@ -1438,7 +1438,7 @@ fn merge_part_message(
 
 /// Merge a stored transcript snapshot with parts that arrived live while the
 /// snapshot request was in flight. Live text wins when the stored part is
-/// empty or an older prefix, mirroring OpenCode's hydration tracker.
+/// empty or an older prefix, preserving monotonic hydration.
 pub(super) fn merge_session_snapshot(
     snapshot: Vec<NeoismAgentMessage>,
     live: Vec<NeoismAgentMessage>,

@@ -49,7 +49,7 @@ pub enum SlashCommandAction {
     ResumeGoal,
     UndoSession,
     RedoSession,
-    /// Toggle the OpenCode-style keyboard/help strip below the composer.
+    /// Toggle the keyboard/help strip below the composer.
     ToggleInputHelp,
     /// Toggle the Agent conversation sidebar and persist its default.
     ToggleSidebar,

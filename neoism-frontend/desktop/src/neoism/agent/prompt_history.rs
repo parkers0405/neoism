@@ -1,4 +1,4 @@
-//! Global, persistent agent prompt history (zsh / codex / opencode style).
+//! Global, persistent agent prompt history with shell-style navigation.
 //!
 //! Every prompt sent from the agent composer is appended here, and every
 //! freshly-opened agent pane seeds its Up-arrow recall from the same file.

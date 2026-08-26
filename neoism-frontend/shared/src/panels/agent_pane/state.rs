@@ -531,7 +531,7 @@ impl Default for NeoismWordmarkState {
 
 pub struct NeoismAgentPane {
     pub(super) input: String,
-    /// Whether the OpenCode-style keyboard/help strip below the composer is
+    /// Whether the keyboard/help strip below the composer is
     /// visible. `/hints` toggles this pane-local presentation preference.
     input_help_visible: bool,
     pub(super) messages: Vec<NeoismAgentMessage>,

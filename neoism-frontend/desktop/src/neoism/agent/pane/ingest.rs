@@ -157,7 +157,7 @@ impl NeoismAgentPane {
                     changed = true;
                 }
                 AgentSessionUpdate::EventStreamReconnected => {
-                    // OpenCode-style recovery: lifecycle is event-driven
+                    // Event-driven recovery: lifecycle is inferred from
                     // during a healthy stream. A reconnect edge requests one
                     // tree/status snapshot to cover anything missed while the
                     // transport was down; it does not start a timer loop.
@@ -1664,7 +1664,7 @@ impl NeoismAgentPane {
         // Anchor by the user message's id, not its index: the marker must
         // stay on this SAME turn for the whole visit even as the list is
         // replaced or older pages are prepended. Trace collapses only when
-        // the session is left and re-entered (opencode-style), never because
+        // the session is left and re-entered, never because
         // a newer prompt was sent.
         self.timeline_live_trace_anchor =
             last_user.map(|index| self.messages[index].id.clone());
@@ -1677,7 +1677,7 @@ impl NeoismAgentPane {
             self.retain_current_turn_trace();
             return;
         }
-        // OpenCode's running-child inspector retains every accumulated frame.
+        // The running-child inspector retains every accumulated frame.
         // Do the same for an ongoing sub-agent, including tools from earlier
         // resumed turns. Completion leaves this stable for the current visit;
         // leaving and reopening the settled child restores the clean mask.

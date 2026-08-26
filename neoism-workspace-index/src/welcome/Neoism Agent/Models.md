@@ -26,7 +26,7 @@ Use `/model` in an agent pane or open the model picker from the agent header. Th
 
 `model` is the normal default. `smallModel` is available for lightweight internal work. `variant` selects a provider/model variant when one exists.
 
-`textVerbosity` controls response length for supported models. Valid values are `low`, `medium`, and `high`. Neoism defaults compatible non-chat GPT-5.x models to `low`, matching OpenCode v2.
+`textVerbosity` controls response length for supported models. Valid values are `low`, `medium`, and `high`. Neoism defaults compatible non-chat GPT-5.x models to `low`.
 
 ## Resolution order
 

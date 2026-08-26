@@ -98,6 +98,7 @@ pub(crate) fn palette_action_name(
         A::SelectNextSplit => "SelectNextSplit",
         A::SelectPrevSplit => "SelectPrevSplit",
         A::ConfigEditor => "ConfigEditor",
+        A::OpenSettings => "OpenSettings",
         A::WindowCreateNew => "WindowCreateNew",
         A::IncreaseFontSize => "IncreaseFontSize",
         A::DecreaseFontSize => "DecreaseFontSize",

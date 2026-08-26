@@ -1,4 +1,4 @@
-use super::sections::{render_directory_section, render_section_header};
+use super::sections::{render_directory_section, render_section_header, SECTION_GAP};
 use super::*;
 
 const SCRAMBLE_MS: f32 = 320.0;
@@ -374,7 +374,7 @@ pub(crate) fn render_sessions_list(
         clip,
         occlusion_rects,
     );
-    y += 8.0 * s;
+    y += SECTION_GAP * s;
     y = render_section_header(
         sugarloaf,
         "Previous Sessions",

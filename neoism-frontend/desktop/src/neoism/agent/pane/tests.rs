@@ -1678,9 +1678,11 @@ fn server_expanded_user_part_merges_into_pasted_token_echo() {
     assert!(pane.submit());
     assert_eq!(pane.messages[0].text, "[pasted 2 lines]");
 
-    // The server streams the user part back EXPANDED, with its own id.
+    // The server streams the user part back EXPANDED, under the same client
+    // message id the prompt was sent with (the message-id idempotence
+    // contract round-trips it).
     let mut server_part = NeoismAgentMessage::user("first line\nsecond line");
-    server_part.id = "srv-user-1".to_string();
+    server_part.id = pane.messages[0].id.clone();
     pane.upsert_part_message(server_part);
 
     let users: Vec<_> = pane
@@ -1694,7 +1696,10 @@ fn server_expanded_user_part_merges_into_pasted_token_echo() {
         "expanded server echo must not add a second user bubble"
     );
     assert_eq!(users[0].text, "[pasted 2 lines]");
-    assert_eq!(users[0].id, "srv-user-1");
+    assert!(
+        users[0].id.starts_with("msg_"),
+        "the merged bubble keeps the round-tripped client message id"
+    );
 }
 
 #[test]
@@ -1903,9 +1908,17 @@ fn model_change_queues_context_limit_refresh_for_runtime() {
 
     pane.apply_model("claude-test".to_string());
 
+    // A model change persists the choice into the unified config AND refreshes
+    // the context limit for the new model.
     assert_eq!(
         pane.drain_pending_outbound(),
-        vec![OutboundAgentCommand::RefreshModelContextLimit]
+        vec![
+            OutboundAgentCommand::PersistConfigChoice {
+                model: Some("claude-test".to_string()),
+                thinking: None,
+            },
+            OutboundAgentCommand::RefreshModelContextLimit,
+        ]
     );
 }
 

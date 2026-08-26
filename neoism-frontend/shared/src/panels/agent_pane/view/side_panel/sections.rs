@@ -1,3 +1,4 @@
+use super::super::draw::draw_rect_clipped;
 use super::draw::{
     draw_subagent_spinner, intersect_rect, push_provider_icon_clipped,
     render_back_button, render_scramble_text, set_back_cursor_if_focused,
@@ -336,7 +337,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
         clip,
         occlusion_rects,
     );
-    y += 6.0 * s;
+    y += SECTION_GAP * s;
 
     // --- Session ---
     y = render_section_header(
@@ -391,7 +392,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     // quiet platinum face deliberately read as a control strip rather than a
     // modern pill; token/cost calculations remain owned by the usage policy.
     if let Some((context_total, limit)) = pane.context_usage() {
-        y += 6.0 * s;
+        y += SECTION_GAP * s;
         y = render_section_header(
             sugarloaf,
             "Usage",
@@ -412,55 +413,44 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
         // Black keyline, pale top/left highlight, then a recessed cool-gray
         // well. The unrounded corners and exact one-pixel steps are the
         // characteristic Platinum control-strip silhouette.
-        sugarloaf.quad(
-            None,
-            text_x,
-            bar_y,
-            track_w,
-            bar_h,
+        draw_rect_clipped(
+            sugarloaf,
+            [text_x, bar_y, track_w, bar_h],
             [0.18, 0.19, 0.19, 1.0],
-            [0.0; 4],
-            DEPTH,
             ORDER_PANEL + 2,
+            clip,
         );
-        sugarloaf.quad(
-            None,
-            text_x + stroke,
-            bar_y + stroke,
-            (track_w - stroke * 2.0).max(0.0),
-            (bar_h - stroke * 2.0).max(0.0),
+        draw_rect_clipped(
+            sugarloaf,
+            [
+                text_x + stroke,
+                bar_y + stroke,
+                (track_w - stroke * 2.0).max(0.0),
+                (bar_h - stroke * 2.0).max(0.0),
+            ],
             [0.86, 0.85, 0.81, 1.0],
-            [0.0; 4],
-            DEPTH,
             ORDER_PANEL + 3,
+            clip,
         );
         let well_x = text_x + stroke * 2.0;
         let well_y = bar_y + stroke * 2.0;
         let well_w = (track_w - stroke * 3.0).max(0.0);
         let well_h = (bar_h - stroke * 3.0).max(0.0);
-        sugarloaf.quad(
-            None,
-            well_x,
-            well_y,
-            well_w,
-            well_h,
+        draw_rect_clipped(
+            sugarloaf,
+            [well_x, well_y, well_w, well_h],
             [0.42, 0.43, 0.42, 1.0],
-            [0.0; 4],
-            DEPTH,
             ORDER_PANEL + 4,
+            clip,
         );
         let fill_w = well_w * context_fill_fraction(context_total, limit);
         if fill_w > 0.0 {
-            sugarloaf.quad(
-                None,
-                well_x,
-                well_y,
-                fill_w,
-                well_h,
+            draw_rect_clipped(
+                sugarloaf,
+                [well_x, well_y, fill_w, well_h],
                 [0.69, 0.69, 0.65, 1.0],
-                [0.0; 4],
-                DEPTH,
                 ORDER_PANEL + 5,
+                clip,
             );
         }
         y = bar_y + bar_h + 6.0 * s;
@@ -498,7 +488,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     // The session's persistent active/blocked goal sits ABOVE branches and
     // tasks, so Alt+H immediately shows what the agent is still pursuing.
     if let Some(goal) = pane.side_panel().session_goal().cloned() {
-        y += 6.0 * s;
+        y += SECTION_GAP * s;
         y = render_goal_section(
             sugarloaf,
             &goal,
@@ -527,7 +517,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     let subagents_count = pane.side_panel().subagents().len();
     let has_real_subagents = subagents_count > 1;
     if has_real_subagents {
-        y += 6.0 * s;
+        y += SECTION_GAP * s;
         y = render_section_header(
             sugarloaf,
             "Branches",
@@ -566,7 +556,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     // all that's needed for the check-off to mirror the chat.
     if !tasks.is_empty() {
         if has_real_subagents {
-            y += 10.0 * s;
+            y += 6.0 * s;
         }
         render_tasks_section(
             sugarloaf,

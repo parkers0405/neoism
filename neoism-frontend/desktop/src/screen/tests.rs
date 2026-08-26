@@ -166,7 +166,9 @@ fn git_state_event_filter_accepts_stable_git_state() {
     ))
     .add_path(PathBuf::from("/repo/.git/refs/heads/main"));
 
-    assert!(git_state_event_relevant(&index));
+    // `.git/index` churns on every staging/porcelain operation and is
+    // deliberately filtered out; stable git state means HEAD/ref movement.
+    assert!(!git_state_event_relevant(&index));
     assert!(git_state_event_relevant(&head));
     assert!(git_state_event_relevant(&branch_ref));
 }

@@ -477,9 +477,18 @@ pub fn file_url(path: &std::path::Path) -> String {
             absolute
         }
     };
-    url::Url::from_file_path(&absolute)
-        .map(String::from)
-        .unwrap_or_else(|_| format!("file://{}", absolute.to_string_lossy()))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        url::Url::from_file_path(&absolute)
+            .map(String::from)
+            .unwrap_or_else(|_| format!("file://{}", absolute.to_string_lossy()))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        // `url` intentionally omits filesystem conversion APIs on wasm.
+        // Browser attachment paths are already normalized by the host.
+        format!("file://{}", absolute.to_string_lossy().replace(' ', "%20"))
+    }
 }
 
 pub fn previous_char_boundary(value: &str, byte: usize) -> usize {

@@ -828,10 +828,16 @@ impl NeoismAgentPane {
         if self.is_streaming() {
             self.reveal_ongoing_session_trace();
         }
-        // Live-trace was cleared by the switch. Drop the parked layout so
-        // settled tool/reasoning rows are re-masked instead of flashing as
-        // leftover titles from the previous visit.
-        self.invalidate_timeline_layout();
+        // Warm switches adopt the cached layout epoch wholesale: the cached
+        // session's live updates already bump its own epoch, so an unchanged
+        // transcript renders from the parked layout with no relayout flash.
+        self.timeline_layout_epoch = cached.timeline_layout_epoch;
+        if !stays_in_family {
+            // Leaving the family collapses the live-trace window; drop the
+            // parked layout so settled tool/reasoning rows are re-masked
+            // instead of flashing as leftover titles from the previous visit.
+            self.invalidate_timeline_layout();
+        }
         if !self.runtime_hydrated_sessions.contains(session_id) {
             self.hydrate_runtime_status_for_session(session_id);
         }
@@ -1651,10 +1657,13 @@ impl NeoismAgentPane {
         oldest_cursor: Option<String>,
         reached_start: bool,
     ) {
+        // Release the latch even for a stale response from a previous
+        // session: a switch mid-request otherwise leaves `loading_older`
+        // wedged and the new session can never page back.
+        self.timeline_history.loading_older = false;
         if self.session_id.as_deref() != Some(session_id.as_str()) {
             return;
         }
-        self.timeline_history.loading_older = false;
         // "Is there more history?" is a property of *stored messages*, not the
         // expanded render blocks. A full page (raw_count == limit) means more
         // may remain; a short page means we hit the start. Comparing block

@@ -2037,7 +2037,7 @@ fn tool_title(tool: &str, state: &Value) -> String {
     // `short_path` made every slash a path separator and retained an enormous
     // tail after the final two slashes. Multiline commands could consequently
     // consume the four-row title cap and make the body look vertically cut
-    // off. Keep the useful OpenCode-style `Bash(command)` label, but normalize
+    // off. Keep the useful `Bash(command)` label, but normalize
     // it to a bounded single-line preview.
     let inline_target = input
         .get("command")

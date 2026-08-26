@@ -17,7 +17,7 @@ use crate::primitives::ide_theme::IdeTheme;
 /// in `measure_message_height_with` must subtract the SAME amount from the
 /// wrap width or card heights drift.
 pub(super) const ASSISTANT_TEXT_PAD_LEFT: f32 = 18.0;
-/// Extra room below a settled assistant answer for the OpenCode-style
+/// Extra room below a settled assistant answer for the
 /// `Agent · Model · Duration` provenance line.
 pub(super) const ASSISTANT_RESPONSE_FOOTER_H: f32 = 28.0;
 

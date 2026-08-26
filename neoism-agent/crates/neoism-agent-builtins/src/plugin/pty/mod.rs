@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use neoism_agent_plugin_api::{AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope, WebSocketRouteContribution, WebSocketRouteHandler, WebSocketSession};
+use neoism_agent_plugin_api::{ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope, WebSocketRouteContribution, WebSocketRouteHandler, WebSocketSession};
 
 pub const ID: &str = "dev.neoism.pty";
 
@@ -16,12 +16,13 @@ pub trait PtyHost: Send + Sync + 'static {
 pub struct PtyPlugin { host: Arc<dyn PtyHost> }
 impl PtyPlugin { pub fn new(host: Arc<dyn PtyHost>) -> Self { Self { host } } }
 
-impl AgentPlugin for PtyPlugin {
+impl PluginDefinition for PtyPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest { id: ID.into(), name: "Pseudo terminals".into(), version: env!("CARGO_PKG_VERSION").into(), internal: true, disableable: true, capabilities: vec!["neoism.pty".into()], requires: Vec::new(), event_namespaces: vec!["pty".into()], api_prefix: Some(format!("/v2/plugins/{ID}")), config: BTreeMap::new() }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![WorkspaceRead, WorkspaceWrite, ProcessSpawn] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         for (id, method, suffix, action) in [
             ("v2.plugins.pty.shells", RouteMethod::Get, "/shells", PtyAction::Shells),
             ("v2.plugins.pty.list", RouteMethod::Get, "", PtyAction::List),

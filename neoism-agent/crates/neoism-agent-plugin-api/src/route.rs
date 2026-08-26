@@ -34,7 +34,6 @@ impl RouteMethod {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum RouteScope {
-    Global,
     Workspace,
     Session,
 }
@@ -164,7 +163,7 @@ mod tests {
             id: "escape".to_string(),
             method: RouteMethod::Get,
             path: "/../health".to_string(),
-            scope: RouteScope::Global,
+            scope: RouteScope::Workspace,
             request_schema: None,
             response_schema: None,
         };

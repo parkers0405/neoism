@@ -1,28 +1,28 @@
 use neoism_agent_plugin_api::{
-    PluginFuture, PluginRegistrar, PluginRuntimeError,
+    PluginContributions, PluginFuture, PluginRuntimeError,
 };
 
 pub(crate) struct Skills(pub(crate) crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::skills::SkillsHost for Skills {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+    fn register_tools(&self, registrar: &mut PluginContributions) {
         crate::tool::register_skill_tools(registrar, &self.0);
     }
 }
 
 pub(crate) struct WorkspaceTools(pub(crate) crate::state::AppState);
 impl neoism_agent_builtins::plugin::workspace_tools::WorkspaceToolsHost for WorkspaceTools {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) { crate::tool::register_workspace_tools(registrar, &self.0); }
+    fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_workspace_tools(registrar, &self.0); }
 }
 
 pub(crate) struct NotesTools(pub(crate) crate::state::AppState);
 impl neoism_agent_builtins::plugin::notes_tools::NotesToolsHost for NotesTools {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) { crate::tool::register_notes_tools(registrar, &self.0); }
+    fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_notes_tools(registrar, &self.0); }
 }
 
 pub(crate) struct CustomTools(pub(crate) Vec<crate::custom_tool::CustomTool>);
 impl neoism_agent_builtins::plugin::custom_tools::CustomToolsHost for CustomTools {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+    fn register_tools(&self, registrar: &mut PluginContributions) {
         for tool in &self.0 {
             let item = tool.item();
             registrar.tool(item.id, Some(item.parameters));
@@ -33,7 +33,7 @@ impl neoism_agent_builtins::plugin::custom_tools::CustomToolsHost for CustomTool
 pub(crate) struct Subagents(pub(crate) crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::subagents::SubagentsHost for Subagents {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+    fn register_tools(&self, registrar: &mut PluginContributions) {
         crate::tool::register_subagent_tools(registrar, &self.0);
     }
 
@@ -62,7 +62,7 @@ impl neoism_agent_builtins::plugin::subagents::SubagentsHost for Subagents {
 pub(crate) struct Lsp(pub(crate) crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::lsp::LspHost for Lsp {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+    fn register_tools(&self, registrar: &mut PluginContributions) {
         crate::tool::register_lsp_tools(registrar, &self.0);
     }
 
@@ -75,24 +75,24 @@ impl neoism_agent_builtins::plugin::lsp::LspHost for Lsp {
             let state = State(self.0.clone());
             let headers = axum::http::HeaderMap::new();
             let value = match action {
-                LspAction::Status => serde_json::to_value(crate::lsp_routes::lsp_status(state, Query(query_value(query)?), headers).await.0),
-                LspAction::Hover => serde_json::to_value(crate::lsp_routes::lsp_hover(state, Query(query_value(query)?), headers).await.0),
-                LspAction::SignatureHelp => serde_json::to_value(crate::lsp_routes::lsp_signature_help(state, Query(query_value(query)?), headers).await.0),
-                LspAction::InlayHints => serde_json::to_value(crate::lsp_routes::lsp_inlay_hints(state, Query(query_value(query)?), headers).await.0),
-                LspAction::DocumentHighlights => serde_json::to_value(crate::lsp_routes::lsp_document_highlights(state, Query(query_value(query)?), headers).await.0),
-                LspAction::Definition => serde_json::to_value(crate::lsp_routes::lsp_definition(state, Query(query_value(query)?), headers).await.0),
-                LspAction::References => serde_json::to_value(crate::lsp_routes::lsp_references(state, Query(query_value(query)?), headers).await.0),
-                LspAction::Implementation => serde_json::to_value(crate::lsp_routes::lsp_implementation(state, Query(query_value(query)?), headers).await.0),
-                LspAction::PrepareCallHierarchy => serde_json::to_value(crate::lsp_routes::lsp_prepare_call_hierarchy(state, Query(query_value(query)?), headers).await.0),
-                LspAction::IncomingCalls => serde_json::to_value(crate::lsp_routes::lsp_incoming_calls(state, Query(query_value(query)?), headers).await.0),
-                LspAction::OutgoingCalls => serde_json::to_value(crate::lsp_routes::lsp_outgoing_calls(state, Query(query_value(query)?), headers).await.0),
-                LspAction::Diagnostics => serde_json::to_value(crate::lsp_routes::lsp_diagnostics(state, Query(query_value(query)?), headers).await.0),
-                LspAction::DocumentSymbols => serde_json::to_value(crate::lsp_routes::lsp_document_symbols(state, Query(query_value(query)?), headers).await.0),
-                LspAction::Formatting => serde_json::to_value(crate::lsp_routes::lsp_formatting(state, Query(query_value(query)?), headers).await.0),
-                LspAction::CodeActions => serde_json::to_value(crate::lsp_routes::lsp_code_actions(state, Query(query_value(query)?), headers).await.0),
+                LspAction::Status => serde_json::to_value(crate::lsp_routes::lsp_status(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::Hover => serde_json::to_value(crate::lsp_routes::lsp_hover(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::SignatureHelp => serde_json::to_value(crate::lsp_routes::lsp_signature_help(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::InlayHints => serde_json::to_value(crate::lsp_routes::lsp_inlay_hints(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::DocumentHighlights => serde_json::to_value(crate::lsp_routes::lsp_document_highlights(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::Definition => serde_json::to_value(crate::lsp_routes::lsp_definition(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::References => serde_json::to_value(crate::lsp_routes::lsp_references(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::Implementation => serde_json::to_value(crate::lsp_routes::lsp_implementation(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::PrepareCallHierarchy => serde_json::to_value(crate::lsp_routes::lsp_prepare_call_hierarchy(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::IncomingCalls => serde_json::to_value(crate::lsp_routes::lsp_incoming_calls(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::OutgoingCalls => serde_json::to_value(crate::lsp_routes::lsp_outgoing_calls(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::Diagnostics => serde_json::to_value(crate::lsp_routes::lsp_diagnostics(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::DocumentSymbols => serde_json::to_value(crate::lsp_routes::lsp_document_symbols(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::Formatting => serde_json::to_value(crate::lsp_routes::lsp_formatting(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
+                LspAction::CodeActions => serde_json::to_value(crate::lsp_routes::lsp_code_actions(state, Query(query_value(query)?), headers).await.map_err(runtime_error)?.0),
                 LspAction::Touch => {
                     let body = serde_json::from_value(request.body).map_err(runtime_error)?;
-                    serde_json::to_value(crate::lsp_routes::lsp_touch(state, headers, Json(body)).await.0)
+                    serde_json::to_value(crate::lsp_routes::lsp_touch(state, headers, Json(body)).await.map_err(runtime_error)?.0)
                 }
                 LspAction::Shutdown => serde_json::to_value(crate::lsp_routes::lsp_shutdown(state).await.0),
             }.map_err(runtime_error)?;
@@ -104,7 +104,7 @@ impl neoism_agent_builtins::plugin::lsp::LspHost for Lsp {
 pub(crate) struct Mcp(pub(crate) crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::mcp::McpHost for Mcp {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+    fn register_tools(&self, registrar: &mut PluginContributions) {
         registrar.tool("execute", None);
     }
 
@@ -191,11 +191,11 @@ impl neoism_agent_builtins::plugin::pty::PtyHost for Pty {
         Box::pin(async move {
             let pty_id = request.path.get("pty_id").cloned().unwrap_or_default();
             let query = query_value(route_query(&request))?;
-            let generation = request_generation(&self.0, &request)
+            let generation = request_generation(&self.0, &request).await
                 .ok_or_else(|| neoism_agent_plugin_api::PluginRuntimeError::new("plugin generation is no longer available"))?;
             crate::pty_routes::prepare_connection_with_runtime(
                 self.0.clone(),
-                generation.pty(),
+                generation.pty()?,
                 pty_id,
                 query,
             )
@@ -205,16 +205,21 @@ impl neoism_agent_builtins::plugin::pty::PtyHost for Pty {
     }
 }
 
-fn request_generation(
+async fn request_generation(
     state: &crate::state::AppState,
     request: &neoism_agent_plugin_api::RouteRequest,
 ) -> Option<crate::workspace_runtime::PluginGenerationLease> {
     let workspace = request.workspace.as_ref()?;
     let generation = request.generation?;
+    if let Some(active) = crate::workspace_runtime::active_generation(&workspace.to_string_lossy()) {
+        if active.generation == generation {
+            return Some(active);
+        }
+    }
     state
         .inner
         .workspace_runtimes
-        .loaded(&workspace.to_string_lossy())?
+        .loaded(&workspace.to_string_lossy()).await?
         .lease_generation(generation)
 }
 
@@ -296,17 +301,17 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
 
 pub(crate) struct Artifacts(pub(crate) crate::state::AppState);
 impl neoism_agent_builtins::plugin::artifacts::ArtifactsHost for Artifacts {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) { crate::tool::register_artifact_tools(registrar, &self.0); }
+    fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_artifact_tools(registrar, &self.0); }
 }
 
 pub(crate) struct Interactions(pub(crate) crate::state::AppState);
 impl neoism_agent_builtins::plugin::interactions::InteractionsHost for Interactions {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) { crate::tool::register_interaction_tools(registrar, &self.0); }
+    fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_interaction_tools(registrar, &self.0); }
 }
 
 pub(crate) struct Goals(pub(crate) crate::state::AppState);
 impl neoism_agent_builtins::plugin::goals::GoalsHost for Goals {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) { crate::tool::register_goal_tools(registrar, &self.0); }
+    fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_goal_tools(registrar, &self.0); }
 
     fn load<'a>(&'a self, session_id: &'a str) -> PluginFuture<'a, Option<neoism_agent_core::SessionGoal>> {
         Box::pin(async move { crate::ensure_session(&self.0, session_id).await.map(|session| session.goal()).map_err(runtime_error) })

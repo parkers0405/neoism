@@ -918,6 +918,9 @@ fn main() {
             );
             publish_diagnostics(&mut output, uri, 0, &current_text);
             if mode == "crash-once" && !crash_marker.exists() {
+                // Let the client consume the flushed diagnostic before it
+                // observes EOF from the deliberate crash.
+                std::thread::sleep(std::time::Duration::from_millis(25));
                 std::fs::write(&crash_marker, b"crashed").unwrap();
                 append(log, "crash-after-open");
                 return;

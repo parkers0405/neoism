@@ -48,9 +48,9 @@ pub(crate) fn skill_tool(
             .filter(|value| !value.is_empty()).ok_or_else(|| anyhow::anyhow!("tool argument name is required"))?;
         context.ensure_allowed("skill", name)?;
         let directory = context.cwd.to_string_lossy();
-        let skills = get_from_snapshot(context.plugin_snapshot(), &directory).await?;
+        let skills = get_from_snapshot(context.plugin_snapshot()?, &directory).await?;
         let available = skills.iter().map(|skill| skill.id.as_str()).collect::<Vec<_>>().join(", ");
-        let skill = resolve_from_snapshot(context.plugin_snapshot(), &directory, name).await?
+        let skill = resolve_from_snapshot(context.plugin_snapshot()?, &directory, name).await?
             .ok_or_else(|| anyhow::anyhow!("Skill \"{name}\" not found. Available skills: {}", if available.is_empty() { "none" } else { &available }))?;
         render_skill(skill)
     }

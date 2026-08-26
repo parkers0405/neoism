@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use neoism_agent_core::CommandInfo;
 use neoism_agent_plugin_api::{
-    AgentPlugin, CommandSource, PluginFuture, PluginHostError, PluginManifest,
-    PluginRegistrar, PluginRuntimeError, RouteContribution, RouteHandler, RouteMethod,
+    CommandSource, PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest,
+    PluginRuntimeError, RouteContribution, RouteHandler, RouteMethod,
     ContributionMetadata, PluginScope, RouteDescriptor, RouteRequest, RouteResponse, RouteScope,
 };
 use neoism_agent_service_api::AgentServices;
@@ -24,7 +24,7 @@ impl CommandsPlugin {
     }
 }
 
-impl AgentPlugin for CommandsPlugin {
+impl PluginDefinition for CommandsPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(), name: "Commands".into(), version: env!("CARGO_PKG_VERSION").into(),
@@ -34,7 +34,8 @@ impl AgentPlugin for CommandsPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![ConfigRead, WorkspaceRead] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         registrar.runtime_route(RouteContribution {
             descriptor: RouteDescriptor {
                 id: "v2.commands.list".into(),
@@ -44,7 +45,7 @@ impl AgentPlugin for CommandsPlugin {
                 request_schema: None,
                 response_schema: None,
             },
-            metadata: ContributionMetadata::new("v2.plugins.commands.list", ID, PluginScope::Workspace),
+            metadata: ContributionMetadata::new("v2.commands.list", ID, PluginScope::Workspace),
             handler: Arc::new(CommandsRoute(self.commands.clone())),
         });
         registrar.command_source_runtime("workspace-commands", Arc::new(WorkspaceCommands(self.commands.clone())));
@@ -193,7 +194,7 @@ mod tests {
     fn manifest_and_registration_are_owned_here() {
         let plugin = CommandsPlugin::new(&neoism_agent_core::AgentConfigDocument::default());
         assert_eq!(plugin.manifest().id, ID);
-        let mut registrar = PluginRegistrar::default();
-        plugin.register(&mut registrar).unwrap();
+        let mut registrar = PluginContributions::default();
+        plugin.contributions(&mut registrar).unwrap();
     }
 }

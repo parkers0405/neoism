@@ -43,8 +43,8 @@ pub(crate) async fn pty_create(
         .map(|shell| shell.path)
         .unwrap_or_else(pty::fallback_shell);
     let directory = resolve_directory(query.directory, &headers);
-    let runtime = state.workspace_runtime(&directory).await;
-    let pty_runtime = runtime.pty();
+    let runtime = state.workspace_runtime(&directory).await.map_err(ApiError::gone)?;
+    let pty_runtime = runtime.pty().map_err(|error| ApiError::gone(error.to_string()))?;
     let mut info = pty::create_pty_info(
         request,
         runtime.root.to_string_lossy().into_owned(),
@@ -116,15 +116,17 @@ pub(crate) async fn pty_update(
     Path(pty_id): Path<String>,
     Json(request): Json<pty::PtyUpdateRequest>,
 ) -> Result<Json<PtyInfo>, ApiError> {
+    let runtime = find_pty_runtime(&state, &pty_id)
+        .await
+        .ok_or_else(|| ApiError::not_found("PTY session not found"))?;
     let size = request.size;
     let updated = {
-        let runtime = find_pty_runtime(&state, &pty_id).await.ok_or_else(|| ApiError::not_found("PTY session not found"))?;
         let mut ptys = runtime.infos.write().await;
         pty::update_pty(&mut *ptys, &pty_id, request)
             .map_err(|_| ApiError::not_found("PTY session not found"))?
     };
     if let Some(size) = size {
-        find_pty_runtime(&state, &pty_id).await.unwrap().processes.resize(&pty_id, size).await;
+        runtime.processes.resize(&pty_id, size).await;
     }
     state.publish(EventPayload::new(
         event_type::PTY_UPDATED,
@@ -228,11 +230,24 @@ impl neoism_agent_plugin_api::WebSocketSession for PtySocketSession {
     }
 }
 
-async fn find_pty_runtime(state: &AppState, pty_id: &str) -> Option<std::sync::Arc<pty::PtyWorkspaceRuntime>> {
+struct LeasedPtyRuntime {
+    _workspace: std::sync::Arc<crate::workspace_runtime::WorkspaceRuntime>,
+    _generation: crate::workspace_runtime::PluginGenerationLease,
+    runtime: std::sync::Arc<pty::PtyWorkspaceRuntime>,
+}
+
+impl std::ops::Deref for LeasedPtyRuntime {
+    type Target = pty::PtyWorkspaceRuntime;
+
+    fn deref(&self) -> &Self::Target { &self.runtime }
+}
+
+async fn find_pty_runtime(state: &AppState, pty_id: &str) -> Option<LeasedPtyRuntime> {
     for runtime in state.inner.workspace_runtimes.runtimes().await {
-        let Some(ptys) = runtime.pty_if_allocated() else { continue; };
+        let generation = runtime.snapshot();
+        let Some(ptys) = generation.pty_if_allocated() else { continue; };
         if ptys.infos.read().await.contains_key(pty_id) {
-            return Some(ptys);
+            return Some(LeasedPtyRuntime { _workspace: runtime, _generation: generation, runtime: ptys });
         }
     }
     None

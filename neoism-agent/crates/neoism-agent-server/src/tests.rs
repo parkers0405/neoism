@@ -2275,7 +2275,7 @@ async fn disabled_execution_contributions_have_no_side_effects() {
         assert!(result.is_err(), "disabled {name} unexpectedly executed");
     }
 
-    let workspace = state.workspace_runtime(root.to_string_lossy().as_ref()).await;
+    let workspace = state.workspace_runtime(root.to_string_lossy().as_ref()).await.unwrap();
     assert!(!workspace.mcp_is_allocated(), "disabled MCP allocated a runtime");
     assert!(workspace.background_if_allocated().is_none(), "disabled background tool allocated state");
     assert!(!marker.exists(), "a disabled shell, MCP, background, or custom tool spawned");
@@ -2346,7 +2346,7 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     cleanup_sqlite_files(&db_path);
 
     let state = AppState::open_database(db_path.clone()).await.unwrap();
-    let runtime = state.workspace_runtime(root.to_string_lossy().as_ref()).await;
+    let runtime = state.workspace_runtime(root.to_string_lossy().as_ref()).await.unwrap();
     let app = app(state.clone());
     let hook_ctx = plugin::ChatHookContext {
         session_id: "ses_test".to_string(),

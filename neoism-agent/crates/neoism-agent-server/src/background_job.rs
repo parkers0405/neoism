@@ -147,7 +147,7 @@ pub(crate) async fn start_background_task_tool(
     let description = string_arg(&input, "description")
         .unwrap_or_else(|| command.chars().take(80).collect::<String>());
     let cwd = resolve_job_cwd(&parent.directory, optional_cwd(&input), permissions)?;
-    let background = generation.background();
+    let background = generation.background().map_err(|error| error.to_string())?;
     let project_root =
         crate::windows_process::canonicalize_path(Path::new(&parent.directory))
             .map_err(|error| format!("failed to resolve project directory: {error}"))?;
@@ -482,7 +482,10 @@ async fn finish_background_job(state: &AppState, background: &BackgroundWorkspac
     }
 }
 
-async fn find_job(state: &AppState, job_id: &str) -> Option<(std::sync::Arc<BackgroundWorkspaceRuntime>, BackgroundJob)> {
+async fn find_job(
+    state: &AppState,
+    job_id: &str,
+) -> Option<(crate::workspace_runtime::LeasedResource<BackgroundWorkspaceRuntime>, BackgroundJob)> {
     for runtime in state.inner.workspace_runtimes.runtimes().await {
         let Some(background) = runtime.background_if_allocated() else { continue; };
         let job = background.jobs.read().await.get(job_id).cloned();

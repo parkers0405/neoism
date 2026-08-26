@@ -171,6 +171,14 @@ async fn plugin_route_dispatch(
 ) -> Response {
     let directory = if let Some(directory) = request_directory(&request) {
         directory
+    } else if let Some(matched) = request.extensions().get::<MatchedPluginSession>() {
+        matched.directory.clone()
+    } else if request.uri().path().starts_with("/v2/plugins/") {
+        let session = match session_id_from_path(request.uri().path()) {
+            Some(session_id) => state.inner.store.get_session(session_id).await.ok().flatten(),
+            None => None,
+        };
+        session.map(|session| session.directory).unwrap_or_else(|| std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned())
     } else if let Some(session_id) = session_id_from_path(request.uri().path()) {
         match state.inner.store.get_session(session_id).await {
             Ok(Some(session)) => session.directory,
@@ -180,6 +188,9 @@ async fn plugin_route_dispatch(
         std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned()
     };
     let snapshot = state.plugin_snapshot(&directory).await;
+    if !snapshot.is_active() {
+        return auth_error(StatusCode::GONE, "plugin.generation_closed", "The plugin generation is shut down");
+    }
     let websocket_route = snapshot.runtime_websocket_routes.values().find_map(|registered| {
         (registered.route.descriptor.method.as_str() == request.method().as_str())
             .then(|| match_plugin_path(&registered.route.descriptor.path, request.uri().path()))
@@ -193,6 +204,7 @@ async fn plugin_route_dispatch(
             directory,
             request,
             snapshot.clone(),
+            state.clone(),
         )
         .await;
     }
@@ -209,10 +221,54 @@ async fn plugin_route_dispatch(
             directory,
             request,
             snapshot.clone(),
+            state.clone(),
         )
         .await;
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+#[derive(Clone, Debug)]
+struct MatchedPluginSession {
+    session_id: String,
+    directory: String,
+}
+
+async fn resolve_scoped_plugin_session(
+    state: &AppState,
+    path: &str,
+    method: &str,
+    claims: &crate::caller::CallerClaims,
+) -> Result<Option<MatchedPluginSession>, Response> {
+    for candidate_id in path.split('/').filter(|segment| !segment.is_empty()).rev() {
+        let Some(session) = state.inner.store.get_session(candidate_id).await.ok().flatten() else { continue; };
+        let snapshot = state.plugin_snapshot(&session.directory).await;
+        if snapshot_matches_session_route(&snapshot, method, path, session.id.as_str()) {
+            if !crate::caller::allows_session(claims, &session)
+                || !crate::caller::allows_directory(claims, &session.directory)
+            {
+                return Err(auth_error(StatusCode::FORBIDDEN, "auth.session_forbidden", "The caller is not authorized for this session or directory"));
+            }
+            return Ok(Some(MatchedPluginSession { session_id: session.id.to_string(), directory: session.directory }));
+        }
+    }
+    Ok(None)
+}
+
+fn snapshot_matches_session_route(snapshot: &neoism_agent_plugin_api::RegistrySnapshot, method: &str, path: &str, session_id: &str) -> bool {
+    snapshot.runtime_routes.values().any(|registered| {
+        registered.route.descriptor.scope == neoism_agent_plugin_api::RouteScope::Session
+            && registered.route.descriptor.method.as_str() == method
+            && match_plugin_path(&registered.route.descriptor.path, path)
+                .and_then(|params| params.get("session_id").cloned())
+                .as_deref() == Some(session_id)
+    }) || snapshot.runtime_websocket_routes.values().any(|registered| {
+        registered.route.descriptor.scope == neoism_agent_plugin_api::RouteScope::Session
+            && registered.route.descriptor.method.as_str() == method
+            && match_plugin_path(&registered.route.descriptor.path, path)
+                .and_then(|params| params.get("session_id").cloned())
+                .as_deref() == Some(session_id)
+    })
 }
 
 struct HostWebSocket(WebSocket);
@@ -253,7 +309,10 @@ async fn dispatch_websocket_route(
     directory: String,
     request: Request<Body>,
     generation_lease: crate::workspace_runtime::PluginGenerationLease,
+    state: AppState,
 ) -> Response {
+    if generation_lease.ensure_active().is_err() { return auth_error(StatusCode::GONE, "plugin.generation_closed", "The plugin generation is shut down"); }
+    if let Err(response) = validate_plugin_route_scope(&registered.route.descriptor, &path, &directory, &state).await { return response; }
     let (mut parts, _) = request.into_parts();
     let query = url::form_urlencoded::parse(parts.uri.query().unwrap_or_default().as_bytes())
         .fold(std::collections::BTreeMap::<String, Vec<String>>::new(), |mut output, (key, value)| {
@@ -264,7 +323,7 @@ async fn dispatch_websocket_route(
     let claims = parts.extensions.get::<crate::caller::CallerClaims>();
     let route_request = neoism_agent_plugin_api::RouteRequest {
         workspace_id: claims.and_then(|claims| claims.workspace_id.clone()),
-        workspace: Some(directory.into()),
+        workspace: Some(std::path::PathBuf::from(directory)),
         session_id: path.get("session_id").cloned(),
         actor: claims.map(|claims| claims.subject.clone()),
         generation: Some(generation_lease.generation),
@@ -286,9 +345,17 @@ async fn dispatch_websocket_route(
         Ok(upgrade) => upgrade,
         Err(error) => return error.into_response(),
     };
+    let mut cancellation = generation_lease.websocket_cancellation();
     upgrade.on_upgrade(move |socket| async move {
-        let _generation_lease = generation_lease;
-        let _ = session.run(Box::new(HostWebSocket(socket))).await;
+        let _ = crate::workspace_runtime::scope_generation(
+            generation_lease,
+            async move {
+                tokio::select! {
+                    result = session.run(Box::new(HostWebSocket(socket))) => result,
+                    _ = cancellation.changed() => Ok(()),
+                }
+            },
+        ).await;
     }).into_response()
 }
 
@@ -298,7 +365,10 @@ async fn dispatch_runtime_route(
     directory: String,
     request: Request<Body>,
     generation: crate::workspace_runtime::PluginGenerationLease,
+    state: AppState,
 ) -> Response {
+    if generation.ensure_active().is_err() { return auth_error(StatusCode::GONE, "plugin.generation_closed", "The plugin generation is shut down"); }
+    if let Err(response) = validate_plugin_route_scope(&registered.route.descriptor, &path_params, &directory, &state).await { return response; }
     let (parts, body) = request.into_parts();
     let mut query = std::collections::BTreeMap::<String, Vec<String>>::new();
     for (key, value) in
@@ -344,7 +414,7 @@ async fn dispatch_runtime_route(
     let session_id = path_params.get("session_id").cloned();
     let request = neoism_agent_plugin_api::RouteRequest {
         workspace_id,
-        workspace: Some(directory.into()),
+        workspace: Some(std::path::PathBuf::from(directory)),
         session_id,
         actor,
         generation: Some(generation.generation),
@@ -389,6 +459,31 @@ async fn dispatch_runtime_route(
             "plugin.route_failed",
             &error.to_string(),
         ),
+    }
+}
+
+async fn validate_plugin_route_scope(
+    descriptor: &neoism_agent_plugin_api::RouteDescriptor,
+    path: &std::collections::BTreeMap<String, String>,
+    directory: &str,
+    state: &AppState,
+) -> Result<(), Response> {
+    match descriptor.scope {
+        neoism_agent_plugin_api::RouteScope::Workspace => Ok(()),
+        neoism_agent_plugin_api::RouteScope::Session => {
+            let session_id = path.get("session_id").ok_or_else(|| auth_error(
+                StatusCode::BAD_REQUEST,
+                "plugin.session_scope_required",
+                "This plugin route requires a session scope",
+            ))?;
+            match state.inner.store.get_session(session_id).await {
+                Ok(Some(session)) if crate::workspace_runtime::canonical_location(&session.directory)
+                    == crate::workspace_runtime::canonical_location(directory) => Ok(()),
+                Ok(Some(_)) => Err(auth_error(StatusCode::FORBIDDEN, "plugin.session_workspace_mismatch", "The session does not belong to this workspace")),
+                Ok(None) => Err(auth_error(StatusCode::NOT_FOUND, "plugin.session_not_found", "Session not found")),
+                Err(error) => Err(auth_error(StatusCode::INTERNAL_SERVER_ERROR, "plugin.session_lookup_failed", &error.to_string())),
+            }
+        }
     }
 }
 
@@ -458,17 +553,6 @@ async fn authenticate_request(
                 "This global credential or configuration route is unavailable in hosted mode",
             );
         }
-        if claims.hosted
-            && !claims.directory_prefixes.is_empty()
-            && requested_directory.is_none()
-            && requires_directory_scope(request.uri().path())
-        {
-            return auth_error(
-                StatusCode::BAD_REQUEST,
-                "auth.directory_scope_required",
-                "This hosted route requires a directory scope",
-            );
-        }
         let query_session_id = request_session_id(request.uri());
         if claims.hosted
             && request.uri().path() == "/v2/events"
@@ -480,9 +564,20 @@ async fn authenticate_request(
                 "Hosted event streams require sessionId",
             );
         }
-        let mut owned_session = session_id_from_path(request.uri().path())
-            .map(str::to_string)
-            .or(query_session_id);
+        let plugin_path = request.uri().path().starts_with("/v2/plugins/");
+        let matched_plugin_session = if plugin_path {
+            match resolve_scoped_plugin_session(&state, request.uri().path(), request.method().as_str(), &claims).await {
+                Ok(matched) => matched,
+                Err(response) => return response,
+            }
+        } else {
+            None
+        };
+        let mut owned_session = if plugin_path {
+            matched_plugin_session.as_ref().map(|matched| matched.session_id.clone()).or(query_session_id)
+        } else {
+            session_id_from_path(request.uri().path()).map(str::to_string).or(query_session_id)
+        };
         if owned_session.is_none() {
             if let Some(request_id) = interaction_id_from_path(request.uri().path()) {
                 match state.inner.store.interaction_session_id(request_id).await {
@@ -498,6 +593,7 @@ async fn authenticate_request(
                 }
             }
         }
+        let mut authorized_session = false;
         if let Some(session_id) = owned_session.as_deref() {
             match state.inner.store.get_session(session_id).await {
                 Ok(Some(session)) if !crate::caller::allows_session(&claims, &session) => {
@@ -507,6 +603,7 @@ async fn authenticate_request(
                         "The caller is not authorized for this session or directory",
                     );
                 }
+                Ok(Some(_)) => authorized_session = true,
                 Err(error) => {
                     tracing::warn!(%error, "failed to authorize session owner");
                     return auth_error(
@@ -518,6 +615,14 @@ async fn authenticate_request(
                 _ => {}
             }
         }
+        if claims.hosted
+            && requested_directory.is_none()
+            && !authorized_session
+            && requires_directory_scope(request.uri().path())
+        {
+            return auth_error(StatusCode::BAD_REQUEST, "auth.directory_scope_required", "This hosted route requires an authorized session or directory scope");
+        }
+        if let Some(matched) = matched_plugin_session { request.extensions_mut().insert(matched); }
         request.extensions_mut().insert(claims);
     }
     let method = request.method().to_string();
@@ -581,11 +686,13 @@ fn session_id_from_path(path: &str) -> Option<&str> {
         .split('/')
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    let index = parts
-        .iter()
-        .position(|part| *part == "sessions")?;
-    let id = *parts.get(index + 1)?;
-    (!matches!(id, "status" | "workspace" | "project")).then_some(id)
+    if let Some(index) = parts.iter().position(|part| *part == "sessions") {
+        let id = *parts.get(index + 1)?;
+        return (!matches!(id, "status" | "workspace" | "project")).then_some(id);
+    }
+    // Plugin session routes are /v2/plugins/{plugin-id}/{session-id}/... .
+    // Non-session plugin resource IDs harmlessly miss the session store.
+    if let ["v2", "plugins", _, id, ..] = parts.as_slice() { Some(*id) } else { None }
 }
 
 fn interaction_id_from_path(path: &str) -> Option<&str> {
@@ -616,6 +723,90 @@ fn requires_directory_scope(path: &str) -> bool {
         && !path.starts_with("/v2/meta")
         && !path.starts_with("/v2/openapi")
         && !path.starts_with("/v2/capabilities")
-        && !path.starts_with("/v2/plugins")
         && path != "/v2/health"
+}
+
+#[cfg(test)]
+mod hosted_plugin_authorization_tests {
+    use super::*;
+
+    struct NoopRoute;
+    impl neoism_agent_plugin_api::RouteHandler for NoopRoute {
+        fn handle<'a>(&'a self, _: neoism_agent_plugin_api::RouteRequest) -> neoism_agent_plugin_api::PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
+            Box::pin(async { Ok(neoism_agent_plugin_api::RouteResponse::json(200, serde_json::Value::Null)) })
+        }
+    }
+
+    fn route(id: &str, path: &str, scope: neoism_agent_plugin_api::RouteScope) -> neoism_agent_plugin_api::RegisteredRouteContribution {
+        neoism_agent_plugin_api::RegisteredRouteContribution {
+            plugin_id: "dev.example.route-auth".into(),
+            route: neoism_agent_plugin_api::RouteContribution {
+                metadata: neoism_agent_plugin_api::ContributionMetadata::new(id, "dev.example.route-auth", neoism_agent_plugin_api::PluginScope::Workspace),
+                descriptor: neoism_agent_plugin_api::RouteDescriptor { id: id.into(), method: neoism_agent_plugin_api::RouteMethod::Get, path: path.into(), scope, request_schema: None, response_schema: None },
+                handler: std::sync::Arc::new(NoopRoute),
+            },
+        }
+    }
+
+    #[test]
+    fn hosted_plugin_session_fallback_requires_a_matched_session_descriptor() {
+        assert!(requires_directory_scope("/v2/plugins/dev.example/items"));
+        let mut snapshot = neoism_agent_plugin_api::RegistrySnapshot::empty();
+        snapshot.runtime_routes.insert("workspace".into(), route("workspace", "/v2/plugins/dev.example.route-auth/:resource_id", neoism_agent_plugin_api::RouteScope::Workspace));
+        assert!(!snapshot_matches_session_route(&snapshot, "GET", "/v2/plugins/dev.example.route-auth/ses_fake", "ses_fake"));
+        snapshot.runtime_routes.insert("session".into(), route("session", "/v2/plugins/dev.example.route-auth/sessions/:session_id", neoism_agent_plugin_api::RouteScope::Session));
+        assert!(snapshot_matches_session_route(&snapshot, "GET", "/v2/plugins/dev.example.route-auth/sessions/ses_real", "ses_real"));
+    }
+
+    fn scoped_claims(directory: String, tenant_id: &str) -> crate::caller::CallerClaims {
+        crate::caller::CallerClaims {
+            subject: "scoped-test".into(), workspace_id: None, tenant_id: tenant_id.into(),
+            directory_prefixes: vec![directory], hosted: false, max_sessions: None,
+            max_artifacts: None, max_artifact_bytes: None, artifact_retention_days: None,
+            requests_per_minute: None, max_in_flight: None,
+        }
+    }
+
+    async fn session_route_fixture() -> (AppState, neoism_agent_core::SessionInfo, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("neoism-plugin-route-auth-{}", neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = AppState::open_database(root.join("state.sqlite3")).await.unwrap();
+        let now = crate::now_millis();
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert(crate::caller::TENANT_EXTRA_KEY.into(), serde_json::Value::String("tenant-a".into()));
+        let session = neoism_agent_core::SessionInfo {
+            id: neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Session),
+            slug: "route-auth".into(), project_id: "global".into(), workspace_id: None,
+            directory: root.to_string_lossy().into_owned(), path: None, parent_id: None,
+            title: "Route auth".into(), agent: None, model: None,
+            version: env!("CARGO_PKG_VERSION").into(),
+            time: neoism_agent_core::TimeInfo { created: now, updated: now, compacting: None, archived: None },
+            permission: None, extra,
+        };
+        state.inner.store.insert_session(&session).await.unwrap();
+        (state, session, root)
+    }
+
+    #[tokio::test]
+    async fn denied_scoped_non_hosted_credential_cannot_use_session_plugin_route() {
+        let (state, session, root) = session_route_fixture().await;
+        let path = format!("/v2/plugins/{}/{}", neoism_agent_builtins::plugin::goals::ID, session.id);
+        let denied = scoped_claims(root.to_string_lossy().into_owned(), "tenant-b");
+        let response = resolve_scoped_plugin_session(&state, &path, "GET", &denied).await.unwrap_err();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn allowed_scoped_non_hosted_credential_resolves_session_plugin_route() {
+        let (state, session, root) = session_route_fixture().await;
+        let path = format!("/v2/plugins/{}/{}", neoism_agent_builtins::plugin::goals::ID, session.id);
+        let allowed = scoped_claims(root.to_string_lossy().into_owned(), "tenant-a");
+        let matched = resolve_scoped_plugin_session(&state, &path, "GET", &allowed).await.unwrap().unwrap();
+        assert_eq!(matched.session_id, session.id.to_string());
+        assert_eq!(crate::workspace_runtime::canonical_location(&matched.directory), crate::workspace_runtime::canonical_location(&session.directory));
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

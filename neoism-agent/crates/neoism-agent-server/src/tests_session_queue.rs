@@ -1043,10 +1043,11 @@ async fn held_subtask_completion_delivers_when_parent_turn_ends() {
         &state,
         &child.directory,
     )
-    .await;
+    .await.unwrap();
     workspace
         .runtime
         .subagents()
+        .unwrap()
         .track(child.id.to_string())
         .await;
     // The stale Busy status that used to wedge delivery forever.

@@ -30,10 +30,10 @@ pub(crate) struct WorkspacePluginSnapshot {
 pub(crate) async fn acquire_workspace_plugin_snapshot(
     state: &AppState,
     directory: &str,
-) -> WorkspacePluginSnapshot {
-    let (runtime, evicted) = state.inner.workspace_runtimes.acquire(directory, state).await;
+) -> Result<WorkspacePluginSnapshot, ApiError> {
+    let (runtime, evicted) = state.inner.workspace_runtimes.acquire(directory, state).await.map_err(ApiError::gone)?;
     for stale in evicted {
-        stale.teardown(state).await;
+        let _ = stale.teardown(state).await;
         state
             .inner
             .workspace_plugin_generations
@@ -44,12 +44,12 @@ pub(crate) async fn acquire_workspace_plugin_snapshot(
     let directory = runtime.root.to_string_lossy().into_owned();
     let snapshot = runtime.snapshot();
     state.reconcile_workspace_plugins(&runtime, &snapshot).await;
-    WorkspacePluginSnapshot {
+    Ok(WorkspacePluginSnapshot {
         directory,
         #[cfg(test)]
         runtime,
         snapshot,
-    }
+    })
 }
 
 pub(crate) fn tool_contribution<'a>(
@@ -98,7 +98,7 @@ pub(crate) async fn available_tools_for_directory(
     state: &AppState,
     directory: &str,
 ) -> Result<Vec<ToolListItem>, ApiError> {
-    let workspace = acquire_workspace_plugin_snapshot(state, directory).await;
+    let workspace = acquire_workspace_plugin_snapshot(state, directory).await?;
     let directory = workspace.directory;
     let snapshot = workspace.snapshot;
     available_tools_for_snapshot(state, &directory, &snapshot).await
@@ -679,12 +679,12 @@ mod tests {
             &state,
             root.to_string_lossy().as_ref(),
         )
-        .await;
+        .await.unwrap();
         let alias = acquire_workspace_plugin_snapshot(
             &state,
             root.join(".").to_string_lossy().as_ref(),
         )
-        .await;
+        .await.unwrap();
 
         assert_eq!(canonical.directory, alias.directory);
         assert!(Arc::ptr_eq(&canonical.runtime, &alias.runtime));

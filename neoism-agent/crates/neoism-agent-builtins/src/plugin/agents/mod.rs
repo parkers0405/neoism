@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use neoism_agent_plugin_api::{
-    AgentCatalog as ServiceAgentCatalog, AgentPlugin, AgentService, AgentSource,
+    AgentCatalog as ServiceAgentCatalog, AgentService, AgentSource, PluginDefinition,
     AgentSourceSnapshot, ContributionMetadata, PluginFuture, PluginHostError,
-    PluginManifest, PluginRegistrar, PluginRuntimeError, PluginScope, RouteContribution, RouteDescriptor,
+    PluginContributions, PluginManifest, PluginRuntimeError, PluginScope, RouteContribution, RouteDescriptor,
     RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope, ServiceRequest,
 };
 
@@ -27,7 +27,7 @@ impl AgentsPlugin {
     }
 }
 
-impl AgentPlugin for AgentsPlugin {
+impl PluginDefinition for AgentsPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(),
@@ -43,7 +43,8 @@ impl AgentPlugin for AgentsPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { vec![neoism_agent_plugin_api::HostCapability::ConfigRead] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         let source = Arc::new(BuiltinAgentSource(self.catalog.clone()));
         registrar.agent_source_runtime("workspace-agents", source.clone());
         registrar.agent_service_runtime("workspace-agents", source.clone());

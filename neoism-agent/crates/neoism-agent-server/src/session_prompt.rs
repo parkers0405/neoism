@@ -81,7 +81,7 @@ pub(crate) async fn append_prompt(
         state,
         &info.directory,
     )
-    .await;
+    .await?;
     let goals_enabled = crate::agent_tool_registry::plugin_present(
         &workspace.snapshot,
         neoism_agent_builtins::plugin::goals::ID,
@@ -388,8 +388,8 @@ pub(crate) async fn append_prompt(
         history = state.inner.store.list_messages(&session_id_text).await?;
     }
     let provider_service = plugin_snapshot
-        .provider_services
-        .values()
+        .provider_services_by_priority()
+        .into_iter()
         .next()
         .cloned()
         .ok_or_else(|| ApiError::internal("no provider plugin is registered"))?;
@@ -633,8 +633,8 @@ fn render_plugin_prompt(
         },
     };
     plugins
-        .prompt_services
-        .values()
+        .prompt_services_by_priority()
+        .into_iter()
         .find_map(|service| service.render(&request).ok().map(|prompt| prompt.content))
 }
 
@@ -1548,9 +1548,9 @@ async fn generate_model_title(
         } else {
             None
         };
-    let provider_runtime = state
+    let Ok(provider_runtime) = state
         .workspace_runtime(directory.as_deref().unwrap_or_default())
-        .await;
+        .await else { return; };
     let snapshot = provider_runtime.snapshot();
     let request = build_provider_generation_request(
         &state,
@@ -1567,7 +1567,7 @@ async fn generate_model_title(
         None,
     )
     .await;
-    let Some(provider) = snapshot.provider_services.values().next() else {
+    let Some(provider) = snapshot.provider_services_by_priority().into_iter().next() else {
         return;
     };
     let Ok(stream) = provider.stream(request) else {

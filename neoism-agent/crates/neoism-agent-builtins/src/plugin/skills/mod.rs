@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use neoism_agent_core::SkillInfo;
 use neoism_agent_plugin_api::{
-    AgentPlugin, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar,
+    PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest,
     ContributionMetadata, PluginRuntimeError, PluginScope, RouteContribution, RouteDescriptor, RouteHandler,
     RouteMethod, RouteRequest, RouteResponse, RouteScope, SkillSource,
 };
@@ -19,7 +19,7 @@ pub const ID: &str = "dev.neoism.skills";
 /// The only server-owned part of the skills plugin is registration of the
 /// kernel-backed `skill` tool. Discovery and source execution remain here.
 pub trait SkillsHost: Send + Sync + 'static {
-    fn register_tools(&self, registrar: &mut PluginRegistrar);
+    fn register_tools(&self, registrar: &mut PluginContributions);
 }
 
 pub struct SkillsPlugin {
@@ -42,7 +42,7 @@ impl SkillsPlugin {
     }
 }
 
-impl AgentPlugin for SkillsPlugin {
+impl PluginDefinition for SkillsPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(), name: "Skills".into(), version: env!("CARGO_PKG_VERSION").into(),
@@ -52,7 +52,8 @@ impl AgentPlugin for SkillsPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { vec![neoism_agent_plugin_api::HostCapability::WorkspaceRead] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         registrar.runtime_route(RouteContribution {
             descriptor: RouteDescriptor {
                 id: "v2.skills.list".into(),
@@ -62,7 +63,7 @@ impl AgentPlugin for SkillsPlugin {
                 request_schema: None,
                 response_schema: None,
             },
-            metadata: ContributionMetadata::new("v2.plugins.skills.list", ID, PluginScope::Workspace),
+            metadata: ContributionMetadata::new("v2.skills.list", ID, PluginScope::Workspace),
             handler: Arc::new(SkillsRoute(self.config.clone(), self.discovery_roots.clone())),
         });
         registrar.skill_source_runtime(
@@ -320,7 +321,7 @@ mod tests {
     use super::*;
 
     struct Host;
-    impl SkillsHost for Host { fn register_tools(&self, _: &mut PluginRegistrar) {} }
+    impl SkillsHost for Host { fn register_tools(&self, _: &mut PluginContributions) {} }
 
     #[test]
     fn plugin_owns_manifest_and_runtime_source() {
@@ -330,8 +331,8 @@ mod tests {
             Arc::new(Host),
         );
         assert_eq!(plugin.manifest().id, ID);
-        let mut registrar = PluginRegistrar::default();
-        plugin.register(&mut registrar).unwrap();
+        let mut registrar = PluginContributions::default();
+        plugin.contributions(&mut registrar).unwrap();
     }
 
     #[test]

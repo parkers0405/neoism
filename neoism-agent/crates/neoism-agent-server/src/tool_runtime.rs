@@ -52,6 +52,7 @@ async fn execute_tool_call_with_env_and_cancel(
     cancel: Option<Arc<AtomicBool>>,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> Result<tool::ToolExecutionResult, String> {
+    snapshot.ensure_active().map_err(|error| error.to_string())?;
     let started = crate::perf::now();
     let input_bytes = input.to_string().len();
     let services = state.services().clone();
@@ -345,7 +346,7 @@ async fn execute_stateful_tool_call(
         "background_task_result" => {
             ensure_tool_permission(permissions, "background_task_result", "*")?;
             let result = crate::background_job::background_task_result_tool(
-                snapshot.background(), session_id, input,
+                snapshot.background().map_err(|error| error.to_string())?, session_id, input,
             )
             .await?;
             Ok(Some(result))

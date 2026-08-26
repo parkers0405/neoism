@@ -290,7 +290,7 @@ pub(crate) async fn publish_background_subtask_finished(
     text: &str,
 ) {
     let tracked = match state.inner.store.get_session(child_id).await {
-        Ok(Some(child)) => state.inner.workspace_runtimes.loaded(&child.directory)
+        Ok(Some(child)) => state.inner.workspace_runtimes.loaded(&child.directory).await
             .and_then(|runtime| runtime.subagents_if_allocated()),
         _ => None,
     };
@@ -621,8 +621,8 @@ pub(crate) async fn mark_subtask_notify_on_idle(
     if child.parent_id.is_none() {
         return Ok(());
     }
-    if let Some(runtime) = state.inner.workspace_runtimes.loaded(&child.directory) {
-        runtime.subagents().track(child_id.to_string()).await;
+    if let Some(runtime) = state.inner.workspace_runtimes.loaded(&child.directory).await {
+        if let Ok(subagents) = runtime.subagents() { subagents.track(child_id.to_string()).await; }
     }
     child.extra.insert(
         SUBTASK_NOTIFY_ON_IDLE_KEY.to_string(),
@@ -868,12 +868,15 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
         }
     };
     for child in deferred {
-        let runtime = state.workspace_runtime(&child.directory).await;
+        let Ok(runtime) = state.workspace_runtime(&child.directory).await else {
+            clear_subtask_completion_for_teardown(state, child.id.as_str()).await;
+            continue;
+        };
         if !runtime.snapshot().manifests.iter().any(|plugin| plugin.id == neoism_agent_builtins::plugin::subagents::ID) {
             clear_subtask_completion_for_teardown(state, child.id.as_str()).await;
             continue;
         }
-        runtime.subagents().track(child.id.to_string()).await;
+        if let Ok(subagents) = runtime.subagents() { subagents.track(child.id.to_string()).await; }
         publish_deferred_subtask_completion_if_idle(state, child.id.as_str()).await;
     }
 
@@ -1250,10 +1253,11 @@ mod tests {
                 state,
                 &session.directory,
             )
-            .await;
+            .await.unwrap();
             workspace
                 .runtime
                 .subagents()
+                .unwrap()
                 .track(session.id.to_string())
                 .await;
         }

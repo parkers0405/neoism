@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use neoism_agent_plugin_api::{AgentPlugin, PluginHostError, PluginManifest, PluginRegistrar};
+use neoism_agent_plugin_api::{PluginContributions, PluginDefinition, PluginHostError, PluginManifest};
 
 pub const ID: &str = "dev.neoism.artifacts";
 
 pub trait ArtifactsHost: Send + Sync + 'static {
-    fn register_tools(&self, registrar: &mut PluginRegistrar);
+    fn register_tools(&self, registrar: &mut PluginContributions);
 }
 
 pub struct ArtifactsPlugin {
@@ -19,7 +19,7 @@ impl ArtifactsPlugin {
     }
 }
 
-impl AgentPlugin for ArtifactsPlugin {
+impl PluginDefinition for ArtifactsPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(),
@@ -35,7 +35,8 @@ impl AgentPlugin for ArtifactsPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![WorkspaceRead, WorkspaceWrite, ProcessSpawn] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         self.host.register_tools(registrar);
         Ok(())
     }

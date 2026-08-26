@@ -25,7 +25,7 @@ async fn generated_context(root: &Path) -> ToolContext {
         &state,
         root.to_string_lossy().as_ref(),
     )
-    .await;
+    .await.unwrap();
     assert_eq!(workspace.directory, root.to_string_lossy());
     ToolContext::new(root).with_state(Some(state))
 }
@@ -86,7 +86,7 @@ async fn notes_tool_delegates_to_the_injected_service_and_rejects_removed_operat
         &state,
         root.to_string_lossy().as_ref(),
     )
-    .await;
+    .await.unwrap();
     assert!(crate::agent_tool_registry::tool_contribution(&workspace.snapshot, "notes").is_some());
     assert!(workspace.snapshot.runtime_tools.contains_key("notes"));
     let context = ToolContext::new(&root)
@@ -133,7 +133,7 @@ async fn notes_tool_delegates_to_the_injected_service_and_rejects_removed_operat
         &disabled_state,
         root.to_string_lossy().as_ref(),
     )
-    .await;
+    .await.unwrap();
     assert!(crate::agent_tool_registry::tool_contribution(&disabled_workspace.snapshot, "notes").is_none());
     assert!(!disabled_workspace.snapshot.runtime_tools.contains_key("notes"));
     let disabled = execute(

@@ -5,8 +5,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use neoism_agent_core::{GoalResearchNote, GoalStatus, SessionGoal};
 use neoism_agent_plugin_api::{
-    AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest,
-    PluginRegistrar, PluginRuntimeError, RouteContribution, RouteDescriptor, RouteHandler,
+    ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest,
+    PluginRuntimeError, RouteContribution, RouteDescriptor, RouteHandler,
     PluginScope, RouteMethod, RouteRequest, RouteResponse, RouteScope,
 };
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,7 @@ const MAX_CONTENT_CHARS: usize = 8_000;
 
 /// Persistence and kernel tool dispatch remain server responsibilities.
 pub trait GoalsHost: Send + Sync + 'static {
-    fn register_tools(&self, registrar: &mut PluginRegistrar);
+    fn register_tools(&self, registrar: &mut PluginContributions);
     fn load<'a>(&'a self, session_id: &'a str) -> PluginFuture<'a, Option<SessionGoal>>;
     fn save<'a>(
         &'a self,
@@ -31,7 +31,7 @@ pub struct GoalsPlugin { host: Arc<dyn GoalsHost> }
 
 impl GoalsPlugin { pub fn new(host: Arc<dyn GoalsHost>) -> Self { Self { host } } }
 
-impl AgentPlugin for GoalsPlugin {
+impl PluginDefinition for GoalsPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(), name: "Goals".into(), version: env!("CARGO_PKG_VERSION").into(),
@@ -41,7 +41,8 @@ impl AgentPlugin for GoalsPlugin {
         }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![WorkspaceRead, WorkspaceWrite, EventPublish, Network, SecretRead] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         for (id, method, suffix, action) in [
             ("v2.plugins.goals.get", RouteMethod::Get, "", GoalRouteAction::Get),
             ("v2.plugins.goals.set", RouteMethod::Post, "", GoalRouteAction::Set),

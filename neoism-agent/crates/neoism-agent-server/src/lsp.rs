@@ -1893,7 +1893,7 @@ fn lsp_tool_blocking(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let runtime = context.lsp_runtime();
+    let runtime = context.lsp_runtime()?;
     let operation = string_arg(&arguments, "operation")
         .ok_or_else(|| anyhow::anyhow!("tool argument operation is required"))?;
     match operation.as_str() {

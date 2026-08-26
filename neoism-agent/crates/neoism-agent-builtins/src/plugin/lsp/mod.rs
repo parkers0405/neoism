@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use neoism_agent_plugin_api::{AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope};
+use neoism_agent_plugin_api::{ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope};
 
 pub const ID: &str = "dev.neoism.lsp";
 
@@ -9,19 +9,20 @@ pub const ID: &str = "dev.neoism.lsp";
 pub enum LspAction { Status, Hover, SignatureHelp, InlayHints, DocumentHighlights, Definition, References, Implementation, PrepareCallHierarchy, IncomingCalls, OutgoingCalls, Diagnostics, DocumentSymbols, Formatting, CodeActions, Touch, Shutdown }
 
 pub trait LspHost: Send + Sync + 'static {
-    fn register_tools(&self, registrar: &mut PluginRegistrar);
+    fn register_tools(&self, registrar: &mut PluginContributions);
     fn execute<'a>(&'a self, action: LspAction, request: RouteRequest) -> PluginFuture<'a, RouteResponse>;
 }
 
 pub struct LspPlugin { host: Arc<dyn LspHost> }
 impl LspPlugin { pub fn new(host: Arc<dyn LspHost>) -> Self { Self { host } } }
 
-impl AgentPlugin for LspPlugin {
+impl PluginDefinition for LspPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest { id: ID.into(), name: "Language servers".into(), version: env!("CARGO_PKG_VERSION").into(), internal: true, disableable: true, capabilities: vec!["neoism.lsp".into()], requires: Vec::new(), event_namespaces: vec!["lsp".into()], api_prefix: Some(format!("/v2/plugins/{ID}")), config: BTreeMap::new() }
     }
 
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![WorkspaceRead, ProcessSpawn] }
+    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
         self.host.register_tools(registrar);
         for (id, method, suffix, action) in [
             ("v2.plugins.lsp.status", RouteMethod::Get, "", LspAction::Status),

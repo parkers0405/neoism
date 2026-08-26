@@ -51,8 +51,9 @@ for (const pkg of PACKAGES) {
   writeFileSync(manifest, `${JSON.stringify(parsed, null, 2)}\n`);
 }
 
-run("npm", ["install", "--no-audit", "--no-fund"], workspace);
-run("npm", ["run", "build"], workspace);
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+run(npm, ["install", "--no-audit", "--no-fund"], workspace);
+run(npm, ["run", "build"], workspace);
 
 for (const pkg of PACKAGES) {
   const dir = join(workspace, "packages", pkg);
@@ -63,7 +64,7 @@ for (const pkg of PACKAGES) {
   }
   const publishArgs = ["publish", "--access", "public"];
   if (dryRun) publishArgs.push("--dry-run");
-  run("npm", publishArgs, dir);
+  run(npm, publishArgs, dir);
   console.log(`published ${name}@${version}`);
 }
 
@@ -79,7 +80,7 @@ function workspaceCargoVersion() {
 function alreadyPublished(name, target) {
   try {
     const output = execFileSync(
-      "npm",
+      process.platform === "win32" ? "npm.cmd" : "npm",
       ["view", `${name}@${target}`, "version"],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
     ).trim();

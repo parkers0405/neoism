@@ -244,6 +244,30 @@ pub(crate) fn build_plugin_command(
                 })?
                 .path
         };
+    // Windows `CreateProcess` cannot exec `.cmd`/`.bat` shims (npm-installed
+    // global tools resolve to these); route them through `cmd /C`, mirroring
+    // the LSP launcher. The wrap logic itself compiles and is unit-tested on
+    // every platform; only the interpreter resolution is Windows-gated.
+    #[cfg(windows)]
+    let (program, arguments) = {
+        if is_batch_shim(&program) {
+            let cmd = executables
+                .resolve(&neoism_agent_service_api::ExecutableRequest::new(
+                    "cmd",
+                    neoism_agent_service_api::ExecutablePurpose::PlatformShell,
+                ))
+                .map_err(|error| {
+                    anyhow::anyhow!("Windows command interpreter is unavailable: {error}")
+                })?
+                .path;
+            batch_shim_command(cmd, &program, arguments)
+        } else {
+            (program, arguments.to_vec())
+        }
+    };
+    #[cfg(windows)]
+    let arguments = &arguments[..];
+
         #[cfg(target_os = "linux")]
         if !matches!(sandbox, SandboxPolicy::Off) {
             let bwrap = executables.resolve(
@@ -342,6 +366,29 @@ pub(crate) fn build_plugin_command(
         command.args(arguments).current_dir(working_directory);
         Ok(command)
     }
+}
+
+/// True for Windows batch shims that `CreateProcess` cannot exec directly.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn is_batch_shim(program: &Path) -> bool {
+    program
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+}
+
+/// `cmd /C <shim> <args...>` — the only reliable way to run a `.cmd`/`.bat`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn batch_shim_command(
+    interpreter: PathBuf,
+    shim: &Path,
+    arguments: &[String],
+) -> (PathBuf, Vec<String>) {
+    let mut wrapped = vec!["/C".to_string(), shim.to_string_lossy().into_owned()];
+    wrapped.extend(arguments.iter().cloned());
+    (interpreter, wrapped)
 }
 
 pub(crate) fn configured_agent_plugins(
@@ -631,6 +678,24 @@ mod process_tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn batch_shims_route_through_the_command_interpreter() {
+        assert!(is_batch_shim(Path::new(r"C:\tools\npm.CMD")));
+        assert!(is_batch_shim(Path::new(r"C:\tools\build.bat")));
+        assert!(!is_batch_shim(Path::new(r"C:\tools\node.exe")));
+        assert!(!is_batch_shim(Path::new("/usr/bin/npm")));
+
+        let (program, arguments) = batch_shim_command(
+            PathBuf::from(r"C:\Windows\System32\cmd.exe"),
+            Path::new(r"C:\tools\npm.cmd"),
+            &["install".to_string(), "left-pad".to_string()],
+        );
+        assert_eq!(program, PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        assert_eq!(arguments[0], "/C");
+        assert_eq!(arguments[1], r"C:\tools\npm.cmd");
+        assert_eq!(&arguments[2..], ["install", "left-pad"]);
+    }
 
     fn standard_executables() -> Arc<dyn neoism_agent_service_api::ExecutableService> {
         Arc::new(neoism_agent_service_api::StandardExecutableService)

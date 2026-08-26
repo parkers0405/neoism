@@ -1196,14 +1196,67 @@ mod tests {
         root
     }
 
-    fn temp_notes_home(name: &str) -> PathBuf {
+    /// `NEOISM_NOTES_HOME` is process-global state and the vault registry
+    /// lives inside it, but `cargo test` runs tests on parallel threads of
+    /// one process. Any test that reads or mutates the notes home must hold
+    /// this lock for its full duration — otherwise another test's `set_var`
+    /// lands between this test's setup and its assertions, and registry
+    /// writes teleport into the other test's temp home.
+    static NOTES_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_notes_home() -> std::sync::MutexGuard<'static, ()> {
+        NOTES_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A per-test notes home: takes the global lock, points
+    /// `NEOISM_NOTES_HOME` at a fresh temp dir, and restores the previous
+    /// value when dropped.
+    struct NotesHome {
+        root: PathBuf,
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl std::ops::Deref for NotesHome {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl AsRef<Path> for NotesHome {
+        fn as_ref(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for NotesHome {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("NEOISM_NOTES_HOME", value),
+                    None => std::env::remove_var("NEOISM_NOTES_HOME"),
+                }
+            }
+        }
+    }
+
+    fn temp_notes_home(name: &str) -> NotesHome {
+        let lock = lock_notes_home();
         let root = std::env::temp_dir()
             .join(format!("neoism-notes-home-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
+        let previous = std::env::var_os("NEOISM_NOTES_HOME");
         unsafe {
             std::env::set_var("NEOISM_NOTES_HOME", &root);
         }
-        root
+        NotesHome {
+            root,
+            previous,
+            _lock: lock,
+        }
     }
 
     #[test]
@@ -1230,17 +1283,13 @@ mod tests {
         assert_eq!(reloaded.config.id, workspace.config.id);
 
         let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(notes_home);
+        let _ = fs::remove_dir_all(&notes_home);
     }
 
     #[test]
     fn link_workspace_creates_project_metadata_in_vault() {
         let root = temp_root("link-workspace-root");
-        let notes_home = std::env::temp_dir().join(format!(
-            "neoism-notes-home-link-workspace-root-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&notes_home);
+        let notes_home = temp_notes_home("link-workspace-root");
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(root.join(NEOISM_DIR)).unwrap();
         let mut workspace = NeoismWorkspace {
@@ -1261,7 +1310,7 @@ mod tests {
         assert!(metadata.contains(&format!("\"name\": \"{project_name}\"")));
         assert!(metadata.contains("\"kind\": \"dir\""));
         let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(notes_home);
+        let _ = fs::remove_dir_all(&notes_home);
     }
 
     #[test]
@@ -1340,11 +1389,12 @@ mod tests {
         assert_ne!(advertised, notes_vaults_dir());
 
         let _ = fs::remove_dir_all(code_root);
-        let _ = fs::remove_dir_all(notes_home);
+        let _ = fs::remove_dir_all(&notes_home);
     }
 
     #[test]
     fn default_notes_workspace_has_stable_global_identity() {
+        let _guard = lock_notes_home();
         let first = default_notes_workspace();
         let second = default_notes_workspace();
         assert_eq!(first.config.id, DEFAULT_NOTES_WORKSPACE_ID);
@@ -1424,7 +1474,7 @@ mod tests {
         assert_eq!(moved.workspace.notes_workspace_dir(), moved_scope);
 
         let _ = fs::remove_dir_all(code_root);
-        let _ = fs::remove_dir_all(notes_home);
+        let _ = fs::remove_dir_all(&notes_home);
     }
 
     #[test]
@@ -1466,7 +1516,7 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(code_root);
-        let _ = fs::remove_dir_all(notes_home);
+        let _ = fs::remove_dir_all(&notes_home);
     }
 
     #[test]
@@ -1502,7 +1552,7 @@ mod tests {
         assert!(!notes_home.join(DEFAULT_NOTES_WORKSPACE).exists());
 
         let _ = fs::remove_dir_all(code_root);
-        let _ = fs::remove_dir_all(notes_home);
+        let _ = fs::remove_dir_all(&notes_home);
     }
 
     #[test]
@@ -1541,6 +1591,6 @@ mod tests {
             .is_none());
 
         let _ = fs::remove_dir_all(code_root);
-        let _ = fs::remove_dir_all(notes_home);
+        let _ = fs::remove_dir_all(&notes_home);
     }
 }

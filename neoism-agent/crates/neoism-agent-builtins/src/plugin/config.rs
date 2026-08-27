@@ -27,6 +27,7 @@ impl ConfigPlugin {
 
 #[derive(Clone, Copy)]
 pub enum ConfigAdminAction {
+    Defaults,
     Get,
     Update,
     Validate,
@@ -63,6 +64,7 @@ impl PluginDefinition for ConfigPlugin {
             Arc::new(WorkspaceConfig(self.services.clone())),
         );
         for (id, method, path, action) in [
+            ("v2.config.defaults", RouteMethod::Get, "/v2/config/defaults", ConfigAdminAction::Defaults),
             ("v2.config.get", RouteMethod::Get, "/v2/config", ConfigAdminAction::Get),
             ("v2.config.update", RouteMethod::Patch, "/v2/config", ConfigAdminAction::Update),
             ("v2.config.validate", RouteMethod::Get, "/v2/config/validate", ConfigAdminAction::Validate),
@@ -133,6 +135,17 @@ pub fn load_snapshot(snapshot: &ConfigSnapshot) -> anyhow::Result<(AgentConfigDo
     normalize(&mut document);
     let roots = snapshot.discovery_roots.iter().map(|root| root.path.clone()).collect();
     Ok((document, roots))
+}
+
+/// The effective selections a workspace client needs before it creates or
+/// opens a session. Keep this projection deliberately small: unlike the full
+/// config document, it is safe to return through a hosted workspace proxy.
+pub fn selection_defaults(document: &AgentConfigDocument) -> Value {
+    serde_json::json!({
+        "defaultAgent": document.default_agent,
+        "model": document.model,
+        "variant": document.variant,
+    })
 }
 
 fn merge_markdown_entries(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
@@ -259,5 +272,40 @@ fn merge_unique_array(target: &mut Value, source: Value) {
     for item in source {
         if item.as_str().is_some_and(|text| !seen.insert(text.to_string())) { continue; }
         target.push(item);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_defaults_exposes_only_safe_effective_choices() {
+        let document: AgentConfigDocument = serde_json::from_value(serde_json::json!({
+            "defaultAgent": "build",
+            "model": "openai/gpt-5.6",
+            "variant": "high",
+            "username": "host-user",
+            "mcp": {
+                "private": {
+                    "type": "remote",
+                    "url": "https://example.invalid",
+                    "headers": { "authorization": "secret" }
+                }
+            }
+        }))
+        .unwrap();
+
+        let defaults = selection_defaults(&document);
+        assert_eq!(
+            defaults,
+            serde_json::json!({
+                "defaultAgent": "build",
+                "model": "openai/gpt-5.6",
+                "variant": "high"
+            })
+        );
+        assert!(defaults.get("username").is_none());
+        assert!(defaults.get("mcp").is_none());
     }
 }

@@ -137,31 +137,27 @@ impl NeoismAgentPane {
                 continue;
             }
             let job_id = background_job_id_from_message(existing);
-            let already_present = server_messages.iter().any(|incoming| {
+            let matching_index = server_messages.iter().position(|incoming| {
                 incoming.id == existing.id
                     || (job_id.is_some()
                         && background_completion_job_id_from_message(incoming) == job_id)
             });
-            if already_present {
-                continue;
-            }
-            // Chronological anchor: right after the nearest preceding local
-            // message the snapshot also contains; a card with no anchored
-            // neighbor (fresh, still-draining turn) belongs at the end.
-            let insert_at = self.messages[..index]
-                .iter()
-                .rev()
-                .find_map(|prior| {
-                    if prior.id.is_empty() {
-                        return None;
-                    }
-                    server_messages
-                        .iter()
-                        .position(|incoming| incoming.id == prior.id)
-                })
-                .map(|position| position + 1)
-                .unwrap_or(server_messages.len());
-            server_messages.insert(insert_at, existing.clone());
+            let card = match matching_index {
+                Some(matching_index)
+                    if server_messages[matching_index].id == existing.id
+                        || is_background_completion_card(&server_messages[matching_index]) =>
+                {
+                    server_messages.remove(matching_index)
+                }
+                Some(_) => continue,
+                None => existing.clone(),
+            };
+            let insert_at = background_completion_anchor_index(
+                &self.messages,
+                index,
+                &server_messages,
+            );
+            server_messages.insert(insert_at, card);
         }
         server_messages
     }
@@ -336,6 +332,26 @@ impl NeoismAgentPane {
                 return;
             }
         }
+        if is_background_completion_card(&message) {
+            let live_kind = match self.streaming_state {
+                NeoismAgentStreamingState::Generating => {
+                    Some(NeoismAgentMessageKind::Assistant)
+                }
+                NeoismAgentStreamingState::Thinking => {
+                    Some(NeoismAgentMessageKind::Reasoning)
+                }
+                _ => None,
+            };
+            if let Some(index) = live_kind.and_then(|kind| {
+                self.messages
+                    .iter()
+                    .rposition(|existing| existing.kind == kind)
+            }) {
+                self.messages.insert(index, message);
+                self.invalidate_timeline_layout();
+                return;
+            }
+        }
         if let Some(index) = self.match_running_tool_part(&message) {
             let merged = merge_part_message(self.messages[index].clone(), message);
             self.messages[index] = merged;
@@ -449,4 +465,32 @@ impl NeoismAgentPane {
 /// must not drag the whole settled turn back into view with it.
 fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
     message.tool == "background_task_result" && message.id.starts_with("background-task-")
+}
+
+fn background_completion_anchor_index(
+    local_messages: &[NeoismAgentMessage],
+    local_index: usize,
+    server_messages: &[NeoismAgentMessage],
+) -> usize {
+    if let Some(position) = local_messages[..local_index]
+        .iter()
+        .rev()
+        .filter(|message| !message.id.is_empty())
+        .find_map(|prior| {
+            server_messages
+                .iter()
+                .position(|incoming| incoming.id == prior.id)
+        })
+    {
+        return position + 1;
+    }
+    local_messages[local_index.saturating_add(1)..]
+        .iter()
+        .filter(|message| !message.id.is_empty())
+        .find_map(|following| {
+            server_messages
+                .iter()
+                .position(|incoming| incoming.id == following.id)
+        })
+        .unwrap_or(server_messages.len())
 }

@@ -2154,6 +2154,61 @@ fn background_completion_card_survives_history_snapshot_replacement() {
 }
 
 #[test]
+fn background_completion_stays_before_the_text_streaming_when_it_finished() {
+    let mut pane = NeoismAgentPane::default();
+    let launch = NeoismAgentMessage::tool(
+        "Run timer",
+        "job_id: job-1\nstatus: running",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    )
+    .with_id("tool-launch");
+    pane.upsert_part_message(launch.clone());
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("Streaming before finish ").with_id("answer"),
+    );
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+
+    pane.upsert_part_message(client_background_completion_card("job-1"));
+    pane.apply_part_delta(
+        Some("msg-active".to_string()),
+        Some("answer".to_string()),
+        Some("text".to_string()),
+        "and after finish",
+    );
+
+    assert_eq!(
+        pane.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-launch", "background-task-job-1", "answer"]
+    );
+    assert!(pane.messages[2].text.ends_with("and after finish"));
+
+    let mut server_copy = client_background_completion_card("job-1");
+    server_copy.detail = "Background shell task finished.\njob_id: job-1\nstatus: completed\n<background_task_result>ok</background_task_result>".to_string();
+    pane.apply_history(vec![
+        launch,
+        NeoismAgentMessage::assistant("Streaming before finish and after finish")
+            .with_id("answer"),
+        server_copy,
+    ]);
+
+    assert_eq!(
+        pane.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-launch", "background-task-job-1", "answer"]
+    );
+    assert!(pane.messages[1].detail.contains("<background_task_result>"));
+}
+
+#[test]
 fn server_background_completion_copy_replaces_client_card_without_duplicate() {
     let mut pane = NeoismAgentPane::default();
     pane.apply_history(vec![NeoismAgentMessage::user("run it").with_id("u-1")]);

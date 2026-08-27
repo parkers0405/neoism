@@ -153,6 +153,7 @@ pub fn canonical_openapi() -> Value {
     }
     for (path, method, operation_id) in [
         ("/v2/health", "get", "v2.health"),
+        ("/v2/config/defaults", "get", "v2.config.defaults"),
         ("/v2/config", "get", "v2.config.get"),
         ("/v2/config", "patch", "v2.config.update"),
         ("/v2/config/validate", "get", "v2.config.validate"),
@@ -397,6 +398,7 @@ fn apply_authoritative_contract(document: &mut Value) {
     add("/v2/audit", "get", op("v2.audit.list", "system", json!([
         query("limit", false, json!({ "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 }))
     ]), None, success("200", "Audit entries", json!({ "type": "array", "items": r("AuditEntry") }))));
+    add("/v2/config/defaults", "get", op("v2.config.defaults", "system", json!([directory()]), None, success("200", "Safe effective agent selections", r("ConfigDefaults"))));
     add("/v2/config", "get", op("v2.config.get", "system", json!([directory()]), None, success("200", "Effective agent configuration", r("ConfigDocument"))));
     add("/v2/config", "patch", op("v2.config.update", "system", json!([directory()]), Some(json_request(true, r("ConfigDocument"))), success("200", "Updated configuration", r("ConfigDocument"))));
     add("/v2/config/validate", "get", op("v2.config.validate", "system", json!([directory()]), None, success("200", "Configuration validation", r("ConfigValidation"))));
@@ -1055,6 +1057,16 @@ fn authoritative_schemas() -> Value {
             "healthy": { "type": "boolean", "const": true }, "version": { "type": "string" }
         }},
         "ConfigDocument": { "type": "object", "additionalProperties": true, "description": "Canonical agent configuration; extension/plugin keys are preserved." },
+        "ConfigDefaults": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["defaultAgent", "model", "variant"],
+            "properties": {
+                "defaultAgent": { "type": ["string", "null"] },
+                "model": { "type": ["string", "null"] },
+                "variant": { "type": ["string", "null"] }
+            }
+        },
         "ConfigValidation": { "type": "object", "additionalProperties": false, "required": ["ok", "diagnostics"], "properties": {
             "ok": { "type": "boolean" }, "diagnostics": { "type": "array", "items": r("ConfigDiagnostic") }
         }},

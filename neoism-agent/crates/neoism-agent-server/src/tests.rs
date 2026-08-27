@@ -2140,6 +2140,7 @@ async fn public_api_is_v2_only() {
     let app = app(state.clone());
     for (method, path) in [
         (Method::GET, "/v2/health"),
+        (Method::GET, "/v2/config/defaults"),
         (Method::GET, "/v2/config"),
         (Method::GET, "/v2/providers/configured"),
         (Method::GET, "/v2/providers"),
@@ -3189,6 +3190,71 @@ fn generic_config_reads_only_canonical_agent_json() {
     assert!(!loaded.info.mcp.contains_key("alpha"));
     assert!(!loaded.info.mcp.contains_key("beta"));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn safe_config_defaults_use_global_config_without_a_workspace_file() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-safe-defaults-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let user_root = root.join("user");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&user_root).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        user_root.join("agent.json"),
+        r#"{
+            "defaultAgent": "build",
+            "model": "openai/gpt-5.6",
+            "variant": "xhigh",
+            "username": "private-host-name"
+        }"#,
+    )
+    .unwrap();
+    assert!(!workspace.join(".agent/agent.json").exists());
+
+    let services = neoism_agent_service_api::AgentServices::new(
+        std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
+        crate::standard_workspace_search(),
+    )
+    .with_config(std::sync::Arc::new(
+        neoism_agent_service_api::StandardConfigSourceService::new(&user_root),
+    ));
+    let db = root.join("agent.db");
+    let state = AppState::open_database_with_services(&db, services)
+        .await
+        .unwrap();
+    let router = app(state.clone());
+    let defaults: Value = response_json(
+        router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!(
+                    "/v2/config/defaults?directory={}",
+                    workspace.to_string_lossy()
+                ),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        defaults,
+        json!({
+            "defaultAgent": "build",
+            "model": "openai/gpt-5.6",
+            "variant": "xhigh"
+        })
+    );
+    assert!(defaults.get("username").is_none());
+
+    drop(router);
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&db);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

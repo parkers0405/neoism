@@ -380,6 +380,9 @@ async fn ensure_nested_external_session(
     let child_id = neoism_agent_core::new_session_id();
     let now = now_millis();
     let mut extra = BTreeMap::new();
+    if let Some(tenant) = parent.extra.get(crate::caller::TENANT_EXTRA_KEY) {
+        extra.insert(crate::caller::TENANT_EXTRA_KEY.to_string(), tenant.clone());
+    }
     extra.insert(
         "externalAgent".to_string(),
         json!({

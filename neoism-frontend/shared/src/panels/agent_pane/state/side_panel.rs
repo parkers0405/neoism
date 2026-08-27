@@ -194,13 +194,69 @@ fn compact_excerpt(excerpt: &str) -> String {
         }
     }
     let compact = compact.trim().to_string();
-    const MAX: usize = 140;
+    // Wrapping handles presentation; this is just a sanity ceiling so one
+    // enormous chunk can't bloat the display list.
+    const MAX: usize = 480;
     if compact.chars().count() <= MAX {
         return compact;
     }
-    let mut truncated: String = compact.chars().take(MAX).collect();
-    truncated.push('…');
-    truncated
+    compact.chars().take(MAX).collect()
+}
+
+/// Word-wrap an excerpt into at most `max_lines` lines of `columns`
+/// monospace characters. Overlong words hard-split; a truncated tail gets an
+/// ellipsis on the final line.
+fn wrap_excerpt_lines(excerpt: &str, columns: usize, max_lines: usize) -> Vec<String> {
+    let columns = columns.max(8);
+    let mut lines: Vec<String> = Vec::with_capacity(max_lines);
+    let mut current = String::new();
+    let mut current_len = 0usize;
+    let mut truncated = false;
+    'words: for word in excerpt.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        loop {
+            let sep = usize::from(current_len > 0);
+            if current_len + sep + word.len() <= columns {
+                if sep == 1 {
+                    current.push(' ');
+                }
+                current.extend(word.iter());
+                current_len += sep + word.len();
+                continue 'words;
+            }
+            // The word doesn't fit on this line.
+            if word.len() > columns {
+                // Hard-split an overlong token across lines.
+                let take = columns - current_len - sep;
+                if take > 0 {
+                    if sep == 1 {
+                        current.push(' ');
+                    }
+                    current.extend(word.iter().take(take));
+                    word.drain(..take);
+                }
+            }
+            if lines.len() + 1 == max_lines {
+                truncated = true;
+                break 'words;
+            }
+            lines.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    if truncated {
+        if let Some(last) = lines.last_mut() {
+            while last.chars().count() >= columns {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
+    lines.retain(|line| !line.is_empty());
+    lines
 }
 
 fn preserve_specific_subagent_metadata(
@@ -577,6 +633,9 @@ pub struct NeoismAgentSidePanel {
     /// list state renders a skeleton shimmer instead of "No results".
     semantic_searching: bool,
     semantic_search_started: Option<Instant>,
+    /// Monospace column budget for wrapping semantic excerpt chunks into
+    /// list rows, fed back from the renderer's measured panel width.
+    result_wrap_columns: usize,
     /// True when the selection cursor sits on the search row (reached by
     /// arrow-up past the first session, or by typing). While set, the
     /// trail cursor renders on the search field and no session row is
@@ -693,6 +752,7 @@ impl Default for NeoismAgentSidePanel {
             semantic_results: Vec::new(),
             semantic_searching: false,
             semantic_search_started: None,
+            result_wrap_columns: 42,
             search_focused: false,
             sessions: Vec::new(),
             sessions_loaded: false,
@@ -1488,6 +1548,18 @@ impl NeoismAgentSidePanel {
         self.semantic_searching
     }
 
+    /// Feed the renderer's measured monospace column budget back so excerpt
+    /// chunks wrap to the actual panel width. Rebuilds the display list only
+    /// when the budget actually changes (a resize), so calling this every
+    /// frame is free.
+    pub fn set_result_wrap_columns(&mut self, columns: usize) {
+        let columns = columns.clamp(16, 160);
+        if columns != self.result_wrap_columns {
+            self.result_wrap_columns = columns;
+            self.rebuild_session_display();
+        }
+    }
+
     /// Seconds since the in-flight semantic search began.
     pub fn semantic_search_elapsed(&self) -> f32 {
         self.semantic_search_started
@@ -1544,14 +1616,16 @@ impl NeoismAgentSidePanel {
                 out.push(NeoismAgentSessionEntry::header(label));
             }
             out.push(visible[i].clone());
-            // The matched transcript chunk renders as its own row under the
-            // session so the fixed-height virtualized list stays uniform.
+            // The matched transcript chunk renders as its own rows under the
+            // session — word-wrapped to the measured panel width, one list
+            // row per line, so the fixed-height virtualized list stays
+            // uniform while the chunk reads like real text.
             if let Some(hit) = semantic.get(visible[i].id.as_str()) {
                 let excerpt = compact_excerpt(&hit.excerpt);
-                if !excerpt.is_empty() {
+                for line in wrap_excerpt_lines(&excerpt, self.result_wrap_columns, 3) {
                     out.push(NeoismAgentSessionEntry::excerpt(
                         visible[i].id.clone(),
-                        excerpt,
+                        line,
                     ));
                 }
             }

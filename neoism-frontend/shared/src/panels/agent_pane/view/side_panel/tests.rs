@@ -693,13 +693,30 @@ to handle unicode boundaries".to_string(),
         .iter()
         .position(|entry| entry.id == "ses-b" && !entry.is_excerpt)
         .expect("semantically matched session joins the filtered list");
-    let excerpt = &rows[session_ix + 1];
-    assert!(excerpt.is_excerpt, "excerpt row renders under its session");
-    assert_eq!(excerpt.id, "ses-b", "activating the excerpt resumes the session");
+    let excerpt_lines: Vec<&NeoismAgentSessionEntry> = rows[session_ix + 1..]
+        .iter()
+        .take_while(|entry| entry.is_excerpt)
+        .collect();
+    assert!(!excerpt_lines.is_empty(), "excerpt rows render under their session");
+    assert!(
+        excerpt_lines.iter().all(|entry| entry.id == "ses-b"),
+        "activating any excerpt line resumes the session"
+    );
+    let joined = excerpt_lines
+        .iter()
+        .map(|entry| entry.title.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
     assert_eq!(
-        excerpt.title,
+        joined,
         "we rewrote the tokenizer to handle unicode boundaries",
-        "whitespace runs collapse to one displayable line"
+        "whitespace collapses and the chunk word-wraps across rows"
+    );
+    assert!(
+        excerpt_lines
+            .iter()
+            .all(|entry| entry.title.chars().count() <= 42),
+        "each wrapped line fits the column budget"
     );
 
     // Typing past the fetched query drops the stale excerpt rows.
@@ -708,7 +725,7 @@ to handle unicode boundaries".to_string(),
 }
 
 #[test]
-fn long_excerpts_truncate_on_a_char_boundary() {
+fn long_excerpts_wrap_to_three_lines_and_end_with_an_ellipsis() {
     let mut panel = NeoismAgentSidePanel::default();
     panel.set_sessions(vec![NeoismAgentSessionEntry::new("ses-a", "Session", "1d")]);
     panel.set_session_query("needle".to_string());
@@ -716,15 +733,51 @@ fn long_excerpts_truncate_on_a_char_boundary() {
         "needle".to_string(),
         vec![NeoismAgentSemanticMatch {
             session_id: "ses-a".to_string(),
-            excerpt: "ü".repeat(400),
+            excerpt: "word ".repeat(200),
             distance: 0.2,
         }],
     );
-    let excerpt = panel
+    let lines: Vec<String> = panel
         .sessions()
         .iter()
-        .find(|entry| entry.is_excerpt)
-        .expect("excerpt row");
-    assert_eq!(excerpt.title.chars().count(), 141, "140 chars plus ellipsis");
-    assert!(excerpt.title.ends_with('…'));
+        .filter(|entry| entry.is_excerpt)
+        .map(|entry| entry.title.clone())
+        .collect();
+    assert_eq!(lines.len(), 3, "chunks cap at three wrapped rows");
+    assert!(lines.iter().all(|line| line.chars().count() <= 42));
+    assert!(lines.last().unwrap().ends_with('…'));
+}
+
+#[test]
+fn excerpt_wrap_follows_the_measured_column_budget() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("ses-a", "Session", "1d")]);
+    panel.set_session_query("needle".to_string());
+    panel.set_semantic_results(
+        "needle".to_string(),
+        vec![NeoismAgentSemanticMatch {
+            session_id: "ses-a".to_string(),
+            excerpt: "alpha beta gamma delta epsilon zeta".to_string(),
+            distance: 0.2,
+        }],
+    );
+    // A narrower panel re-wraps the same chunk into more, shorter rows.
+    panel.set_result_wrap_columns(16);
+    let narrow: Vec<String> = panel
+        .sessions()
+        .iter()
+        .filter(|entry| entry.is_excerpt)
+        .map(|entry| entry.title.clone())
+        .collect();
+    assert!(narrow.len() >= 2);
+    assert!(narrow.iter().all(|line| line.chars().count() <= 16));
+
+    panel.set_result_wrap_columns(160);
+    let wide: Vec<String> = panel
+        .sessions()
+        .iter()
+        .filter(|entry| entry.is_excerpt)
+        .map(|entry| entry.title.clone())
+        .collect();
+    assert_eq!(wide, vec!["alpha beta gamma delta epsilon zeta".to_string()]);
 }

@@ -356,18 +356,22 @@ pub fn data_dir() -> PathBuf {
 // keeps working. New routes use `verify_bearer` instead.
 // ---------------------------------------------------------------------------
 
-/// Verify a token presented via `?token=` against `NEOISM_DAEMON_TOKEN`.
+/// Verify a token presented via `?token=` against the daemon's accepted
+/// tokens (canonical file first, startup env as fallback).
 pub fn verify(provided: Option<&str>) -> Result<(), AuthError> {
-    match std::env::var("NEOISM_DAEMON_TOKEN") {
-        Ok(expected) if !expected.is_empty() => {
+    let accepted = crate::daemon_token::accepted_daemon_tokens();
+    match accepted.is_empty() {
+        false => {
             let presented = provided.ok_or(AuthError::Missing)?;
-            if constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+            if accepted.iter().any(|expected| {
+                constant_time_eq(presented.as_bytes(), expected.as_bytes())
+            }) {
                 Ok(())
             } else {
                 Err(AuthError::Invalid)
             }
         }
-        _ => {
+        true => {
             if cfg!(debug_assertions) {
                 tracing::warn!(
                     "NEOISM_DAEMON_TOKEN not set; allowing connection (debug build only)"

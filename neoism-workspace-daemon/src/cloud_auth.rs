@@ -111,12 +111,9 @@ pub fn legacy_daemon_token_configured() -> bool {
 }
 
 pub fn legacy_daemon_token_matches(candidate: &str) -> bool {
-    match std::env::var("NEOISM_DAEMON_TOKEN") {
-        Ok(expected) if !expected.is_empty() => {
-            constant_time_eq(candidate.as_bytes(), expected.as_bytes())
-        }
-        _ => false,
-    }
+    crate::daemon_token::accepted_daemon_tokens()
+        .iter()
+        .any(|expected| constant_time_eq(candidate.as_bytes(), expected.as_bytes()))
 }
 
 #[cfg(test)]

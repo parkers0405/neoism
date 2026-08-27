@@ -155,6 +155,28 @@ fn generate_daemon_token() -> String {
 }
 
 /// Resolve the on-disk token path.
+/// Every value the daemon currently trusts as ITS token: the canonical
+/// on-disk token (the live trust root, shared with the desktop and the
+/// agent-server) plus the env var captured at startup. Comparing against
+/// both keeps long-lived processes working across a token-file rotation
+/// (the runtime dir is a tmpfs recreated at login) in either direction —
+/// stale env accepting the fresh file value and vice versa.
+pub fn accepted_daemon_tokens() -> Vec<String> {
+    let mut tokens = Vec::new();
+    if let Ok(file) = fs::read_to_string(daemon_token_path()) {
+        let file = file.trim().to_string();
+        if !file.is_empty() {
+            tokens.push(file);
+        }
+    }
+    if let Ok(env) = std::env::var(DAEMON_TOKEN_ENV) {
+        if !env.is_empty() && !tokens.contains(&env) {
+            tokens.push(env);
+        }
+    }
+    tokens
+}
+
 pub fn daemon_token_path() -> PathBuf {
     #[cfg(unix)]
     {

@@ -304,6 +304,15 @@ pub enum SessionEventUpdate {
         /// `SidePanel::set_session_goal`.
         version: u64,
     },
+    /// Authoritative model-selection fields from the main session's full
+    /// `session.created` / `session.updated` info payload. `thinking` is
+    /// double-optional: the outer `Some` means a model object was present and
+    /// the inner value is its variant (`None` clears a previous variant).
+    SessionMetadataUpdated {
+        agent: Option<String>,
+        model: Option<String>,
+        thinking: Option<Option<String>>,
+    },
     ExecutionUpdated(Value),
     RuntimeUpdated(Value),
 }
@@ -385,6 +394,12 @@ pub fn classify_session_event(
                     }
                 }
             } else if let Some(info) = properties.get("info") {
+                let model_metadata = session_model_metadata(info);
+                out.push(SessionEventUpdate::SessionMetadataUpdated {
+                    agent: session_agent_label(info),
+                    model: model_metadata.as_ref().map(|(model, _)| model.clone()),
+                    thinking: model_metadata.map(|(_, thinking)| thinking),
+                });
                 // Main session updated — surface its persistent goal so the
                 // side panel's Goal section reflects set / change / pause /
                 // complete / blocked / clear live. SESSION_UPDATED always
@@ -1162,6 +1177,27 @@ pub fn session_agent_label(info: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn session_model_metadata(info: &Value) -> Option<(String, Option<String>)> {
+    let model = info.get("model")?;
+    let provider = model
+        .get("providerId")
+        .or_else(|| model.get("provider_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    let id = model
+        .get("id")
+        .or_else(|| model.get("modelId"))
+        .or_else(|| model.get("model_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    let thinking = model
+        .get("variant")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Some((format!("{provider}/{id}"), thinking))
+}
+
 fn find_crlf(bytes: &[u8]) -> Option<usize> {
     bytes.windows(2).position(|window| window == b"\r\n")
 }
@@ -1717,11 +1753,11 @@ mod tests {
             }
         });
         let updates = classify_session_event(with_goal, "ses_root", &mut state);
-        assert!(matches!(
-            updates.as_slice(),
-            [SessionEventUpdate::GoalUpdated { goal: Some(goal), version: 4_200 }]
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            SessionEventUpdate::GoalUpdated { goal: Some(goal), version: 4_200 }
                 if goal.text == "ship it"
-        ));
+        )));
 
         // Info present but no goal → authoritative CLEAR (live), versioned by
         // the session's `time.updated` so it sorts after the goal it removed.
@@ -1732,13 +1768,15 @@ mod tests {
                 "info": { "id": "ses_root", "time": { "updated": 5_000 } }
             }
         });
-        assert!(matches!(
-            classify_session_event(cleared, "ses_root", &mut state).as_slice(),
-            [SessionEventUpdate::GoalUpdated {
-                goal: None,
-                version: 5_000
-            }]
-        ));
+        assert!(classify_session_event(cleared, "ses_root", &mut state)
+            .iter()
+            .any(|update| matches!(
+                update,
+                SessionEventUpdate::GoalUpdated {
+                    goal: None,
+                    version: 5_000
+                }
+            )));
 
         // Thin event with no `info` → no GoalUpdated (must not false-clear).
         let thin = json!({
@@ -1746,6 +1784,62 @@ mod tests {
             "properties": { "sessionId": "ses_root" }
         });
         assert!(classify_session_event(thin, "ses_root", &mut state).is_empty());
+    }
+
+    #[test]
+    fn session_updated_emits_authoritative_model_and_thinking() {
+        let mut state = SessionEventUpdateState::default();
+        let updates = classify_session_event(
+            json!({
+                "type": "session.updated",
+                "properties": {
+                    "sessionId": "ses_root",
+                    "info": {
+                        "id": "ses_root",
+                        "agent": "plan",
+                        "model": {
+                            "providerId": "openai",
+                            "id": "gpt-5.6",
+                            "variant": "high"
+                        },
+                        "time": { "updated": 1_000 }
+                    }
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            SessionEventUpdate::SessionMetadataUpdated { agent, model, thinking }
+                if agent.as_deref() == Some("plan")
+                    && model.as_deref() == Some("openai/gpt-5.6")
+                    && thinking.as_ref().and_then(|value| value.as_deref()) == Some("high")
+        )));
+
+        let updates = classify_session_event(
+            json!({
+                "type": "session.updated",
+                "properties": {
+                    "sessionId": "ses_root",
+                    "info": {
+                        "id": "ses_root",
+                        "model": { "providerId": "openai", "id": "gpt-5.6" },
+                        "time": { "updated": 2_000 }
+                    }
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            SessionEventUpdate::SessionMetadataUpdated { model, thinking, .. }
+                if model.as_deref() == Some("openai/gpt-5.6")
+                    && thinking == &Some(None)
+        )));
     }
 
     #[test]

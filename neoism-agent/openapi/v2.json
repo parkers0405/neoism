@@ -210,6 +210,36 @@
         },
         "type": "array"
       },
+      "AgentPart": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "source": {},
+          "type": {
+            "const": "agent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "sessionId",
+          "messageId",
+          "name"
+        ],
+        "type": "object"
+      },
       "ApiError": {
         "additionalProperties": false,
         "properties": {
@@ -434,6 +464,24 @@
         ],
         "type": "object"
       },
+      "CacheUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "read": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "write": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "read",
+          "write"
+        ],
+        "type": "object"
+      },
       "Capability": {
         "additionalProperties": false,
         "properties": {
@@ -515,6 +563,42 @@
           "$ref": "#/components/schemas/Command"
         },
         "type": "array"
+      },
+      "CompactionPart": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "boolean"
+          },
+          "tailStartMessageId": {
+            "type": "string"
+          },
+          "type": {
+            "const": "compaction",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "sessionId",
+          "messageId",
+          "reason",
+          "summary"
+        ],
+        "type": "object"
       },
       "ConfigDiagnostic": {
         "additionalProperties": false,
@@ -992,29 +1076,7 @@
             "additionalProperties": false,
             "properties": {
               "part": {
-                "additionalProperties": true,
-                "properties": {
-                  "author": {
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "string"
-                  },
-                  "role": {
-                    "type": "string"
-                  },
-                  "system": {
-                    "type": "string"
-                  },
-                  "type": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "id",
-                  "type"
-                ],
-                "type": "object"
+                "$ref": "#/components/schemas/Part"
               },
               "sessionID": {
                 "type": "string"
@@ -2985,6 +3047,42 @@
         ],
         "type": "object"
       },
+      "FilePart": {
+        "additionalProperties": true,
+        "properties": {
+          "filename": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "const": "file",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "sessionId",
+          "messageId",
+          "mime",
+          "url"
+        ],
+        "type": "object"
+      },
       "ForkSessionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -3901,29 +3999,39 @@
         "type": "object"
       },
       "Part": {
-        "additionalProperties": true,
-        "description": "Known and future message parts remain round-trippable.",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "messageId": {
-            "type": "string"
-          },
-          "sessionId": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
+        "description": "One message part, discriminated by `type`. Every part the server emits today is a declared variant; variants tolerate additive fields.",
+        "discriminator": {
+          "propertyName": "type"
         },
-        "required": [
-          "type",
-          "id",
-          "sessionId",
-          "messageId"
-        ],
-        "type": "object"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TextPart"
+          },
+          {
+            "$ref": "#/components/schemas/CompactionPart"
+          },
+          {
+            "$ref": "#/components/schemas/AgentPart"
+          },
+          {
+            "$ref": "#/components/schemas/SubtaskPart"
+          },
+          {
+            "$ref": "#/components/schemas/ReasoningPart"
+          },
+          {
+            "$ref": "#/components/schemas/ToolPart"
+          },
+          {
+            "$ref": "#/components/schemas/StepStartPart"
+          },
+          {
+            "$ref": "#/components/schemas/StepFinishPart"
+          },
+          {
+            "$ref": "#/components/schemas/FilePart"
+          }
+        ]
       },
       "PartEnvelope": {
         "additionalProperties": false,
@@ -3944,6 +4052,23 @@
           "kind",
           "schemaVersion",
           "data"
+        ],
+        "type": "object"
+      },
+      "PartTime": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start"
         ],
         "type": "object"
       },
@@ -4713,6 +4838,40 @@
         ],
         "type": "object"
       },
+      "ReasoningPart": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "metadata": {},
+          "sessionId": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "time": {
+            "$ref": "#/components/schemas/PartTime"
+          },
+          "type": {
+            "const": "reasoning",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "sessionId",
+          "messageId",
+          "text",
+          "time"
+        ],
+        "type": "object"
+      },
       "RevertRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5255,6 +5414,74 @@
         },
         "type": "array"
       },
+      "StepFinishPart": {
+        "additionalProperties": true,
+        "properties": {
+          "cost": {
+            "type": "number"
+          },
+          "id": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenUsage"
+          },
+          "type": {
+            "const": "step-finish",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "sessionId",
+          "messageId",
+          "reason",
+          "tokens",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "StepStartPart": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string"
+          },
+          "type": {
+            "const": "step-start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "sessionId",
+          "messageId"
+        ],
+        "type": "object"
+      },
       "StopSubagentsRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5355,6 +5582,84 @@
         ],
         "type": "object"
       },
+      "SubtaskPart": {
+        "additionalProperties": true,
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "model": {
+            "$ref": "#/components/schemas/UserModelRef"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "const": "subtask",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "sessionId",
+          "messageId",
+          "prompt",
+          "description",
+          "agent"
+        ],
+        "type": "object"
+      },
+      "TextPart": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "synthetic": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          },
+          "time": {
+            "$ref": "#/components/schemas/PartTime"
+          },
+          "type": {
+            "const": "text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "sessionId",
+          "messageId",
+          "text"
+        ],
+        "type": "object"
+      },
       "Todo": {
         "additionalProperties": false,
         "properties": {
@@ -5372,6 +5677,37 @@
           "content",
           "status",
           "priority"
+        ],
+        "type": "object"
+      },
+      "TokenUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "cache": {
+            "$ref": "#/components/schemas/CacheUsage"
+          },
+          "input": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reasoning": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "reasoning",
+          "cache"
         ],
         "type": "object"
       },
@@ -5399,6 +5735,154 @@
           "$ref": "#/components/schemas/Tool"
         },
         "type": "array"
+      },
+      "ToolPart": {
+        "additionalProperties": true,
+        "properties": {
+          "callId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "metadata": {},
+          "sessionId": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ToolState"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "sessionId",
+          "messageId",
+          "tool",
+          "callId",
+          "state"
+        ],
+        "type": "object"
+      },
+      "ToolState": {
+        "description": "Tool call lifecycle, discriminated by `status`.",
+        "discriminator": {
+          "propertyName": "status"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ToolStatePending"
+          },
+          {
+            "$ref": "#/components/schemas/ToolStateRunning"
+          },
+          {
+            "$ref": "#/components/schemas/ToolStateCompleted"
+          },
+          {
+            "$ref": "#/components/schemas/ToolStateError"
+          }
+        ]
+      },
+      "ToolStateCompleted": {
+        "additionalProperties": true,
+        "properties": {
+          "input": {},
+          "metadata": {},
+          "output": {
+            "type": "string"
+          },
+          "status": {
+            "const": "completed",
+            "type": "string"
+          },
+          "time": {
+            "$ref": "#/components/schemas/PartTime"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "input",
+          "output",
+          "metadata",
+          "title",
+          "time"
+        ],
+        "type": "object"
+      },
+      "ToolStateError": {
+        "additionalProperties": true,
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "input": {},
+          "status": {
+            "const": "error",
+            "type": "string"
+          },
+          "time": {
+            "$ref": "#/components/schemas/PartTime"
+          }
+        },
+        "required": [
+          "status",
+          "input",
+          "error",
+          "time"
+        ],
+        "type": "object"
+      },
+      "ToolStatePending": {
+        "additionalProperties": true,
+        "properties": {
+          "input": {},
+          "raw": {
+            "type": "string"
+          },
+          "status": {
+            "const": "pending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "input",
+          "raw"
+        ],
+        "type": "object"
+      },
+      "ToolStateRunning": {
+        "additionalProperties": true,
+        "properties": {
+          "input": {},
+          "status": {
+            "const": "running",
+            "type": "string"
+          },
+          "time": {
+            "$ref": "#/components/schemas/PartTime"
+          }
+        },
+        "required": [
+          "status",
+          "input",
+          "time"
+        ],
+        "type": "object"
       },
       "UnknownObject": {
         "additionalProperties": true,
@@ -5438,6 +5922,25 @@
         "type": "object"
       },
       "UserModel": {
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string"
+          },
+          "providerId": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "providerId",
+          "modelId"
+        ],
+        "type": "object"
+      },
+      "UserModelRef": {
         "additionalProperties": false,
         "properties": {
           "modelId": {

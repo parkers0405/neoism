@@ -27,6 +27,26 @@ export type PluginManifest = ContractPluginManifest;
 export type ApiErrorBody = ApiError;
 export type Session = ContractSession;
 export type MessageWithParts = Message;
+export type {
+  Part,
+  TextPart,
+  CompactionPart,
+  AgentPart,
+  SubtaskPart,
+  ReasoningPart,
+  ToolPart,
+  ToolState,
+  ToolStatePending,
+  ToolStateRunning,
+  ToolStateCompleted,
+  ToolStateError,
+  StepStartPart,
+  StepFinishPart,
+  FilePart,
+  PartTime,
+  TokenUsage,
+  CacheUsage,
+} from "./generated/contract.js";
 export type ArtifactInfo = Artifact;
 export type PermissionRequest = ContractPermissionRequest;
 export type QuestionRequest = ContractQuestionRequest;

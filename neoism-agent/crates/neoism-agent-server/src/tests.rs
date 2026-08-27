@@ -611,6 +611,69 @@ async fn transcript_search_route_serves_keyword_hits_without_embeddings() {
 }
 
 #[tokio::test]
+async fn transcript_search_falls_back_to_per_term_matches_for_multi_word_queries() {
+    std::env::set_var("NEOISM_AGENT_DISABLE_EMBEDDINGS", "1");
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-or-search-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let now = now_millis();
+    // Two sessions, each mentioning only ONE of the query's words — the
+    // AND search finds neither, the per-term fallback finds both.
+    let tokenizer_session = neoism_agent_core::new_session_id();
+    let unicode_session = neoism_agent_core::new_session_id();
+    for (session_id, text) in [
+        (&tokenizer_session, "rewrote the tokenizer end to end"),
+        (&unicode_session, "unicode boundaries were the culprit"),
+    ] {
+        let session = store_test_session(session_id, now);
+        state.inner.store.insert_session(&session).await.unwrap();
+        state
+            .inner
+            .store
+            .append_message(
+                session_id.as_str(),
+                &store_test_message(session_id, now, text),
+            )
+            .await
+            .unwrap();
+    }
+
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/plugins/dev.neoism.semantic/search?q=tokenizer%20unicode&limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let hits = parsed["hits"].as_array().unwrap();
+    let sessions: Vec<&str> = hits
+        .iter()
+        .filter_map(|hit| hit["sessionId"].as_str())
+        .collect();
+    assert!(
+        sessions.contains(&tokenizer_session.as_str())
+            && sessions.contains(&unicode_session.as_str()),
+        "per-term fallback surfaces both single-word matches: {parsed}"
+    );
+
+    std::env::remove_var("NEOISM_AGENT_DISABLE_EMBEDDINGS");
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn store_persists_sessions_and_searches_with_like() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-{}.turso.db",

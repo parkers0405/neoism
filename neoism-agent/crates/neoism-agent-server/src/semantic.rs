@@ -352,7 +352,43 @@ pub(crate) async fn semantic_search_route(
 
 /// Map the store's keyword transcript search into semantic-hit shape. The
 /// `>>match<<` markers the search tool renders are stripped for the UI.
+///
+/// The store search requires every term to appear in one message. When a
+/// multi-word query finds nothing that way, retry each term on its own and
+/// merge — a query like "tokenizer unicode" should still surface sessions
+/// that only mention one of the words.
 async fn keyword_hits(
+    store: &crate::state::SessionStore,
+    query: &str,
+    session_id: Option<&str>,
+    limit: usize,
+) -> Vec<crate::state::SemanticSearchHit> {
+    let hits = search_hits(store, query, session_id, limit).await;
+    if !hits.is_empty() {
+        return hits;
+    }
+    let terms: Vec<&str> = query
+        .split_whitespace()
+        .filter(|term| term.len() >= 2)
+        .collect();
+    if terms.len() < 2 {
+        return hits;
+    }
+    let mut merged: Vec<crate::state::SemanticSearchHit> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for term in terms {
+        for hit in search_hits(store, term, session_id, limit).await {
+            if seen.insert(hit.message_id.clone()) {
+                merged.push(hit);
+            }
+        }
+    }
+    merged.sort_by(|a, b| b.created.cmp(&a.created));
+    merged.truncate(limit);
+    merged
+}
+
+async fn search_hits(
     store: &crate::state::SessionStore,
     query: &str,
     session_id: Option<&str>,

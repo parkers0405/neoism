@@ -725,6 +725,82 @@ to handle unicode boundaries".to_string(),
 }
 
 #[test]
+fn excerpt_rows_highlight_every_search_term_occurrence_case_insensitively() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("ses-a", "Untitled", "1d")]);
+    panel.set_session_query("Token stream".to_string());
+    panel.set_semantic_results(
+        "Token stream".to_string(),
+        vec![NeoismAgentSemanticMatch {
+            session_id: "ses-a".to_string(),
+            excerpt: "the TOKEN stream retokenizes each token per stream".to_string(),
+            distance: 0.0,
+        }],
+    );
+
+    let excerpts: Vec<&NeoismAgentSessionEntry> = panel
+        .sessions()
+        .iter()
+        .filter(|entry| entry.is_excerpt)
+        .collect();
+    assert!(!excerpts.is_empty());
+    let highlighted: Vec<String> = excerpts
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .highlights
+                .iter()
+                .map(|&(start, end)| entry.title[start..end].to_ascii_lowercase())
+        })
+        .collect();
+    // Both terms, all occurrences, regardless of case — including the
+    // "token" inside "retokenizes".
+    assert!(highlighted.iter().filter(|hit| hit.contains("token")).count() >= 3);
+    assert!(highlighted.iter().filter(|hit| hit.contains("stream")).count() >= 2);
+    // Ranges are sorted, non-overlapping, and on char boundaries.
+    for entry in &excerpts {
+        let mut previous_end = 0;
+        for &(start, end) in &entry.highlights {
+            assert!(start >= previous_end && end > start && end <= entry.title.len());
+            assert!(entry.title.is_char_boundary(start) && entry.title.is_char_boundary(end));
+            previous_end = end;
+        }
+    }
+}
+
+#[test]
+fn overlapping_term_matches_merge_into_one_highlight_range() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("ses-a", "Untitled", "1d")]);
+    panel.set_session_query("streams stream".to_string());
+    panel.set_semantic_results(
+        "streams stream".to_string(),
+        vec![NeoismAgentSemanticMatch {
+            session_id: "ses-a".to_string(),
+            excerpt: "streams everywhere".to_string(),
+            distance: 0.0,
+        }],
+    );
+    let entry = panel
+        .sessions()
+        .iter()
+        .find(|entry| entry.is_excerpt)
+        .expect("excerpt row")
+        .clone();
+    // "stream" and "streams" overlap over the same word — one merged range.
+    let over_streams: Vec<_> = entry
+        .highlights
+        .iter()
+        .filter(|&&(start, _)| start == entry.title.find("streams").unwrap())
+        .collect();
+    assert_eq!(over_streams.len(), 1);
+    assert_eq!(
+        &entry.title[over_streams[0].0..over_streams[0].1],
+        "streams"
+    );
+}
+
+#[test]
 fn long_excerpts_wrap_to_three_lines_and_end_with_an_ellipsis() {
     let mut panel = NeoismAgentSidePanel::default();
     panel.set_sessions(vec![NeoismAgentSessionEntry::new("ses-a", "Session", "1d")]);

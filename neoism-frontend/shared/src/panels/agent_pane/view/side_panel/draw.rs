@@ -657,6 +657,21 @@ pub(crate) fn render_sessions_list(
     let title_x = text_x + dot_gutter;
     let current_id = pane.session_id_str().map(str::to_string);
 
+    // Feed the measured monospace column budget back so excerpt chunks wrap
+    // to this exact panel width; a change (resize) rebuilds the display list
+    // before we snapshot it below.
+    {
+        let excerpt_font = FONT_SIZE * s * 0.9;
+        let probe = DrawOpts {
+            font_size: excerpt_font,
+            ..DrawOpts::default()
+        };
+        let char_w = sugarloaf.text_mut().measure("M", &probe).max(1.0);
+        let excerpt_w = (text_w - dot_gutter - 10.0 * s).max(char_w);
+        pane.side_panel_mut()
+            .set_result_wrap_columns((excerpt_w / char_w).floor() as usize);
+    }
+
     let sessions = pane.side_panel().sessions().to_vec();
     for absolute_ix in start..end {
         let entry = &sessions[absolute_ix];
@@ -690,6 +705,8 @@ pub(crate) fn render_sessions_list(
         // activating it resumes the parent session — so the shared hover
         // treatment below still applies.
         if entry.is_excerpt {
+            let first_of_run = absolute_ix == 0
+                || !sessions[absolute_ix - 1].is_excerpt;
             let hover = if pane.side_panel().hovered_session() == Some(absolute_ix) {
                 pane.side_panel().session_hover_scale()
             } else {
@@ -709,11 +726,14 @@ pub(crate) fn render_sessions_list(
                 );
             }
             let tick_w = 2.0 * s;
-            let tick_h = row_h - 8.0 * s;
+            // One continuous tick per excerpt run: full-height on every row,
+            // so wrapped lines read as a single quoted chunk.
+            let tick_y = if first_of_run { row_y + 4.0 * s } else { row_y };
+            let tick_h = if first_of_run { row_h - 4.0 * s } else { row_h };
             sugarloaf.rounded_rect(
                 None,
                 title_x + 2.0 * s,
-                row_y + 4.0 * s,
+                tick_y,
                 tick_w,
                 tick_h,
                 theme.f32_alpha(theme.cyan, 0.55),

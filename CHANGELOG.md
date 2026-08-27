@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.62] - 2026-08-27
+
+### Fixed
+
+- Guests in a joined workspace now appear in the transcript under their
+  presence name instead of `local-operator` or a device id; the
+  credential subject remains the authorization and audit identity.
+- Joined agent panes adopt the host's configured model and thinking
+  variant instead of showing "server default": session metadata now
+  flows through the event stream, and retargeting a pane to a host
+  re-hydrates its configuration defaults.
+
 ## [0.7.61] - 2026-08-27
 
 ### Fixed

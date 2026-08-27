@@ -137,6 +137,7 @@ pub(crate) async fn v2_events(
         // replay AND buffered in the live subscription; remember replayed ids
         // so the buffered copies are skipped instead of duplicated.
         let mut replayed_ids: HashSet<String> = HashSet::new();
+        let mut foreign_sessions: HashSet<String> = HashSet::new();
         if let Some(mut cursor) = replay_from {
             loop {
                 // Read the global sequence when scoped, then filter in memory.
@@ -207,7 +208,15 @@ pub(crate) async fn v2_events(
             if !replayed_ids.is_empty() && replayed_ids.remove(live.id.as_str()) {
                 continue;
             }
-            if !admit_live_event(&state, &live, family_root.as_deref(), &mut session_family).await {
+            if !admit_live_event(
+                &state,
+                &live,
+                family_root.as_deref(),
+                &mut session_family,
+                &mut foreign_sessions,
+            )
+            .await
+            {
                 continue;
             }
             let deleted_session = (live.kind == neoism_agent_core::event_type::SESSION_DELETED)
@@ -241,11 +250,21 @@ pub(crate) async fn v2_session_runtime(
 
 /// Whether a live event belongs on this connection's stream, growing the
 /// connection-owned family when the event reveals a new descendant session.
-async fn admit_live_event(
+///
+/// The descend check walks the parent chain with one store read per hop, so
+/// its VERDICT must be cached in both directions: a busy foreign session
+/// emits hundreds of events per second, and re-running the store walk for
+/// every one of them — while the store is busy-retrying provider writes —
+/// stalls this subscriber until the broadcast receiver lags and sheds the
+/// events the client actually wanted (the "watched pane freezes while the
+/// status pill still moves" wedge). Negative caching is sound because a
+/// session's parent is fixed at creation; ids are never re-parented.
+pub(crate) async fn admit_live_event(
     state: &AppState,
     live: &neoism_agent_core::EventPayload,
     family_root: Option<&str>,
     session_family: &mut Option<HashSet<String>>,
+    foreign_sessions: &mut HashSet<String>,
 ) -> bool {
     if event_matches_family(live, session_family.as_ref()) {
         return true;
@@ -254,7 +273,14 @@ async fn admit_live_event(
     else {
         return false;
     };
+    if foreign_sessions.contains(live_session_id) {
+        return false;
+    }
     if !session_descends_from(state, live_session_id, root).await {
+        if foreign_sessions.len() >= 16_384 {
+            foreign_sessions.clear();
+        }
+        foreign_sessions.insert(live_session_id.to_string());
         return false;
     }
     if let Some(family) = session_family.as_mut() {

@@ -67,4 +67,44 @@ neoism-agent openapi          # print the OpenAPI document
 
 Point any SDK or HTTP client at it. The desktop's embedded server is the same binary surface.
 
+## Embedding the agent in a product
+
+A backend that drives the agent per tenant (a SaaS assistant, a bot, a
+pipeline) runs one loop per conversation:
+
+1. Connect with a bearer token. For multi-tenant deployments, use
+   `NEOISM_AGENT_AUTH_CONFIG` with one token per tenant, a
+   `directoryPrefixes` jail, and per-tenant rate and concurrency quotas.
+2. Create or reuse a session rooted in the tenant's directory
+   (`sessions.create({ directory })`). Instructions and configuration are
+   discovered upward from that directory, so shared rules live at the base
+   and per-tenant overrides in the tenant folder.
+3. Subscribe to `/v2/events` with the session id and `tail: true`
+   **before** prompting, so nothing slips between the two. The SDK
+   subscription reconnects automatically and resumes from its sequence
+   cursor.
+4. Prompt with a caller-generated `messageId` — retrying the same prompt
+   after a network failure is idempotent, never a duplicate turn.
+5. Stream tokens from `message.part.delta`, watch typed tool and
+   step-finish parts (token counts and cost for billing), and finish when
+   `session.status` reports idle for the session.
+
+The complete, runnable version of this loop is
+`sdk/typescript/examples/headless.ts` in the repository.
+
+Headless runs should preconfigure [[Permissions]] rules (allow and deny
+patterns) so a turn never blocks on an interactive approval; the
+`permission.asked` event plus `interactions.permissions.reply` is the
+interactive fallback, not the plan.
+
+## API stability
+
+The committed OpenAPI document is the contract. Within a major
+`apiVersion`: existing routes, fields, event types, and part types are not
+removed or repurposed; new ones may be added at any time. Part and event
+schemas tolerate additive fields — validating clients must ignore unknown
+properties. Event `sequence` values are monotone per connection and safe
+to use as a resume cursor. Breaking changes get a new version prefix and a
+deprecation window, never a silent change under `/v2`.
+
 See [[SDK]] for typed clients, [[Plugins]] for extending the server, and [[Sessions and Sharing]] for the session model.

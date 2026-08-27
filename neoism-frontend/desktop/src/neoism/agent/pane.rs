@@ -766,6 +766,13 @@ pub struct NeoismAgentPane {
     file_mention_root_pin: Mutex<Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
     event_stream: Option<AgentSessionEventStream>,
     event_wake: Option<AgentEventWake>,
+    /// Set when the server reported a recoverable provider error and is
+    /// retrying the in-flight run. The retry re-seeds the SAME text part
+    /// with empty text to wipe the partial reply; the normal empty-snapshot
+    /// guard would ignore that wipe and the re-streamed tokens would append
+    /// onto the partial, doubling the text. Consumed by the first empty
+    /// assistant snapshot (or cleared at idle).
+    pub(super) retry_reset_pending: bool,
     /// Transcript/state caches keyed by real session id. Parent and child
     /// sessions remain resident while navigation only changes `session_id`,
     /// matching the route-over-global-store model.
@@ -1064,6 +1071,7 @@ impl Default for NeoismAgentPane {
             file_mention_root_pin: Mutex::new(None),
             event_stream: None,
             event_wake: None,
+            retry_reset_pending: false,
             session_cache: HashMap::new(),
             session_preloads_in_flight: BTreeSet::new(),
             session_preload_queue: VecDeque::new(),

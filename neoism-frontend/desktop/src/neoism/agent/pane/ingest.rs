@@ -168,6 +168,7 @@ impl NeoismAgentPane {
                     self.note_session_runtime_event(&stream_session_id);
                     self.terminal_idle_sessions
                         .insert(stream_session_id.clone());
+                    self.retry_reset_pending = false;
                     if stream_is_active {
                         let had_root_activity = self.streaming_state
                             != NeoismAgentStreamingState::Idle
@@ -211,6 +212,7 @@ impl NeoismAgentPane {
                     // stalled; the next part/idle event moves us back out.
                     let _ = attempt;
                     let reason = message.filter(|m| !m.is_empty());
+                    self.retry_reset_pending = true;
                     self.note_streaming(NeoismAgentStreamingState::Retrying, reason);
                     changed = true;
                 }
@@ -2352,12 +2354,24 @@ impl NeoismAgentPane {
         if message.kind == NeoismAgentMessageKind::Assistant
             && message.text.is_empty()
             && !message.id.is_empty()
-            && self
+        {
+            if let Some(index) = self
                 .messages
                 .iter()
-                .any(|existing| existing.id == message.id)
-        {
-            return;
+                .position(|existing| existing.id == message.id)
+            {
+                // A retry re-seeds this same part with empty text to wipe
+                // the partial reply before re-streaming; honor the wipe so
+                // the retried tokens don't append onto the partial. Outside
+                // a retry, a late empty snapshot must never regress text
+                // that already streamed.
+                if self.retry_reset_pending {
+                    self.retry_reset_pending = false;
+                    self.messages[index].text.clear();
+                    self.mark_timeline_message_dirty_at(index);
+                }
+                return;
+            }
         }
         if !message.id.is_empty() {
             if let Some(index) = self

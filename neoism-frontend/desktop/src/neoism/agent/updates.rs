@@ -312,6 +312,19 @@ pub(super) fn start_session_event_stream(
     server: String,
     session_id: String,
 ) -> AgentSessionEventStream {
+    start_session_event_stream_with_reconcile(server, session_id, false)
+}
+
+/// Start a stream whose FIRST successful connect already performs the
+/// reconnect reconciliation (status + transcript refetch). Used by the
+/// pane's liveness watchdog when it force-resubscribes a wedged stream —
+/// whatever was missed while wedged is recovered exactly like a normal
+/// reconnect.
+pub(super) fn start_session_event_stream_with_reconcile(
+    server: String,
+    session_id: String,
+    reconcile_first_connect: bool,
+) -> AgentSessionEventStream {
     let (tx, rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stream_stop = stop.clone();
@@ -332,6 +345,7 @@ pub(super) fn start_session_event_stream(
                 stream_stop,
                 stream_known_child_session_ids,
                 stream_wake,
+                reconcile_first_connect,
             );
         })
     {
@@ -430,6 +444,7 @@ fn push_coalesced_update(out: &mut Vec<AgentSessionUpdate>, update: AgentSession
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_event_stream(
     server: String,
     session_id: String,
@@ -437,8 +452,11 @@ fn run_event_stream(
     stop: Arc<AtomicBool>,
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
+    reconcile_first_connect: bool,
 ) {
-    let mut connected_once = false;
+    // Treating the first connect as a "reconnect" runs the full status +
+    // transcript reconciliation immediately — the watchdog resubscribe path.
+    let mut connected_once = reconcile_first_connect;
     while !stop.load(Ordering::Relaxed) {
         match open_event_stream_with_deadline(&server, &session_id) {
             Ok(connection) => {

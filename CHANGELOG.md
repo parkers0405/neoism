@@ -2,6 +2,37 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.61] - 2026-08-27
+
+### Fixed
+
+- Fixed watched sessions freezing while the activity pill kept moving.
+  Three mechanisms were closed: transcript snapshots no longer run on the
+  SSE reader thread (a slow store read was stalling token delivery for
+  its whole duration), the scoped event stream caches foreign-session
+  verdicts instead of walking storage per event, and a lagged event
+  subscriber is disconnected for clean reconnect recovery instead of
+  continuing with a hole in its timeline. Two client-side watchdogs
+  remain as safety nets: a dead-socket detector and a stalled-stream
+  force-resubscribe with full reconciliation.
+- Fixed joined workspaces failing with daemon-credential errors after a
+  token rotation: every place a daemon token is signed or compared (the
+  websocket handshake, the agent proxy, credential minting, and agent
+  verification) now treats the on-disk token as the live trust root with
+  the startup environment as fallback.
+
+### SDK and API
+
+- Every message part now has a typed schema in the OpenAPI contract:
+  discriminated part union, status-discriminated tool states, and typed
+  step-finish token usage and cost. Part events carry the typed part.
+- Live events carry a wire-monotone sequence (durable rows persist the
+  same value), fixing SDK event streams that previously dropped every
+  event after the first; the SDK dedupes by event id and its event
+  subscription yields the typed union.
+- Added a runnable headless embedding example and handbook coverage for
+  embedding, hosted multi-tenant authentication, and API stability.
+
 ## [0.7.60] - 2026-08-27
 
 ### Fixed

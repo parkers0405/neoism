@@ -18,11 +18,15 @@ impl NeoismAgentPane {
         let mut delta_bytes = 0usize;
         let mut changed = include_outbound && self.drain_outbound_commands();
         changed |= self.drain_background_updates();
+        self.tick_stream_liveness();
         let Some(event_stream) = self.event_stream.as_mut() else {
             return changed;
         };
         let stream_session_id = event_stream.session_id().to_string();
         let (updates, stream_has_more) = event_stream.drain(MAX_STREAM_UPDATES_PER_FRAME);
+        if !updates.is_empty() {
+            self.last_stream_update_at = Some(Instant::now());
+        }
         let stream_is_active =
             self.session_id.as_deref() == Some(stream_session_id.as_str());
         for update in updates {
@@ -1782,6 +1786,76 @@ impl NeoismAgentPane {
         self.timeline_velocity_px_s = 0.0;
         self.timeline_last_tick_at = None;
         self.timeline_last_scroll_at = Some(Instant::now());
+    }
+
+    /// Liveness watchdog, called every frame the pane drains. When the pane
+    /// believes a run is active (the status pill is painted from a state we
+    /// reached via events or polling) but the event stream has delivered
+    /// NOTHING for the stall window, the stream is wedged in a way its own
+    /// reader cannot see — force a resubscribe whose first connect performs
+    /// the full reconnect reconciliation. This is the automated equivalent
+    /// of closing and reopening the chat.
+    pub(crate) fn tick_stream_liveness(&mut self) {
+        const STREAM_STALL_AFTER: std::time::Duration =
+            std::time::Duration::from_secs(40);
+        const RESUBSCRIBE_MIN_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(60);
+        if self.streaming_state == NeoismAgentStreamingState::Idle {
+            return;
+        }
+        let Some(session_id) = self.session_id.clone() else {
+            return;
+        };
+        if self.event_stream.is_none() {
+            return;
+        }
+        // Nothing drained yet at all: measure from when streaming began.
+        let last_signal = self
+            .last_stream_update_at
+            .or(self.streaming_state_changed_at)
+            .or(self.streaming_started_at);
+        let Some(last_signal) = last_signal else {
+            return;
+        };
+        if last_signal.elapsed() < STREAM_STALL_AFTER {
+            return;
+        }
+        if self
+            .last_stream_resubscribe_at
+            .is_some_and(|at| at.elapsed() < RESUBSCRIBE_MIN_INTERVAL)
+        {
+            return;
+        }
+        self.last_stream_resubscribe_at = Some(Instant::now());
+        tracing::warn!(
+            session_id = %session_id,
+            "agent event stream stalled while a run is active; forcing resubscribe"
+        );
+        self.force_resubscribe_session_updates(&session_id);
+    }
+
+    /// Tear down the current event stream and start a fresh subscription
+    /// whose first connect reconciles status + transcript like a reconnect.
+    pub(crate) fn force_resubscribe_session_updates(&mut self, session_id: &str) {
+        let known_child_session_ids = self
+            .side_panel
+            .subagents()
+            .iter()
+            .map(|entry| entry.id.clone())
+            .filter(|child_id| child_id != session_id)
+            .collect::<Vec<_>>();
+        self.event_stream = None;
+        let mut event_stream =
+            crate::neoism::agent::updates::start_session_event_stream_with_reconcile(
+                self.server.clone(),
+                session_id.to_string(),
+                true,
+            );
+        if let Some(wake) = self.event_wake.clone() {
+            event_stream.set_wake(wake);
+        }
+        event_stream.track_child_sessions(known_child_session_ids);
+        self.event_stream = Some(event_stream);
     }
 
     pub(crate) fn start_session_updates(&mut self, session_id: &str) {

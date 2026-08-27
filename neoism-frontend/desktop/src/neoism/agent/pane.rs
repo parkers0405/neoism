@@ -766,6 +766,15 @@ pub struct NeoismAgentPane {
     file_mention_root_pin: Mutex<Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
     event_stream: Option<AgentSessionEventStream>,
     event_wake: Option<AgentEventWake>,
+    /// When the most recent update was drained from the event stream.
+    /// Feeds the liveness watchdog: a session that claims active work but
+    /// whose stream has delivered nothing for too long gets a forced
+    /// resubscribe + transcript reconcile (the automated version of the
+    /// user closing and reopening the chat).
+    pub(super) last_stream_update_at: Option<Instant>,
+    /// Rate-limits forced resubscribes so a genuinely quiet-but-healthy
+    /// stream is not torn down repeatedly.
+    pub(super) last_stream_resubscribe_at: Option<Instant>,
     /// Set when the server reported a recoverable provider error and is
     /// retrying the in-flight run. The retry re-seeds the SAME text part
     /// with empty text to wipe the partial reply; the normal empty-snapshot
@@ -1071,6 +1080,8 @@ impl Default for NeoismAgentPane {
             file_mention_root_pin: Mutex::new(None),
             event_stream: None,
             event_wake: None,
+            last_stream_update_at: None,
+            last_stream_resubscribe_at: None,
             retry_reset_pending: false,
             session_cache: HashMap::new(),
             session_preloads_in_flight: BTreeSet::new(),

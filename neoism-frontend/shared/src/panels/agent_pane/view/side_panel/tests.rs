@@ -1,5 +1,5 @@
 use super::*;
-use crate::panels::agent_pane::state::side_panel::{GoalStatus, SidePanelMode};
+use crate::panels::agent_pane::state::side_panel::{GoalStatus, NeoismAgentSemanticMatch, SidePanelMode};
 
 struct TestPane {
     side_panel: NeoismAgentSidePanel,
@@ -665,4 +665,66 @@ fn content_scroll_clamps_to_known_overflow() {
     // Can't scroll past the top either.
     assert!(panel.scroll_content_pixels(-1000.0));
     assert_eq!(panel.content_scroll_px(), 0.0);
+}
+
+#[test]
+fn semantic_matches_inject_selectable_excerpt_rows_under_their_session() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![
+        NeoismAgentSessionEntry::new("ses-a", "Fix the parser", "1d"),
+        NeoismAgentSessionEntry::new("ses-b", "Unrelated title", "2d"),
+    ]);
+    panel.set_session_query("tokenizer".to_string());
+    // Title filter alone matches nothing.
+    assert!(panel.sessions().iter().all(|entry| entry.is_header || entry.title != "Unrelated title"));
+
+    panel.set_semantic_results(
+        "tokenizer".to_string(),
+        vec![NeoismAgentSemanticMatch {
+            session_id: "ses-b".to_string(),
+            excerpt: "we rewrote the   tokenizer
+to handle unicode boundaries".to_string(),
+            distance: 0.12,
+        }],
+    );
+
+    let rows = panel.sessions();
+    let session_ix = rows
+        .iter()
+        .position(|entry| entry.id == "ses-b" && !entry.is_excerpt)
+        .expect("semantically matched session joins the filtered list");
+    let excerpt = &rows[session_ix + 1];
+    assert!(excerpt.is_excerpt, "excerpt row renders under its session");
+    assert_eq!(excerpt.id, "ses-b", "activating the excerpt resumes the session");
+    assert_eq!(
+        excerpt.title,
+        "we rewrote the tokenizer to handle unicode boundaries",
+        "whitespace runs collapse to one displayable line"
+    );
+
+    // Typing past the fetched query drops the stale excerpt rows.
+    panel.set_session_query("tokenizer rewrite".to_string());
+    assert!(panel.sessions().iter().all(|entry| !entry.is_excerpt));
+}
+
+#[test]
+fn long_excerpts_truncate_on_a_char_boundary() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("ses-a", "Session", "1d")]);
+    panel.set_session_query("needle".to_string());
+    panel.set_semantic_results(
+        "needle".to_string(),
+        vec![NeoismAgentSemanticMatch {
+            session_id: "ses-a".to_string(),
+            excerpt: "ü".repeat(400),
+            distance: 0.2,
+        }],
+    );
+    let excerpt = panel
+        .sessions()
+        .iter()
+        .find(|entry| entry.is_excerpt)
+        .expect("excerpt row");
+    assert_eq!(excerpt.title.chars().count(), 141, "140 chars plus ellipsis");
+    assert!(excerpt.title.ends_with('…'));
 }

@@ -1365,7 +1365,15 @@ impl NeoismAgentPane {
                         Some(hits) => {
                             self.side_panel.set_semantic_results(
                                 query.clone(),
-                                hits.iter().map(|hit| hit.session_id.clone()).collect(),
+                                hits.iter()
+                                    .map(|hit| {
+                                        neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSemanticMatch {
+                                            session_id: hit.session_id.clone(),
+                                            excerpt: hit.excerpt.clone(),
+                                            distance: hit.distance,
+                                        }
+                                    })
+                                    .collect(),
                             );
                             self.apply_semantic_hits_to_session_picker(&query, &hits);
                         }

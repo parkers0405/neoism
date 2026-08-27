@@ -477,6 +477,13 @@ jobs:
        (needs.build.result == 'skipped' && needs.precheck.outputs.reuse_run != ''))
     runs-on: ubuntu-latest
     steps:
+      # Only CHANGELOG.md is needed here — it becomes the release body.
+      - name: Check out the changelog
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            CHANGELOG.md
+          sparse-checkout-cone-mode: false
       # Reuse path: the build matrix never ran, so attach the validated
       # same-commit run's artifacts to a fresh draft ourselves.
       - name: Attach reused artifacts to the draft release
@@ -489,6 +496,24 @@ jobs:
           gh release create "${{ github.ref_name }}" -R parkers0405/neoism \
             --draft --title "${{ github.ref_name }}" || true
           gh release upload "${{ github.ref_name }}" -R parkers0405/neoism --clobber artifacts/*/*
+      # The release body is the tag's section of CHANGELOG.md, so the notes
+      # are written once in the repo and reviewed like any other change.
+      - name: Set release notes from the changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { grab = 1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then
+            gh release edit "${GITHUB_REF_NAME}" -R parkers0405/neoism --notes-file notes.md
+          else
+            echo "No CHANGELOG.md section for ${VERSION}; leaving the release body empty."
+          fi
       - name: Undraft the dist release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

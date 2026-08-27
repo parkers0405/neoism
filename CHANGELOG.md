@@ -2,60 +2,94 @@
 
 All notable user-facing changes to Neoism are documented here.
 
-## [0.7.56] - 2026-08-27
+## [0.7.57] - 2026-08-27
 
-### Added
+This release ships the Agent V2 replatform: the agent server is now a
+plugin-first platform with one versioned API, one ordered event bus, a
+third-party plugin runtime, and a typed TypeScript SDK.
 
-- Rebuilt the agent server as the plugin-first V2 platform: providers, tools,
-  MCP, LSP, PTY, VCS, workflows, and configuration now load as internal
-  plugins in immutable per-workspace generations that reload live on
-  configuration changes.
-- Added the serve-plugin runtime for third-party plugins: long-lived
-  `neoism-plugin/2` processes registered from a command, a local entry file,
-  or an npm package, exposing tools, hooks, and event subscriptions. Plugin
-  failures degrade with a reason instead of failing the workspace.
-- Added the `@neoism/plugin` TypeScript authoring package
-  (`definePlugin`/`runPlugin`) alongside the typed SDK packages, with a
-  version-locked npm publish pipeline.
-- Typed the V2 event stream: every published event type is part of a
-  discriminated union in the committed OpenAPI document, and the SDK event
-  subscription yields the typed union with cursor-based reconnect.
-- Added TLS support to the desktop agent transport (`https://` servers).
-- Session search in the agent side panel now searches full transcripts:
-  matching excerpt chunks render under each session, word-wrapped to the
-  panel, with every occurrence of the search terms highlighted. Semantic
-  ranking blends in when an embeddings provider is configured; keyword
-  search works without one.
-- Multi-word transcript searches fall back to per-term matches when no
-  single message contains every word.
-- Documented the V2 platform in the bundled handbook: new Server and API,
-  Plugins, and SDK pages plus an architecture overview.
+### Agent V2 platform
 
-### Changed
+- Rebuilt the agent server around internal plugins: providers, tools, agents,
+  MCP, LSP, PTY, VCS, workflows, semantic search, configuration, and the
+  system prompt all load as plugins in immutable per-workspace generations
+  that reload live when configuration changes.
+- Every route is served through `/v2/` and described by a committed OpenAPI
+  document; a parity test keeps plugin-dispatched routes and the spec in
+  lockstep.
+- Replaced the split live/durable event channels with one ordered event bus:
+  snapshots and deltas broadcast synchronously in publish order, ending
+  freeze-then-double-stream artifacts and out-of-order thinking cards during
+  live streams.
+- Restored real-time token streaming cadence end to end.
+- The session coordinator is the sole in-memory authority on run ownership;
+  plugin session access is descriptor-validated.
+- Plugin generations retire only after active leases release, so in-flight
+  requests never race a configuration reload.
+- The Agent supervisor starts with the workspace daemon, and persisted Agent
+  settings project into V2 configuration.
 
-- Replaced the split live/durable agent event channels with one ordered
-  event bus: snapshots and deltas arrive in strict publish order, ending
-  freeze-then-double-stream artifacts and out-of-order thinking cards.
-- The session coordinator is now the sole in-memory authority on run
-  ownership.
-- Plugin-dispatched routes are validated against the OpenAPI document by a
-  parity test, and plugin session access is descriptor-validated.
-- Windows runs npm-based plugin installs and batch shims through `cmd /C`
-  with PATHEXT-aware resolution.
+### Third-party plugins
+
+- Added the serve-plugin runtime: long-lived `neoism-plugin/2` processes that
+  register tools, hooks, and event subscriptions over newline-delimited JSON
+  stdio.
+- Plugins load from a command, a local entry file, or an npm package; npm
+  installs happen in the background and the generation rebuilds live when the
+  install completes.
+- A failing plugin degrades with a visible reason instead of failing the
+  workspace.
+- Added the `@neoism/plugin` authoring package (`definePlugin`/`runPlugin`)
+  with an SDK client wired to the host server.
+- Windows resolves npm and batch shims through `cmd /C` with PATHEXT-aware
+  executable resolution.
+
+### SDK and typed events
+
+- Typed the V2 event stream: all 34 published event types form a
+  discriminated union in the OpenAPI document, exhaustively tested against
+  the server's event vocabulary.
+- The TypeScript SDK yields that typed union from its event subscription,
+  with automatic reconnect and a sequence cursor that deduplicates replays.
+- Session, message, artifact, permission, question, provider, catalog, and
+  plugin operations are all exposed through the generated typed client.
+- Added a version-locked npm publish pipeline for the SDK packages.
+- The desktop and shared frontends now consume `neoism-agent-core` types
+  directly for event classification and turn assembly.
+- Added TLS to the desktop agent transport for `https://` servers.
+
+### Transcript search
+
+- Session search in the agent side panel now searches full transcripts, not
+  just titles: matching excerpt chunks render under each session,
+  word-wrapped to the panel width.
+- Every occurrence of the search terms highlights inside the excerpts.
+- Semantic ranking blends in when an embeddings provider is configured;
+  keyword search works without one.
+- Multi-word searches fall back to per-term matches when no single message
+  contains every word.
 
 ### Fixed
 
 - New agent responses no longer inherit the previous response's execution
-  timer. Quiescence now settles from the queue worker's exit, exempts the
-  admitting prompt's own worker, and reconciles leaked `running` run rows
-  (for example from manual compaction) that silently blocked executions
-  from ever finishing.
+  timer: quiescence settles at queue-worker exit, exempts the admitting
+  prompt's own worker, and reconciles leaked `running` run rows that
+  silently blocked executions from ever finishing.
 - Manual compaction durably finishes its run record instead of leaking a
   permanently running row.
-- Transcript search no longer fails when plugin routes deliver numeric
-  query parameters as strings.
-- Restored real-time token streaming cadence and correct part ordering
-  during live streams.
+- Transcript search no longer fails when plugin routes deliver numeric query
+  parameters as strings.
+- Subagent activity status, timing, and live token streaming stabilized;
+  live agent timelines stay chronological and reasoning order survives
+  metadata arrival.
+- Notes vault tests no longer race process-global state.
+
+### Documentation
+
+- Documented the V2 platform in the bundled handbook: new Server and API,
+  Plugins, and SDK pages, an architecture overview, and refreshed Configure,
+  Tools, and MCP pages.
+- GitHub releases now carry these notes automatically from the changelog.
 
 ## [0.7.55] - 2026-08-24
 

@@ -148,6 +148,11 @@ pub(super) enum AgentSessionUpdate {
         /// races this live update is dropped. See `SidePanel::set_session_goal`.
         version: u64,
     },
+    SessionMetadataUpdated {
+        agent: Option<String>,
+        model: Option<String>,
+        thinking: Option<Option<String>>,
+    },
     ExecutionUpdated(Value),
     RuntimeUpdated(Value),
 }
@@ -1042,6 +1047,15 @@ fn send_event_updates(
             SessionEventUpdate::GoalUpdated { goal, version } => {
                 tx.send(AgentSessionUpdate::GoalUpdated { goal, version })?;
             }
+            SessionEventUpdate::SessionMetadataUpdated {
+                agent,
+                model,
+                thinking,
+            } => tx.send(AgentSessionUpdate::SessionMetadataUpdated {
+                agent,
+                model,
+                thinking,
+            })?,
             SessionEventUpdate::ExecutionUpdated(snapshot) => {
                 tx.send(AgentSessionUpdate::ExecutionUpdated(snapshot))?;
             }
@@ -1201,6 +1215,45 @@ mod tests {
             update,
             AgentSessionUpdate::ChildPartDelta { session_id, delta, .. }
                 if session_id == "child" && delta == "live after discovery"
+        )));
+    }
+
+    #[test]
+    fn session_model_and_thinking_metadata_reaches_desktop_queue() {
+        let (tx, rx) = mpsc::channel();
+
+        send_event_updates(
+            serde_json::json!({
+                "type": "session.updated",
+                "properties": {
+                    "sessionId": "root",
+                    "info": {
+                        "id": "root",
+                        "agent": "plan",
+                        "model": {
+                            "providerId": "openai",
+                            "id": "gpt-5.6",
+                            "variant": "high"
+                        },
+                        "time": { "updated": 1 }
+                    }
+                }
+            }),
+            "",
+            "root",
+            &tx,
+            &mut SessionEventUpdateState::default(),
+            &no_wake(),
+            &no_refresh_epoch(),
+        )
+        .unwrap();
+
+        assert!(rx.try_iter().any(|update| matches!(
+            update,
+            AgentSessionUpdate::SessionMetadataUpdated { agent, model, thinking }
+                if agent.as_deref() == Some("plan")
+                    && model.as_deref() == Some("openai/gpt-5.6")
+                    && thinking.as_ref().and_then(|value| value.as_deref()) == Some("high")
         )));
     }
 

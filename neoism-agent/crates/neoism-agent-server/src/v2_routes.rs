@@ -470,7 +470,8 @@ pub(crate) async fn v2_prompt(
     Json(mut request): Json<V2PromptRequest>,
 ) -> Result<Response, ApiError> {
     if let Some(Extension(claims)) = claims {
-        // `author` is authenticated transport identity, never caller JSON.
+        // Access-control identity remains `claims.subject`; message author is
+        // the participant's presence display label.
         bind_authenticated_author(&mut request, &claims);
     }
     let delivery = request.delivery.as_deref().unwrap_or("steer").to_string();
@@ -503,8 +504,32 @@ pub(crate) async fn v2_prompt_async(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn bind_authenticated_author(request: &mut V2PromptRequest, claims: &crate::caller::CallerClaims) {
-    request.author = Some(claims.subject.clone());
+fn bind_authenticated_author(
+    request: &mut V2PromptRequest,
+    claims: &crate::caller::CallerClaims,
+) {
+    // Workspace-scoped credentials are short-lived delegations minted by the
+    // authenticated host daemon. Their caller body carries the desktop's
+    // presence label (the same deterministic avatar seed used by multiplayer
+    // chrome/files), while `claims.subject` remains the stable actor used for
+    // authorization and audit. Conflating those two identities turned every
+    // legacy-token guest into `local-operator` and every paired guest into a
+    // device UUID in the transcript.
+    //
+    // Direct hosted API callers do not cross that trusted workspace proxy, so
+    // they retain the stricter subject-bound author behavior.
+    if claims.workspace_id.is_some() && claims.tenant_id.starts_with("workspace:") {
+        request.author = request
+            .author
+            .take()
+            .and_then(|author| {
+                let author = author.trim();
+                (!author.is_empty()).then(|| author.chars().take(32).collect())
+            })
+            .or_else(|| Some(claims.subject.clone()));
+    } else {
+        request.author = Some(claims.subject.clone());
+    }
 }
 
 #[cfg(test)]
@@ -512,7 +537,39 @@ mod authenticated_author_tests {
     use super::*;
 
     #[test]
-    fn caller_json_cannot_spoof_message_author() {
+    fn workspace_proxy_preserves_presence_label_separately_from_actor() {
+        let mut request = V2PromptRequest {
+            prompt: Some("hello".into()),
+            delivery: None,
+            message_id: None,
+            model: None,
+            agent: None,
+            no_reply: false,
+            system: None,
+            tools: None,
+            author: Some("  piss-desktop  ".into()),
+            parts: None,
+            variant: None,
+        };
+        let claims = crate::caller::CallerClaims {
+            subject: "device:authenticated".into(),
+            workspace_id: Some("workspace-a".into()),
+            tenant_id: "workspace:workspace-a".into(),
+            directory_prefixes: Vec::new(),
+            hosted: true,
+            max_sessions: None,
+            max_artifacts: None,
+            max_artifact_bytes: None,
+            artifact_retention_days: None,
+            requests_per_minute: None,
+            max_in_flight: None,
+        };
+        bind_authenticated_author(&mut request, &claims);
+        assert_eq!(request.author.as_deref(), Some("piss-desktop"));
+    }
+
+    #[test]
+    fn direct_hosted_caller_cannot_spoof_message_author() {
         let mut request = V2PromptRequest {
             prompt: Some("hello".into()),
             delivery: None,
@@ -523,6 +580,38 @@ mod authenticated_author_tests {
             system: None,
             tools: None,
             author: Some("forged-author".into()),
+            parts: None,
+            variant: None,
+        };
+        let claims = crate::caller::CallerClaims {
+            subject: "hosted:authenticated".into(),
+            workspace_id: None,
+            tenant_id: "hosted-tenant".into(),
+            directory_prefixes: Vec::new(),
+            hosted: true,
+            max_sessions: None,
+            max_artifacts: None,
+            max_artifact_bytes: None,
+            artifact_retention_days: None,
+            requests_per_minute: None,
+            max_in_flight: None,
+        };
+        bind_authenticated_author(&mut request, &claims);
+        assert_eq!(request.author.as_deref(), Some("hosted:authenticated"));
+    }
+
+    #[test]
+    fn workspace_proxy_without_presence_label_falls_back_to_actor() {
+        let mut request = V2PromptRequest {
+            prompt: Some("hello".into()),
+            delivery: None,
+            message_id: None,
+            model: None,
+            agent: None,
+            no_reply: false,
+            system: None,
+            tools: None,
+            author: Some("  ".into()),
             parts: None,
             variant: None,
         };

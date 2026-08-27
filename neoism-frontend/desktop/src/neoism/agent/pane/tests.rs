@@ -1105,6 +1105,11 @@ fn offscreen_root_stream_is_live_before_switching_back() {
                 }),
                 version: 9,
             },
+            AgentSessionUpdate::SessionMetadataUpdated {
+                agent: Some("plan".to_string()),
+                model: Some("openai/gpt-5.6".to_string()),
+                thinking: Some(Some("high".to_string())),
+            },
             AgentSessionUpdate::PartDelta {
                 message_id: Some("assistant-message".to_string()),
                 part_id: Some("answer".to_string()),
@@ -1129,6 +1134,9 @@ fn offscreen_root_stream_is_live_before_switching_back() {
             .map(|goal| goal.text.as_str()),
         Some("keep shipping")
     );
+    assert_eq!(pane.agent.as_deref(), Some("plan"));
+    assert_eq!(pane.model, "openai/gpt-5.6");
+    assert_eq!(pane.thinking.as_deref(), Some("high"));
     assert!(pane.runtime_status_requests.get("root").is_none());
 }
 
@@ -2061,6 +2069,25 @@ fn agent_model_and_thinking_changes_preserve_composer_draft() {
 fn with_directory_queues_config_defaults_for_runtime() {
     let mut pane = NeoismAgentPane::with_directory(Some("/tmp/project".to_string()));
 
+    assert_eq!(
+        pane.drain_pending_outbound(),
+        vec![OutboundAgentCommand::ApplyConfigDefaults]
+    );
+}
+
+#[test]
+fn switching_to_joined_agent_server_reloads_that_hosts_defaults() {
+    let mut pane = NeoismAgentPane::default();
+    pane.directory = Some("/tmp/project".to_string());
+    pane.model = "local/model".to_string();
+    pane.thinking = Some("high".to_string());
+
+    pane.switch_server("http://peer:7981/agent/workspaces/ws/".to_string());
+
+    assert_eq!(pane.server, "http://peer:7981/agent/workspaces/ws");
+    assert_eq!(pane.directory.as_deref(), Some("/tmp/project"));
+    assert!(pane.model.is_empty());
+    assert_eq!(pane.thinking, None);
     assert_eq!(
         pane.drain_pending_outbound(),
         vec![OutboundAgentCommand::ApplyConfigDefaults]

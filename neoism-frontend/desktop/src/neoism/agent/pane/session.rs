@@ -10,6 +10,11 @@ impl NeoismAgentPane {
         *self = Self::default();
         self.server = server;
         self.directory = directory;
+        // Construction queued defaults for the original (usually local)
+        // server. Retargeting replaces that channel and state, so hydrate the
+        // selected host as well; joined panes otherwise stay on
+        // "server default" / "none" while the host uses its configured model.
+        self.apply_config_defaults();
         // Keep server switching off the UI thread. The next visible sidebar
         // render calls `maybe_refresh_side_panel_sessions`, which paints its
         // unloaded skeleton immediately and hydrates the host's chats through

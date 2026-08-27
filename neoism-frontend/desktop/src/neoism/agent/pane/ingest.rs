@@ -479,6 +479,39 @@ impl NeoismAgentPane {
                     self.side_panel.set_session_goal(goal, version);
                     changed = true;
                 }
+                AgentSessionUpdate::SessionMetadataUpdated {
+                    agent,
+                    model,
+                    thinking,
+                } => {
+                    if !stream_is_active {
+                        let cached = self
+                            .session_cache
+                            .entry(stream_session_id.clone())
+                            .or_insert_with(CachedAgentSession::live_only);
+                        if let Some(agent) = agent {
+                            cached.state.agent = Some(agent);
+                        }
+                        if let Some(model) = model {
+                            cached.state.model = Some(model);
+                        }
+                        if let Some(thinking) = thinking {
+                            cached.state.thinking = thinking;
+                        }
+                        continue;
+                    }
+                    if let Some(agent) = agent {
+                        self.agent = Some(agent);
+                    }
+                    if let Some(model) = model {
+                        self.model = model;
+                        self.execute_refresh_model_context_limit_command();
+                    }
+                    if let Some(thinking) = thinking {
+                        self.thinking = thinking;
+                    }
+                    changed = true;
+                }
                 AgentSessionUpdate::ExecutionUpdated(snapshot) => {
                     if let Some(activity) = super::super::api::execution_activity_from_json(&snapshot)
                     {

@@ -367,6 +367,19 @@ async fn release_owned_compaction_run(
     let Some(run_id) = owned_run_id else {
         return;
     };
+    // Durable finish FIRST, mirroring `try_finish_session_run`. Manual
+    // compaction wrote a store run row on start; releasing only the in-memory
+    // slot left that row 'running' forever, which vetoes
+    // `mark_execution_finished`'s guard — the execution then never settles and
+    // every later prompt inherits its timer.
+    if let Err(error) = state
+        .inner
+        .store
+        .finish_run(&run_id, "completed", None)
+        .await
+    {
+        tracing::warn!(%error, %session_id, %run_id, "failed to durably finish compaction run");
+    }
     state
         .inner
         .session_coordinator
@@ -1346,6 +1359,73 @@ mod tests {
         plugin_system_messages(&system_prompt_snapshot(), info, "stub", true)
             .into_iter()
             .find(|message| message.content.contains("Persistent goal"))
+    }
+
+    #[tokio::test]
+    async fn releasing_owned_compaction_run_finalizes_the_store_row() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-compaction-release-{}.sqlite3",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        let state = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        let now = crate::now_millis();
+        let session = SessionInfo {
+            id: neoism_agent_core::new_session_id(),
+            slug: "compact-release".into(),
+            project_id: "global".into(),
+            workspace_id: None,
+            directory: "/tmp".into(),
+            path: None,
+            parent_id: None,
+            title: "Compact release".into(),
+            agent: None,
+            model: None,
+            version: env!("CARGO_PKG_VERSION").into(),
+            time: neoism_agent_core::TimeInfo {
+                created: now,
+                updated: now,
+                compacting: None,
+                archived: None,
+            },
+            permission: None,
+            extra: std::collections::BTreeMap::new(),
+        };
+        state.inner.store.insert_session(&session).await.unwrap();
+        let session_id = session.id.to_string();
+        let run = crate::state::SessionRun {
+            id: "owned-compaction-run".to_string(),
+            started_at: now,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        state
+            .inner
+            .session_coordinator
+            .try_start_run(&session_id, run.clone())
+            .await
+            .unwrap();
+        state.inner.store.start_run(&run.id, &session_id).await.unwrap();
+
+        release_owned_compaction_run(&state, &session_id, Some(run.id.clone())).await;
+
+        // The in-memory slot is free again AND the store row is finalized —
+        // a 'running' leftover would veto execution settling forever.
+        assert!(state
+            .inner
+            .session_coordinator
+            .active_run(&session_id)
+            .await
+            .is_none());
+        let statuses = state
+            .inner
+            .store
+            .session_run_statuses(&session_id)
+            .await
+            .unwrap();
+        assert_eq!(statuses, vec![("owned-compaction-run".to_string(), "completed".to_string())]);
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

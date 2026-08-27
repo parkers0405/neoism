@@ -198,10 +198,15 @@ pub(crate) async fn v2_events(
             let live = match receiver.recv().await {
                 Ok(live) => live,
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    // Dropped events are reconciled by the client's idle
-                    // refresh; delivery order is preserved for what remains.
-                    tracing::warn!(skipped, "v2 event subscriber lagged; dropping events");
-                    continue;
+                    // Live deltas are transient, so continuing would leave
+                    // this connection looking healthy with a permanent hole
+                    // in its timeline. End it and let the client reconnect +
+                    // reconcile the transcript from a fresh subscription.
+                    tracing::warn!(
+                        skipped,
+                        "v2 event subscriber lagged; closing stream for recovery"
+                    );
+                    break;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };

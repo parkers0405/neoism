@@ -1489,6 +1489,58 @@ async fn foreign_session_verdicts_are_cached_per_connection() {
 }
 
 #[tokio::test]
+async fn v2_event_stream_closes_on_receiver_lag_so_client_can_reconcile() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-lagged-events-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let session = store_test_session(&session_id, now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+
+    // Creating the response installs the broadcast receiver. Leave the body
+    // unpolled while publishing one more event than it can retain, reproducing
+    // a UI subscriber stalled by a transcript reconciliation read.
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v2/events?sessionId={}&tail=true", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    for index in 0..=crate::state::EVENT_BROADCAST_CAPACITY {
+        state.publish_live(EventPayload::new(
+            event_type::MESSAGE_PART_DELTA,
+            json!({
+                "sessionID": session_id,
+                "messageID": "message-live",
+                "partID": "part-live",
+                "field": "text",
+                "delta": index.to_string()
+            }),
+        ));
+    }
+
+    let next = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("lagged stream termination should be observable");
+    assert!(
+        next.is_none(),
+        "a lagged stream must close instead of silently skipping live deltas"
+    );
+
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn v2_live_events_carry_monotone_wire_sequences() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-wire-seq-{}.sqlite3",

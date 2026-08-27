@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use turso::Value as SqlValue;
 
+pub(crate) const EVENT_BROADCAST_CAPACITY: usize = 16_384;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -411,9 +412,11 @@ impl AppState {
     ) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&artifact_root).await?;
         // Single ordered bus for every event (live deltas + committed edges).
-        // Capacity must absorb a full streaming burst per subscriber; lagging
-        // drops events for that subscriber only, reconciled by idle refresh.
-        let (events, _) = broadcast::channel(16_384);
+        // Capacity must absorb a full streaming burst per subscriber. A
+        // subscriber that exceeds it is disconnected so reconnect recovery
+        // can reconcile the lost transient deltas instead of silently
+        // continuing with a permanently incomplete timeline.
+        let (events, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
         let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> =
             Arc::new(neoism_agent_builtins::ProviderPlatform::from_env());

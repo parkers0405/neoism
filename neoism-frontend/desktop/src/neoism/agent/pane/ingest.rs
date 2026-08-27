@@ -1837,13 +1837,7 @@ impl NeoismAgentPane {
     /// Tear down the current event stream and start a fresh subscription
     /// whose first connect reconciles status + transcript like a reconnect.
     pub(crate) fn force_resubscribe_session_updates(&mut self, session_id: &str) {
-        let known_child_session_ids = self
-            .side_panel
-            .subagents()
-            .iter()
-            .map(|entry| entry.id.clone())
-            .filter(|child_id| child_id != session_id)
-            .collect::<Vec<_>>();
+        let known_child_session_ids = self.tracked_sessions_for_stream(session_id);
         self.event_stream = None;
         let mut event_stream =
             crate::neoism::agent::updates::start_session_event_stream_with_reconcile(
@@ -1859,13 +1853,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn start_session_updates(&mut self, session_id: &str) {
-        let known_child_session_ids = self
-            .side_panel
-            .subagents()
-            .iter()
-            .map(|entry| entry.id.clone())
-            .filter(|child_id| child_id != session_id)
-            .collect::<Vec<_>>();
+        let known_child_session_ids = self.tracked_sessions_for_stream(session_id);
         let previous_session_id = self
             .event_stream
             .as_ref()
@@ -1902,6 +1890,34 @@ impl NeoismAgentPane {
                 "agent event stream start"
             );
         }
+    }
+
+    /// Sessions whose events arrive over a family-root subscription. The
+    /// roster is hydrated asynchronously, so the session currently on screen
+    /// must be seeded explicitly when it differs from the subscribed root.
+    /// Otherwise early child deltas remain in the decoder's unknown-session
+    /// queue while root status events continue to animate the activity pill.
+    pub(super) fn tracked_sessions_for_stream(
+        &self,
+        stream_session_id: &str,
+    ) -> Vec<String> {
+        let mut session_ids = self
+            .side_panel
+            .subagents()
+            .iter()
+            .map(|entry| entry.id.clone())
+            .filter(|child_id| child_id != stream_session_id)
+            .collect::<Vec<_>>();
+        if let Some(viewed_session_id) = self
+            .session_id
+            .as_ref()
+            .filter(|viewed_session_id| viewed_session_id.as_str() != stream_session_id)
+        {
+            if !session_ids.contains(viewed_session_id) {
+                session_ids.push(viewed_session_id.clone());
+            }
+        }
+        session_ids
     }
 
     pub(crate) fn set_event_wake(&mut self, wake: AgentEventWake) {

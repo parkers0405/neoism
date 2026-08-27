@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -460,6 +460,7 @@ fn run_event_stream(
     while !stop.load(Ordering::Relaxed) {
         match open_event_stream_with_deadline(&server, &session_id) {
             Ok(connection) => {
+                let message_refresh_epoch = Arc::new(AtomicU64::new(0));
                 if connected_once {
                     // The stream is subscribed before the snapshot is fetched, so live
                     // events cannot slip between reconnect and reconciliation.
@@ -467,55 +468,33 @@ fn run_event_stream(
                         return;
                     }
                     let statuses = fetch_session_statuses(&server).ok();
-                    match fetch_session_messages_page(&server, &session_id, None, 80) {
-                        Ok(page) => {
-                            // An idle session is absent from `/session/status`. Recover
-                            // the terminal signal as well as its transcript after a
-                            // reconnect; otherwise a dropped final `session.status`
-                            // event can leave Crafting/Tinkering painted forever.
-                            let session_is_idle =
-                                statuses.as_ref().is_some_and(|statuses| {
-                                    statuses.get(&session_id).is_none_or(|status| {
-                                        !matches!(status.kind.as_str(), "busy" | "retry")
-                                    })
-                                });
-                            if session_is_idle
-                                && tx.send(AgentSessionUpdate::SessionIdle).is_err()
-                            {
-                                return;
-                            }
-                            if tx
-                                .send(AgentSessionUpdate::Messages {
-                                    messages: page.blocks,
-                                    oldest_cursor: page.oldest_cursor,
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        Err(error) if !stop.load(Ordering::Relaxed) => {
-                            let _ = tx.send(AgentSessionUpdate::System {
-                                title: "Neoism".to_string(),
-                                body: error,
-                            });
-                        }
-                        Err(_) => return,
+                    // An idle session is absent from `/session/status`. Recover
+                    // the terminal signal after reconnect; otherwise a dropped
+                    // final status event can leave Crafting painted forever.
+                    let session_is_idle = statuses.as_ref().is_some_and(|statuses| {
+                        statuses.get(&session_id).is_none_or(|status| {
+                            !matches!(status.kind.as_str(), "busy" | "retry")
+                        })
+                    });
+                    if session_is_idle
+                        && tx.send(AgentSessionUpdate::SessionIdle).is_err()
+                    {
+                        return;
                     }
                     let known_children = known_child_session_ids
                         .lock()
                         .map(|known| known.iter().cloned().collect::<Vec<_>>())
                         .unwrap_or_default();
-                    for child_id in known_children {
+                    for child_id in &known_children {
                         if let Some(statuses) = statuses.as_ref() {
                             // `/session/status` is the live run set. A known
                             // child omitted from a successful snapshot is idle.
                             let (status, started_at) =
-                                reconnect_child_status(statuses, &child_id)
+                                reconnect_child_status(statuses, child_id)
                                     .unwrap_or_else(|| ("completed".to_string(), None));
                             if tx
                                 .send(AgentSessionUpdate::SubagentStatus {
-                                    session_id: child_id.clone(),
+                                    session_id: child_id.to_string(),
                                     status,
                                     started_at,
                                     title: None,
@@ -526,21 +505,29 @@ fn run_event_stream(
                                 return;
                             }
                         }
-                        if let Ok(page) =
-                            fetch_session_messages_page(&server, &child_id, None, 80)
-                        {
-                            if tx
-                                .send(AgentSessionUpdate::ChildMessages {
-                                    session_id: child_id,
-                                    messages: page.blocks,
-                                    oldest_cursor: page.oldest_cursor,
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
                     }
+                    wake_event_loop(&wake);
+
+                    // Message REST reads can take ten seconds while the store
+                    // is busy (especially around provider retries). Never do
+                    // them on the one thread draining the SSE socket: that
+                    // creates a healthy-looking activity pill with no token
+                    // delivery. The stream is already subscribed, and pane
+                    // reconciliation preserves any text that arrives before
+                    // these snapshots complete.
+                    let mut refreshes = Vec::with_capacity(known_children.len() + 1);
+                    refreshes.push((session_id.clone(), None));
+                    refreshes.extend(known_children.into_iter().map(|id| (id, None)));
+                    spawn_message_refreshes(
+                        server.clone(),
+                        session_id.clone(),
+                        refreshes,
+                        tx.clone(),
+                        stop.clone(),
+                        wake.clone(),
+                        message_refresh_epoch.clone(),
+                        0,
+                    );
                 }
                 connected_once = true;
                 read_event_stream(
@@ -551,7 +538,10 @@ fn run_event_stream(
                     stop.clone(),
                     known_child_session_ids.clone(),
                     wake.clone(),
+                    message_refresh_epoch.clone(),
                 );
+                // Cancel a snapshot still in flight from this connection.
+                message_refresh_epoch.fetch_add(1, Ordering::AcqRel);
             }
             Err(error) if !connected_once && !stop.load(Ordering::Relaxed) => {
                 let _ = tx.send(AgentSessionUpdate::System {
@@ -624,6 +614,7 @@ fn read_event_stream(
     stop: Arc<AtomicBool>,
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
+    message_refresh_epoch: Arc<AtomicU64>,
 ) {
     read_event_stream_with_staleness(
         connection,
@@ -633,6 +624,7 @@ fn read_event_stream(
         stop,
         known_child_session_ids,
         wake,
+        message_refresh_epoch,
         EVENT_STREAM_STALE_AFTER,
     );
 }
@@ -646,6 +638,7 @@ fn read_event_stream_with_staleness(
     stop: Arc<AtomicBool>,
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
+    message_refresh_epoch: Arc<AtomicU64>,
     stale_after: Duration,
 ) {
     let mut chunked = ChunkedDecoder::new(connection.chunked);
@@ -668,6 +661,7 @@ fn read_event_stream_with_staleness(
                 &known_child_session_ids,
                 &mut pending_unknown_events,
                 &wake,
+                &message_refresh_epoch,
             ) {
                 return;
             }
@@ -692,6 +686,7 @@ fn read_event_stream_with_staleness(
                         &known_child_session_ids,
                         &mut pending_unknown_events,
                         &wake,
+                        &message_refresh_epoch,
                     ) {
                         return;
                     }
@@ -731,6 +726,7 @@ fn process_sse_bytes(
     known_child_session_ids: &Arc<Mutex<HashSet<String>>>,
     pending_unknown_events: &mut VecDeque<Value>,
     wake: &Arc<Mutex<Option<AgentEventWake>>>,
+    message_refresh_epoch: &Arc<AtomicU64>,
 ) -> bool {
     for event in sse.feed(bytes) {
         sync_tracked_child_sessions(state, known_child_session_ids);
@@ -741,13 +737,24 @@ fn process_sse_bytes(
             tx,
             state,
             wake,
+            message_refresh_epoch,
         )
         .is_err()
         {
             return true;
         }
         if matches_session(&event, session_id, state.child_session_ids()) {
-            if send_event_updates(event, server, session_id, tx, state, wake).is_err() {
+            if send_event_updates(
+                event,
+                server,
+                session_id,
+                tx,
+                state,
+                wake,
+                message_refresh_epoch,
+            )
+            .is_err()
+            {
                 return true;
             }
         } else {
@@ -766,6 +773,7 @@ fn process_sse_bytes(
             tx,
             state,
             wake,
+            message_refresh_epoch,
         )
         .is_err()
         {
@@ -791,11 +799,20 @@ fn replay_known_session_events(
     tx: &Sender<AgentSessionUpdate>,
     state: &mut SessionEventUpdateState,
     wake: &Arc<Mutex<Option<AgentEventWake>>>,
+    message_refresh_epoch: &Arc<AtomicU64>,
 ) -> Result<(), mpsc::SendError<AgentSessionUpdate>> {
     let mut still_unknown = VecDeque::with_capacity(pending.len());
     while let Some(event) = pending.pop_front() {
         if matches_session(&event, session_id, state.child_session_ids()) {
-            send_event_updates(event, server, session_id, tx, state, wake)?;
+            send_event_updates(
+                event,
+                server,
+                session_id,
+                tx,
+                state,
+                wake,
+                message_refresh_epoch,
+            )?;
         } else {
             still_unknown.push_back(event);
         }
@@ -811,29 +828,33 @@ fn send_event_updates(
     tx: &Sender<AgentSessionUpdate>,
     state: &mut SessionEventUpdateState,
     wake: &Arc<Mutex<Option<AgentEventWake>>>,
+    message_refresh_epoch: &Arc<AtomicU64>,
 ) -> Result<(), mpsc::SendError<AgentSessionUpdate>> {
+    // Every newly handled SSE event supersedes transcript snapshots launched
+    // by older events. The worker checks this epoch after its blocking REST
+    // read so an old idle/reconnect snapshot can never overwrite a newer run.
+    let event_epoch = message_refresh_epoch.fetch_add(1, Ordering::AcqRel) + 1;
     for update in classify_session_event(event, session_id, state) {
         match update {
             SessionEventUpdate::SessionIdle { refresh_messages } => {
-                if refresh_messages {
-                    if let Ok(page) =
-                        fetch_session_messages_page(server, session_id, None, 80)
-                    {
-                        // Settle the activity chrome before exposing the completed
-                        // response snapshot. Sending these in the opposite order
-                        // allowed one rendered frame with a final-response footer
-                        // and the previous Crafting/Tinkering label simultaneously.
-                        tx.send(AgentSessionUpdate::SessionIdle)?;
-                        tx.send(AgentSessionUpdate::Messages {
-                            messages: page.blocks,
-                            oldest_cursor: page.oldest_cursor,
-                        })?;
-                        state.mark_idle_messages_refreshed();
-                        wake_event_loop(wake);
-                        continue;
-                    }
-                }
+                // Settle the activity chrome immediately, then refresh the
+                // completed transcript away from the SSE reader. A slow REST
+                // snapshot must never stop this connection from consuming the
+                // next run's live deltas.
                 tx.send(AgentSessionUpdate::SessionIdle)?;
+                if refresh_messages {
+                    state.mark_idle_messages_refreshed();
+                    spawn_message_refreshes(
+                        server.to_string(),
+                        session_id.to_string(),
+                        vec![(session_id.to_string(), None)],
+                        tx.clone(),
+                        Arc::new(AtomicBool::new(false)),
+                        wake.clone(),
+                        message_refresh_epoch.clone(),
+                        event_epoch,
+                    );
+                }
             }
             SessionEventUpdate::ChildRunIdle { session_id } => {
                 tx.send(AgentSessionUpdate::ChildRunIdle { session_id })?;
@@ -909,33 +930,25 @@ fn send_event_updates(
                 kind,
                 usage,
             } => {
-                if let Ok(page) =
-                    fetch_session_messages_page(server, &owner_session_id, None, 80)
-                {
-                    let messages = if let Some(usage) = usage {
-                        with_compaction_usage(page.blocks, usage.into())
-                    } else {
-                        page.blocks
-                    };
-                    if owner_session_id == session_id {
-                        tx.send(AgentSessionUpdate::Messages {
-                            messages,
-                            oldest_cursor: page.oldest_cursor,
-                        })?;
-                        state.mark_idle_messages_refreshed();
-                    } else {
-                        tx.send(AgentSessionUpdate::ChildMessages {
-                            session_id: owner_session_id.clone(),
-                            messages,
-                            oldest_cursor: page.oldest_cursor,
-                        })?;
-                    }
+                let refresh_usage = usage.map(Into::into);
+                if owner_session_id == session_id {
+                    state.mark_idle_messages_refreshed();
                 }
                 tx.send(AgentSessionUpdate::CompactionEnded {
-                    session_id: owner_session_id,
+                    session_id: owner_session_id.clone(),
                     summary,
                     kind,
                 })?;
+                spawn_message_refreshes(
+                    server.to_string(),
+                    session_id.to_string(),
+                    vec![(owner_session_id, refresh_usage)],
+                    tx.clone(),
+                    Arc::new(AtomicBool::new(false)),
+                    wake.clone(),
+                    message_refresh_epoch.clone(),
+                    event_epoch,
+                );
             }
             SessionEventUpdate::System { title, body } => {
                 tx.send(AgentSessionUpdate::System { title, body })?;
@@ -1041,6 +1054,57 @@ fn send_event_updates(
     Ok(())
 }
 
+fn spawn_message_refreshes(
+    server: String,
+    stream_session_id: String,
+    refreshes: Vec<(String, Option<super::pane::NeoismAgentUsage>)>,
+    tx: Sender<AgentSessionUpdate>,
+    stop: Arc<AtomicBool>,
+    wake: Arc<Mutex<Option<AgentEventWake>>>,
+    message_refresh_epoch: Arc<AtomicU64>,
+    expected_epoch: u64,
+) {
+    let thread_name = format!("neoism-agent-refresh-{stream_session_id}");
+    let _ = thread::Builder::new().name(thread_name).spawn(move || {
+        for (owner_session_id, usage) in refreshes {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let Ok(page) =
+                fetch_session_messages_page(&server, &owner_session_id, None, 80)
+            else {
+                continue;
+            };
+            if stop.load(Ordering::Relaxed)
+                || message_refresh_epoch.load(Ordering::Acquire) != expected_epoch
+            {
+                return;
+            }
+            let messages = if let Some(usage) = usage {
+                with_compaction_usage(page.blocks, usage)
+            } else {
+                page.blocks
+            };
+            let update = if owner_session_id == stream_session_id {
+                AgentSessionUpdate::Messages {
+                    messages,
+                    oldest_cursor: page.oldest_cursor,
+                }
+            } else {
+                AgentSessionUpdate::ChildMessages {
+                    session_id: owner_session_id,
+                    messages,
+                    oldest_cursor: page.oldest_cursor,
+                }
+            };
+            if tx.send(update).is_err() {
+                return;
+            }
+            wake_event_loop(&wake);
+        }
+    });
+}
+
 fn wake_event_loop(wake: &Arc<Mutex<Option<AgentEventWake>>>) {
     if let Ok(wake) = wake.lock() {
         if let Some(wake) = wake.as_ref() {
@@ -1097,6 +1161,10 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    fn no_refresh_epoch() -> Arc<AtomicU64> {
+        Arc::new(AtomicU64::new(0))
+    }
+
     #[test]
     fn unknown_child_event_replays_after_late_tree_discovery() {
         let event = serde_json::json!({
@@ -1124,6 +1192,7 @@ mod tests {
             &tx,
             &mut state,
             &no_wake(),
+            &no_refresh_epoch(),
         )
         .unwrap();
 
@@ -1167,6 +1236,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(Mutex::new(None)),
+            no_refresh_epoch(),
             Duration::from_millis(300),
         );
         let elapsed = started.elapsed();
@@ -1182,8 +1252,162 @@ mod tests {
     }
 
     #[test]
+    fn idle_snapshot_does_not_block_the_live_event_reader() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let (request_started_tx, request_started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let responder = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).unwrap();
+            request_started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let body = r#"{"items":[]}"#;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let (tx, rx) = mpsc::channel();
+        let mut state = SessionEventUpdateState::default();
+        let refresh_epoch = no_refresh_epoch();
+        let started = Instant::now();
+
+        send_event_updates(
+            serde_json::json!({
+                "type": "session.status",
+                "properties": {
+                    "sessionID": "root",
+                    "status": { "type": "idle" }
+                }
+            }),
+            &server,
+            "root",
+            &tx,
+            &mut state,
+            &no_wake(),
+            &refresh_epoch,
+        )
+        .unwrap();
+
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the SSE reader waited for the transcript REST response"
+        );
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(500)),
+            Ok(AgentSessionUpdate::SessionIdle)
+        ));
+        request_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("background transcript request should start");
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok(AgentSessionUpdate::Messages { .. })
+        ));
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn newer_live_event_cancels_an_inflight_idle_snapshot() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let (request_started_tx, request_started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let responder = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).unwrap();
+            request_started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let body = r#"{"items":[]}"#;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let (tx, rx) = mpsc::channel();
+        let mut state = SessionEventUpdateState::default();
+        let refresh_epoch = no_refresh_epoch();
+
+        send_event_updates(
+            serde_json::json!({
+                "type": "session.status",
+                "properties": {
+                    "sessionID": "root",
+                    "status": { "type": "idle" }
+                }
+            }),
+            &server,
+            "root",
+            &tx,
+            &mut state,
+            &no_wake(),
+            &refresh_epoch,
+        )
+        .unwrap();
+        request_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("background transcript request should start");
+
+        send_event_updates(
+            serde_json::json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "root",
+                    "messageID": "new-message",
+                    "partID": "new-part",
+                    "partType": "text",
+                    "field": "text",
+                    "delta": "new run token"
+                }
+            }),
+            &server,
+            "root",
+            &tx,
+            &mut state,
+            &no_wake(),
+            &refresh_epoch,
+        )
+        .unwrap();
+        release_tx.send(()).unwrap();
+        responder.join().unwrap();
+
+        let updates = (0..2)
+            .map(|_| {
+                rx.recv_timeout(Duration::from_secs(2))
+                    .expect("idle and newer delta should both be delivered")
+            })
+            .collect::<Vec<_>>();
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            AgentSessionUpdate::PartDelta { delta, .. } if delta == "new run token"
+        )));
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_millis(500)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a snapshot requested by the prior idle event must not overwrite a newer run"
+        );
+    }
+
+    #[test]
     fn deltas_still_flow_after_provider_error_and_retry_sequence() {
         let wake = Arc::new(Mutex::new(None));
+        let refresh_epoch = no_refresh_epoch();
         let (tx, rx) = mpsc::channel();
         let mut state = SessionEventUpdateState::default();
         let events = [
@@ -1196,9 +1420,11 @@ mod tests {
             serde_json::json!({"type": "message.part.delta", "properties": {"sessionID": "root", "messageID": "msg-a", "partID": "part-t", "partType": "text", "field": "text", "delta": "fresh"}}),
         ];
         for event in events {
-            send_event_updates(event, "", "root", &tx, &mut state, &wake).unwrap();
+            send_event_updates(event, "", "root", &tx, &mut state, &wake, &refresh_epoch)
+                .unwrap();
         }
-        let updates: Vec<AgentSessionUpdate> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let updates: Vec<AgentSessionUpdate> =
+            std::iter::from_fn(|| rx.try_recv().ok()).collect();
         let deltas: Vec<&str> = updates
             .iter()
             .filter_map(|update| match update {
@@ -1233,6 +1459,7 @@ mod tests {
             wake_count_for_callback.fetch_add(1, Ordering::Relaxed);
         }))));
         let (tx, rx) = mpsc::channel();
+        let refresh_epoch = no_refresh_epoch();
 
         send_event_updates(
             event,
@@ -1241,6 +1468,7 @@ mod tests {
             &tx,
             &mut SessionEventUpdateState::default(),
             &wake,
+            &refresh_epoch,
         )
         .unwrap();
 
@@ -1266,6 +1494,7 @@ mod tests {
             &tx,
             &mut SessionEventUpdateState::default(),
             &wake,
+            &refresh_epoch,
         )
         .unwrap();
         assert_eq!(wake_count.load(Ordering::Relaxed), 1);

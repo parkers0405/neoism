@@ -1133,6 +1133,41 @@ fn offscreen_root_stream_is_live_before_switching_back() {
 }
 
 #[test]
+fn parented_view_is_tracked_before_its_roster_hydrates() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".to_string());
+    pane.parent_session_id = Some("root".to_string());
+    pane.session_tree_root_id = Some("root".to_string());
+    pane.messages = vec![NeoismAgentMessage::user("question")];
+
+    // A cached activation can start the family-root stream before the async
+    // subagent roster contains the viewed child. Seeded ownership is what
+    // lets the stream decoder classify the child's very first delta.
+    assert_eq!(
+        pane.tracked_sessions_for_stream("root"),
+        vec!["child".to_string()]
+    );
+
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [AgentSessionUpdate::ChildPartDelta {
+            session_id: "child".to_string(),
+            message_id: Some("assistant-message".to_string()),
+            part_id: Some("answer".to_string()),
+            kind: Some("text".to_string()),
+            delta: "visible child token".to_string(),
+        }],
+    ));
+
+    assert!(pane.drain_server_updates());
+    assert!(pane
+        .messages
+        .iter()
+        .any(|message| message.text == "visible child token"));
+    assert!(!pane.session_cache.contains_key("child"));
+}
+
+#[test]
 fn child_completion_and_parent_continuation_stay_live_during_child_view() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("child".to_string());

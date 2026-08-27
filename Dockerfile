@@ -13,7 +13,13 @@ COPY . .
 # Capped parallelism: an uncapped release build inside the container
 # saturates every host core (opt-level=3, codegen-units=1 on the heavy
 # deps) and starves the desktop the developer is actively using.
-RUN CARGO_BUILD_JOBS=4 cargo build --release -p neoism-workspace-daemon -p neoism-agent
+# The workspace release profile (fat LTO, codegen-units=1, full debuginfo)
+# OOM-kills hosted runners — the same override release-neoism.yml uses.
+RUN CARGO_BUILD_JOBS=4 \
+    CARGO_PROFILE_RELEASE_DEBUG=0 \
+    CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+    cargo build --release -p neoism-workspace-daemon -p neoism-agent
 
 FROM debian:bookworm-slim AS runtime
 

@@ -1,5 +1,6 @@
 use super::sections::{render_directory_section, render_section_header, SECTION_GAP};
 use super::*;
+use crate::panels::agent_pane::view::draw::measure_text_cached;
 
 const SCRAMBLE_MS: f32 = 320.0;
 const SCRAMBLE_GLYPHS: &[char] = &['#', '@', '%', '&', '*', '+', '?', '/', '~', '='];
@@ -750,14 +751,68 @@ pub(crate) fn render_sessions_list(
             let excerpt_x = title_x + 10.0 * s;
             let excerpt_w = text_w - dot_gutter - 10.0 * s;
             let label = truncate_to_fit(&entry.title, excerpt_w, sugarloaf, &excerpt_opts);
-            draw_text_with_occlusion(
-                sugarloaf,
-                excerpt_x,
-                text_y,
-                &label,
-                &excerpt_opts,
-                occlusion_rects,
-            );
+            // Matched search terms render as bright segments over a soft
+            // accent wash — the excerpt reads like a real search result.
+            // Lines are pre-wrapped to the measured budget, so truncation
+            // is the rare case; when it fires, highlight offsets no longer
+            // line up with the label and we fall back to the flat draw.
+            if entry.highlights.is_empty() || label != entry.title {
+                draw_text_with_occlusion(
+                    sugarloaf,
+                    excerpt_x,
+                    text_y,
+                    &label,
+                    &excerpt_opts,
+                    occlusion_rects,
+                );
+                continue;
+            }
+            let bright_opts = DrawOpts {
+                color: theme.u8_alpha(theme.fg, 0.95),
+                ..excerpt_opts.clone()
+            };
+            let mut cursor_x = excerpt_x;
+            let mut byte = 0;
+            let mut spans = entry.highlights.iter().copied().peekable();
+            while byte < label.len() {
+                let (bright, end) = match spans.peek().copied() {
+                    Some((start, end)) if start <= byte => {
+                        spans.next();
+                        (true, end.min(label.len()))
+                    }
+                    Some((start, _)) => (false, start.min(label.len())),
+                    None => (false, label.len()),
+                };
+                let segment = &label[byte..end];
+                byte = end;
+                if segment.is_empty() {
+                    continue;
+                }
+                let opts = if bright { &bright_opts } else { &excerpt_opts };
+                let advance = measure_text_cached(sugarloaf, segment, opts);
+                if bright {
+                    sugarloaf.rounded_rect(
+                        None,
+                        cursor_x - 1.0 * s,
+                        row_y + 2.0 * s,
+                        advance + 2.0 * s,
+                        row_h - 4.0 * s,
+                        theme.f32_alpha(theme.cyan, 0.16),
+                        DEPTH,
+                        3.0 * s,
+                        ORDER_PANEL + 2,
+                    );
+                }
+                draw_text_with_occlusion(
+                    sugarloaf,
+                    cursor_x,
+                    text_y,
+                    segment,
+                    opts,
+                    occlusion_rects,
+                );
+                cursor_x += advance;
+            }
             continue;
         }
 

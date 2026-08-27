@@ -78,6 +78,9 @@ pub struct NeoismAgentSessionEntry {
     /// session id (so activating it resumes that session) and `title` holds
     /// the matched excerpt text.
     pub is_excerpt: bool,
+    /// Byte ranges into `title` that matched the active search terms —
+    /// rendered highlighted on excerpt rows. Sorted and non-overlapping.
+    pub highlights: Vec<(usize, usize)>,
 }
 
 /// One semantic transcript-search hit, per session (best chunk kept).
@@ -107,6 +110,7 @@ impl NeoismAgentSessionEntry {
             pinned: false,
             is_header: false,
             is_excerpt: false,
+            highlights: Vec::new(),
         }
     }
 
@@ -123,6 +127,7 @@ impl NeoismAgentSessionEntry {
             pinned: false,
             is_header: true,
             is_excerpt: false,
+            highlights: Vec::new(),
         }
     }
 
@@ -140,6 +145,7 @@ impl NeoismAgentSessionEntry {
             pinned: false,
             is_header: false,
             is_excerpt: true,
+            highlights: Vec::new(),
         }
     }
 
@@ -201,6 +207,35 @@ fn compact_excerpt(excerpt: &str) -> String {
         return compact;
     }
     compact.chars().take(MAX).collect()
+}
+
+/// Byte ranges of every ASCII-case-insensitive occurrence of any search
+/// term in `line`, merged where they touch or overlap. Terms are expected
+/// pre-lowercased; ASCII lowering preserves byte offsets so the ranges
+/// index the original string safely.
+fn term_highlight_ranges(line: &str, terms: &[String]) -> Vec<(usize, usize)> {
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let haystack = line.to_ascii_lowercase();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for term in terms {
+        let mut from = 0;
+        while let Some(found) = haystack[from..].find(term.as_str()) {
+            let start = from + found;
+            ranges.push((start, start + term.len()));
+            from = start + term.len().max(1);
+        }
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 /// Word-wrap an excerpt into at most `max_lines` lines of `columns`
@@ -1579,6 +1614,13 @@ impl NeoismAgentSidePanel {
         use crate::panels::agent_pane::session_group::section_label_at;
 
         let needle = self.session_query.trim().to_lowercase();
+        // Search terms for excerpt highlighting: whitespace-split words of
+        // two characters or more, already lowercased with the needle.
+        let terms: Vec<String> = needle
+            .split_whitespace()
+            .filter(|word| word.len() >= 2)
+            .map(str::to_string)
+            .collect();
         let semantic_active =
             !needle.is_empty() && self.semantic_query == self.session_query.trim();
         let semantic: std::collections::HashMap<&str, &NeoismAgentSemanticMatch> =
@@ -1623,10 +1665,12 @@ impl NeoismAgentSidePanel {
             if let Some(hit) = semantic.get(visible[i].id.as_str()) {
                 let excerpt = compact_excerpt(&hit.excerpt);
                 for line in wrap_excerpt_lines(&excerpt, self.result_wrap_columns, 3) {
-                    out.push(NeoismAgentSessionEntry::excerpt(
+                    let mut row = NeoismAgentSessionEntry::excerpt(
                         visible[i].id.clone(),
                         line,
-                    ));
+                    );
+                    row.highlights = term_highlight_ranges(&row.title, &terms);
+                    out.push(row);
                 }
             }
         }

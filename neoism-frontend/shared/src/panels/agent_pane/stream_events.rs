@@ -7,6 +7,10 @@ use serde_json::{json, Value};
 use super::state::side_panel::SessionGoal;
 use super::state::{NeoismAgentPendingPermission, NeoismAgentUsage};
 
+const BACKGROUND_TASK_COMPLETION_MESSAGE_PREFIX: &str = "msg_background_completion_";
+const BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER: &str =
+    "Neoism runtime notification: background shell task completion.";
+
 pub struct ChunkedDecoder {
     chunked: bool,
     buffer: Vec<u8>,
@@ -725,7 +729,15 @@ pub fn classify_session_event(
             if action != "dequeue" {
                 return Vec::new();
             }
-            queued_request_text(properties.get("request").unwrap_or(&Value::Null))
+            let request = properties.get("request").unwrap_or(&Value::Null);
+            // Background jobs resume the model by queueing a synthetic
+            // user-role prompt containing command/output context. That
+            // request is model input, not something the human submitted;
+            // never turn its dequeue event into a visible user message.
+            if is_background_task_completion_dequeue(properties, request) {
+                return Vec::new();
+            }
+            queued_request_text(request)
                 .map(|text| vec![SessionEventUpdate::DequeuedPrompt { text }])
                 .unwrap_or_default()
         }
@@ -839,6 +851,25 @@ fn queued_request_text(request: &Value) -> Option<String> {
         .trim()
         .to_string();
     (!text.is_empty()).then_some(text)
+}
+
+fn is_background_task_completion_dequeue(properties: &Value, request: &Value) -> bool {
+    properties
+        .get("messageID")
+        .or_else(|| properties.get("messageId"))
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with(BACKGROUND_TASK_COMPLETION_MESSAGE_PREFIX))
+        || request
+            .get("messageId")
+            .or_else(|| request.get("messageID"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with(BACKGROUND_TASK_COMPLETION_MESSAGE_PREFIX))
+        || request
+            .get("system")
+            .and_then(Value::as_str)
+            .is_some_and(|system| {
+                system.contains(BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER)
+            })
 }
 
 pub fn task_status_from_parent_part(part: &Value) -> Option<SubagentTaskStatus> {
@@ -1864,5 +1895,28 @@ mod tests {
                 text: "queued turn".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn classify_session_event_hides_background_completion_dequeue() {
+        let mut state = SessionEventUpdateState::default();
+        let event = json!({
+            "type": "session.queue.updated",
+            "properties": {
+                "sessionID": "ses_root",
+                "action": "dequeue",
+                "messageID": "msg_background_completion_job_123",
+                "request": {
+                    "messageId": "msg_background_completion_job_123",
+                    "system": "Neoism runtime notification: background shell task completion.",
+                    "parts": [{
+                        "type": "text",
+                        "text": "Background shell task finished.\njob_id: job_123\ndescription: Timer\nstatus: completed\nexit_code: 0\ncwd: /tmp\ncommand: sleep 20\n\nThe captured process output is included below as runtime system context.\nCall background_task_result with this job_id to reread retained output during this server lifetime.\n\n<background_task_result>\n(no output)\n</background_task_result>"
+                    }]
+                }
+            }
+        });
+
+        assert!(classify_session_event(event, "ses_root", &mut state).is_empty());
     }
 }

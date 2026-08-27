@@ -52,6 +52,36 @@ for await (const event of client.events({ sessionId })) {
 
 Every published event type has a schema in the contract; an event the server can emit but the contract doesn't describe fails the server's own test suite.
 
+## Typed parts
+
+Message parts are the same kind of union, discriminated by `type` — text,
+reasoning, tool, subtask, step-start, step-finish, compaction, agent, and
+file. Tool parts carry a status-discriminated state machine, and
+step-finish parts carry typed token usage and cost:
+
+```ts
+for (const part of message.parts) {
+  if (part.type === "tool" && part.state.status === "completed") {
+    console.log(part.tool, part.state.title);
+  }
+  if (part.type === "step-finish") {
+    billing.record(part.tokens.input + part.tokens.output, part.cost);
+  }
+}
+```
+
+`message.part.updated` events carry the same typed `Part`, so live handling
+and transcript reads share one set of narrowing branches.
+
+## A complete embedding loop
+
+`sdk/typescript/examples/headless.ts` in the repository is the full
+headless driver — create a session in a directory, subscribe before
+prompting, prompt with an idempotent `messageId`, stream typed deltas,
+collect step-finish usage, detect idle, and read the transcript back. The
+"Embedding the agent in a product" section of [[Server and API]] walks
+through the same loop.
+
 ## How it stays in sync
 
 - The OpenAPI document is authoritative and committed (`neoism-agent/openapi/v2.json`).

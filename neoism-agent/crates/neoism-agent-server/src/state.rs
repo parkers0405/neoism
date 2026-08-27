@@ -3517,6 +3517,58 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Interrupt store run rows for sessions that provably have no live run.
+    /// Callers must hold the family's execution keyed lock and have verified
+    /// the coordinator (the sole in-memory authority) shows no active run for
+    /// any of these sessions — run starts serialize on the same lock, so a
+    /// 'running'/'retry' row here is a leak from an interrupted teardown.
+    pub(crate) async fn interrupt_abandoned_runs(
+        &self,
+        session_ids: &[String],
+    ) -> anyhow::Result<u64> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; session_ids.len()].join(", ");
+        let mut params = vec![
+            int(store_i64(crate::now_millis())),
+            text(
+                json!({ "message": "Run abandoned without teardown; reconciled at quiescence" })
+                    .to_string(),
+            ),
+        ];
+        params.extend(session_ids.iter().map(|session_id| text(session_id.clone())));
+        let affected = self
+            .db
+            .execute(
+                &format!(
+                    "UPDATE session_runs \
+                     SET status = 'interrupted', updated = ?, error_json = ? \
+                     WHERE status IN ('running', 'retry') AND session_id IN ({placeholders})"
+                ),
+                params,
+            )
+            .await?;
+        Ok(affected)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn session_run_statuses(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT id, status FROM session_runs WHERE session_id = ? ORDER BY created",
+                vec![text(session_id)],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| Ok((row.get_str("id")?, row.get_str("status")?)))
+            .collect()
+    }
+
     pub(crate) async fn interrupt_stale_runs(&self) -> anyhow::Result<u64> {
         let affected = self
             .db

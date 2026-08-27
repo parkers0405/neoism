@@ -488,6 +488,26 @@ async fn finish_if_quiescent_impl(
     if branches.iter().any(|branch| branch.status == "outstanding") {
         return;
     }
+    // The family is quiescent by every live authority, so any store run row
+    // still 'running' is a leak from an interrupted teardown. Left alone it
+    // vetoes `mark_execution_finished`'s run guard forever — the execution
+    // never settles and every later prompt inherits its timer. Run starts
+    // serialize on this root's keyed lock (held here), so reconciling now
+    // cannot race a genuinely starting run.
+    let family_ids = family.iter().cloned().collect::<Vec<_>>();
+    match state.inner.store.interrupt_abandoned_runs(&family_ids).await {
+        Ok(0) => {}
+        Ok(reconciled) => {
+            tracing::warn!(
+                root_session_id = %root_id,
+                reconciled,
+                "interrupted abandoned store run rows during quiescence"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, root_session_id = %root_id, "failed to reconcile abandoned runs");
+        }
+    }
     if state
         .inner
         .store
@@ -571,6 +591,82 @@ mod tests {
             .await
             .unwrap()
             .is_some_and(|activity| activity.execution_id == next.execution_id));
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn quiescence_reconciles_leaked_running_run_row_and_settles() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-execution-leaked-run-{}.sqlite3",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        let state = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        let now = crate::now_millis();
+        let mut session = SessionInfo {
+            id: neoism_agent_core::new_session_id(),
+            slug: "leaked-run".into(),
+            project_id: "global".into(),
+            workspace_id: None,
+            directory: "/tmp".into(),
+            path: None,
+            parent_id: None,
+            title: "Leaked run".into(),
+            agent: None,
+            model: None,
+            version: env!("CARGO_PKG_VERSION").into(),
+            time: TimeInfo {
+                created: now,
+                updated: now,
+                compacting: None,
+                archived: None,
+            },
+            permission: None,
+            extra: BTreeMap::new(),
+        };
+        state.inner.store.insert_session(&session).await.unwrap();
+        let root = session.id.to_string();
+        let previous = state
+            .inner
+            .store
+            .admit_execution_activity(&root, "execution-poisoned", "message-old", "")
+            .await
+            .unwrap()
+            .unwrap();
+        // The production poison: a store run row left 'running' by an
+        // interrupted teardown, with no matching coordinator run. It vetoes
+        // mark_execution_finished's guard, so before reconciliation the
+        // execution could never settle and every new prompt inherited it.
+        state
+            .inner
+            .store
+            .start_run("leaked-run-row", &root)
+            .await
+            .unwrap();
+
+        finish_if_quiescent(&state, &root).await;
+        let settled = state
+            .inner
+            .store
+            .get_execution_activity(&root)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            settled.finished,
+            "quiescence must interrupt the abandoned run row and settle"
+        );
+
+        // A genuinely new prompt now mints a fresh execution — no timer
+        // inheritance.
+        let next = ensure_for_prompt(&state, &mut session, "message-new", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(next.execution_id, previous.execution_id);
+        assert_eq!(next.completed_ms, 0);
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_file(path);
     }

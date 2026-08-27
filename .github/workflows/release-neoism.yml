@@ -113,6 +113,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          # A failed leg still spent its compile time — save the cache
+          # anyway so the retry (always a new commit after a version
+          # bump) starts warm instead of rebuilding every dependency.
+          cache-on-failure: true
 
       - name: Build the stack (release)
         # Unset CI: `fff-search`'s build script demands Zig when CI is set,

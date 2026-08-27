@@ -56,6 +56,13 @@ pub(crate) struct InnerState {
     pub(crate) workflow_scheduler_started: AtomicBool,
     events: broadcast::Sender<EventPayload>,
     event_writer: mpsc::UnboundedSender<EventPayload>,
+    /// Wire-monotone sequence allocator for broadcast events, seeded from
+    /// the durable log's high-water mark so live and replayed events share
+    /// one cursor space.
+    event_sequence: std::sync::atomic::AtomicU64,
+    /// Serializes stamp+broadcast so subscribers observe sequences in
+    /// broadcast order.
+    event_order: std::sync::Mutex<()>,
 }
 
 struct ExecutionLeaseControl {
@@ -214,8 +221,9 @@ fn event_statements(
             ],
         ),
         (
-            "INSERT INTO events (event_id, kind, aggregate_id, aggregate_seq, owner_id, session_id, event_json, created) VALUES (?, ?, ?, (SELECT seq FROM event_sequences WHERE aggregate_id = ?), ?, ?, ?, ?)".to_string(),
+            "INSERT INTO events (seq, event_id, kind, aggregate_id, aggregate_seq, owner_id, session_id, event_json, created) VALUES (?, ?, ?, ?, (SELECT seq FROM event_sequences WHERE aggregate_id = ?), ?, ?, ?, ?)".to_string(),
             vec![
+                event.sequence.map(|seq| int(seq as i64)).unwrap_or(SqlValue::Null),
                 text(event.id.to_string()),
                 text(event.kind.clone()),
                 text(aggregate_id),
@@ -415,6 +423,7 @@ impl AppState {
         let durable_permissions = store.list_pending_permissions().await?;
         let durable_questions = store.list_pending_questions().await?;
         store.interrupt_stale_runs().await?;
+        let event_sequence_seed = store.latest_event_sequence().await?;
         let execution_owner_id = Id::ascending(IdKind::Event).to_string();
         let execution_lease_control = Arc::new(ExecutionLeaseControl {
             stopping: AtomicBool::new(false),
@@ -463,6 +472,8 @@ impl AppState {
                 workflow_scheduler_started: AtomicBool::new(false),
                 events,
                 event_writer,
+                event_sequence: std::sync::atomic::AtomicU64::new(event_sequence_seed),
+                event_order: std::sync::Mutex::new(()),
             }),
         };
         let weak_state = Arc::downgrade(&state.inner);
@@ -667,12 +678,47 @@ impl AppState {
         self.inner.events.subscribe()
     }
 
+    /// Stamp the wire sequence and broadcast, atomically with respect to
+    /// other broadcasts so subscribers see sequences in send order. Events
+    /// that were already stamped (transactional commits allocate before the
+    /// write) keep their sequence.
+    fn stamp_and_broadcast(&self, event: &mut EventPayload) {
+        let _order = self
+            .inner
+            .event_order
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if event.sequence.is_none() {
+            event.sequence = Some(
+                self.inner
+                    .event_sequence
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1,
+            );
+        }
+        let _ = self.inner.events.send(event.clone());
+    }
+
+    /// Allocate a wire sequence without broadcasting — for events persisted
+    /// transactionally before their broadcast.
+    pub(crate) fn allocate_event_sequence(&self, event: &mut EventPayload) {
+        if event.sequence.is_none() {
+            event.sequence = Some(
+                self.inner
+                    .event_sequence
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1,
+            );
+        }
+    }
+
     pub(crate) fn publish(&self, event: EventPayload) {
         // Opencode-model bus: broadcast in PUBLISH order, persist alongside.
         // Routing delivery through the durable writer made committed events
         // (reasoning/tool part snapshots) lag behind live token deltas
         // published after them, so subscribers saw parts out of order.
-        let _ = self.inner.events.send(event.clone());
+        let mut event = event;
+        self.stamp_and_broadcast(&mut event);
         if let Err(error) = self.inner.event_writer.send(event) {
             tracing::error!(event = %error.0.kind, "durable event writer stopped");
         }
@@ -683,7 +729,8 @@ impl AppState {
     /// writing every provider delta here stalls the provider and amplifies the
     /// growing message into thousands of database writes.
     pub(crate) fn publish_live(&self, event: EventPayload) {
-        let _ = self.inner.events.send(event);
+        let mut event = event;
+        self.stamp_and_broadcast(&mut event);
     }
 
     #[cfg(test)]
@@ -691,6 +738,8 @@ impl AppState {
         &self,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        let mut event = event;
+        self.allocate_event_sequence(&mut event);
         self.inner.store.append_event(&event).await?;
         for runtime in self.inner.workspace_runtimes.runtimes().await {
             crate::plugin::publish_event(&runtime.snapshot(), &event);
@@ -707,7 +756,8 @@ impl AppState {
                 crate::plugin::publish_event(&runtime.snapshot(), &hook_event);
             }
         });
-        let _ = self.inner.events.send(event);
+        let mut event = event;
+        self.stamp_and_broadcast(&mut event);
     }
 
     pub(crate) async fn update_session_with_event(
@@ -715,6 +765,8 @@ impl AppState {
         info: &SessionInfo,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        let mut event = event;
+        self.allocate_event_sequence(&mut event);
         self.inner
             .store
             .commit_projection_event(
@@ -741,6 +793,8 @@ impl AppState {
         message: &MessageWithParts,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        let mut event = event;
+        self.allocate_event_sequence(&mut event);
         self.inner
             .store
             .commit_projection_event(
@@ -768,6 +822,8 @@ impl AppState {
         message: &MessageWithParts,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        let mut event = event;
+        self.allocate_event_sequence(&mut event);
         self.inner
             .store
             .commit_projection_event(
@@ -800,6 +856,8 @@ impl AppState {
         epoch: &crate::context_epoch::ContextEpoch,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        let mut event = event;
+        self.allocate_event_sequence(&mut event);
         self.inner
             .store
             .commit_projection_event(
@@ -838,6 +896,8 @@ impl AppState {
         delivery: &str,
         event: EventPayload,
     ) -> anyhow::Result<usize> {
+        let mut event = event;
+        self.allocate_event_sequence(&mut event);
         self.inner
             .store
             .commit_projection_event(
@@ -3199,7 +3259,6 @@ impl SessionStore {
             .collect()
     }
 
-    #[cfg(test)]
     pub(crate) async fn latest_event_sequence(&self) -> anyhow::Result<u64> {
         Ok(self
             .db

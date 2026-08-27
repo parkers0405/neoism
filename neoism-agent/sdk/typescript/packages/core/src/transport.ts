@@ -1,4 +1,4 @@
-import type { EventEnvelope } from "./types.js";
+import type { Event } from "./types.js";
 
 export interface RequestDescriptor {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -19,5 +19,5 @@ export interface EventOptions {
 
 export interface NeoismTransport {
   request<T>(request: RequestDescriptor): Promise<T>;
-  events(options?: EventOptions): AsyncIterable<EventEnvelope>;
+  events(options?: EventOptions): AsyncIterable<Event>;
 }

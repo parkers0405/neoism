@@ -7,6 +7,8 @@ import {
   type RequestDescriptor,
 } from "@neoism/sdk-core";
 
+const SEEN_EVENT_WINDOW = 8192;
+
 export interface HttpTransportOptions {
   baseUrl: string;
   token?: string;
@@ -79,6 +81,8 @@ async function* followEvents(
   reconnect: HttpTransportOptions["reconnect"],
 ): AsyncIterable<Event> {
   let cursor = options.since;
+  const seenIds = new Set<string>();
+  const seenOrder: string[] = [];
   let delay = reconnect?.initialDelayMs ?? 250;
   const maximumDelay = reconnect?.maximumDelayMs ?? 10_000;
   while (!options.signal?.aborted) {
@@ -98,8 +102,20 @@ async function* followEvents(
       if (!response.body) throw new Error("Event response has no body");
       delay = reconnect?.initialDelayMs ?? 250;
       for await (const event of parseSse(response.body)) {
-        if (event.sequence <= (cursor ?? -1)) continue;
-        cursor = event.sequence;
+        // Dedupe by event id, not sequence order: a transactionally
+        // committed event can broadcast slightly after later-stamped
+        // events, and a strict sequence gate would silently drop it.
+        // The resume cursor still advances to the highest sequence seen.
+        if (event.id && seenIds.has(event.id)) continue;
+        if (event.id) {
+          seenIds.add(event.id);
+          seenOrder.push(event.id);
+          if (seenOrder.length > SEEN_EVENT_WINDOW) {
+            const evicted = seenOrder.shift();
+            if (evicted !== undefined) seenIds.delete(evicted);
+          }
+        }
+        if (event.sequence > (cursor ?? 0)) cursor = event.sequence;
         yield event;
       }
     } catch (error) {

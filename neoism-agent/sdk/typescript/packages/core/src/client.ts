@@ -12,7 +12,7 @@ import type {
   CommandInfo,
   ArtifactInfo,
   CapabilityInfo,
-  EventEnvelope,
+  Event,
   MessageWithParts,
   Page,
   PluginManifest,
@@ -39,7 +39,7 @@ export interface NeoismClient {
     request<T>(id: string, path?: string, options?: Omit<RequestDescriptor, "path">): Promise<T>;
   };
   readonly events: {
-    subscribe(options?: EventOptions): AsyncIterable<EventEnvelope>;
+    subscribe(options?: EventOptions): AsyncIterable<Event>;
   };
   readonly artifacts: {
     list(sessionId?: string): Promise<ArtifactInfo[]>;

@@ -8,6 +8,13 @@ pub struct EventPayload<T = Value> {
     pub id: EventId,
     #[serde(rename = "type")]
     pub kind: String,
+    /// Wire-monotone broadcast sequence, stamped by the server when the
+    /// event is published. Live-only events (token deltas) and durable
+    /// events share one number space, and durable rows persist their
+    /// stamped value — so a client cursor taken from any event resumes
+    /// the durable log correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
     pub properties: T,
 }
 
@@ -15,6 +22,7 @@ impl<T> EventPayload<T> {
     pub fn new(kind: impl Into<String>, properties: T) -> Self {
         Self {
             id: Id::ascending(IdKind::Event),
+            sequence: None,
             kind: kind.into(),
             properties,
         }

@@ -158,9 +158,10 @@ impl ConnectTokens {
 pub(crate) fn discover_shells() -> Vec<ShellItem> {
     #[cfg(windows)]
     {
+        let services = crate::standard_services();
         let mut shells = ["pwsh.exe", "powershell.exe", "cmd.exe"]
             .into_iter()
-            .filter_map(crate::platform_shell::resolve_command)
+            .filter_map(|name| crate::platform_shell::resolve_command(&services, name))
             .map(|path| {
                 let path = path.to_string_lossy().into_owned();
                 ShellItem {

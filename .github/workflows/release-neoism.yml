@@ -378,6 +378,15 @@ jobs:
         run: |
           set -euo pipefail
           OUT="neoism-${{ matrix.goos }}-${{ matrix.goarch }}"
+          # Everything shipped is already copied into stage/, but rust-cache
+          # still needs target/*/release/deps for its post-job save — so free
+          # only the uncached bulk: build-script outputs, incremental state,
+          # linked binaries, and registry sources. v0.7.57's DMG failed here
+          # with "No space left on device".
+          rm -rf target/*/release/build target/*/release/incremental \
+            target/release ~/.cargo/registry/src
+          find target -maxdepth 3 -type f -size +100M -delete 2>/dev/null || true
+          df -h / || true
           mkdir -p stage/dmg
           cp -R "stage/$OUT/Neoism.app" stage/dmg/
           ln -s /Applications stage/dmg/Applications

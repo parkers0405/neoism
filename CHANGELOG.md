@@ -2,7 +2,7 @@
 
 All notable user-facing changes to Neoism are documented here.
 
-## [0.7.58] - 2026-08-27
+## [0.7.59] - 2026-08-27
 
 This release ships the Agent V2 replatform: the agent server is now a
 plugin-first platform with one versioned API, one ordered event bus, a

@@ -24,6 +24,56 @@ fn file_mention_options_filter_workspace_trash_dirs() {
 }
 
 #[test]
+fn retry_reset_wipes_partial_text_so_restreams_do_not_double() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_part_delta(
+        Some("msg-a".into()),
+        Some("part-t".into()),
+        Some("text".into()),
+        "partial reply ",
+    );
+    // Provider overload → server announces the retry, then re-seeds the
+    // SAME text part with empty text before re-streaming.
+    pane.retry_reset_pending = true;
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("").with_id("part-t".to_string()),
+    );
+    pane.apply_part_delta(
+        Some("msg-a".into()),
+        Some("part-t".into()),
+        Some("text".into()),
+        "fresh reply",
+    );
+    let row = pane
+        .messages
+        .iter()
+        .find(|message| message.id == "part-t")
+        .expect("text row survives the retry wipe");
+    assert_eq!(row.text, "fresh reply");
+    assert!(!pane.retry_reset_pending, "wipe consumes the pending flag");
+}
+
+#[test]
+fn late_empty_snapshot_without_retry_never_regresses_streamed_text() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_part_delta(
+        Some("msg-a".into()),
+        Some("part-t".into()),
+        Some("text".into()),
+        "streamed text",
+    );
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("").with_id("part-t".to_string()),
+    );
+    let row = pane
+        .messages
+        .iter()
+        .find(|message| message.id == "part-t")
+        .expect("text row still present");
+    assert_eq!(row.text, "streamed text");
+}
+
+#[test]
 fn idle_clears_status_but_keeps_trace_until_session_reset() {
     let mut pane = NeoismAgentPane::default();
     pane.messages.push(NeoismAgentMessage::user("question"));

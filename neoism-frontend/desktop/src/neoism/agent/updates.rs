@@ -590,7 +590,37 @@ fn open_event_stream_with_deadline(
     }
 }
 
+/// The server emits an SSE keep-alive every 10 seconds, so a healthy event
+/// stream is never quiet for long. A socket that stops delivering bytes for
+/// this long is dead (half-open TCP after a network/server hiccup) even
+/// though reads keep returning TimedOut — without this bound the reader
+/// spins forever and the pane silently stops receiving deltas until the
+/// session is closed and reopened.
+const EVENT_STREAM_STALE_AFTER: Duration = Duration::from_secs(45);
+
 fn read_event_stream(
+    connection: EventStreamConnection,
+    server: String,
+    session_id: String,
+    tx: Sender<AgentSessionUpdate>,
+    stop: Arc<AtomicBool>,
+    known_child_session_ids: Arc<Mutex<HashSet<String>>>,
+    wake: Arc<Mutex<Option<AgentEventWake>>>,
+) {
+    read_event_stream_with_staleness(
+        connection,
+        server,
+        session_id,
+        tx,
+        stop,
+        known_child_session_ids,
+        wake,
+        EVENT_STREAM_STALE_AFTER,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_event_stream_with_staleness(
     mut connection: EventStreamConnection,
     server: String,
     session_id: String,
@@ -598,6 +628,7 @@ fn read_event_stream(
     stop: Arc<AtomicBool>,
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
+    stale_after: Duration,
 ) {
     let mut chunked = ChunkedDecoder::new(connection.chunked);
     let mut sse = SseDecoder::default();
@@ -626,10 +657,12 @@ fn read_event_stream(
     }
 
     let mut buf = [0u8; 8192];
+    let mut last_bytes_at = std::time::Instant::now();
     while !stop.load(Ordering::Relaxed) {
         match connection.stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                last_bytes_at = std::time::Instant::now();
                 for data in chunked.feed(&buf[..n]) {
                     if process_sse_bytes(
                         &mut sse,
@@ -650,7 +683,15 @@ fn read_event_stream(
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
+                ) =>
+            {
+                // Quiet is normal between keep-alives; quiet past the
+                // staleness bound means the connection is dead. Break so
+                // the outer loop reconnects and reconciles the transcript.
+                if last_bytes_at.elapsed() >= stale_after {
+                    break;
+                }
+            }
             Err(error) => {
                 let _ = tx.send(AgentSessionUpdate::System {
                     title: "Neoism".to_string(),
@@ -1074,6 +1115,85 @@ mod tests {
             AgentSessionUpdate::ChildPartDelta { session_id, delta, .. }
                 if session_id == "child" && delta == "live after discovery"
         )));
+    }
+
+    #[test]
+    fn silent_event_stream_goes_stale_and_returns_for_reconnect() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept and hold the socket open without ever writing — the
+        // half-dead-connection shape that previously wedged the reader
+        // forever (reads time out, loop treats that as benign, no bytes
+        // ever arrive, pane never sees another delta).
+        let hold = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            drop(socket);
+        });
+        let stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let connection = EventStreamConnection {
+            stream: crate::neoism::agent::transport::AgentTransport::Plain(stream),
+            initial_body: Vec::new(),
+            chunked: false,
+        };
+        let (tx, _rx) = mpsc::channel();
+        let started = Instant::now();
+        read_event_stream_with_staleness(
+            connection,
+            String::new(),
+            "root".to_string(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(HashSet::new())),
+            Arc::new(Mutex::new(None)),
+            Duration::from_millis(300),
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "must wait out the staleness bound, returned after {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "a silent socket must go stale promptly, took {elapsed:?}"
+        );
+        drop(hold);
+    }
+
+    #[test]
+    fn deltas_still_flow_after_provider_error_and_retry_sequence() {
+        let wake = Arc::new(Mutex::new(None));
+        let (tx, rx) = mpsc::channel();
+        let mut state = SessionEventUpdateState::default();
+        let events = [
+            serde_json::json!({"type": "message.part.delta", "properties": {"sessionID": "root", "messageID": "msg-a", "partID": "part-t", "partType": "text", "field": "text", "delta": "partial "}}),
+            serde_json::json!({"type": "session.error", "properties": {"sessionID": "root", "error": {"name": "ProviderError", "data": {"message": "upstream 529"}}}}),
+            serde_json::json!({"type": "session.status", "properties": {"sessionID": "root", "status": {"type": "retry", "attempt": 1, "message": "upstream 529"}}}),
+            serde_json::json!({"type": "message.updated", "properties": {"sessionID": "root", "info": {"id": "msg-a", "role": "assistant", "sessionID": "root", "time": {"created": 1}}}}),
+            serde_json::json!({"type": "message.part.updated", "properties": {"sessionID": "root", "part": {"id": "part-s2", "messageID": "msg-a", "sessionID": "root", "type": "step-start"}}}),
+            serde_json::json!({"type": "message.part.updated", "properties": {"sessionID": "root", "part": {"id": "part-t", "messageID": "msg-a", "sessionID": "root", "type": "text", "text": ""}}}),
+            serde_json::json!({"type": "message.part.delta", "properties": {"sessionID": "root", "messageID": "msg-a", "partID": "part-t", "partType": "text", "field": "text", "delta": "fresh"}}),
+        ];
+        for event in events {
+            send_event_updates(event, "", "root", &tx, &mut state, &wake).unwrap();
+        }
+        let updates: Vec<AgentSessionUpdate> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let deltas: Vec<&str> = updates
+            .iter()
+            .filter_map(|update| match update {
+                AgentSessionUpdate::PartDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec!["partial ", "fresh"],
+            "post-retry deltas must still classify ({} updates drained)",
+            updates.len()
+        );
     }
 
     #[test]

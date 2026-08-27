@@ -2,6 +2,22 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.60] - 2026-08-27
+
+### Fixed
+
+- A watched agent session no longer freezes after a provider-overload
+  retry. The event-stream reader now detects a dead connection (45
+  seconds without server keep-alives), reconnects, and reconciles the
+  transcript — live token streaming resumes without closing and
+  reopening the session.
+- Retried responses no longer double their text: the retry's message
+  reset is honored so re-streamed tokens replace the failed partial
+  reply instead of appending to it. Late empty snapshots outside a
+  retry still never regress streamed text.
+- Failed release build legs now save their compile caches, so release
+  retries start warm.
+
 ## [0.7.59] - 2026-08-27
 
 This release ships the Agent V2 replatform: the agent server is now a

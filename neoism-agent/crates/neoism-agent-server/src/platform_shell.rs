@@ -4,7 +4,8 @@ use tokio::process::Command;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShellKind {
-    #[cfg(not(windows))]
+    // Never constructed on Windows, but the variant stays ungated so
+    // cross-platform match arms compile on every target.
     Posix,
     PowerShell,
     Cmd,

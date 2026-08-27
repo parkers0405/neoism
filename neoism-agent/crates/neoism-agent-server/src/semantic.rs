@@ -260,8 +260,29 @@ fn clamp_input(content: &str) -> String {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SemanticSearchQuery {
     q: String,
+    #[serde(default, deserialize_with = "usize_or_string")]
     limit: Option<usize>,
     session_id: Option<String>,
+}
+
+/// Plugin-dispatched routes deliver query params as strings; accept both
+/// `10` and `"10"` so `?limit=` doesn't 500 through that path.
+fn usize_or_string<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Number(usize),
+        Text(String),
+    }
+    <Option<Raw> as serde::Deserialize>::deserialize(deserializer)?
+        .map(|raw| match raw {
+            Raw::Number(value) => Ok(value),
+            Raw::Text(text) => text.trim().parse().map_err(serde::de::Error::custom),
+        })
+        .transpose()
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -272,28 +293,17 @@ pub(crate) struct SemanticSearchResponse {
     hits: Vec<SemanticSearchHit>,
 }
 
-/// `GET /v2/plugins/dev.neoism.semantic/search?q=…&limit=…&sessionId=…` — embed the query and rank
-/// indexed transcript messages by cosine distance.
+/// `GET /v2/plugins/dev.neoism.semantic/search?q=…&limit=…&sessionId=…` —
+/// transcript content search. Exact keyword matches (the store's AND-term
+/// search with excerpt windows) always run; when an embeddings provider is
+/// configured, semantic hits are blended in behind them. Without embeddings
+/// the route stays `available` — content search degrades to keyword, never
+/// to titles-only.
 pub(crate) async fn semantic_search_route(
     State(state): State<AppState>,
     Query(query): Query<SemanticSearchQuery>,
 ) -> Result<Json<SemanticSearchResponse>, ApiError> {
     let store = &state.inner.store;
-    let auth = if let Some(provider_id) = EmbeddingsClient::configured_provider_id() {
-        state.inner.provider_service.auth(&provider_id).await.ok().flatten()
-    } else { None };
-    let Some(client) = EmbeddingsClient::from_env(auth) else {
-        return Ok(Json(SemanticSearchResponse {
-            available: false,
-            hits: Vec::new(),
-        }));
-    };
-    if !store.semantic_search_supported() {
-        return Ok(Json(SemanticSearchResponse {
-            available: false,
-            hits: Vec::new(),
-        }));
-    }
     let needle = query.q.trim();
     if needle.is_empty() {
         return Ok(Json(SemanticSearchResponse {
@@ -301,23 +311,70 @@ pub(crate) async fn semantic_search_route(
             hits: Vec::new(),
         }));
     }
-    let vectors = client.embed(&[needle.to_string()]).await?;
-    let vector = vectors
-        .into_iter()
-        .next()
-        .context("embeddings response was empty")?;
-    let hits = store
-        .semantic_search(
-            &vector_json(&vector),
-            &client.model_spec,
-            query.session_id.as_deref(),
-            query.limit.unwrap_or(20),
-        )
-        .await?;
+    let limit = query.limit.unwrap_or(20);
+
+    // Exact matches first: they carry distance 0.0 so a literal hit always
+    // outranks a fuzzy-semantic one, and they work with zero configuration.
+    let mut hits = keyword_hits(store, needle, query.session_id.as_deref(), limit).await;
+
+    let auth = if let Some(provider_id) = EmbeddingsClient::configured_provider_id() {
+        state.inner.provider_service.auth(&provider_id).await.ok().flatten()
+    } else { None };
+    if let Some(client) = EmbeddingsClient::from_env(auth) {
+        if store.semantic_search_supported() {
+            let vectors = client.embed(&[needle.to_string()]).await?;
+            let vector = vectors
+                .into_iter()
+                .next()
+                .context("embeddings response was empty")?;
+            let semantic = store
+                .semantic_search(
+                    &vector_json(&vector),
+                    &client.model_spec,
+                    query.session_id.as_deref(),
+                    limit,
+                )
+                .await?;
+            let seen: std::collections::HashSet<String> =
+                hits.iter().map(|hit| hit.message_id.clone()).collect();
+            hits.extend(
+                semantic
+                    .into_iter()
+                    .filter(|hit| !seen.contains(&hit.message_id)),
+            );
+        }
+    }
     Ok(Json(SemanticSearchResponse {
         available: true,
         hits,
     }))
+}
+
+/// Map the store's keyword transcript search into semantic-hit shape. The
+/// `>>match<<` markers the search tool renders are stripped for the UI.
+async fn keyword_hits(
+    store: &crate::state::SessionStore,
+    query: &str,
+    session_id: Option<&str>,
+    limit: usize,
+) -> Vec<crate::state::SemanticSearchHit> {
+    store
+        .search_messages(query, session_id, limit)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|hit| crate::state::SemanticSearchHit {
+            session_id: hit.session_id,
+            message_id: hit.message_id,
+            role: hit.role,
+            created: hit.created,
+            excerpt: hit
+                .excerpt
+                .replacen(">>", "", 1)
+                .replacen("<<", "", 1),
+            distance: 0.0,
+        })
+        .collect()
 }
 
 /// Start the background embedding indexer if the store supports vector

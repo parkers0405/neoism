@@ -547,6 +547,70 @@ fn store_test_message(
 }
 
 #[tokio::test]
+async fn transcript_search_route_serves_keyword_hits_without_embeddings() {
+    // Force the no-embeddings path so this is deterministic regardless of
+    // any provider keys in the environment.
+    std::env::set_var("NEOISM_AGENT_DISABLE_EMBEDDINGS", "1");
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-keyword-search-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let now = now_millis();
+    let session = store_test_session(&session_id, now);
+    state.inner.store.insert_session(&session).await.unwrap();
+    state
+        .inner
+        .store
+        .append_message(
+            session_id.as_str(),
+            &store_test_message(&session_id, now, "this may sound weird but go with it"),
+        )
+        .await
+        .unwrap();
+
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/plugins/dev.neoism.semantic/search?q=sound%20weird&limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed["available"], true,
+        "content search must stay available without an embeddings provider"
+    );
+    let hits = parsed["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{parsed}");
+    assert_eq!(hits[0]["sessionId"], session_id.to_string());
+    let excerpt = hits[0]["excerpt"].as_str().unwrap();
+    assert!(
+        excerpt.contains("sound weird but go with it"),
+        "excerpt carries the matched chunk: {excerpt}"
+    );
+    assert!(
+        !excerpt.contains(">>") && !excerpt.contains("<<"),
+        "tool-facing match markers are stripped for the UI: {excerpt}"
+    );
+    assert_eq!(hits[0]["distance"], 0.0, "exact matches outrank semantic ones");
+
+    std::env::remove_var("NEOISM_AGENT_DISABLE_EMBEDDINGS");
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn store_persists_sessions_and_searches_with_like() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-{}.turso.db",

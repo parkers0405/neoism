@@ -1442,6 +1442,53 @@ async fn v2_root_event_stream_forwards_live_delta_from_child_created_after_conne
 }
 
 #[tokio::test]
+async fn foreign_session_verdicts_are_cached_per_connection() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-foreign-cache-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let root_id = neoism_agent_core::new_session_id();
+    let foreign_id = neoism_agent_core::new_session_id();
+    for id in [&root_id, &foreign_id] {
+        let session = store_test_session(id, now_millis());
+        state.inner.store.insert_session(&session).await.unwrap();
+    }
+
+    let mut family = Some(std::collections::HashSet::from([root_id.to_string()]));
+    let mut foreign = std::collections::HashSet::new();
+    let event = EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({ "sessionID": foreign_id, "messageID": "m", "partID": "p", "field": "text", "delta": "x" }),
+    );
+    // First foreign event pays the store walk and records the verdict...
+    assert!(!crate::v2_routes::admit_live_event(
+        &state, &event, Some(root_id.as_str()), &mut family, &mut foreign
+    ).await);
+    assert!(foreign.contains(foreign_id.as_str()), "negative verdict cached");
+    // ...later ones skip the store entirely (delete the session row: a
+    // cached verdict needs no lookup, an uncached one would now admit the
+    // event through the missing-parent fallback path differently).
+    state.inner.store.delete_session(root_id.as_str()).await.ok();
+    assert!(!crate::v2_routes::admit_live_event(
+        &state, &event, Some(root_id.as_str()), &mut family, &mut foreign
+    ).await);
+
+    // Family members always admit without store traffic.
+    let own = EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({ "sessionID": root_id, "messageID": "m", "partID": "p", "field": "text", "delta": "y" }),
+    );
+    assert!(crate::v2_routes::admit_live_event(
+        &state, &own, Some(root_id.as_str()), &mut family, &mut foreign
+    ).await);
+
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn v2_live_events_carry_monotone_wire_sequences() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-wire-seq-{}.sqlite3",

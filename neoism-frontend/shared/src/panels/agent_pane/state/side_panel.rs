@@ -73,6 +73,21 @@ pub struct NeoismAgentSessionEntry {
     /// True for an injected cyan date-group / "Pinned" header row (not a
     /// selectable session). `title` holds the header label.
     pub is_header: bool,
+    /// True for an injected semantic-match excerpt row shown under its
+    /// session while a transcript search is active. `id` carries the parent
+    /// session id (so activating it resumes that session) and `title` holds
+    /// the matched excerpt text.
+    pub is_excerpt: bool,
+}
+
+/// One semantic transcript-search hit, per session (best chunk kept).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeoismAgentSemanticMatch {
+    pub session_id: String,
+    /// The matched transcript chunk, as returned by the server.
+    pub excerpt: String,
+    /// Cosine distance — lower is closer.
+    pub distance: f64,
 }
 
 impl NeoismAgentSessionEntry {
@@ -91,6 +106,7 @@ impl NeoismAgentSessionEntry {
             updated_ms: 0,
             pinned: false,
             is_header: false,
+            is_excerpt: false,
         }
     }
 
@@ -106,6 +122,24 @@ impl NeoismAgentSessionEntry {
             updated_ms: 0,
             pinned: false,
             is_header: true,
+            is_excerpt: false,
+        }
+    }
+
+    /// A semantic-match excerpt row under `session_id`'s entry. Selectable:
+    /// activating it resumes the parent session.
+    pub fn excerpt(session_id: impl Into<String>, excerpt: impl Into<String>) -> Self {
+        Self {
+            id: session_id.into(),
+            title: excerpt.into(),
+            time_label: String::new(),
+            depth: 0,
+            agent_kind: None,
+            runtime_status: None,
+            updated_ms: 0,
+            pinned: false,
+            is_header: false,
+            is_excerpt: true,
         }
     }
 
@@ -140,6 +174,33 @@ fn generic_subagent_metadata(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "" | "agent" | "subagent" | "sub-agent" | "sub agent" | "untitled" | "unknown"
     )
+}
+
+/// Collapse a transcript excerpt to one displayable line: whitespace runs
+/// (including newlines) become single spaces, and long chunks truncate on a
+/// char boundary with an ellipsis.
+fn compact_excerpt(excerpt: &str) -> String {
+    let mut compact = String::with_capacity(excerpt.len().min(160));
+    let mut last_space = true;
+    for ch in excerpt.chars() {
+        if ch.is_whitespace() {
+            if !last_space {
+                compact.push(' ');
+                last_space = true;
+            }
+        } else {
+            compact.push(ch);
+            last_space = false;
+        }
+    }
+    let compact = compact.trim().to_string();
+    const MAX: usize = 140;
+    if compact.chars().count() <= MAX {
+        return compact;
+    }
+    let mut truncated: String = compact.chars().take(MAX).collect();
+    truncated.push('…');
+    truncated
 }
 
 fn preserve_specific_subagent_metadata(
@@ -509,9 +570,9 @@ pub struct NeoismAgentSidePanel {
     /// Results only apply while it still matches the live filter, so a
     /// stale fetch that raced further typing never mislabels the list.
     semantic_query: String,
-    /// Session ids matched by server-side semantic transcript search,
+    /// Sessions matched by server-side semantic transcript search,
     /// best-first. Unioned into the display list with title matches.
-    semantic_results: Vec<String>,
+    semantic_results: Vec<NeoismAgentSemanticMatch>,
     /// True while a semantic transcript search is in flight — the empty
     /// list state renders a skeleton shimmer instead of "No results".
     semantic_searching: bool,
@@ -1394,11 +1455,17 @@ impl NeoismAgentSidePanel {
         }
     }
 
-    /// Install semantic transcript-search results (session ids,
-    /// best-first) fetched for `query`, and fold them into the display
-    /// list. A result set for a query the user has already typed past
-    /// is stored but simply won't apply until queries line up again.
-    pub fn set_semantic_results(&mut self, query: String, results: Vec<String>) {
+    /// Install semantic transcript-search results (best chunk per session,
+    /// closest-first) fetched for `query`, and fold them into the display
+    /// list: matched sessions join the title filter and each shows its
+    /// matched excerpt chunk beneath the row. A result set for a query the
+    /// user has already typed past is stored but simply won't apply until
+    /// queries line up again.
+    pub fn set_semantic_results(
+        &mut self,
+        query: String,
+        results: Vec<NeoismAgentSemanticMatch>,
+    ) {
         self.semantic_query = query.trim().to_string();
         self.semantic_results = results;
         self.rebuild_session_display();
@@ -1440,11 +1507,16 @@ impl NeoismAgentSidePanel {
         use crate::panels::agent_pane::session_group::section_label_at;
 
         let needle = self.session_query.trim().to_lowercase();
-        let semantic: std::collections::HashSet<&str> =
-            if !needle.is_empty() && self.semantic_query == self.session_query.trim() {
-                self.semantic_results.iter().map(String::as_str).collect()
+        let semantic_active =
+            !needle.is_empty() && self.semantic_query == self.session_query.trim();
+        let semantic: std::collections::HashMap<&str, &NeoismAgentSemanticMatch> =
+            if semantic_active {
+                self.semantic_results
+                    .iter()
+                    .map(|hit| (hit.session_id.as_str(), hit))
+                    .collect()
             } else {
-                std::collections::HashSet::new()
+                std::collections::HashMap::new()
             };
         let mut visible: Vec<NeoismAgentSessionEntry> = self
             .all_sessions
@@ -1452,7 +1524,7 @@ impl NeoismAgentSidePanel {
             .filter(|entry| {
                 needle.is_empty()
                     || entry.title.to_lowercase().contains(&needle)
-                    || semantic.contains(entry.id.as_str())
+                    || semantic.contains_key(entry.id.as_str())
             })
             .cloned()
             .collect();
@@ -1472,6 +1544,17 @@ impl NeoismAgentSidePanel {
                 out.push(NeoismAgentSessionEntry::header(label));
             }
             out.push(visible[i].clone());
+            // The matched transcript chunk renders as its own row under the
+            // session so the fixed-height virtualized list stays uniform.
+            if let Some(hit) = semantic.get(visible[i].id.as_str()) {
+                let excerpt = compact_excerpt(&hit.excerpt);
+                if !excerpt.is_empty() {
+                    out.push(NeoismAgentSessionEntry::excerpt(
+                        visible[i].id.clone(),
+                        excerpt,
+                    ));
+                }
+            }
         }
         self.sessions = out;
 

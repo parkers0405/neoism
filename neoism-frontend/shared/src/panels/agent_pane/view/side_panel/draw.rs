@@ -685,6 +685,62 @@ pub(crate) fn render_sessions_list(
             continue;
         }
 
+        // Semantic-match excerpt row: the matched transcript chunk, dim and
+        // indented under its session, with a small accent tick. Selectable —
+        // activating it resumes the parent session — so the shared hover
+        // treatment below still applies.
+        if entry.is_excerpt {
+            let hover = if pane.side_panel().hovered_session() == Some(absolute_ix) {
+                pane.side_panel().session_hover_scale()
+            } else {
+                0.0
+            };
+            if hover > 0.002 {
+                sugarloaf.quad(
+                    None,
+                    list_rect[0],
+                    row_y,
+                    list_rect[2],
+                    row_h,
+                    theme.f32_alpha(theme.surface, 0.28 * hover),
+                    [5.0 * s; 4],
+                    DEPTH,
+                    ORDER_PANEL + 1,
+                );
+            }
+            let tick_w = 2.0 * s;
+            let tick_h = row_h - 8.0 * s;
+            sugarloaf.rounded_rect(
+                None,
+                title_x + 2.0 * s,
+                row_y + 4.0 * s,
+                tick_w,
+                tick_h,
+                theme.f32_alpha(theme.cyan, 0.55),
+                DEPTH,
+                tick_w / 2.0,
+                ORDER_PANEL + 2,
+            );
+            let excerpt_opts = DrawOpts {
+                font_size: FONT_SIZE * s * 0.9,
+                color: theme.u8_alpha(theme.fg, 0.62),
+                clip_rect: Some(list_rect),
+                ..DrawOpts::default()
+            };
+            let excerpt_x = title_x + 10.0 * s;
+            let excerpt_w = text_w - dot_gutter - 10.0 * s;
+            let label = truncate_to_fit(&entry.title, excerpt_w, sugarloaf, &excerpt_opts);
+            draw_text_with_occlusion(
+                sugarloaf,
+                excerpt_x,
+                text_y,
+                &label,
+                &excerpt_opts,
+                occlusion_rects,
+            );
+            continue;
+        }
+
         let is_current = current_id.as_deref() == Some(entry.id.as_str());
         let running = session_entry_is_running(entry);
         let hover = if pane.side_panel().hovered_session() == Some(absolute_ix) {

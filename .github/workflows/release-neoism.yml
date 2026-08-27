@@ -77,6 +77,16 @@ jobs:
       # indirection is the documented pattern.
       HAVE_MAC_SIGNING: ${{ secrets.MACOS_SIGN_P12 != '' }}
       HAVE_WINDOWS_SIGNING: ${{ secrets.WINDOWS_SIGN_PFX != '' }}
+      # Compilation cache. With no R2 secrets, sccache rides the GitHub
+      # Actions cache (10GB, LRU per entry — degrades gracefully under
+      # eviction, unlike an all-or-nothing target-dir tarball). Adding the
+      # three SCCACHE_R2_* secrets flips every leg to the R2 bucket, which
+      # has no size cap and survives any number of same-day releases.
+      HAVE_R2_CACHE: ${{ secrets.SCCACHE_R2_BUCKET != '' }}
+      SCCACHE_R2_BUCKET: ${{ secrets.SCCACHE_R2_BUCKET }}
+      SCCACHE_R2_ENDPOINT: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     strategy:
       fail-fast: false
       matrix:
@@ -106,13 +116,43 @@ jobs:
             libfontconfig1-dev libfreetype6-dev \
             glslang-tools libssl-dev
 
+      # Defender real-time scanning inspects every rustc artifact write and
+      # costs a double-digit percentage of Windows compile time. The runner
+      # is ephemeral; excluding the workspace is safe and standard.
+      - name: Exclude build tree from Windows Defender
+        if: matrix.goos == 'windows'
+        shell: powershell
+        run: |
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionProcess "rustc.exe","cargo.exe","link.exe","sccache.exe"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure compilation cache backend
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          if [ "$HAVE_R2_CACHE" = "true" ]; then
+            echo "SCCACHE_BUCKET=$SCCACHE_R2_BUCKET" >> "$GITHUB_ENV"
+            echo "SCCACHE_ENDPOINT=$SCCACHE_R2_ENDPOINT" >> "$GITHUB_ENV"
+            echo "SCCACHE_REGION=auto" >> "$GITHUB_ENV"
+          else
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          fi
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          # sccache owns compilation caching at per-crate granularity, so
+          # the multi-gigabyte target dir stays out of the 10GB Actions
+          # cache — hoarding it is what evicted every other leg's cache on
+          # multi-release days. Only the small registry/git caches remain.
+          cache-targets: false
           # A failed leg still spent its compile time — save the cache
           # anyway so the retry (always a new commit after a version
           # bump) starts warm instead of rebuilding every dependency.
@@ -125,6 +165,7 @@ jobs:
         run: |
           env -u CI cargo build --release --locked --target ${{ matrix.target }} \
            -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
+          sccache --show-stats || true
 
       - name: Install WiX Toolset
         if: matrix.goos == 'windows'

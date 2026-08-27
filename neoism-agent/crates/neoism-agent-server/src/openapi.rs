@@ -730,7 +730,115 @@ fn canonical_schemas() -> Value {
     schemas.as_object_mut().expect("schema object").extend(
         typed_event_schemas().as_object().expect("typed event schema object").clone()
     );
+    schemas.as_object_mut().expect("schema object").extend(
+        typed_part_schemas().as_object().expect("typed part schema object").clone()
+    );
     schemas
+}
+
+/// Discriminated schemas for every message part, mirroring the core `Part`
+/// enum's serde serialization exactly (tag = `type`, kebab-case; camelCase
+/// fields). Variants allow additional properties so additive server fields
+/// never break older validating clients, but every field the server emits
+/// today is declared. Exhaustiveness against the Rust enum is enforced by
+/// `every_part_variant_has_a_typed_schema`.
+fn typed_part_schemas() -> Value {
+    let part_base = |tag: &str, required: Value, properties: Value| {
+        let mut props = serde_json::Map::new();
+        props.insert("type".into(), json!({ "type": "string", "const": tag }));
+        props.insert("id".into(), json!({ "type": "string" }));
+        props.insert("sessionId".into(), json!({ "type": "string" }));
+        props.insert("messageId".into(), json!({ "type": "string" }));
+        for (key, value) in properties.as_object().expect("part properties").clone() {
+            props.insert(key, value);
+        }
+        let mut req = vec![json!("type"), json!("id"), json!("sessionId"), json!("messageId")];
+        req.extend(required.as_array().expect("part required").clone());
+        json!({ "type": "object", "additionalProperties": true, "required": req, "properties": props })
+    };
+    let r = |name: &str| json!({ "$ref": format!("#/components/schemas/{name}") });
+    json!({
+        "PartTime": { "type": "object", "additionalProperties": false, "required": ["start"], "properties": {
+            "start": { "type": "integer", "minimum": 0 }, "end": { "type": "integer", "minimum": 0 }
+        }},
+        "CacheUsage": { "type": "object", "additionalProperties": false, "required": ["read", "write"], "properties": {
+            "read": { "type": "integer", "minimum": 0 }, "write": { "type": "integer", "minimum": 0 }
+        }},
+        "TokenUsage": { "type": "object", "additionalProperties": false, "required": ["input", "output", "reasoning", "cache"], "properties": {
+            "total": { "type": "integer", "minimum": 0 }, "input": { "type": "integer", "minimum": 0 },
+            "output": { "type": "integer", "minimum": 0 }, "reasoning": { "type": "integer", "minimum": 0 },
+            "cache": r("CacheUsage")
+        }},
+        "UserModelRef": { "type": "object", "additionalProperties": false, "required": ["providerId", "modelId"], "properties": {
+            "providerId": { "type": "string" }, "modelId": { "type": "string" }, "variant": { "type": "string" }
+        }},
+        "ToolState": {
+            "description": "Tool call lifecycle, discriminated by `status`.",
+            "oneOf": [
+                { "$ref": "#/components/schemas/ToolStatePending" },
+                { "$ref": "#/components/schemas/ToolStateRunning" },
+                { "$ref": "#/components/schemas/ToolStateCompleted" },
+                { "$ref": "#/components/schemas/ToolStateError" }
+            ],
+            "discriminator": { "propertyName": "status" }
+        },
+        "ToolStatePending": { "type": "object", "additionalProperties": true, "required": ["status", "input", "raw"], "properties": {
+            "status": { "type": "string", "const": "pending" }, "input": {}, "raw": { "type": "string" }
+        }},
+        "ToolStateRunning": { "type": "object", "additionalProperties": true, "required": ["status", "input", "time"], "properties": {
+            "status": { "type": "string", "const": "running" }, "input": {}, "time": r("PartTime")
+        }},
+        "ToolStateCompleted": { "type": "object", "additionalProperties": true, "required": ["status", "input", "output", "metadata", "title", "time"], "properties": {
+            "status": { "type": "string", "const": "completed" }, "input": {}, "output": { "type": "string" },
+            "metadata": {}, "title": { "type": "string" }, "time": r("PartTime")
+        }},
+        "ToolStateError": { "type": "object", "additionalProperties": true, "required": ["status", "input", "error", "time"], "properties": {
+            "status": { "type": "string", "const": "error" }, "input": {}, "error": { "type": "string" }, "time": r("PartTime")
+        }},
+        "TextPart": part_base("text", json!(["text"]), json!({
+            "text": { "type": "string" }, "synthetic": { "type": "boolean" }, "time": r("PartTime")
+        })),
+        "CompactionPart": part_base("compaction", json!(["reason", "summary"]), json!({
+            "reason": { "type": "string" }, "summary": { "type": "boolean" }, "tailStartMessageId": { "type": "string" }
+        })),
+        "AgentPart": part_base("agent", json!(["name"]), json!({
+            "name": { "type": "string" }, "source": {}
+        })),
+        "SubtaskPart": part_base("subtask", json!(["prompt", "description", "agent"]), json!({
+            "prompt": { "type": "string" }, "description": { "type": "string" }, "agent": { "type": "string" },
+            "model": r("UserModelRef"), "command": { "type": "string" }
+        })),
+        "ReasoningPart": part_base("reasoning", json!(["text", "time"]), json!({
+            "text": { "type": "string" }, "time": r("PartTime"), "metadata": {}
+        })),
+        "ToolPart": part_base("tool", json!(["tool", "callId", "state"]), json!({
+            "tool": { "type": "string" }, "callId": { "type": "string" }, "state": r("ToolState"), "metadata": {}
+        })),
+        "StepStartPart": part_base("step-start", json!([]), json!({
+            "snapshot": { "type": "string" }
+        })),
+        "StepFinishPart": part_base("step-finish", json!(["reason", "tokens", "cost"]), json!({
+            "reason": { "type": "string" }, "tokens": r("TokenUsage"), "cost": { "type": "number" }, "snapshot": { "type": "string" }
+        })),
+        "FilePart": part_base("file", json!(["mime", "url"]), json!({
+            "mime": { "type": "string" }, "url": { "type": "string" }, "filename": { "type": "string" }
+        })),
+        "Part": {
+            "description": "One message part, discriminated by `type`. Every part the server emits today is a declared variant; variants tolerate additive fields.",
+            "oneOf": [
+                { "$ref": "#/components/schemas/TextPart" },
+                { "$ref": "#/components/schemas/CompactionPart" },
+                { "$ref": "#/components/schemas/AgentPart" },
+                { "$ref": "#/components/schemas/SubtaskPart" },
+                { "$ref": "#/components/schemas/ReasoningPart" },
+                { "$ref": "#/components/schemas/ToolPart" },
+                { "$ref": "#/components/schemas/StepStartPart" },
+                { "$ref": "#/components/schemas/StepFinishPart" },
+                { "$ref": "#/components/schemas/FilePart" }
+            ],
+            "discriminator": { "propertyName": "type" }
+        }
+    })
 }
 
 /// PascalCase component name for one event type: "message.part.delta" →
@@ -773,12 +881,10 @@ fn event_data_schema(event_type: &str) -> Value {
     use neoism_agent_core::event_type as et;
     let r = |name: &str| json!({ "$ref": format!("#/components/schemas/{name}") });
     let nullable = |schema: Value| json!({ "oneOf": [schema, { "type": "null" }] });
-    // Serialized core structs whose closed schemas would reject the extra
-    // keys some publish sites inject stay open objects.
-    let part = json!({ "type": "object", "additionalProperties": true, "required": ["id", "type"], "properties": {
-        "id": { "type": "string" }, "type": { "type": "string" },
-        "role": { "type": "string" }, "system": { "type": "string" }, "author": { "type": "string" }
-    }});
+    // Every publish site serializes a real core `Part`; the live user-part
+    // broadcast additionally injects `role`/`system`/`author`, which the
+    // typed variants tolerate via additionalProperties.
+    let part = r("Part");
     let message_info = json!({ "type": "object", "additionalProperties": true, "required": ["role", "id", "sessionId"], "properties": {
         "role": { "type": "string" }, "id": { "type": "string" }, "sessionId": { "type": "string" }
     }});
@@ -998,9 +1104,7 @@ fn authoritative_schemas() -> Value {
             "model": r("ModelRef"), "variant": { "type": "string" }, "prompt": { "type": "string" }, "options": { "type": "object", "additionalProperties": true }, "steps": { "type": "integer", "minimum": 0 }
         }},
         "AgentList": { "type": "array", "items": r("Agent") },
-        "Part": { "type": "object", "additionalProperties": true, "required": ["type", "id", "sessionId", "messageId"], "properties": {
-            "type": { "type": "string" }, "id": { "type": "string" }, "sessionId": { "type": "string" }, "messageId": { "type": "string" }
-        }, "description": "Known and future message parts remain round-trippable." },
+
         "MessageInfo": { "type": "object", "additionalProperties": true, "required": ["role", "id", "sessionId", "time"], "properties": {
             "role": { "type": "string", "enum": ["user", "assistant"] }, "id": { "type": "string" }, "sessionId": { "type": "string" }, "time": { "type": "object", "additionalProperties": true }
         }},
@@ -1189,6 +1293,105 @@ mod tests {
 
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_part_variant_has_a_typed_schema_and_samples_validate() {
+        use neoism_agent_core::{
+            AgentPart, CacheUsage, CompactionPart, FilePart, Part, PartTime, ReasoningPart,
+            StepFinishPart, StepStartPart, SubtaskPart, TextPart, TokenUsage, ToolPart,
+            ToolState,
+        };
+        let id = || neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Part);
+        let sid = neoism_agent_core::new_session_id();
+        let mid = neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Message);
+        let time = PartTime { start: 1, end: Some(2) };
+        let tool = |state: ToolState| {
+            Part::Tool(ToolPart {
+                id: id(), session_id: sid.clone(), message_id: mid.clone(),
+                tool: "bash".into(), call_id: "call".into(), state,
+                metadata: Some(serde_json::json!({"x": 1})),
+            })
+        };
+        // One sample per Part variant (plus every ToolState) — adding a new
+        // variant to the core enum without extending this list is a compile
+        // error via the match below.
+        let samples = vec![
+            Part::Text(TextPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), text: "t".into(), synthetic: Some(true), time: Some(time.clone()) }),
+            Part::Compaction(CompactionPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), reason: "auto".into(), summary: true, tail_start_message_id: Some(mid.clone()) }),
+            Part::Agent(AgentPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), name: "build".into(), source: None }),
+            Part::Subtask(SubtaskPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), prompt: "p".into(), description: "d".into(), agent: "general".into(), model: None, command: None }),
+            Part::Reasoning(ReasoningPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), text: "r".into(), time: time.clone(), metadata: None }),
+            tool(ToolState::Pending { input: serde_json::json!({}), raw: String::new() }),
+            tool(ToolState::Running { input: serde_json::json!({}), time: time.clone() }),
+            tool(ToolState::Completed { input: serde_json::json!({}), output: "ok".into(), metadata: serde_json::json!({}), title: "Bash".into(), time: time.clone() }),
+            tool(ToolState::Error { input: serde_json::json!({}), error: "boom".into(), time: time.clone() }),
+            Part::StepStart(StepStartPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), snapshot: None }),
+            Part::StepFinish(StepFinishPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), reason: "stop".into(), tokens: TokenUsage { total: Some(3), input: 1, output: 1, reasoning: 1, cache: CacheUsage { read: 0, write: 0 } }, cost: 0.01, snapshot: None }),
+            Part::File(FilePart { id: id(), session_id: sid.clone(), message_id: mid.clone(), mime: "text/plain".into(), url: "artifact://a".into(), filename: None }),
+        ];
+        // Exhaustiveness: the compiler forces this match to grow with the enum.
+        for part in &samples {
+            match part {
+                Part::Text(_) | Part::Compaction(_) | Part::Agent(_) | Part::Subtask(_)
+                | Part::Reasoning(_) | Part::Tool(_) | Part::StepStart(_)
+                | Part::StepFinish(_) | Part::File(_) => {}
+            }
+        }
+
+        let schemas = typed_part_schemas();
+        let union_tags: Vec<String> = schemas["Part"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|variant| {
+                let name = variant["$ref"].as_str().unwrap().rsplit('/').next().unwrap();
+                schemas[name]["properties"]["type"]["const"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(union_tags.len(), 9, "one union variant per Part variant");
+
+        for part in &samples {
+            let value = serde_json::to_value(part).unwrap();
+            let tag = value["type"].as_str().unwrap();
+            let schema_name = schemas["Part"]["oneOf"]
+                .as_array().unwrap().iter()
+                .map(|variant| variant["$ref"].as_str().unwrap().rsplit('/').next().unwrap())
+                .find(|name| schemas[name]["properties"]["type"]["const"] == tag)
+                .unwrap_or_else(|| panic!("no schema variant for serialized tag {tag}"));
+            let schema = &schemas[schema_name];
+            for required in schema["required"].as_array().unwrap() {
+                let field = required.as_str().unwrap();
+                assert!(
+                    value.get(field).is_some(),
+                    "{schema_name}: serialized {tag} part missing required field {field}: {value}"
+                );
+            }
+            // Every serialized field must be declared, so the schema never
+            // silently under-describes what the server actually emits.
+            for (field, _) in value.as_object().unwrap() {
+                assert!(
+                    schema["properties"].get(field).is_some(),
+                    "{schema_name}: emitted field {field} is not declared in the schema"
+                );
+            }
+            if tag == "tool" {
+                let state = &value["state"];
+                let status = state["status"].as_str().unwrap();
+                let state_schema_name = schemas["ToolState"]["oneOf"]
+                    .as_array().unwrap().iter()
+                    .map(|variant| variant["$ref"].as_str().unwrap().rsplit('/').next().unwrap())
+                    .find(|name| schemas[name]["properties"]["status"]["const"] == status)
+                    .unwrap_or_else(|| panic!("no ToolState schema for status {status}"));
+                for required in schemas[state_schema_name]["required"].as_array().unwrap() {
+                    let field = required.as_str().unwrap();
+                    assert!(
+                        state.get(field).is_some(),
+                        "{state_schema_name}: tool state missing required {field}: {state}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

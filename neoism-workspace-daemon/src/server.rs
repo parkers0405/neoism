@@ -353,12 +353,23 @@ fn mint_agent_credential(
     root: &std::path::Path,
 ) -> Result<String, Response> {
 
-    let signing_key = std::env::var("NEOISM_DAEMON_TOKEN")
+    // The env var is captured once at daemon startup, but the canonical
+    // token file is the live trust root shared with the (possibly separate)
+    // agent-server process — and it rotates when the runtime dir is
+    // recreated. Prefer the current file so a signer with a stale env can
+    // never mint credentials the verifier must reject.
+    let signing_key = std::fs::read_to_string(crate::daemon_token::daemon_token_path())
         .ok()
-        .filter(|key| !key.is_empty())
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .or_else(|| {
+            std::env::var("NEOISM_DAEMON_TOKEN")
+                .ok()
+                .filter(|key| !key.is_empty())
+        })
         .ok_or_else(|| {
             tracing::error!(
-                "cannot mint Agent credential: NEOISM_DAEMON_TOKEN is unavailable"
+                "cannot mint Agent credential: no daemon token on disk or in NEOISM_DAEMON_TOKEN"
             );
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         })?;
@@ -518,6 +529,21 @@ mod agent_proxy_auth_tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _token = DaemonTokenGuard::set("daemon-test-key");
         let temp = tempfile::tempdir().unwrap();
+        // Minting prefers the canonical on-disk token; point the runtime
+        // dir at this test's sandbox so the machine's real token file
+        // cannot shadow the env key under test.
+        let prev_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", temp.path());
+        struct RestoreRuntime(Option<std::ffi::OsString>);
+        impl Drop for RestoreRuntime {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+                    None => std::env::remove_var("XDG_RUNTIME_DIR"),
+                }
+            }
+        }
+        let _restore = RestoreRuntime(prev_runtime);
         let auth = AuthService::bootstrap(temp.path()).unwrap();
 
         let root = temp.path();

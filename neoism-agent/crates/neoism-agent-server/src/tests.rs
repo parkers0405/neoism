@@ -1442,6 +1442,94 @@ async fn v2_root_event_stream_forwards_live_delta_from_child_created_after_conne
 }
 
 #[tokio::test]
+async fn v2_live_events_carry_monotone_wire_sequences() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-wire-seq-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let session = store_test_session(&session_id, now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v2/events?sessionId={}&tail=true", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+
+    // Mix live-only deltas and durable events: every broadcast frame must
+    // carry a strictly increasing wire sequence — the SDK's reconnect
+    // cursor depends on it (sequence: 0 on live events made clients drop
+    // every event after the first as a replay).
+    state.publish_live(EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({ "sessionID": session_id, "messageID": "m", "partID": "p", "field": "text", "delta": "a" }),
+    ));
+    state.publish(EventPayload::new(
+        event_type::MESSAGE_PART_UPDATED,
+        json!({ "sessionID": session_id, "part": { "id": "p", "type": "text", "messageID": "m", "sessionId": session_id, "text": "ab" } }),
+    ));
+    state.publish_live(EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({ "sessionID": session_id, "messageID": "m", "partID": "p", "field": "text", "delta": "b" }),
+    ));
+
+    let mut received = String::new();
+    let mut sequences: Vec<u64> = Vec::new();
+    while sequences.len() < 3 {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("stamped events should arrive")
+            .expect("SSE stream open")
+            .expect("readable chunk");
+        received.push_str(&String::from_utf8_lossy(&chunk));
+        sequences = received
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|value| value["sequence"].as_u64())
+            .collect();
+    }
+    assert!(
+        sequences.iter().all(|sequence| *sequence > 0),
+        "live events must be stamped, got {sequences:?}"
+    );
+    let mut sorted = sequences.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        sequences.len(),
+        "wire sequences must be distinct: {sequences:?}"
+    );
+    assert_eq!(
+        sorted, sequences,
+        "wire sequences must arrive in increasing order: {sequences:?}"
+    );
+
+    // The durable row persists its stamped value, so a client cursor from a
+    // live event resumes the durable log coherently.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let durable_max = state.inner.store.latest_event_sequence().await.unwrap();
+    assert!(
+        sequences.contains(&durable_max),
+        "durable seq {durable_max} should be one of the broadcast sequences {sequences:?}"
+    );
+
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn v2_event_stream_flushes_live_deltas_before_durable_replay() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-live-before-durable-{}.sqlite3",

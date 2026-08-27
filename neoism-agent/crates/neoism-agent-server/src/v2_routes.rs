@@ -318,9 +318,13 @@ fn event_matches_family(
 
 fn v2_live_sse_event(event: neoism_agent_core::EventPayload) -> Event {
     let session_id = event_session_id(&event).map(str::to_string);
+    // The publish paths stamp every broadcast with the wire-monotone
+    // sequence; durable rows persist the same value, so client cursors
+    // taken from live events resume the durable log correctly.
+    let sequence = event.sequence.unwrap_or(0);
     let envelope = EventEnvelope {
         id: event.id.to_string(),
-        sequence: 0,
+        sequence,
         source: event_source(&event.kind).to_string(),
         schema_version: "1.0.0".to_string(),
         timestamp: crate::server_util::now_millis() as i64,
@@ -331,9 +335,14 @@ fn v2_live_sse_event(event: neoism_agent_core::EventPayload) -> Event {
         kind: event.kind,
         data: event.properties,
     };
-    Event::default()
+    let sse = Event::default()
         .event(envelope.kind.clone())
-        .data(serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_string()))
+        .data(serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_string()));
+    if sequence > 0 {
+        sse.id(sequence.to_string())
+    } else {
+        sse
+    }
 }
 
 fn persisted_event_envelope(event: crate::state::PersistedEvent) -> EventEnvelope<Value> {

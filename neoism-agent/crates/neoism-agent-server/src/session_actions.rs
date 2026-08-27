@@ -198,6 +198,7 @@ pub(crate) async fn create_subtask_session(
         extra: [
             crate::execution_activity::EXECUTION_ID_KEY,
             crate::execution_activity::EXECUTION_ROOT_KEY,
+            crate::caller::TENANT_EXTRA_KEY,
         ]
         .into_iter()
         .filter_map(|key| parent.extra.get(key).cloned().map(|value| (key.to_string(), value)))

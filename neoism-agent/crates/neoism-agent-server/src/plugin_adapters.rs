@@ -232,6 +232,10 @@ impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {
             let directory = request.workspace.unwrap_or_default();
             let directory = directory.to_string_lossy();
             let body = match action {
+                ConfigAdminAction::Defaults => {
+                    let config = neoism_agent_builtins::plugin::config::load(self.0.services(), &directory).map_err(runtime_error)?.0;
+                    Ok(neoism_agent_builtins::plugin::config::selection_defaults(&config))
+                }
                 ConfigAdminAction::Get => {
                     let mut config = neoism_agent_builtins::plugin::config::load(self.0.services(), &directory).map_err(runtime_error)?.0;
                     crate::config::inject_builtin_mcp(&mut config, self.0.services());

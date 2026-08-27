@@ -268,8 +268,16 @@ async fn resolve_scoped_plugin_session(
     let Some(session) = find_scoped_plugin_session(state, path, method).await else {
         return Ok(None);
     };
-    if !crate::caller::allows_session(claims, &session)
-        || !crate::caller::allows_directory(claims, &session.directory)
+    if !allows_session_or_ancestor(state, claims, &session)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to authorize plugin session ancestry");
+            auth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "auth.lookup_failed",
+                "Failed to authorize the session",
+            )
+        })?
     {
         return Err(auth_error(StatusCode::FORBIDDEN, "auth.session_forbidden", "The caller is not authorized for this session or directory"));
     }
@@ -528,6 +536,56 @@ fn match_plugin_path(
     Some(params)
 }
 
+/// Authorize a session directly, or through an authorized ancestor in the
+/// same workspace and directory. Older internally-spawned subagent sessions
+/// did not copy the tenant marker from their parent, so direct authorization
+/// alone makes a legitimately shared child impossible to open.
+async fn allows_session_or_ancestor(
+    state: &AppState,
+    claims: &crate::caller::CallerClaims,
+    session: &neoism_agent_core::SessionInfo,
+) -> anyhow::Result<bool> {
+    if crate::caller::allows_session(claims, session) {
+        return Ok(true);
+    }
+    if !crate::caller::allows_directory(claims, &session.directory) {
+        return Ok(false);
+    }
+    if claims.workspace_id.as_ref().is_some_and(|workspace_id| {
+        session
+            .workspace_id
+            .as_ref()
+            .is_none_or(|session_workspace| session_workspace.to_string() != *workspace_id)
+    }) {
+        return Ok(false);
+    }
+
+    let descendant_directory = crate::workspace_runtime::canonical_location(&session.directory);
+    let descendant_workspace = session.workspace_id.clone();
+    let mut parent_id = session.parent_id.clone();
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..16 {
+        let Some(id) = parent_id else { return Ok(false) };
+        if !seen.insert(id.to_string()) {
+            return Ok(false);
+        }
+        let Some(parent) = state.inner.store.get_session(id.as_str()).await? else {
+            return Ok(false);
+        };
+        if parent.workspace_id != descendant_workspace
+            || crate::workspace_runtime::canonical_location(&parent.directory)
+                != descendant_directory
+        {
+            return Ok(false);
+        }
+        if crate::caller::allows_session(claims, &parent) {
+            return Ok(true);
+        }
+        parent_id = parent.parent_id;
+    }
+    Ok(false)
+}
+
 async fn authenticate_request(
     State(state): State<AppState>,
     mut request: Request<Body>,
@@ -617,14 +675,24 @@ async fn authenticate_request(
         let mut authorized_session = false;
         if let Some(session_id) = owned_session.as_deref() {
             match state.inner.store.get_session(session_id).await {
-                Ok(Some(session)) if !crate::caller::allows_session(&claims, &session) => {
-                    return auth_error(
-                        StatusCode::FORBIDDEN,
-                        "auth.session_forbidden",
-                        "The caller is not authorized for this session or directory",
-                    );
-                }
-                Ok(Some(_)) => authorized_session = true,
+                Ok(Some(session)) => match allows_session_or_ancestor(&state, &claims, &session).await {
+                    Ok(true) => authorized_session = true,
+                    Ok(false) => {
+                        return auth_error(
+                            StatusCode::FORBIDDEN,
+                            "auth.session_forbidden",
+                            "The caller is not authorized for this session or directory",
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to authorize session ancestry");
+                        return auth_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "auth.lookup_failed",
+                            "Failed to authorize the session",
+                        );
+                    }
+                },
                 Err(error) => {
                     tracing::warn!(%error, "failed to authorize session owner");
                     return auth_error(
@@ -784,6 +852,13 @@ mod hosted_plugin_authorization_tests {
         assert!(snapshot_matches_session_route(&snapshot, "GET", "/v2/plugins/dev.example.route-auth/sessions/ses_real", "ses_real"));
     }
 
+    #[test]
+    fn hosted_clients_can_read_safe_defaults_but_not_full_config() {
+        assert!(hosted_restricted_path("/v2/config"));
+        assert!(hosted_restricted_path("/v2/config/validate"));
+        assert!(!hosted_restricted_path("/v2/config/defaults"));
+    }
+
     fn scoped_claims(directory: String, tenant_id: &str) -> crate::caller::CallerClaims {
         crate::caller::CallerClaims {
             subject: "scoped-test".into(), workspace_id: None, tenant_id: tenant_id.into(),
@@ -871,6 +946,39 @@ mod hosted_plugin_authorization_tests {
         let matched = resolve_scoped_plugin_session(&state, &path, "GET", &allowed).await.unwrap().unwrap();
         assert_eq!(matched.session_id, session.id.to_string());
         assert_eq!(crate::workspace_runtime::canonical_location(&matched.directory), crate::workspace_runtime::canonical_location(&session.directory));
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn shared_parent_authorizes_legacy_child_without_tenant_marker() {
+        let (state, mut parent, root) = session_route_fixture().await;
+        parent.workspace_id = Some("workspace-a".into());
+        state.inner.store.update_session(&parent).await.unwrap();
+        let mut child = parent.clone();
+        child.id = neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Session);
+        child.parent_id = Some(parent.id.clone());
+        child.title = "Legacy subagent".into();
+        child.extra.clear();
+        state.inner.store.insert_session(&child).await.unwrap();
+
+        let mut allowed = scoped_claims(root.to_string_lossy().into_owned(), "tenant-a");
+        allowed.workspace_id = Some("workspace-a".into());
+        assert!(!crate::caller::allows_session(&allowed, &child));
+        assert!(allows_session_or_ancestor(&state, &allowed, &child)
+            .await
+            .unwrap());
+
+        let denied = scoped_claims(root.to_string_lossy().into_owned(), "tenant-b");
+        assert!(!allows_session_or_ancestor(&state, &denied, &child)
+            .await
+            .unwrap());
+        let mut wrong_workspace = allowed.clone();
+        wrong_workspace.workspace_id = Some("workspace-b".into());
+        assert!(!allows_session_or_ancestor(&state, &wrong_workspace, &child)
+            .await
+            .unwrap());
+
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(root);
     }

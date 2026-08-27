@@ -193,6 +193,7 @@ async fn create_external_subtask_session(
     for key in [
         crate::execution_activity::EXECUTION_ID_KEY,
         crate::execution_activity::EXECUTION_ROOT_KEY,
+        crate::caller::TENANT_EXTRA_KEY,
     ] {
         if let Some(value) = parent.extra.get(key) {
             extra.insert(key.to_string(), value.clone());

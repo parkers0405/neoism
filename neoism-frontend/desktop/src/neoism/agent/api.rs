@@ -855,8 +855,8 @@ pub(super) fn fetch_config_defaults(
     directory: Option<&str>,
 ) -> Result<ConfigDefaults, String> {
     let path = directory
-        .map(|dir| format!("/v2/config?directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/v2/config".to_string());
+        .map(|dir| format!("/v2/config/defaults?directory={}", percent_encode(dir)))
+        .unwrap_or_else(|| "/v2/config/defaults".to_string());
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "Neoism Agent returned an empty config response".to_string())?;
     Ok(config_defaults_from_json(&value))

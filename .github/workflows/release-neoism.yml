@@ -432,10 +432,28 @@ jobs:
             target/release ~/.cargo/registry/src
           find target -maxdepth 3 -type f -size +100M -delete 2>/dev/null || true
           df -h / || true
+          rm -rf stage/dmg
           mkdir -p stage/dmg
-          cp -R "stage/$OUT/Neoism.app" stage/dmg/
+          # Apple recommends ditto for app bundles so symlinks, modes, and
+          # extended attributes survive the staging copy.
+          ditto "stage/$OUT/Neoism.app" stage/dmg/Neoism.app
           ln -s /Applications stage/dmg/Applications
-          hdiutil create -volname "Neoism" -srcfolder stage/dmg -ov -format UDZO "$OUT.dmg"
+
+          # Do not let hdiutil infer the temporary filesystem size from APFS
+          # allocated blocks. Rust/Mach-O outputs can be sparse (and cache
+          # restoration changes their allocation), so hdiutil's automatic
+          # estimate can be smaller than the logical bytes it must copy. That
+          # produces a bogus "No space left on device" even with 90+ GiB free
+          # on the runner. Size from logical file lengths, then add 100% plus
+          # 256 MiB for HFS metadata, xattrs, and future bundle growth.
+          CONTENT_BYTES="$(find stage/dmg -type f -exec stat -f '%z' {} \; \
+            | awk '{ total += $1 } END { printf "%.0f", total }')"
+          CONTENT_MIB=$(( (CONTENT_BYTES + 1048575) / 1048576 ))
+          IMAGE_MIB=$(( CONTENT_MIB * 2 + 256 ))
+          echo "DMG source: ${CONTENT_MIB} MiB logical; image filesystem: ${IMAGE_MIB} MiB"
+          du -sh stage/dmg
+          hdiutil create -volname "Neoism" -srcfolder stage/dmg \
+            -size "${IMAGE_MIB}m" -fs HFS+ -ov -format UDZO "$OUT.dmg"
           if [ "$HAVE_MAC_SIGNING" = "true" ]; then
             IDENTITY=$(security find-identity -v -p codesigning \
               | awk -F'"' '/Developer ID Application/{print $2; exit}')
@@ -445,6 +463,27 @@ jobs:
               --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
             xcrun stapler staple "$OUT.dmg"
           fi
+          hdiutil verify "$OUT.dmg"
+
+          # Mount the final image and prove all three executables survived the
+          # copy. A valid container with a truncated app is not a release.
+          VERIFY_MOUNT="$RUNNER_TEMP/neoism-dmg-verify"
+          mkdir -p "$VERIFY_MOUNT"
+          DMG_MOUNTED=false
+          cleanup_dmg_mount() {
+            if [ "$DMG_MOUNTED" = "true" ]; then
+              hdiutil detach "$VERIFY_MOUNT" || true
+            fi
+          }
+          trap cleanup_dmg_mount EXIT
+          hdiutil attach "$OUT.dmg" -readonly -nobrowse -mountpoint "$VERIFY_MOUNT"
+          DMG_MOUNTED=true
+          for bin in neoism neoism-workspace-daemon neoism-agent; do
+            test -x "$VERIFY_MOUNT/Neoism.app/Contents/MacOS/$bin"
+          done
+          hdiutil detach "$VERIFY_MOUNT"
+          DMG_MOUNTED=false
+          trap - EXIT
           # Hash LAST — stapling rewrites the dmg.
           shasum -a 256 "$OUT.dmg" > "$OUT.dmg.sha256"
 

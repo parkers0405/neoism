@@ -447,6 +447,21 @@ fn child_background_completion_stays_out_of_main_transcript() {
         .any(|message| message.id == "background-task-job-child"));
 }
 
+fn client_background_completion_card(job_id: &str) -> NeoismAgentMessage {
+    let mut card = NeoismAgentMessage::tool(
+        "background_task_result",
+        format!("job_id: {job_id}\nstatus: completed\nbackground shell task finished"),
+        "completed",
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    )
+    .with_id(format!("background-task-{job_id}"));
+    card.detail = card.text.clone();
+    card
+}
+
 #[test]
 fn background_completion_card_survives_messages_snapshot_replacement() {
     let mut pane = NeoismAgentPane::default();
@@ -477,6 +492,66 @@ fn background_completion_card_survives_messages_snapshot_replacement() {
 
     assert_eq!(pane.messages.len(), 3);
     assert_eq!(pane.messages[2].id, "background-task-job-1");
+}
+
+#[test]
+fn background_completion_stays_before_the_text_streaming_when_it_finished() {
+    let mut pane = NeoismAgentPane::default();
+    let launch = NeoismAgentMessage::tool(
+        "Run timer",
+        "job_id: job-1\nstatus: running",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    )
+    .with_id("tool-launch");
+    pane.remember_live_part_parent("tool-launch", Some("msg-active"));
+    pane.upsert_part_message(launch.clone());
+    pane.remember_live_part_parent("answer", Some("msg-active"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("Streaming before finish ").with_id("answer"),
+    );
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+
+    pane.upsert_part_message(client_background_completion_card("job-1"));
+    pane.apply_part_delta(
+        Some("msg-active".to_string()),
+        Some("answer".to_string()),
+        Some("text".to_string()),
+        "and after finish",
+    );
+
+    assert_eq!(
+        pane.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-launch", "background-task-job-1", "answer"]
+    );
+    assert!(pane.messages[2].text.ends_with("and after finish"));
+
+    // The persisted runtime prompt lands at the server transcript tail
+    // after the active turn settles. Reconciliation must keep the live
+    // completion anchor while still taking the richer server detail.
+    let mut server_copy = client_background_completion_card("job-1");
+    server_copy.detail = "Background shell task finished.\njob_id: job-1\nstatus: completed\n<background_task_result>ok</background_task_result>".to_string();
+    pane.messages = pane.preserve_background_completion_cards(vec![
+        launch,
+        NeoismAgentMessage::assistant("Streaming before finish and after finish")
+            .with_id("answer"),
+        server_copy,
+    ]);
+
+    assert_eq!(
+        pane.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-launch", "background-task-job-1", "answer"]
+    );
+    assert!(pane.messages[1].detail.contains("<background_task_result>"));
 }
 
 #[test]

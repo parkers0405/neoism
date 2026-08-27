@@ -759,8 +759,8 @@ pub(crate) async fn handle_get_config_defaults(
     directory: Option<String>,
 ) {
     let path = match directory {
-        Some(dir) => format!("/v2/config?directory={}", percent_encode(&dir)),
-        None => "/v2/config".to_string(),
+        Some(dir) => format!("/v2/config/defaults?directory={}", percent_encode(&dir)),
+        None => "/v2/config/defaults".to_string(),
     };
     match http_get_json(&inner, &path).await {
         Ok(value) => {

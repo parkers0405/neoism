@@ -57,6 +57,48 @@ pub(crate) struct CallerPolicy {
     usage: Arc<UsageTracker>,
 }
 
+/// The canonical daemon-token file shared by every Neoism process on this
+/// machine: `$XDG_RUNTIME_DIR/neoism/daemon-token` on unix, the per-user
+/// temp-dir variant elsewhere. Mirrors `daemon_token::daemon_token_path` /
+/// the desktop's `embedded_daemon_token_path`.
+fn canonical_daemon_token_from_disk() -> Option<String> {
+    let path = {
+        #[cfg(unix)]
+        {
+            match std::env::var_os("XDG_RUNTIME_DIR") {
+                Some(runtime) if !runtime.is_empty() => {
+                    std::path::PathBuf::from(runtime).join("neoism").join("daemon-token")
+                }
+                _ => {
+                    let uid = unsafe { libc::geteuid() };
+                    std::env::temp_dir()
+                        .join(format!("neoism-{uid}"))
+                        .join("daemon-token")
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Mirror the desktop's `per_user_suffix`: sanitized USERNAME.
+            let user = std::env::var("USERNAME")
+                .ok()
+                .filter(|name| !name.is_empty())
+                .map(|name| {
+                    name.chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                        .collect::<String>()
+                })
+                .unwrap_or_else(|| "default".to_string());
+            std::env::temp_dir()
+                .join(format!("neoism-{user}"))
+                .join("daemon-token")
+        }
+    };
+    let token = std::fs::read_to_string(path).ok()?;
+    let token = token.trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
 impl CallerPolicy {
     pub(crate) fn from_env() -> Self {
         let hosted_config = std::env::var("NEOISM_AGENT_AUTH_CONFIG")
@@ -85,16 +127,42 @@ impl CallerPolicy {
             token.starts_with(neoism_agent_service_api::daemon_credential::PREFIX)
         }) {
             let token = supplied.expect("checked above");
-            let key = self.daemon_key.as_deref().ok_or_else(|| {
-                "daemon credential verifier is not configured".to_string()
-            })?;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|_| "system clock is before Unix epoch".to_string())?
                 .as_secs() as i64;
-            let claims =
-                neoism_agent_service_api::daemon_credential::verify(token, key, now)
-                    .map_err(str::to_string)?;
+            // The signing daemon and this verifier can drift: the env var is
+            // captured at process start, but the canonical token file rotates
+            // when the runtime dir is recreated, and dev profiles keep their
+            // token in a different file than a standalone daemon. On a
+            // signature mismatch (or missing env key), retry against the
+            // canonical on-disk token before rejecting — both processes on
+            // one machine share that trust root.
+            let env_key = self.daemon_key.as_deref();
+            let verified = match env_key {
+                Some(key) => {
+                    neoism_agent_service_api::daemon_credential::verify(token, key, now)
+                }
+                None => Err("daemon credential verifier is not configured"),
+            };
+            let claims = match verified {
+                Ok(claims) => claims,
+                Err(env_error) => {
+                    let file_key = canonical_daemon_token_from_disk()
+                        .filter(|file_key| Some(file_key.as_bytes()) != env_key);
+                    match file_key {
+                        Some(file_key) => {
+                            neoism_agent_service_api::daemon_credential::verify(
+                                token,
+                                file_key.as_bytes(),
+                                now,
+                            )
+                            .map_err(|_| env_error.to_string())?
+                        }
+                        None => return Err(env_error.to_string()),
+                    }
+                }
+            };
             return Ok(Some(CallerClaims {
                 subject: claims.subject,
                 workspace_id: Some(claims.workspace_id),
@@ -316,6 +384,76 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_mismatch_falls_back_to_canonical_token_file() {
+        let runtime = std::env::temp_dir().join(format!(
+            "neoism-caller-fallback-{}",
+            std::process::id()
+        ));
+        let dir = runtime.join("neoism");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("daemon-token"), "file-key\n").unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let claims = neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
+            "guest".to_string(),
+            "ws-1",
+            "workspace:ws-1".to_string(),
+            vec!["/tmp".to_string()],
+            true,
+            now,
+            60,
+        )
+        .unwrap();
+        let credential =
+            neoism_agent_service_api::daemon_credential::issue(&claims, b"file-key").unwrap();
+
+        // Env-captured key is STALE (the drift scenario); the canonical file
+        // holds the signer's key.
+        let policy = CallerPolicy {
+            daemon_key: Some(Arc::<[u8]>::from(b"stale-env-key".as_slice())),
+            hosted_config: Ok(None),
+            local_token: None,
+            usage: Arc::new(UsageTracker::default()),
+        };
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+        let verified = policy.authenticate(Some(&credential));
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        let claims = verified.expect("file-key fallback").expect("claims");
+        assert_eq!(claims.subject, "guest");
+        assert_eq!(claims.workspace_id.as_deref(), Some("ws-1"));
+
+        // A credential signed with a key matching NEITHER still fails.
+        let bogus =
+            neoism_agent_service_api::daemon_credential::issue(&claims_for_bogus(now), b"other")
+                .unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+        let rejected = policy.authenticate(Some(&bogus));
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        assert!(rejected.is_err());
+        let _ = std::fs::remove_dir_all(&runtime);
+    }
+
+    fn claims_for_bogus(
+        now: i64,
+    ) -> neoism_agent_service_api::daemon_credential::DaemonCredentialClaims {
+        neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
+            "intruder".to_string(),
+            "ws-2",
+            "workspace:ws-2".to_string(),
+            vec![],
+            true,
+            now,
+            60,
+        )
+        .unwrap()
+    }
+
     use super::*;
 
     fn claims(tenant_id: String) -> CallerClaims {

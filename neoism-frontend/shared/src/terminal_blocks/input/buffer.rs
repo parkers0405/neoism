@@ -125,6 +125,29 @@ impl TerminalInputBuffer {
         row: &str,
         cursor_abs_row: Option<usize>,
     ) -> bool {
+        self.finish_unintegrated_command_at_prompt(row, cursor_abs_row, true)
+    }
+
+    /// Complete a local shell command from a visible prompt when the shell
+    /// emitted no OSC 133 lifecycle. Windows must keep this fallback even for
+    /// local PTYs: `cmd.exe` has no integration shim, and PowerShell profiles
+    /// can replace the injected prompt hook. Unlike the remote fallback, a
+    /// blank row is not sufficient evidence here because a quiet local
+    /// command may legitimately leave its cursor on one while still running.
+    pub fn finish_unintegrated_local_command_at_prompt(
+        &mut self,
+        row: &str,
+        cursor_abs_row: Option<usize>,
+    ) -> bool {
+        self.finish_unintegrated_command_at_prompt(row, cursor_abs_row, false)
+    }
+
+    fn finish_unintegrated_command_at_prompt(
+        &mut self,
+        row: &str,
+        cursor_abs_row: Option<usize>,
+        allow_blank_prompt: bool,
+    ) -> bool {
         let trimmed = row.trim_end();
         let visible_prompt = looks_like_shell_prompt(row);
 
@@ -153,7 +176,8 @@ impl TerminalInputBuffer {
         //       (e.g. `sleep`, whose cursor never leaves the submission row)
         //       from being marked finished early.
         let clear_cmd = is_clear_command(&block.command);
-        let blank_prompt_below_output = trimmed.is_empty()
+        let blank_prompt_below_output = allow_blank_prompt
+            && trimmed.is_empty()
             && matches!(
                 (block.output_start_row, cursor_abs_row),
                 (Some(start), Some(cursor)) if cursor > start
@@ -165,7 +189,8 @@ impl TerminalInputBuffer {
         // pane never drops to zero blocks: the splash / clean viewport never
         // returns and the old `ls` output (and its hover-links) stays occluded
         // behind the "hidden" screen.
-        let cleared_to_top = clear_cmd
+        let cleared_to_top = allow_blank_prompt
+            && clear_cmd
             && trimmed.is_empty()
             && matches!(
                 (block.output_start_row, cursor_abs_row),

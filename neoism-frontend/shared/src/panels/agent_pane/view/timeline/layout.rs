@@ -1094,7 +1094,9 @@ pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
         .iter()
         .enumerate()
         .map(|(index, message)| {
-            if is_subagent_runtime_notification(message) {
+            if is_subagent_runtime_notification(message)
+                || is_background_completion_result_card(message)
+            {
                 return false;
             }
             match message.kind() {
@@ -1102,23 +1104,20 @@ pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
                 AgentTimelineMessageKind::Reasoning
                 | AgentTimelineMessageKind::Tool
                 | AgentTimelineMessageKind::Subtask
-                | AgentTimelineMessageKind::Compaction => {
-                    index >= live_start || is_background_completion_result_card(message)
+                | AgentTimelineMessageKind::Compaction => index >= live_start,
+                AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => {
+                    true
                 }
-                AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => true,
             }
         })
         .collect()
 }
 
-/// The background-task completion card ("this finished while you were
-/// working") is a transcript event, not turn trace: once it lands it STAYS
-/// visible — settling the turn, refreshing history, or re-entering the
-/// session must never declutter it away. Identified by the durable id the
-/// live event and the persisted runtime notification share
-/// (`background-task-{job}`, see `api_mapping::background_completion_card`);
-/// an ordinary `background_task_result` tool CALL row (the model rereading
-/// retained output, part-id identity) keeps normal trace settling.
+/// The runtime completion sentinel exists only to settle background-task
+/// activity. It is not a human turn or a model tool call, and placing it in
+/// the visible transcript requires guessing an impossible mid-stream anchor.
+/// Genuine model-issued `background_task_result` calls have normal part ids
+/// and remain subject to the ordinary live-trace visibility rules.
 fn is_background_completion_result_card<M: AgentTimelineMessage>(message: &M) -> bool {
     message.tool() == "background_task_result"
         && message.id().starts_with("background-task-")

@@ -495,7 +495,7 @@ fn background_completion_card_survives_messages_snapshot_replacement() {
 }
 
 #[test]
-fn background_completion_stays_before_the_text_streaming_when_it_finished() {
+fn background_completion_never_relocates_streaming_content_or_durable_turns() {
     let mut pane = NeoismAgentPane::default();
     let launch = NeoismAgentMessage::tool(
         "Run timer",
@@ -528,19 +528,20 @@ fn background_completion_stays_before_the_text_streaming_when_it_finished() {
             .iter()
             .map(|message| message.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["tool-launch", "background-task-job-1", "answer"]
+        vec!["tool-launch", "answer", "background-task-job-1"]
     );
-    assert!(pane.messages[2].text.ends_with("and after finish"));
+    assert!(pane.messages[1].text.ends_with("and after finish"));
 
-    // The persisted runtime prompt lands at the server transcript tail
-    // after the active turn settles. Reconciliation must keep the live
-    // completion anchor while still taking the richer server detail.
+    // The completion event has no transcript anchor. Once the persisted
+    // runtime prompt arrives, its durable server position wins — including
+    // a user turn that did not exist when the live event was received.
     let mut server_copy = client_background_completion_card("job-1");
     server_copy.detail = "Background shell task finished.\njob_id: job-1\nstatus: completed\n<background_task_result>ok</background_task_result>".to_string();
     pane.messages = pane.preserve_background_completion_cards(vec![
         launch,
         NeoismAgentMessage::assistant("Streaming before finish and after finish")
             .with_id("answer"),
+        NeoismAgentMessage::user("newer turn").with_id("user-newer"),
         server_copy,
     ]);
 
@@ -549,9 +550,14 @@ fn background_completion_stays_before_the_text_streaming_when_it_finished() {
             .iter()
             .map(|message| message.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["tool-launch", "background-task-job-1", "answer"]
+        vec![
+            "tool-launch",
+            "answer",
+            "user-newer",
+            "background-task-job-1"
+        ]
     );
-    assert!(pane.messages[1].detail.contains("<background_task_result>"));
+    assert!(pane.messages[3].detail.contains("<background_task_result>"));
 }
 
 #[test]
@@ -606,6 +612,77 @@ fn server_background_completion_copy_replaces_client_card_without_duplicate() {
             .count(),
         1,
         "server copy replaces the client copy, no duplicate"
+    );
+}
+
+#[test]
+fn background_completion_runtime_ids_never_reorder_visible_replies() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("thanks").with_id("msg_010000000002human"),
+        NeoismAgentMessage::assistant("Both timers are running.").with_id("prt-running"),
+    ];
+    pane.remember_live_part_parent("prt-running", Some("msg_047100000000assistant"));
+
+    // The live completion event has no durable transcript position. The
+    // 15-second answer can begin before the persisted runtime-prompt part
+    // catches up and gives the hidden sentinel its synthetic parent id.
+    pane.upsert_part_message(client_background_completion_card("job-15"));
+    pane.apply_part_delta(
+        Some("msg_047200000000assistant".into()),
+        Some("prt-answer-15".into()),
+        Some("text".into()),
+        "15-second timer finished; the 30-second timer is still running.",
+    );
+    pane.remember_live_part_parent(
+        "background-task-job-15",
+        Some("msg_background_completion_job-15"),
+    );
+
+    // The next completion is already mapped when its answer starts. A
+    // lexicographic sort must not use `msg_background_completion_*` as an
+    // ordering anchor: it is a reserved runtime id, not an ascending id.
+    pane.upsert_part_message(client_background_completion_card("job-30"));
+    pane.remember_live_part_parent(
+        "background-task-job-30",
+        Some("msg_background_completion_job-30"),
+    );
+    pane.apply_part_delta(
+        Some("msg_047300000000assistant".into()),
+        Some("prt-answer-30".into()),
+        Some("text".into()),
+        "30-second timer finished.",
+    );
+
+    // A fast follow-up is still optimistic (empty id) when its answer starts.
+    // Later assistant output must remain below that human turn.
+    pane.messages.push(NeoismAgentMessage::user("NICE"));
+    pane.apply_part_delta(
+        Some("msg_047400000000assistant".into()),
+        Some("prt-answer-nice".into()),
+        Some("text".into()),
+        "Both completed on schedule.",
+    );
+
+    assert_eq!(
+        pane.messages
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message.kind,
+                    NeoismAgentMessageKind::User | NeoismAgentMessageKind::Assistant
+                )
+            })
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "thanks",
+            "Both timers are running.",
+            "15-second timer finished; the 30-second timer is still running.",
+            "30-second timer finished.",
+            "NICE",
+            "Both completed on schedule.",
+        ]
     );
 }
 

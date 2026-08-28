@@ -1613,24 +1613,44 @@ fn chronological_live_insert_index(
     incoming: &NeoismAgentMessage,
 ) -> Option<usize> {
     let incoming_id = canonical_live_message_id(incoming, parent_ids)?;
-    messages.iter().position(|existing| {
-        canonical_live_message_id(existing, parent_ids)
-            .is_some_and(|existing_id| existing_id > incoming_id)
-    })
+    // An optimistic/queued human prompt is a hard turn boundary even before
+    // its durable id arrives. Never move later output above what the user can
+    // already see at the bottom of the timeline.
+    let turn_start = messages
+        .iter()
+        .rposition(|message| message.kind == NeoismAgentMessageKind::User)
+        .map_or(0, |index| index + 1);
+    messages[turn_start..]
+        .iter()
+        .position(|existing| {
+            canonical_live_message_id(existing, parent_ids)
+                .is_some_and(|existing_id| existing_id > incoming_id)
+        })
+        .map(|index| turn_start + index)
 }
 
 fn canonical_live_message_id<'a>(
     message: &'a NeoismAgentMessage,
     parent_ids: &'a HashMap<String, String>,
 ) -> Option<&'a str> {
-    if message.id.starts_with("msg_") {
-        Some(message.id.as_str())
-    } else {
-        parent_ids
-            .get(&message.id)
-            .map(String::as_str)
-            .filter(|id| id.starts_with("msg_"))
+    // Runtime completion rows are lifecycle/context sentinels, not real
+    // ascending transcript messages. Their reserved ids sort after every
+    // canonical `msg_0...` id and previously acted as a false barrier: the
+    // 30-second reply and then the reply to an optimistic user prompt were
+    // inserted above the 15-second reply. Subagent/runtime notices likewise
+    // must never participate in transcript ordering.
+    if message.id.starts_with("background-task-") {
+        return None;
     }
+    let id = if message.id.starts_with("msg_") {
+        message.id.as_str()
+    } else {
+        parent_ids.get(&message.id)?.as_str()
+    };
+    (id.starts_with("msg_")
+        && !id.starts_with("msg_background_completion_")
+        && !id.starts_with("msg_subtask_completion_"))
+    .then_some(id)
 }
 
 pub(super) fn upsert_cached_part_message(
@@ -1879,19 +1899,6 @@ fn background_task_empty_snapshot(message: &NeoismAgentMessage) -> bool {
     let text = format!("{}\n{}", message.detail, message.text).to_ascii_lowercase();
     text.contains("no background tasks exist")
         || text.contains("no background tasks are running")
-}
-
-/// A background-task completion card carrying the durable job identity —
-/// either the client-injected copy synthesized from the live
-/// `session.background_task.completed` event or the server-persisted
-/// runtime notification mapped by the shared
-/// `api_mapping::background_completion_card` (both use id
-/// `background-task-{job}`). Mirrors the shared pane's predicate
-/// (`neoism-ui` state.rs).
-pub(super) fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
-    message.kind == NeoismAgentMessageKind::Tool
-        && message.tool == "background_task_result"
-        && message.id.starts_with("background-task-")
 }
 
 fn running_background_task_count(messages: &[NeoismAgentMessage]) -> usize {

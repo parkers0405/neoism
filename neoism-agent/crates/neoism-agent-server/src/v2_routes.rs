@@ -335,7 +335,17 @@ async fn session_descends_from(state: &AppState, session_id: &str, root: &str) -
 }
 
 fn event_session_id(event: &neoism_agent_core::EventPayload) -> Option<&str> {
-    event.properties.get("sessionID").and_then(Value::as_str)
+    // Most event payloads use the legacy `sessionID` spelling, while typed
+    // camelCase payloads such as QuestionRequestInfo and
+    // PermissionRequestInfo serialize this field as `sessionId`. Scoped v2
+    // streams must recognize both or interaction prompts are filtered out
+    // even though their tool parts continue to reach the timeline.
+    event
+        .properties
+        .get("sessionID")
+        .or_else(|| event.properties.get("sessionId"))
+        .or_else(|| event.properties.get("session_id"))
+        .and_then(Value::as_str)
 }
 
 fn event_matches_family(
@@ -377,12 +387,7 @@ fn v2_live_sse_event(event: neoism_agent_core::EventPayload) -> Event {
 }
 
 fn persisted_event_envelope(event: crate::state::PersistedEvent) -> EventEnvelope<Value> {
-    let session_id = event
-        .payload
-        .properties
-        .get("sessionID")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let session_id = event_session_id(&event.payload).map(str::to_string);
     let kind = event.payload.kind;
     EventEnvelope {
         id: event.seq.to_string(),

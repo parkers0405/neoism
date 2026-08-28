@@ -1898,6 +1898,37 @@ mod tests {
     }
 
     #[test]
+    fn classify_session_event_reports_camel_case_question_request() {
+        let mut state = SessionEventUpdateState::default();
+        let event = json!({
+            "type": "question.asked",
+            "properties": {
+                "id": "que_1",
+                "sessionId": "ses_root",
+                "messageId": "msg_1",
+                "questions": [{
+                    "header": "Activate privacy fix",
+                    "question": "Restart Paper now?",
+                    "options": [{
+                        "label": "Restart",
+                        "description": "Brief downtime"
+                    }]
+                }]
+            }
+        });
+
+        let updates = classify_session_event(event, "ses_root", &mut state);
+        assert!(matches!(
+            updates.as_slice(),
+            [SessionEventUpdate::QuestionAsked(question)]
+                if question.id == "que_1"
+                    && question.session_id == "ses_root"
+                    && question.questions[0].text == "Restart Paper now?"
+                    && question.questions[0].options[0].label == "Restart"
+        ));
+    }
+
+    #[test]
     fn classify_session_event_hides_background_completion_dequeue() {
         let mut state = SessionEventUpdateState::default();
         let event = json!({

@@ -1442,6 +1442,63 @@ async fn v2_root_event_stream_forwards_live_delta_from_child_created_after_conne
 }
 
 #[tokio::test]
+async fn v2_session_event_stream_forwards_camel_case_question_event() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-question-live-events-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let session = store_test_session(&session_id, now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v2/events?sessionId={}&tail=true&limit=1",
+                    session_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+
+    let question = QuestionRequestInfo {
+        id: Id::ascending(IdKind::Question).to_string(),
+        session_id: session_id.to_string(),
+        message_id: Id::ascending(IdKind::Message).to_string(),
+        questions: vec![json!({
+            "header": "Activate privacy fix",
+            "question": "Restart Paper now?",
+            "options": [{ "label": "Restart", "description": "Brief downtime" }]
+        })],
+    };
+    state.publish(EventPayload::new(
+        event_type::QUESTION_ASKED,
+        json!(question),
+    ));
+
+    let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("question event should reach the scoped SSE stream")
+        .expect("SSE body should remain open")
+        .expect("SSE body chunk should be readable");
+    let text = String::from_utf8_lossy(&chunk);
+    assert!(text.contains("question.asked"), "{text}");
+    assert!(text.contains("Activate privacy fix"), "{text}");
+    assert!(text.contains(session_id.as_str()), "{text}");
+
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn foreign_session_verdicts_are_cached_per_connection() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-foreign-cache-{}.sqlite3",

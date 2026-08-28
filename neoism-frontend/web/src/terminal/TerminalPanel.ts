@@ -343,6 +343,8 @@ export interface TerminalPanelOptions {
    *  host switches the daemon workspace (same handler the legacy
    *  switcher overlay used). */
   onWorkspaceSelected?: (workspaceId: string) => void;
+  /** Alt+P `cd …` requested a new declared workspace root. */
+  onWorkspaceRootRequested?: (path: string) => void;
   onWorkspaceIslandIntent?: (intent: {
     kind: "activate" | "context_menu" | "open_workspaces";
     workspace_id?: string | null;
@@ -3076,6 +3078,9 @@ export class TerminalPanel {
           break;
         case "workspace":
           this.options.onWorkspaceSelected?.(intent.workspace_id);
+          break;
+        case "directory":
+          this.options.onWorkspaceRootRequested?.(intent.path);
           break;
         case "server":
           // Carries the picked server's id — the plain `action` intent

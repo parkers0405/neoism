@@ -75,6 +75,30 @@ fn live_execution_owns_redraw_across_transient_run_idle() {
 }
 
 #[test]
+fn live_execution_without_visible_status_does_not_reserve_status_row() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    pane.apply_execution_activity(ExecutionActivityState {
+        execution_id: "execution-a".into(),
+        root_session_id: "root".into(),
+        active_segments: [("provider".into(), 1_000)].into(),
+        revision: 1,
+        finished: false,
+        ..Default::default()
+    });
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert_eq!(pane.streaming_label(), "Crafting");
+    pane.note_session_idle();
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
+
+    assert_eq!(pane.animation_reason(), Some("streaming"));
+    assert_eq!(pane.streaming_label(), "");
+    assert!(!pane.has_status_activity());
+}
+
+#[test]
 fn execution_revision_cannot_rewind_and_replacement_resets() {
     let mut pane = NeoismAgentPane::default();
     let activity = |id: &str, revision: u64, completed_ms: u64| ExecutionActivityState {
@@ -1546,9 +1570,33 @@ fn completed_child_ignores_stale_permission_request_activity() {
 fn authoritative_child_continuation_reopens_completed_branch() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
-    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "parent".to_string(),
+        4,
+        [("child-1".to_string(), "completed".to_string(), None)],
+    ));
 
-    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, Some(2));
+    pane.note_subagent_event(
+        "child-1".to_string(),
+        BranchStatus::Active,
+        None,
+        None,
+        Some("task".to_string()),
+        Some(2),
+    );
+
+    assert_eq!(
+        pane.side_panel.branch_activity("child-1").map(|a| a.status),
+        Some(BranchStatus::Completed)
+    );
+    assert!(pane.side_panel.branch_terminal_locked("child-1"));
+    assert!(!pane.active_subagent_ids.contains("child-1"));
+
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "parent".to_string(),
+        5,
+        [("child-1".to_string(), "outstanding".to_string(), Some(3))],
+    ));
 
     assert_eq!(
         pane.side_panel.branch_activity("child-1").map(|a| a.status),

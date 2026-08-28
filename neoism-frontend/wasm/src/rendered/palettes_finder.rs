@@ -14,6 +14,7 @@ use neoism_ui::panels::command_palette::{PaletteHostCapabilities, PaletteSurface
 use neoism_ui::panels::finder::{FinderMode, ReferenceRow};
 use neoism_ui::panels::notifications::NotificationLevel;
 use neoism_ui::PanelKey;
+use std::path::Path;
 
 thread_local! {
     /// Last `(pattern, selected row line)` the buffer-search live-drive
@@ -385,6 +386,21 @@ impl ChromeBridge {
     /// capture-only pattern in `handle_event`.
     pub fn pick_palette_action(&mut self) -> bool {
         if !self.chrome.command_palette.is_enabled() {
+            return false;
+        }
+
+        if self.chrome.command_palette.is_cd_query() {
+            let path = self
+                .chrome
+                .command_palette
+                .get_selected_cd_directory()
+                .map(|entry| entry.absolute_path)
+                .or_else(|| self.chrome.command_palette.get_typed_cd_target());
+            if let Some(path) = path.filter(|path| !path.trim().is_empty()) {
+                self.pending_palette_intents
+                    .push(PaletteIntent::Directory { path });
+                return true;
+            }
             return false;
         }
 
@@ -805,7 +821,50 @@ impl ChromeBridge {
             }
         };
         self.chrome.command_palette.set_surface(surface);
+        self.sync_palette_cd_search();
         self.sync_finder_buffer_search();
+    }
+
+    fn sync_palette_cd_search(&mut self) {
+        use neoism_ui::services::{IoError, SearchService as _};
+
+        let Some(query) = self
+            .chrome
+            .command_palette
+            .cd_query_suffix()
+            .map(str::to_owned)
+        else {
+            self.cd_search_key = None;
+            self.cd_search_pending = None;
+            return;
+        };
+        if self.cd_search_key.as_deref() == Some(query.as_str()) {
+            return;
+        }
+        self.cd_search_key = Some(query.clone());
+        self.cd_search_pending = None;
+        match self.search.search_directories(Path::new("."), &query) {
+            Ok(hits) => {
+                let rows = hits
+                    .into_iter()
+                    .map(|hit| {
+                        let absolute = self.workspace_root.join(&hit.path);
+                        neoism_ui::panels::command_palette::PaletteDirectoryEntry {
+                            absolute_path: absolute.to_string_lossy().into_owned(),
+                            display: Some(hit.path),
+                            detail: Some(
+                                self.workspace_root.to_string_lossy().into_owned(),
+                            ),
+                        }
+                    })
+                    .collect();
+                self.chrome.command_palette.set_cd_directory_results(rows);
+            }
+            Err(IoError::Pending(request_id)) => {
+                self.cd_search_pending = Some((request_id, query));
+            }
+            Err(_) => {}
+        }
     }
 
     /// Live-drive for the finder's BufferLines / BufferReplace modes —

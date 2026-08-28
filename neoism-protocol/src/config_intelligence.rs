@@ -446,6 +446,7 @@ mod tests {
             extensible: true,
             category: ConfigCategory::Appearance,
             control: ConfigControl::Text,
+            settings_visible: true,
         }
     }
 

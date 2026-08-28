@@ -239,41 +239,43 @@ pub fn render_tool_message(
     let title_avail_w = (w - 46.0 * s).max(40.0 * s);
     let title_text = message.title_text();
     let title_lines = wrap_text(sugarloaf, &title_text, title_avail_w, &title_opts, 4);
-    if !suppress_interactions {
-        let title_w = title_lines
-            .iter()
-            .map(|line| sugarloaf.text_mut().measure(line, &title_opts))
-            .fold(12.0_f32, f32::max);
-        let title_sel = pane.register_selectable_line(
-            &title_text,
-            [
-                x + 22.0 * s,
-                y + 2.0 * s - 3.0 * s,
-                title_w,
-                title_opts.font_size + 8.0 * s,
-            ],
-        );
-        if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(title_sel) {
-            draw_rounded_rect_clipped(
-                sugarloaf,
+    for (line_index, line) in title_lines.iter().enumerate() {
+        let line_y = y + 2.0 * s + line_index as f32 * 20.0 * s;
+        if !suppress_interactions {
+            let text_x = x + 22.0 * s;
+            let title_w = sugarloaf.text_mut().measure(line, &title_opts).max(12.0);
+            let stops = measured_caret_stops(sugarloaf, line, &title_opts, text_x);
+            let title_sel = pane.register_selectable_line_with_caret_stops(
+                line,
                 [
-                    sel_left - 2.0,
-                    y + 2.0 * s - 3.0 * s,
-                    (sel_right - sel_left + 4.0).max(2.0),
+                    text_x,
+                    line_y - 3.0 * s,
+                    title_w,
                     title_opts.font_size + 8.0 * s,
                 ],
-                theme.f32_alpha(theme.accent, 0.22),
-                4.0,
-                ORDER_PANEL + 2,
-                message_clip,
+                &stops,
             );
+            if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(title_sel)
+            {
+                draw_rounded_rect_clipped(
+                    sugarloaf,
+                    [
+                        sel_left - 2.0,
+                        line_y - 3.0 * s,
+                        (sel_right - sel_left + 4.0).max(2.0),
+                        title_opts.font_size + 8.0 * s,
+                    ],
+                    theme.f32_alpha(theme.accent, 0.22),
+                    4.0,
+                    ORDER_PANEL + 2,
+                    message_clip,
+                );
+            }
         }
-    }
-    for (line_index, line) in title_lines.iter().enumerate() {
         draw_tool_title(
             sugarloaf,
             x + 22.0 * s,
-            y + 2.0 * s + line_index as f32 * 20.0 * s,
+            line_y,
             line,
             &title_opts,
             theme,
@@ -285,6 +287,7 @@ pub fn render_tool_message(
     if message.is_todos_output() {
         render_tool_todos(
             sugarloaf,
+            pane,
             x + 30.0 * s,
             y + 28.0 * s + title_offset,
             w - 40.0 * s,
@@ -293,6 +296,7 @@ pub fn render_tool_message(
             s,
             message_clip,
             occlusion_rects,
+            suppress_interactions,
         );
         return h;
     }
@@ -438,7 +442,8 @@ pub fn render_tool_message(
         let rendered = row.text.as_str();
         if !suppress_interactions {
             let line_w = sugarloaf.text_mut().measure(rendered, text_opts).max(12.0);
-            let sel_index = pane.register_selectable_line(
+            let stops = measured_caret_stops(sugarloaf, rendered, text_opts, text_x);
+            let sel_index = pane.register_selectable_line_with_caret_stops(
                 rendered,
                 [
                     text_x,
@@ -446,6 +451,7 @@ pub fn render_tool_message(
                     line_w,
                     text_opts.font_size + 8.0 * s,
                 ],
+                &stops,
             );
             if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(sel_index)
             {
@@ -903,8 +909,9 @@ fn draw_diff_body_scrollbar(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render_tool_todos<Todo: AgentToolTodo>(
+pub fn render_tool_todos<Todo: AgentToolTodo, P: AgentToolPane>(
     sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
     x: f32,
     y: f32,
     w: f32,
@@ -913,6 +920,7 @@ pub fn render_tool_todos<Todo: AgentToolTodo>(
     s: f32,
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
+    suppress_interactions: bool,
 ) {
     let Some(opts) = opts_with_clip(
         DrawOpts {
@@ -984,9 +992,41 @@ pub fn render_tool_todos<Todo: AgentToolTodo>(
             (w - 46.0 * s).max(40.0 * s),
             &text_opts,
         ) {
+            let text_x = x + 46.0 * s;
+            if !suppress_interactions {
+                let line_w = sugarloaf.text_mut().measure(&line, &text_opts).max(12.0);
+                let stops = measured_caret_stops(sugarloaf, &line, &text_opts, text_x);
+                let selection_index = pane.register_selectable_line_with_caret_stops(
+                    &line,
+                    [
+                        text_x,
+                        line_y - 3.0 * s,
+                        line_w,
+                        text_opts.font_size + 8.0 * s,
+                    ],
+                    &stops,
+                );
+                if let Some((left, right)) =
+                    pane.selectable_line_highlight(selection_index)
+                {
+                    draw_rounded_rect_clipped(
+                        sugarloaf,
+                        [
+                            left,
+                            line_y - 3.0 * s,
+                            right - left,
+                            text_opts.font_size + 8.0 * s,
+                        ],
+                        theme.f32_alpha(theme.accent, 0.22),
+                        4.0,
+                        ORDER_PANEL + 2,
+                        viewport_clip,
+                    );
+                }
+            }
             draw_text_clipped(
                 sugarloaf,
-                x + 46.0 * s,
+                text_x,
                 line_y,
                 &line,
                 &text_opts,

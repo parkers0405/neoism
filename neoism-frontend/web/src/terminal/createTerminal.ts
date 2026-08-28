@@ -706,6 +706,7 @@ export interface TerminalAdapter {
      *  Wasm passes `(reqId, envelopeJson)` for every search flavor. */
     setSearchCollectFiles?(cb: (reqId: number, envelopeJson: string) => void): void;
     setSearchFiles?(cb: (reqId: number, envelopeJson: string) => void): void;
+    setSearchDirectories?(cb: (reqId: number, envelopeJson: string) => void): void;
     setSearchGrep?(cb: (reqId: number, envelopeJson: string) => void): void;
     setSearchGitChanges?(cb: (reqId: number, envelopeJson: string) => void): void;
     setSearchGitRepoRoot?(cb: (reqId: number, envelopeJson: string) => void): void;
@@ -845,6 +846,7 @@ export type PaletteIntent =
     | { kind: "shader"; title: string; filter: string | null }
     | { kind: "buffer"; target: PaletteBufferTarget }
     | { kind: "workspace"; workspace_id: string }
+    | { kind: "directory"; path: string }
     | { kind: "server"; action: string; id: string };
 
 export type PaletteBufferTarget =
@@ -1520,6 +1522,7 @@ interface ChromeBridgeInstance {
      *  search panels yet. */
     set_search_collect_files?(cb: (reqId: number, envelopeJson: string) => void): void;
     set_search_files?(cb: (reqId: number, envelopeJson: string) => void): void;
+    set_search_directories?(cb: (reqId: number, envelopeJson: string) => void): void;
     set_search_grep?(cb: (reqId: number, envelopeJson: string) => void): void;
     set_search_git_changes?(cb: (reqId: number, envelopeJson: string) => void): void;
     set_search_git_repo_root?(cb: (reqId: number, envelopeJson: string) => void): void;
@@ -3093,6 +3096,9 @@ class ChromeAdapter implements TerminalAdapter {
     }
     setSearchFiles(cb: (reqId: number, envelopeJson: string) => void): void {
         this.inner.set_search_files?.(cb);
+    }
+    setSearchDirectories(cb: (reqId: number, envelopeJson: string) => void): void {
+        this.inner.set_search_directories?.(cb);
     }
     setSearchGrep(cb: (reqId: number, envelopeJson: string) => void): void {
         this.inner.set_search_grep?.(cb);

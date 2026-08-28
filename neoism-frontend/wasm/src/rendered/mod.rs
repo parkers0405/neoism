@@ -1516,6 +1516,7 @@ struct JsServiceState {
     /// back through `service_reply(req_id, payload_json)`.
     search_collect_files: Option<js_sys::Function>,
     search_files: Option<js_sys::Function>,
+    search_directories: Option<js_sys::Function>,
     search_grep: Option<js_sys::Function>,
     search_git_changes: Option<js_sys::Function>,
     search_git_repo_root: Option<js_sys::Function>,
@@ -1552,6 +1553,7 @@ impl JsServiceState {
             git_diff: None,
             search_collect_files: None,
             search_files: None,
+            search_directories: None,
             search_grep: None,
             search_git_changes: None,
             search_git_repo_root: None,
@@ -1737,6 +1739,9 @@ enum PaletteIntent {
     /// switches the daemon workspace, mirroring desktop's
     /// `switch_daemon_host_workspace`.
     Workspace { workspace_id: String },
+    /// Alt+P `cd …`: re-point the declared workspace root. The host owns
+    /// the daemon mutation; this never writes shell input into an existing PTY.
+    Directory { path: String },
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -1861,6 +1866,11 @@ pub struct ChromeBridge {
     /// onto a host-side handler (toggle panel, run ex command,
     /// etc.).
     pending_palette_intents: Vec<PaletteIntent>,
+    /// Last web `cd` suffix dispatched through SearchService, plus its pending
+    /// request id. This suppresses duplicate requests from the per-frame host
+    /// sync while still rejecting stale replies after another keystroke.
+    cd_search_key: Option<String>,
+    cd_search_pending: Option<(u64, String)>,
     /// Agent pane state — composer input, history, timeline,
     /// streaming flag, pending permission, JS send callback.
     /// Lives on the bridge so the web frontend can drive an

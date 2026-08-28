@@ -408,7 +408,7 @@ fn draw_inline_wrapped_lines(
                     clip_bottom,
                     occlusions,
                 );
-                if inline_style_is_spellcheckable(&run.style) {
+                if pane.spellcheck_enabled && inline_style_is_spellcheckable(&run.style) {
                     draw_virtual_spellcheck_underlines(
                         sugarloaf,
                         &run.text,
@@ -507,7 +507,7 @@ fn draw_virtual_spellcheck_underlines(
     if spellcheck_dictionary().is_none() || text.is_empty() {
         return;
     }
-    let underline_y = y + line_height(opts) - 2.6;
+    let underline_y = y + line_height(opts) - 6.0;
     if underline_y < clip_top || underline_y > clip_bottom {
         return;
     }

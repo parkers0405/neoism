@@ -260,8 +260,8 @@ export class WorkspaceService {
     this.send({ SwitchHostWorkspace: { workspace_id: workspaceId } });
   }
 
-  /** Re-point an existing workspace's directory (the explicit ":cd").
-   *  The daemon creates the dir if missing and broadcasts a tree change
+  /** Re-point an existing workspace's directory (the explicit `cd`).
+   *  The daemon resolves and validates it, then broadcasts a tree change
    *  so every client in the workspace re-roots its Explorer. */
   setWorkspaceRoot(workspaceId: string, rootDir: string): void {
     this.send({

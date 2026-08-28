@@ -16,6 +16,7 @@ use neoism_ui::panels::agent_pane::interaction_policy;
 use neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand;
 use neoism_ui::panels::agent_pane::permission_policy::{self, PermissionReplyStart};
 use neoism_ui::panels::agent_pane::question_policy::NeoismAgentPendingQuestion;
+use neoism_ui::panels::agent_pane::selection_model::SelectableLine;
 use neoism_ui::panels::agent_pane::state::{
     branch_status_from_runtime, task_message_status_from_runtime,
 };
@@ -874,12 +875,7 @@ pub struct NeoismAgentPane {
     background_status_rect: Option<[f32; 4]>,
     background_task_details_expanded: bool,
     hover_link_target: Option<String>,
-    /// (text, screen_rect, content_y_abs). The trailing `content_y_abs`
-    /// is the line's position inside the *unscrolled* timeline content,
-    /// so it survives scroll passes — anchor/focus reference it instead
-    /// of the per-frame `selectable_lines` index, which would otherwise
-    /// drift as scroll re-registers a different window of lines.
-    selectable_lines: Vec<(String, [f32; 4], f32)>,
+    selectable_lines: Vec<SelectableLine>,
     /// Logical count of `selectable_lines` valid for the current frame. The
     /// Vec retains its `String` allocations across frames (reused in place)
     /// so the per-frame "clear" is just resetting this to 0 — no per-line
@@ -1008,12 +1004,16 @@ pub(crate) struct SelectionPoint {
     /// Position in the unscrolled timeline content. Stable across scroll
     /// passes — that's the whole point.
     content_y: f32,
+    row_x: f32,
+    byte_offset: usize,
     x: f32,
 }
 
 impl PartialEq for SelectionPoint {
     fn eq(&self, other: &Self) -> bool {
-        (self.content_y - other.content_y).abs() < 0.5 && (self.x - other.x).abs() < 0.01
+        (self.content_y - other.content_y).abs() < 0.5
+            && (self.row_x - other.row_x).abs() < 0.5
+            && self.byte_offset == other.byte_offset
     }
 }
 
@@ -1022,34 +1022,14 @@ fn order_endpoints(
     b: SelectionPoint,
 ) -> (SelectionPoint, SelectionPoint) {
     if a.content_y < b.content_y
-        || ((a.content_y - b.content_y).abs() < 0.5 && a.x <= b.x)
+        || ((a.content_y - b.content_y).abs() < 0.5
+            && (a.row_x < b.row_x
+                || ((a.row_x - b.row_x).abs() < 0.5 && a.byte_offset <= b.byte_offset)))
     {
         (a, b)
     } else {
         (b, a)
     }
-}
-
-/// Extract the substring of `text` that approximately falls within the
-/// horizontal range `[left_x, right_x]` over the registered `rect`. We
-/// don't have per-glyph metrics here, so we treat the line as evenly
-/// spaced — close enough for monospace and acceptable for proportional.
-fn slice_line_by_x(text: &str, rect: &[f32; 4], left_x: f32, right_x: f32) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return String::new();
-    }
-    let line_left = rect[0];
-    let line_w = rect[2].max(1.0);
-    let char_w = line_w / chars.len() as f32;
-    let start_idx = (((left_x - line_left) / char_w).round() as isize)
-        .clamp(0, chars.len() as isize) as usize;
-    let end_idx = (((right_x - line_left) / char_w).round() as isize)
-        .clamp(0, chars.len() as isize) as usize;
-    if end_idx <= start_idx {
-        return String::new();
-    }
-    chars[start_idx..end_idx].iter().collect()
 }
 
 impl Default for NeoismAgentPane {

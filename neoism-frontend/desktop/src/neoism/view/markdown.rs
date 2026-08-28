@@ -1,6 +1,7 @@
 pub(crate) use neoism_ui::panels::agent_pane::view::markdown::AssistantMarkdownBlock;
 
 use crate::neoism::agent::NeoismAgentPane;
+use neoism_ui::panels::agent_pane::selection_model::SelectableCaretStop;
 use neoism_ui::panels::agent_pane::view::markdown::AgentMarkdownPane;
 
 impl AgentMarkdownPane for NeoismAgentPane {
@@ -27,6 +28,20 @@ impl AgentMarkdownPane for NeoismAgentPane {
 
     fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize {
         NeoismAgentPane::register_selectable_line(self, text, rect)
+    }
+
+    fn register_selectable_line_with_caret_stops(
+        &mut self,
+        text: &str,
+        rect: [f32; 4],
+        caret_stops: &[SelectableCaretStop],
+    ) -> usize {
+        NeoismAgentPane::register_selectable_line_with_caret_stops(
+            self,
+            text,
+            rect,
+            caret_stops,
+        )
     }
 
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)> {

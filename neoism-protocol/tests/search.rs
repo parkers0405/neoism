@@ -1,8 +1,8 @@
 //! Wire-contract tests for daemon-backed file, grep, and git search.
 
 use neoism_protocol::search::{
-    SearchClientMessage, SearchFileHit, SearchFileMode, SearchGitHit, SearchGitStatus,
-    SearchGrepHit, SearchGrepMode, SearchServerMessage,
+    SearchClientMessage, SearchDirectoryHit, SearchFileHit, SearchFileMode, SearchGitHit,
+    SearchGitStatus, SearchGrepHit, SearchGrepMode, SearchServerMessage,
 };
 
 fn roundtrip_client(message: &SearchClientMessage) {
@@ -34,6 +34,11 @@ fn client_requests_roundtrip() {
         query: "protocol".into(),
         cwd: ".".into(),
         mode: SearchFileMode::Fuzzy,
+    });
+    roundtrip_client(&SearchClientMessage::SearchDirectories {
+        req_id: 10,
+        query: "proto".into(),
+        cwd: ".".into(),
     });
     roundtrip_client(&SearchClientMessage::SearchFiles {
         req_id: 3,
@@ -87,6 +92,13 @@ fn server_results_roundtrip() {
         hits: vec![SearchFileHit {
             score: -17,
             path: "src/search.rs".into(),
+        }],
+    });
+    roundtrip_server(&SearchServerMessage::SearchDirectoriesResult {
+        req_id: 9,
+        hits: vec![SearchDirectoryHit {
+            score: 275,
+            path: "neoism-protocol/tests".into(),
         }],
     });
     roundtrip_server(&SearchServerMessage::SearchGrepResult {

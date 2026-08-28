@@ -36,12 +36,12 @@ use crate::panels::agent_pane::input_controller::{self, AgentInputBuffer, InputW
 use crate::panels::agent_pane::interaction_policy;
 use crate::panels::agent_pane::outbound::OutboundAgentCommand;
 use crate::panels::agent_pane::permission_policy::{self, PermissionReplyStart};
+use crate::panels::agent_pane::selection_model::SelectableLine;
 use crate::panels::agent_pane::status_policy;
 use crate::panels::agent_pane::timeline_scroll_policy::ctrl_u_d_scroll_delta;
 use crate::panels::agent_pane::usage_policy::{
     usage_detail_lines, usage_summary_label, UsageSnapshot,
 };
-
 use self::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
 pub use self::pickers_state::{mcp_action_options, mcp_options_from_status};
 use self::side_panel::{BranchStatus, BranchStatusTransition, NeoismAgentSidePanel};
@@ -618,12 +618,7 @@ pub struct NeoismAgentPane {
     background_status_rect: Option<[f32; 4]>,
     background_task_details_expanded: bool,
     hover_link_target: Option<String>,
-    /// (text, screen_rect, content_y_abs). The trailing `content_y_abs`
-    /// is the line's position inside the *unscrolled* timeline content,
-    /// so it survives scroll passes — anchor/focus reference it instead
-    /// of the per-frame `selectable_lines` index, which would otherwise
-    /// drift as scroll re-registers a different window of lines.
-    selectable_lines: Vec<(String, [f32; 4], f32)>,
+    selectable_lines: Vec<SelectableLine>,
     /// Logical count of `selectable_lines` for the current frame; the Vec
     /// retains its `String` allocations across frames so per-frame "clear"
     /// is O(1) with no alloc/free churn.
@@ -826,12 +821,16 @@ struct SelectionPoint {
     /// Position in the unscrolled timeline content. Stable across scroll
     /// passes — that's the whole point.
     content_y: f32,
+    row_x: f32,
+    byte_offset: usize,
     x: f32,
 }
 
 impl PartialEq for SelectionPoint {
     fn eq(&self, other: &Self) -> bool {
-        (self.content_y - other.content_y).abs() < 0.5 && (self.x - other.x).abs() < 0.01
+        (self.content_y - other.content_y).abs() < 0.5
+            && (self.row_x - other.row_x).abs() < 0.5
+            && self.byte_offset == other.byte_offset
     }
 }
 
@@ -840,34 +839,14 @@ fn order_endpoints(
     b: SelectionPoint,
 ) -> (SelectionPoint, SelectionPoint) {
     if a.content_y < b.content_y
-        || ((a.content_y - b.content_y).abs() < 0.5 && a.x <= b.x)
+        || ((a.content_y - b.content_y).abs() < 0.5
+            && (a.row_x < b.row_x
+                || ((a.row_x - b.row_x).abs() < 0.5 && a.byte_offset <= b.byte_offset)))
     {
         (a, b)
     } else {
         (b, a)
     }
-}
-
-/// Extract the substring of `text` that approximately falls within the
-/// horizontal range `[left_x, right_x]` over the registered `rect`. We
-/// don't have per-glyph metrics here, so we treat the line as evenly
-/// spaced — close enough for monospace and acceptable for proportional.
-fn slice_line_by_x(text: &str, rect: &[f32; 4], left_x: f32, right_x: f32) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return String::new();
-    }
-    let line_left = rect[0];
-    let line_w = rect[2].max(1.0);
-    let char_w = line_w / chars.len() as f32;
-    let start_idx = (((left_x - line_left) / char_w).round() as isize)
-        .clamp(0, chars.len() as isize) as usize;
-    let end_idx = (((right_x - line_left) / char_w).round() as isize)
-        .clamp(0, chars.len() as isize) as usize;
-    if end_idx <= start_idx {
-        return String::new();
-    }
-    chars[start_idx..end_idx].iter().collect()
 }
 
 fn virtual_agent_role(kind: NeoismAgentMessageKind) -> VirtualAgentRole {
@@ -1615,13 +1594,16 @@ impl NeoismAgentPane {
             return;
         }
         self.upsert_live_subagent_entry(&session_id, title, agent);
-        self.side_panel.set_branch_activity_tool(
+        let applied = self.note_subagent_observed_runtime(
             session_id.clone(),
             status,
             current_tool,
             started_at,
         );
-        self.note_subagent_runtime(session_id.clone(), status, started_at);
+        if !applied {
+            self.sync_subagent_waiting_clock();
+            return;
+        }
         if self.session_id.as_deref() == Some(session_id.as_str())
             && matches!(status, BranchStatus::Completed | BranchStatus::Stopped)
         {

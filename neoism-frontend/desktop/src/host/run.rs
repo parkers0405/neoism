@@ -52,6 +52,11 @@ fn modal_uses_late_overlay(modal_active: bool) -> bool {
     modal_active
 }
 
+#[inline]
+fn settings_uses_late_overlay(settings_active: bool) -> bool {
+    settings_active
+}
+
 impl Renderer {
     #[inline]
     pub fn run(
@@ -1376,8 +1381,13 @@ impl Renderer {
             }
         }
 
-        // Full-screen settings overlay, below the modal so a confirm
-        // dialog opened from it still floats on top.
+        // The agent input island also uses Sugarloaf's late pass. Put the
+        // complete settings surface there so its material occludes the island;
+        // the modal is submitted afterward and therefore still floats on top.
+        let settings_late_overlay = settings_uses_late_overlay(self.settings.is_active());
+        if settings_late_overlay {
+            sugarloaf.set_late_overlay_mode(true);
+        }
         self.settings.render(
             sugarloaf,
             window_size.width as f32 / scale_factor,
@@ -1386,6 +1396,9 @@ impl Renderer {
             self.chrome_scale,
             None,
         );
+        if settings_late_overlay {
+            sugarloaf.set_late_overlay_mode(false);
+        }
 
         // Sugarloaf's ordinary UI text flushes after normal quads. Route the
         // complete modal material through its purpose-built late overlay pass
@@ -1613,12 +1626,20 @@ impl neoism_ui::panels::buffer_tabs::AgentIconProvider<crate::neoism::icon::Agen
 
 #[cfg(test)]
 mod tests {
-    use super::{modal_uses_late_overlay, terminal_splash_wants_visible};
+    use super::{
+        modal_uses_late_overlay, settings_uses_late_overlay, terminal_splash_wants_visible,
+    };
 
     #[test]
     fn every_active_modal_uses_late_overlay_material() {
         assert!(modal_uses_late_overlay(true));
         assert!(!modal_uses_late_overlay(false));
+    }
+
+    #[test]
+    fn active_settings_use_late_overlay_material() {
+        assert!(settings_uses_late_overlay(true));
+        assert!(!settings_uses_late_overlay(false));
     }
 
     #[test]

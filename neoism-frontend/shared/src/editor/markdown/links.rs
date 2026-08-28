@@ -145,6 +145,9 @@ impl MarkdownPane {
     }
 
     pub fn spelling_word_at(&self, x: f32, y: f32) -> Option<MarkdownMisspelling> {
+        if !self.spellcheck_enabled {
+            return None;
+        }
         let (line_ix, col) = if let Some(cell) = self
             .table_cell_rects
             .iter()

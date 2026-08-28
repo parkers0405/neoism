@@ -72,13 +72,21 @@ fn measured_card_equals_sum_of_block_heights() {
         ),
         AssistantMarkdownBlock::Quote(vec!["quote".into()]),
         AssistantMarkdownBlock::Blank,
-        AssistantMarkdownBlock::Bullet(vec!["item".into()]),
+        AssistantMarkdownBlock::ListItem(AssistantListItem {
+            marker: AssistantListMarker::Unordered,
+            depth: 0,
+            lines: vec!["item".into()],
+        }),
     ];
 
     let expected = 8.0 * s
         + blocks
             .iter()
-            .map(|b| markdown_block_height(b, 360.0, &pane, s) + 6.0 * s)
+            .enumerate()
+            .map(|(index, block)| {
+                markdown_block_height(block, 360.0, &pane, s)
+                    + markdown_block_gap(block, blocks.get(index + 1), s)
+            })
             .sum::<f32>();
     assert_eq!(
         measure_markdown_blocks(&blocks, 360.0, &pane, s),
@@ -370,6 +378,7 @@ fn explicit_web_links_ignore_destination_edge_whitespace() {
                 label,
                 source_target,
                 target: Some(target),
+                ..
             } if label == "ZhangHanDong"
                 && source_target == "https://github.com/ZhangHanDong"
                 && target == "https://github.com/ZhangHanDong"
@@ -454,5 +463,52 @@ fn outer_blank_blocks_never_inflate_a_message_card() {
         blocks.as_slice(),
         [AssistantMarkdownBlock::Paragraph(lines)]
             if lines.len() == 1 && lines[0] == "visible"
+    ));
+}
+
+#[test]
+fn semantic_lines_join_paragraphs_but_preserve_markdown_blocks() {
+    let source = "A paragraph hard-wrapped by\nthe model.\n\n- first\n  continuation\n  - nested\n1. ordered\n- [x] complete\n\n---";
+    assert_eq!(
+        semantic_markdown_lines(source),
+        vec![
+            "A paragraph hard-wrapped by the model.",
+            "",
+            "- first continuation",
+            "  - nested",
+            "1. ordered",
+            "- [x] complete",
+            "",
+            "---",
+        ]
+    );
+}
+
+#[test]
+fn list_parser_preserves_kind_marker_depth_and_task_state() {
+    assert_eq!(
+        markdown_list_item("- item"),
+        Some((AssistantListMarker::Unordered, 0, "item"))
+    );
+    assert_eq!(
+        markdown_list_item("  7. nested"),
+        Some((AssistantListMarker::Ordered("7.".into()), 1, "nested"))
+    );
+    assert_eq!(
+        markdown_list_item("- [x] shipped"),
+        Some((AssistantListMarker::Task { checked: true }, 0, "shipped"))
+    );
+}
+
+#[test]
+fn emphasis_markers_render_semantically_without_leaking_delimiters() {
+    let source = "*italic* **bold** ***both*** __strong__";
+    assert_eq!(rendered_inline_text(source), "italic bold both strong");
+    let segments = parsed_markdown_inline_line(source);
+    assert!(segments
+        .iter()
+        .any(|segment| matches!(segment, MarkdownInlineSegment::Italic(text) if text == "italic")));
+    assert!(segments.iter().any(
+        |segment| matches!(segment, MarkdownInlineSegment::BoldItalic(text) if text == "both")
     ));
 }

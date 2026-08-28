@@ -1350,10 +1350,14 @@ pub fn render(
             bottom,
         );
 
-        if !matches!(
-            parsed.kind,
-            RenderLineKind::Code | RenderLineKind::CodeFence | RenderLineKind::Divider
-        ) {
+        if pane.spellcheck_enabled
+            && !matches!(
+                parsed.kind,
+                RenderLineKind::Code
+                    | RenderLineKind::CodeFence
+                    | RenderLineKind::Divider
+            )
+        {
             let active_col = if is_cursor_line && cursor_col >= cursor_marker_len {
                 Some(cursor_col - cursor_marker_len)
             } else {

@@ -98,6 +98,8 @@ pub struct Application<'a> {
     app_id: Option<String>,
     initial_open_paths: Vec<PathBuf>,
     _external_command_listener: Option<crate::ipc::ExternalCommandListener>,
+    update_check_started: bool,
+    pending_update_version: Option<String>,
 }
 
 impl Application<'_> {
@@ -188,7 +190,36 @@ impl Application<'_> {
             app_id,
             initial_open_paths,
             _external_command_listener: external_command_listener,
+            update_check_started: false,
+            pending_update_version: None,
         }
+    }
+
+    fn present_pending_update(&mut self, window_id: WindowId) {
+        let Some(route) = self.router.routes.get_mut(&window_id) else {
+            return;
+        };
+        if route.window.screen.renderer.modal.is_active() {
+            return;
+        }
+        let Some(version) = self.pending_update_version.take() else {
+            return;
+        };
+        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+        route.window.screen.renderer.modal.open(ModalSpec {
+            title: format!("Neoism {version} is available"),
+            body: "## A fresh build is ready\n\n- Latest fixes and performance improvements\n- Installs through Neoism's platform updater\n- Your workspace stays available when you reopen"
+                .to_string(),
+            meta: format!("Installed: v{}", env!("CARGO_PKG_VERSION")),
+            input: None,
+            buttons: vec![
+                ModalButton::new("Update", "Enter", ModalAction::UpdateNeoism),
+                ModalButton::new("Not now", "Esc", ModalAction::Close),
+            ],
+            busy: false,
+            blocking: true,
+        });
+        route.request_overlay_redraw();
     }
 
     fn next_window_profile_id(&mut self) -> String {
@@ -1455,6 +1486,8 @@ impl Application<'_> {
                 RioEvent::PrepareRender(_) => "RioEvent::PrepareRender",
                 RioEvent::PrepareRenderOnRoute(_, _) => "RioEvent::PrepareRenderOnRoute",
                 RioEvent::UpdateTitles => "RioEvent::UpdateTitles",
+                RioEvent::UpdateAvailable { .. } => "RioEvent::UpdateAvailable",
+                RioEvent::SelfUpdateProgress { .. } => "RioEvent::SelfUpdateProgress",
                 RioEvent::UpdateConfig => "RioEvent::UpdateConfig",
                 RioEvent::CreateWindow(_) => "RioEvent::CreateWindow",
                 RioEvent::CreateWindowWithOptions { .. } => {
@@ -2024,6 +2057,59 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             RioEventType::Rio(RioEvent::UpdateTitles) => {
                 self.router.update_titles();
+                if !self.update_check_started {
+                    self.update_check_started = true;
+                    if let Some(window_id) = self.router.routes.keys().next().copied() {
+                        crate::update::spawn_check(self.event_proxy.clone(), window_id);
+                    }
+                }
+                if let Some(window_id) = self.router.routes.keys().next().copied() {
+                    self.present_pending_update(window_id);
+                }
+            }
+            RioEventType::Rio(RioEvent::UpdateAvailable { version }) => {
+                self.pending_update_version = Some(version);
+                self.present_pending_update(window_id);
+            }
+            RioEventType::Rio(RioEvent::SelfUpdateProgress {
+                percent,
+                message,
+                ready_to_restart,
+                failed,
+            }) => {
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    if failed {
+                        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+                        route.window.screen.renderer.modal.open(ModalSpec {
+                            title: "Update failed".to_string(),
+                            body: message.clone(),
+                            meta: "Neoism was not changed. You can keep working and try again later."
+                                .to_string(),
+                            input: None,
+                            buttons: vec![ModalButton::new("Close", "Enter", ModalAction::Close)],
+                            busy: false,
+                            blocking: true,
+                        });
+                        route.window.screen.renderer.notifications.push(
+                            format!("Neoism update failed: {message}"),
+                            neoism_ui::panels::notifications::NotificationLevel::Error,
+                        );
+                    } else {
+                        route.window.screen.renderer.modal.update_progress(
+                            message,
+                            percent.map_or_else(
+                                || "Preparing update".to_string(),
+                                |value| format!("{value}% complete"),
+                            ),
+                            percent,
+                            !ready_to_restart,
+                        );
+                    }
+                    route.request_overlay_redraw();
+                }
+                if ready_to_restart {
+                    event_loop.exit();
+                }
             }
             RioEventType::Rio(RioEvent::MouseCursorDirty) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {

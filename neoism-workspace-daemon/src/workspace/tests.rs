@@ -495,6 +495,36 @@ fn editor_surface_requires_session_in_active_workspace() {
 }
 
 #[test]
+fn workspace_root_change_resolves_relative_path_and_rejects_missing_directory() {
+    let td = TempDir::new().unwrap();
+    let original = td.path().join("projects").join("one");
+    let target = td.path().join("projects").join("two with spaces");
+    std::fs::create_dir_all(&original).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+    let mgr = make_manager(&td);
+    mgr.create_host_workspace(
+        "local".into(),
+        Some("workspace-cd".into()),
+        None,
+        Some(original),
+    );
+
+    let updated = mgr
+        .set_host_workspace_root("workspace-cd", PathBuf::from("'../two with spaces'"))
+        .expect("existing relative directory accepted");
+    assert_eq!(updated.root_dir.as_deref(), Some(target.as_path()));
+
+    let missing = td.path().join("projects").join("missing");
+    assert!(mgr
+        .set_host_workspace_root("workspace-cd", PathBuf::from("../missing"))
+        .is_none());
+    assert!(
+        !missing.exists(),
+        "a mistyped cd must not create a directory"
+    );
+}
+
+#[test]
 fn workspace_action_create_note_falls_back_to_default_vault() {
     let td = TempDir::new().unwrap();
     // `create_neoism_note` resolves the global Default vault when the

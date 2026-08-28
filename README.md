@@ -4,32 +4,37 @@
 
 [![Neoism terminal](https://raw.githubusercontent.com/parkers0405/neoism/241e6daaea1249d2eff6ca94b91dbacc2c426b0f/docs/images/terminal.png)](https://github.com/parkers0405/neoism)
 
-Neoism starts with the terminal instead of hiding it. Real shells, managed Neovim panes, Markdown notes, drawings, AI agents, diagnostics, files, and workspace navigation live together in one Rust-owned interface.
+Neoism starts with the terminal instead of hiding it. Real shells, native code and Markdown editors, drawings, AI agents, diagnostics, files, and workspace navigation live together in one Rust-owned interface.
 
 It is not an Electron IDE or a web terminal wrapper. The desktop app owns a native `winit` window and renders through `sugarloaf`; the browser client uses the same renderer family through Rust/WASM and WebGPU/WebGL.
 
 ## What Neoism is
 
 - **Terminal-first**: real PTYs, GPU-rendered text, smooth scrollback, tabs, splits, and command navigation.
-- **An editor workspace**: managed Neovim with a Rust-owned file tree, buffer tabs, diagnostics, finder, and workspace chrome.
+- **Native editing**: Rust-owned code and Markdown editors with LSP, Vim-style input, a file tree, buffer tabs, diagnostics, and finder.
 - **A place for project knowledge**: Markdown, Neoism Notes, Mermaid, notebooks, EPUBs, and `.neodraw` sketches live beside the code.
 - **Agent-native**: persistent local agent sessions, parallel sub-agents, LSP, shell and file tools, permissions, checkpoints, undo trees, and durable memory.
 - **Multiplayer and remote**: a workspace daemon owns PTYs and shared state so the same workspace can be used from desktop, web, phone, or another laptop over Tailscale.
 - **Local-first**: your files, terminals, notes, agents, and credentials stay on machines you control.
 - **Discoverable configuration**: `Alt+,` opens the active host's JSONC config with completion for every setting and host-aware suggestions for fonts, agents, models, extensions, and language servers.
 
-Neoism combines a native desktop app, a shared Rust UI, a Rust/WASM web renderer, a workspace daemon, and a standalone agent server. The terminal remains the center while every other surface participates in the same workspace.
+## One workspace, one connected system
+
+The workspace daemon keeps terminals, files, collaboration, and remote sessions alive across desktop, web, phone, and other laptops. It supervises Neoism's HTTP/SSE agent server, where persistent sessions, providers, tools, permissions, plugins, MCP, LSP, memory, and sub-agents work together on the same workspace.
 
 ## Install
 
-Download the latest platform release from [GitHub Releases](https://github.com/parkers0405/neoism/releases/latest), or use
-the platform installer below.
+Prebuilt releases support Linux x86_64, Apple Silicon macOS, and Windows x86_64.
 
-### Linux and macOS
+### Linux
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/parkers0405/neoism/main/scripts/install.sh | bash
 ```
+
+### macOS
+
+Download the latest DMG from [GitHub Releases](https://github.com/parkers0405/neoism/releases/latest), or use the shell installer command above for a command-line installation.
 
 ### Windows
 
@@ -39,12 +44,7 @@ Download and open [`Neoism-x86_64.msi`](https://github.com/parkers0405/neoism/re
 irm https://raw.githubusercontent.com/parkers0405/neoism/main/install.ps1 | iex
 ```
 
-The per-user installer requires no administrator rights and installs Neoism to
-`%LOCALAPPDATA%\Programs\Neoism`. Windows Installer owns upgrades, PATH, Start
-Menu integration, file associations, repair, and uninstall; user data remains
-under AppData when Neoism is uninstalled.
-
-Prebuilt releases install `neoism`, `neoism-workspace-daemon`, and `neoism-agent`. Neoism expects `nvim` and `ripgrep` on `PATH`.
+The per-user installer requires no administrator rights. Releases include `neoism`, `neoism-workspace-daemon`, and `neoism-agent`. `ripgrep` is recommended for full workspace text search; Neovim is not required.
 
 Update an existing installation with:
 
@@ -52,18 +52,7 @@ Update an existing installation with:
 neoism update
 ```
 
-If an older Neoism release cannot complete its update check, re-run the
-platform installer to bootstrap onto the latest release without using the old updater:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/parkers0405/neoism/main/scripts/install.sh | bash
-```
-
-On Windows, re-run the PowerShell installer shown above.
-
-Close all running Neoism windows before reopening the newly installed version.
-
-Build and run Neoism from source with:
+## Build from source
 
 ```sh
 git clone https://github.com/parkers0405/neoism.git

@@ -461,10 +461,7 @@ pub(crate) async fn execute_mcp_gateway(
                 .get("tool")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("execute action=call requires tool"))?;
-            if !tools.iter().any(|tool| {
-                mcp_canonical_path(tool) == path
-                    || mcp::tool_runtime_id(&tool.client, &tool.name) == path
-            }) {
+            if !tools.iter().any(|tool| mcp_path_matches(tool, path)) {
                 let namespace = path
                     .split_once('.')
                     .map(|(namespace, _)| namespace.to_string())
@@ -495,10 +492,7 @@ pub(crate) async fn execute_mcp_gateway(
             }
             let selected = tools
                 .iter()
-                .find(|tool| {
-                    mcp_canonical_path(tool) == path
-                        || mcp::tool_runtime_id(&tool.client, &tool.name) == path
-                })
+                .find(|tool| mcp_path_matches(tool, path))
                 .ok_or_else(|| {
                     anyhow::anyhow!("unknown or unavailable MCP tool {path}")
                 })?;
@@ -599,8 +593,26 @@ fn mcp_search_result(
 fn mcp_canonical_path(tool: &McpToolInfo) -> String {
     let runtime_id = mcp::tool_runtime_id(&tool.client, &tool.name);
     mcp_path(&runtime_id)
-        .map(|(namespace, name)| format!("{namespace}.{name}"))
+        .map(|(namespace, name)| {
+            let name = namespace
+                .strip_prefix("neoism_")
+                .and_then(|domain| name.strip_prefix(domain))
+                .and_then(|name| name.strip_prefix('_'))
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&name);
+            format!("{namespace}.{name}")
+        })
         .unwrap_or_else(|| format!("{}.{}", tool.client, tool.name))
+}
+
+fn mcp_path_matches(tool: &McpToolInfo, path: &str) -> bool {
+    if mcp_canonical_path(tool) == path {
+        return true;
+    }
+    let runtime_id = mcp::tool_runtime_id(&tool.client, &tool.name);
+    runtime_id == path
+        || mcp_path(&runtime_id)
+            .is_some_and(|(namespace, name)| format!("{namespace}.{name}") == path)
 }
 
 fn mcp_canonical_namespace(client: &str) -> String {
@@ -853,6 +865,26 @@ mod tests {
         let result = mcp_search_result(&tools, &json!({ "query": "create issue" }));
         let payload: Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(payload["items"][0]["path"], "odd_server.create_issue");
+    }
+
+    #[test]
+    fn bundled_gateway_paths_collapse_repeated_domain_and_keep_aliases() {
+        let memory = mcp_tool("neoism-memory", "memory.recall", "Recall memory");
+        assert_eq!(mcp_canonical_path(&memory), "neoism_memory.recall");
+        assert!(mcp_path_matches(&memory, "neoism_memory.recall"));
+        assert!(mcp_path_matches(
+            &memory,
+            "neoism_memory.memory_recall"
+        ));
+        assert!(mcp_path_matches(
+            &memory,
+            "mcp__neoism_memory__memory_recall"
+        ));
+
+        let docs = mcp_tool("neoism-docs", "docs.search", "Search docs");
+        assert_eq!(mcp_canonical_path(&docs), "neoism_docs.search");
+        let external = mcp_tool("product-help", "docs.search", "Search product docs");
+        assert_eq!(mcp_canonical_path(&external), "product_help.docs_search");
     }
 
     #[test]

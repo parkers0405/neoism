@@ -7,7 +7,169 @@ use neoism_terminal_core::crosswords::pos::Direction;
 use neoism_ui::panels::command_palette::PaletteAction;
 use neoism_window::keyboard::{Key, ModifiersState};
 
+fn unquote_cd_target(target: &str) -> &str {
+    let target = target.trim();
+    if target.len() >= 2 {
+        let bytes = target.as_bytes();
+        if (bytes[0] == b'\'' && bytes[target.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[target.len() - 1] == b'"')
+        {
+            return &target[1..target.len() - 1];
+        }
+    }
+    target
+}
+
+fn expand_cd_target(base: &Path, target: &str) -> Option<PathBuf> {
+    let target = unquote_cd_target(target);
+    if target == "~" {
+        return dirs::home_dir();
+    }
+    if let Some(rest) = target
+        .strip_prefix("~/")
+        .or_else(|| target.strip_prefix("~\\"))
+    {
+        return dirs::home_dir().map(|home| home.join(rest));
+    }
+    if target.starts_with('~') {
+        return None;
+    }
+    let path = PathBuf::from(target);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    })
+}
+
 impl Screen<'_> {
+    /// Refresh the directory rows for a normal command-palette query beginning
+    /// with `cd`. fff owns recursive discovery/ranking; direct path resolution
+    /// is kept here so `~`, `..`, quoted paths, and an exact directory work
+    /// even before (or without) an index hit.
+    pub(crate) fn refresh_cd_palette_results(&mut self) {
+        use neoism_agent_service_api::{
+            DirectorySearchRequest, WorkspaceSearchRequestControl,
+            WorkspaceSearchService as _,
+        };
+        use neoism_ui::panels::command_palette::PaletteDirectoryEntry;
+
+        let Some(suffix) = self
+            .renderer
+            .command_palette
+            .cd_query_suffix()
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        // A joined workspace's path belongs to the host. Its search is routed
+        // over the daemon by the web/shared service path; never inspect that
+        // absolute path on the guest machine.
+        if self.context_manager.current_workspace_is_remote_joined() {
+            self.renderer
+                .command_palette
+                .set_cd_directory_results(Vec::new());
+            return;
+        }
+        let Some(base) = self
+            .active_workspace_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+        else {
+            return;
+        };
+
+        let typed = unquote_cd_target(&suffix);
+        let expanded = expand_cd_target(&base, typed);
+        let mut search_root = expanded.clone().unwrap_or_else(|| base.clone());
+        let mut exact = None;
+        if search_root.is_dir() {
+            exact = std::fs::canonicalize(&search_root).ok();
+        } else {
+            while !search_root.is_dir() {
+                let Some(parent) = search_root.parent() else {
+                    search_root = base.clone();
+                    break;
+                };
+                search_root = parent.to_path_buf();
+            }
+        }
+        let query = expanded
+            .as_deref()
+            .and_then(|path| path.strip_prefix(&search_root).ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| typed.to_owned());
+
+        let mut rows = Vec::new();
+        if let Some(path) = exact {
+            rows.push(PaletteDirectoryEntry::new(path.to_string_lossy()));
+        }
+        if let Ok(result) =
+            self.cd_directory_search
+                .search_directories(&DirectorySearchRequest {
+                    root: search_root.clone(),
+                    query,
+                    offset: 0,
+                    limit: 128,
+                    control: WorkspaceSearchRequestControl {
+                        timeout_ms: 2_000,
+                        cancel: None,
+                    },
+                })
+        {
+            for relative in result.paths {
+                let path = search_root.join(&relative);
+                let absolute = path.to_string_lossy().into_owned();
+                if rows.iter().any(|row| row.absolute_path == absolute) {
+                    continue;
+                }
+                rows.push(PaletteDirectoryEntry {
+                    absolute_path: absolute,
+                    display: Some(relative),
+                    detail: Some(search_root.to_string_lossy().into_owned()),
+                });
+            }
+        }
+        self.renderer.command_palette.set_cd_directory_results(rows);
+    }
+
+    /// Commit a palette `cd` as an application workspace-root change. This is
+    /// deliberately not shell evaluation and does not alter existing PTYs.
+    pub(crate) fn commit_palette_cd(&mut self, target: &str) -> bool {
+        use neoism_ui::panels::notifications::NotificationLevel;
+
+        let Some(base) = self
+            .active_workspace_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+        else {
+            return false;
+        };
+        let Some(path) = expand_cd_target(&base, target) else {
+            self.renderer.notifications.push(
+                "Unsupported directory: use ~ or ~/path; ~user expansion is not supported.",
+                NotificationLevel::Error,
+            );
+            return false;
+        };
+        let Ok(path) = std::fs::canonicalize(&path) else {
+            self.renderer.notifications.push(
+                format!("Directory not found: {}", path.display()),
+                NotificationLevel::Error,
+            );
+            return false;
+        };
+        if !path.is_dir() {
+            self.renderer.notifications.push(
+                format!("Not a directory: {}", path.display()),
+                NotificationLevel::Error,
+            );
+            return false;
+        }
+        self.set_active_workspace_root(path, true);
+        true
+    }
+
     pub(crate) fn open_edit_server_form(
         &mut self,
         id: String,
@@ -499,6 +661,22 @@ impl Screen<'_> {
                 scale_factor,
             ) {
                 self.renderer.command_palette.select_clicked(index);
+
+                if self.renderer.command_palette.is_cd_query() {
+                    let target = self
+                        .renderer
+                        .command_palette
+                        .get_selected_cd_directory()
+                        .map(|entry| entry.absolute_path)
+                        .or_else(|| self.renderer.command_palette.get_typed_cd_target());
+                    if let Some(target) = target {
+                        if self.commit_palette_cd(&target) {
+                            self.renderer.command_palette.set_enabled(false);
+                        }
+                        self.mark_dirty();
+                    }
+                    return true;
+                }
             }
             self.mark_dirty();
             return true;

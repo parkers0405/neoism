@@ -1,6 +1,6 @@
 use super::*;
 use crate::workspace::extensions::{ExtensionEntry, ExtensionStatus};
-use neoism_extensions::{ExtensionManifest, InstalledIndex, ProgressEvent};
+use neoism_extensions::{ExtensionManifest, ProgressEvent};
 use neoism_ui::panels::extensions_page::NeoismExtensionsPane;
 use neoism_ui::panels::notifications::NotificationLevel;
 use std::sync::atomic::Ordering;
@@ -298,7 +298,7 @@ impl Screen<'_> {
         if !CATALOG_CACHE_FRESH.swap(false, Ordering::AcqRel) {
             return;
         }
-        let entries = self.load_bundled_extension_entries();
+        let mut entries = self.load_bundled_extension_entries();
         for (_, item) in self
             .context_manager
             .current_grid_mut()
@@ -306,6 +306,13 @@ impl Screen<'_> {
             .iter_mut()
         {
             if let Some(pane) = item.val.neoism_extensions.as_mut() {
+                for entry in &mut entries {
+                    if let Some(current) = pane.entries().iter().find(|old| old.id == entry.id) {
+                        if matches!(current.status, ExtensionStatus::Installing { .. } | ExtensionStatus::Failed { .. }) {
+                            entry.status = current.status.clone();
+                        }
+                    }
+                }
                 pane.set_entries(entries.clone());
             }
         }
@@ -507,41 +514,6 @@ impl Screen<'_> {
             }
             match outcome {
                 Ok(Ok(installed_entry)) => {
-                    let mut index = match InstalledIndex::load() {
-                        Ok(index) => index,
-                        Err(err) => {
-                            if let Some(p) = pane.as_deref_mut() {
-                                if let Some(entry) =
-                                    p.entries_mut().iter_mut().find(|e| e.id == id)
-                                {
-                                    entry.status = ExtensionStatus::NotInstalled;
-                                }
-                            }
-                            self.finalize_install_failure(
-                                &id,
-                                &source,
-                                &format!("installed files were created, but Neoism could not read the install record: {err}"),
-                            );
-                            continue;
-                        }
-                    };
-                    index.install_record(installed_entry.clone());
-                    if let Err(err) = index.save() {
-                        if let Some(p) = pane.as_deref_mut() {
-                            if let Some(entry) =
-                                p.entries_mut().iter_mut().find(|e| e.id == id)
-                            {
-                                entry.status = ExtensionStatus::NotInstalled;
-                            }
-                        }
-                        self.finalize_install_failure(
-                            &id,
-                            &source,
-                            &format!("installed files were created, but Neoism could not persist the install record: {err}"),
-                        );
-                        continue;
-                    }
-
                     if let Some(manifest) = self.lookup_bundled_manifest(&id) {
                         if is_mcp_entry(&manifest) {
                             if let Some(bin) = installed_entry.bin_path.as_ref() {
@@ -577,7 +549,7 @@ impl Screen<'_> {
                         if let Some(entry) =
                             p.entries_mut().iter_mut().find(|e| e.id == id)
                         {
-                            entry.status = ExtensionStatus::NotInstalled;
+                            entry.status = ExtensionStatus::Failed { message: err.to_string() };
                         }
                     }
                     self.finalize_install_failure(&id, &source, &err.to_string());
@@ -587,7 +559,7 @@ impl Screen<'_> {
                         if let Some(entry) =
                             p.entries_mut().iter_mut().find(|e| e.id == id)
                         {
-                            entry.status = ExtensionStatus::NotInstalled;
+                            entry.status = ExtensionStatus::Failed { message: format!("install task crashed: {join_err}") };
                         }
                     }
                     self.finalize_install_failure(

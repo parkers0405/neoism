@@ -1379,6 +1379,11 @@ export interface SearchFileHit {
   path: string;
 }
 
+export interface SearchDirectoryHit {
+  score: number;
+  path: string;
+}
+
 export interface SearchGrepHit {
   score: number;
   path: string;
@@ -1404,6 +1409,7 @@ export type SearchClientMessage =
         mode: SearchFileMode;
       };
     }
+  | { SearchDirectories: { req_id: number; query: string; cwd: string } }
   | {
       SearchGrep: {
         req_id: number;
@@ -1421,6 +1427,7 @@ export type SearchClientMessage =
 export type SearchServerMessage =
   | { CollectFilesResult: { req_id: number; paths: string[] } }
   | { SearchFilesResult: { req_id: number; hits: SearchFileHit[] } }
+  | { SearchDirectoriesResult: { req_id: number; hits: SearchDirectoryHit[] } }
   | { SearchGrepResult: { req_id: number; hits: SearchGrepHit[] } }
   | { SearchGitChangesResult: { req_id: number; hits: SearchGitHit[] } }
   | { GitRepoRootResult: { req_id: number; path: string | null } }

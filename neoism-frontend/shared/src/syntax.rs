@@ -1251,7 +1251,10 @@ pub fn syn_color(tok: SynTok, theme: &IdeTheme, dim: bool) -> [u8; 4] {
         SynTok::Number => theme.u8(theme.syn_number),
         SynTok::Comment => theme.u8(theme.syn_comment),
         SynTok::Function => theme.u8(theme.syn_func),
-        SynTok::Punct => theme.u8(theme.muted),
+        // Structural code characters must remain as legible as identifiers.
+        // Muting punctuation made (), {}, operators and delimiters disappear
+        // even though they carry the shape of the expression.
+        SynTok::Punct => theme.u8(theme.fg),
     };
     c[3] = alpha;
     c

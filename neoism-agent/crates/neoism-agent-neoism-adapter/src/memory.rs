@@ -160,7 +160,7 @@ impl MemoryService for NeoismMemoryService {
             Some(SystemContextFragment {
                 id: format!("memory:{}:{}", root.scope, root.path.display()),
                 content: format!(
-                    "Persistent {} memory index (vault {}), stored in {}. That folder is OUTSIDE the workspace directory. Access it only with the {} memory tools. Use memory.recall before repeating project discovery, memory.read for linked topic files, and memory.write for new durable facts.\n{}",
+                    "Persistent {} memory index (vault {}), stored in {}. That folder is OUTSIDE the workspace directory. Access it only with the {} memory tools. Use neoism_memory.recall before repeating project discovery, neoism_memory.read for linked topic files, and neoism_memory.write for new durable facts.\n{}",
                     root.scope, root.label, root.path.display(), MCP_ID, text
                 ),
             })

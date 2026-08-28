@@ -30,6 +30,7 @@ fn modal_action_policy_tag(
     use neoism_ui::widgets::modal::ModalAction as A;
     match action {
         A::Close => Tag::Close,
+        A::UpdateNeoism => Tag::UpdateNeoism,
         A::InstallLsp { .. } => Tag::InstallLsp,
         A::InstallPythonKernel => Tag::InstallPythonKernel,
         A::ApplyTheme { .. } => Tag::ApplyTheme,

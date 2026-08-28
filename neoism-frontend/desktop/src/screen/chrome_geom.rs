@@ -239,6 +239,13 @@ impl Screen<'_> {
 
             for current_context in context_grid.contexts_mut().values_mut() {
                 let current_context = current_context.context_mut();
+                if let Some(markdown) = current_context.markdown.as_mut() {
+                    markdown.spellcheck_enabled = config.editor.markdown.spellcheck;
+                }
+                if let Some(notebook) = current_context.notebook.as_mut() {
+                    notebook.markdown.spellcheck_enabled =
+                        config.editor.markdown.spellcheck;
+                }
                 let mut terminal = current_context.terminal.lock();
                 current_context.renderable_content =
                     RenderableContent::from_cursor_config(&config.terminal.cursor);

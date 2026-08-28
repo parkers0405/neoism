@@ -58,6 +58,13 @@ impl Screen<'_> {
                 if !blocking {
                     return false;
                 }
+                if self
+                    .renderer
+                    .modal
+                    .has_action(&neoism_ui::widgets::modal::ModalAction::UpdateNeoism)
+                {
+                    return true;
+                }
                 if let Some(action) = self.renderer.modal.escape_action() {
                     self.execute_modal_action(action);
                 } else {
@@ -87,6 +94,59 @@ impl Screen<'_> {
         match action {
             ModalAction::Close => {
                 self.renderer.modal.close();
+            }
+            ModalAction::UpdateNeoism => {
+                #[cfg(debug_assertions)]
+                if std::env::var_os("NEOISM_UPDATE_CHECK").is_some() {
+                    self.renderer.modal.open(
+                        neoism_ui::widgets::modal::ModalSpec {
+                            title: "Updating Neoism (preview)".to_string(),
+                            body: "Preparing the update preview".to_string(),
+                            meta: "0% complete".to_string(),
+                            input: None,
+                            buttons: vec![neoism_ui::widgets::modal::ModalButton::new(
+                                "Hide",
+                                "Esc",
+                                ModalAction::Close,
+                            )],
+                            busy: true,
+                            blocking: false,
+                        },
+                    );
+                    crate::update::spawn_install_preview(
+                        self.context_manager.event_proxy(),
+                        self.context_manager.window_id(),
+                    );
+                    return;
+                }
+                let result = crate::update::spawn_install(
+                    self.context_manager.event_proxy(),
+                    self.context_manager.window_id(),
+                );
+                match result {
+                    Ok(()) => self.renderer.modal.open(
+                        neoism_ui::widgets::modal::ModalSpec {
+                            title: "Updating Neoism".to_string(),
+                            body: "The update is downloading in the background. Neoism will close automatically when it is ready.".to_string(),
+                            meta: "Your workspace will be available when you reopen Neoism.".to_string(),
+                            input: None,
+                            buttons: vec![neoism_ui::widgets::modal::ModalButton::new(
+                                "Hide",
+                                "Esc",
+                                ModalAction::Close,
+                            )],
+                            busy: true,
+                            blocking: false,
+                        },
+                    ),
+                    Err(error) => {
+                        self.renderer.modal.close();
+                        self.renderer.notifications.push(
+                            format!("Could not start the Neoism update: {error}"),
+                            neoism_ui::panels::notifications::NotificationLevel::Error,
+                        );
+                    }
+                }
             }
             ModalAction::InstallLsp { server } => {
                 self.start_lsp_install(server);

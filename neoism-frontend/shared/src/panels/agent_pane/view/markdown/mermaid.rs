@@ -115,6 +115,7 @@ pub(crate) fn render_mermaid_block<P: AgentMarkdownPane>(
     if raw_mode {
         render_mermaid_raw_body(
             sugarloaf,
+            pane,
             x,
             y,
             w,
@@ -124,6 +125,7 @@ pub(crate) fn render_mermaid_block<P: AgentMarkdownPane>(
             s,
             viewport_clip,
             occlusion_rects,
+            suppress_interactions,
         );
         return;
     }
@@ -164,8 +166,9 @@ pub(crate) fn render_mermaid_block<P: AgentMarkdownPane>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_mermaid_raw_body(
+fn render_mermaid_raw_body<P: AgentMarkdownPane>(
     sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
     x: f32,
     y: f32,
     w: f32,
@@ -175,6 +178,7 @@ fn render_mermaid_raw_body(
     s: f32,
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
+    suppress_interactions: bool,
 ) {
     let header_h = 34.0 * s;
     let body_top = y + header_h + 8.0 * s;
@@ -212,14 +216,28 @@ fn render_mermaid_raw_body(
         } else {
             break;
         };
-        draw_text_clipped(
-            sugarloaf,
-            x + 18.0 * s,
-            body_top + ix as f32 * line_h,
-            line,
-            &opts,
-            occlusion_rects,
-        );
+        let text_x = x + 18.0 * s;
+        let line_y = body_top + ix as f32 * line_h;
+        if !suppress_interactions {
+            let line_w = measure_text_cached(sugarloaf, line, &opts).max(12.0 * s);
+            let stops = measured_caret_stops(sugarloaf, line, &opts, text_x);
+            let selection_index = pane.register_selectable_line_with_caret_stops(
+                line,
+                [text_x, line_y - 2.0 * s, line_w, line_h],
+                &stops,
+            );
+            if let Some((left, right)) = pane.selectable_line_highlight(selection_index) {
+                draw_rounded_rect_clipped(
+                    sugarloaf,
+                    [left, line_y - 2.0 * s, right - left, line_h],
+                    theme.f32_alpha(theme.accent, 0.22),
+                    3.0 * s,
+                    ORDER_PANEL + 2,
+                    viewport_clip,
+                );
+            }
+        }
+        draw_text_clipped(sugarloaf, text_x, line_y, line, &opts, occlusion_rects);
     }
 }
 

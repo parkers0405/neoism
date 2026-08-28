@@ -68,6 +68,9 @@ pub enum ExtensionStatus {
     Installed {
         version: String,
     },
+    Failed {
+        message: String,
+    },
     Uninstalling,
 }
 

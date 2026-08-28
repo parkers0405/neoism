@@ -98,10 +98,7 @@ impl NeoismAgentPane {
 
     pub fn has_status_activity(&self) -> bool {
         self.is_streaming()
-            || self
-                .execution_activity
-                .as_ref()
-                .is_some_and(|activity| self.execution_status_live(activity))
+            || self.viewed_subagent_outstanding()
             || self.active_subagent_count() > 0
             || self.running_background_task_count() > 0
             // The grace hold counts as activity so the status row's
@@ -315,9 +312,11 @@ impl NeoismAgentPane {
                 _ => BranchStatus::Stopped,
             };
             self.upsert_live_subagent_entry(&session_id, None, None);
-            let status = self
-                .side_panel
-                .reconcile_branch_lifecycle_snapshot(session_id.clone(), status);
+            // This snapshot passed the monotonic family-revision gate above,
+            // so it is the only active signal allowed to reopen a terminal
+            // child for a genuine continuation/new execution.
+            self.side_panel
+                .set_branch_activity_status(session_id.clone(), status);
             self.side_panel
                 .set_branch_activity_started_at(session_id.clone(), started_at);
             if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
@@ -409,6 +408,29 @@ impl NeoismAgentPane {
             self.active_subagent_ids.remove(&session_id);
             self.active_subagent_started_at.remove(&session_id);
         }
+    }
+
+    /// Apply status evidence that carries no execution/family revision.
+    /// Terminal edges may latch completion, but active/waiting observations
+    /// cannot reopen a child after an authoritative snapshot completed it.
+    pub fn note_subagent_observed_runtime(
+        &mut self,
+        session_id: String,
+        status: BranchStatus,
+        current_tool: Option<String>,
+        started_at: Option<u64>,
+    ) -> bool {
+        if matches!(status, BranchStatus::Completed | BranchStatus::Stopped) {
+            self.side_panel.set_branch_activity_tool(
+                session_id.clone(),
+                status,
+                current_tool,
+                started_at,
+            );
+            self.note_subagent_runtime(session_id, status, started_at);
+            return true;
+        }
+        self.note_subagent_part_activity(session_id, status, current_tool, started_at)
     }
 
     pub fn settle_tracked_subagents(&mut self, status: BranchStatus) {
@@ -573,12 +595,12 @@ impl NeoismAgentPane {
             self.note_subagent_runtime(task_id, status, None);
         }
         for (task_id, status) in &explicit_statuses {
-            // The poll is authoritative even when the child was previously
-            // active. Always mirror it into the runtime set so a completed
-            // child is removed instead of lingering until another live event.
-            self.note_subagent_runtime(
+            // Snapshot row statuses have no execution/family revision. They
+            // may settle a child, but cannot reopen a terminal lock.
+            self.note_subagent_observed_runtime(
                 task_id.clone(),
                 branch_status_from_runtime(status),
+                None,
                 None,
             );
         }
@@ -591,16 +613,11 @@ impl NeoismAgentPane {
             })
             .filter_map(|(index, message)| {
                 let task_id = task_id_from_task_message(message)?;
-                let status = explicit_statuses
-                    .get(&task_id)
-                    .copied()
-                    .or_else(|| {
-                        self.side_panel
-                            .branch_activity(&task_id)
-                            .and_then(|activity| {
-                                task_message_status_from_branch(activity.status)
-                            })
-                    })
+                let status = self
+                    .side_panel
+                    .branch_activity(&task_id)
+                    .and_then(|activity| task_message_status_from_branch(activity.status))
+                    .or_else(|| explicit_statuses.get(&task_id).copied())
                     .or_else(|| {
                         active_task_ids.contains(&task_id).then_some("running")
                     })?;

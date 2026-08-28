@@ -6,8 +6,8 @@
 //! Palette mode + row shapes consumed by the filter / render pipelines.
 
 use super::actions::{
-    HostKind, PaletteAction, PaletteBufferEntry, PaletteMashupEntry, PaletteServerEntry,
-    PaletteShaderEntry, PaletteWorkspaceEntry,
+    HostKind, PaletteAction, PaletteBufferEntry, PaletteDirectoryEntry,
+    PaletteMashupEntry, PaletteServerEntry, PaletteShaderEntry, PaletteWorkspaceEntry,
 };
 
 /// What the palette is currently browsing and filtering over.
@@ -66,6 +66,10 @@ pub(crate) enum PaletteRow<'a> {
     },
     Buffer {
         entry: &'a PaletteBufferEntry,
+    },
+    /// Host-supplied result shown in place of commands for a `cd` query.
+    Directory {
+        entry: &'a PaletteDirectoryEntry,
     },
     /// Host header separator in the grouped Workspaces tree. Renders the
     /// kind glyph, the host label, an online dot, and (for non-local
@@ -128,6 +132,9 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Mashup { entry } => entry.name.as_str(),
             PaletteRow::Shader { entry } => entry.title.as_str(),
             PaletteRow::Buffer { entry } => entry.title.as_str(),
+            PaletteRow::Directory { entry } => {
+                entry.display.as_deref().unwrap_or(&entry.absolute_path)
+            }
             PaletteRow::WorkspaceHost { label, .. } => label,
             PaletteRow::WorkspaceCreate => "+ New Workspace",
             PaletteRow::Workspace { entry } => entry.title.as_str(),
@@ -162,6 +169,11 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Mashup { .. } => "",
             PaletteRow::Shader { entry } => entry.detail.as_str(),
             PaletteRow::Buffer { entry } => entry.detail.as_str(),
+            PaletteRow::Directory { entry } => entry
+                .detail
+                .as_deref()
+                .or_else(|| entry.display.as_ref().map(|_| entry.absolute_path.as_str()))
+                .unwrap_or(""),
             // Host headers surface the dialable daemon endpoint on the
             // right (non-local only). Local hosts keep the slot empty so
             // the row reads as plain "⌂ local".
@@ -196,6 +208,7 @@ impl<'a> PaletteRow<'a> {
             | PaletteRow::Mashup { .. }
             | PaletteRow::Shader { .. }
             | PaletteRow::Buffer { .. }
+            | PaletteRow::Directory { .. }
             | PaletteRow::WorkspaceHost { .. }
             | PaletteRow::Workspace { .. }
             | PaletteRow::Ex { .. }

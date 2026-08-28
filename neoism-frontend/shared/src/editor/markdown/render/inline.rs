@@ -60,7 +60,7 @@ pub(super) fn draw_spellcheck_underlines(
         if word_w <= 0.0 || word_w > remaining_w + 1.0 {
             continue;
         }
-        let underline_y = y + line_h - 4.0;
+        let underline_y = y + line_h - 6.0;
         if underline_y < clip_top || underline_y > clip_bottom {
             continue;
         }
@@ -138,27 +138,17 @@ pub(super) fn draw_spellcheck_squiggle(
     w: f32,
     theme: &IdeTheme,
 ) {
-    let mut dx = 0.0;
-    let mut high = true;
-    while dx < w {
-        let segment_w = 2.4_f32.min(w - dx).max(0.0);
-        if segment_w <= 0.0 {
-            break;
-        }
-        draw_rect_clipped(
-            sugarloaf,
-            clip,
-            x + dx,
-            y + if high { 0.0 } else { 2.0 },
-            segment_w,
-            1.3,
-            theme.f32_alpha(theme.red, 0.9),
-            DEPTH,
-            ORDER_TEXT + 2,
-        );
-        high = !high;
-        dx += 3.2;
-    }
+    draw_rect_clipped(
+        sugarloaf,
+        clip,
+        x,
+        y,
+        w,
+        1.3,
+        theme.f32_alpha(theme.red, 0.9),
+        DEPTH,
+        ORDER_TEXT + 2,
+    );
 }
 
 #[cfg(test)]

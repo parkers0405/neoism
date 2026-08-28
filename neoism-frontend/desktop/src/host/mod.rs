@@ -139,6 +139,8 @@ pub struct Renderer {
     /// `[neoism] vim-mode` — new code/markdown editors open with the
     /// vim modal layer (default true). Read at editor creation.
     pub vim_mode: bool,
+    /// Markdown spelling underlines and context-menu actions.
+    pub markdown_spellcheck: bool,
     pub fps_counter: fps::FpsCounter,
     pub terminal_block_prompt_animating: bool,
     pub terminal_splash_animating: bool,
@@ -414,6 +416,7 @@ impl Renderer {
             status_fps_enabled: config.ui.status_fps,
             code_format_on_save: config.editor.format_on_save,
             vim_mode: config.editor.vim_mode,
+            markdown_spellcheck: config.editor.markdown.spellcheck,
             fps_counter: fps::FpsCounter::default(),
             terminal_block_prompt_animating: false,
             terminal_splash_animating: false,

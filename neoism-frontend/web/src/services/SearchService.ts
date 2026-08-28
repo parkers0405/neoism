@@ -55,6 +55,8 @@ export interface SearchBridge {
   setSearchCollectFiles?(cb: (reqId: number, envelopeJson: string) => void): void;
   /// Install the JS-side callback for fuzzy/exact file picker.
   setSearchFiles?(cb: (reqId: number, envelopeJson: string) => void): void;
+  /// Install the JS-side callback for fuzzy directory-only search.
+  setSearchDirectories?(cb: (reqId: number, envelopeJson: string) => void): void;
   /// Install the JS-side callback for `rg <query>` (or fuzzy/regex).
   setSearchGrep?(cb: (reqId: number, envelopeJson: string) => void): void;
   /// Install the JS-side callback for `git status --porcelain` rows.
@@ -115,6 +117,9 @@ export class SearchService {
       this.client.sendSearch(parseSearchEnvelope(reqId, envelopeJson));
     });
     this.bridge.setSearchFiles?.((reqId, envelopeJson) => {
+      this.client.sendSearch(parseSearchEnvelope(reqId, envelopeJson));
+    });
+    this.bridge.setSearchDirectories?.((reqId, envelopeJson) => {
       this.client.sendSearch(parseSearchEnvelope(reqId, envelopeJson));
     });
     this.bridge.setSearchGrep?.((reqId, envelopeJson) => {
@@ -199,6 +204,11 @@ function parseSearchEnvelope(reqId: number, envelopeJson: string): SearchClientM
         req_id: reqId,
         mode: coerceFileMode(parsed.SearchFiles.mode),
       },
+    };
+  }
+  if ("SearchDirectories" in parsed) {
+    return {
+      SearchDirectories: { ...parsed.SearchDirectories, req_id: reqId },
     };
   }
   if ("SearchGrep" in parsed) {

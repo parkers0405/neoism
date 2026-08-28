@@ -14,8 +14,8 @@ use web_time::Instant;
 use crate::animation::CriticallyDampedSpring;
 
 use super::actions::{
-    PaletteBufferEntry, PaletteHostCapabilities, PaletteHostEntry, PaletteServerEntry,
-    PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry,
+    PaletteBufferEntry, PaletteDirectoryEntry, PaletteHostCapabilities, PaletteHostEntry,
+    PaletteServerEntry, PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry,
 };
 use super::modes::PaletteMode;
 use super::MAX_RECENT_SEARCHES;
@@ -82,6 +82,9 @@ pub struct CommandPalette {
     /// query is non-empty so the dropdown reads as a live picker
     /// rather than a history list.
     pub(super) buffer_matches: Vec<(u64, u64, String)>,
+    /// Host-owned directory snapshot for the current Commands-mode `cd`
+    /// query. The shared palette never touches the filesystem itself.
+    pub(super) cd_directory_results: Vec<PaletteDirectoryEntry>,
     /// Direction of the current Search-mode session: `false` for `/`
     /// (forward), `true` for `?` (backward). The commit dispatcher reads
     /// this to pick the search direction (and `v:searchforward` so
@@ -160,6 +163,7 @@ impl Default for CommandPalette {
             last_scroll_time: None,
             recent_searches: Vec::new(),
             buffer_matches: Vec::new(),
+            cd_directory_results: Vec::new(),
             search_backward: false,
             scale: 1.0,
             list_scroll_spring: CriticallyDampedSpring::new(),
@@ -222,6 +226,7 @@ impl CommandPalette {
         self.enabled = enabled;
         if enabled {
             self.query.clear();
+            self.cd_directory_results.clear();
             self.selected_index = 0;
             self.scroll_offset = 0;
             self.caret_blink_start = Instant::now();
@@ -529,7 +534,13 @@ impl CommandPalette {
     }
 
     pub fn set_query(&mut self, query: String) {
+        let old_cd_suffix = self.cd_query_suffix().map(str::to_owned);
         self.query = query;
+        if self.cd_query_suffix() != old_cd_suffix.as_deref() {
+            // Never show results belonging to a previous suffix while the
+            // host obtains the next filesystem snapshot.
+            self.cd_directory_results.clear();
+        }
         self.selected_index = 0;
         self.scroll_offset = 0;
         self.caret_blink_start = Instant::now();
@@ -545,6 +556,37 @@ impl CommandPalette {
         // Typing reshapes the list entirely — drop any scrollbar
         // fade state so the next scroll starts with a clean timer.
         self.last_scroll_time = None;
+        self.reset_motion();
+    }
+
+    /// Whether Commands mode currently contains exactly `cd` or starts with
+    /// `cd ` and therefore expects host-owned directory rows.
+    pub fn is_cd_query(&self) -> bool {
+        self.cd_query_suffix().is_some()
+    }
+
+    /// Raw target suffix following `cd `. Exact `cd` and `cd ` both yield an
+    /// empty suffix. Matching is case-sensitive and only applies in Commands
+    /// mode.
+    pub fn cd_query_suffix(&self) -> Option<&str> {
+        if !matches!(self.mode, PaletteMode::Commands) {
+            return None;
+        }
+        if self.query == "cd" {
+            Some("")
+        } else {
+            self.query.strip_prefix("cd ")
+        }
+    }
+
+    /// Replace directory rows for the current `cd` suffix. Input order is
+    /// preserved because filtering and ranking belong to the filesystem host.
+    pub fn set_cd_directory_results(&mut self, results: Vec<PaletteDirectoryEntry>) {
+        self.cd_directory_results = results;
+        self.selected_index = self
+            .selected_index
+            .min(self.cd_directory_results.len().saturating_sub(1));
+        self.scroll_offset = self.scroll_offset.min(self.selected_index);
         self.reset_motion();
     }
 

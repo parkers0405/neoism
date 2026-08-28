@@ -13,11 +13,9 @@ impl Screen<'_> {
     /// drains the receiver and finalises bookkeeping.
     pub(crate) fn dispatch_install(&mut self, id: &str) {
         tracing::info!(target: "neoism::extensions", id = %id, "dispatch_install");
-        // The progress button doubles as Cancel. Check before routing special
-        // installers so every install kind behaves the same and a double click
-        // cannot start two writers against one destination.
-        if self.cancel_install_if_running(id) {
-            tracing::info!(target: "neoism::extensions", id = %id, "install click cancelled an in-flight job (button doubles as Cancel)");
+        // Installing is a stable, non-destructive state. A retained hover or
+        // double click must never turn the primary action into cancellation.
+        if self.renderer.install_tracker.in_flight.contains_key(id) {
             return;
         }
         if is_builtin_extension_id(id) {
@@ -111,31 +109,6 @@ impl Screen<'_> {
             },
         );
         self.mark_dirty();
-    }
-
-    fn cancel_install_if_running(&mut self, id: &str) -> bool {
-        let Some(job) = self.renderer.install_tracker.in_flight.remove(id) else {
-            return false;
-        };
-        job.install_handle.cancel();
-        if let Some(pane) = self
-            .context_manager
-            .current_mut()
-            .neoism_extensions
-            .as_mut()
-        {
-            if let Some(entry) =
-                pane.entries_mut().iter_mut().find(|entry| entry.id == id)
-            {
-                entry.status = ExtensionStatus::NotInstalled;
-            }
-        }
-        self.renderer.notifications.push(
-            format!("Cancelled installation of {id}"),
-            NotificationLevel::Info,
-        );
-        self.mark_dirty();
-        true
     }
 
     fn dispatch_builtin_mcp_install(&mut self, id: &str) {

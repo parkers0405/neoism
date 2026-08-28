@@ -51,6 +51,9 @@ impl ChromeBridge {
     pub fn set_search_files(&self, cb: js_sys::Function) {
         self.services_state.0.borrow_mut().search_files = Some(cb);
     }
+    pub fn set_search_directories(&self, cb: js_sys::Function) {
+        self.services_state.0.borrow_mut().search_directories = Some(cb);
+    }
     pub fn set_search_grep(&self, cb: js_sys::Function) {
         self.services_state.0.borrow_mut().search_grep = Some(cb);
     }

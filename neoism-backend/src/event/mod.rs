@@ -229,6 +229,19 @@ pub enum RioEvent {
     /// Update window titles.
     UpdateTitles,
 
+    /// A post-launch background check found a newer desktop release.
+    UpdateAvailable {
+        version: String,
+    },
+
+    /// Status from the existing `neoism update` command while GUI-driven.
+    SelfUpdateProgress {
+        percent: Option<u8>,
+        message: String,
+        ready_to_restart: bool,
+        failed: bool,
+    },
+
     /// Update terminal screen colors.
     ///
     /// The first usize is the route_id, the second is the color index to change.
@@ -349,6 +362,18 @@ impl Debug for RioEvent {
             RioEvent::AcpWake => write!(f, "AcpWake"),
             RioEvent::WorkspaceNotesWake => write!(f, "WorkspaceNotesWake"),
             RioEvent::UpdateTitles => write!(f, "UpdateTitles"),
+            RioEvent::UpdateAvailable { version } => {
+                write!(f, "UpdateAvailable({version})")
+            }
+            RioEvent::SelfUpdateProgress {
+                percent,
+                message,
+                ready_to_restart,
+                failed,
+            } => write!(
+                f,
+                "SelfUpdateProgress({percent:?}, {message}, ready={ready_to_restart}, failed={failed})"
+            ),
             RioEvent::Noop => write!(f, "Noop"),
             RioEvent::Copy(_) => write!(f, "Copy"),
             RioEvent::Paste => write!(f, "Paste"),

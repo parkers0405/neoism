@@ -254,6 +254,7 @@ pub fn default_config_file_content() -> String {
     //     "vim-mode": true,
     //     "format-on-save": true,    // run the LSP formatter before every save
     //     "minimap": true,
+    //     "markdown": { "spellcheck": true },
     // },
 
     // ── [terminal] — the terminal emulator ────────────────────────

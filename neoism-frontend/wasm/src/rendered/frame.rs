@@ -81,6 +81,38 @@ impl ChromeBridge {
     ) -> Result<(), JsValue> {
         let payload: serde_json::Value = serde_json::from_str(payload_json)
             .map_err(|e| JsValue::from_str(&format!("payload parse: {e}")))?;
+        if self
+            .cd_search_pending
+            .as_ref()
+            .is_some_and(|(pending_id, query)| {
+                *pending_id == request_id
+                    && self.cd_search_key.as_deref() == Some(query.as_str())
+            })
+        {
+            if let Ok(
+                neoism_protocol::search::SearchServerMessage::SearchDirectoriesResult {
+                    hits,
+                    ..
+                },
+            ) = serde_json::from_value(payload.clone())
+            {
+                let rows = hits
+                    .into_iter()
+                    .map(|hit| {
+                        let absolute = self.workspace_root.join(&hit.path);
+                        neoism_ui::panels::command_palette::PaletteDirectoryEntry {
+                            absolute_path: absolute.to_string_lossy().into_owned(),
+                            display: Some(hit.path),
+                            detail: Some(
+                                self.workspace_root.to_string_lossy().into_owned(),
+                            ),
+                        }
+                    })
+                    .collect();
+                self.chrome.command_palette.set_cd_directory_results(rows);
+            }
+            self.cd_search_pending = None;
+        }
         let event = neoism_ui::event::UiEvent::ServiceReply {
             request_id,
             payload,

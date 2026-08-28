@@ -5,9 +5,9 @@
 
 use super::actions::{
     command_visible_for_host, command_visible_for_surface, shaders_modal_spec,
-    theme_picker_modal_spec, HostKind, PaletteAction, PaletteHostCapabilities,
-    PaletteMashupEntry, PaletteServerEntry, PaletteShaderEntry, PaletteSurface,
-    PaletteWorkspaceEntry, PaletteWorkspaceTarget, WorkspaceHostKind,
+    theme_picker_modal_spec, HostKind, PaletteAction, PaletteDirectoryEntry,
+    PaletteHostCapabilities, PaletteMashupEntry, PaletteServerEntry, PaletteShaderEntry,
+    PaletteSurface, PaletteWorkspaceEntry, PaletteWorkspaceTarget, WorkspaceHostKind,
     WorkspaceVisibility,
 };
 use super::commands::COMMANDS;
@@ -152,6 +152,83 @@ fn test_filtered_commands_empty_query() {
         .filter(|cmd| command_visible_for_surface(&cmd.action, PaletteSurface::Terminal))
         .count();
     assert_eq!(filtered.len(), expected);
+}
+
+#[test]
+fn commands_cd_query_uses_host_directory_rows_and_preserves_raw_query() {
+    let mut palette = CommandPalette::new();
+    palette.set_query("cd /home/par".into());
+    assert!(palette.is_cd_query());
+    assert_eq!(palette.cd_query_suffix(), Some("/home/par"));
+    assert_eq!(palette.get_typed_cd_target(), Some("/home/par".into()));
+
+    palette.set_cd_directory_results(vec![
+        PaletteDirectoryEntry {
+            absolute_path: "/home/parkersettle".into(),
+            display: Some("parkersettle".into()),
+            detail: None,
+        },
+        PaletteDirectoryEntry {
+            absolute_path: "/home/parker-work".into(),
+            display: None,
+            detail: Some("work checkout".into()),
+        },
+    ]);
+
+    assert_eq!(palette.query, "cd /home/par");
+    let rows = palette.filtered_rows();
+    assert_eq!(rows.len(), 2);
+    assert!(matches!(rows[0].1, PaletteRow::Directory { .. }));
+    assert_eq!(rows[0].1.title(), "parkersettle");
+    assert_eq!(rows[0].1.shortcut(), "/home/parkersettle");
+    assert_eq!(rows[1].1.title(), "/home/parker-work");
+    assert_eq!(rows[1].1.shortcut(), "work checkout");
+    drop(rows);
+
+    palette.move_selection_down();
+    assert_eq!(
+        palette
+            .get_selected_cd_directory()
+            .map(|entry| entry.absolute_path),
+        Some("/home/parker-work".into())
+    );
+    assert!(palette.get_selected_action().is_none());
+}
+
+#[test]
+fn exact_cd_is_a_cd_query_and_backspacing_restores_commands() {
+    let mut palette = CommandPalette::new();
+    palette.set_query("cd".into());
+    assert_eq!(palette.cd_query_suffix(), Some(""));
+    palette.set_cd_directory_results(vec![PaletteDirectoryEntry::new("/tmp")]);
+    assert_eq!(palette.filtered_rows()[0].1.title(), "/tmp");
+
+    palette.set_query("c".into());
+    assert!(!palette.is_cd_query());
+    assert!(palette.get_selected_cd_directory().is_none());
+    assert!(palette.get_typed_cd_target().is_none());
+    assert!(palette
+        .filtered_rows()
+        .iter()
+        .any(|(_, row)| matches!(row, PaletteRow::Command { .. })));
+}
+
+#[test]
+fn directory_tab_completion_keeps_cd_prefix_and_uses_absolute_path() {
+    let mut palette = CommandPalette::new();
+    palette.set_query("cd ~/pro".into());
+    palette.set_cd_directory_results(vec![PaletteDirectoryEntry {
+        absolute_path: "/home/parkersettle/projects".into(),
+        display: Some("projects".into()),
+        detail: None,
+    }]);
+
+    assert!(palette.tab_complete());
+    assert_eq!(palette.query, "cd /home/parkersettle/projects");
+    assert_eq!(
+        palette.get_typed_cd_target(),
+        Some("/home/parkersettle/projects".into())
+    );
 }
 
 /// Desktop's list must be byte-identical whether or not the (all-true

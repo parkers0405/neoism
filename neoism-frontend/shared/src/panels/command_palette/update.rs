@@ -224,18 +224,19 @@ impl CommandPalette {
     /// Note: `set_query` resets selection / scroll, so the user lands
     /// on the (still-matching) first row of the now-narrowed list.
     pub fn tab_complete(&mut self) -> bool {
-        let title = match self
-            .filtered_rows()
-            .get(self.selected_index)
-            .map(|(_, row)| row.title().to_owned())
-        {
+        let completion = match self.filtered_rows().get(self.selected_index).map(
+            |(_, row)| match row {
+                PaletteRow::Directory { entry } => format!("cd {}", entry.absolute_path),
+                _ => row.title().to_owned(),
+            },
+        ) {
             Some(t) => t,
             None => return false,
         };
-        if title == self.query {
+        if completion == self.query {
             return false;
         }
-        self.set_query(title);
+        self.set_query(completion);
         true
     }
 
@@ -243,6 +244,28 @@ impl CommandPalette {
         self.filtered_rows()
             .get(self.selected_index)
             .and_then(|(_, row)| row.action())
+    }
+
+    /// Highlighted host-supplied directory, owned so the caller can mutate
+    /// the palette immediately after retrieving it.
+    pub fn get_selected_cd_directory(
+        &self,
+    ) -> Option<super::actions::PaletteDirectoryEntry> {
+        if !self.is_cd_query() {
+            return None;
+        }
+        self.filtered_rows()
+            .get(self.selected_index)
+            .and_then(|(_, row)| match row {
+                PaletteRow::Directory { entry } => Some((*entry).clone()),
+                _ => None,
+            })
+    }
+
+    /// Raw freeform target typed after `cd `. Available even when the host has
+    /// supplied no matching row, so direct paths can still be committed.
+    pub fn get_typed_cd_target(&self) -> Option<String> {
+        self.cd_query_suffix().map(str::to_owned)
     }
 
     pub fn selected_server_id(&self) -> Option<String> {
@@ -309,6 +332,7 @@ impl CommandPalette {
                 | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
+                | PaletteRow::Directory { .. }
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
@@ -335,6 +359,7 @@ impl CommandPalette {
                 | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
+                | PaletteRow::Directory { .. }
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
@@ -356,6 +381,7 @@ impl CommandPalette {
                 | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
+                | PaletteRow::Directory { .. }
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
@@ -378,6 +404,7 @@ impl CommandPalette {
                 | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
+                | PaletteRow::Directory { .. }
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
@@ -400,6 +427,7 @@ impl CommandPalette {
                 | PaletteRow::Theme { .. }
                 | PaletteRow::Mashup { .. }
                 | PaletteRow::Buffer { .. }
+                | PaletteRow::Directory { .. }
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
@@ -442,6 +470,7 @@ impl CommandPalette {
                 | PaletteRow::Theme { .. }
                 | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
+                | PaletteRow::Directory { .. }
                 | PaletteRow::Ex { .. }
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
@@ -472,6 +501,7 @@ impl CommandPalette {
                 | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
+                | PaletteRow::Directory { .. }
                 | PaletteRow::Ex { .. }
                 | PaletteRow::Search { .. } => None,
             })
@@ -488,6 +518,13 @@ impl CommandPalette {
     pub(super) fn filtered_rows(&self) -> Vec<(i32, PaletteRow<'_>)> {
         if let PaletteMode::Workspaces(workspaces) = &self.mode {
             return self.grouped_workspace_rows(workspaces);
+        }
+        if self.is_cd_query() {
+            return self
+                .cd_directory_results
+                .iter()
+                .map(|entry| (0, PaletteRow::Directory { entry }))
+                .collect();
         }
 
         let mut results: Vec<(i32, PaletteRow<'_>)> = match &self.mode {

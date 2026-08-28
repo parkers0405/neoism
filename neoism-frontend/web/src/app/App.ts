@@ -591,6 +591,11 @@ export class App {
       getWorkspacesModalPayload: () => this.buildWorkspacesModalPayload(),
       onWorkspaceSelected: (workspaceId) =>
         this.switchToWorkspaceById(workspaceId),
+      onWorkspaceRootRequested: (path) => {
+        if (this.activeWorkspaceId) {
+          this.workspaceService?.setWorkspaceRoot(this.activeWorkspaceId, path);
+        }
+      },
       onWorkspaceIslandIntent: (intent) => this.handleWorkspaceIslandIntent(intent),
       onCreateWorkspace: () => this.createWorkspaceOnConnectedHost(),
       onBufferTabsChanged: (tabs) => {

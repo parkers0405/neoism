@@ -1256,7 +1256,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         tree.set_focused(false);
                     }
                     self.blur(PanelKey::FileTree);
-                    self.git_diff_panel.stage_all();
+                    self.git_diff_panel.stage_all_toggle();
                     return true;
                 }
                 GitPanelHit::FolderToggle(visual_ix) => {

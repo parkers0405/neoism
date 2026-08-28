@@ -6,8 +6,8 @@ use neoism_protocol::search::{
 use neoism_ui::services::{
     ClipboardService, ClockService, CommandError, CommandService, DirEntry, FilesService,
     GitService, GitStatus, IoError, NotificationLevel, NotificationService, RequestId,
-    SearchFileHit, SearchFileMode, SearchGitHit, SearchGrepHit, SearchGrepMode,
-    SearchService,
+    SearchDirectoryHit, SearchFileHit, SearchFileMode, SearchGitHit, SearchGrepHit,
+    SearchGrepMode, SearchService,
 };
 use std::path::Path;
 use web_time::Duration;
@@ -232,6 +232,24 @@ impl SearchService for JsSearchService {
             query: query.to_string(),
             cwd: cwd.to_string_lossy().into_owned(),
             mode: map_file_mode(mode),
+        };
+        call_with_id_and_envelope(cb.as_ref(), id, &envelope);
+        Err(IoError::Pending(id))
+    }
+
+    fn search_directories(
+        &self,
+        cwd: &Path,
+        query: &str,
+    ) -> Result<Vec<SearchDirectoryHit>, IoError> {
+        let mut s = self.0 .0.borrow_mut();
+        let id = s.alloc_request_id();
+        let cb = s.search_directories.clone();
+        drop(s);
+        let envelope = SearchClientMessage::SearchDirectories {
+            req_id: id,
+            query: query.to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
         };
         call_with_id_and_envelope(cb.as_ref(), id, &envelope);
         Err(IoError::Pending(id))

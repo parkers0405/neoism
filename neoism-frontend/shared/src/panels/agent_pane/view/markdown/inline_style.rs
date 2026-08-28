@@ -22,10 +22,41 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
             rest = &rest[consumed..];
             continue;
         }
+        if let Some(after) = rest.strip_prefix("***") {
+            if let Some(end) = after.find("***") {
+                out.push(MarkdownInlineSegment::BoldItalic(after[..end].to_string()));
+                rest = &after[end + 3..];
+                continue;
+            }
+        }
+        if let Some(after) = rest.strip_prefix("___") {
+            if let Some(end) = after.find("___") {
+                out.push(MarkdownInlineSegment::BoldItalic(after[..end].to_string()));
+                rest = &after[end + 3..];
+                continue;
+            }
+        }
         if let Some(after) = rest.strip_prefix("**") {
             if let Some(end) = after.find("**") {
                 out.push(MarkdownInlineSegment::Bold(after[..end].to_string()));
                 rest = &after[end + 2..];
+                continue;
+            }
+        }
+        if let Some(after) = rest.strip_prefix("__") {
+            if let Some(end) = after.find("__") {
+                out.push(MarkdownInlineSegment::Bold(after[..end].to_string()));
+                rest = &after[end + 2..];
+                continue;
+            }
+        }
+        if let Some((marker, after)) = ['*', '_']
+            .into_iter()
+            .find_map(|marker| rest.strip_prefix(marker).map(|after| (marker, after)))
+        {
+            if let Some(end) = after.find(marker) {
+                out.push(MarkdownInlineSegment::Italic(after[..end].to_string()));
+                rest = &after[end + marker.len_utf8()..];
                 continue;
             }
         }
@@ -56,11 +87,13 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
                 label: markdown_link_visible_label(link.label).to_string(),
                 source_target: source_target.to_string(),
                 target,
+                bold: markdown_link_label_style(link.label).0,
+                italic: markdown_link_label_style(link.label).1,
             });
             rest = &rest[link.consumed..];
             continue;
         }
-        let next = md::next_inline_marker(rest).unwrap_or(rest.len());
+        let next = next_agent_inline_marker(rest).unwrap_or(rest.len());
         let text = &rest[..next.max(1).min(rest.len())];
         parse_plain_markdown_segment(text, &mut out);
         rest = &rest[text.len()..];
@@ -68,8 +101,35 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
     out
 }
 
+fn next_agent_inline_marker(value: &str) -> Option<usize> {
+    ["***", "___", "**", "__", "~~", "`", "[", "\\", "*", "_"]
+        .into_iter()
+        .filter_map(|needle| value.find(needle))
+        .min()
+}
+
+fn markdown_link_label_style(label: &str) -> (bool, bool) {
+    if (label.starts_with("***") && label.ends_with("***"))
+        || (label.starts_with("___") && label.ends_with("___"))
+    {
+        (true, true)
+    } else if (label.starts_with("**") && label.ends_with("**"))
+        || (label.starts_with("__") && label.ends_with("__"))
+    {
+        (true, false)
+    } else if (label.starts_with('*') && label.ends_with('*'))
+        || (label.starts_with('_') && label.ends_with('_'))
+    {
+        (false, true)
+    } else {
+        (false, false)
+    }
+}
+
 fn markdown_link_visible_label(label: &str) -> &str {
     [
+        ("***", "***"),
+        ("___", "___"),
         ("**", "**"),
         ("__", "__"),
         ("~~", "~~"),

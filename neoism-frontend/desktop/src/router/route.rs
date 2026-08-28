@@ -1067,6 +1067,9 @@ impl Route<'_> {
                             self.window.screen.renderer.command_palette.is_search_mode();
                         let completed =
                             self.window.screen.renderer.command_palette.tab_complete();
+                        if completed {
+                            self.window.screen.refresh_cd_palette_results();
+                        }
                         if completed && was_search {
                             let query =
                                 self.window.screen.renderer.command_palette.query.clone();
@@ -1083,6 +1086,33 @@ impl Route<'_> {
                     }
                     key if is_enter_key(key) => {
                         tracing::trace!(target: "neoism::input", "command palette activating selection");
+                        if self.window.screen.renderer.command_palette.is_cd_query() {
+                            let target = self
+                                .window
+                                .screen
+                                .renderer
+                                .command_palette
+                                .get_selected_cd_directory()
+                                .map(|entry| entry.absolute_path)
+                                .or_else(|| {
+                                    self.window
+                                        .screen
+                                        .renderer
+                                        .command_palette
+                                        .get_typed_cd_target()
+                                });
+                            if let Some(target) = target {
+                                if self.window.screen.commit_palette_cd(&target) {
+                                    self.window
+                                        .screen
+                                        .renderer
+                                        .command_palette
+                                        .set_enabled(false);
+                                }
+                                self.request_overlay_redraw();
+                            }
+                            return true;
+                        }
                         // Ex / Search modes short-circuit the rest of
                         // Enter handling: snapshot the typed query,
                         // close the palette, then forward to nvim as
@@ -1545,6 +1575,7 @@ impl Route<'_> {
                                 .renderer
                                 .command_palette
                                 .set_query(new_query.clone());
+                            self.window.screen.refresh_cd_palette_results();
                             if was_search {
                                 self.dispatch_palette_search_query(&new_query);
                             }
@@ -1585,6 +1616,7 @@ impl Route<'_> {
                                     .renderer
                                     .command_palette
                                     .set_query(new_query.clone());
+                                self.window.screen.refresh_cd_palette_results();
                                 if was_search {
                                     self.dispatch_palette_search_query(&new_query);
                                 }

@@ -9,6 +9,7 @@ use std::rc::Rc;
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
+use crate::panels::agent_pane::selection_model::SelectableCaretStop;
 use crate::panels::agent_pane::state::{
     NeoismAgentMessage, NeoismAgentPane, NeoismAgentTodo,
 };
@@ -19,7 +20,7 @@ use crate::widgets::scrollbar;
 use super::code_block::truncate_chars;
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_status_dot_text,
-    draw_text_clipped, intersect_rect, opts_with_clip, wrap_text,
+    draw_text_clipped, intersect_rect, measured_caret_stops, opts_with_clip, wrap_text,
 };
 use super::{ORDER_PANEL, ORDER_TEXT};
 use crate::primitives::ide_theme::IdeTheme;
@@ -364,6 +365,14 @@ pub trait AgentToolPane {
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]);
     fn link_hovered(&self, target: &str) -> bool;
     fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize;
+    fn register_selectable_line_with_caret_stops(
+        &mut self,
+        text: &str,
+        rect: [f32; 4],
+        _caret_stops: &[SelectableCaretStop],
+    ) -> usize {
+        self.register_selectable_line(text, rect)
+    }
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)>;
     fn suppress_tool_interactions(&self) -> bool {
         false
@@ -467,6 +476,20 @@ macro_rules! neoism_ui_impl_agent_tool_message {
                 <$pane>::register_selectable_line(self, text, rect)
             }
 
+            fn register_selectable_line_with_caret_stops(
+                &mut self,
+                text: &str,
+                rect: [f32; 4],
+                caret_stops: &[$crate::panels::agent_pane::selection_model::SelectableCaretStop],
+            ) -> usize {
+                <$pane>::register_selectable_line_with_caret_stops(
+                    self,
+                    text,
+                    rect,
+                    caret_stops,
+                )
+            }
+
             fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)> {
                 <$pane>::selectable_line_highlight(self, index)
             }
@@ -522,6 +545,20 @@ impl AgentToolPane for NeoismAgentPane {
 
     fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize {
         NeoismAgentPane::register_selectable_line(self, text, rect)
+    }
+
+    fn register_selectable_line_with_caret_stops(
+        &mut self,
+        text: &str,
+        rect: [f32; 4],
+        caret_stops: &[SelectableCaretStop],
+    ) -> usize {
+        NeoismAgentPane::register_selectable_line_with_caret_stops(
+            self,
+            text,
+            rect,
+            caret_stops,
+        )
     }
 
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)> {

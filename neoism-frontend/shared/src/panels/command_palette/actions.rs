@@ -177,6 +177,29 @@ pub struct PaletteBufferEntry {
     pub target: PaletteBufferTarget,
 }
 
+/// One host-supplied directory suggestion for an Alt+P `cd` query.
+///
+/// `absolute_path` is used for completion and dispatch. Hosts may provide a
+/// shorter `display` label and an additional `detail`; when only a display
+/// label is supplied, the generic row pipeline shows the absolute path in the
+/// detail column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteDirectoryEntry {
+    pub absolute_path: String,
+    pub display: Option<String>,
+    pub detail: Option<String>,
+}
+
+impl PaletteDirectoryEntry {
+    pub fn new(absolute_path: impl Into<String>) -> Self {
+        Self {
+            absolute_path: absolute_path.into(),
+            display: None,
+            detail: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteWorkspaceTarget {
     pub workspace_id: String,

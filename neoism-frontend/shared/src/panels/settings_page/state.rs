@@ -742,6 +742,10 @@ impl NeoismSettingsPane {
     pub fn set_descriptors(&mut self, descriptors: Vec<ConfigDescriptor>) {
         self.rows = descriptors
             .into_iter()
+            .filter(|descriptor| {
+                descriptor.settings_visible
+                    && !descriptor.path.split('.').any(|segment| segment == "*")
+            })
             .map(SettingRow::from_descriptor)
             .collect();
         self.rows.sort_by(|left, right| {
@@ -1338,6 +1342,7 @@ mod descriptor_tests {
             extensible: true,
             category,
             control,
+            settings_visible: true,
         }
     }
 
@@ -1376,6 +1381,39 @@ mod descriptor_tests {
             pane.category = category;
             assert_eq!(pane.visible_settings().len(), 1, "missing {category:?}");
         }
+    }
+
+    #[test]
+    fn completion_only_and_wildcard_descriptors_never_become_settings_rows() {
+        let mut pane = NeoismSettingsPane::new();
+        let visible = descriptor(
+            "appearance.theme",
+            ConfigCategory::Appearance,
+            ConfigControl::Text,
+            ConfigValueKind::String,
+            json!("default"),
+        );
+        let mut generated = descriptor(
+            "platform.windows.window.mode",
+            ConfigCategory::Platform,
+            ConfigControl::Text,
+            ConfigValueKind::String,
+            json!("Windowed"),
+        );
+        generated.settings_visible = false;
+        let wildcard = descriptor(
+            "agent.agent.*.model",
+            ConfigCategory::Agent,
+            ConfigControl::Text,
+            ConfigValueKind::String,
+            Value::Null,
+        );
+
+        pane.set_descriptors(vec![visible, generated, wildcard]);
+        assert_eq!(pane.descriptor_count(), 1);
+        assert_eq!(pane.rows[0].path, "appearance.theme");
+        pane.search = "mode".into();
+        assert!(pane.visible_settings().is_empty());
     }
 
     #[test]

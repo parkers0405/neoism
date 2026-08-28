@@ -46,6 +46,7 @@ fn d(
         extensible,
         category,
         control,
+        settings_visible: true,
     }
 }
 
@@ -379,6 +380,17 @@ pub fn config_descriptors() -> Vec<D> {
             "Show the code editor minimap.",
             Kind::Boolean,
             json!(false),
+            &[],
+            false,
+            C::Editor,
+            Control::Toggle,
+        ),
+        d(
+            "editor.markdown.spellcheck",
+            "Markdown spell check",
+            "Underline misspelled words in Markdown editors.",
+            Kind::Boolean,
+            json!(true),
             &[],
             false,
             C::Editor,
@@ -1012,6 +1024,7 @@ fn generated_descriptor(path: &str, default: Value) -> D {
         "ui" => C::Ui,
         "presence" => C::Presence,
         "keybinds" => C::Keybinds,
+        "agent" => C::Agent,
         "platform" => C::Platform,
         "renderer" => C::Renderer,
         "developer" => C::Developer,
@@ -1038,7 +1051,7 @@ fn generated_descriptor(path: &str, default: Value) -> D {
         Kind::Object => "JSON object",
     };
     let group = path.split('.').next().unwrap_or("Neoism");
-    d(
+    let mut descriptor = d(
         path,
         &label,
         &format!("Set {label} in the {group} configuration. Accepts a {kind_name}."),
@@ -1048,7 +1061,9 @@ fn generated_descriptor(path: &str, default: Value) -> D {
         !matches!(kind, Kind::Boolean),
         category,
         control,
-    )
+    );
+    descriptor.settings_visible = false;
+    descriptor
 }
 
 fn enrich_runtime_suggestions(rows: &mut [D]) {
@@ -1228,5 +1243,26 @@ mod tests {
             .iter()
             .all(|option| option.value.is_number()));
         assert_eq!(font_size.constraints.unit.as_deref(), Some("pt"));
+    }
+
+    #[test]
+    fn generated_completion_templates_are_not_graphical_settings() {
+        let descriptors = config_descriptors();
+        let visible = descriptors
+            .iter()
+            .filter(|row| row.settings_visible)
+            .collect::<Vec<_>>();
+
+        assert!(visible.iter().any(|row| row.path == "appearance.theme"));
+        assert!(visible.iter().any(|row| row.path == "editor.vim-mode"));
+        assert!(visible.iter().all(|row| !row.path.contains('*')));
+        assert!(descriptors
+            .iter()
+            .find(|row| row.path == "platform.windows.window.mode")
+            .is_some_and(|row| !row.settings_visible));
+        assert!(descriptors
+            .iter()
+            .find(|row| row.path == "agent.agent.*.model")
+            .is_some_and(|row| !row.settings_visible && row.category == C::Agent));
     }
 }

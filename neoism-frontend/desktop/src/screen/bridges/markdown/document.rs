@@ -36,8 +36,10 @@ impl Screen<'_> {
         // list directories.
         let covers = Self::list_available_covers();
         let vim = self.renderer.vim_mode;
+        let spellcheck = self.renderer.markdown_spellcheck;
         if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(&path) {
             pane.available_covers = covers;
+            pane.spellcheck_enabled = spellcheck;
             // Honor `[neoism] vim-mode` (default on): opt OUT to plain
             // always-insert editing when the setting is off.
             pane.vim_enabled = vim;

@@ -427,9 +427,10 @@ impl NeoismAgentPane {
                 // parent's "Sub-agents working" status row stuck on
                 // after the subagent had already completed.
                 let branch_status = branch_status_from_runtime(&status.kind);
-                self.note_subagent_runtime(
+                self.note_subagent_observed_runtime(
                     entry.id.clone(),
                     branch_status,
+                    None,
                     status.started_at,
                 );
             }
@@ -443,12 +444,15 @@ impl NeoismAgentPane {
             } else {
                 BranchStatus::Active
             };
-            self.note_subagent_runtime(
+            let applied = self.note_subagent_observed_runtime(
                 child_id.clone(),
                 branch_status,
+                None,
                 status.started_at,
             );
-            self.set_task_message_status(child_id, "running");
+            if applied {
+                self.set_task_message_status(child_id, "running");
+            }
         }
         self.reconcile_task_message_statuses();
         self.sync_subagent_waiting_clock();
@@ -546,10 +550,7 @@ impl NeoismAgentPane {
 
     pub fn has_status_activity(&self) -> bool {
         self.is_streaming()
-            || self
-                .execution_activity
-                .as_ref()
-                .is_some_and(|activity| self.execution_status_live(activity))
+            || self.viewed_subagent_outstanding()
             || self.active_subagent_count() > 0
             || self.running_background_task_count() > 0
             // The grace hold counts as activity so the status row's
@@ -774,9 +775,10 @@ impl NeoismAgentPane {
                 _ => BranchStatus::Stopped,
             };
             self.upsert_live_subagent_entry(&session_id, None, None);
-            let status = self
-                .side_panel
-                .reconcile_branch_lifecycle_snapshot(session_id.clone(), status);
+            // A newer family revision is authoritative proof of a genuine
+            // continuation and may reopen the same child session ID.
+            self.side_panel
+                .set_branch_activity_status(session_id.clone(), status);
             self.side_panel
                 .set_branch_activity_started_at(session_id.clone(), started_at);
             if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
@@ -884,6 +886,26 @@ impl NeoismAgentPane {
             self.active_subagent_ids.remove(&session_id);
             self.active_subagent_started_at.remove(&session_id);
         }
+    }
+
+    pub(crate) fn note_subagent_observed_runtime(
+        &mut self,
+        session_id: String,
+        status: BranchStatus,
+        current_tool: Option<String>,
+        started_at: Option<u64>,
+    ) -> bool {
+        if matches!(status, BranchStatus::Completed | BranchStatus::Stopped) {
+            self.side_panel.set_branch_activity_tool(
+                session_id.clone(),
+                status,
+                current_tool,
+                started_at,
+            );
+            self.note_subagent_runtime(session_id, status, started_at);
+            return true;
+        }
+        self.note_subagent_part_activity(session_id, status, current_tool, started_at)
     }
 
     pub(crate) fn settle_tracked_subagents(&mut self, status: BranchStatus) {

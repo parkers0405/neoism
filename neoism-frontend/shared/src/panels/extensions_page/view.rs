@@ -1396,10 +1396,13 @@ fn paint_install_button(
                 // moving segment communicates liveness without fabricating a
                 // percentage. The host already repaints continuously while an
                 // install is in flight.
-                let elapsed = std::time::SystemTime::now()
+                let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs_f32();
+                    .unwrap_or_default();
+                let elapsed = crate::render_policy::animation_phase_from_unix_secs(
+                    now.as_secs(),
+                    now.subsec_nanos(),
+                );
                 let segment_w = bw * 0.32;
                 let travel = bw + segment_w;
                 let segment_x = bx - segment_w + travel * ((elapsed * 0.8) % 1.0);
@@ -1418,7 +1421,7 @@ fn paint_install_button(
                     seg_clip,
                 );
             }
-            let label = installing_label(*percent, status_text, hovered);
+            let label = installing_label(*percent, status_text);
             let opts = DrawOpts {
                 font_size: 11.0 * s,
                 color: theme.u8(theme.fg),
@@ -1435,6 +1438,29 @@ fn paint_install_button(
                 &opts,
                 occlusion_rects,
             );
+        }
+        ExtensionStatus::Failed { message } => {
+            let btn_clip = clip.unwrap_or(rect);
+            draw_rounded_rect_clipped(
+                sugarloaf,
+                rect,
+                theme.f32_alpha(theme.red, 0.16),
+                BUTTON_RADIUS * s,
+                ORDER_BUTTON,
+                btn_clip,
+            );
+            paint_outline_clipped(sugarloaf, rect, theme.f32(theme.red), s, btn_clip);
+            let label = if hovered { "Retry" } else { "Failed" };
+            let opts = DrawOpts {
+                font_size: 11.0 * s,
+                color: theme.u8(theme.red),
+                bold: true,
+                clip_rect: clip,
+                ..DrawOpts::default()
+            };
+            let lw = sugarloaf.text_mut().measure(label, &opts);
+            draw_text_with_occlusion(sugarloaf, bx + (bw - lw) * 0.5, by + 5.0 * s, label, &opts, occlusion_rects);
+            let _ = message;
         }
         ExtensionStatus::Uninstalling => {
             let btn_clip = clip.unwrap_or(rect);
@@ -1474,15 +1500,13 @@ fn install_button_label(status: &ExtensionStatus) -> &'static str {
         ExtensionStatus::Unavailable => "No installer",
         ExtensionStatus::NotInstalled => "+ Install",
         ExtensionStatus::Installed { .. } => "Uninstall",
+        ExtensionStatus::Failed { .. } => "Retry",
         ExtensionStatus::Installing { .. } => "Installing...",
         ExtensionStatus::Uninstalling => "Uninstalling...",
     }
 }
 
-fn installing_label(percent: Option<u8>, status: &str, hovered: bool) -> String {
-    if hovered {
-        return "Cancel".to_string();
-    }
+fn installing_label(percent: Option<u8>, status: &str) -> String {
     let lower = status.to_ascii_lowercase();
     let phase = if lower.contains("connect") || lower.contains("resolv") {
         "Connecting"
@@ -1728,16 +1752,16 @@ mod tests {
     #[test]
     fn install_progress_label_distinguishes_known_and_unknown_progress() {
         assert_eq!(
-            super::installing_label(None, "connecting to GitHub", false),
+            super::installing_label(None, "connecting to GitHub"),
             "Connecting…"
         );
         assert_eq!(
-            super::installing_label(Some(42), "downloading 12 MiB", false),
+            super::installing_label(Some(42), "downloading 12 MiB"),
             "Downloading 42%"
         );
         assert_eq!(
-            super::installing_label(Some(42), "downloading 12 MiB", true),
-            "Cancel"
+            super::installing_label(Some(42), "downloading 12 MiB"),
+            "Downloading 42%"
         );
     }
 }

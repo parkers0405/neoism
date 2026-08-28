@@ -420,7 +420,7 @@ pub(crate) fn render(
             clip_rect: Some(content_clip),
             ..base
         };
-        let mut detail = format!("{}  ·  {}", def.path, def.description);
+        let mut detail = def.description.clone();
         if def.constraints.min.is_some() || def.constraints.max.is_some() {
             let range = match (def.constraints.min, def.constraints.max) {
                 (Some(min), Some(max)) => format!("{min}-{max}"),

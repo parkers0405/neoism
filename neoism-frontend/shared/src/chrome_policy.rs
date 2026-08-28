@@ -501,6 +501,7 @@ pub enum ModalActionDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalActionTag {
     Close,
+    UpdateNeoism,
     InstallLsp,
     InstallPythonKernel,
     ApplyTheme,
@@ -558,6 +559,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
     use ModalActionTag as T;
     match tag {
         T::Close => D::Close,
+        T::UpdateNeoism => D::KeepOpenForBusyAction,
         T::InstallLsp
         | T::InstallPythonKernel
         | T::ApplyTheme

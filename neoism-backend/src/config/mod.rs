@@ -163,6 +163,8 @@ pub struct EditorConfig {
     pub format_on_save: bool,
     #[serde(default)]
     pub minimap: bool,
+    #[serde(default)]
+    pub markdown: MarkdownEditorConfig,
     /// External editor command shelled out to for "open in editor" (Rio
     /// heritage). Nested here as `[editor] external` so the `editor`
     /// group name stays free.
@@ -176,8 +178,22 @@ impl Default for EditorConfig {
             vim_mode: true,
             format_on_save: true,
             minimap: false,
+            markdown: MarkdownEditorConfig::default(),
             external: default_editor(),
         }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct MarkdownEditorConfig {
+    /// Show spelling underlines and spelling actions in Markdown surfaces.
+    #[serde(default = "default_bool_true")]
+    pub spellcheck: bool,
+}
+
+impl Default for MarkdownEditorConfig {
+    fn default() -> Self {
+        Self { spellcheck: true }
     }
 }
 
@@ -1108,6 +1124,7 @@ mod tests {
         assert!(config.ui.status_fps);
         assert!(config.editor.format_on_save);
         assert!(!config.editor.minimap);
+        assert!(config.editor.markdown.spellcheck);
     }
 
     #[test]
@@ -1123,7 +1140,7 @@ mod tests {
         "theme": "tokyo_night",   // IDE theme
         "fonts": { "size": 16.0 },
     },
-    "editor": { "minimap": true },
+    "editor": { "minimap": true, "markdown": { "spellcheck": false } },
     "ui": { "status-fps": false },
     // agent-server keys co-live in the same file; the app ignores them
     "agent": { "model": "anthropic/claude-opus-5" },
@@ -1134,6 +1151,7 @@ mod tests {
         assert_eq!(config.appearance.palette, "lucario");
         assert_eq!(config.appearance.theme, "tokyo_night");
         assert!(config.editor.minimap);
+        assert!(!config.editor.markdown.spellcheck);
         assert!(!config.ui.status_fps);
         assert_eq!(config.appearance.fonts.size, 16.0);
     }

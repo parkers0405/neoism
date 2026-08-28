@@ -14,6 +14,7 @@ impl Screen<'_> {
         let scale = self.sugarloaf.scale_factor();
         let theme = self.renderer.theme;
         let markdown_font_scale = self.renderer.chrome_scale();
+        let spellcheck_enabled = self.renderer.markdown_spellcheck;
         let window_size = self.sugarloaf.window_size();
         let text_occlusions = self.renderer.active_text_occlusion_rects(
             window_size.width,
@@ -145,6 +146,7 @@ impl Screen<'_> {
                     ];
                     {
                         let markdown = &mut notebook.markdown;
+                        markdown.spellcheck_enabled = spellcheck_enabled;
                         markdown.remote_cursors =
                             remote_by_path.remove(&markdown.path).unwrap_or_default();
                         crate::editor::markdown::render::render(
@@ -176,6 +178,7 @@ impl Screen<'_> {
                         item.layout_rect[2] / scale,
                         item.layout_rect[3] / scale,
                     ];
+                    epub.markdown.spellcheck_enabled = spellcheck_enabled;
                     crate::editor::markdown::render::render(
                         &mut self.sugarloaf,
                         &mut epub.markdown,
@@ -204,6 +207,7 @@ impl Screen<'_> {
             };
             self.sugarloaf
                 .clear_image_overlays_for(item.val.rich_text_id);
+            markdown.spellcheck_enabled = spellcheck_enabled;
             markdown.remote_cursors =
                 remote_by_path.remove(&markdown.path).unwrap_or_default();
             let rect = [

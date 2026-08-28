@@ -308,23 +308,31 @@ impl NeoismAgentPane {
                     self.ensure_session_preloaded(session_id.clone(), refresh_completed);
                     self.upsert_live_subagent_entry(&session_id, title, agent);
                     let branch_status = branch_status_from_runtime(&status);
-                    self.note_session_branch_runtime(
-                        &session_id,
-                        branch_status,
-                        started_at,
-                    );
-                    self.note_subagent_runtime(
+                    let applied = self.note_subagent_observed_runtime(
                         session_id.clone(),
                         branch_status,
+                        None,
                         started_at,
                     );
-                    self.reconcile_viewed_subagent_runtime(&session_id, branch_status);
-                    if matches!(
-                        branch_status,
-                        BranchStatus::Active | BranchStatus::WaitingPermission
-                    ) {
+                    if applied {
+                        self.note_session_branch_runtime(
+                            &session_id,
+                            branch_status,
+                            started_at,
+                        );
+                        self.reconcile_viewed_subagent_runtime(
+                            &session_id,
+                            branch_status,
+                        );
+                    }
+                    if applied
+                        && matches!(
+                            branch_status,
+                            BranchStatus::Active | BranchStatus::WaitingPermission
+                        )
+                    {
                         self.set_task_message_status(&session_id, "running");
-                    } else {
+                    } else if applied {
                         self.set_task_message_status(&session_id, status.as_str());
                         self.reconcile_parent_after_subagent_terminal(&session_id);
                     }

@@ -40,6 +40,7 @@ const ORDER: u8 = 24;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
     Close,
+    UpdateNeoism,
     InstallLsp {
         server: String,
     },
@@ -438,6 +439,7 @@ pub struct UniversalModal {
     body_wheel_accumulator: f32,
     scale: f32,
     busy: bool,
+    progress: Option<u8>,
     blocking: bool,
     opened_at: Instant,
     top_anchor: f32,
@@ -507,6 +509,7 @@ impl Default for UniversalModal {
             body_wheel_accumulator: 0.0,
             scale: 1.0,
             busy: false,
+            progress: None,
             blocking: true,
             opened_at: Instant::now(),
             top_anchor: MODAL_MARGIN_TOP,
@@ -549,6 +552,7 @@ impl UniversalModal {
         self.body_scroll_offset = 0;
         self.body_wheel_accumulator = 0.0;
         self.busy = false;
+        self.progress = None;
         self.blocking = true;
     }
 
@@ -588,6 +592,7 @@ impl UniversalModal {
         };
         self.markdown_input_rect = None;
         self.busy = spec.busy;
+        self.progress = None;
         self.blocking = spec.blocking;
         self.opened_at = Instant::now();
         self.selected_index = 0;
@@ -934,7 +939,24 @@ impl UniversalModal {
     }
 
     pub fn needs_redraw(&self) -> bool {
-        self.active && self.busy
+        self.active && self.busy && self.progress.is_none()
+    }
+
+    pub fn update_progress(
+        &mut self,
+        body: impl Into<String>,
+        meta: impl Into<String>,
+        progress: Option<u8>,
+        busy: bool,
+    ) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.body = body.into();
+        self.meta = meta.into();
+        self.progress = progress.map(|value| value.min(100));
+        self.busy = busy;
+        true
     }
 
     /// Attach a segmented mode slider to the OPEN form (call right
@@ -1081,6 +1103,10 @@ impl UniversalModal {
             .get(self.selected_index)
             .map(|button| button.action.clone())?;
         Some(self.apply_input(action))
+    }
+
+    pub fn has_action(&self, action: &ModalAction) -> bool {
+        self.buttons.iter().any(|button| &button.action == action)
     }
 
     pub fn submit_form(&mut self) -> Option<ModalAction> {
@@ -1718,7 +1744,7 @@ impl UniversalModal {
             text_y += 20.0 * s;
         }
 
-        if self.busy {
+        if self.busy || self.progress.is_some() {
             let track_y = text_y + 4.0 * s;
             let track_w = w - pad * 2.0;
             sugarloaf.rounded_rect(
@@ -1733,17 +1759,22 @@ impl UniversalModal {
                 ORDER,
             );
 
-            let elapsed = Instant::now()
-                .saturating_duration_since(self.opened_at)
-                .as_millis() as f32;
-            let segment_w = (BUSY_BAR_WIDTH * s).min(track_w * 0.6);
-            let travel = (track_w - segment_w).max(1.0);
-            let phase = ((elapsed / 1100.0) % 1.0) * travel;
+            let (fill_x, fill_w) = if let Some(progress) = self.progress {
+                (text_x, track_w * progress as f32 / 100.0)
+            } else {
+                let elapsed = Instant::now()
+                    .saturating_duration_since(self.opened_at)
+                    .as_millis() as f32;
+                let segment_w = (BUSY_BAR_WIDTH * s).min(track_w * 0.6);
+                let travel = (track_w - segment_w).max(1.0);
+                let phase = ((elapsed / 1100.0) % 1.0) * travel;
+                (text_x + phase, segment_w)
+            };
             sugarloaf.rounded_rect(
                 None,
-                text_x + phase,
+                fill_x,
                 track_y,
-                segment_w,
+                fill_w,
                 BUSY_BAR_HEIGHT * s,
                 theme.f32(theme.accent),
                 DEPTH_ELEMENT + 0.01,
@@ -2531,5 +2562,23 @@ mod tests {
         assert_eq!(lines[0].kind, BodyLineKind::Mermaid);
         assert!(lines[0].mermaid.is_some());
         assert!(lines[0].row_span > 1);
+    }
+
+    #[test]
+    fn determinate_progress_does_not_request_animation_frames() {
+        let mut modal = UniversalModal::new();
+        modal.open(ModalSpec {
+            title: "Updating".into(),
+            body: "Starting".into(),
+            meta: String::new(),
+            input: None,
+            buttons: Vec::new(),
+            busy: true,
+            blocking: false,
+        });
+        assert!(modal.needs_redraw());
+        assert!(modal.update_progress("Downloading", "42% complete", Some(42), true));
+        assert_eq!(modal.progress, Some(42));
+        assert!(!modal.needs_redraw());
     }
 }

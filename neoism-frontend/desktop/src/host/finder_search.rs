@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
-use neoism_ui::services::{
-    IoError, SearchFileHit, SearchFileMode, SearchGitHit, SearchGrepHit, SearchGrepMode,
-    SearchService,
-};
 use neoism_agent_service_api::WorkspaceSearchService as _;
+use neoism_ui::services::{
+    IoError, SearchDirectoryHit, SearchFileHit, SearchFileMode, SearchGitHit,
+    SearchGrepHit, SearchGrepMode, SearchService,
+};
 
 use crate::screen::panes::is_project_workspace;
 
@@ -143,7 +143,8 @@ impl NativeSearchService {
                 *pin = self.local_search.pin_root(cwd).ok();
             }
         }
-        self.local_search.with_picker(cwd, op)
+        self.local_search
+            .with_picker(cwd, op)
             .inspect_err(|error| {
                 tracing::warn!(
                     target: "neoism::finder",
@@ -241,6 +242,41 @@ impl SearchService for NativeSearchService {
                 Ok(exact_file_hits(query, paths.iter().map(String::as_str)))
             }
         }
+    }
+
+    fn search_directories(
+        &self,
+        cwd: &Path,
+        query: &str,
+    ) -> Result<Vec<SearchDirectoryHit>, IoError> {
+        if let Some(id) = self.remote_dispatch(cwd, |req_id, cwd| {
+            neoism_protocol::search::SearchClientMessage::SearchDirectories {
+                req_id,
+                query: query.to_string(),
+                cwd,
+            }
+        }) {
+            return Err(IoError::Pending(id));
+        }
+        let result = self.local_search.search_directories(
+            &neoism_agent_service_api::DirectorySearchRequest {
+                root: cwd.to_path_buf(),
+                query: query.to_string(),
+                offset: 0,
+                limit: MAX_HITS,
+                control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(
+                ),
+            },
+        );
+        result
+            .map(|result| {
+                result
+                    .paths
+                    .into_iter()
+                    .map(|path| SearchDirectoryHit { score: 0, path })
+                    .collect()
+            })
+            .map_err(|error| IoError::Other(error.to_string()))
     }
 
     fn search_grep(

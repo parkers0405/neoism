@@ -1275,6 +1275,19 @@ impl Screen<'_> {
             self.mark_dirty();
             return true;
         }
+        // Text owns pointer-down even inside links and expandable tool cards.
+        // A plain click is replayed as the semantic action on release; any
+        // movement becomes selection instead of opening/toggling mid-drag.
+        let started_on_text = self
+            .context_manager
+            .current_mut()
+            .neoism_agent
+            .as_mut()
+            .is_some_and(|agent| agent.begin_selection_on_text_at(mx, my));
+        if started_on_text {
+            self.mark_dirty();
+            return true;
+        }
         let link = self
             .context_manager
             .current()
@@ -1541,6 +1554,51 @@ impl Screen<'_> {
             return true;
         }
         if release.0 {
+            self.mark_dirty();
+            return true;
+        }
+        let scale = self.sugarloaf.scale_factor();
+        let mx = self.mouse.x as f32 / scale;
+        let my = self.mouse.y as f32 / scale;
+        if let Some(link) = self
+            .context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .and_then(|agent| agent.link_at(mx, my))
+        {
+            if let Some(key) = neoism_ui::panels::agent_pane::view::markdown::mermaid_toggle_key_from_link_target(&link) {
+                if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                    agent.toggle_mermaid_raw_mode(key);
+                }
+            } else if let Some(text) = neoism_ui::panels::agent_pane::view::markdown::copied_code_from_link_target(&link) {
+                let chars = text.chars().count();
+                clipboard.set(ClipboardType::Clipboard, text);
+                if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                    agent.mark_code_copied(&link);
+                    agent.push_copied_notice(chars);
+                }
+            } else if link.starts_with("http://") || link.starts_with("https://") {
+                if crate::background_process::open_url(&link).is_err() {
+                    let chars = link.chars().count();
+                    clipboard.set(ClipboardType::Clipboard, link);
+                    if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                        agent.push_copied_notice(chars);
+                    }
+                }
+            } else {
+                self.open_neoism_agent_link_target(&link);
+            }
+            self.mark_dirty();
+            return true;
+        }
+        let toggled_tool = self
+            .context_manager
+            .current_mut()
+            .neoism_agent
+            .as_mut()
+            .is_some_and(|agent| agent.toggle_tool_at(mx, my));
+        if toggled_tool {
             self.mark_dirty();
             return true;
         }

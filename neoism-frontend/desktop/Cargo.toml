@@ -89,6 +89,7 @@ lru = "0.16.0"
 neoism-notifier = { workspace = true }
 roxmltree = "0.20.0"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = { workspace = true }
 # Embedded-daemon mode (G8): when the desktop binary launches and
 # no external daemon is reachable, we spawn a `WorkspaceManager` +
 # axum router inside our own process and bind it to a per-user unix
@@ -109,7 +110,6 @@ objc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 ahash = { version = "0.8.11", default-features = false, features = ["std"] }
 dunce = { workspace = true }
-sha2 = { workspace = true }
 tinyvec = { version = "1.8.1", features = ["alloc"] }
 windows-sys = { version = "0.60.2", features = [
     "Win32_System_Console",

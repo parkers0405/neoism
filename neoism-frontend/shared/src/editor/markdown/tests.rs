@@ -34,6 +34,7 @@ mod tests {
             read_only: false,
             reader_footer: None,
             vim_enabled: true,
+            spellcheck_enabled: true,
             cursor_line: 0,
             cursor_col: 0,
             visual_anchor: None,

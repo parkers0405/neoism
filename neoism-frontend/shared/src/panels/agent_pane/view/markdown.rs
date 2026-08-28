@@ -9,6 +9,7 @@ use sugarloaf::Sugarloaf;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::neodraw::{render_scene, Camera, Vec2};
+use crate::panels::agent_pane::selection_model::SelectableCaretStop;
 use crate::panels::agent_pane::state::NeoismAgentPane;
 
 use super::code_block::{
@@ -17,7 +18,8 @@ use super::code_block::{
 };
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped,
-    draw_top_rounded_rect_clipped, intersect_rect, measure_text_cached, opts_with_clip,
+    draw_top_rounded_rect_clipped, intersect_rect, measure_text_cached,
+    measured_caret_stops, opts_with_clip,
 };
 use super::{ORDER_PANEL, ORDER_TEXT};
 use crate::primitives::ide_theme::IdeTheme;
@@ -44,11 +46,8 @@ const TABLE_BLOCK_PAD_Y: f32 = 14.0;
 // into the message width. Very long cells still wrap at the upper bound.
 const TABLE_MIN_COLUMN_W: f32 = 320.0;
 const TABLE_MAX_COLUMN_W: f32 = 520.0;
-/// List markers are intentionally hidden in agent prose, so their text must
-/// start on the same column as surrounding paragraphs and headings. Keeping
-/// the old marker gutter made bold list-item labels look detached from the
-/// explanation directly beneath them.
-const BULLET_TEXT_INDENT: f32 = 0.0;
+const LIST_MARKER_GUTTER: f32 = 24.0;
+const LIST_DEPTH_INDENT: f32 = 18.0;
 pub const COPY_LINK_PREFIX: &str = "neoism-copy://";
 const COPY_REF_LINK_PREFIX: &str = "neoism-copy-ref://";
 pub const MERMAID_TOGGLE_LINK_PREFIX: &str = "neoism-mermaid-toggle://";
@@ -89,6 +88,8 @@ struct PlainTokenStyle {
 enum MarkdownInlineSegment {
     Text(String),
     Bold(String),
+    Italic(String),
+    BoldItalic(String),
     Strike(String),
     Code {
         text: String,
@@ -98,12 +99,28 @@ enum MarkdownInlineSegment {
         label: String,
         source_target: String,
         target: Option<String>,
+        bold: bool,
+        italic: bool,
     },
     PlainToken {
         text: String,
         target: Option<String>,
         style: Option<PlainTokenStyle>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssistantListMarker {
+    Unordered,
+    Ordered(String),
+    Task { checked: bool },
+}
+
+#[derive(Clone, Debug)]
+pub struct AssistantListItem {
+    pub marker: AssistantListMarker,
+    pub depth: usize,
+    pub lines: Vec<String>,
 }
 
 fn inline_segment_link_target(segment: &MarkdownInlineSegment) -> Option<&str> {
@@ -215,8 +232,9 @@ pub enum AssistantMarkdownBlock {
         level: usize,
         lines: Vec<String>,
     },
-    Bullet(Vec<String>),
+    ListItem(AssistantListItem),
     Quote(Vec<String>),
+    Rule,
     Table {
         rows: Vec<Vec<String>>,
         column_widths: Vec<f32>,
@@ -255,6 +273,14 @@ pub trait AgentMarkdownPane {
     );
 
     fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize;
+    fn register_selectable_line_with_caret_stops(
+        &mut self,
+        text: &str,
+        rect: [f32; 4],
+        _caret_stops: &[SelectableCaretStop],
+    ) -> usize {
+        self.register_selectable_line(text, rect)
+    }
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)>;
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]);
     fn link_hovered(&self, target: &str) -> bool;
@@ -318,6 +344,20 @@ impl AgentMarkdownPane for NeoismAgentPane {
 
     fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize {
         NeoismAgentPane::register_selectable_line(self, text, rect)
+    }
+
+    fn register_selectable_line_with_caret_stops(
+        &mut self,
+        text: &str,
+        rect: [f32; 4],
+        caret_stops: &[SelectableCaretStop],
+    ) -> usize {
+        NeoismAgentPane::register_selectable_line_with_caret_stops(
+            self,
+            text,
+            rect,
+            caret_stops,
+        )
     }
 
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)> {
@@ -502,13 +542,17 @@ fn push_layout_prose_block(
             level,
             lines: wrap_inline_aware(sugarloaf, heading, width, &heading_opts),
         });
-    } else if let Some(bullet) = markdown_bullet(raw) {
-        blocks.push(AssistantMarkdownBlock::Bullet(wrap_inline_aware(
-            sugarloaf,
-            bullet,
-            (width - 28.0 * s).max(40.0 * s),
-            paragraph_opts,
-        )));
+    } else if let Some((marker, depth, text)) = markdown_list_item(raw) {
+        blocks.push(AssistantMarkdownBlock::ListItem(AssistantListItem {
+            marker,
+            depth,
+            lines: wrap_inline_aware(
+                sugarloaf,
+                text,
+                (width - list_text_indent(depth, s)).max(40.0 * s),
+                paragraph_opts,
+            ),
+        }));
     } else if let Some(quote) = markdown_quote(raw) {
         blocks.push(AssistantMarkdownBlock::Quote(wrap_inline_aware(
             sugarloaf,
@@ -516,6 +560,8 @@ fn push_layout_prose_block(
             (width - 24.0 * s).max(40.0 * s),
             paragraph_opts,
         )));
+    } else if md::is_divider_line(raw.trim()) {
+        blocks.push(AssistantMarkdownBlock::Rule);
     } else {
         blocks.push(AssistantMarkdownBlock::Paragraph(wrap_inline_aware(
             sugarloaf,
@@ -524,6 +570,72 @@ fn push_layout_prose_block(
             paragraph_opts,
         )));
     }
+}
+
+fn list_text_indent(depth: usize, s: f32) -> f32 {
+    (LIST_MARKER_GUTTER + depth as f32 * LIST_DEPTH_INDENT) * s
+}
+
+/// Join physical source lines that CommonMark treats as one paragraph while
+/// leaving specialized block syntax intact for the retained renderers.
+fn semantic_markdown_lines(text: &str) -> Vec<String> {
+    fn flush_paragraph(lines: &mut Vec<String>, paragraph: &mut String) {
+        if !paragraph.is_empty() {
+            lines.push(std::mem::take(paragraph));
+        }
+    }
+
+    let mut lines = Vec::new();
+    let mut paragraph = String::new();
+    let mut in_fence = false;
+    for raw in text.lines() {
+        let trimmed = raw.trim();
+        if md::fence_info(trimmed).is_some() {
+            flush_paragraph(&mut lines, &mut paragraph);
+            lines.push(raw.to_string());
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            lines.push(raw.to_string());
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush_paragraph(&mut lines, &mut paragraph);
+            if !lines.last().is_some_and(String::is_empty) {
+                lines.push(String::new());
+            }
+            continue;
+        }
+
+        let parsed = md::parse_line(raw, false);
+        let structural = !matches!(parsed.kind, md::MarkdownBlockKind::Paragraph)
+            || md::parse_table_row_trimmed(raw).is_some();
+        if structural {
+            flush_paragraph(&mut lines, &mut paragraph);
+            lines.push(raw.to_string());
+            continue;
+        }
+
+        if raw.len() != raw.trim_start().len()
+            && paragraph.is_empty()
+            && lines
+                .last()
+                .is_some_and(|line| markdown_list_item(line).is_some())
+        {
+            let previous = lines.last_mut().expect("checked above");
+            previous.push(' ');
+            previous.push_str(trimmed);
+            continue;
+        }
+
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
+        paragraph.push_str(trimmed);
+    }
+    flush_paragraph(&mut lines, &mut paragraph);
+    lines
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -604,6 +716,8 @@ fn wrap_inline_aware(
 enum InlineWrapStyle {
     Plain,
     Bold,
+    Italic,
+    BoldItalic,
     Strike,
     Code,
     MarkdownLink(String),
@@ -621,6 +735,8 @@ impl InlineWrapToken {
         match &self.style {
             InlineWrapStyle::Plain => self.text.clone(),
             InlineWrapStyle::Bold => format!("**{}**", self.text),
+            InlineWrapStyle::Italic => format!("*{}*", self.text),
+            InlineWrapStyle::BoldItalic => format!("***{}***", self.text),
             InlineWrapStyle::Strike => format!("~~{}~~", self.text),
             InlineWrapStyle::Code => format!("`{}`", self.text),
             InlineWrapStyle::MarkdownLink(target) => {
@@ -645,6 +761,18 @@ fn inline_wrap_tokens(text: &str) -> Vec<InlineWrapToken> {
             MarkdownInlineSegment::Bold(text) => push_inline_segment_words(
                 text,
                 InlineWrapStyle::Bold,
+                &mut pending_whitespace,
+                &mut tokens,
+            ),
+            MarkdownInlineSegment::Italic(text) => push_inline_segment_words(
+                text,
+                InlineWrapStyle::Italic,
+                &mut pending_whitespace,
+                &mut tokens,
+            ),
+            MarkdownInlineSegment::BoldItalic(text) => push_inline_segment_words(
+                text,
+                InlineWrapStyle::BoldItalic,
                 &mut pending_whitespace,
                 &mut tokens,
             ),
@@ -772,6 +900,8 @@ fn measure_markdown_inline_width(
             let (text, bold) = match segment {
                 MarkdownInlineSegment::Text(text) => (text.as_str(), opts.bold),
                 MarkdownInlineSegment::Bold(text) => (text.as_str(), true),
+                MarkdownInlineSegment::Italic(text) => (text.as_str(), opts.bold),
+                MarkdownInlineSegment::BoldItalic(text) => (text.as_str(), true),
                 MarkdownInlineSegment::Strike(text) => (text.as_str(), opts.bold),
                 MarkdownInlineSegment::Code { text, .. } => (text.as_str(), true),
                 MarkdownInlineSegment::MarkdownLink { label, .. } => {
@@ -801,12 +931,100 @@ fn rendered_inline_text(line: &str) -> String {
         .map(|segment| match segment {
             MarkdownInlineSegment::Text(text) => text.as_str(),
             MarkdownInlineSegment::Bold(text) => text.as_str(),
+            MarkdownInlineSegment::Italic(text) => text.as_str(),
+            MarkdownInlineSegment::BoldItalic(text) => text.as_str(),
             MarkdownInlineSegment::Strike(text) => text.as_str(),
             MarkdownInlineSegment::Code { text, .. } => text.as_str(),
             MarkdownInlineSegment::MarkdownLink { label, .. } => label.as_str(),
             MarkdownInlineSegment::PlainToken { text, .. } => text.as_str(),
         })
         .collect()
+}
+
+fn markdown_inline_caret_stops(
+    sugarloaf: &mut Sugarloaf,
+    line: &str,
+    opts: &DrawOpts,
+    theme: &IdeTheme,
+    start_x: f32,
+) -> Vec<SelectableCaretStop> {
+    let mut stops = vec![SelectableCaretStop {
+        byte_offset: 0,
+        x: start_x,
+    }];
+    let mut byte_offset = 0usize;
+    let mut x = start_x;
+    for segment in parsed_markdown_inline_line(line).iter() {
+        let (text, segment_opts) = match segment {
+            MarkdownInlineSegment::Text(text) => (text.as_str(), *opts),
+            MarkdownInlineSegment::Bold(text) => {
+                let mut styled = *opts;
+                styled.bold = true;
+                (text.as_str(), styled)
+            }
+            MarkdownInlineSegment::Italic(text) => {
+                let mut styled = *opts;
+                styled.italic = true;
+                (text.as_str(), styled)
+            }
+            MarkdownInlineSegment::BoldItalic(text) => {
+                let mut styled = *opts;
+                styled.bold = true;
+                styled.italic = true;
+                (text.as_str(), styled)
+            }
+            MarkdownInlineSegment::Strike(text) => (text.as_str(), *opts),
+            MarkdownInlineSegment::Code { text, .. } => {
+                let mut styled = *opts;
+                styled.bold = true;
+                (text.as_str(), styled)
+            }
+            MarkdownInlineSegment::MarkdownLink {
+                label,
+                bold,
+                italic,
+                ..
+            } => {
+                let mut styled = *opts;
+                styled.bold |= *bold;
+                styled.italic |= *italic;
+                (label.as_str(), styled)
+            }
+            MarkdownInlineSegment::PlainToken {
+                text,
+                target,
+                style,
+            } => {
+                let mut styled = *opts;
+                if target.is_none() {
+                    styled.bold |= style.is_some_and(|style| style.bold);
+                }
+                (text.as_str(), styled)
+            }
+        };
+        let graphemes = text.graphemes(true).collect::<Vec<_>>();
+        if graphemes.is_empty() {
+            continue;
+        }
+        let measured = graphemes
+            .iter()
+            .map(|grapheme| measure_text_cached(sugarloaf, grapheme, &segment_opts))
+            .collect::<Vec<_>>();
+        let measured_sum = measured.iter().sum::<f32>();
+        let painted_width = measure_text_cached(sugarloaf, text, &segment_opts);
+        let correction = if measured_sum > f32::EPSILON {
+            painted_width / measured_sum
+        } else {
+            1.0
+        };
+        for (grapheme, width) in graphemes.into_iter().zip(measured) {
+            byte_offset += grapheme.len();
+            x += width * correction;
+            stops.push(SelectableCaretStop { byte_offset, x });
+        }
+    }
+    let _ = theme;
+    stops
 }
 
 pub fn layout_assistant_markdown_cached<P: AgentMarkdownPane>(
@@ -876,7 +1094,8 @@ pub fn layout_assistant_markdown(
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     let mut pending_table_header: Option<(String, Vec<String>)> = None;
 
-    for raw in text.lines() {
+    for raw in semantic_markdown_lines(text) {
+        let raw = raw.as_str();
         let trimmed = raw.trim();
         if let Some(info) = md::fence_info(trimmed) {
             if let Some((lang, lines)) = code.take() {
@@ -911,7 +1130,7 @@ pub fn layout_assistant_markdown(
             continue;
         }
 
-        for raw in expand_inline_bullets(raw) {
+        for raw in [raw.to_string()] {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 flush_pending_table_header(
@@ -1627,10 +1846,13 @@ pub fn markdown_block_height<P: AgentMarkdownPane>(
         AssistantMarkdownBlock::Heading { level, lines } => {
             4.0 * s + lines.len().max(1) as f32 * heading_line_height(*level, s)
         }
-        AssistantMarkdownBlock::Bullet(lines) => lines.len().max(1) as f32 * 19.0 * s,
+        AssistantMarkdownBlock::ListItem(item) => {
+            item.lines.len().max(1) as f32 * 19.0 * s
+        }
         AssistantMarkdownBlock::Quote(lines) => {
             4.0 * s + lines.len().max(1) as f32 * 19.0 * s
         }
+        AssistantMarkdownBlock::Rule => 9.0 * s,
         AssistantMarkdownBlock::Table { rows, .. } => {
             measure_laid_out_table_height(rows, s)
         }
@@ -1675,10 +1897,26 @@ pub fn measure_markdown_blocks<P: AgentMarkdownPane>(
         return 0.0;
     }
     let mut height = 8.0 * s;
-    for block in blocks {
-        height += markdown_block_height(block, width, pane, s) + 6.0 * s;
+    for (index, block) in blocks.iter().enumerate() {
+        height += markdown_block_height(block, width, pane, s)
+            + markdown_block_gap(block, blocks.get(index + 1), s);
     }
     height.max(22.0 * s)
+}
+
+fn markdown_block_gap(
+    block: &AssistantMarkdownBlock,
+    next: Option<&AssistantMarkdownBlock>,
+    s: f32,
+) -> f32 {
+    match (block, next) {
+        (
+            AssistantMarkdownBlock::ListItem(_),
+            Some(AssistantMarkdownBlock::ListItem(_)),
+        ) => 2.0 * s,
+        (AssistantMarkdownBlock::Blank, _) => 0.0,
+        _ => 6.0 * s,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1778,7 +2016,9 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
     for (block_index, block) in blocks.iter().enumerate() {
         let block_h = markdown_block_height(block, w, pane, s);
         let block_top = cursor_y;
-        let next_cursor = block_top + block_h + 6.0 * s;
+        let next_cursor = block_top
+            + block_h
+            + markdown_block_gap(block, blocks.get(block_index + 1), s);
         if block_top > bottom {
             break;
         }
@@ -1843,19 +2083,91 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                     line_y += line_h;
                 }
             }
-            AssistantMarkdownBlock::Bullet(lines) => {
-                // The leading "-" / dot marker is intentionally NOT drawn.
-                // Its gutter is removed too, keeping list-item labels aligned
-                // with the paragraphs that commonly explain them below.
+            AssistantMarkdownBlock::ListItem(item) => {
                 let line_h = 19.0 * s;
                 let (start_ix, end_ix) =
-                    visible_line_range(cursor_y, line_h, lines.len(), viewport_clip);
+                    visible_line_range(cursor_y, line_h, item.lines.len(), viewport_clip);
                 let mut line_y = cursor_y + start_ix as f32 * line_h;
-                for line in &lines[start_ix..end_ix] {
+                let marker_x = text_x + item.depth as f32 * LIST_DEPTH_INDENT * s;
+                let content_x = text_x + list_text_indent(item.depth, s);
+                if start_ix == 0 {
+                    match &item.marker {
+                        AssistantListMarker::Unordered => {
+                            let size = 5.0 * s;
+                            draw_rounded_rect_clipped(
+                                sugarloaf,
+                                [marker_x + 7.0 * s, cursor_y + 6.0 * s, size, size],
+                                theme.f32(theme.readable_accent(theme.blue)),
+                                size * 0.5,
+                                ORDER_TEXT,
+                                viewport_clip,
+                            );
+                        }
+                        AssistantListMarker::Ordered(marker) => {
+                            let Some(marker_opts) = opts_with_clip(
+                                DrawOpts {
+                                    font_size: 12.5 * s,
+                                    color: theme.u8(theme.readable_accent(theme.blue)),
+                                    bold: true,
+                                    ..DrawOpts::default()
+                                },
+                                viewport_clip,
+                            ) else {
+                                return;
+                            };
+                            let marker_w =
+                                measure_text_cached(sugarloaf, marker, &marker_opts);
+                            draw_text_clipped(
+                                sugarloaf,
+                                marker_x + (19.0 * s - marker_w).max(0.0),
+                                cursor_y,
+                                marker,
+                                &marker_opts,
+                                occlusion_rects,
+                            );
+                        }
+                        AssistantListMarker::Task { checked } => {
+                            let box_color =
+                                if *checked { theme.green } else { theme.muted };
+                            draw_rounded_rect_clipped(
+                                sugarloaf,
+                                [
+                                    marker_x + 4.0 * s,
+                                    cursor_y + 2.5 * s,
+                                    12.0 * s,
+                                    12.0 * s,
+                                ],
+                                theme.f32_alpha(
+                                    box_color,
+                                    if *checked { 0.9 } else { 0.35 },
+                                ),
+                                3.0 * s,
+                                ORDER_TEXT,
+                                viewport_clip,
+                            );
+                            if !*checked {
+                                draw_rounded_rect_clipped(
+                                    sugarloaf,
+                                    [
+                                        marker_x + 6.0 * s,
+                                        cursor_y + 4.5 * s,
+                                        8.0 * s,
+                                        8.0 * s,
+                                    ],
+                                    theme.f32(theme.bg),
+                                    1.5 * s,
+                                    ORDER_TEXT + 1,
+                                    viewport_clip,
+                                );
+                            }
+                        }
+                    }
+                }
+                for line in &item.lines[start_ix..end_ix] {
                     draw_markdown_inline_line(
                         sugarloaf,
                         pane,
-                        text_x + BULLET_TEXT_INDENT * s,
+                        content_x,
                         line_y,
                         line,
                         &opts,
@@ -1896,6 +2208,20 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                     );
                     line_y += line_h;
                 }
+            }
+            AssistantMarkdownBlock::Rule => {
+                draw_rect_clipped(
+                    sugarloaf,
+                    [
+                        text_x,
+                        cursor_y + 4.0 * s,
+                        (w - 8.0 * s).max(20.0 * s),
+                        1.0 * s,
+                    ],
+                    theme.f32_alpha(theme.border, 0.8),
+                    ORDER_TEXT,
+                    viewport_clip,
+                );
             }
             AssistantMarkdownBlock::Code {
                 lang,
@@ -2288,6 +2614,29 @@ pub(super) fn render_markdown_code_block(
             s,
             viewport_clip,
         );
+        if !suppress_interactions {
+            let text_x = x + code_left_pad - horizontal_scroll;
+            let text_w = measure_text_cached(sugarloaf, line, &opts).max(12.0 * s);
+            if let Some(hit_rect) =
+                intersect_rect([text_x, line_y - 2.0 * s, text_w, line_h], code_clip)
+            {
+                let stops = measured_caret_stops(sugarloaf, line, &opts, text_x);
+                let selection_index = pane
+                    .register_selectable_line_with_caret_stops(line, hit_rect, &stops);
+                if let Some((left, right)) =
+                    pane.selectable_line_highlight(selection_index)
+                {
+                    draw_rounded_rect_clipped(
+                        sugarloaf,
+                        [left, line_y - 2.0 * s, right - left, line_h],
+                        theme.f32_alpha(theme.accent, 0.22),
+                        3.0 * s,
+                        ORDER_PANEL + 3,
+                        code_clip,
+                    );
+                }
+            }
+        }
         let mut line_num_opts = num_opts;
         if let Some(color) = diff.map(|kind| super::code_block::diff_color(kind, theme)) {
             line_num_opts.color = theme.u8(color);
@@ -2539,9 +2888,11 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
         // sums the same per-segment widths the draw loop advances `x` by.
         let rendered = rendered_inline_text(line);
         let line_w = measure_markdown_inline_width(sugarloaf, line, opts).max(12.0);
-        let line_index = pane.register_selectable_line(
+        let caret_stops = markdown_inline_caret_stops(sugarloaf, line, opts, theme, x);
+        let line_index = pane.register_selectable_line_with_caret_stops(
             &rendered,
             [x, y - 3.0, line_w, opts.font_size + 8.0],
+            &caret_stops,
         );
         if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(line_index) {
             // Sub-line highlight follows the drag end-points so the user can
@@ -2599,6 +2950,24 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                 draw_text_clipped(sugarloaf, x, y, text, &bold, occlusion_rects);
                 x += measure_text_cached(sugarloaf, text, &bold);
             }
+            MarkdownInlineSegment::Italic(text) => {
+                let mut italic_opts = *opts;
+                italic_opts.italic = true;
+                draw_text_clipped(sugarloaf, x, y, text, &italic_opts, occlusion_rects);
+                x += measure_text_cached(sugarloaf, text, &italic_opts);
+            }
+            MarkdownInlineSegment::BoldItalic(text) => {
+                let mut emphasis_opts = *opts;
+                emphasis_opts.bold = true;
+                emphasis_opts.italic = true;
+                emphasis_opts.color = theme.u8(if theme.is_dark() {
+                    theme.white
+                } else {
+                    theme.fg
+                });
+                draw_text_clipped(sugarloaf, x, y, text, &emphasis_opts, occlusion_rects);
+                x += measure_text_cached(sugarloaf, text, &emphasis_opts);
+            }
             MarkdownInlineSegment::Strike(text) => {
                 let mut strike_opts = *opts;
                 strike_opts.color = theme.u8(theme.muted);
@@ -2647,8 +3016,16 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                     );
                 }
             }
-            MarkdownInlineSegment::MarkdownLink { label, target, .. } => {
+            MarkdownInlineSegment::MarkdownLink {
+                label,
+                target,
+                bold,
+                italic,
+                ..
+            } => {
                 let mut link_opts = *opts;
+                link_opts.bold |= *bold;
+                link_opts.italic |= *italic;
                 link_opts.color = theme.u8(theme.readable_accent(if target.is_some() {
                     theme.blue
                 } else {
@@ -3029,47 +3406,26 @@ fn markdown_heading(line: &str) -> Option<(usize, &str)> {
     (!rest.is_empty()).then_some((level, rest))
 }
 
-fn markdown_bullet(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
-    for marker in ["- [ ] ", "- [x] ", "- [X] ", "- ", "* ", "+ "] {
-        if let Some(rest) = trimmed.strip_prefix(marker) {
-            return Some(rest.trim());
+fn markdown_list_item(line: &str) -> Option<(AssistantListMarker, usize, &str)> {
+    let parsed = md::parse_line(line, false);
+    match parsed.kind {
+        md::MarkdownBlockKind::Task { checked, depth } => {
+            Some((AssistantListMarker::Task { checked }, depth, parsed.text))
         }
+        md::MarkdownBlockKind::Bullet { depth } => {
+            Some((AssistantListMarker::Unordered, depth, parsed.text))
+        }
+        md::MarkdownBlockKind::Ordered { depth } => Some((
+            AssistantListMarker::Ordered(parsed.list_marker?.to_string()),
+            depth,
+            parsed.text,
+        )),
+        _ => None,
     }
-    let (number, rest) = trimmed.split_once(". ")?;
-    (!number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()))
-        .then_some(rest.trim())
 }
 
 fn markdown_quote(line: &str) -> Option<&str> {
     line.trim_start().strip_prefix('>').map(str::trim)
-}
-
-fn expand_inline_bullets(line: &str) -> Vec<String> {
-    let trimmed = line.trim_start();
-    if markdown_bullet(trimmed).is_some() || !line.contains(" - ") {
-        return vec![line.to_string()];
-    }
-    let Some(first_marker) = line.find(" - ") else {
-        return vec![line.to_string()];
-    };
-    let before = line[..first_marker].trim_end();
-    let rest = &line[first_marker + 3..];
-    let mut out = Vec::new();
-    if !before.is_empty() {
-        out.push(before.to_string());
-    }
-    for item in rest.split(" - ") {
-        let item = item.trim();
-        if !item.is_empty() {
-            out.push(format!("- {item}"));
-        }
-    }
-    if out.is_empty() {
-        vec![line.to_string()]
-    } else {
-        out
-    }
 }
 
 #[cfg(test)]

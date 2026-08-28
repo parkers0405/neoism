@@ -58,6 +58,14 @@ pub struct SearchFileHit {
     pub path: String,
 }
 
+/// One scored directory path. Field-for-field mirror of
+/// `neoism_ui::services::SearchDirectoryHit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchDirectoryHit {
+    pub score: i32,
+    pub path: String,
+}
+
 /// One scored grep match. Field-for-field mirror of
 /// `neoism_ui::services::SearchGrepHit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +101,13 @@ pub enum SearchClientMessage {
         query: String,
         cwd: String,
         mode: SearchFileMode,
+    },
+    /// Fuzzy directory-only search over `cwd`. Maps to
+    /// `SearchService::search_directories`.
+    SearchDirectories {
+        req_id: RequestId,
+        query: String,
+        cwd: String,
     },
     /// `rg <query>` (or fuzzy / regex variant) rooted at `cwd`. Maps to
     /// `SearchService::search_grep`.
@@ -133,6 +148,11 @@ pub enum SearchServerMessage {
     SearchFilesResult {
         req_id: RequestId,
         hits: Vec<SearchFileHit>,
+    },
+    /// Reply to `SearchDirectories`.
+    SearchDirectoriesResult {
+        req_id: RequestId,
+        hits: Vec<SearchDirectoryHit>,
     },
     /// Reply to `SearchGrep`.
     SearchGrepResult {

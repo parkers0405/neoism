@@ -636,15 +636,52 @@ impl WorkspaceManager {
         Some(workspace)
     }
 
-    /// Re-point a workspace's directory (the explicit ":cd"). Creates the
-    /// dir if missing and returns the updated summary; callers broadcast a
-    /// tree change so every client in the workspace re-roots.
+    /// Re-point a workspace's directory (the explicit `cd`). Relative paths
+    /// resolve from the current declared root and `~` resolves on this host.
+    /// Unlike workspace creation, re-rooting never creates a missing path.
     pub(crate) fn set_host_workspace_root(
         &self,
         workspace_id: &str,
         root_dir: PathBuf,
     ) -> Option<WorkspaceSummary> {
-        let dir = declare_workspace_dir(Some(root_dir));
+        let current_root = self
+            .inner
+            .lock()
+            .host_workspaces
+            .get(workspace_id)?
+            .root_dir
+            .clone()
+            .unwrap_or_else(crate::files::workspace_root);
+        let raw = root_dir.to_string_lossy();
+        let raw = raw.trim();
+        let raw = if raw.len() >= 2
+            && ((raw.starts_with('\'') && raw.ends_with('\''))
+                || (raw.starts_with('"') && raw.ends_with('"')))
+        {
+            &raw[1..raw.len() - 1]
+        } else {
+            raw
+        };
+        let candidate = if raw == "~" {
+            dirs::home_dir()?
+        } else if let Some(rest) =
+            raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"))
+        {
+            dirs::home_dir()?.join(rest)
+        } else if raw.starts_with('~') {
+            return None;
+        } else {
+            let path = PathBuf::from(raw);
+            if path.is_absolute() {
+                path
+            } else {
+                current_root.join(path)
+            }
+        };
+        let dir = crate::path::canonicalize(&candidate).ok()?;
+        if !dir.is_dir() {
+            return None;
+        }
         // Re-rooting the workspace re-resolves the linked vault: a `:cd`
         // into a differently-linked project must re-point notes too.
         let linked_vault_dir = resolve_linked_vault_dir(&dir);

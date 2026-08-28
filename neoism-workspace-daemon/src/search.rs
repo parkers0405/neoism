@@ -21,8 +21,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use neoism_protocol::search::{
-    RequestId, SearchClientMessage, SearchFileHit, SearchFileMode, SearchGitHit,
-    SearchGitStatus, SearchGrepHit, SearchGrepMode, SearchServerMessage,
+    RequestId, SearchClientMessage, SearchDirectoryHit, SearchFileHit, SearchFileMode,
+    SearchGitHit, SearchGitStatus, SearchGrepHit, SearchGrepMode, SearchServerMessage,
 };
 use parking_lot::Mutex;
 use tokio::io::AsyncBufReadExt;
@@ -97,6 +97,11 @@ pub fn dispatch(
         } => {
             spawn_task(registry, req_id, tx.clone(), async move {
                 search_files(req_id, workspace_root, query, cwd, mode).await
+            });
+        }
+        SearchClientMessage::SearchDirectories { req_id, query, cwd } => {
+            spawn_task(registry, req_id, tx.clone(), async move {
+                search_directories(req_id, workspace_root, query, cwd).await
             });
         }
         SearchClientMessage::SearchGrep {
@@ -273,6 +278,81 @@ fn walkdir_files(cwd: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+// -----------------------------------------------------------------------
+// SearchDirectories (bounded directory-only fuzzy walk)
+// -----------------------------------------------------------------------
+
+async fn search_directories(
+    req_id: RequestId,
+    workspace_root: PathBuf,
+    query: String,
+    cwd: String,
+) -> SearchServerMessage {
+    let cwd_abs = match resolve_cwd(req_id, workspace_root, &cwd) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    let join =
+        tokio::task::spawn_blocking(move || directory_hits(&cwd_abs, &query)).await;
+    match join {
+        Ok(hits) => SearchServerMessage::SearchDirectoriesResult { req_id, hits },
+        Err(error) => SearchServerMessage::SearchError {
+            req_id,
+            message: format!("directory search join error: {error}"),
+        },
+    }
+}
+
+fn directory_hits(cwd: &Path, query: &str) -> Vec<SearchDirectoryHit> {
+    const MAX_SCANNED_DIRECTORIES: usize = 20_000;
+    const MAX_DEPTH: usize = 32;
+    let trimmed = query.trim();
+    let mut hits = Vec::new();
+    let walker = WalkDir::new(cwd)
+        .max_depth(MAX_DEPTH)
+        .into_iter()
+        .filter_entry(|entry| {
+            if !entry.file_type().is_dir() {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            !matches!(
+                name.as_ref(),
+                ".git"
+                    | "node_modules"
+                    | "target"
+                    | ".venv"
+                    | "venv"
+                    | "__pycache__"
+                    | ".cache"
+                    | "dist"
+                    | "build"
+            )
+        });
+    for entry in walker
+        .flatten()
+        .filter(|entry| entry.file_type().is_dir())
+        .skip(1)
+        .take(MAX_SCANNED_DIRECTORIES)
+    {
+        let Ok(relative) = entry.path().strip_prefix(cwd) else {
+            continue;
+        };
+        let path = relative.to_string_lossy().into_owned();
+        let score = if trimmed.is_empty() {
+            0
+        } else if let Some(score) = fuzzy_file_match_score(trimmed, &path) {
+            score
+        } else {
+            continue;
+        };
+        hits.push(SearchDirectoryHit { score, path });
+    }
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
+    hits.truncate(MAX_HITS);
+    hits
 }
 
 // -----------------------------------------------------------------------
@@ -709,6 +789,19 @@ mod tests {
         assert!(fuzzy_file_match_score("src", "src/lib.rs").is_some());
         assert!(fuzzy_file_match_score("slr", "src/lib.rs").is_some());
         assert!(fuzzy_file_match_score("xyz", "src/lib.rs").is_none());
+    }
+
+    #[test]
+    fn directory_hits_never_include_files() {
+        let root = std::env::temp_dir()
+            .join(format!("neoism-directory-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/not-a-directory.rs"), "").unwrap();
+        let hits = directory_hits(&root, "src");
+        assert!(hits.iter().any(|hit| hit.path == "src"));
+        assert!(hits.iter().all(|hit| !hit.path.ends_with(".rs")));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

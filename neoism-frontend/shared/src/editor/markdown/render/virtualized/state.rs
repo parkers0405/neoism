@@ -141,6 +141,7 @@ mod tests {
             read_only: false,
             reader_footer: None,
             vim_enabled: true,
+            spellcheck_enabled: true,
             cursor_line: 1,
             cursor_col: 5,
             visual_anchor: None,

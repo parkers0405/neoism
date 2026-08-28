@@ -2,8 +2,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use sugarloaf::text::DrawOpts;
 use sugarloaf::{GraphicOverlay, Sugarloaf};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::DEPTH;
+use crate::panels::agent_pane::selection_model::SelectableCaretStop;
 use crate::primitives::draw_text_with_occlusion;
 
 const TEXT_MEASURE_CACHE_LIMIT: usize = 8192;
@@ -72,6 +74,41 @@ pub fn measure_text_cached(
     let value = sugarloaf.text_mut().measure(text, opts);
     TEXT_MEASURE_CACHE.with(|cache| cache.borrow_mut().insert(key, value));
     value
+}
+
+pub fn measured_caret_stops(
+    sugarloaf: &mut Sugarloaf,
+    text: &str,
+    opts: &DrawOpts,
+    start_x: f32,
+) -> Vec<SelectableCaretStop> {
+    let mut stops = vec![SelectableCaretStop {
+        byte_offset: 0,
+        x: start_x,
+    }];
+    let graphemes = text.graphemes(true).collect::<Vec<_>>();
+    if graphemes.is_empty() {
+        return stops;
+    }
+    let measured = graphemes
+        .iter()
+        .map(|grapheme| measure_text_cached(sugarloaf, grapheme, opts))
+        .collect::<Vec<_>>();
+    let measured_sum = measured.iter().sum::<f32>();
+    let full_width = measure_text_cached(sugarloaf, text, opts);
+    let correction = if measured_sum > f32::EPSILON {
+        full_width / measured_sum
+    } else {
+        1.0
+    };
+    let mut byte_offset = 0usize;
+    let mut x = start_x;
+    for (grapheme, width) in graphemes.into_iter().zip(measured) {
+        byte_offset += grapheme.len();
+        x += width * correction;
+        stops.push(SelectableCaretStop { byte_offset, x });
+    }
+    stops
 }
 
 pub fn opts_with_clip(mut opts: DrawOpts, clip: [f32; 4]) -> Option<DrawOpts> {

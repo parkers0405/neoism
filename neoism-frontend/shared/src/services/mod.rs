@@ -175,6 +175,13 @@ pub struct SearchFileHit {
     pub path: String,
 }
 
+/// One scored directory path returned by the search service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchDirectoryHit {
+    pub score: i32,
+    pub path: String,
+}
+
 /// One scored grep match (path/line/column/text) returned by the
 /// search service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +236,13 @@ pub trait SearchService: Send + Sync {
         query: &str,
         mode: SearchFileMode,
     ) -> Result<Vec<SearchFileHit>, IoError>;
+
+    /// Fuzzy directory-only search rooted at `cwd`; paths are relative.
+    fn search_directories(
+        &self,
+        cwd: &Path,
+        query: &str,
+    ) -> Result<Vec<SearchDirectoryHit>, IoError>;
 
     /// `rg <query>` (or fuzzy/regex variant) rooted at `cwd`.
     /// Added wave6: replaces direct `Command::new("rg")` in finder.
@@ -380,6 +394,13 @@ impl SearchService for NullSearchService {
         _query: &str,
         _mode: SearchFileMode,
     ) -> Result<Vec<SearchFileHit>, IoError> {
+        Ok(Vec::new())
+    }
+    fn search_directories(
+        &self,
+        _cwd: &Path,
+        _query: &str,
+    ) -> Result<Vec<SearchDirectoryHit>, IoError> {
         Ok(Vec::new())
     }
     fn search_grep(

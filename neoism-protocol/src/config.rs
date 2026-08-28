@@ -42,6 +42,14 @@ pub struct ConfigDescriptor {
     pub extensible: bool,
     pub category: ConfigCategory,
     pub control: ConfigControl,
+    /// Whether this descriptor is a concrete control in the graphical
+    /// Settings page. Completion-only templates remain in the schema.
+    #[serde(default = "default_settings_visible")]
+    pub settings_visible: bool,
+}
+
+fn default_settings_visible() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -311,6 +319,7 @@ mod tests {
                 extensible: false,
                 category: ConfigCategory::Editor,
                 control: ConfigControl::Toggle,
+                settings_visible: true,
             }],
         };
         let encoded = serde_json::to_string(&reply).unwrap();

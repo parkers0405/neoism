@@ -2,6 +2,15 @@ use super::*;
 
 impl NeoismAgentPane {
     pub fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize {
+        self.register_selectable_line_with_caret_stops(text, rect, &[])
+    }
+
+    pub fn register_selectable_line_with_caret_stops(
+        &mut self,
+        text: &str,
+        rect: [f32; 4],
+        caret_stops: &[crate::panels::agent_pane::selection_model::SelectableCaretStop],
+    ) -> usize {
         // Derive the line's absolute position in the (unscrolled)
         // timeline content from its current screen y. Callers don't have
         // to thread scroll state through every render path; we look it
@@ -9,13 +18,11 @@ impl NeoismAgentPane {
         let content_y = self.content_y_for_screen_y(rect[1]);
         let index = self.selectable_lines_len;
         if let Some(slot) = self.selectable_lines.get_mut(index) {
-            slot.0.clear();
-            slot.0.push_str(text);
-            slot.1 = rect;
-            slot.2 = content_y;
+            slot.set(text, rect, content_y, Some(caret_stops));
         } else {
-            self.selectable_lines
-                .push((text.to_string(), rect, content_y));
+            let mut line = SelectableLine::new(text, rect, content_y);
+            line.set(text, rect, content_y, Some(caret_stops));
+            self.selectable_lines.push(line);
         }
         self.selectable_lines_len += 1;
         index
@@ -38,18 +45,18 @@ impl NeoismAgentPane {
     /// reappears.
     pub fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)> {
         let (anchor, focus) = self.ordered_selection_endpoints()?;
-        let (_, rect, content_y) = self.selectable_lines.get(index)?;
-        if *content_y < anchor.content_y - 0.5 || *content_y > focus.content_y + 0.5 {
+        let line = self.selectable_lines.get(index)?;
+        if !selection_contains_line(anchor, focus, line) {
             return None;
         }
-        let line_left = rect[0];
-        let line_right = rect[0] + rect[2];
-        let single_row = (anchor.content_y - focus.content_y).abs() < 0.5;
+        let line_left = line.rect[0];
+        let line_right = line.rect[0] + line.rect[2];
+        let single_row = same_selection_row(anchor, focus);
         let (left, right) = if single_row {
             (anchor.x.min(focus.x), anchor.x.max(focus.x))
-        } else if (*content_y - anchor.content_y).abs() < 0.5 {
+        } else if selection_point_matches_line(anchor, line) {
             (anchor.x, line_right)
-        } else if (*content_y - focus.content_y).abs() < 0.5 {
+        } else if selection_point_matches_line(focus, line) {
             (line_left, focus.x)
         } else {
             (line_left, line_right)
@@ -68,15 +75,38 @@ impl NeoismAgentPane {
                 .filter(|[vx, vy, vw, vh]| {
                     x >= *vx && x <= vx + vw && y >= *vy && y <= vy + vh
                 })
-                .and_then(|_| self.nearest_selectable_line(y))
+                .and_then(|_| self.nearest_selectable_line(x, y))
         });
         let Some(index) = index else {
             self.selection_anchor = None;
             self.selection_focus = None;
             return false;
         };
-        let content_y = self.selectable_lines[index].2;
-        let anchor = SelectionPoint { content_y, x };
+        let line = &self.selectable_lines[index];
+        let caret = line.caret_at_x(x);
+        let anchor = SelectionPoint {
+            content_y: line.content_y,
+            row_x: line.rect[0],
+            byte_offset: caret.byte_offset,
+            x: caret.x,
+        };
+        self.selection_anchor = Some(anchor);
+        self.selection_focus = Some(anchor);
+        true
+    }
+
+    pub fn begin_selection_on_text_at(&mut self, x: f32, y: f32) -> bool {
+        let Some(index) = self.selectable_line_at(x, y) else {
+            return false;
+        };
+        let line = &self.selectable_lines[index];
+        let caret = line.caret_at_x(x);
+        let anchor = SelectionPoint {
+            content_y: line.content_y,
+            row_x: line.rect[0],
+            byte_offset: caret.byte_offset,
+            x: caret.x,
+        };
         self.selection_anchor = Some(anchor);
         self.selection_focus = Some(anchor);
         true
@@ -88,12 +118,18 @@ impl NeoismAgentPane {
         }
         let index = self
             .selectable_line_at(x, y)
-            .or_else(|| self.nearest_selectable_line(y));
-        let content_y = match index {
-            Some(ix) => self.selectable_lines[ix].2,
+            .or_else(|| self.nearest_selectable_line(x, y));
+        let line = match index {
+            Some(ix) => &self.selectable_lines[ix],
             None => return false,
         };
-        let next = SelectionPoint { content_y, x };
+        let caret = line.caret_at_x(x);
+        let next = SelectionPoint {
+            content_y: line.content_y,
+            row_x: line.rect[0],
+            byte_offset: caret.byte_offset,
+            x: caret.x,
+        };
         if self.selection_focus == Some(next) {
             return false;
         }
@@ -165,7 +201,7 @@ impl NeoismAgentPane {
         let anchor = self.selection_anchor.take()?;
         let focus = self.selection_focus.take()?;
         let (start, end) = order_endpoints(anchor, focus);
-        let single_row = (start.content_y - end.content_y).abs() < 0.5;
+        let single_row = same_selection_row(start, end);
         if single_row && (start.x - end.x).abs() < 1.0 {
             return None;
         }
@@ -175,31 +211,29 @@ impl NeoismAgentPane {
         // unavoidable trade for not rendering the whole conversation,
         // but the auto-scroll + the wide registration margin handle the
         // common cases.
-        let mut rows: Vec<(f32, &String, &[f32; 4])> = self.selectable_lines
+        let mut rows: Vec<&SelectableLine> = self.selectable_lines
             [..self.selectable_lines_len]
             .iter()
-            .filter(|(_, _, content_y)| {
-                *content_y >= start.content_y - 0.5 && *content_y <= end.content_y + 0.5
-            })
-            .map(|(text, rect, content_y)| (*content_y, text, rect))
+            .filter(|line| selection_contains_line(start, end, line))
             .collect();
-        rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        rows.sort_by(|a, b| compare_line_order(a, b));
         let mut out = Vec::new();
-        for (content_y, text, rect) in &rows {
-            let line_left = rect[0];
-            let line_right = rect[0] + rect[2];
-            let at_start = (*content_y - start.content_y).abs() < 0.5;
-            let at_end = (*content_y - end.content_y).abs() < 0.5;
-            let (left, right) = if single_row {
-                (start.x.min(end.x), start.x.max(end.x))
+        for line in rows {
+            let at_start = selection_point_matches_line(start, line);
+            let at_end = selection_point_matches_line(end, line);
+            let (start_byte, end_byte) = if single_row {
+                (
+                    start.byte_offset.min(end.byte_offset),
+                    start.byte_offset.max(end.byte_offset),
+                )
             } else if at_start {
-                (start.x, line_right)
+                (start.byte_offset, line.text.len())
             } else if at_end {
-                (line_left, end.x)
+                (0, end.byte_offset)
             } else {
-                (line_left, line_right)
+                (0, line.text.len())
             };
-            out.push(slice_line_by_x(text, rect, left, right));
+            out.push(line.slice_between(start_byte, end_byte));
         }
         let joined = out
             .iter()
@@ -217,17 +251,18 @@ impl NeoismAgentPane {
         self.selectable_lines[..self.selectable_lines_len]
             .iter()
             .enumerate()
-            .find(|(_, (_, rect, _))| {
-                x >= rect[0]
-                    && x <= rect[0] + rect[2]
-                    && y >= rect[1]
-                    && y <= rect[1] + rect[3]
+            .rfind(|(_, line)| {
+                x >= line.rect[0]
+                    && x <= line.rect[0] + line.rect[2]
+                    && y >= line.rect[1]
+                    && y <= line.rect[1] + line.rect[3]
             })
             .map(|(index, _)| index)
     }
 
     pub(in crate::panels::agent_pane::state) fn nearest_selectable_line(
         &self,
+        x: f32,
         y: f32,
     ) -> Option<usize> {
         if self.selectable_lines_len == 0 {
@@ -236,12 +271,20 @@ impl NeoismAgentPane {
         self.selectable_lines[..self.selectable_lines_len]
             .iter()
             .enumerate()
-            .min_by(|(_, (_, a, _)), (_, (_, b, _))| {
-                let mid_a = a[1] + a[3] * 0.5;
-                let mid_b = b[1] + b[3] * 0.5;
-                (mid_a - y)
-                    .abs()
-                    .partial_cmp(&(mid_b - y).abs())
+            .min_by(|(_, a), (_, b)| {
+                let distance = |line: &SelectableLine| {
+                    let mid_y = line.rect[1] + line.rect[3] * 0.5;
+                    let dx = if x < line.rect[0] {
+                        line.rect[0] - x
+                    } else if x > line.rect[0] + line.rect[2] {
+                        x - (line.rect[0] + line.rect[2])
+                    } else {
+                        0.0
+                    };
+                    (mid_y - y).abs() * 4.0 + dx
+                };
+                distance(a)
+                    .partial_cmp(&distance(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(index, _)| index)
@@ -254,4 +297,38 @@ impl NeoismAgentPane {
         let focus = self.selection_focus?;
         Some(order_endpoints(anchor, focus))
     }
+}
+
+fn same_selection_row(a: SelectionPoint, b: SelectionPoint) -> bool {
+    (a.content_y - b.content_y).abs() < 0.5 && (a.row_x - b.row_x).abs() < 0.5
+}
+
+fn selection_point_matches_line(point: SelectionPoint, line: &SelectableLine) -> bool {
+    (point.content_y - line.content_y).abs() < 0.5
+        && (point.row_x - line.rect[0]).abs() < 0.5
+}
+
+fn compare_line_order(a: &SelectableLine, b: &SelectableLine) -> std::cmp::Ordering {
+    a.content_y
+        .partial_cmp(&b.content_y)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            a.rect[0]
+                .partial_cmp(&b.rect[0])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+fn selection_contains_line(
+    start: SelectionPoint,
+    end: SelectionPoint,
+    line: &SelectableLine,
+) -> bool {
+    let after_start = line.content_y > start.content_y + 0.5
+        || ((line.content_y - start.content_y).abs() < 0.5
+            && line.rect[0] >= start.row_x - 0.5);
+    let before_end = line.content_y < end.content_y - 0.5
+        || ((line.content_y - end.content_y).abs() < 0.5
+            && line.rect[0] <= end.row_x + 0.5);
+    after_start && before_end
 }

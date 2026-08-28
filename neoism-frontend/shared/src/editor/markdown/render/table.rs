@@ -1110,20 +1110,22 @@ pub(super) fn render_table_row(
                     clip_bottom,
                     text_occlusions,
                 );
-                draw_spellcheck_underlines(
-                    sugarloaf,
-                    cell_x + 16.0,
-                    text_y,
-                    line_h,
-                    wrap_width,
-                    &clipped_opts,
-                    theme,
-                    clip,
-                    clip_top,
-                    clip_bottom,
-                    text_occlusions,
-                    &rendered,
-                );
+                if pane.spellcheck_enabled {
+                    draw_spellcheck_underlines(
+                        sugarloaf,
+                        cell_x + 16.0,
+                        text_y,
+                        line_h,
+                        wrap_width,
+                        &clipped_opts,
+                        theme,
+                        clip,
+                        clip_top,
+                        clip_bottom,
+                        text_occlusions,
+                        &rendered,
+                    );
+                }
                 text_y += line_h;
             }
             draw_inline_links_for_line(

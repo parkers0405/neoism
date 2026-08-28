@@ -209,19 +209,19 @@ fn collect_extension_entries(
     // Built-in Neoism MCP integrations — always present, no lifecycle.
     for (id, name, description, extra_category) in [
         (
-            "neoism-notes-mcp",
+            "neoism-notes",
             "Neoism Notes",
             "Built-in MCP-style notes access for Neoism agents, scoped to linked project notes when available.",
             "Notes",
         ),
         (
-            "neoism-memory-mcp",
+            "neoism-memory",
             "Neoism Memory",
             "Built-in MCP-style persistent memory for Neoism agents. Stores MEMORY.md indexes and topic files in Neoism Notes vaults.",
             "Memory",
         ),
         (
-            "neoism-docs-mcp",
+            "neoism-docs",
             "Neoism Docs",
             "Read-only access to Neoism's bundled product documentation.",
             "Documentation",

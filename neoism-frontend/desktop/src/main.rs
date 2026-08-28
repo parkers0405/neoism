@@ -43,6 +43,7 @@ mod ssh_hosts;
 #[cfg(not(target_arch = "wasm32"))]
 mod tailscale;
 mod terminal;
+mod update;
 mod workspace;
 
 use base64::{engine::general_purpose, Engine as _};
@@ -837,24 +838,155 @@ fn resolve_daemon(daemon_url: Option<&str>) -> Option<ResolvedDaemon> {
 /// `neoism update` / `neoism upgrade` — self-update from GitHub Releases.
 /// Downloads the same `neoism-<os>-<arch>.tar.gz` the installer uses and
 /// swaps the three binaries in place. Returns true if it handled the args.
+#[derive(Default)]
+struct SelfUpdateOptions {
+    force: bool,
+    gui: bool,
+    relaunch: bool,
+    parent_pid: Option<u32>,
+}
+
+struct UpdateReporter {
+    gui: bool,
+}
+
+impl UpdateReporter {
+    fn progress(&self, percent: Option<u8>, message: impl AsRef<str>) {
+        self.emit(percent, false, false, message.as_ref());
+    }
+
+    fn ready(&self, message: impl AsRef<str>) {
+        self.emit(Some(100), true, false, message.as_ref());
+    }
+
+    fn failed(&self, message: impl AsRef<str>) {
+        self.emit(None, false, true, message.as_ref());
+    }
+
+    fn emit(&self, percent: Option<u8>, ready: bool, failed: bool, message: &str) {
+        if !self.gui {
+            return;
+        }
+        let message = message.replace(['\t', '\r', '\n'], " ");
+        let percent = percent.map_or_else(|| "-".to_string(), |value| value.to_string());
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(
+            stdout,
+            "NEOISM_UPDATE\t{percent}\t{}\t{}\t{message}",
+            u8::from(ready),
+            u8::from(failed)
+        );
+        let _ = stdout.flush();
+    }
+}
+
 fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     match args.first().and_then(|a| a.to_str()) {
         Some("update" | "upgrade" | "self-update") => {}
         _ => return Ok(false),
     }
-    let force = args.iter().any(|a| a.to_str() == Some("--force"));
-    if let Err(err) = self_update(force) {
+    let mut options = SelfUpdateOptions::default();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--force") => options.force = true,
+            Some("--gui") => options.gui = true,
+            Some("--relaunch") => options.relaunch = true,
+            Some("--parent-pid") => {
+                index += 1;
+                options.parent_pid = Some(
+                    args.get(index)
+                        .and_then(|value| value.to_str())
+                        .ok_or("--parent-pid requires a process id")?
+                        .parse()?,
+                );
+            }
+            Some(other) => return Err(format!("unknown update option `{other}`").into()),
+            None => return Err("update options must be valid UTF-8".into()),
+        }
+        index += 1;
+    }
+    if options.relaunch && (!options.gui || options.parent_pid.is_none()) {
+        return Err("--relaunch requires --gui and --parent-pid".into());
+    }
+    let reporter = UpdateReporter { gui: options.gui };
+    if let Err(err) = self_update(&options, &reporter) {
+        if options.gui {
+            let _ = std::fs::write(
+                std::env::temp_dir().join("neoism-update.log"),
+                format!("Neoism update failed: {err}\n"),
+            );
+        }
+        reporter.failed(err.to_string());
         eprintln!("neoism update failed: {err}");
         std::process::exit(1);
     }
     Ok(true)
 }
 
+fn download_update_file(
+    url: &str,
+    destination: &std::path::Path,
+    reporter: &UpdateReporter,
+    progress_range: (u8, u8),
+) -> Result<(), Box<dyn std::error::Error>> {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let partial = destination.with_extension(format!(
+            "{}part",
+            destination
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map_or(String::new(), |extension| format!("{extension}."))
+        ));
+        let _ = tokio::fs::remove_file(&partial).await;
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(15 * 60))
+            .user_agent(concat!("neoism/", env!("CARGO_PKG_VERSION")))
+            .build()?;
+        let response = client.get(url).send().await?.error_for_status()?;
+        let total = response.content_length().filter(|value| *value > 0);
+        let mut stream = response.bytes_stream();
+        let mut file = tokio::fs::File::create(&partial).await?;
+        let mut downloaded = 0_u64;
+        let mut last_percent = None;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk).await?;
+            downloaded = downloaded.saturating_add(chunk.len() as u64);
+            let percent = total.map(|total| {
+                progress_range.0
+                    + ((downloaded.saturating_mul(100) / total).min(100) as u8
+                        * (progress_range.1 - progress_range.0)
+                        / 100)
+            });
+            if percent != last_percent {
+                last_percent = percent;
+                reporter.progress(percent, "Downloading Neoism");
+            }
+        }
+        file.flush().await?;
+        drop(file);
+        let _ = tokio::fs::remove_file(destination).await;
+        tokio::fs::rename(&partial, destination).await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
 #[cfg(windows)]
 fn stage_windows_msi_update(
     msi: &std::path::Path,
     temp_dir: &std::path::Path,
+    gui_pid: Option<u32>,
+    relaunch: bool,
+    relaunch_exe: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::windows::process::CommandExt;
 
@@ -863,8 +995,11 @@ fn stage_windows_msi_update(
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const HELPER: &str = r#"param(
   [Parameter(Mandatory = $true)][int]$UpdaterPid,
+  [Parameter(Mandatory = $true)][int]$GuiPid,
   [Parameter(Mandatory = $true)][string]$MsiPath,
-  [Parameter(Mandatory = $true)][string]$TempDir
+  [Parameter(Mandatory = $true)][string]$TempDir,
+  [Parameter(Mandatory = $true)][string]$RelaunchExe,
+  [Parameter(Mandatory = $true)][int]$Relaunch
 )
 $ErrorActionPreference = 'Stop'
 $log = Join-Path $env:TEMP 'neoism-update.log'
@@ -872,6 +1007,10 @@ try {
   $deadline = [DateTime]::UtcNow.AddMinutes(2)
   while (Get-Process -Id $UpdaterPid -ErrorAction SilentlyContinue) {
     if ([DateTime]::UtcNow -ge $deadline) { throw 'timed out waiting for the updater to exit' }
+    Start-Sleep -Milliseconds 250
+  }
+  while ($GuiPid -gt 0 -and (Get-Process -Id $GuiPid -ErrorAction SilentlyContinue)) {
+    if ([DateTime]::UtcNow -ge $deadline) { throw 'timed out waiting for Neoism to close' }
     Start-Sleep -Milliseconds 250
   }
   foreach ($name in @('neoism', 'neoism-workspace-daemon', 'neoism-agent')) {
@@ -887,6 +1026,7 @@ try {
     throw "Windows Installer exited with code $($installer.ExitCode)"
   }
   "$(Get-Date -Format o) Neoism MSI update completed with code $($installer.ExitCode)" | Set-Content $log
+  if ($Relaunch -eq 1) { Start-Process -FilePath $RelaunchExe }
   Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue
 } catch {
   "$(Get-Date -Format o) Neoism MSI update failed: $($_.Exception.Message)" | Set-Content $log
@@ -908,10 +1048,16 @@ try {
         .arg(&helper)
         .arg("-UpdaterPid")
         .arg(std::process::id().to_string())
+        .arg("-GuiPid")
+        .arg(gui_pid.unwrap_or_default().to_string())
         .arg("-MsiPath")
         .arg(msi)
         .arg("-TempDir")
         .arg(temp_dir)
+        .arg("-RelaunchExe")
+        .arg(relaunch_exe)
+        .arg("-Relaunch")
+        .arg(if relaunch { "1" } else { "0" })
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -928,17 +1074,25 @@ fn run_macos_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
     if args.first().and_then(|arg| arg.to_str()) != Some("--macos-update-helper") {
         return Ok(false);
     }
-    if args.len() != 3 {
+    if args.len() != 5 {
         return Err("invalid macOS update helper arguments".into());
     }
     let app_dst = std::path::PathBuf::from(&args[1]);
     let app_src = std::path::PathBuf::from(&args[2]);
+    let gui_pid = args[3]
+        .to_str()
+        .ok_or("invalid macOS GUI pid")?
+        .parse::<u32>()?;
+    let relaunch = args[4].to_str() == Some("1");
     let parent = app_dst.parent().ok_or("cannot resolve Neoism.app parent")?;
     let staged_app = parent.join(".Neoism.app.new");
     let old_app = parent.join(".Neoism.app.old");
     let deadline = Instant::now() + Duration::from_secs(120);
     let helper_pid = std::process::id();
 
+    if gui_pid > 0 {
+        wait_for_process_exit(gui_pid, Duration::from_secs(120))?;
+    }
     let _ = terminate_other_neoism_processes();
     while process_ids_by_name("neoism")
         .into_iter()
@@ -968,6 +1122,15 @@ fn run_macos_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
     let _ = std::fs::remove_dir_all(&old_app);
     if let Some(temp_dir) = app_src.parent() {
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+    if relaunch {
+        std::process::Command::new("/usr/bin/open")
+            .arg("-n")
+            .arg(&app_dst)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
     }
     Ok(true)
 }
@@ -1019,6 +1182,55 @@ fn terminate_other_neoism_processes() -> usize {
         .count()
 }
 
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as i32, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    std::process::Command::new("tasklist.exe")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+        })
+}
+
+fn wait_for_process_exit(
+    pid: u32,
+    timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    while process_is_alive(pid) {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for process {pid} to exit").into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_for_other_neoism_processes(timeout: std::time::Duration) {
+    let current_pid = std::process::id();
+    let deadline = std::time::Instant::now() + timeout;
+    while ["neoism", "neoism-workspace-daemon", "neoism-agent"]
+        .into_iter()
+        .flat_map(process_ids_by_name)
+        .any(|pid| pid != current_pid && process_is_alive(pid))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(not(unix))]
+fn wait_for_other_neoism_processes(_timeout: std::time::Duration) {}
+
 #[cfg(not(unix))]
 fn terminate_other_neoism_processes() -> usize {
     0
@@ -1052,7 +1264,10 @@ fn is_host_process(pid: u32) -> bool {
     true
 }
 
-fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn self_update(
+    options: &SelfUpdateOptions,
+    reporter: &UpdateReporter,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Public binaries repo (source stays private). Override with NEOISM_REPO.
     let repo =
         std::env::var("NEOISM_REPO").unwrap_or_else(|_| "parkers0405/neoism".to_string());
@@ -1078,6 +1293,7 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     let current = concat!("v", env!("CARGO_PKG_VERSION"));
     println!("neoism {current} ({goos}/{goarch}) — checking for updates…");
+    reporter.progress(Some(5), "Checking the latest Neoism release");
 
     // The unauthenticated GitHub API is limited to 60 requests/hour per public
     // IP, so users behind the same NAT could exhaust it and get a misleading
@@ -1136,17 +1352,19 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
             .is_some_and(|version| latest.trim_start_matches('v') == version.trim())
     });
 
-    if !force && latest == current {
+    if !options.force && latest == current {
         #[cfg(target_os = "macos")]
         if !macos_app_is_current {
             println!("The Neoism.app bundle is stale; replacing it with {latest}.");
         } else {
             println!("Already up to date ({current}).");
+            reporter.failed(format!("Neoism is already up to date ({current})"));
             return Ok(());
         }
         #[cfg(not(target_os = "macos"))]
         {
             println!("Already up to date ({current}).");
+            reporter.failed(format!("Neoism is already up to date ({current})"));
             return Ok(());
         }
     }
@@ -1161,29 +1379,22 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
     let archive = tmp.join(&asset);
-    let dl = std::process::Command::new("curl")
-        .args(["-fsSL", "-o"])
-        .arg(&archive)
-        .arg(&url)
-        .status()?;
-    if !dl.success() {
+    reporter.progress(Some(10), format!("Downloading Neoism {latest}"));
+    if let Err(error) = download_update_file(&url, &archive, reporter, (10, 70)) {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(format!("download failed: {url}").into());
+        return Err(format!("download failed: {error}").into());
     }
-    #[cfg(windows)]
     {
         use sha2::{Digest, Sha256};
 
+        reporter.progress(Some(72), "Verifying the release checksum");
         let checksum_url = format!("{url}.sha256");
         let checksum_path = tmp.join(format!("{asset}.sha256"));
-        let checksum_download = std::process::Command::new("curl")
-            .args(["-fsSL", "-o"])
-            .arg(&checksum_path)
-            .arg(&checksum_url)
-            .status()?;
-        if !checksum_download.success() {
+        if let Err(error) =
+            download_update_file(&checksum_url, &checksum_path, reporter, (72, 75))
+        {
             let _ = std::fs::remove_dir_all(&tmp);
-            return Err(format!("checksum download failed: {checksum_url}").into());
+            return Err(format!("checksum download failed: {error}").into());
         }
         let expected = std::fs::read_to_string(&checksum_path)?
             .split_whitespace()
@@ -1205,7 +1416,17 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        stage_windows_msi_update(&archive, &tmp)?;
+    }
+    #[cfg(windows)]
+    {
+        reporter.progress(Some(85), "Staging the Windows installer");
+        stage_windows_msi_update(
+            &archive,
+            &tmp,
+            options.parent_pid,
+            options.relaunch,
+            &std::env::current_exe()?,
+        )?;
         println!(
             "Neoism {latest} is staged. Closing Neoism, its daemon, and its agent to finish the Windows update."
         );
@@ -1213,10 +1434,12 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
             "  • Windows Installer will upgrade all three executables transactionally."
         );
         println!("  • Update status is written to %TEMP%\\neoism-update.log.");
+        reporter.ready("Restarting Neoism to finish the update");
         return Ok(());
     }
     #[cfg(not(windows))]
     {
+        reporter.progress(Some(75), "Extracting the Neoism release");
         let untar = std::process::Command::new("tar")
             .arg("-xzf")
             .arg(&archive)
@@ -1276,14 +1499,19 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
             .arg("--macos-update-helper")
             .arg(app_dst)
             .arg(&app_src)
+            .arg(options.parent_pid.unwrap_or_default().to_string())
+            .arg(if options.relaunch { "1" } else { "0" })
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?;
         println!("Neoism {latest} is staged. Closing Neoism to finish the macOS update.");
+        reporter.ready("Restarting Neoism to install the update");
         return Ok(());
     }
 
+    #[cfg(not(windows))]
+    reporter.progress(Some(85), "Installing Neoism");
     #[cfg(not(windows))]
     for bin in BINS {
         #[cfg(target_os = "macos")]
@@ -1315,17 +1543,35 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
-    let stopped = terminate_other_neoism_processes();
-    if stopped > 0 {
-        println!("  ✓ stopped {stopped} stale Neoism process(es) — GUI, daemon, agent");
+    if options.gui {
+        reporter.ready("Restarting Neoism to finish the update");
+        if let Some(parent_pid) = options.parent_pid {
+            wait_for_process_exit(parent_pid, std::time::Duration::from_secs(30))?;
+        }
     }
-    println!("Updated to {latest}.");
-    println!(
-        "  • The agent server + embedded daemon relaunch when you next open Neoism."
-    );
-    println!(
-        "  • Containerized servers are left untouched — they manage their own lifecycle."
-    );
+    let stopped = terminate_other_neoism_processes();
+    if !options.gui {
+        if stopped > 0 {
+            println!(
+                "  ✓ stopped {stopped} stale Neoism process(es) — GUI, daemon, agent"
+            );
+        }
+        println!("Updated to {latest}.");
+        println!(
+            "  • The agent server + embedded daemon relaunch when you next open Neoism."
+        );
+        println!(
+            "  • Containerized servers are left untouched — they manage their own lifecycle."
+        );
+    }
+    if options.relaunch {
+        wait_for_other_neoism_processes(std::time::Duration::from_secs(10));
+        std::process::Command::new(std::env::current_exe()?)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+    }
     Ok(())
 }
 
@@ -1388,8 +1634,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut initial_open_paths = terminal_options.open_paths.clone();
     initial_open_paths.extend(terminal_options.paths.clone());
 
-    let can_forward_to_running_instance =
-        args.daemon_url.is_none() && args.ssh_host.is_none();
+    let can_forward_to_running_instance = args.daemon_url.is_none()
+        && args.ssh_host.is_none()
+        && std::env::var_os("NEOISM_UPDATE_CHECK").is_none();
     let should_forward_to_running_instance = can_forward_to_running_instance
         && (terminal_options.new_window
             || (terminal_options.command.is_empty()

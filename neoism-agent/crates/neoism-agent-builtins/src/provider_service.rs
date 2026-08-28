@@ -142,6 +142,73 @@ struct ProviderAuthorizeRequest {
 #[derive(Deserialize)]
 struct ProviderCallbackRequest { method: Value, code: Option<String> }
 
-fn runtime_error(error: impl std::fmt::Display) -> PluginRuntimeError {
-    PluginRuntimeError::new(error.to_string())
+fn runtime_error(error: impl Into<anyhow::Error>) -> PluginRuntimeError {
+    let error = error.into();
+    let provider_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::provider_error::ProviderError>());
+    let transport_is_retryable = error.chain().any(|cause| {
+        cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+            error.is_timeout()
+                || error.is_connect()
+                || error.is_request()
+                || error.is_body()
+                || error.is_decode()
+        })
+    });
+    let message = format!("{error:#}");
+
+    if let Some(error) = provider_error {
+        return PluginRuntimeError::provider(
+            message,
+            error.retryable,
+            error.retry_after_ms,
+        );
+    }
+    if transport_is_retryable {
+        return PluginRuntimeError::provider(message, true, None);
+    }
+    PluginRuntimeError::new(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_error;
+    use crate::provider_error::ProviderError;
+
+    #[test]
+    fn runtime_error_preserves_provider_retry_metadata() {
+        let error = ProviderError {
+            provider: "OpenAI".to_string(),
+            status: Some(429),
+            message: "rate limit".to_string(),
+            body: None,
+            retryable: true,
+            retry_after_ms: Some(4_200),
+            context_overflow: false,
+        };
+
+        let error = runtime_error(anyhow::Error::new(error));
+
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(error.retry_after_ms, Some(4_200));
+    }
+
+    #[test]
+    fn runtime_error_preserves_explicit_terminal_provider_errors() {
+        let error = ProviderError {
+            provider: "OpenAI".to_string(),
+            status: Some(400),
+            message: "context window exceeded".to_string(),
+            body: None,
+            retryable: false,
+            retry_after_ms: None,
+            context_overflow: true,
+        };
+
+        assert_eq!(
+            runtime_error(anyhow::Error::new(error)).retryable,
+            Some(false)
+        );
+    }
 }

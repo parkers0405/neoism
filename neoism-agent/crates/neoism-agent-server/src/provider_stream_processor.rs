@@ -123,7 +123,12 @@ impl ProviderStreamStepError {
     fn retryable_provider_error(error: &anyhow::Error) -> Self {
         let retry_after_ms = error
             .downcast_ref::<crate::provider_error::ProviderError>()
-            .and_then(|error| error.retry_after_ms);
+            .and_then(|error| error.retry_after_ms)
+            .or_else(|| {
+                error
+                    .downcast_ref::<neoism_agent_plugin_api::PluginRuntimeError>()
+                    .and_then(|error| error.retry_after_ms)
+            });
         Self {
             message: error.to_string(),
             retryable: true,
@@ -162,7 +167,26 @@ pub(crate) async fn run_provider_stream_step(
         .await
         {
             ProviderEventPoll::Event(event) => event,
-            ProviderEventPoll::End => break,
+            ProviderEventPoll::End => {
+                let message = "Provider stream ended before a terminal event".to_string();
+                if provider_stream_timeout_is_retryable(&stream_state) {
+                    return Err(ProviderStreamStepError::unfinalized(message, true));
+                }
+                finish_provider_stream_with_error(
+                    ctx.state,
+                    ctx.session_id,
+                    ctx.session_id_text,
+                    ctx.run_id,
+                    ctx.text_part_id.as_str(),
+                    ctx.live_message,
+                    message.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    ProviderStreamStepError::unfinalized(error.to_string(), false)
+                })?;
+                return Err(ProviderStreamStepError::finalized(message));
+            }
             ProviderEventPoll::Cancelled => {
                 finish_provider_stream_with_error(
                     ctx.state,
@@ -1019,6 +1043,16 @@ mod tests {
             ProviderStreamStepState::new("openai".to_string(), "model".to_string());
         stream.executed_tool_calls.insert("call-1".to_string());
 
+        assert!(!provider_stream_timeout_is_retryable(&stream));
+    }
+
+    #[test]
+    fn premature_eof_uses_the_same_tool_replay_guard() {
+        let mut stream =
+            ProviderStreamStepState::new("openai".to_string(), "model".to_string());
+        assert!(provider_stream_timeout_is_retryable(&stream));
+
+        stream.executed_tool_calls.insert("call-1".to_string());
         assert!(!provider_stream_timeout_is_retryable(&stream));
     }
 }

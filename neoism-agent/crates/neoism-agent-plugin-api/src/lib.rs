@@ -233,6 +233,9 @@ impl RegisteredRuntimeHook {
 #[error("{message}")]
 pub struct PluginRuntimeError {
     pub message: String,
+    /// Provider errors set this explicitly so retry policy survives the plugin boundary.
+    pub retryable: Option<bool>,
+    pub retry_after_ms: Option<u64>,
 }
 
 pub const PROCESS_PLUGIN_PROTOCOL: &str = "neoism-plugin/1";
@@ -261,6 +264,20 @@ impl PluginRuntimeError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            retryable: None,
+            retry_after_ms: None,
+        }
+    }
+
+    pub fn provider(
+        message: impl Into<String>,
+        retryable: bool,
+        retry_after_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            retryable: Some(retryable),
+            retry_after_ms,
         }
     }
 }

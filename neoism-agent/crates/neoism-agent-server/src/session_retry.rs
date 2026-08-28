@@ -36,9 +36,16 @@ pub(crate) fn retry_delay_ms_for_error(
     attempt: u64,
     error: Option<&anyhow::Error>,
 ) -> u64 {
-    let retry_after = error
-        .and_then(|error| error.downcast_ref::<ProviderError>())
-        .and_then(|error| error.retry_after_ms);
+    let retry_after = error.and_then(|error| {
+        error
+            .downcast_ref::<ProviderError>()
+            .and_then(|error| error.retry_after_ms)
+            .or_else(|| {
+                error
+                    .downcast_ref::<neoism_agent_plugin_api::PluginRuntimeError>()
+                    .and_then(|error| error.retry_after_ms)
+            })
+    });
     retry_delay_ms_with_override(attempt, retry_after)
 }
 
@@ -78,6 +85,13 @@ pub(crate) fn retryable_error(error: &anyhow::Error) -> bool {
                 .body
                 .as_deref()
                 .is_some_and(retryable_message);
+    }
+    if let Some(plugin_error) =
+        error.downcast_ref::<neoism_agent_plugin_api::PluginRuntimeError>()
+    {
+        if let Some(retryable) = plugin_error.retryable {
+            return retryable;
+        }
     }
     error.chain().any(|cause| {
         retryable_message(&cause.to_string())
@@ -252,5 +266,26 @@ mod tests {
 
         assert_eq!(retry_delay_ms_for_error(1, Some(&error)), 4_200);
         assert!(retryable_error(&error));
+    }
+
+    #[test]
+    fn plugin_provider_error_preserves_retry_decision_and_delay() {
+        let error =
+            anyhow::Error::new(neoism_agent_plugin_api::PluginRuntimeError::provider(
+                "OpenAI transport failed",
+                true,
+                Some(2_500),
+            ));
+
+        assert!(retryable_error(&error));
+        assert_eq!(retry_delay_ms_for_error(1, Some(&error)), 2_500);
+
+        let terminal =
+            anyhow::Error::new(neoism_agent_plugin_api::PluginRuntimeError::provider(
+                "500 tokens exceed context window",
+                false,
+                None,
+            ));
+        assert!(!retryable_error(&terminal));
     }
 }

@@ -2352,7 +2352,7 @@ async fn run_provider_stream_step_with_retry(
             Ok(stream) => stream,
             Err(error) => {
                 crate::execution_activity::end_provider_segment(activity_segment).await;
-                let error = anyhow::anyhow!(error.to_string());
+                let error = anyhow::Error::new(error);
                 if attempt < max_retries
                     && !cancellation.load(Ordering::SeqCst)
                     && session_retry::retryable_error(&error)
@@ -2401,9 +2401,11 @@ async fn run_provider_stream_step_with_retry(
         let provider_stream = crate::provider::ProviderStream {
             provider_id: provider_stream.provider_id,
             model_id: provider_stream.model_id,
-            events: Box::pin(provider_stream.events.map(|event| {
-                event.map_err(|error| anyhow::anyhow!(error.to_string()))
-            })),
+            events: Box::pin(
+                provider_stream
+                    .events
+                    .map(|event| event.map_err(anyhow::Error::new)),
+            ),
         };
         let stream_result = run_provider_stream_step(ctx, provider_stream, cancellation).await;
         crate::execution_activity::end_provider_segment(activity_segment).await;

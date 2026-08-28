@@ -23,7 +23,8 @@
 //! receivers stay inside `LocalPty` and the synchronous
 //! [`PtySession::read`] / [`PtySession::write`] API drains them.
 
-use std::io::{ErrorKind, Read as _, Write as _};
+use std::collections::VecDeque;
+use std::io::{self, ErrorKind, Read as _};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, SyncSender, TryRecvError};
 use std::sync::Arc;
@@ -53,6 +54,55 @@ enum Command {
     },
     Resize(WinsizeBuilder),
     Shutdown,
+}
+
+struct PendingWrite {
+    bytes: Vec<u8>,
+    offset: usize,
+    completion: Option<SyncSender<std::io::Result<usize>>>,
+}
+
+/// Push as much queued input into the PTY writer as it will accept now.
+///
+/// This must run immediately after draining `Command::Write`, not only after
+/// a later writable event. The Windows ConPTY writer is backed by an in-memory
+/// pipe whose readiness can already be `writable` when poll interest is
+/// enabled; with edge-triggered polling there may be no new edge, leaving the
+/// command (and synchronous terminal-protocol replies) queued forever.
+fn flush_pending_writes<W: io::Write>(
+    writer: &mut W,
+    pending_writes: &mut VecDeque<PendingWrite>,
+    current_write: &mut Option<PendingWrite>,
+) -> io::Result<()> {
+    loop {
+        if current_write.is_none() {
+            *current_write = pending_writes.pop_front();
+        }
+        let Some(write) = current_write.as_mut() else {
+            return Ok(());
+        };
+        match writer.write(&write.bytes[write.offset..]) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                write.offset += n;
+                if write.offset >= write.bytes.len() {
+                    if let Some(completion) = write.completion.take() {
+                        let _ = completion.send(Ok(write.bytes.len()));
+                    }
+                    *current_write = None;
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(()),
+            Err(err) => {
+                if let Some(completion) = write.completion.take() {
+                    let _ =
+                        completion.send(Err(io::Error::new(err.kind(), err.to_string())));
+                }
+                return Err(err);
+            }
+        }
+    }
 }
 
 /// Native PTY worker. See module docs.
@@ -333,13 +383,7 @@ fn reader_loop_impl(
     let mut events = Events::with_capacity(1024);
     let mut buf = vec![0u8; READ_BUFFER_SIZE];
     let mut shutting_down = false;
-    struct PendingWrite {
-        bytes: Vec<u8>,
-        offset: usize,
-        completion: Option<SyncSender<std::io::Result<usize>>>,
-    }
-
-    let mut pending_writes = std::collections::VecDeque::<PendingWrite>::new();
+    let mut pending_writes = VecDeque::<PendingWrite>::new();
     let mut current_write: Option<PendingWrite> = None;
 
     'event_loop: loop {
@@ -388,6 +432,17 @@ fn reader_loop_impl(
         }
 
         if shutting_down {
+            break 'event_loop;
+        }
+
+        // A command-channel wake-up proves there is new work, so attempt it
+        // now. Waiting exclusively for a separate writable edge loses input
+        // on Windows when ConPTY's write pipe was already writable before we
+        // enabled that interest.
+        if let Err(err) =
+            flush_pending_writes(pty.writer(), &mut pending_writes, &mut current_write)
+        {
+            error!(target: "neoism_terminal_pty", "PTY write error: {err}");
             break 'event_loop;
         }
 
@@ -455,43 +510,13 @@ fn reader_loop_impl(
                 }
 
                 if event.readiness().is_writable() {
-                    'write_loop: loop {
-                        if current_write.is_none() {
-                            current_write = pending_writes.pop_front();
-                        }
-                        let Some(write) = current_write.as_mut() else {
-                            break 'write_loop;
-                        };
-                        match pty.writer().write(&write.bytes[write.offset..]) {
-                            Ok(0) => break 'write_loop,
-                            Ok(n) => {
-                                write.offset += n;
-                                if write.offset >= write.bytes.len() {
-                                    if let Some(completion) = write.completion.take() {
-                                        let _ = completion.send(Ok(write.bytes.len()));
-                                    }
-                                    current_write = None;
-                                }
-                            }
-                            Err(err) => match err.kind() {
-                                ErrorKind::Interrupted => continue,
-                                ErrorKind::WouldBlock => break 'write_loop,
-                                _ => {
-                                    if let Some(completion) = write.completion.take() {
-                                        let _ =
-                                            completion.send(Err(std::io::Error::new(
-                                                err.kind(),
-                                                err.to_string(),
-                                            )));
-                                    }
-                                    error!(
-                                        target: "neoism_terminal_pty",
-                                        "PTY write error: {err}"
-                                    );
-                                    break 'event_loop;
-                                }
-                            },
-                        }
+                    if let Err(err) = flush_pending_writes(
+                        pty.writer(),
+                        &mut pending_writes,
+                        &mut current_write,
+                    ) {
+                        error!(target: "neoism_terminal_pty", "PTY write error: {err}");
+                        break 'event_loop;
                     }
                 }
             }
@@ -563,4 +588,43 @@ fn command_on_path(command: &str) -> bool {
     };
 
     std::env::split_paths(&paths).any(|dir| dir.join(command).is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queued_input_is_written_without_waiting_for_a_writable_event() {
+        let mut writer = Vec::new();
+        let mut pending = VecDeque::from([PendingWrite {
+            bytes: b"neoism update\r".to_vec(),
+            offset: 0,
+            completion: None,
+        }]);
+        let mut current = None;
+
+        flush_pending_writes(&mut writer, &mut pending, &mut current).unwrap();
+
+        assert_eq!(writer, b"neoism update\r");
+        assert!(pending.is_empty());
+        assert!(current.is_none());
+    }
+
+    #[test]
+    fn immediate_write_completes_synchronous_protocol_reply() {
+        let (completion, completed) = mpsc::sync_channel(1);
+        let mut writer = Vec::new();
+        let mut pending = VecDeque::from([PendingWrite {
+            bytes: b"reply".to_vec(),
+            offset: 0,
+            completion: Some(completion),
+        }]);
+        let mut current = None;
+
+        flush_pending_writes(&mut writer, &mut pending, &mut current).unwrap();
+
+        assert_eq!(completed.recv().unwrap().unwrap(), 5);
+        assert_eq!(writer, b"reply");
+    }
 }

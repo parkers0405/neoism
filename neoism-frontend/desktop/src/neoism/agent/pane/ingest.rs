@@ -2010,17 +2010,12 @@ impl NeoismAgentPane {
         self.pending_user_prompts.clear();
     }
 
-    /// Keep every landed background-task completion card through a
-    /// snapshot replacement. The live `session.background_task.completed`
-    /// event injects the card immediately, but the server only persists its
-    /// equivalent (the `msg_background_completion_{job}` runtime prompt,
-    /// mapped back to the SAME card id by the shared `api_mapping`) once
-    /// the queued notification prompt drains — a `Messages` refresh inside
-    /// that window would silently wipe the card. Re-insert any copy the
-    /// snapshot lacks at its chronological position; when the snapshot DOES
-    /// carry the server copy (same id, or same job id) it replaces the
-    /// client copy — no duplicate. Mirrors the shared pane's helper of the
-    /// same name (`neoism-ui` state/ingest.rs).
+    /// Keep the hidden background-completion sentinel through the short gap
+    /// between the live completion event and the durable runtime prompt.
+    /// Once the server snapshot contains its own copy, the server's position
+    /// is authoritative. The completion event has no transcript anchor, so
+    /// preserving its speculative live position can cross assistant/user
+    /// turn boundaries and reorder the visible timeline.
     pub(crate) fn preserve_background_completion_cards(
         &self,
         mut server_messages: Vec<NeoismAgentMessage>,
@@ -2030,35 +2025,26 @@ impl NeoismAgentPane {
                 continue;
             }
             let job_id = background_job_id_from_message(existing);
-            let matching_index = server_messages.iter().position(|incoming| {
+            let already_present = server_messages.iter().any(|incoming| {
                 incoming.id == existing.id
                     || (job_id.is_some()
                         && background_completion_job_id_from_message(incoming) == job_id)
             });
-            let card = match matching_index {
-                Some(matching_index)
-                    if server_messages[matching_index].id == existing.id
-                        || is_background_completion_card(&server_messages[matching_index]) =>
-                {
-                    // The durable server copy has richer detail, but its
-                    // synthetic runtime prompt was persisted only after the
-                    // in-flight provider turn settled. Keep the LIVE event's
-                    // actual visual anchor instead of accepting that delayed
-                    // tail position.
-                    server_messages.remove(matching_index)
-                }
-                // A normal model-issued `background_task_result` call for the
-                // same job is its own chronological row. It supersedes the
-                // synthetic completion card rather than being relocated.
-                Some(_) => continue,
-                None => existing.clone(),
-            };
-            let insert_at = background_completion_anchor_index(
-                &self.messages,
-                index,
-                &server_messages,
-            );
-            server_messages.insert(insert_at, card);
+            if already_present {
+                continue;
+            }
+            let insert_at = self.messages[..index]
+                .iter()
+                .rev()
+                .filter(|message| !message.id.is_empty())
+                .find_map(|prior| {
+                    server_messages
+                        .iter()
+                        .position(|incoming| incoming.id == prior.id)
+                })
+                .map(|position| position + 1)
+                .unwrap_or(server_messages.len());
+            server_messages.insert(insert_at, existing.clone());
         }
         server_messages
     }
@@ -2519,17 +2505,6 @@ impl NeoismAgentPane {
                 return;
             }
         }
-        if is_background_completion_card(&message) {
-            if let Some(index) = live_background_completion_insert_index(
-                &self.messages,
-                &self.live_part_parent_ids,
-                self.streaming_state,
-            ) {
-                self.messages.insert(index, message);
-                self.invalidate_timeline_layout();
-                return;
-            }
-        }
         // A runtime notification can be persisted and broadcast after the
         // provider has already started streaming the assistant response it
         // triggered. Both carry ascending canonical message ids, so put a
@@ -2741,48 +2716,4 @@ fn normalize_grouped_assistant_reasoning_order(
 /// must not drag the whole settled turn back into view with it.
 fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
     message.tool == "background_task_result" && message.id.starts_with("background-task-")
-}
-
-fn live_background_completion_insert_index(
-    messages: &[NeoismAgentMessage],
-    parent_ids: &HashMap<String, String>,
-    streaming_state: NeoismAgentStreamingState,
-) -> Option<usize> {
-    let live_kind = match streaming_state {
-        NeoismAgentStreamingState::Generating => NeoismAgentMessageKind::Assistant,
-        NeoismAgentStreamingState::Thinking => NeoismAgentMessageKind::Reasoning,
-        _ => return None,
-    };
-    messages
-        .iter()
-        .rposition(|message| message.kind == live_kind && parent_ids.contains_key(&message.id))
-        .or_else(|| messages.iter().rposition(|message| message.kind == live_kind))
-}
-
-fn background_completion_anchor_index(
-    local_messages: &[NeoismAgentMessage],
-    local_index: usize,
-    server_messages: &[NeoismAgentMessage],
-) -> usize {
-    if let Some(position) = local_messages[..local_index]
-        .iter()
-        .rev()
-        .filter(|message| !message.id.is_empty())
-        .find_map(|prior| {
-            server_messages
-                .iter()
-                .position(|incoming| incoming.id == prior.id)
-        })
-    {
-        return position + 1;
-    }
-    local_messages[local_index.saturating_add(1)..]
-        .iter()
-        .filter(|message| !message.id.is_empty())
-        .find_map(|following| {
-            server_messages
-                .iter()
-                .position(|incoming| incoming.id == following.id)
-        })
-        .unwrap_or(server_messages.len())
 }

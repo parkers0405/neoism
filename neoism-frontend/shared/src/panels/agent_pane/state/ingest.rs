@@ -117,17 +117,12 @@ impl NeoismAgentPane {
         server_messages
     }
 
-    /// Keep every landed background-task completion card through a
-    /// snapshot replacement. The live `session.background_task.completed`
-    /// event injects the card immediately, but the server only persists its
-    /// equivalent (the `msg_background_completion_{job}` runtime prompt,
-    /// mapped back to the SAME card id by `api_mapping`) once the queued
-    /// notification prompt drains — a history refresh inside that window
-    /// would silently wipe the card. Re-insert any copy the snapshot lacks
-    /// at its chronological position; when the snapshot DOES carry the
-    /// server copy (same id, or same job id) it replaces the client copy —
-    /// no duplicate. Mirrors the desktop pane's helper of the same name
-    /// (`desktop/src/neoism/agent/pane/ingest.rs`).
+    /// Keep the hidden background-completion sentinel through the short gap
+    /// between the live completion event and the durable runtime prompt.
+    /// Once the server snapshot contains its own copy, the server's position
+    /// is authoritative. The completion event has no transcript anchor, so
+    /// preserving its speculative live position can cross assistant/user
+    /// turn boundaries and reorder the visible timeline.
     pub(in crate::panels::agent_pane::state) fn preserve_background_completion_cards(
         &self,
         mut server_messages: Vec<NeoismAgentMessage>,
@@ -137,27 +132,26 @@ impl NeoismAgentPane {
                 continue;
             }
             let job_id = background_job_id_from_message(existing);
-            let matching_index = server_messages.iter().position(|incoming| {
+            let already_present = server_messages.iter().any(|incoming| {
                 incoming.id == existing.id
                     || (job_id.is_some()
                         && background_completion_job_id_from_message(incoming) == job_id)
             });
-            let card = match matching_index {
-                Some(matching_index)
-                    if server_messages[matching_index].id == existing.id
-                        || is_background_completion_card(&server_messages[matching_index]) =>
-                {
-                    server_messages.remove(matching_index)
-                }
-                Some(_) => continue,
-                None => existing.clone(),
-            };
-            let insert_at = background_completion_anchor_index(
-                &self.messages,
-                index,
-                &server_messages,
-            );
-            server_messages.insert(insert_at, card);
+            if already_present {
+                continue;
+            }
+            let insert_at = self.messages[..index]
+                .iter()
+                .rev()
+                .filter(|message| !message.id.is_empty())
+                .find_map(|prior| {
+                    server_messages
+                        .iter()
+                        .position(|incoming| incoming.id == prior.id)
+                })
+                .map(|position| position + 1)
+                .unwrap_or(server_messages.len());
+            server_messages.insert(insert_at, existing.clone());
         }
         server_messages
     }
@@ -332,26 +326,6 @@ impl NeoismAgentPane {
                 return;
             }
         }
-        if is_background_completion_card(&message) {
-            let live_kind = match self.streaming_state {
-                NeoismAgentStreamingState::Generating => {
-                    Some(NeoismAgentMessageKind::Assistant)
-                }
-                NeoismAgentStreamingState::Thinking => {
-                    Some(NeoismAgentMessageKind::Reasoning)
-                }
-                _ => None,
-            };
-            if let Some(index) = live_kind.and_then(|kind| {
-                self.messages
-                    .iter()
-                    .rposition(|existing| existing.kind == kind)
-            }) {
-                self.messages.insert(index, message);
-                self.invalidate_timeline_layout();
-                return;
-            }
-        }
         if let Some(index) = self.match_running_tool_part(&message) {
             let merged = merge_part_message(self.messages[index].clone(), message);
             self.messages[index] = merged;
@@ -465,32 +439,4 @@ impl NeoismAgentPane {
 /// must not drag the whole settled turn back into view with it.
 fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
     message.tool == "background_task_result" && message.id.starts_with("background-task-")
-}
-
-fn background_completion_anchor_index(
-    local_messages: &[NeoismAgentMessage],
-    local_index: usize,
-    server_messages: &[NeoismAgentMessage],
-) -> usize {
-    if let Some(position) = local_messages[..local_index]
-        .iter()
-        .rev()
-        .filter(|message| !message.id.is_empty())
-        .find_map(|prior| {
-            server_messages
-                .iter()
-                .position(|incoming| incoming.id == prior.id)
-        })
-    {
-        return position + 1;
-    }
-    local_messages[local_index.saturating_add(1)..]
-        .iter()
-        .filter(|message| !message.id.is_empty())
-        .find_map(|following| {
-            server_messages
-                .iter()
-                .position(|incoming| incoming.id == following.id)
-        })
-        .unwrap_or(server_messages.len())
 }

@@ -1156,6 +1156,45 @@ fn raw_remote_prompt_finishes_command_without_any_osc_markers() {
 }
 
 #[test]
+fn raw_local_windows_prompt_finishes_command_without_osc_markers() {
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("Get-ChildItem");
+    input.submit_with_context(None, Some(10));
+
+    assert!(!input.finish_unintegrated_local_command_at_prompt(
+        "Directory: C:\\Users\\neoism",
+        Some(11),
+    ));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+
+    assert!(input.finish_unintegrated_local_command_at_prompt(
+        "PS C:\\Users\\neoism>   ",
+        Some(12),
+    ));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Ok
+    );
+}
+
+#[test]
+fn blank_local_windows_row_does_not_finish_quiet_command() {
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("Start-Sleep 30");
+    input.submit_with_context(None, Some(10));
+
+    assert!(!input.finish_unintegrated_local_command_at_prompt("", Some(11)));
+    assert!(!input.finish_unintegrated_local_command_at_prompt("", Some(11)));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+}
+
+#[test]
 fn joined_blank_prompt_finishes_command_without_osc_or_visible_prompt() {
     // Joined workspace: Neoism's daemon block-wrapper sets `PROMPT=''`, so a
     // remote shell that emits no OSC 133 lifecycle at all leaves only an

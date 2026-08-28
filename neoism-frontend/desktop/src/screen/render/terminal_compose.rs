@@ -245,6 +245,27 @@ impl Screen<'_> {
                     }
                 }
             }
+            #[cfg(target_os = "windows")]
+            if ctx.remote_pty.is_none() {
+                // Local Windows shells are not guaranteed to emit OSC 133:
+                // cmd.exe has no integration hook, and a PowerShell profile
+                // may replace Neoism's injected prompt function. The visible
+                // prompt on the live cursor row is still definitive evidence
+                // that the command returned. Without this fallback every
+                // submitted block remains Running and its timer spins until
+                // the next command is entered.
+                for row in &terminal_prompt_rows {
+                    if ctx
+                        .terminal_input
+                        .finish_unintegrated_local_command_at_prompt(
+                            row,
+                            Some(terminal_cursor_abs),
+                        )
+                    {
+                        break;
+                    }
+                }
+            }
             let block_input_active = is_active
                 && !ctx.has_non_terminal_surface()
                 && ctx

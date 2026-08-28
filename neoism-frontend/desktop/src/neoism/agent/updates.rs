@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -27,6 +27,45 @@ use super::side_panel::SessionGoal;
 const CONNECT_HEADER_TIMEOUT: Duration = Duration::from_secs(3);
 const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 const PENDING_UNKNOWN_SESSION_EVENT_LIMIT: usize = 512;
+
+/// Transcript snapshots are reconciled independently for every session in a
+/// subscribed tree. An event from a child must not invalidate the parent's
+/// completed-message refresh (or vice versa), and lifecycle-only events must
+/// not invalidate either one.
+#[derive(Default)]
+struct MessageRefreshEpochs {
+    by_session: Mutex<HashMap<String, u64>>,
+}
+
+impl MessageRefreshEpochs {
+    fn current(&self, session_id: &str) -> u64 {
+        let mut epochs = self
+            .by_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *epochs.entry(session_id.to_string()).or_default()
+    }
+
+    fn advance(&self, session_id: &str) -> u64 {
+        let mut epochs = self
+            .by_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let epoch = epochs.entry(session_id.to_string()).or_default();
+        *epoch = epoch.wrapping_add(1);
+        *epoch
+    }
+
+    fn invalidate_all(&self) {
+        let mut epochs = self
+            .by_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for epoch in epochs.values_mut() {
+            *epoch = epoch.wrapping_add(1);
+        }
+    }
+}
 
 pub(super) enum AgentSessionUpdate {
     Messages {
@@ -465,7 +504,7 @@ fn run_event_stream(
     while !stop.load(Ordering::Relaxed) {
         match open_event_stream_with_deadline(&server, &session_id) {
             Ok(connection) => {
-                let message_refresh_epoch = Arc::new(AtomicU64::new(0));
+                let message_refresh_epochs = Arc::new(MessageRefreshEpochs::default());
                 if connected_once {
                     // The stream is subscribed before the snapshot is fetched, so live
                     // events cannot slip between reconnect and reconciliation.
@@ -530,8 +569,7 @@ fn run_event_stream(
                         tx.clone(),
                         stop.clone(),
                         wake.clone(),
-                        message_refresh_epoch.clone(),
-                        0,
+                        message_refresh_epochs.clone(),
                     );
                 }
                 connected_once = true;
@@ -543,10 +581,10 @@ fn run_event_stream(
                     stop.clone(),
                     known_child_session_ids.clone(),
                     wake.clone(),
-                    message_refresh_epoch.clone(),
+                    message_refresh_epochs.clone(),
                 );
                 // Cancel a snapshot still in flight from this connection.
-                message_refresh_epoch.fetch_add(1, Ordering::AcqRel);
+                message_refresh_epochs.invalidate_all();
             }
             Err(error) if !connected_once && !stop.load(Ordering::Relaxed) => {
                 let _ = tx.send(AgentSessionUpdate::System {
@@ -619,7 +657,7 @@ fn read_event_stream(
     stop: Arc<AtomicBool>,
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
-    message_refresh_epoch: Arc<AtomicU64>,
+    message_refresh_epochs: Arc<MessageRefreshEpochs>,
 ) {
     read_event_stream_with_staleness(
         connection,
@@ -629,7 +667,7 @@ fn read_event_stream(
         stop,
         known_child_session_ids,
         wake,
-        message_refresh_epoch,
+        message_refresh_epochs,
         EVENT_STREAM_STALE_AFTER,
     );
 }
@@ -643,7 +681,7 @@ fn read_event_stream_with_staleness(
     stop: Arc<AtomicBool>,
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
-    message_refresh_epoch: Arc<AtomicU64>,
+    message_refresh_epochs: Arc<MessageRefreshEpochs>,
     stale_after: Duration,
 ) {
     let mut chunked = ChunkedDecoder::new(connection.chunked);
@@ -666,7 +704,7 @@ fn read_event_stream_with_staleness(
                 &known_child_session_ids,
                 &mut pending_unknown_events,
                 &wake,
-                &message_refresh_epoch,
+                &message_refresh_epochs,
             ) {
                 return;
             }
@@ -691,7 +729,7 @@ fn read_event_stream_with_staleness(
                         &known_child_session_ids,
                         &mut pending_unknown_events,
                         &wake,
-                        &message_refresh_epoch,
+                        &message_refresh_epochs,
                     ) {
                         return;
                     }
@@ -731,7 +769,7 @@ fn process_sse_bytes(
     known_child_session_ids: &Arc<Mutex<HashSet<String>>>,
     pending_unknown_events: &mut VecDeque<Value>,
     wake: &Arc<Mutex<Option<AgentEventWake>>>,
-    message_refresh_epoch: &Arc<AtomicU64>,
+    message_refresh_epochs: &Arc<MessageRefreshEpochs>,
 ) -> bool {
     for event in sse.feed(bytes) {
         sync_tracked_child_sessions(state, known_child_session_ids);
@@ -742,7 +780,7 @@ fn process_sse_bytes(
             tx,
             state,
             wake,
-            message_refresh_epoch,
+            message_refresh_epochs,
         )
         .is_err()
         {
@@ -756,7 +794,7 @@ fn process_sse_bytes(
                 tx,
                 state,
                 wake,
-                message_refresh_epoch,
+                message_refresh_epochs,
             )
             .is_err()
             {
@@ -778,7 +816,7 @@ fn process_sse_bytes(
             tx,
             state,
             wake,
-            message_refresh_epoch,
+            message_refresh_epochs,
         )
         .is_err()
         {
@@ -804,7 +842,7 @@ fn replay_known_session_events(
     tx: &Sender<AgentSessionUpdate>,
     state: &mut SessionEventUpdateState,
     wake: &Arc<Mutex<Option<AgentEventWake>>>,
-    message_refresh_epoch: &Arc<AtomicU64>,
+    message_refresh_epochs: &Arc<MessageRefreshEpochs>,
 ) -> Result<(), mpsc::SendError<AgentSessionUpdate>> {
     let mut still_unknown = VecDeque::with_capacity(pending.len());
     while let Some(event) = pending.pop_front() {
@@ -816,7 +854,7 @@ fn replay_known_session_events(
                 tx,
                 state,
                 wake,
-                message_refresh_epoch,
+                message_refresh_epochs,
             )?;
         } else {
             still_unknown.push_back(event);
@@ -833,13 +871,10 @@ fn send_event_updates(
     tx: &Sender<AgentSessionUpdate>,
     state: &mut SessionEventUpdateState,
     wake: &Arc<Mutex<Option<AgentEventWake>>>,
-    message_refresh_epoch: &Arc<AtomicU64>,
+    message_refresh_epochs: &Arc<MessageRefreshEpochs>,
 ) -> Result<(), mpsc::SendError<AgentSessionUpdate>> {
-    // Every newly handled SSE event supersedes transcript snapshots launched
-    // by older events. The worker checks this epoch after its blocking REST
-    // read so an old idle/reconnect snapshot can never overwrite a newer run.
-    let event_epoch = message_refresh_epoch.fetch_add(1, Ordering::AcqRel) + 1;
-    for update in classify_session_event(event, session_id, state) {
+    let updates = classify_session_event(event, session_id, state);
+    for update in updates {
         match update {
             SessionEventUpdate::SessionIdle { refresh_messages } => {
                 // Settle the activity chrome immediately, then refresh the
@@ -849,6 +884,7 @@ fn send_event_updates(
                 tx.send(AgentSessionUpdate::SessionIdle)?;
                 if refresh_messages {
                     state.mark_idle_messages_refreshed();
+                    message_refresh_epochs.advance(session_id);
                     spawn_message_refreshes(
                         server.to_string(),
                         session_id.to_string(),
@@ -856,8 +892,7 @@ fn send_event_updates(
                         tx.clone(),
                         Arc::new(AtomicBool::new(false)),
                         wake.clone(),
-                        message_refresh_epoch.clone(),
-                        event_epoch,
+                        message_refresh_epochs.clone(),
                     );
                 }
             }
@@ -869,13 +904,17 @@ fn send_event_updates(
                 part_id,
                 kind,
                 delta,
-            } => tx.send(AgentSessionUpdate::PartDelta {
-                message_id,
-                part_id,
-                kind,
-                delta,
-            })?,
+            } => {
+                message_refresh_epochs.advance(session_id);
+                tx.send(AgentSessionUpdate::PartDelta {
+                    message_id,
+                    part_id,
+                    kind,
+                    delta,
+                })?;
+            }
             SessionEventUpdate::PartUpdated(part) => {
+                message_refresh_epochs.advance(session_id);
                 if let Some(message) = part_block(&part) {
                     tx.send(AgentSessionUpdate::PartUpdated {
                         message,
@@ -884,6 +923,7 @@ fn send_event_updates(
                 }
             }
             SessionEventUpdate::PartRemoved(part_id) => {
+                message_refresh_epochs.advance(session_id);
                 tx.send(AgentSessionUpdate::PartRemoved(part_id))?;
             }
             SessionEventUpdate::ChildPartDelta {
@@ -892,14 +932,18 @@ fn send_event_updates(
                 part_id,
                 kind,
                 delta,
-            } => tx.send(AgentSessionUpdate::ChildPartDelta {
-                session_id,
-                message_id,
-                part_id,
-                kind,
-                delta,
-            })?,
+            } => {
+                message_refresh_epochs.advance(&session_id);
+                tx.send(AgentSessionUpdate::ChildPartDelta {
+                    session_id,
+                    message_id,
+                    part_id,
+                    kind,
+                    delta,
+                })?;
+            }
             SessionEventUpdate::ChildPartUpdated { session_id, part } => {
+                message_refresh_epochs.advance(&session_id);
                 if let Some(message) = part_block(&part) {
                     tx.send(AgentSessionUpdate::ChildPartUpdated {
                         session_id,
@@ -911,15 +955,19 @@ fn send_event_updates(
             SessionEventUpdate::ChildPartRemoved {
                 session_id,
                 part_id,
-            } => tx.send(AgentSessionUpdate::ChildPartRemoved {
-                session_id,
-                part_id,
-            })?,
+            } => {
+                message_refresh_epochs.advance(&session_id);
+                tx.send(AgentSessionUpdate::ChildPartRemoved {
+                    session_id,
+                    part_id,
+                })?;
+            }
             SessionEventUpdate::CompactionStarted {
                 session_id,
                 id,
                 reason,
             } => {
+                message_refresh_epochs.advance(&session_id);
                 tx.send(AgentSessionUpdate::CompactionStarted {
                     session_id,
                     id,
@@ -927,6 +975,7 @@ fn send_event_updates(
                 })?;
             }
             SessionEventUpdate::CompactionDelta { session_id, delta } => {
+                message_refresh_epochs.advance(&session_id);
                 tx.send(AgentSessionUpdate::CompactionDelta { session_id, delta })?;
             }
             SessionEventUpdate::CompactionEnded {
@@ -935,6 +984,7 @@ fn send_event_updates(
                 kind,
                 usage,
             } => {
+                message_refresh_epochs.advance(&owner_session_id);
                 let refresh_usage = usage.map(Into::into);
                 if owner_session_id == session_id {
                     state.mark_idle_messages_refreshed();
@@ -951,26 +1001,30 @@ fn send_event_updates(
                     tx.clone(),
                     Arc::new(AtomicBool::new(false)),
                     wake.clone(),
-                    message_refresh_epoch.clone(),
-                    event_epoch,
+                    message_refresh_epochs.clone(),
                 );
             }
             SessionEventUpdate::System { title, body } => {
                 tx.send(AgentSessionUpdate::System { title, body })?;
             }
             SessionEventUpdate::Retrying { attempt, message } => {
+                message_refresh_epochs.advance(session_id);
                 tx.send(AgentSessionUpdate::Retrying { attempt, message })?;
             }
             SessionEventUpdate::QueueStatus {
                 count,
                 preview,
                 started_at,
-            } => tx.send(AgentSessionUpdate::QueueStatus {
-                count,
-                preview,
-                started_at,
-            })?,
+            } => {
+                message_refresh_epochs.advance(session_id);
+                tx.send(AgentSessionUpdate::QueueStatus {
+                    count,
+                    preview,
+                    started_at,
+                })?;
+            }
             SessionEventUpdate::DequeuedPrompt { text } => {
+                message_refresh_epochs.advance(session_id);
                 tx.send(AgentSessionUpdate::DequeuedPrompt { text })?
             }
             SessionEventUpdate::SubagentStatus {
@@ -1075,12 +1129,18 @@ fn spawn_message_refreshes(
     tx: Sender<AgentSessionUpdate>,
     stop: Arc<AtomicBool>,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
-    message_refresh_epoch: Arc<AtomicU64>,
-    expected_epoch: u64,
+    message_refresh_epochs: Arc<MessageRefreshEpochs>,
 ) {
+    let refreshes = refreshes
+        .into_iter()
+        .map(|(owner_session_id, usage)| {
+            let expected_epoch = message_refresh_epochs.current(&owner_session_id);
+            (owner_session_id, usage, expected_epoch)
+        })
+        .collect::<Vec<_>>();
     let thread_name = format!("neoism-agent-refresh-{stream_session_id}");
     let _ = thread::Builder::new().name(thread_name).spawn(move || {
-        for (owner_session_id, usage) in refreshes {
+        for (owner_session_id, usage, expected_epoch) in refreshes {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -1090,9 +1150,9 @@ fn spawn_message_refreshes(
                 continue;
             };
             if stop.load(Ordering::Relaxed)
-                || message_refresh_epoch.load(Ordering::Acquire) != expected_epoch
+                || message_refresh_epochs.current(&owner_session_id) != expected_epoch
             {
-                return;
+                continue;
             }
             let messages = if let Some(usage) = usage {
                 with_compaction_usage(page.blocks, usage)
@@ -1175,8 +1235,8 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
-    fn no_refresh_epoch() -> Arc<AtomicU64> {
-        Arc::new(AtomicU64::new(0))
+    fn no_refresh_epoch() -> Arc<MessageRefreshEpochs> {
+        Arc::new(MessageRefreshEpochs::default())
     }
 
     #[test]
@@ -1366,6 +1426,127 @@ mod tests {
             Ok(AgentSessionUpdate::Messages { .. })
         ));
         responder.join().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_event_does_not_cancel_an_inflight_idle_snapshot() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let (request_started_tx, request_started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let responder = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).unwrap();
+            request_started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let body = r#"{"items":[]}"#;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let (tx, rx) = mpsc::channel();
+        let mut state = SessionEventUpdateState::default();
+        let refresh_epochs = no_refresh_epoch();
+
+        send_event_updates(
+            serde_json::json!({
+                "type": "session.status",
+                "properties": {
+                    "sessionID": "root",
+                    "status": { "type": "idle" }
+                }
+            }),
+            &server,
+            "root",
+            &tx,
+            &mut state,
+            &no_wake(),
+            &refresh_epochs,
+        )
+        .unwrap();
+        request_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("background transcript request should start");
+
+        // Execution/runtime lifecycle snapshots commonly follow the terminal
+        // idle edge. They do not mutate the transcript and therefore must not
+        // discard the only snapshot that adds response footer metadata.
+        send_event_updates(
+            serde_json::json!({
+                "type": "session.execution.updated",
+                "properties": {
+                    "sessionID": "root",
+                    "snapshot": { "executionId": "execution" },
+                    "runtime": { "phase": "idle" }
+                }
+            }),
+            &server,
+            "root",
+            &tx,
+            &mut state,
+            &no_wake(),
+            &refresh_epochs,
+        )
+        .unwrap();
+        send_event_updates(
+            serde_json::json!({
+                "type": "session.background_task.completed",
+                "properties": {
+                    "sessionID": "root",
+                    "jobID": "job-timer",
+                    "status": "completed"
+                }
+            }),
+            &server,
+            "root",
+            &tx,
+            &mut state,
+            &no_wake(),
+            &refresh_epochs,
+        )
+        .unwrap();
+        release_tx.send(()).unwrap();
+        responder.join().unwrap();
+
+        let updates = (0..5)
+            .map(|_| {
+                rx.recv_timeout(Duration::from_secs(2)).expect(
+                    "idle, lifecycle updates, and transcript snapshot should arrive",
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(updates
+            .iter()
+            .any(|update| matches!(update, AgentSessionUpdate::Messages { .. })));
+        assert!(updates
+            .iter()
+            .any(|update| matches!(update, AgentSessionUpdate::ExecutionUpdated(_))));
+        assert!(updates
+            .iter()
+            .any(|update| matches!(update, AgentSessionUpdate::RuntimeUpdated(_))));
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            AgentSessionUpdate::BackgroundTaskCompleted { job_id, .. }
+                if job_id == "job-timer"
+        )));
+    }
+
+    #[test]
+    fn child_transcript_epoch_does_not_invalidate_parent_snapshot() {
+        let epochs = MessageRefreshEpochs::default();
+        let parent_epoch = epochs.current("parent");
+
+        epochs.advance("child");
+
+        assert_eq!(epochs.current("parent"), parent_epoch);
+        assert_ne!(epochs.current("child"), parent_epoch);
     }
 
     #[test]

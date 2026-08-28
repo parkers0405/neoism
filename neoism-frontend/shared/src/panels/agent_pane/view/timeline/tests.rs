@@ -213,12 +213,10 @@ fn every_assistant_chunk_survives_settling_around_tools() {
 }
 
 #[test]
-fn background_completion_card_stays_visible_after_turn_settles() {
-    // The durable completion card (id `background-task-{job}`) is a
-    // transcript event: settling the turn or reloading the session must
-    // never declutter it. An ordinary background_task_result tool CALL
-    // (part-id identity — the model rereading retained output) keeps
-    // normal trace settling.
+fn background_completion_sentinel_never_renders_as_a_timeline_row() {
+    // The synthetic completion sentinel (id `background-task-{job}`) exists
+    // only to settle runtime activity. A genuine background_task_result tool
+    // CALL has a normal part id and remains visible while its turn is live.
     let messages = vec![
         text_message("u1", NeoismAgentMessageKind::User, "start the build"),
         tool_message(
@@ -236,16 +234,16 @@ fn background_completion_card_stays_visible_after_turn_settles() {
         text_message("a1", NeoismAgentMessageKind::Assistant, "It finished."),
     ];
 
-    // Fully settled (reload / turn over): the completion card survives,
-    // the reread tool row hides like any other trace.
+    // Fully settled: both tool rows are hidden like ordinary turn trace.
     assert_eq!(
         timeline_message_visibility(&messages, None),
-        vec![true, true, false, true]
+        vec![true, false, false, true]
     );
-    // Live window: everything visible as before.
+    // Live: the genuine model tool call is shown; the synthetic sentinel is
+    // still hidden and cannot disturb visible transcript order.
     assert_eq!(
         timeline_message_visibility(&messages, Some(1)),
-        vec![true; messages.len()]
+        vec![true, false, true, true]
     );
 }
 

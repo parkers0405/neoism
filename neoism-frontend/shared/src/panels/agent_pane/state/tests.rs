@@ -2154,7 +2154,7 @@ fn background_completion_card_survives_history_snapshot_replacement() {
 }
 
 #[test]
-fn background_completion_stays_before_the_text_streaming_when_it_finished() {
+fn background_completion_never_relocates_streaming_content_or_durable_turns() {
     let mut pane = NeoismAgentPane::default();
     let launch = NeoismAgentMessage::tool(
         "Run timer",
@@ -2185,9 +2185,9 @@ fn background_completion_stays_before_the_text_streaming_when_it_finished() {
             .iter()
             .map(|message| message.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["tool-launch", "background-task-job-1", "answer"]
+        vec!["tool-launch", "answer", "background-task-job-1"]
     );
-    assert!(pane.messages[2].text.ends_with("and after finish"));
+    assert!(pane.messages[1].text.ends_with("and after finish"));
 
     let mut server_copy = client_background_completion_card("job-1");
     server_copy.detail = "Background shell task finished.\njob_id: job-1\nstatus: completed\n<background_task_result>ok</background_task_result>".to_string();
@@ -2195,6 +2195,7 @@ fn background_completion_stays_before_the_text_streaming_when_it_finished() {
         launch,
         NeoismAgentMessage::assistant("Streaming before finish and after finish")
             .with_id("answer"),
+        NeoismAgentMessage::user("newer turn").with_id("user-newer"),
         server_copy,
     ]);
 
@@ -2203,9 +2204,14 @@ fn background_completion_stays_before_the_text_streaming_when_it_finished() {
             .iter()
             .map(|message| message.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["tool-launch", "background-task-job-1", "answer"]
+        vec![
+            "tool-launch",
+            "answer",
+            "user-newer",
+            "background-task-job-1"
+        ]
     );
-    assert!(pane.messages[1].detail.contains("<background_task_result>"));
+    assert!(pane.messages[3].detail.contains("<background_task_result>"));
 }
 
 #[test]

@@ -40,7 +40,28 @@ impl NeoismAgentPane {
     /// git-status worker pattern: never blocks the frame; the worker
     /// pushes its result through `background_tx` and the next frame's
     /// `drain_background_updates` lifts it into `side_panel`.
-    pub fn maybe_refresh_side_panel_sessions(&mut self) {}
+    pub fn maybe_refresh_side_panel_sessions(&mut self) {
+        if !self.side_panel.should_refresh_sessions() {
+            return;
+        }
+        self.side_panel.mark_refresh_kicked();
+        self.push_outbound(OutboundAgentCommand::RefreshSessions {
+            directory: self.directory.clone(),
+            cursor: None,
+        });
+    }
+
+    /// Scroll the session sidebar and request one continuation page when the
+    /// viewport reaches the loaded tail.
+    pub fn scroll_side_panel_pixels(&mut self, delta_pixels: f32, rows: usize) {
+        self.side_panel.scroll_pixels(delta_pixels, rows);
+        if let Some(cursor) = self.side_panel.begin_session_page_near_end() {
+            self.push_outbound(OutboundAgentCommand::RefreshSessions {
+                directory: self.directory.clone(),
+                cursor: Some(cursor),
+            });
+        }
+    }
 
     /// Resume the side-panel's currently selected previous session, if
     /// any. Exposed for the click/Enter handler in `screen::bridges::agent`.
@@ -311,12 +332,14 @@ impl NeoismAgentPane {
                 "completed" => BranchStatus::Completed,
                 _ => BranchStatus::Stopped,
             };
-            self.upsert_live_subagent_entry(&session_id, None, None);
+            if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
+                self.upsert_live_subagent_entry(&session_id, None, None);
+            }
             // This snapshot passed the monotonic family-revision gate above,
             // so it is the only active signal allowed to reopen a terminal
             // child for a genuine continuation/new execution.
             self.side_panel
-                .set_branch_activity_status(session_id.clone(), status);
+                .set_branch_activity_status_from_recovery(session_id.clone(), status);
             self.side_panel
                 .set_branch_activity_started_at(session_id.clone(), started_at);
             if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
@@ -333,6 +356,7 @@ impl NeoismAgentPane {
         if viewed_terminal {
             self.side_panel.clear_status_display_hold();
         }
+        self.side_panel.prune_expired_completed_subagents();
         self.sync_subagent_waiting_clock();
         true
     }

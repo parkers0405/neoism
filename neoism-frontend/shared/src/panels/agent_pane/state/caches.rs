@@ -267,7 +267,12 @@ impl NeoismAgentPane {
     }
 
     pub fn running_background_task_count(&self) -> usize {
-        self.running_background_task_count
+        // Transcript lifecycle is authoritative. The cached field exists for
+        // session handoff and clock seeding, but snapshot merges can add a
+        // completion sentinel without passing through the live-event refresh
+        // path. Reading the cache here left `N background tasks running`
+        // latched forever even though the completed rows were already loaded.
+        running_background_task_count(&self.messages)
     }
 
     pub(in crate::panels::agent_pane::state) fn running_background_task_started_at(

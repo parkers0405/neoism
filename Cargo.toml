@@ -36,7 +36,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.68"
+version = "0.7.69"
 authors = ["Parker Settle", "Neoism contributors"]
 edition = "2021"
 license = "MIT"
@@ -52,36 +52,36 @@ readme = "README.md"
 # Note: https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#multiple-locations
 # Sugarloaf example uses path when used locally, but uses
 # version from crates.io when published.
-teletypewriter = { path = "teletypewriter", version = "0.7.68" }
-neoism-backend = { path = "neoism-backend", version = "0.7.68" }
-neoism-terminal-core = { path = "neoism-terminal-core", version = "0.7.68" }
-neoism-terminal-pty = { path = "neoism-terminal-pty", version = "0.7.68" }
-neoism-terminal-wasm = { path = "neoism-frontend/wasm", version = "0.7.68" }
-neoism-ui = { path = "neoism-frontend/shared", version = "0.7.68" }
-neoism-window = { path = "neoism-window", version = "0.7.68", default-features = false }
-neoism-notifier = { path = "neoism-notifier", version = "0.7.68" }
-neoism-grapheme-width = { path = "neoism-grapheme-width", version = "0.7.68" }
-sugarloaf = { path = "sugarloaf", version = "0.7.68" }
-neoism-agent-core = { path = "neoism-agent/crates/neoism-agent-core", version = "0.7.68" }
-neoism-agent-service-api = { path = "neoism-agent/crates/neoism-agent-service-api", version = "0.7.68" }
-neoism-agent-workspace-search-fff = { path = "neoism-agent/crates/neoism-agent-workspace-search-fff", version = "0.7.68" }
-neoism-agent-neoism-adapter = { path = "neoism-agent/crates/neoism-agent-neoism-adapter", version = "0.7.68" }
-neoism-agent-plugin-api = { path = "neoism-agent/crates/neoism-agent-plugin-api", version = "0.7.68" }
-neoism-agent-builtins = { path = "neoism-agent/crates/neoism-agent-builtins", version = "0.7.68" }
-neoism-agent-server = { path = "neoism-agent/crates/neoism-agent-server", version = "0.7.68" }
-neoism-extensions = { path = "neoism-extensions", version = "0.7.68" }
-neoism-product-docs = { path = "neoism-product-docs", version = "0.7.68" }
-neoism-sync = { path = "neoism-sync", version = "0.7.68" }
-neoism-remarkable = { path = "neoism-remarkable", version = "0.7.68" }
-neoism-neoworld-core = { path = "neoism-neoworld-core", version = "0.7.68" }
-neoism-neoworld = { path = "neoism-neoworld", version = "0.7.68" }
+teletypewriter = { path = "teletypewriter", version = "0.7.69" }
+neoism-backend = { path = "neoism-backend", version = "0.7.69" }
+neoism-terminal-core = { path = "neoism-terminal-core", version = "0.7.69" }
+neoism-terminal-pty = { path = "neoism-terminal-pty", version = "0.7.69" }
+neoism-terminal-wasm = { path = "neoism-frontend/wasm", version = "0.7.69" }
+neoism-ui = { path = "neoism-frontend/shared", version = "0.7.69" }
+neoism-window = { path = "neoism-window", version = "0.7.69", default-features = false }
+neoism-notifier = { path = "neoism-notifier", version = "0.7.69" }
+neoism-grapheme-width = { path = "neoism-grapheme-width", version = "0.7.69" }
+sugarloaf = { path = "sugarloaf", version = "0.7.69" }
+neoism-agent-core = { path = "neoism-agent/crates/neoism-agent-core", version = "0.7.69" }
+neoism-agent-service-api = { path = "neoism-agent/crates/neoism-agent-service-api", version = "0.7.69" }
+neoism-agent-workspace-search-fff = { path = "neoism-agent/crates/neoism-agent-workspace-search-fff", version = "0.7.69" }
+neoism-agent-neoism-adapter = { path = "neoism-agent/crates/neoism-agent-neoism-adapter", version = "0.7.69" }
+neoism-agent-plugin-api = { path = "neoism-agent/crates/neoism-agent-plugin-api", version = "0.7.69" }
+neoism-agent-builtins = { path = "neoism-agent/crates/neoism-agent-builtins", version = "0.7.69" }
+neoism-agent-server = { path = "neoism-agent/crates/neoism-agent-server", version = "0.7.69" }
+neoism-extensions = { path = "neoism-extensions", version = "0.7.69" }
+neoism-product-docs = { path = "neoism-product-docs", version = "0.7.69" }
+neoism-sync = { path = "neoism-sync", version = "0.7.69" }
+neoism-remarkable = { path = "neoism-remarkable", version = "0.7.69" }
+neoism-neoworld-core = { path = "neoism-neoworld-core", version = "0.7.69" }
+neoism-neoworld = { path = "neoism-neoworld", version = "0.7.69" }
 
 # Own dependencies
 anyhow = "1.0"
 async-stream = "0.3"
-copa = { path = "copa", default-features = true, version = "0.7.68" }
-neoism-proc-macros = { path = "neoism-proc-macros", version = "0.7.68" }
-corcovado = { path = "corcovado", version = "0.7.68" }
+copa = { path = "copa", default-features = true, version = "0.7.69" }
+neoism-proc-macros = { path = "neoism-proc-macros", version = "0.7.69" }
+corcovado = { path = "corcovado", version = "0.7.69" }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 parking_lot = { version = "0.12.5", features = [
     "nightly",
@@ -151,9 +151,9 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 
 # Workspace daemon stack
-neoism-protocol = { path = "neoism-protocol", version = "0.7.68" }
-neoism-workspace-index = { path = "neoism-workspace-index", version = "0.7.68" }
-neoism-workspace-daemon = { path = "neoism-workspace-daemon", version = "0.7.68" }
+neoism-protocol = { path = "neoism-protocol", version = "0.7.69" }
+neoism-workspace-index = { path = "neoism-workspace-index", version = "0.7.69" }
+neoism-workspace-daemon = { path = "neoism-workspace-daemon", version = "0.7.69" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }

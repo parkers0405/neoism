@@ -244,6 +244,7 @@ pub(crate) async fn v2_session_runtime(
 ) -> Result<Json<SessionRuntimeSnapshot>, ApiError> {
     let session = ensure_session(&state, &session_id).await?;
     let root_id = crate::execution_activity::root_session_id(&state, &session).await;
+    crate::execution_activity::finish_if_quiescent(&state, &root_id).await;
     Ok(Json(
         state
             .inner
@@ -445,6 +446,42 @@ pub(crate) async fn v2_session_list(
     Query(query): Query<SessionListQuery>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Json<Page<SessionInfo>>, ApiError> {
+    if query.roots.as_deref() == Some("true") {
+        let cursor = query
+            .cursor
+            .as_deref()
+            .map(crate::state::SessionListCursor::decode)
+            .transpose()
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let mut page = state
+            .inner
+            .store
+            .list_root_sessions_page(
+                query.directory.as_deref(),
+                query.path.as_deref(),
+                query.start,
+                query.search.as_deref(),
+                cursor.as_ref(),
+                query.limit,
+            )
+            .await?;
+        if !state.inner.store.session_list_index_ready().await? {
+            return Err(ApiError::service_unavailable(
+                "Session catalog is still indexing; retry shortly",
+            ));
+        }
+        if let Some(Extension(claims)) = claims {
+            page.items
+                .retain(|session| crate::caller::allows_session(&claims, session));
+        }
+        return Ok(Json(Page {
+            items: page.items,
+            cursor: PageCursor {
+                previous: None,
+                next: page.next_cursor,
+            },
+        }));
+    }
     let mut sessions = state.inner.store.list_sessions().await?;
     if let Some(Extension(claims)) = claims {
         sessions.retain(|session| crate::caller::allows_session(&claims, session));

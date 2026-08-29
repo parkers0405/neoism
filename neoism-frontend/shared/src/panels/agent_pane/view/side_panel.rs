@@ -412,6 +412,7 @@ pub fn render_side_panel_with_icons<P, I>(
             [content_x, content_y, content_w, content_h],
             theme,
             s,
+            now_seconds,
             mouse,
             occlusion_rects,
             frame_radius - frame_stroke,

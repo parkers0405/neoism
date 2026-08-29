@@ -186,7 +186,7 @@ impl Screen<'_> {
                 let row_h = agent.side_panel().row_height().max(1.0);
                 let pixels = Self::vertical_overlay_scroll_pixels(delta, row_h);
                 let rows = agent.side_panel().last_panel_height_rows();
-                agent.side_panel_mut().scroll_pixels(pixels, rows);
+                agent.scroll_side_panel_pixels(pixels, rows);
                 self.mark_dirty();
                 return true;
             }

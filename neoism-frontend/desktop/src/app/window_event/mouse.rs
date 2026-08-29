@@ -17,6 +17,40 @@ impl Application<'_> {
         state: ElementState,
         button: MouseButton,
     ) {
+        // Pointer capture can hand the release to another Neoism window.
+        // The source Island remains the gesture owner, so finalize it there
+        // before dispatching the destination window's unrelated release.
+        if button == MouseButton::Left && state == ElementState::Pressed {
+            // A fresh press supersedes any gesture whose release was lost,
+            // including stale capture in this same window. The normal press
+            // path below can immediately arm a new Island drag if appropriate.
+            for route in self.router.routes.values_mut() {
+                if route.window.screen.cancel_island_drag() {
+                    route.window.set_cursor(CursorIcon::Default);
+                    route.request_redraw();
+                }
+            }
+        } else if button == MouseButton::Left && state == ElementState::Released {
+            let source_window = self
+                .router
+                .routes
+                .iter()
+                .find_map(|(id, route)| {
+                    (*id != window_id && route.window.screen.has_island_drag()).then_some(*id)
+                });
+            if let Some(source_window) = source_window {
+                if let Some(source) = self.router.routes.get_mut(&source_window) {
+                    source.window.screen.mouse.left_button_state = ElementState::Released;
+                    let committed = source.window.screen.handle_island_drag_release();
+                    source.window.set_cursor(CursorIcon::Default);
+                    source.request_redraw();
+                    if committed {
+                        return;
+                    }
+                }
+            }
+        }
+
         // Gathered before borrowing the route so the buffer-tab
         // right-click menu can offer workspaces that live in OTHER OS
         // windows (e.g. detached) as move targets.
@@ -400,6 +434,19 @@ impl Application<'_> {
                     .process_mouse_bindings(button, &mut self.router.clipboard);
             }
             ElementState::Released => {
+                // The Island owns the left-button gesture once a workspace
+                // tab is armed. Finalize it before any overlay/sidebar release
+                // handler can consume the event and leave the tab latched.
+                // A sub-threshold click still clears Island state and falls
+                // through to the normal click pipeline.
+                if button == MouseButton::Left
+                    && route.window.screen.handle_island_drag_release()
+                {
+                    route.window.set_cursor(CursorIcon::Default);
+                    route.request_redraw();
+                    return;
+                }
+
                 // 5D-drag: finish a Workspaces-modal drag. A drop on a
                 // host header emits MoveWorkspaceToHost (5D-wire then
                 // dispatches the real promote/demote); a plain click
@@ -519,17 +566,6 @@ impl Application<'_> {
                         .handle_neoism_agent_mouse_release(&mut self.router.clipboard)
                 {
                     route.window.set_cursor(CursorIcon::Text);
-                    route.request_redraw();
-                    return;
-                }
-
-                // Workspace-strip drag (top-level tabs in the Island).
-                // Mirrors the buffer-tabs release path — runs first so
-                // a release that crossed the detach threshold isn't
-                // mistaken for a stale buffer-tabs drag.
-                if button == MouseButton::Left
-                    && route.window.screen.handle_island_drag_release()
-                {
                     route.request_redraw();
                     return;
                 }
@@ -658,6 +694,16 @@ impl Application<'_> {
         route.window.screen.mouse.y = y;
         route.window.screen.mouse.raw_y = position.y;
         route.window.screen.mouse.raw_x = position.x;
+
+        // A release may be consumed by native capture loss or another UI
+        // subsystem. Never let a workspace tab continue following motion
+        // after the authoritative button state is already up.
+        if route.window.screen.mouse.left_button_state != ElementState::Pressed
+            && route.window.screen.cancel_island_drag()
+        {
+            route.window.set_cursor(CursorIcon::Default);
+            route.request_redraw();
+        }
 
         {
             let scale = route.window.screen.sugarloaf.scale_factor();

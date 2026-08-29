@@ -454,7 +454,8 @@ fn apply_authoritative_contract(document: &mut Value) {
     add("/v2/sessions", "get", op("v2.sessions.list", "sessions", json!([
         directory(), query("path", false, json!({ "type": "string" })), query("roots", false, json!({ "type": "string" })),
         query("start", false, json!({ "type": "integer", "minimum": 0 })), query("search", false, json!({ "type": "string" })),
-        query("limit", false, json!({ "type": "integer", "minimum": 1 }))
+        query("limit", false, json!({ "type": "integer", "minimum": 1, "maximum": 200 })),
+        query("cursor", false, json!({ "type": "string" }))
     ]), None, success("200", "Session page", r("SessionPage"))));
     add("/v2/sessions", "post", op("v2.sessions.create", "sessions", json!([directory()]), Some(json_request(false, r("CreateSessionRequest"))), success("200", "Created session", r("Session"))));
     add("/v2/sessions/status", "get", op("v2.sessions.status", "sessions", json!([]), None, success("200", "Session status map", r("SessionStatusMap"))));

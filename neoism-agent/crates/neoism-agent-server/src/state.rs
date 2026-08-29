@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -95,6 +95,38 @@ pub(crate) struct SessionRun {
     pub(crate) id: String,
     pub(crate) started_at: u64,
     pub(crate) cancel: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SessionListPage {
+    pub(crate) items: Vec<SessionInfo>,
+    pub(crate) next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SessionListCursor {
+    updated: u64,
+    id: String,
+}
+
+impl SessionListCursor {
+    pub(crate) fn decode(value: &str) -> anyhow::Result<Self> {
+        let value = value
+            .strip_prefix("v1:")
+            .context("unsupported session cursor version")?;
+        let (updated, id) = value
+            .split_once(':')
+            .context("invalid session cursor")?;
+        anyhow::ensure!(!id.is_empty(), "invalid session cursor");
+        Ok(Self {
+            updated: updated.parse().context("invalid session cursor timestamp")?,
+            id: id.to_string(),
+        })
+    }
+
+    fn encode(updated: u64, id: &str) -> String {
+        format!("v1:{updated}:{id}")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +230,99 @@ fn opt_text(value: Option<String>) -> SqlValue {
 
 fn int(value: i64) -> SqlValue {
     SqlValue::Integer(value)
+}
+
+fn session_list_index_statement(info: &SessionInfo) -> anyhow::Result<(String, Vec<SqlValue>)> {
+    let mut extra = BTreeMap::new();
+    for key in [crate::caller::TENANT_EXTRA_KEY, "pinned"] {
+        if let Some(value) = info.extra.get(key) {
+            extra.insert(key.to_string(), value.clone());
+        }
+    }
+    let summary = SessionInfo {
+        id: info.id.clone(),
+        slug: info.slug.clone(),
+        project_id: info.project_id.clone(),
+        workspace_id: info.workspace_id.clone(),
+        directory: info.directory.clone(),
+        path: info.path.clone(),
+        parent_id: info.parent_id.clone(),
+        title: info.title.clone(),
+        agent: info.agent.clone(),
+        model: info.model.clone(),
+        version: info.version.clone(),
+        time: info.time.clone(),
+        permission: None,
+        extra,
+    };
+    let summary_json = serde_json::to_string(&summary)?;
+    Ok((
+        r#"INSERT INTO session_list_index
+           (session_id, directory, path, parent_id, title, updated, archived, tenant_id, workspace_id, summary_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(session_id) DO UPDATE SET
+             directory = excluded.directory,
+             path = excluded.path,
+             parent_id = excluded.parent_id,
+             title = excluded.title,
+             updated = excluded.updated,
+             archived = excluded.archived,
+             tenant_id = excluded.tenant_id,
+             workspace_id = excluded.workspace_id,
+             summary_json = excluded.summary_json
+           WHERE excluded.updated >= session_list_index.updated"#
+            .to_string(),
+        vec![
+            text(info.id.to_string()),
+            text(&info.directory),
+            opt_text(info.path.clone()),
+            opt_text(info.parent_id.as_ref().map(ToString::to_string)),
+            text(&info.title),
+            int(store_i64(info.time.updated)),
+            info.time.archived.map(int).unwrap_or(SqlValue::Null),
+            text(crate::caller::session_tenant(info)),
+            opt_text(info.workspace_id.as_ref().map(ToString::to_string)),
+            text(summary_json),
+        ],
+    ))
+}
+
+fn session_list_info_from_row(row: &DbRow) -> anyhow::Result<SessionInfo> {
+    if let Some(summary) = row.get_opt_str("summary_json")?.filter(|value| !value.is_empty()) {
+        return decode_json(summary);
+    }
+    // Legacy sidecars predate compact summary_json. Reconstruct the list
+    // contract from indexed columns rather than reopening multi-megabyte
+    // canonical conversation blobs on the latency-sensitive sidebar path.
+    let session_id = row.get_str("session_id")?;
+    let updated = row.get_i64("updated")?.max(0) as u64;
+    let mut value = json!({
+        "id": session_id,
+        "slug": session_id,
+        "projectId": "global",
+        "directory": row.get_str("directory")?,
+        "title": row.get_str("title")?,
+        "version": env!("CARGO_PKG_VERSION"),
+        "time": {
+            "created": updated,
+            "updated": updated,
+            "archived": row.get_opt_i64("archived")?,
+        },
+        crate::caller::TENANT_EXTRA_KEY: row.get_str("tenant_id")?,
+    });
+    let object = value
+        .as_object_mut()
+        .expect("session list fallback is an object");
+    for (key, value) in [
+        ("path", row.get_opt_str("path")?),
+        ("parentId", row.get_opt_str("parent_id")?),
+        ("workspaceId", row.get_opt_str("workspace_id")?),
+    ] {
+        if let Some(value) = value {
+            object.insert(key.to_string(), Value::String(value));
+        }
+    }
+    decode_json(value.to_string())
 }
 
 fn event_statements(
@@ -539,6 +664,24 @@ impl AppState {
         &self.inner.services
     }
 
+    pub(crate) fn start_session_list_backfill(&self) {
+        let store = self.inner.store.clone();
+        tokio::spawn(async move {
+            // Yield the launch path completely: the HTTP serve loop and first
+            // interactive requests get priority over legacy index hydration.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            loop {
+                match store.backfill_session_list_index().await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "session list index backfill retrying");
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        });
+    }
+
     pub(crate) async fn plugin_snapshot(
         &self,
         directory: &str,
@@ -773,15 +916,18 @@ impl AppState {
         self.inner
             .store
             .commit_projection_event(
-                vec![(
-                    "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?"
-                        .to_string(),
-                    vec![
-                        text(serde_json::to_string(info)?),
-                        int(store_i64(info.time.updated)),
-                        text(info.id.to_string()),
-                    ],
-                )],
+                vec![
+                    (
+                        "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?"
+                            .to_string(),
+                        vec![
+                            text(serde_json::to_string(info)?),
+                            int(store_i64(info.time.updated)),
+                            text(info.id.to_string()),
+                        ],
+                    ),
+                    session_list_index_statement(info)?,
+                ],
                 &event,
                 None,
             )
@@ -994,6 +1140,89 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        // List metadata lives in a compact sidecar. Creating it is constant
+        // time even for legacy databases whose session JSON is many gigabytes.
+        self.db
+            .execute_transaction(vec![
+                (
+                    r#"CREATE TABLE IF NOT EXISTS schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at INTEGER NOT NULL
+                    )"#
+                    .to_string(),
+                    Vec::new(),
+                ),
+                (
+                    r#"CREATE TABLE IF NOT EXISTS data_migrations (
+                        name TEXT PRIMARY KEY,
+                        state TEXT NOT NULL,
+                        cursor_updated INTEGER,
+                        cursor_id TEXT,
+                        rows_done INTEGER NOT NULL DEFAULT 0,
+                        updated_at INTEGER NOT NULL,
+                        error TEXT
+                    )"#
+                    .to_string(),
+                    Vec::new(),
+                ),
+                (
+                    r#"CREATE TABLE IF NOT EXISTS session_list_index (
+                        session_id TEXT PRIMARY KEY,
+                        directory TEXT NOT NULL,
+                        path TEXT,
+                        parent_id TEXT,
+                        title TEXT NOT NULL,
+                        updated INTEGER NOT NULL,
+                        archived INTEGER,
+                        tenant_id TEXT NOT NULL DEFAULT 'local',
+                        workspace_id TEXT,
+                        summary_json TEXT
+                    )"#
+                    .to_string(),
+                    Vec::new(),
+                ),
+                (
+                    "CREATE INDEX IF NOT EXISTS idx_session_list_roots_directory_updated ON session_list_index(directory, updated DESC, session_id DESC) WHERE parent_id IS NULL"
+                        .to_string(),
+                    Vec::new(),
+                ),
+                (
+                    "CREATE INDEX IF NOT EXISTS idx_session_list_roots_updated ON session_list_index(updated DESC, session_id DESC) WHERE parent_id IS NULL"
+                        .to_string(),
+                    Vec::new(),
+                ),
+                (
+                    "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (1, 'session-list-index', ?)"
+                        .to_string(),
+                    vec![int(store_i64(crate::now_millis()))],
+                ),
+                (
+                    "INSERT OR IGNORE INTO data_migrations (name, state, rows_done, updated_at) VALUES ('session-list-index-v1', 'pending', 0, ?)"
+                        .to_string(),
+                    vec![int(store_i64(crate::now_millis()))],
+                ),
+            ])
+            .await?;
+        if !self.schema_migration_applied(3).await? {
+            if !self
+                .table_has_column("session_list_index", "summary_json")
+                .await?
+            {
+                self.db
+                    .execute(
+                        "ALTER TABLE session_list_index ADD COLUMN summary_json TEXT",
+                        Vec::new(),
+                    )
+                    .await?;
+            }
+            self.db
+                .execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (3, 'session-list-summary', ?)",
+                    vec![int(store_i64(crate::now_millis()))],
+                )
+                .await?;
+        }
         self.db
             .execute(
                 r#"
@@ -1040,63 +1269,62 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
-        // Additive migrations for databases created by the first execution
-        // timer implementation. Defaults are only migration scaffolding; new
-        // rows always carry an execution and owner identity.
-        let _ = self
-            .db
-            .execute(
-                "ALTER TABLE execution_activity ADD COLUMN family_revision INTEGER NOT NULL DEFAULT 0",
-                Vec::new(),
-            )
-            .await;
-        let _ = self
-            .db
-            .execute(
-                "ALTER TABLE execution_activity_segments ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
-                Vec::new(),
-            )
-            .await;
-        let _ = self
-            .db
-            .execute(
-                "ALTER TABLE execution_activity_segments ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''",
-                Vec::new(),
-            )
-            .await;
-        let _ = self
-            .db
-            .execute(
-                "ALTER TABLE execution_activity_segments ADD COLUMN owner_instance_id TEXT NOT NULL DEFAULT ''",
-                Vec::new(),
-            )
-            .await;
-        self.db
-            .execute(
-                "UPDATE execution_activity_segments SET execution_id = COALESCE((SELECT execution_id FROM execution_activity WHERE execution_activity.root_session_id = execution_activity_segments.root_session_id), '') WHERE execution_id = ''",
-                Vec::new(),
-            )
-            .await?;
-        self.db
-            .execute(
-                "UPDATE execution_activity_segments SET session_id = root_session_id WHERE session_id = ''",
-                Vec::new(),
-            )
-            .await?;
-        // Preserve aggregate history on upgrade and seed every in-flight
-        // segment owner before completion can depend on the new table.
-        self.db
-            .execute(
-                "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT root_session_id, execution_id, root_session_id, completed_ms FROM execution_activity",
-                Vec::new(),
-            )
-            .await?;
-        self.db
-            .execute(
-                "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT root_session_id, execution_id, session_id, 0 FROM execution_activity_segments",
-                Vec::new(),
-            )
-            .await?;
+        if !self.schema_migration_applied(2).await? {
+            // Additive migrations for databases created by the first execution
+            // timer implementation. Column checks replace ignored ALTER errors,
+            // and the data copy runs only once instead of on every launch.
+            if !self.table_has_column("execution_activity", "family_revision").await? {
+                self.db
+                    .execute(
+                        "ALTER TABLE execution_activity ADD COLUMN family_revision INTEGER NOT NULL DEFAULT 0",
+                        Vec::new(),
+                    )
+                    .await?;
+            }
+            for (column, definition) in [
+                ("session_id", "TEXT NOT NULL DEFAULT ''"),
+                ("execution_id", "TEXT NOT NULL DEFAULT ''"),
+                ("owner_instance_id", "TEXT NOT NULL DEFAULT ''"),
+            ] {
+                if !self
+                    .table_has_column("execution_activity_segments", column)
+                    .await?
+                {
+                    self.db
+                        .execute(
+                            &format!(
+                                "ALTER TABLE execution_activity_segments ADD COLUMN {column} {definition}"
+                            ),
+                            Vec::new(),
+                        )
+                        .await?;
+                }
+            }
+            self.db
+                .execute_transaction(vec![
+                    (
+                        "UPDATE execution_activity_segments SET execution_id = COALESCE((SELECT execution_id FROM execution_activity WHERE execution_activity.root_session_id = execution_activity_segments.root_session_id), '') WHERE execution_id = ''".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "UPDATE execution_activity_segments SET session_id = root_session_id WHERE session_id = ''".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT root_session_id, execution_id, root_session_id, completed_ms FROM execution_activity".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "INSERT OR IGNORE INTO execution_session_activity (root_session_id, execution_id, session_id, completed_ms) SELECT root_session_id, execution_id, session_id, 0 FROM execution_activity_segments".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (2, 'execution-activity-v2', ?)".to_string(),
+                        vec![int(store_i64(crate::now_millis()))],
+                    ),
+                ])
+                .await?;
+        }
         self.db
             .execute(
                 r#"
@@ -1807,6 +2035,17 @@ impl SessionStore {
         Ok(false)
     }
 
+    async fn schema_migration_applied(&self, version: i64) -> anyhow::Result<bool> {
+        Ok(self
+            .db
+            .fetch_optional(
+                "SELECT version FROM schema_migrations WHERE version = ?",
+                vec![int(version)],
+            )
+            .await?
+            .is_some())
+    }
+
     pub(crate) async fn list_sessions(&self) -> anyhow::Result<Vec<SessionInfo>> {
         let rows = self
             .db
@@ -1818,6 +2057,81 @@ impl SessionStore {
         rows.into_iter()
             .map(|row| decode_json(row.get_str("info_json")?))
             .collect()
+    }
+
+    pub(crate) async fn list_root_sessions_page(
+        &self,
+        directory: Option<&str>,
+        path: Option<&str>,
+        start: Option<u64>,
+        search: Option<&str>,
+        cursor: Option<&SessionListCursor>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<SessionListPage> {
+        let limit = limit.unwrap_or(50).clamp(1, 200);
+        let mut clauses = vec!["i.parent_id IS NULL".to_string()];
+        let mut params = Vec::new();
+        if let Some(directory) = directory {
+            clauses.push("i.directory = ?".to_string());
+            params.push(text(directory));
+        }
+        if let Some(path) = path {
+            clauses.push("i.path = ?".to_string());
+            params.push(text(path));
+        }
+        if let Some(start) = start {
+            clauses.push("i.updated >= ?".to_string());
+            params.push(int(store_i64(start)));
+        }
+        if let Some(search) = search.filter(|value| !value.is_empty()) {
+            clauses.push("LOWER(i.title) LIKE ?".to_string());
+            params.push(text(format!("%{}%", search.to_lowercase())));
+        }
+        if let Some(cursor) = cursor {
+            clauses.push("(i.updated < ? OR (i.updated = ? AND i.session_id < ?))".to_string());
+            params.push(int(store_i64(cursor.updated)));
+            params.push(int(store_i64(cursor.updated)));
+            params.push(text(&cursor.id));
+        }
+        params.push(int((limit + 1) as i64));
+        let rows = self
+            .db
+            .fetch_all(
+                &format!(
+                    "SELECT i.session_id, i.directory, i.path, i.parent_id, i.title, i.updated, i.archived, i.tenant_id, i.workspace_id, i.summary_json FROM session_list_index i WHERE {} ORDER BY i.updated DESC, i.session_id DESC LIMIT ?",
+                    clauses.join(" AND ")
+                ),
+                params,
+            )
+            .await?;
+        let has_more = rows.len() > limit;
+        let mut items = Vec::with_capacity(rows.len().min(limit));
+        let mut last_key = None;
+        for row in rows.into_iter().take(limit) {
+            last_key = Some((
+                row.get_i64("updated")?.max(0) as u64,
+                row.get_str("session_id")?,
+            ));
+            items.push(session_list_info_from_row(&row)?);
+        }
+        Ok(SessionListPage {
+            next_cursor: has_more.then(|| {
+                let (updated, id) = last_key.expect("a page with more rows has an item");
+                SessionListCursor::encode(updated, &id)
+            }),
+            items,
+        })
+    }
+
+    pub(crate) async fn session_list_index_ready(&self) -> anyhow::Result<bool> {
+        Ok(self
+            .db
+            .fetch_optional(
+                "SELECT state FROM data_migrations WHERE name = 'session-list-index-v1'",
+                Vec::new(),
+            )
+            .await?
+            .is_some_and(|row| row.get_str("state").is_ok_and(|state| state == "complete")))
     }
 
     /// Decode only sessions carrying a particular flattened `extra` key.
@@ -1841,14 +2155,17 @@ impl SessionStore {
 
     pub(crate) async fn insert_session(&self, info: &SessionInfo) -> anyhow::Result<()> {
         self.db
-            .execute(
-                "INSERT INTO sessions (id, info_json, updated) VALUES (?, ?, ?)",
-                vec![
-                    text(info.id.to_string()),
-                    text(serde_json::to_string(info)?),
-                    int(store_i64(info.time.updated)),
-                ],
-            )
+            .execute_transaction(vec![
+                (
+                    "INSERT INTO sessions (id, info_json, updated) VALUES (?, ?, ?)".to_string(),
+                    vec![
+                        text(info.id.to_string()),
+                        text(serde_json::to_string(info)?),
+                        int(store_i64(info.time.updated)),
+                    ],
+                ),
+                session_list_index_statement(info)?,
+            ])
             .await?;
         Ok(())
     }
@@ -2104,14 +2421,17 @@ impl SessionStore {
 
     pub(crate) async fn update_session(&self, info: &SessionInfo) -> anyhow::Result<()> {
         self.db
-            .execute(
-                "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?",
-                vec![
-                    text(serde_json::to_string(info)?),
-                    int(store_i64(info.time.updated)),
-                    text(info.id.to_string()),
-                ],
-            )
+            .execute_transaction(vec![
+                (
+                    "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?".to_string(),
+                    vec![
+                        text(serde_json::to_string(info)?),
+                        int(store_i64(info.time.updated)),
+                        text(info.id.to_string()),
+                    ],
+                ),
+                session_list_index_statement(info)?,
+            ])
             .await?;
         Ok(())
     }
@@ -2718,9 +3038,87 @@ impl SessionStore {
         for table in ["messages", "prompt_queue", "session_runs", "session_context_epochs", "message_embeddings"] {
             statements.push((format!("DELETE FROM {table} WHERE session_id = ?"), vec![text(session_id)]));
         }
+        statements.push(("DELETE FROM session_list_index WHERE session_id = ?".to_string(), vec![text(session_id)]));
         statements.push(("DELETE FROM sessions WHERE id = ?".to_string(), vec![text(session_id)]));
         let results = self.db.execute_transaction_with_results(statements).await?;
         Ok(results.last().copied().unwrap_or(0) > 0)
+    }
+
+    async fn backfill_session_list_index(&self) -> anyhow::Result<()> {
+        const BATCH_SIZE: i64 = 16;
+        loop {
+            let migration = self
+                .db
+                .fetch_optional(
+                    "SELECT state, cursor_updated, cursor_id FROM data_migrations WHERE name = 'session-list-index-v1'",
+                    Vec::new(),
+                )
+                .await?;
+            let Some(migration) = migration else { return Ok(()); };
+            if migration.get_str("state")? == "complete" {
+                return Ok(());
+            }
+            let cursor_updated = migration.get_opt_i64("cursor_updated")?;
+            let cursor_id = migration.get_opt_str("cursor_id")?;
+            let (sql, params) = match (cursor_updated, cursor_id.as_deref()) {
+                (Some(updated), Some(id)) => (
+                    "SELECT id, info_json, updated FROM sessions WHERE updated < ? OR (updated = ? AND id < ?) ORDER BY updated DESC, id DESC LIMIT ?",
+                    vec![int(updated), int(updated), text(id), int(BATCH_SIZE)],
+                ),
+                _ => (
+                    "SELECT id, info_json, updated FROM sessions ORDER BY updated DESC, id DESC LIMIT ?",
+                    vec![int(BATCH_SIZE)],
+                ),
+            };
+            let rows = self.db.fetch_all(sql, params).await?;
+            if rows.is_empty() {
+                self.db
+                    .execute(
+                        "UPDATE data_migrations SET state = 'complete', updated_at = ?, error = NULL WHERE name = 'session-list-index-v1'",
+                        vec![int(store_i64(crate::now_millis()))],
+                    )
+                    .await?;
+                return Ok(());
+            }
+            let batch_len = rows.len();
+            let last_updated = rows.last().expect("non-empty batch").get_i64("updated")?;
+            let last_id = rows.last().expect("non-empty batch").get_str("id")?;
+            let payloads = rows
+                .into_iter()
+                .map(|row| Ok((row.get_str("id")?, row.get_str("info_json")?)))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let decoded = tokio::task::spawn_blocking(move || {
+                payloads
+                    .into_iter()
+                    .map(|(id, raw)| (id, decode_json::<SessionInfo>(raw)))
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .context("session list index decoder task failed")?;
+            let mut statements = Vec::with_capacity(batch_len + 1);
+            let mut skipped = 0usize;
+            for (session_id, decoded) in decoded {
+                match decoded {
+                    Ok(info) => statements.push(session_list_index_statement(&info)?),
+                    Err(error) => {
+                        skipped += 1;
+                        tracing::warn!(%session_id, %error, "skipping malformed legacy session during list-index backfill");
+                    }
+                }
+            }
+            statements.push((
+                "UPDATE data_migrations SET state = 'running', cursor_updated = ?, cursor_id = ?, rows_done = rows_done + ?, updated_at = ?, error = ? WHERE name = 'session-list-index-v1'".to_string(),
+                vec![
+                    int(last_updated),
+                    text(last_id),
+                    int(batch_len as i64),
+                    int(store_i64(crate::now_millis())),
+                    (skipped > 0).then(|| text(format!("skipped {skipped} malformed rows"))).unwrap_or(SqlValue::Null),
+                ],
+            ));
+            self.db.execute_transaction(statements).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     pub(crate) async fn list_messages(

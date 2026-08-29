@@ -269,24 +269,46 @@ pub(super) fn fetch_skill_options(
 }
 
 /// Fetch the recent sessions for `directory`, newest-first, capped to 24.
+struct SessionValuesPage {
+    items: Vec<Value>,
+    next_cursor: Option<String>,
+}
+
 fn fetch_sessions_sorted(
     server: &str,
     directory: Option<&str>,
-) -> Result<Vec<Value>, String> {
-    let path = directory
+) -> Result<SessionValuesPage, String> {
+    fetch_sessions_page(server, directory, None)
+}
+
+fn fetch_sessions_page(
+    server: &str,
+    directory: Option<&str>,
+    cursor: Option<&str>,
+) -> Result<SessionValuesPage, String> {
+    let mut path = directory
         .filter(|directory| !directory.trim().is_empty())
-        .map(|dir| format!("/v2/sessions?roots=true&directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/v2/sessions?roots=true".to_string());
+        .map(|dir| format!("/v2/sessions?roots=true&limit=24&directory={}", percent_encode(dir)))
+        .unwrap_or_else(|| "/v2/sessions?roots=true&limit=24".to_string());
+    if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
+        path.push_str("&cursor=");
+        path.push_str(&percent_encode(cursor));
+    }
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "Neoism Agent returned an empty session response".to_string())?;
     let sessions = value
         .get("items")
         .and_then(Value::as_array)
         .ok_or_else(|| "Neoism Agent returned malformed sessions".to_string())?;
-    let mut sessions = sessions.to_vec();
-    sessions.sort_by(|a, b| session_updated_at(b).cmp(&session_updated_at(a)));
-    sessions.truncate(24);
-    Ok(sessions)
+    let next_cursor = value
+        .get("cursor")
+        .and_then(|cursor| cursor.get("next"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(SessionValuesPage {
+        items: sessions.to_vec(),
+        next_cursor,
+    })
 }
 
 pub(super) fn fetch_session_options(
@@ -294,7 +316,7 @@ pub(super) fn fetch_session_options(
     current_id: Option<&str>,
     directory: Option<&str>,
 ) -> Result<Vec<NeoismAgentPickerOption>, String> {
-    let sessions = fetch_sessions_sorted(server, directory)?;
+    let sessions = fetch_sessions_sorted(server, directory)?.items;
     let inputs = sessions
         .iter()
         .filter_map(|session| session_option_input(session, current_id))
@@ -310,15 +332,25 @@ pub(super) fn fetch_session_entries(
     current_id: Option<&str>,
     directory: Option<&str>,
 ) -> Result<Vec<NeoismAgentSessionEntry>, String> {
-    let sessions = fetch_sessions_sorted(server, directory)?;
-    // Runs map so the home list can green-dot actively-running sessions.
-    // Best-effort: a failed status fetch just means no dots this refresh.
-    let statuses = fetch_session_statuses(server).unwrap_or_default();
+    fetch_session_entries_page(server, current_id, directory, None).map(|page| page.0)
+}
+
+pub(super) fn fetch_session_entries_page(
+    server: &str,
+    current_id: Option<&str>,
+    directory: Option<&str>,
+    cursor: Option<&str>,
+) -> Result<(Vec<NeoismAgentSessionEntry>, Option<String>), String> {
+    let page = fetch_sessions_page(server, directory, cursor)?;
+    // Runtime dots hydrate independently from live session events. Do not
+    // hold the catalogue behind the serial status endpoint.
+    let statuses = HashMap::new();
     let _ = current_id;
-    Ok(sessions
+    let entries = page.items
         .iter()
         .filter_map(|session| session_entry(session, &statuses))
-        .collect())
+        .collect();
+    Ok((entries, page.next_cursor))
 }
 
 pub(super) fn fetch_subagent_options(
@@ -857,7 +889,16 @@ pub(super) fn fetch_config_defaults(
     let path = directory
         .map(|dir| format!("/v2/config/defaults?directory={}", percent_encode(dir)))
         .unwrap_or_else(|| "/v2/config/defaults".to_string());
-    let value = api_request_json(server, "GET", &path, None)?
+    // First workspace access may construct the plugin generation. This runs
+    // off the UI thread, so give that one-time operation a truthful budget
+    // instead of silently dropping defaults at the generic 900 ms deadline.
+    let value = api_request_json_with_read_timeout(
+        server,
+        "GET",
+        &path,
+        None,
+        std::time::Duration::from_secs(12),
+    )?
         .ok_or_else(|| "Neoism Agent returned an empty config response".to_string())?;
     Ok(config_defaults_from_json(&value))
 }

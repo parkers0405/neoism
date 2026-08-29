@@ -202,6 +202,12 @@ fn stale_busy_child_event_cannot_reopen_completed_branch_but_newer_runtime_can()
     );
     assert!(pane.side_panel.branch_terminal_locked("child-1"));
     assert!(!pane.active_subagent_ids.contains("child-1"));
+    pane.side_panel.prune_expired_completed_subagents();
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "child-1"));
 
     assert!(pane.apply_branch_lifecycle_snapshot(
         "parent".to_string(),
@@ -950,6 +956,42 @@ fn running_background_task_count_tracks_started_and_collected_jobs() {
         .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
     assert!(!pane.background_task_details_expanded());
+}
+
+#[test]
+fn background_task_count_settles_when_snapshot_adds_completion_without_clock_refresh() {
+    let mut pane = NeoismAgentPane::default();
+    let mut started = NeoismAgentMessage::tool(
+        "Background Task",
+        "job_id: job-1\nstatus: running\ncommand: cargo check",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    started.detail = started.text.clone();
+    pane.messages.push(started);
+    pane.ensure_background_task_activity_clock();
+    assert_eq!(pane.running_background_task_count(), 1);
+
+    let mut completed = NeoismAgentMessage::tool(
+        "Background Task Result",
+        "Background shell task finished.\njob_id: job-1\nstatus: completed",
+        "completed",
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    completed.detail = completed.text.clone();
+    // Snapshot reconciliation does not necessarily traverse the live event
+    // edge that refreshes the cached activity clock.
+    pane.messages.push(completed);
+
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert!(!pane.has_status_activity());
+    assert!(pane.active_background_task_summaries().is_empty());
 }
 
 #[test]

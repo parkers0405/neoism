@@ -992,6 +992,7 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
                         now_seconds,
                         row_clip,
                         s,
+                        ORDER_PANEL + 3,
                     );
                 } else {
                     draw_status_dot_text(

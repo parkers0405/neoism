@@ -71,9 +71,60 @@ pub fn measure_text_cached(
     if let Some(value) = TEXT_MEASURE_CACHE.with(|cache| cache.borrow().get(&key)) {
         return value;
     }
-    let value = sugarloaf.text_mut().measure(text, opts);
+    let measured = sugarloaf.text_mut().measure(text, opts);
+    let value = if text.chars().all(char::is_whitespace) {
+        // Some shapers omit glyphs for a whitespace-only run and report zero
+        // width. Agent Markdown deliberately splits differently styled words
+        // into runs, leaving their separator as exactly such a run. Recover
+        // the current face's space advance from an in-context probe so the
+        // following run cannot paint over the preceding colored/bold token.
+        let separated = sugarloaf.text_mut().measure("M M", opts);
+        let joined = sugarloaf.text_mut().measure("MM", opts);
+        stable_whitespace_advance(
+            measured,
+            separated - joined,
+            opts.font_size,
+            whitespace_columns(text),
+        )
+    } else {
+        measured
+    };
     TEXT_MEASURE_CACHE.with(|cache| cache.borrow_mut().insert(key, value));
     value
+}
+
+fn whitespace_columns(text: &str) -> usize {
+    text.chars()
+        .map(|ch| if ch == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+fn stable_whitespace_advance(
+    measured: f32,
+    probed_space: f32,
+    font_size: f32,
+    columns: usize,
+) -> f32 {
+    let space = probed_space.max(font_size * 0.35);
+    measured.max(space * columns as f32)
+}
+
+#[cfg(test)]
+mod measure_tests {
+    use super::{stable_whitespace_advance, whitespace_columns};
+
+    #[test]
+    fn whitespace_columns_preserve_spaces_and_expand_tabs() {
+        assert_eq!(whitespace_columns(" "), 1);
+        assert_eq!(whitespace_columns("  \t"), 6);
+    }
+
+
+    #[test]
+    fn whitespace_advance_survives_a_zero_width_shaper_run() {
+        assert_eq!(stable_whitespace_advance(0.0, 0.0, 20.0, 1), 7.0);
+        assert_eq!(stable_whitespace_advance(0.0, 8.0, 20.0, 2), 16.0);
+    }
 }
 
 pub fn measured_caret_stops(

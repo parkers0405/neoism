@@ -233,11 +233,39 @@ impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {
             let directory = directory.to_string_lossy();
             let body = match action {
                 ConfigAdminAction::Defaults => {
-                    let config = neoism_agent_builtins::plugin::config::load(self.0.services(), &directory).map_err(runtime_error)?.0;
+                    let config = match self
+                        .0
+                        .inner
+                        .workspace_runtimes
+                        .loaded(&directory)
+                        .await
+                    {
+                        Some(runtime) => runtime.snapshot().config().clone(),
+                        None => neoism_agent_builtins::plugin::config::load(
+                            self.0.services(),
+                            &directory,
+                        )
+                        .map_err(runtime_error)?
+                        .0,
+                    };
                     Ok(neoism_agent_builtins::plugin::config::selection_defaults(&config))
                 }
                 ConfigAdminAction::Get => {
-                    let mut config = neoism_agent_builtins::plugin::config::load(self.0.services(), &directory).map_err(runtime_error)?.0;
+                    let mut config = match self
+                        .0
+                        .inner
+                        .workspace_runtimes
+                        .loaded(&directory)
+                        .await
+                    {
+                        Some(runtime) => runtime.snapshot().config().clone(),
+                        None => neoism_agent_builtins::plugin::config::load(
+                            self.0.services(),
+                            &directory,
+                        )
+                        .map_err(runtime_error)?
+                        .0,
+                    };
                     crate::config::inject_builtin_mcp(&mut config, self.0.services());
                     serde_json::to_value(config)
                 }

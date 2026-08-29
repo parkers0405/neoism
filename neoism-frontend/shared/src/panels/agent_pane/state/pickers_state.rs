@@ -118,6 +118,7 @@ impl NeoismAgentPane {
     pub fn open_sessions_picker(&mut self) {
         self.push_outbound(OutboundAgentCommand::RefreshSessions {
             directory: self.directory.clone(),
+            cursor: None,
         });
         let selected = self
             .session_options
@@ -284,6 +285,7 @@ impl NeoismAgentPane {
         if !self.side_panel.user_hidden() {
             self.push_outbound(OutboundAgentCommand::RefreshSessions {
                 directory: self.directory.clone(),
+                cursor: None,
             });
         }
     }

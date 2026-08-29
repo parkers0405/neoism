@@ -127,6 +127,7 @@ pub enum OutboundAgentCommand {
     /// Refresh the session list used by `/sessions` and the agent side panel.
     RefreshSessions {
         directory: Option<String>,
+        cursor: Option<String>,
     },
 
     /// Request older transcript messages before the currently loaded
@@ -391,7 +392,10 @@ mod tests {
         };
         let _ = OutboundAgentCommand::SetInputHelpVisible { visible: false };
         let _ = OutboundAgentCommand::RefreshModelContextLimit;
-        let _ = OutboundAgentCommand::RefreshSessions { directory: None };
+        let _ = OutboundAgentCommand::RefreshSessions {
+            directory: None,
+            cursor: None,
+        };
         let _ = OutboundAgentCommand::RefreshModels;
         let _ = OutboundAgentCommand::RefreshAgents { directory: None };
         let _ = OutboundAgentCommand::RefreshSkills { directory: None };

@@ -28,6 +28,7 @@ pub(crate) struct SessionListQuery {
     pub start: Option<u64>,
     pub search: Option<String>,
     pub limit: Option<usize>,
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

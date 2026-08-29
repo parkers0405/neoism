@@ -999,6 +999,78 @@ async fn session_directory_patch_moves_and_persists_the_session() {
 }
 
 #[tokio::test]
+async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-session-list-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let store = SessionStore::open(path.clone()).await.unwrap();
+    let now = now_millis();
+    let mut ids = Vec::new();
+    for title in ["one", "two", "three"] {
+        let id = neoism_agent_core::new_session_id();
+        let mut session = store_test_session(&id, now);
+        session.directory = "/indexed".to_string();
+        session.title = title.to_string();
+        store.insert_session(&session).await.unwrap();
+        ids.push(id);
+    }
+
+    let first = store
+        .list_root_sessions_page(Some("/indexed"), None, None, None, None, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(first.items.len(), 2);
+    let cursor = crate::state::SessionListCursor::decode(
+        first.next_cursor.as_deref().expect("second page cursor"),
+    )
+    .unwrap();
+    let second = store
+        .list_root_sessions_page(
+            Some("/indexed"),
+            None,
+            None,
+            None,
+            Some(&cursor),
+            Some(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.items.len(), 1);
+    let listed = first
+        .items
+        .into_iter()
+        .chain(second.items)
+        .map(|session| session.id.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(listed.len(), 3, "equal timestamps must not duplicate or omit rows");
+
+    let mut moved = store.get_session(ids[0].as_str()).await.unwrap().unwrap();
+    moved.directory = "/moved".to_string();
+    moved.time.updated += 1;
+    store.update_session(&moved).await.unwrap();
+    assert_eq!(
+        store
+            .list_root_sessions_page(Some("/moved"), None, None, None, None, Some(10))
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert!(store.delete_session(ids[0].as_str()).await.unwrap());
+    assert!(store
+        .list_root_sessions_page(Some("/moved"), None, None, None, None, Some(10))
+        .await
+        .unwrap()
+        .items
+        .is_empty());
+    store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn semantic_store_ranks_by_vector_distance_on_turso() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-sem-{}.turso.db",

@@ -217,6 +217,11 @@ fn stale_idle_tree_refresh_cannot_terminalize_authoritative_outstanding_branch()
         [("child".into(), "completed".into(), Some(10))],
     ));
     assert_eq!(pane.active_subagent_count(), 0);
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "child"));
 }
 
 #[test]
@@ -235,6 +240,11 @@ fn reconnect_snapshot_restores_outstanding_branch_and_stale_revision_cannot_rewi
         [("child".into(), "completed".into(), Some(10))],
     ));
     assert_eq!(pane.active_subagent_count(), 0);
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "child"));
     assert!(!pane.apply_branch_lifecycle_snapshot(
         "root".into(),
         7,
@@ -1444,8 +1454,130 @@ fn initial_session_skeleton_animates_until_sessions_load() {
     let mut pane = NeoismAgentPane::default();
 
     assert!(pane.side_panel.is_animating());
+    pane.side_panel.set_sessions_error("temporarily unavailable");
+    assert!(matches!(
+        pane.side_panel.session_catalog_state(),
+        super::side_panel::SessionCatalogState::Error(_)
+    ));
+    assert!(pane.side_panel.is_animating());
     pane.side_panel.set_sessions(Vec::new());
     assert!(!pane.side_panel.is_animating());
+}
+
+#[test]
+fn session_catalog_refresh_failure_preserves_stale_rows_without_loader() {
+    let mut pane = NeoismAgentPane::default();
+    pane.side_panel.set_sessions(vec![NeoismAgentSessionEntry::new(
+        "ses-1",
+        "Previous session",
+        "1m",
+    )]);
+
+    pane.side_panel.set_sessions_error("temporarily unavailable");
+
+    assert!(matches!(
+        pane.side_panel.session_catalog_state(),
+        super::side_panel::SessionCatalogState::Ready
+    ));
+    assert!(!pane.side_panel.is_animating());
+    assert!(pane
+        .side_panel
+        .sessions()
+        .iter()
+        .any(|session| session.id == "ses-1"));
+
+    pane.side_panel.set_sessions(Vec::new());
+    assert!(matches!(
+        pane.side_panel.session_catalog_state(),
+        super::side_panel::SessionCatalogState::Ready
+    ));
+    assert!(!pane.side_panel.is_animating());
+}
+
+#[test]
+fn session_catalog_pages_append_once_without_resetting_loaded_rows() {
+    let mut pane = NeoismAgentPane::default();
+    let first = (0..8)
+        .map(|index| {
+            NeoismAgentSessionEntry::new(
+                format!("session-{index}"),
+                format!("Session {index}"),
+                "now",
+            )
+            .with_updated_ms(100 - index)
+        })
+        .collect();
+    pane.side_panel
+        .set_session_page(first, None, Some("next-1".to_string()));
+    assert!(!pane.side_panel.should_refresh_sessions());
+    pane.side_panel.set_last_panel_height_rows(2);
+    pane.side_panel.scroll_pixels(-10_000.0, 2);
+    let scroll_top = pane.side_panel.scroll_top();
+
+    assert_eq!(
+        pane.side_panel.begin_session_page_near_end().as_deref(),
+        Some("next-1")
+    );
+    assert!(pane.side_panel.session_page_loading());
+    assert_eq!(pane.side_panel.begin_session_page_near_end(), None);
+
+    pane.side_panel.set_session_page(
+        vec![
+            NeoismAgentSessionEntry::new("session-7", "duplicate", "now")
+                .with_updated_ms(93),
+            NeoismAgentSessionEntry::new("session-8", "Session 8", "now")
+                .with_updated_ms(92),
+        ],
+        Some("next-1"),
+        None,
+    );
+    let ids = pane
+        .side_panel
+        .sessions()
+        .iter()
+        .filter(|entry| !entry.is_header)
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 9);
+    assert_eq!(ids.iter().filter(|id| **id == "session-7").count(), 1);
+    assert!(ids.contains(&"session-8"));
+    assert!(!pane.side_panel.session_page_loading());
+    assert_eq!(pane.side_panel.scroll_top(), scroll_top);
+    assert_eq!(pane.side_panel.session_next_cursor(), None);
+    assert_eq!(pane.side_panel.begin_session_page_near_end(), None);
+}
+
+#[test]
+fn scrolling_session_catalog_tail_requests_the_continuation_cursor() {
+    let mut pane = NeoismAgentPane::default();
+    let _ = pane.drain_pending_outbound();
+    pane.set_directory(Some("/workspace".to_string()));
+    pane.side_panel.set_session_page(
+        (0..8)
+            .map(|index| {
+                NeoismAgentSessionEntry::new(
+                    format!("session-{index}"),
+                    format!("Session {index}"),
+                    "now",
+                )
+                .with_updated_ms(100 - index)
+            })
+            .collect(),
+        None,
+        Some("next-page".to_string()),
+    );
+    pane.side_panel.set_last_panel_height_rows(2);
+
+    pane.scroll_side_panel_pixels(-10_000.0, 2);
+    assert!(matches!(
+        pane.drain_pending_outbound().as_slice(),
+        [OutboundAgentCommand::RefreshSessions {
+            directory: Some(directory),
+            cursor: Some(cursor),
+        }] if directory == "/workspace" && cursor == "next-page"
+    ));
+    pane.scroll_side_panel_pixels(-10_000.0, 2);
+    assert!(pane.drain_pending_outbound().is_empty());
 }
 
 #[test]
@@ -1945,6 +2077,41 @@ fn running_background_task_count_tracks_started_and_collected_jobs() {
         .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
     assert!(!pane.background_task_details_expanded());
+}
+
+#[test]
+fn background_task_count_settles_when_snapshot_adds_completion_without_clock_refresh() {
+    let mut pane = NeoismAgentPane::default();
+    let mut started = NeoismAgentMessage::tool(
+        "Background Task",
+        "job_id: job-1\nstatus: running\ncommand: cargo check",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    started.detail = started.text.clone();
+    pane.messages.push(started);
+    pane.refresh_background_task_activity_clock();
+    assert_eq!(pane.running_background_task_count(), 1);
+
+    let mut completed = NeoismAgentMessage::tool(
+        "Background Task Result",
+        "Background shell task finished.\njob_id: job-1\nstatus: completed",
+        "completed",
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    completed.detail = completed.text.clone();
+    // Model a snapshot merge: the message lands without the live completion
+    // branch refreshing the cached activity clock.
+    pane.messages.push(completed);
+
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert!(pane.active_background_task_summaries().is_empty());
 }
 
 #[test]

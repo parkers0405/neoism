@@ -754,7 +754,9 @@ fn write_settings(updates: &[(&str, serde_json::Value)]) -> std::io::Result<()> 
             value.clone(),
         )?;
     }
-    std::fs::write(path, content)
+    std::fs::write(path, content)?;
+    invalidate_config_json_cache();
+    Ok(())
 }
 
 /// Upsert (or clear) a `keybinds.keys` binding override for `action` in
@@ -768,6 +770,7 @@ pub fn write_keybind(action: &str, key: &str, with: &str) -> std::io::Result<()>
     let output = jsonc_edit::edit_keybind(&content, action, key, with)?;
     if output != content {
         std::fs::write(path, output)?;
+        invalidate_config_json_cache();
     }
     Ok(())
 }
@@ -777,13 +780,52 @@ pub fn write_keybind(action: &str, key: &str, with: &str) -> std::io::Result<()>
 /// including keys the terminal `Config` struct doesn't model.
 pub fn load_config_json_value() -> serde_json::Value {
     let path = config_file_path();
+    let fingerprint = std::fs::metadata(&path).ok().map(|metadata| {
+        (
+            metadata.len(),
+            metadata.modified().ok(),
+        )
+    });
+    if let Some(value) = config_json_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.as_ref().filter(|entry| entry.fingerprint == fingerprint).map(|entry| entry.value.clone()))
+    {
+        return value;
+    }
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let cleaned = strip_trailing_commas(&strip_json_comments(&content));
-    if cleaned.trim().is_empty() {
-        return serde_json::Value::Object(serde_json::Map::new());
+    let value = if cleaned.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(&cleaned)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+    };
+    if let Ok(mut cache) = config_json_cache().lock() {
+        *cache = Some(ConfigJsonCache {
+            fingerprint,
+            value: value.clone(),
+        });
     }
-    serde_json::from_str(&cleaned)
-        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+    value
+}
+
+#[derive(Clone)]
+struct ConfigJsonCache {
+    fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
+    value: serde_json::Value,
+}
+
+fn config_json_cache() -> &'static std::sync::Mutex<Option<ConfigJsonCache>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<ConfigJsonCache>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn invalidate_config_json_cache() {
+    if let Ok(mut cache) = config_json_cache().lock() {
+        *cache = None;
+    }
 }
 
 /// Persist `appearance.fonts.family` — Mash Up Packs use this so their

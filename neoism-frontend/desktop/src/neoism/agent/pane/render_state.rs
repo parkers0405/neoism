@@ -298,11 +298,23 @@ impl NeoismAgentPane {
         std::thread::Builder::new()
             .name("neoism-agent-config".into())
             .spawn(move || {
-                if let Ok(defaults) = fetch_config_defaults(&server, directory.as_deref())
-                {
-                    let _ = tx.send(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(
-                        defaults,
-                    ));
+                let mut last_error = None;
+                for delay in [0, 250, 750] {
+                    if delay > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                    }
+                    match fetch_config_defaults(&server, directory.as_deref()) {
+                        Ok(defaults) => {
+                            let _ = tx.send(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(
+                                defaults,
+                            ));
+                            return;
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                if let Some(error) = last_error {
+                    tracing::warn!(%error, "failed to load agent config defaults");
                 }
             })
             .ok();

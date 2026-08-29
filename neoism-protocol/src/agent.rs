@@ -94,6 +94,9 @@ pub enum AgentClientMessage {
         /// reasonable default (~24).
         #[serde(default)]
         limit: Option<u32>,
+        /// Opaque keyset cursor returned by the preceding page.
+        #[serde(default)]
+        cursor: Option<String>,
     },
     /// Replay the persisted message timeline for a session. Useful
     /// for restoring chrome state on reload. The reply is one or
@@ -467,6 +470,15 @@ pub enum AgentServerMessage {
     /// sorted newest-first.
     ThreadList {
         threads: Vec<ThreadSummary>,
+        #[serde(default)]
+        requested_cursor: Option<String>,
+        #[serde(default)]
+        next_cursor: Option<String>,
+    },
+    /// A session catalog request failed. This is distinct from a successful
+    /// empty page so clients never present transport failures as no history.
+    ThreadListFailed {
+        message: String,
     },
     /// Streaming history page. Emitted in response to
     /// [`AgentClientMessage::GetHistory`]; `next_cursor` is the

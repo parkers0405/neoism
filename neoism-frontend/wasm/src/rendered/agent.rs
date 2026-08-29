@@ -173,6 +173,7 @@ impl ChromeBridge {
             self.send_agent_envelope(&AgentClientMessage::ListThreads {
                 directory: self.agent_state.default_directory.clone(),
                 limit: Some(50),
+                cursor: None,
             });
         }
     }
@@ -1171,10 +1172,12 @@ impl ChromeBridge {
         if let Some(pane) = self.chrome.agent_pane_mut() {
             pane.set_directory(self.agent_state.default_directory.clone());
             pane.set_local_presence_name(self.agent_state.local_presence_name.clone());
+            pane.side_panel_mut().mark_refresh_kicked();
         }
         self.send_agent_envelope(&AgentClientMessage::ListThreads {
             directory: self.agent_state.default_directory.clone(),
             limit: Some(50),
+            cursor: None,
         });
         self.send_agent_envelope(&AgentClientMessage::GetConfigDefaults {
             directory: self.agent_state.default_directory.clone(),
@@ -1587,7 +1590,7 @@ impl ChromeBridge {
         }
         if pane.side_panel().contains_point(x, y) {
             let rows = pane.side_panel().last_panel_height_rows();
-            pane.side_panel_mut().scroll_pixels(delta_pixels, rows);
+            pane.scroll_side_panel_pixels(delta_pixels, rows);
             return true;
         }
         if pane.timeline_contains_point(x, y) {
@@ -1650,7 +1653,7 @@ impl ChromeBridge {
         }
         if pane.side_panel().contains_point(x, y) {
             let rows = pane.side_panel().last_panel_height_rows();
-            pane.side_panel_mut().scroll_pixels(wheel.pixels, rows);
+            pane.scroll_side_panel_pixels(wheel.pixels, rows);
             return true;
         }
         if !pane.timeline_contains_point(x, y) {
@@ -1718,7 +1721,7 @@ impl ChromeBridge {
         }
         if pane.side_panel().contains_point(x, y) {
             let rows = pane.side_panel().last_panel_height_rows();
-            pane.side_panel_mut().scroll_pixels(dy_pixels, rows);
+            pane.scroll_side_panel_pixels(dy_pixels, rows);
             return 1;
         }
         if pane.timeline_contains_point(x, y) {

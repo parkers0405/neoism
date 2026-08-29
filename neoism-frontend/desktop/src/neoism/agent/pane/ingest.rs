@@ -1354,8 +1354,103 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                 }
-                Ok(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed(sessions)) => {
-                    self.side_panel.set_sessions(sessions);
+                Ok(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(result)) => {
+                    if let Some(picker) = self
+                        .picker
+                        .as_ref()
+                        .filter(|picker| picker.kind == NeoismAgentPickerKind::Model)
+                    {
+                        let _ = picker;
+                        let options = match result {
+                            Ok(options) => self.model_picker_options(options),
+                            Err(error) => vec![NeoismAgentPickerOption::new(
+                                "Couldn't load models",
+                                &error,
+                                "retry",
+                                "",
+                            )],
+                        };
+                        if let Some(picker) = self.picker.as_mut() {
+                            picker.replace_options(options);
+                        }
+                        changed = true;
+                    }
+                }
+                Ok(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(result)) => {
+                    if let Some(picker) = self
+                        .picker
+                        .as_mut()
+                        .filter(|picker| picker.kind == NeoismAgentPickerKind::Agent)
+                    {
+                        picker.replace_options(result.unwrap_or_else(|error| {
+                            vec![NeoismAgentPickerOption::new(
+                                "Couldn't load agents",
+                                &error,
+                                "retry",
+                                "",
+                            )]
+                        }));
+                        changed = true;
+                    }
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionOptionsRefreshed(result)) => {
+                    if let Some(picker) = self
+                        .picker
+                        .as_mut()
+                        .filter(|picker| picker.kind == NeoismAgentPickerKind::Session)
+                    {
+                        let options = result.unwrap_or_else(|error| {
+                            vec![NeoismAgentPickerOption::new(
+                                "Couldn't load sessions",
+                                &error,
+                                "retry",
+                                "",
+                            )]
+                        });
+                        self.session_picker_base = options.clone();
+                        picker.replace_options(options);
+                        changed = true;
+                    }
+                }
+                Ok(NeoismAgentBackgroundUpdate::SkillOptionsRefreshed {
+                    directory,
+                    result,
+                }) => {
+                    if let Some(picker) = self
+                        .picker
+                        .as_mut()
+                        .filter(|picker| picker.kind == NeoismAgentPickerKind::Skill)
+                    {
+                        let options = result.unwrap_or_else(|error| {
+                            vec![NeoismAgentPickerOption::new(
+                                "Couldn't load skills",
+                                &error,
+                                "retry",
+                                "",
+                            )]
+                        });
+                        self.skill_options_directory = Some(directory);
+                        self.skill_options = options.clone();
+                        picker.replace_options(options);
+                        changed = true;
+                    }
+                }
+                Ok(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
+                    requested_cursor,
+                    result,
+                }) => {
+                    match result {
+                        Ok((sessions, next_cursor)) => self.side_panel.set_session_page(
+                            sessions,
+                            requested_cursor.as_deref(),
+                            next_cursor,
+                        ),
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to refresh agent sessions");
+                            self.side_panel
+                                .settle_session_page_error("couldn't load sessions; retrying");
+                        }
+                    }
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::SidePanelSubagentsRefreshed {

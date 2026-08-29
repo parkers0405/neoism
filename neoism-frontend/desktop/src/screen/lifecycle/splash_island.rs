@@ -541,6 +541,28 @@ impl Screen<'_> {
         }
     }
 
+    pub fn has_island_drag(&self) -> bool {
+        self.renderer
+            .island
+            .as_ref()
+            .and_then(|island| island.drag_source_index())
+            .is_some()
+    }
+
+    /// Cancel an armed or live workspace drag without committing reorder or
+    /// detach. Returns whether state was cleared so event owners can repaint.
+    pub fn cancel_island_drag(&mut self) -> bool {
+        let Some(island) = self.renderer.island.as_mut() else {
+            return false;
+        };
+        if island.drag_source_index().is_none() {
+            return false;
+        }
+        island.cancel_drag();
+        self.mark_dirty();
+        true
+    }
+
     /// Lift the workspace at `index` out of this window — grid (live
     /// sessions) plus its per-workspace chrome state — and park it for
     /// the app loop to adopt into a fresh OS window. The shell keeps

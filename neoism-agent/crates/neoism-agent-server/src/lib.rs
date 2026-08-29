@@ -277,6 +277,7 @@ pub async fn listen(
         total_start_ms = crate::perf::elapsed_ms(started),
         "server state opened"
     );
+    state.start_session_list_backfill();
     let result = axum::serve(listener, app_router::app_with_cors(state.clone(), &options.cors)).await;
     state.shutdown().await?;
     tracing::warn!(

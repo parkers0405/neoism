@@ -1270,6 +1270,7 @@ impl NeoismAgentPane {
         let directory = directory.and_then(|d| (!d.trim().is_empty()).then_some(d));
         if self.directory != directory {
             self.skill_options.clear();
+            self.side_panel.invalidate_session_catalog();
         }
         self.directory = directory;
     }

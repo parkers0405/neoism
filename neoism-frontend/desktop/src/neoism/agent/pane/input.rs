@@ -371,47 +371,42 @@ impl NeoismAgentPane {
     }
 
     pub fn open_agent_picker(&mut self) {
-        let options = fetch_agent_options(&self.server, self.directory.as_deref())
-            .unwrap_or_else(|error| {
-                vec![NeoismAgentPickerOption::new(
-                    "Neoism server not reachable",
-                    &error,
-                    "offline",
-                    "",
-                )]
-            });
-        let selected = options
-            .iter()
-            .position(|option| self.agent.as_deref().unwrap_or("") == option.value)
-            .unwrap_or(0);
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Agent,
             "Agents",
-            options,
-            selected,
+            vec![NeoismAgentPickerOption::new("Loading agents...", "", "", "")],
+            0,
         ));
+        let server = self.server.clone();
+        let directory = self.directory.clone();
+        let tx = self.background_tx.clone();
+        std::thread::Builder::new()
+            .name("neoism-agent-options".into())
+            .spawn(move || {
+                let _ = tx.send(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(
+                    fetch_agent_options(&server, directory.as_deref()),
+                ));
+            })
+            .ok();
     }
 
     pub fn open_model_picker(&mut self) {
-        let options = fetch_model_options(&self.server).unwrap_or_else(|error| {
-            vec![NeoismAgentPickerOption::new(
-                "Neoism server not reachable",
-                &error,
-                "offline",
-                "",
-            )]
-        });
-        let options = self.model_picker_options(options);
-        let selected = options
-            .iter()
-            .position(|option| option.is_selectable() && option.value == self.model)
-            .unwrap_or(0);
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Model,
             "Select model",
-            options,
-            selected,
+            vec![NeoismAgentPickerOption::new("Loading models...", "", "", "")],
+            0,
         ));
+        let server = self.server.clone();
+        let tx = self.background_tx.clone();
+        std::thread::Builder::new()
+            .name("neoism-model-options".into())
+            .spawn(move || {
+                let _ = tx.send(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(
+                    fetch_model_options(&server),
+                ));
+            })
+            .ok();
     }
 
     pub(crate) fn model_picker_options(
@@ -549,29 +544,24 @@ impl NeoismAgentPane {
     }
 
     pub fn open_sessions_picker(&mut self) {
-        match fetch_session_options(
-            &self.server,
-            self.session_id.as_deref(),
-            self.directory.as_deref(),
-        ) {
-            Ok(options) if !options.is_empty() => {
-                let selected = options
-                    .iter()
-                    .position(|option| {
-                        Some(option.value.as_str()) == self.session_id.as_deref()
-                    })
-                    .unwrap_or(0);
-                self.session_picker_base = options.clone();
-                self.picker = Some(NeoismAgentPicker::new(
-                    NeoismAgentPickerKind::Session,
-                    "Sessions",
-                    options,
-                    selected,
+        self.picker = Some(NeoismAgentPicker::new(
+            NeoismAgentPickerKind::Session,
+            "Sessions",
+            vec![NeoismAgentPickerOption::new("Loading sessions...", "", "", "")],
+            0,
+        ));
+        let server = self.server.clone();
+        let current = self.session_id.clone();
+        let directory = self.directory.clone();
+        let tx = self.background_tx.clone();
+        std::thread::Builder::new()
+            .name("neoism-session-options".into())
+            .spawn(move || {
+                let _ = tx.send(NeoismAgentBackgroundUpdate::SessionOptionsRefreshed(
+                    fetch_session_options(&server, current.as_deref(), directory.as_deref()),
                 ));
-            }
-            Ok(_) => self.system_message("Sessions", "no sessions"),
-            Err(error) => self.system_message("Sessions", error),
-        }
+            })
+            .ok();
     }
 
     /// Selected `(session_id, title, pinned)` in an open `/sessions` picker.
@@ -743,18 +733,25 @@ impl NeoismAgentPane {
     }
 
     pub fn open_skill_picker(&mut self) {
-        match self.refresh_skill_options() {
-            Ok(()) if !self.skill_options.is_empty() => {
-                self.picker = Some(NeoismAgentPicker::new(
-                    NeoismAgentPickerKind::Skill,
-                    "Skills",
-                    self.skill_options.clone(),
-                    0,
-                ));
-            }
-            Ok(()) => self.system_message("Skills", "no skills discovered"),
-            Err(error) => self.system_message("Skills", error),
-        }
+        self.picker = Some(NeoismAgentPicker::new(
+            NeoismAgentPickerKind::Skill,
+            "Skills",
+            vec![NeoismAgentPickerOption::new("Loading skills...", "", "", "")],
+            0,
+        ));
+        let server = self.server.clone();
+        let directory = self.directory.clone();
+        let tx = self.background_tx.clone();
+        std::thread::Builder::new()
+            .name("neoism-skill-options".into())
+            .spawn(move || {
+                let result = fetch_skill_options(&server, directory.as_deref());
+                let _ = tx.send(NeoismAgentBackgroundUpdate::SkillOptionsRefreshed {
+                    directory,
+                    result,
+                });
+            })
+            .ok();
     }
 
     pub fn open_subagent_picker(&mut self) {

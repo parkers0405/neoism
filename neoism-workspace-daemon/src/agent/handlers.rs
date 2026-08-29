@@ -106,29 +106,46 @@ pub(crate) async fn handle_list_threads(
     inner: Arc<AgentInner>,
     directory: Option<String>,
     limit: Option<u32>,
+    cursor: Option<String>,
 ) {
     let filtered_dir = directory.as_deref().filter(|d| !d.is_empty());
-    let path = session_list_path(filtered_dir);
     let take = limit.unwrap_or(24).max(1) as usize;
+    let path = session_list_path(filtered_dir, take, cursor.as_deref());
     match http_get_json(&inner, &path).await {
         Ok(value) => {
-            let mut threads = thread_summaries_from_sessions(&value, take);
-            if threads.is_empty() && filtered_dir.is_some() {
-                if let Ok(value) = http_get_json(&inner, &session_list_path(None)).await {
-                    threads = thread_summaries_from_sessions(&value, take);
-                }
-            }
-            let _ = inner.tx.send(AgentServerMessage::ThreadList { threads });
+            let threads = thread_summaries_from_sessions(&value, take);
+            let next_cursor = value
+                .get("cursor")
+                .and_then(|cursor| cursor.get("next"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let _ = inner.tx.send(AgentServerMessage::ThreadList {
+                threads,
+                requested_cursor: cursor,
+                next_cursor,
+            });
         }
-        Err(err) => emit_error(&inner.tx, err),
+        Err(err) => {
+            let _ = inner.tx.send(AgentServerMessage::ThreadListFailed {
+                message: err.to_string(),
+            });
+        }
     }
 }
 
-pub(crate) fn session_list_path(directory: Option<&str>) -> String {
-    let mut path = String::from("/v2/sessions?roots=true");
+pub(crate) fn session_list_path(
+    directory: Option<&str>,
+    limit: usize,
+    cursor: Option<&str>,
+) -> String {
+    let mut path = format!("/v2/sessions?roots=true&limit={}", limit.clamp(1, 200));
     if let Some(dir) = directory {
         path.push_str("&directory=");
         path.push_str(&percent_encode(dir));
+    }
+    if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
+        path.push_str("&cursor=");
+        path.push_str(&percent_encode(cursor));
     }
     path
 }
@@ -1633,6 +1650,8 @@ pub(crate) async fn handle_set_pinned(
 
 #[cfg(test)]
 mod canonical_route_tests {
+    use super::session_list_path;
+
     #[test]
     fn daemon_agent_source_contains_no_deleted_http_routes() {
         let source = include_str!("handlers.rs");
@@ -1647,5 +1666,13 @@ mod canonical_route_tests {
             assert!(!source.contains(&direct), "legacy daemon route remains: {direct}");
             assert!(!event_source.contains(&direct), "legacy daemon event route remains: {direct}");
         }
+    }
+
+    #[test]
+    fn session_list_path_carries_directory_limit_and_cursor() {
+        assert_eq!(
+            session_list_path(Some("/tmp/my project"), 50, Some("v1:42:ses_1")),
+            "/v2/sessions?roots=true&limit=50&directory=%2Ftmp%2Fmy%20project&cursor=v1%3A42%3Ases_1"
+        );
     }
 }

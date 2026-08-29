@@ -188,6 +188,10 @@ impl NeoismAgentPane {
             return;
         }
         self.side_panel.mark_refresh_kicked();
+        self.request_side_panel_session_page(None);
+    }
+
+    fn request_side_panel_session_page(&mut self, cursor: Option<String>) {
         let server = self.server.clone();
         let current = self.session_id.clone();
         let directory = self.directory.clone();
@@ -195,17 +199,25 @@ impl NeoismAgentPane {
         std::thread::Builder::new()
             .name("neoism-agent-sessions".into())
             .spawn(move || {
-                let entries = fetch_session_entries(
+                let entries = crate::neoism::agent::api::fetch_session_entries_page(
                     &server,
                     current.as_deref(),
                     directory.as_deref(),
-                )
-                .unwrap_or_default();
-                let _ = tx.send(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed(
-                    entries,
-                ));
+                    cursor.as_deref(),
+                );
+                let _ = tx.send(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
+                    requested_cursor: cursor,
+                    result: entries,
+                });
             })
             .ok();
+    }
+
+    pub fn scroll_side_panel_pixels(&mut self, delta_pixels: f32, rows: usize) {
+        self.side_panel.scroll_pixels(delta_pixels, rows);
+        if let Some(cursor) = self.side_panel.begin_session_page_near_end() {
+            self.request_side_panel_session_page(Some(cursor));
+        }
     }
 
     /// Kick a background semantic transcript search for `query`, coalesced
@@ -588,7 +600,10 @@ impl NeoismAgentPane {
     }
 
     pub fn running_background_task_count(&self) -> usize {
-        self.running_background_task_count
+        // Derive from the authoritative transcript. Completion sentinels may
+        // arrive through a history merge that bypasses the cached counter's
+        // event edge; the footer must still settle immediately.
+        running_background_task_count(&self.messages)
     }
 
     pub(crate) fn ensure_background_task_activity_clock(&mut self) {
@@ -774,11 +789,13 @@ impl NeoismAgentPane {
                 "completed" => BranchStatus::Completed,
                 _ => BranchStatus::Stopped,
             };
-            self.upsert_live_subagent_entry(&session_id, None, None);
+            if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
+                self.upsert_live_subagent_entry(&session_id, None, None);
+            }
             // A newer family revision is authoritative proof of a genuine
             // continuation and may reopen the same child session ID.
             self.side_panel
-                .set_branch_activity_status(session_id.clone(), status);
+                .set_branch_activity_status_from_recovery(session_id.clone(), status);
             self.side_panel
                 .set_branch_activity_started_at(session_id.clone(), started_at);
             if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
@@ -795,6 +812,7 @@ impl NeoismAgentPane {
         if viewed_terminal {
             self.side_panel.clear_status_display_hold();
         }
+        self.side_panel.prune_expired_completed_subagents();
         self.sync_subagent_waiting_clock();
         true
     }

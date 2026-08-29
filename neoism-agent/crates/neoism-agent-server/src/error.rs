@@ -56,6 +56,13 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn is_conflict(&self) -> bool {
         self.status == StatusCode::CONFLICT
     }
@@ -82,6 +89,7 @@ impl IntoResponse for ApiError {
             StatusCode::GONE => "lifecycle.closed",
             StatusCode::FORBIDDEN => "request.forbidden",
             StatusCode::NOT_IMPLEMENTED => "feature.not_implemented",
+            StatusCode::SERVICE_UNAVAILABLE => "server.starting",
             _ => "server.internal",
         };
         let retryable = self.status.is_server_error();

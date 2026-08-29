@@ -485,8 +485,32 @@ async fn finish_if_quiescent_impl(
     if crate::background_job::family_has_running_jobs(state, &children, &root_id).await {
         return;
     }
-    if branches.iter().any(|branch| branch.status == "outstanding") {
-        return;
+    // Every live authority is now quiescent. An outstanding durable branch at
+    // this point is an orphan from interrupted teardown; treating the row as
+    // authority creates a permanent deadlock (and resurrects the child in
+    // `/runtime` on every reopen). Terminalize it under the root lock before
+    // settling the execution.
+    for branch in branches
+        .iter()
+        .filter(|branch| branch.status == "outstanding")
+    {
+        match state
+            .inner
+            .store
+            .finish_execution_subtask(&execution.execution_id, &branch.session_id, "failed")
+            .await
+        {
+            Ok(true) => tracing::warn!(
+                root_session_id = %root_id,
+                child_session_id = %branch.session_id,
+                "terminalized orphaned outstanding subtask during quiescence"
+            ),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, child_session_id = %branch.session_id, "failed to reconcile orphaned subtask");
+                return;
+            }
+        }
     }
     // The family is quiescent by every live authority, so any store run row
     // still 'running' is a leak from an interrupted teardown. Left alone it
@@ -667,6 +691,125 @@ mod tests {
             .unwrap();
         assert_ne!(next.execution_id, previous.execution_id);
         assert_eq!(next.completed_ms, 0);
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn quiescence_terminalizes_orphaned_outstanding_subtask() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-execution-orphan-subtask-{}.sqlite3",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        let state = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        let now = crate::now_millis();
+        let root_id = neoism_agent_core::new_session_id();
+        let root = SessionInfo {
+            id: root_id.clone(),
+            slug: "orphan-root".into(),
+            project_id: "global".into(),
+            workspace_id: None,
+            directory: "/tmp".into(),
+            path: None,
+            parent_id: None,
+            title: "Orphan root".into(),
+            agent: None,
+            model: None,
+            version: env!("CARGO_PKG_VERSION").into(),
+            time: TimeInfo {
+                created: now,
+                updated: now,
+                compacting: None,
+                archived: None,
+            },
+            permission: None,
+            extra: BTreeMap::new(),
+        };
+        let child_id = neoism_agent_core::new_session_id();
+        let mut child = root.clone();
+        child.id = child_id.clone();
+        child.slug = "orphan-child".into();
+        child.parent_id = Some(root_id.clone());
+        state.inner.store.insert_session(&root).await.unwrap();
+        state.inner.store.insert_session(&child).await.unwrap();
+        state
+            .inner
+            .store
+            .admit_execution_activity(root_id.as_str(), "execution-orphan", "message-root", "")
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .inner
+            .store
+            .register_execution_subtask(
+                "execution-orphan",
+                root_id.as_str(),
+                root_id.as_str(),
+                child_id.as_str(),
+                now,
+            )
+            .await
+            .unwrap();
+
+        state
+            .inner
+            .store
+            .insert_execution_segment(
+                root_id.as_str(),
+                "execution-orphan",
+                "live-segment",
+                &state.inner.execution_owner_id,
+                child_id.as_str(),
+                now,
+            )
+            .await
+            .unwrap();
+        finish_if_quiescent(&state, root_id.as_str()).await;
+        assert_eq!(
+            state
+                .inner
+                .store
+                .execution_subtask_status("execution-orphan", child_id.as_str())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("outstanding"),
+            "a live provider segment must protect real child work"
+        );
+        state
+            .inner
+            .store
+            .finish_execution_segment(
+                root_id.as_str(),
+                "execution-orphan",
+                "live-segment",
+                now + 1,
+            )
+            .await
+            .unwrap();
+
+        finish_if_quiescent(&state, root_id.as_str()).await;
+
+        assert_eq!(
+            state
+                .inner
+                .store
+                .execution_subtask_status("execution-orphan", child_id.as_str())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("failed")
+        );
+        assert!(state
+            .inner
+            .store
+            .get_execution_activity(root_id.as_str())
+            .await
+            .unwrap()
+            .is_some_and(|execution| execution.finished));
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_file(path);
     }

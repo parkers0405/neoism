@@ -603,6 +603,14 @@ impl SessionGoal {
 /// Per-pane side panel state. Holds animation springs, scroll cursor,
 /// and the cached session list. Refreshing the list is the pane's
 /// responsibility — see [`NeoismAgentPane::request_side_panel_refresh`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionCatalogState {
+    Initial,
+    Loading,
+    Ready,
+    Error(String),
+}
+
 pub struct NeoismAgentSidePanel {
     width: f32,
     focused: bool,
@@ -677,7 +685,14 @@ pub struct NeoismAgentSidePanel {
     /// highlighted.
     search_focused: bool,
     sessions: Vec<NeoismAgentSessionEntry>,
-    sessions_loaded: bool,
+    session_catalog_state: SessionCatalogState,
+    /// Opaque keyset cursor returned by the session catalogue. `None` means
+    /// the successful page was final.
+    session_next_cursor: Option<String>,
+    /// Prevents repeated wheel/touch events at the bottom from launching the
+    /// same continuation request more than once.
+    session_page_loading: bool,
+    session_requested_cursor: Option<String>,
     /// Phase origin for the first-load session skeleton. The panel starts
     /// unloaded, so this clock can begin with the panel state and stops
     /// participating in redraws as soon as `set_sessions` lands.
@@ -789,8 +804,11 @@ impl Default for NeoismAgentSidePanel {
             semantic_search_started: None,
             result_wrap_columns: 42,
             search_focused: false,
+            session_next_cursor: None,
+            session_page_loading: false,
+            session_requested_cursor: None,
             sessions: Vec::new(),
-            sessions_loaded: false,
+            session_catalog_state: SessionCatalogState::Initial,
             sessions_loading_started: Instant::now(),
             last_sessions_refresh: None,
             subagents: Vec::new(),
@@ -1170,8 +1188,29 @@ impl NeoismAgentSidePanel {
         &self.sessions
     }
 
+    pub fn invalidate_session_catalog(&mut self) {
+        self.all_sessions.clear();
+        self.sessions.clear();
+        self.session_next_cursor = None;
+        self.session_requested_cursor = None;
+        self.session_page_loading = false;
+        self.session_catalog_state = SessionCatalogState::Initial;
+        self.sessions_loading_started = Instant::now();
+        self.last_sessions_refresh = None;
+        self.scroll_top = 0;
+        self.scroll_px = 0.0;
+        self.scroll.reset();
+    }
+
     pub fn sessions_loaded(&self) -> bool {
-        self.sessions_loaded
+        matches!(
+            self.session_catalog_state,
+            SessionCatalogState::Ready | SessionCatalogState::Error(_)
+        )
+    }
+
+    pub fn session_catalog_state(&self) -> &SessionCatalogState {
+        &self.session_catalog_state
     }
 
     /// Seconds since the initial session-list skeleton began.
@@ -1496,14 +1535,80 @@ impl NeoismAgentSidePanel {
     /// selection / scroll on the sessions axis only when home mode is
     /// active — flipping modes already resets these.
     pub fn set_sessions(&mut self, sessions: Vec<NeoismAgentSessionEntry>) {
+        self.set_session_page(sessions, None, None);
+    }
+
+    /// Apply a catalogue page. First pages replace and reset the home list;
+    /// continuation pages append by id while preserving the viewport.
+    pub fn set_session_page(
+        &mut self,
+        sessions: Vec<NeoismAgentSessionEntry>,
+        requested_cursor: Option<&str>,
+        next_cursor: Option<String>,
+    ) {
         let was_home = matches!(self.mode, SidePanelMode::Sessions);
-        self.all_sessions = sessions;
-        self.sessions_loaded = true;
+        if requested_cursor.is_some() {
+            let mut known = self
+                .all_sessions
+                .iter()
+                .map(|session| session.id.clone())
+                .collect::<HashSet<_>>();
+            self.all_sessions.extend(
+                sessions
+                    .into_iter()
+                    .filter(|session| known.insert(session.id.clone())),
+            );
+        } else {
+            self.all_sessions = sessions;
+        }
+        self.session_next_cursor = next_cursor;
+        self.session_page_loading = false;
+        self.session_requested_cursor = None;
+        self.session_catalog_state = SessionCatalogState::Ready;
         self.rebuild_session_display();
-        if was_home {
+        if was_home && requested_cursor.is_none() {
             self.scroll_px = 0.0;
             self.scroll.reset();
             self.cursor_spring.reset();
+        }
+    }
+
+    pub fn session_next_cursor(&self) -> Option<&str> {
+        self.session_next_cursor.as_deref()
+    }
+
+    pub fn session_requested_cursor(&self) -> Option<&str> {
+        self.session_requested_cursor.as_deref()
+    }
+
+    pub fn session_page_loading(&self) -> bool {
+        self.session_page_loading
+    }
+
+    /// Claim the continuation cursor once the viewport is within four rows
+    /// of the loaded end. The claim is single-flight until a page or failure
+    /// settles it.
+    pub fn begin_session_page_near_end(&mut self) -> Option<String> {
+        if self.session_page_loading
+            || !matches!(self.mode, SidePanelMode::Sessions)
+            || !self.session_query.trim().is_empty()
+            || self.scroll_top.saturating_add(self.last_panel_height_rows + 4)
+                < self.active_len()
+        {
+            return None;
+        }
+        let cursor = self.session_next_cursor.clone()?;
+        self.session_page_loading = true;
+        self.session_requested_cursor = Some(cursor.clone());
+        self.last_sessions_refresh = Some(Instant::now());
+        Some(cursor)
+    }
+
+    pub fn settle_session_page_error(&mut self, message: impl Into<String>) {
+        self.session_page_loading = false;
+        self.session_requested_cursor = None;
+        if self.all_sessions.is_empty() {
+            self.session_catalog_state = SessionCatalogState::Error(message.into());
         }
     }
 
@@ -1872,14 +1977,33 @@ impl NeoismAgentSidePanel {
     /// True when the sessions list is stale enough to justify a refetch.
     /// Used by the pane to debounce the refresh worker.
     pub fn should_refresh_sessions(&self) -> bool {
+        if matches!(self.session_catalog_state, SessionCatalogState::Ready) {
+            // Periodic first-page replacement races continuation pages and
+            // resets a scrolled catalogue. Ready lists advance only through
+            // their cursor; directory changes explicitly invalidate them.
+            return false;
+        }
         let Some(last) = self.last_sessions_refresh else {
             return true;
         };
-        Instant::now().saturating_duration_since(last).as_secs_f32() >= 8.0
+        let retry_after = if matches!(self.session_catalog_state, SessionCatalogState::Error(_)) {
+            0.75
+        } else {
+            8.0
+        };
+        Instant::now().saturating_duration_since(last).as_secs_f32() >= retry_after
     }
 
     pub fn mark_refresh_kicked(&mut self) {
         self.last_sessions_refresh = Some(Instant::now());
+        if self.all_sessions.is_empty() {
+            self.session_catalog_state = SessionCatalogState::Loading;
+            self.sessions_loading_started = Instant::now();
+        }
+    }
+
+    pub fn set_sessions_error(&mut self, message: impl Into<String>) {
+        self.settle_session_page_error(message);
     }
 
     pub fn should_refresh_subagents(&self) -> bool {
@@ -1992,6 +2116,31 @@ impl NeoismAgentSidePanel {
             status,
             BranchStatusTransition::AuthoritativeRun,
         );
+    }
+
+    /// Apply a reconnect/history lifecycle snapshot. Terminal branches are
+    /// hidden immediately instead of receiving the live completion linger
+    /// window; active branches may still reopen on a newer family revision.
+    pub fn set_branch_activity_status_from_recovery(
+        &mut self,
+        session_id: impl Into<String>,
+        status: BranchStatus,
+    ) {
+        let session_id = session_id.into();
+        if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
+            self.set_branch_activity_status(session_id, status);
+            return;
+        }
+        let mut activity = BranchActivity::new(status, None, None);
+        activity.terminal_locked = true;
+        self.branch_activities.insert(session_id.clone(), activity);
+        if let Some(entry) = self
+            .subagents
+            .iter_mut()
+            .find(|entry| entry.id == session_id)
+        {
+            entry.runtime_status = Some(status.runtime_status().to_string());
+        }
     }
 
     /// Apply a branch status with explicit lifecycle semantics. Returns
@@ -2573,11 +2722,12 @@ impl NeoismAgentSidePanel {
     pub fn is_animating(&self) -> bool {
         self.scroll.is_animating()
                 || self.cursor_spring.position != 0.0
-                // Loading states may remain visible during a slow/failed
-                // request, but their shimmer only owns frames briefly.
-                || (!self.sessions_loaded
-                    && !self.user_hidden
-                    && self.sessions_loading_elapsed() < 1.5)
+                // Initial loads and retries keep the skeleton moving until a
+                // successful response proves the catalog is ready (including
+                // a legitimately empty catalog).
+                || (!matches!(self.session_catalog_state, SessionCatalogState::Ready)
+                    && !self.user_hidden)
+                || self.session_page_loading
                 || (self.semantic_searching && self.semantic_search_elapsed() < 1.5)
                 // A running sub-agent paints the rainbow loader spinner (and
                 // the blinking status dot), both of which need the host to

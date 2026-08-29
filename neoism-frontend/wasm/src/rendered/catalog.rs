@@ -264,14 +264,34 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::ThreadDeleted { session_id } => {
             pane.clear_session_id_if(&session_id);
         }
-        AgentServerMessage::ThreadList { threads } => {
+        AgentServerMessage::ThreadList {
+            threads,
+            requested_cursor,
+            next_cursor,
+        } => {
             let current_session_id = pane.session_id_str().map(str::to_string);
-            pane.set_session_options(session_options_from_catalog(
-                &threads,
-                current_session_id.as_deref(),
-            ));
+            let expected_cursor = pane
+                .side_panel()
+                .session_requested_cursor()
+                .map(str::to_string);
+            if requested_cursor.is_none() {
+                pane.set_session_options(session_options_from_catalog(
+                    &threads,
+                    current_session_id.as_deref(),
+                ));
+            }
+            if requested_cursor == expected_cursor {
+                pane.side_panel_mut().set_session_page(
+                    session_entries_from_catalog(&threads),
+                    requested_cursor.as_deref(),
+                    next_cursor,
+                );
+            }
+        }
+        AgentServerMessage::ThreadListFailed { message } => {
+            tracing::warn!(%message, "failed to refresh agent sessions");
             pane.side_panel_mut()
-                .set_sessions(session_entries_from_catalog(&threads));
+                .settle_session_page_error("couldn't load sessions; retrying");
         }
         AgentServerMessage::HistoryChunk {
             session_id,
@@ -1000,6 +1020,7 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::PermissionRequest { .. }
         | AgentServerMessage::Error { .. }
         | AgentServerMessage::ThreadList { .. }
+        | AgentServerMessage::ThreadListFailed { .. }
         | AgentServerMessage::ProviderCatalog { .. }
         | AgentServerMessage::ConfigDefaults { .. }
         | AgentServerMessage::AgentCatalog { .. }

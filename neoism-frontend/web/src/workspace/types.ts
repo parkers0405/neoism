@@ -1093,6 +1093,7 @@ export type AgentClientMessage =
       ListThreads: {
         directory?: string | null;
         limit?: number | null;
+        cursor?: string | null;
       };
     }
   | {
@@ -1215,7 +1216,14 @@ export type AgentServerMessage =
     }
   | { ThreadSwitched: { session_id: string } }
   | { ThreadDeleted: { session_id: string } }
-  | { ThreadList: { threads: ThreadSummary[] } }
+  | {
+      ThreadList: {
+        threads: ThreadSummary[];
+        requested_cursor?: string | null;
+        next_cursor?: string | null;
+      };
+    }
+  | { ThreadListFailed: { message: string } }
   | {
       HistoryChunk: {
         session_id: string;

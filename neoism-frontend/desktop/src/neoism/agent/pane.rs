@@ -589,7 +589,17 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         model: String,
         limit: Option<u64>,
     },
-    SidePanelSessionsRefreshed(Vec<NeoismAgentSessionEntry>),
+    ModelOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
+    AgentOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
+    SessionOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
+    SkillOptionsRefreshed {
+        directory: Option<String>,
+        result: Result<Vec<NeoismAgentPickerOption>, String>,
+    },
+    SidePanelSessionsRefreshed {
+        requested_cursor: Option<String>,
+        result: Result<(Vec<NeoismAgentSessionEntry>, Option<String>), String>,
+    },
     SidePanelSubagentsRefreshed {
         session_id: String,
         generation: u64,

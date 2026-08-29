@@ -12,7 +12,7 @@ use neoism_agent_core::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::provider::provider_api_supported;
 
@@ -39,6 +39,8 @@ pub struct ProviderCatalog {
     cache_path: PathBuf,
     client: reqwest::Client,
     cached: Arc<RwLock<Option<Vec<ProviderInfo>>>>,
+    cold_load_gate: Arc<Mutex<()>>,
+    refresh_gate: Arc<Mutex<()>>,
 }
 
 impl ProviderCatalog {
@@ -59,6 +61,8 @@ impl ProviderCatalog {
             cache_path,
             client: reqwest::Client::new(),
             cached: Arc::new(RwLock::new(None)),
+            cold_load_gate: Arc::new(Mutex::new(())),
+            refresh_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -67,55 +71,53 @@ impl ProviderCatalog {
             return Ok(providers);
         }
 
-        let providers = self.load().await?;
+        // Only the first cache miss performs disk/network work. Other callers
+        // wait for that result instead of launching duplicate catalog fetches.
+        let _load = self.cold_load_gate.lock().await;
+        if let Some(providers) = self.cached.read().await.as_ref().cloned() {
+            return Ok(providers);
+        }
+        let (providers, refresh_stale) = self.load().await?;
         *self.cached.write().await = Some(providers.clone());
+        if refresh_stale {
+            self.schedule_refresh();
+        }
         Ok(providers)
     }
 
     pub async fn refresh(&self, force: bool) -> anyhow::Result<()> {
-        if !force && self.cache_fresh() {
+        let _refresh = self.refresh_gate.lock().await;
+        if !force && self.cache_fresh().await {
             return Ok(());
         }
         let raw = self.fetch_api().await?;
-        write_cache(&self.cache_path, &raw)?;
-        *self.cached.write().await = Some(parse_models(&raw)?);
+        let providers = parse_models_async(raw.clone()).await?;
+        write_cache_async(self.cache_path.clone(), raw).await?;
+        *self.cached.write().await = Some(providers);
         Ok(())
     }
 
-    async fn load(&self) -> anyhow::Result<Vec<ProviderInfo>> {
+    async fn load(&self) -> anyhow::Result<(Vec<ProviderInfo>, bool)> {
         if let Some(path) = &self.path_override {
-            if let Some(raw) = read_to_string(path) {
-                return parse_models(&raw);
+            if let Some(raw) = read_to_string_async(path.clone()).await {
+                return Ok((parse_models_async(raw).await?, false));
             }
         }
 
-        if let Some(raw) = read_to_string(&self.cache_path) {
-            if self.cache_fresh() || fetch_disabled() {
-                return parse_models(&raw);
-            }
-
-            match self.refresh(false).await {
-                Ok(()) => {
-                    return Ok(self
-                        .cached
-                        .read()
-                        .await
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or_default());
-                }
-                Err(_) => return parse_models(&raw),
-            }
+        if let Some(raw) = read_to_string_async(self.cache_path.clone()).await {
+            let providers = parse_models_async(raw).await?;
+            let refresh_stale = !self.cache_fresh().await && !fetch_disabled();
+            return Ok((providers, refresh_stale));
         }
 
         if fetch_disabled() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
 
         let raw = self.fetch_api().await?;
-        let providers = parse_models(&raw)?;
-        let _ = write_cache(&self.cache_path, &raw);
-        Ok(providers)
+        let providers = parse_models_async(raw.clone()).await?;
+        let _ = write_cache_async(self.cache_path.clone(), raw).await;
+        Ok((providers, false))
     }
 
     async fn fetch_api(&self) -> anyhow::Result<String> {
@@ -134,15 +136,30 @@ impl ProviderCatalog {
             .await?)
     }
 
-    fn cache_fresh(&self) -> bool {
-        self.cache_path
-            .metadata()
-            .and_then(|metadata| metadata.modified())
+    async fn cache_fresh(&self) -> bool {
+        tokio::fs::metadata(&self.cache_path)
+            .await
             .ok()
+            .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| SystemTime::now().duration_since(modified).ok())
             .map(|age| age < CACHE_TTL)
             .unwrap_or(false)
     }
+
+    fn schedule_refresh(&self) {
+        let catalog = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = catalog.refresh(false).await {
+                tracing::debug!(%error, "background model catalog refresh failed");
+            }
+        });
+    }
+}
+
+async fn parse_models_async(raw: String) -> anyhow::Result<Vec<ProviderInfo>> {
+    tokio::task::spawn_blocking(move || parse_models(&raw))
+        .await
+        .context("model catalog parser task failed")?
 }
 
 fn parse_models(raw: &str) -> anyhow::Result<Vec<ProviderInfo>> {
@@ -687,18 +704,22 @@ fn model_rank(model: &ModelInfo) -> i32 {
         .unwrap_or_else(|| if model.id.contains("latest") { 1 } else { 0 })
 }
 
-fn read_to_string(path: &PathBuf) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+async fn read_to_string_async(path: PathBuf) -> Option<String> {
+    tokio::fs::read_to_string(path).await.ok()
 }
 
-fn write_cache(path: &PathBuf, raw: &str) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, raw)?;
-    std::fs::rename(tmp, path)?;
-    Ok(())
+async fn write_cache_async(path: PathBuf, raw: String) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, raw)?;
+        std::fs::rename(tmp, path)?;
+        anyhow::Ok(())
+    })
+    .await
+    .context("model catalog cache writer task failed")?
 }
 
 fn fetch_disabled() -> bool {

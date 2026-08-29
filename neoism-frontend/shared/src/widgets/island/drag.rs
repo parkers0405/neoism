@@ -189,7 +189,6 @@ impl Island {
 
     /// Abort a drag without committing — used when the gesture is
     /// canceled by something else (e.g. a modal opening).
-    #[allow(dead_code)]
     pub fn cancel_drag(&mut self) {
         self.drag = None;
     }

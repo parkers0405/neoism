@@ -45,9 +45,9 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_delete_thread(inner, session_id).await;
             });
         }
-        AgentClientMessage::ListThreads { directory, limit } => {
+        AgentClientMessage::ListThreads { directory, limit, cursor } => {
             tokio::spawn(async move {
-                handle_list_threads(inner, directory, limit).await;
+                handle_list_threads(inner, directory, limit, cursor).await;
             });
         }
         AgentClientMessage::GetHistory {

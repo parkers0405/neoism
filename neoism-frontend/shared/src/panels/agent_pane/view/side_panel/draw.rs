@@ -61,6 +61,7 @@ pub(crate) fn draw_subagent_spinner(
     now_seconds: f32,
     clip: [f32; 4],
     s: f32,
+    glow_order: u8,
 ) {
     let center_x = dot_x + diameter * 0.5;
     let center_y = dot_y + diameter * 0.5;
@@ -90,7 +91,7 @@ pub(crate) fn draw_subagent_spinner(
                 loader_pastel_color(tick, trail, alpha * 0.24),
                 [glow * 0.5; 4],
                 DEPTH,
-                ORDER_PANEL + 3,
+                glow_order,
             );
         }
         sugarloaf.quad(
@@ -102,7 +103,7 @@ pub(crate) fn draw_subagent_spinner(
             loader_pastel_color(tick, trail, alpha),
             [dot * 0.5; 4],
             DEPTH,
-            ORDER_PANEL + 4,
+            glow_order + 1,
         );
     }
 }
@@ -326,6 +327,7 @@ pub(crate) fn render_sessions_list(
     content_rect: [f32; 4],
     theme: &IdeTheme,
     s: f32,
+    now_seconds: f32,
     mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
     inner_radius: f32,
@@ -485,7 +487,12 @@ pub(crate) fn render_sessions_list(
     pane.side_panel_mut()
         .clamp_scroll_bounds(rows_visible.max(1));
 
-    if !pane.side_panel().sessions_loaded() {
+    if matches!(
+        pane.side_panel().session_catalog_state(),
+        crate::panels::agent_pane::state::side_panel::SessionCatalogState::Initial
+            | crate::panels::agent_pane::state::side_panel::SessionCatalogState::Loading
+            | crate::panels::agent_pane::state::side_panel::SessionCatalogState::Error(_)
+    ) {
         draw_session_loading_skeleton(
             sugarloaf,
             list_rect,
@@ -893,6 +900,34 @@ pub(crate) fn render_sessions_list(
             &title_text,
             &hovered_title_opts,
             occlusion_rects,
+        );
+    }
+
+    if pane.side_panel().session_page_loading() {
+        let badge = 24.0 * s;
+        let badge_x = list_rect[0] + (list_rect[2] - badge) * 0.5;
+        let badge_y = list_bottom - badge - 4.0 * s;
+        sugarloaf.quad(
+            None,
+            badge_x,
+            badge_y,
+            badge,
+            badge,
+            theme.f32_alpha(theme.surface, 0.92),
+            [badge * 0.5; 4],
+            DEPTH,
+            ORDER_PANEL + 5,
+        );
+        let spinner = 10.0 * s;
+        draw_subagent_spinner(
+            sugarloaf,
+            badge_x + (badge - spinner) * 0.5,
+            badge_y + (badge - spinner) * 0.5,
+            spinner,
+            now_seconds,
+            list_rect,
+            s,
+            ORDER_PANEL + 6,
         );
     }
 }

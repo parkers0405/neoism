@@ -46,6 +46,51 @@ fn test_island() -> Island {
 }
 
 #[test]
+fn island_cancel_clears_armed_drag_without_committing() {
+    let mut island = test_island();
+    island.begin_drag(0, 10.0, 10.0, 0.0, 100.0);
+    assert_eq!(island.drag_source_index(), Some(0));
+
+    island.cancel_drag();
+
+    assert_eq!(island.drag_source_index(), None);
+    assert_eq!(island.end_drag(), IslandDragRelease::None);
+}
+
+#[test]
+fn island_cancel_never_detaches_a_live_armed_drag() {
+    let mut island = test_island();
+    island.begin_drag(0, 10.0, 10.0, 0.0, 100.0);
+    island.update_drag(
+        30.0,
+        ISLAND_HEIGHT + DETACH_THRESHOLD_PX + 20.0,
+        0.0,
+        0.0,
+        100.0,
+        2,
+    );
+    assert!(island.is_dragging());
+    assert!(island.is_detach_armed());
+
+    island.cancel_drag();
+
+    assert_eq!(island.end_drag(), IslandDragRelease::None);
+}
+
+#[test]
+fn island_release_always_clears_drag_state() {
+    let mut island = test_island();
+    island.begin_drag(0, 10.0, 10.0, 0.0, 100.0);
+    assert_eq!(island.end_drag(), IslandDragRelease::None);
+    assert_eq!(island.drag_source_index(), None);
+
+    island.begin_drag(0, 10.0, 10.0, 0.0, 100.0);
+    island.update_drag(30.0, 10.0, 0.0, 0.0, 100.0, 2);
+    assert_eq!(island.end_drag(), IslandDragRelease::Reorder);
+    assert_eq!(island.drag_source_index(), None);
+}
+
+#[test]
 fn progress_first_report_seeds_started_and_seen() {
     let mut island = test_island();
     island.set_progress_report(ProgressReport {

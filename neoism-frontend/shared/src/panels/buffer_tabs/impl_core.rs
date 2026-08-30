@@ -952,6 +952,12 @@ impl<A> BufferTabs<A> {
         });
     }
 
+    /// Cancel an armed or active drag without committing reorder, move-out,
+    /// or tear-out semantics.
+    pub fn cancel_drag(&mut self) -> bool {
+        self.drag.take().is_some()
+    }
+
     /// Update an in-progress drag. Returns `true` when the dragged
     /// tab swapped slots OR the drag's render state changed.
     pub fn update_drag(

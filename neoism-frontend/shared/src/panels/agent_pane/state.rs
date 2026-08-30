@@ -647,6 +647,7 @@ pub struct NeoismAgentPane {
     markdown_blocks_cache:
         RefCell<HashMap<MarkdownBlocksKey, (CachedMarkdownBlocks, u64)>>,
     markdown_blocks_tick: Cell<u64>,
+    markdown_blocks_source_bytes: Cell<usize>,
     timeline_layout_epoch: u64,
     timeline_layout_cache: RefCell<Option<TimelineLayoutCache>>,
     timeline_dirty_message_ids: BTreeSet<String>,
@@ -741,7 +742,6 @@ pub struct NeoismAgentPane {
     /// user sent renders their own presence orb + a "You" tooltip. `None`
     /// on hosts that don't publish presence (falls back to a generic orb).
     local_presence_name: Option<String>,
-    visible_user_orb: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1000,6 +1000,7 @@ impl Default for NeoismAgentPane {
             timeline_measure_cache: RefCell::new(HashMap::new()),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: Cell::new(0),
+            markdown_blocks_source_bytes: Cell::new(0),
             timeline_layout_epoch: 0,
             timeline_layout_cache: RefCell::new(None),
             timeline_dirty_message_ids: BTreeSet::new(),
@@ -1047,7 +1048,6 @@ impl Default for NeoismAgentPane {
             wordmark: NeoismWordmarkState::default(),
             side_panel: NeoismAgentSidePanel::default(),
             local_presence_name: None,
-            visible_user_orb: false,
         }
     }
 }

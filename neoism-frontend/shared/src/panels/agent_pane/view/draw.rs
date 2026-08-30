@@ -9,9 +9,12 @@ use crate::panels::agent_pane::selection_model::SelectableCaretStop;
 use crate::primitives::draw_text_with_occlusion;
 
 const TEXT_MEASURE_CACHE_LIMIT: usize = 8192;
+const CARET_STOP_CACHE_LIMIT: usize = 8192;
+const CARET_STOP_CACHE_POINTS_LIMIT: usize = 262_144;
 
 thread_local! {
     static TEXT_MEASURE_CACHE: RefCell<TextMeasureCache> = RefCell::new(TextMeasureCache::new());
+    static CARET_STOP_CACHE: RefCell<CaretStopCache> = RefCell::new(CaretStopCache::new());
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -20,11 +23,19 @@ struct TextMeasureKey {
     font_size_bits: u32,
     bold: bool,
     italic: bool,
+    font_id: Option<usize>,
+    scale_factor_bits: u32,
 }
 
 struct TextMeasureCache {
     values: HashMap<TextMeasureKey, f32>,
     order: VecDeque<TextMeasureKey>,
+}
+
+struct CaretStopCache {
+    values: HashMap<TextMeasureKey, Vec<SelectableCaretStop>>,
+    order: VecDeque<TextMeasureKey>,
+    points: usize,
 }
 
 impl TextMeasureCache {
@@ -54,6 +65,65 @@ impl TextMeasureCache {
     }
 }
 
+impl CaretStopCache {
+    fn new() -> Self {
+        Self {
+            values: HashMap::new(),
+            order: VecDeque::new(),
+            points: 0,
+        }
+    }
+
+    fn get(
+        &self,
+        key: &TextMeasureKey,
+        start_x: f32,
+    ) -> Option<Vec<SelectableCaretStop>> {
+        self.values.get(key).map(|stops| {
+            stops
+                .iter()
+                .map(|stop| SelectableCaretStop {
+                    byte_offset: stop.byte_offset,
+                    x: stop.x + start_x,
+                })
+                .collect()
+        })
+    }
+
+    fn insert(&mut self, key: TextMeasureKey, stops: Vec<SelectableCaretStop>) {
+        let stop_count = stops.len();
+        if let Some(previous) = self.values.insert(key.clone(), stops) {
+            self.points = self
+                .points
+                .saturating_sub(previous.len())
+                .saturating_add(stop_count);
+            return;
+        }
+        self.order.push_back(key.clone());
+        self.points = self.points.saturating_add(stop_count);
+        while self.order.len() > CARET_STOP_CACHE_LIMIT
+            || (self.points > CARET_STOP_CACHE_POINTS_LIMIT && self.values.len() > 1)
+        {
+            if let Some(old) = self.order.pop_front() {
+                if let Some(stops) = self.values.remove(&old) {
+                    self.points = self.points.saturating_sub(stops.len());
+                }
+            }
+        }
+    }
+}
+
+fn text_measure_key(text: &str, opts: &DrawOpts, scale_factor: f32) -> TextMeasureKey {
+    TextMeasureKey {
+        text: text.to_owned(),
+        font_size_bits: opts.font_size.to_bits(),
+        bold: opts.bold,
+        italic: opts.italic,
+        font_id: opts.font_id,
+        scale_factor_bits: scale_factor.to_bits(),
+    }
+}
+
 pub fn measure_text_cached(
     sugarloaf: &mut Sugarloaf,
     text: &str,
@@ -62,12 +132,7 @@ pub fn measure_text_cached(
     if text.is_empty() {
         return 0.0;
     }
-    let key = TextMeasureKey {
-        text: text.to_owned(),
-        font_size_bits: opts.font_size.to_bits(),
-        bold: opts.bold,
-        italic: opts.italic,
-    };
+    let key = text_measure_key(text, opts, sugarloaf.scale_factor());
     if let Some(value) = TEXT_MEASURE_CACHE.with(|cache| cache.borrow().get(&key)) {
         return value;
     }
@@ -80,9 +145,11 @@ pub fn measure_text_cached(
         // following run cannot paint over the preceding colored/bold token.
         let separated = sugarloaf.text_mut().measure("M M", opts);
         let joined = sugarloaf.text_mut().measure("MM", opts);
+        let cell = sugarloaf.text_mut().measure("M", opts);
         stable_whitespace_advance(
             measured,
             separated - joined,
+            cell,
             opts.font_size,
             whitespace_columns(text),
         )
@@ -94,24 +161,37 @@ pub fn measure_text_cached(
 }
 
 fn whitespace_columns(text: &str) -> usize {
-    text.chars()
-        .map(|ch| if ch == '\t' { 4 } else { 1 })
-        .sum()
+    text.chars().map(|ch| if ch == '\t' { 4 } else { 1 }).sum()
 }
 
 fn stable_whitespace_advance(
     measured: f32,
     probed_space: f32,
+    cell_advance: f32,
     font_size: f32,
     columns: usize,
 ) -> f32 {
-    let space = probed_space.max(font_size * 0.35);
+    // Agent text is monospaced. If the backend strips a whitespace-only run,
+    // a full current-face cell is the correct separator; the old 0.35em
+    // fallback left inline-code/color boundaries visibly crowded.
+    let space = probed_space.max(cell_advance).max(font_size * 0.5);
     measured.max(space * columns as f32)
 }
 
 #[cfg(test)]
 mod measure_tests {
-    use super::{stable_whitespace_advance, whitespace_columns};
+    use super::{stable_whitespace_advance, text_measure_key, whitespace_columns};
+    use sugarloaf::text::DrawOpts;
+
+    #[test]
+    fn measurement_cache_identity_includes_font_and_scale() {
+        let opts = DrawOpts::default();
+        let base = text_measure_key("Yes", &opts, 1.0);
+        let mut alternate_font = opts;
+        alternate_font.font_id = Some(1);
+        assert_ne!(base, text_measure_key("Yes", &alternate_font, 1.0));
+        assert_ne!(base, text_measure_key("Yes", &opts, 2.0));
+    }
 
     #[test]
     fn whitespace_columns_preserve_spaces_and_expand_tabs() {
@@ -119,11 +199,10 @@ mod measure_tests {
         assert_eq!(whitespace_columns("  \t"), 6);
     }
 
-
     #[test]
     fn whitespace_advance_survives_a_zero_width_shaper_run() {
-        assert_eq!(stable_whitespace_advance(0.0, 0.0, 20.0, 1), 7.0);
-        assert_eq!(stable_whitespace_advance(0.0, 8.0, 20.0, 2), 16.0);
+        assert_eq!(stable_whitespace_advance(0.0, 0.0, 12.0, 20.0, 1), 12.0);
+        assert_eq!(stable_whitespace_advance(0.0, 8.0, 12.0, 20.0, 2), 24.0);
     }
 }
 
@@ -133,19 +212,36 @@ pub fn measured_caret_stops(
     opts: &DrawOpts,
     start_x: f32,
 ) -> Vec<SelectableCaretStop> {
-    let mut stops = vec![SelectableCaretStop {
-        byte_offset: 0,
-        x: start_x,
-    }];
-    let graphemes = text.graphemes(true).collect::<Vec<_>>();
-    if graphemes.is_empty() {
+    if text.is_empty() {
+        return vec![SelectableCaretStop {
+            byte_offset: 0,
+            x: start_x,
+        }];
+    }
+    let key = text_measure_key(text, opts, sugarloaf.scale_factor());
+    if let Some(stops) = CARET_STOP_CACHE.with(|cache| cache.borrow().get(&key, start_x))
+    {
         return stops;
     }
-    let measured = graphemes
-        .iter()
-        .map(|grapheme| measure_text_cached(sugarloaf, grapheme, opts))
-        .collect::<Vec<_>>();
-    let measured_sum = measured.iter().sum::<f32>();
+    let mut stops = vec![SelectableCaretStop {
+        byte_offset: 0,
+        x: 0.0,
+    }];
+    // Code tends to repeat a small alphabet across very long lines. Measure
+    // each distinct grapheme once instead of allocating and looking up one
+    // cache key per character on every frame.
+    let mut widths = HashMap::<&str, f32>::new();
+    let mut measured_sum = 0.0;
+    for grapheme in text.graphemes(true) {
+        let width = if let Some(width) = widths.get(grapheme) {
+            *width
+        } else {
+            let width = measure_text_cached(sugarloaf, grapheme, opts);
+            widths.insert(grapheme, width);
+            width
+        };
+        measured_sum += width;
+    }
     let full_width = measure_text_cached(sugarloaf, text, opts);
     let correction = if measured_sum > f32::EPSILON {
         full_width / measured_sum
@@ -153,11 +249,16 @@ pub fn measured_caret_stops(
         1.0
     };
     let mut byte_offset = 0usize;
-    let mut x = start_x;
-    for (grapheme, width) in graphemes.into_iter().zip(measured) {
+    let mut x = 0.0;
+    for grapheme in text.graphemes(true) {
+        let width = widths[grapheme];
         byte_offset += grapheme.len();
         x += width * correction;
         stops.push(SelectableCaretStop { byte_offset, x });
+    }
+    CARET_STOP_CACHE.with(|cache| cache.borrow_mut().insert(key, stops.clone()));
+    for stop in &mut stops {
+        stop.x += start_x;
     }
     stops
 }

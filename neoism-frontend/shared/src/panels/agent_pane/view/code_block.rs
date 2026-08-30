@@ -129,13 +129,6 @@ pub fn warm_code_text_render_cache(cache_id: &str, text: &str, lang: &str) {
     }
 }
 
-pub fn warm_code_lines_render_cache(lines: &[String], lang: &str) {
-    let lang = syntax_lang(lang);
-    for line in lines {
-        highlighted_code_line(line, lang);
-    }
-}
-
 impl AgentCodeMessage for NeoismAgentMessage {
     fn id(&self) -> &str {
         &self.id
@@ -426,7 +419,7 @@ pub fn diff_line_kind(lang: &str, line: &str) -> Option<DiffLineKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_line_kind, DiffLineKind};
+    use super::{diff_line_kind, syntax_span_visible, DiffLineKind};
 
     #[test]
     fn diff_styling_requires_a_diff_language() {
@@ -441,6 +434,16 @@ mod tests {
             diff_line_kind(" PATCH ", "+new"),
             Some(DiffLineKind::Add)
         ));
+    }
+
+    #[test]
+    fn syntax_spans_are_culled_outside_the_horizontal_clip() {
+        let clip = [100.0, 0.0, 200.0, 20.0];
+        assert!(!syntax_span_visible(20.0, 40.0, Some(clip)));
+        assert!(syntax_span_visible(80.0, 40.0, Some(clip)));
+        assert!(syntax_span_visible(150.0, 40.0, Some(clip)));
+        assert!(!syntax_span_visible(320.0, 40.0, Some(clip)));
+        assert!(syntax_span_visible(320.0, 40.0, None));
     }
 }
 
@@ -541,9 +544,23 @@ pub fn draw_syntax_line(
     for (tok, slice) in spans.iter() {
         let mut span_opts = *opts;
         span_opts.color = crate::syntax::syn_color(*tok, theme, false);
-        draw_text_clipped(sugarloaf, x, y, slice, &span_opts, occlusion_rects);
-        x += measure_text_cached(sugarloaf, slice, &span_opts);
+        let width = measure_text_cached(sugarloaf, slice, &span_opts);
+        let visible = syntax_span_visible(x, width, span_opts.clip_rect);
+        if visible {
+            draw_text_clipped(sugarloaf, x, y, slice, &span_opts, occlusion_rects);
+        }
+        x += width;
+        if span_opts
+            .clip_rect
+            .is_some_and(|clip| x > clip[0] + clip[2])
+        {
+            break;
+        }
     }
+}
+
+fn syntax_span_visible(x: f32, width: f32, clip: Option<[f32; 4]>) -> bool {
+    clip.is_none_or(|clip| x + width >= clip[0] && x <= clip[0] + clip[2])
 }
 
 fn highlighted_code_line(line: &str, lang: Lang) -> Rc<Vec<(SynTok, String)>> {

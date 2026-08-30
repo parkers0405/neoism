@@ -19,10 +19,6 @@ mod user_input;
 pub(super) const OVERLAY_PANEL_ID: usize = usize::MAX - 13;
 
 impl AgentPaneView for NeoismAgentPane {
-    fn begin_visible_animation_frame(&mut self) {
-        NeoismAgentPane::begin_visible_animation_frame(self);
-    }
-
     fn tick_timeline_scroll(&mut self) -> bool {
         NeoismAgentPane::tick_timeline_scroll(self)
     }

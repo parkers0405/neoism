@@ -416,6 +416,15 @@ pub(crate) fn apply_agent_event_to_pane(
             };
             pane.enqueue_pending_permission(permission);
         }
+        AgentServerMessage::PermissionRemoved {
+            request_id,
+            session_id,
+        } => {
+            pane.note_permission_replied(&request_id, Some(&session_id));
+        }
+        AgentServerMessage::PermissionReplyFailed { request_id, error } => {
+            pane.permission_reply_failed(&request_id, error);
+        }
         AgentServerMessage::ToolUseResult {
             tool_use_id,
             session_id,
@@ -430,7 +439,6 @@ pub(crate) fn apply_agent_event_to_pane(
                 output,
                 error,
             );
-            pane.note_permission_replied(&tool_use_id, Some(&session_id));
         }
 
         // -- Structured questions (the `question` tool) ----------
@@ -992,6 +1000,7 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::StreamingState { session_id, .. }
         | AgentServerMessage::Notice { session_id, .. }
         | AgentServerMessage::ToolUseRequest { session_id, .. }
+        | AgentServerMessage::PermissionRemoved { session_id, .. }
         | AgentServerMessage::ToolUseResult { session_id, .. }
         | AgentServerMessage::QuestionAsked { session_id, .. }
         | AgentServerMessage::QuestionsUpdated { session_id, .. }
@@ -1013,9 +1022,10 @@ pub(crate) fn agent_event_session_id(
         // renames / pins can target any row of the /sessions picker,
         // and their ack must reach the catalog-refresh trigger even
         // when the target isn't the active session. QuestionReplyFailed
-        // carries no session id at all.
+        // and PermissionReplyFailed carry no session id at all.
         AgentServerMessage::ThreadUpdated { .. }
         | AgentServerMessage::QuestionReplyFailed { .. }
+        | AgentServerMessage::PermissionReplyFailed { .. }
         | AgentServerMessage::Disabled { .. }
         | AgentServerMessage::PermissionRequest { .. }
         | AgentServerMessage::Error { .. }

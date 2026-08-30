@@ -1,6 +1,9 @@
 use super::*;
 use neoism_ui::panels::agent_pane::view::fx::AgentFxKind;
 
+const MAX_MARKDOWN_BLOCKS_CACHE: usize = 4096;
+const MAX_MARKDOWN_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+
 impl NeoismAgentPane {
     pub fn with_directory(directory: Option<String>) -> Self {
         let mut pane = Self {
@@ -160,19 +163,38 @@ impl NeoismAgentPane {
     ) {
         // Sized for paginated history: scrolling back through many loaded
         // pages must not evict and re-parse cards still in reach.
-        const MAX_MARKDOWN_BLOCKS_CACHE: usize = 4096;
         let tick = self.next_markdown_blocks_tick();
         let mut cache = self.markdown_blocks_cache.borrow_mut();
-        // Evict the least-recently-*used* entry (smallest tick) once full. The
-        // O(n) scan only runs on a miss-driven insert past the cap, which after
-        // warmup is rare, so it stays off the hot scroll path.
-        if !cache.contains_key(&key) && cache.len() >= MAX_MARKDOWN_BLOCKS_CACHE {
+        let is_new = !cache.contains_key(&key);
+        if !is_new {
+            cache.insert(key, (blocks, tick));
+            return;
+        }
+        self.markdown_blocks_source_bytes.set(
+            self.markdown_blocks_source_bytes
+                .get()
+                .saturating_add(key.text_len),
+        );
+        // Streaming creates a distinct immutable snapshot for every prefix.
+        // Bound retained source volume as well as entry count so a large code
+        // response cannot leave quadratic text alive until 4096 deltas pass.
+        while cache.len() + 1 > MAX_MARKDOWN_BLOCKS_CACHE
+            || (self.markdown_blocks_source_bytes.get() > MAX_MARKDOWN_SOURCE_BYTES
+                && !cache.is_empty())
+        {
             if let Some(victim) = cache
                 .iter()
                 .min_by_key(|(_, (_, used))| *used)
                 .map(|(victim_key, _)| *victim_key)
             {
                 cache.remove(&victim);
+                self.markdown_blocks_source_bytes.set(
+                    self.markdown_blocks_source_bytes
+                        .get()
+                        .saturating_sub(victim.text_len),
+                );
+            } else {
+                break;
             }
         }
         cache.insert(key, (blocks, tick));

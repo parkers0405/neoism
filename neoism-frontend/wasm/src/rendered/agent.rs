@@ -226,6 +226,18 @@ impl ChromeBridge {
                     }
                 }
             }
+            AgentServerMessage::PermissionRemoved { request_id, .. } => {
+                if self
+                    .agent_state
+                    .pending_permission
+                    .as_ref()
+                    .is_some_and(|permission| {
+                        permission.tool_request_id.as_deref() == Some(request_id.as_str())
+                    })
+                {
+                    self.agent_state.pending_permission = None;
+                }
+            }
             AgentServerMessage::ThreadCreated { session_id, .. }
             | AgentServerMessage::ThreadSwitched { session_id }
             | AgentServerMessage::HistoryChunk { session_id, .. } => {

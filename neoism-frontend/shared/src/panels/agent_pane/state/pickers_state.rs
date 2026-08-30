@@ -434,9 +434,6 @@ impl NeoismAgentPane {
         if !self.has_conversation() {
             return Some("agent_home_wordmark");
         }
-        if self.visible_user_orb {
-            return Some("visible_user_orb");
-        }
         if self.fx_active() {
             return Some("easter_fx");
         }
@@ -483,14 +480,6 @@ impl NeoismAgentPane {
             return Some("side_panel");
         }
         None
-    }
-
-    pub(crate) fn begin_visible_animation_frame(&mut self) {
-        self.visible_user_orb = false;
-    }
-
-    pub(crate) fn mark_visible_user_orb(&mut self) {
-        self.visible_user_orb = true;
     }
 
     pub(in crate::panels::agent_pane::state) fn wordmark_click_is_animating(

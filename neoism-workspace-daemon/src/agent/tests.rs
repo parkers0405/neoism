@@ -180,3 +180,62 @@ fn session_created_without_parent_stays_a_raw_envelope() {
         other => panic!("unexpected message: {other:?}"),
     }
 }
+
+#[test]
+fn permission_asked_maps_current_v2_payload() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    forward_agent_server_event(
+        &tx,
+        "sess-root",
+        json!({
+            "type": "permission.asked",
+            "properties": {
+                "id": "per-1",
+                "sessionId": "sess-root",
+                "title": "Allow bash?",
+                "permission": "bash",
+                "patterns": ["cargo check"],
+                "metadata": { "tool": "bash", "input": { "command": "cargo check" } },
+                "sourceAgent": "build"
+            }
+        }),
+    );
+
+    match rx.try_recv().expect("permission request") {
+        AgentServerMessage::ToolUseRequest {
+            request_id,
+            tool,
+            title,
+            patterns,
+            args,
+            source_agent,
+            ..
+        } => {
+            assert_eq!(request_id, "per-1");
+            assert_eq!(tool, "bash");
+            assert_eq!(title, "Allow bash?");
+            assert_eq!(patterns, ["cargo check"]);
+            assert_eq!(args["command"], "cargo check");
+            assert_eq!(source_agent.as_deref(), Some("build"));
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+}
+
+#[test]
+fn permission_replied_removes_request_by_permission_id() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    forward_agent_server_event(
+        &tx,
+        "sess-root",
+        json!({
+            "type": "permission.replied",
+            "properties": { "requestID": "per-1", "reply": "once" }
+        }),
+    );
+
+    assert!(matches!(
+        rx.try_recv().expect("permission removal"),
+        AgentServerMessage::PermissionRemoved { request_id, .. } if request_id == "per-1"
+    ));
+}

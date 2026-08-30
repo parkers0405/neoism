@@ -892,3 +892,22 @@ fn ordinary_terminal_tab_can_drag_to_a_pane_destination() {
         _ => panic!("a routed terminal tab must be movable"),
     }
 }
+
+#[test]
+fn cancelling_buffer_tab_drag_never_commits_a_move() {
+    let mut tabs = BufferTabs::<()>::new();
+    tabs.set_tabs(vec![terminal("Terminal 7", Some(7))], 0);
+    tabs.set_visible(true);
+
+    tabs.begin_drag(0, 40.0, 10.0, 0.0, 400.0);
+    assert!(tabs.cancel_drag());
+    assert!(!tabs.is_dragging());
+    assert!(!tabs.update_drag(120.0, 100.0, 0.0, 0.0, 400.0));
+    assert!(matches!(tabs.end_drag(true), DragRelease::None));
+
+    tabs.begin_drag(0, 40.0, 10.0, 0.0, 400.0);
+    assert!(tabs.update_drag(120.0, 100.0, 0.0, 0.0, 400.0));
+    assert!(tabs.cancel_drag());
+    assert!(!tabs.is_dragging());
+    assert!(matches!(tabs.end_drag(true), DragRelease::None));
+}

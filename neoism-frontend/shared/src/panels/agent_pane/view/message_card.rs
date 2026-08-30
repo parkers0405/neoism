@@ -80,7 +80,6 @@ where
     fn local_author_name(&self) -> Option<&str> {
         None
     }
-    fn mark_visible_user_orb(&mut self) {}
 }
 
 pub trait AgentMessageCardDelegate<P, M>
@@ -358,10 +357,6 @@ macro_rules! neoism_ui_impl_agent_message_card_pane {
             fn local_author_name(&self) -> Option<&str> {
                 <$pane>::local_presence_name(self)
             }
-
-            fn mark_visible_user_orb(&mut self) {
-                <$pane>::mark_visible_user_orb(self);
-            }
         }
     };
 }
@@ -411,10 +406,6 @@ impl AgentMessageCardPane<NeoismAgentMessage> for NeoismAgentPane {
 
     fn local_author_name(&self) -> Option<&str> {
         NeoismAgentPane::local_presence_name(self)
-    }
-
-    fn mark_visible_user_orb(&mut self) {
-        NeoismAgentPane::mark_visible_user_orb(self);
     }
 }
 
@@ -599,7 +590,6 @@ where
             );
         }
         AgentMessageCardKind::User => {
-            pane.mark_visible_user_orb();
             // Choke point: resolve who sent this into (orb seed, tooltip
             // label). The message's own `author` wins; absent, the pane's
             // local presence name stands in so the local user's message

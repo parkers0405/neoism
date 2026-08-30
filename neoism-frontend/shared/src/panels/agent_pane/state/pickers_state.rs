@@ -460,6 +460,12 @@ impl NeoismAgentPane {
         if self.timeline_is_inertial() {
             return Some("timeline_inertia");
         }
+        // Interaction rects are deliberately omitted while timeline content
+        // moves. Keep a bounded final repaint alive so the first settled frame
+        // republishes authoritative click and wheel geometry.
+        if self.timeline_interaction_settle_active() {
+            return Some("timeline_interaction_settle");
+        }
         // Provider time, status dots, and streamed deltas advance even across
         // transient run-idle edges. Keep draining and painting until the
         // durable execution/branch activity settles.

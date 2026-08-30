@@ -345,6 +345,7 @@ pub(crate) async fn register_subtask(
             &root,
             parent.id.as_str(),
             child_session_id,
+            &state.inner.execution_owner_id,
             crate::now_millis(),
         )
         .await?;
@@ -447,10 +448,22 @@ async fn finish_if_quiescent_impl(
     let Ok(Some(execution)) = state.inner.store.get_execution_activity(&root_id).await else {
         return;
     };
-    if execution.finished || !execution.active_segments.is_empty() {
+    if execution.finished {
         return;
     }
-    let Ok(branches) = state
+    if let Err(error) = state
+        .inner
+        .store
+        .reconcile_stale_execution_subtasks(crate::now_millis().saturating_sub(15_000))
+        .await
+    {
+        tracing::warn!(%error, root_session_id = %root_id, "failed to reconcile stale subtask owners");
+        return;
+    }
+    if !execution.active_segments.is_empty() {
+        return;
+    }
+    let Ok(mut branches) = state
         .inner
         .store
         .list_execution_subtasks(&execution.execution_id)
@@ -458,6 +471,53 @@ async fn finish_if_quiescent_impl(
     else {
         return;
     };
+    let mut repaired_terminal_evidence = false;
+    for branch in branches
+        .iter()
+        .filter(|branch| branch.status == "outstanding")
+    {
+        let Ok(Some(child)) = state.inner.store.get_session(&branch.session_id).await else {
+            continue;
+        };
+        let Some(status) = crate::session_actions::recorded_subtask_terminal_status(
+            &child,
+            branch.started_at.unwrap_or(u64::MAX),
+        ) else {
+            continue;
+        };
+        match state
+            .inner
+            .store
+            .finish_execution_subtask(&execution.execution_id, &branch.session_id, status)
+            .await
+        {
+            Ok(true) => {
+                repaired_terminal_evidence = true;
+                tracing::warn!(
+                    root_session_id = %root_id,
+                    child_session_id = %branch.session_id,
+                    status,
+                    "repaired outstanding subtask from durable completion evidence"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, child_session_id = %branch.session_id, "failed to repair completed subtask lifecycle");
+                return;
+            }
+        }
+    }
+    if repaired_terminal_evidence {
+        let Ok(refreshed) = state
+            .inner
+            .store
+            .list_execution_subtasks(&execution.execution_id)
+            .await
+        else {
+            return;
+        };
+        branches = refreshed;
+    }
     let children = branches
         .iter()
         .map(|branch| branch.session_id.clone())
@@ -676,7 +736,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quiescence_never_terminalizes_an_outstanding_subtask() {
+    async fn quiescence_preserves_live_outstanding_and_repairs_terminal_evidence() {
         let path = std::env::temp_dir().join(format!(
             "neoism-execution-orphan-subtask-{}.sqlite3",
             neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -729,11 +789,11 @@ mod tests {
                 root_id.as_str(),
                 root_id.as_str(),
                 child_id.as_str(),
+                &state.inner.execution_owner_id,
                 now,
             )
             .await
             .unwrap();
-
         state
             .inner
             .store
@@ -784,6 +844,62 @@ mod tests {
             Some("outstanding")
         );
         assert!(!state
+            .inner
+            .store
+            .get_execution_activity(root_id.as_str())
+            .await
+            .unwrap()
+            .is_some_and(|execution| execution.finished));
+
+        child.extra.insert(
+            "subtaskCompletions".to_string(),
+            json!([{
+                "id": "message-old",
+                "generation": "message-old-generation",
+                "pending": false,
+                "status": "completed",
+                "result": "old run",
+                "completedAt": now.saturating_sub(1),
+            }]),
+        );
+        state.inner.store.update_session(&child).await.unwrap();
+        finish_if_quiescent(&state, root_id.as_str()).await;
+        assert_eq!(
+            state
+                .inner
+                .store
+                .execution_subtask_status("execution-orphan", child_id.as_str())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("outstanding"),
+            "completion evidence from an older admission cannot finish a reused child"
+        );
+
+        child.extra.insert(
+            "subtaskCompletions".to_string(),
+            json!([{
+                "id": "message-complete",
+                "generation": "message-generation",
+                "pending": false,
+                "status": "completed",
+                "result": "done",
+                "completedAt": now + 2,
+            }]),
+        );
+        state.inner.store.update_session(&child).await.unwrap();
+        finish_if_quiescent(&state, root_id.as_str()).await;
+        assert_eq!(
+            state
+                .inner
+                .store
+                .execution_subtask_status("execution-orphan", child_id.as_str())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("completed")
+        );
+        assert!(state
             .inner
             .store
             .get_execution_activity(root_id.as_str())
@@ -974,7 +1090,14 @@ mod tests {
         reopened
             .inner
             .store
-            .register_execution_subtask("execution-a", "root", "root", "child", 2_000)
+            .register_execution_subtask(
+                "execution-a",
+                "root",
+                "root",
+                "child",
+                &reopened.inner.execution_owner_id,
+                2_000,
+            )
             .await
             .unwrap();
         assert!(reopened
@@ -993,7 +1116,14 @@ mod tests {
         assert_eq!(reopened
             .inner
             .store
-            .register_execution_subtask("execution-a", "root", "root", "child", 9_000)
+            .register_execution_subtask(
+                "execution-a",
+                "root",
+                "root",
+                "child",
+                &reopened.inner.execution_owner_id,
+                9_000,
+            )
             .await
             .unwrap(), crate::state::ExecutionSubtaskRegistration::AlreadyPresent);
         assert_eq!(
@@ -1042,7 +1172,14 @@ mod tests {
         assert_eq!(reopened
             .inner
             .store
-            .register_execution_subtask("execution-b", "root", "root", "child", 3_000)
+            .register_execution_subtask(
+                "execution-b",
+                "root",
+                "root",
+                "child",
+                &reopened.inner.execution_owner_id,
+                3_000,
+            )
             .await
             .unwrap(), crate::state::ExecutionSubtaskRegistration::Inserted);
         assert_eq!(
@@ -1329,6 +1466,38 @@ mod tests {
             state
                 .inner
                 .store
+                .register_execution_subtask(
+                    "execution-stale",
+                    "root-stale",
+                    "root-stale",
+                    "dead-child",
+                    "dead-owner",
+                    100,
+                )
+                .await
+                .unwrap(),
+            crate::state::ExecutionSubtaskRegistration::Inserted
+        );
+        assert_eq!(
+            state
+                .inner
+                .store
+                .register_execution_subtask(
+                    "execution-stale",
+                    "root-stale",
+                    "root-stale",
+                    "live-child",
+                    &state.inner.execution_owner_id,
+                    100,
+                )
+                .await
+                .unwrap(),
+            crate::state::ExecutionSubtaskRegistration::Inserted
+        );
+        assert_eq!(
+            state
+                .inner
+                .store
                 .reconcile_stale_execution_segments(2_000)
                 .await
                 .unwrap(),
@@ -1343,6 +1512,32 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.completed_ms, 900);
         assert!(snapshot.active_segments.is_empty());
+        state
+            .inner
+            .store
+            .reconcile_stale_execution_subtasks(2_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .inner
+                .store
+                .execution_subtask_status("execution-stale", "dead-child")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            state
+                .inner
+                .store
+                .execution_subtask_status("execution-stale", "live-child")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("outstanding")
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -1437,7 +1632,7 @@ mod tests {
         assert!(owner.inner.store.mark_execution_finished("root", "execution-a").await.unwrap());
         assert_eq!(
             stale.inner.store.register_execution_subtask(
-                "execution-a", "root", "root", "late-child", 10,
+                "execution-a", "root", "root", "late-child", &stale.inner.execution_owner_id, 10,
             ).await.unwrap(),
             crate::state::ExecutionSubtaskRegistration::Rejected,
         );

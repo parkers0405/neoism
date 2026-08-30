@@ -693,6 +693,8 @@ pub struct NeoismAgentSidePanel {
     /// same continuation request more than once.
     session_page_loading: bool,
     session_requested_cursor: Option<String>,
+    session_request_generation: u64,
+    session_refresh_attempts: u8,
     /// Phase origin for the first-load session skeleton. The panel starts
     /// unloaded, so this clock can begin with the panel state and stops
     /// participating in redraws as soon as `set_sessions` lands.
@@ -807,6 +809,8 @@ impl Default for NeoismAgentSidePanel {
             session_next_cursor: None,
             session_page_loading: false,
             session_requested_cursor: None,
+            session_request_generation: 0,
+            session_refresh_attempts: 0,
             sessions: Vec::new(),
             session_catalog_state: SessionCatalogState::Initial,
             sessions_loading_started: Instant::now(),
@@ -1194,6 +1198,8 @@ impl NeoismAgentSidePanel {
         self.session_next_cursor = None;
         self.session_requested_cursor = None;
         self.session_page_loading = false;
+        self.session_request_generation = self.session_request_generation.saturating_add(1);
+        self.session_refresh_attempts = 0;
         self.session_catalog_state = SessionCatalogState::Initial;
         self.sessions_loading_started = Instant::now();
         self.last_sessions_refresh = None;
@@ -1564,6 +1570,7 @@ impl NeoismAgentSidePanel {
         self.session_next_cursor = next_cursor;
         self.session_page_loading = false;
         self.session_requested_cursor = None;
+        self.session_refresh_attempts = 0;
         self.session_catalog_state = SessionCatalogState::Ready;
         self.rebuild_session_display();
         if was_home && requested_cursor.is_none() {
@@ -1585,6 +1592,15 @@ impl NeoismAgentSidePanel {
         self.session_page_loading
     }
 
+    pub fn next_session_request_generation(&mut self) -> u64 {
+        self.session_request_generation = self.session_request_generation.saturating_add(1);
+        self.session_request_generation
+    }
+
+    pub fn session_request_is_current(&self, generation: u64) -> bool {
+        self.session_request_generation == generation
+    }
+
     /// Claim the continuation cursor once the viewport is within four rows
     /// of the loaded end. The claim is single-flight until a page or failure
     /// settles it.
@@ -1601,6 +1617,7 @@ impl NeoismAgentSidePanel {
         self.session_page_loading = true;
         self.session_requested_cursor = Some(cursor.clone());
         self.last_sessions_refresh = Some(Instant::now());
+        self.sessions_loading_started = Instant::now();
         Some(cursor)
     }
 
@@ -1987,6 +2004,9 @@ impl NeoismAgentSidePanel {
             return true;
         };
         let retry_after = if matches!(self.session_catalog_state, SessionCatalogState::Error(_)) {
+            if self.session_refresh_attempts >= 2 {
+                return false;
+            }
             0.75
         } else {
             8.0
@@ -1995,6 +2015,7 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn mark_refresh_kicked(&mut self) {
+        self.session_refresh_attempts = self.session_refresh_attempts.saturating_add(1);
         self.last_sessions_refresh = Some(Instant::now());
         if self.all_sessions.is_empty() {
             self.session_catalog_state = SessionCatalogState::Loading;
@@ -2720,14 +2741,14 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn is_animating(&self) -> bool {
+        let sessions_loading = matches!(self.mode, SidePanelMode::Sessions)
+            && !self.user_hidden
+            && self.sessions_loading_elapsed() < 1.5
+            && (matches!(self.session_catalog_state, SessionCatalogState::Loading)
+                || self.session_page_loading);
         self.scroll.is_animating()
                 || self.cursor_spring.position != 0.0
-                // Initial loads and retries keep the skeleton moving until a
-                // successful response proves the catalog is ready (including
-                // a legitimately empty catalog).
-                || (!matches!(self.session_catalog_state, SessionCatalogState::Ready)
-                    && !self.user_hidden)
-                || self.session_page_loading
+                || sessions_loading
                 || (self.semantic_searching && self.semantic_search_elapsed() < 1.5)
                 // A running sub-agent paints the rainbow loader spinner (and
                 // the blinking status dot), both of which need the host to

@@ -333,9 +333,8 @@ pub(crate) fn apply_agent_event_to_pane(
             if !pane.session_family_contains(&snapshot.root_session_id) {
                 return;
             }
-            if let Some(activity) = snapshot.execution {
-                pane.apply_execution_activity(
-                    neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            let execution = snapshot.execution.map(|activity| {
+                let activity = neoism_ui::panels::agent_pane::state::ExecutionActivityState {
                         execution_id: activity.execution_id,
                         root_session_id: activity.root_session_id,
                         completed_ms: activity.completed_ms,
@@ -348,17 +347,20 @@ pub(crate) fn apply_agent_event_to_pane(
                         }).collect(),
                         revision: activity.revision,
                         finished: activity.finished,
-                    },
-                );
-            }
+                    };
+                activity
+            });
             if snapshot.branches_authoritative {
-                pane.apply_branch_lifecycle_snapshot(
+                pane.apply_runtime_lifecycle_snapshot(
+                    execution,
                     snapshot.root_session_id.clone(),
                     snapshot.family_revision,
                     snapshot.branches.into_iter().map(|branch| {
                         (branch.session_id, branch.status, branch.started_at)
                     }),
                 );
+            } else if let Some(execution) = execution {
+                pane.apply_execution_activity(execution);
             }
         }
         AgentServerMessage::StreamingState { state, label, .. } => {
@@ -830,9 +832,8 @@ pub(crate) fn apply_agent_event_to_cache(
             if !pane.session_family_contains(&snapshot.root_session_id) {
                 return true;
             }
-            if let Some(activity) = snapshot.execution {
-                pane.apply_execution_activity(
-                    neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            let execution = snapshot.execution.map(|activity| {
+                let activity = neoism_ui::panels::agent_pane::state::ExecutionActivityState {
                         execution_id: activity.execution_id,
                         root_session_id: activity.root_session_id,
                         completed_ms: activity.completed_ms,
@@ -845,17 +846,20 @@ pub(crate) fn apply_agent_event_to_cache(
                         }).collect(),
                         revision: activity.revision,
                         finished: activity.finished,
-                    },
-                );
-            }
+                    };
+                activity
+            });
             if snapshot.branches_authoritative {
-                pane.apply_branch_lifecycle_snapshot(
+                pane.apply_runtime_lifecycle_snapshot(
+                    execution,
                     snapshot.root_session_id.clone(),
                     snapshot.family_revision,
                     snapshot.branches.into_iter().map(|branch| {
                         (branch.session_id, branch.status, branch.started_at)
                     }),
                 );
+            } else if let Some(execution) = execution {
+                pane.apply_execution_activity(execution);
             }
             true
         }

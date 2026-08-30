@@ -541,15 +541,12 @@ impl NeoismAgentPane {
                         {
                             continue;
                         }
-                        if let Some(activity) = runtime.execution {
-                            self.apply_execution_activity(activity);
-                        }
-                        self.apply_branch_lifecycle_snapshot(
+                        changed |= self.apply_runtime_lifecycle_snapshot(
+                            runtime.execution,
                             runtime.root_session_id,
                             runtime.family_revision,
                             runtime.branches,
                         );
-                        changed = true;
                     }
                 }
                 AgentSessionUpdate::McpChanged => {
@@ -1446,9 +1443,13 @@ impl NeoismAgentPane {
                     }
                 }
                 Ok(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
+                    generation,
                     requested_cursor,
                     result,
                 }) => {
+                    if !self.side_panel.session_request_is_current(generation) {
+                        continue;
+                    }
                     match result {
                         Ok((sessions, next_cursor)) => self.side_panel.set_session_page(
                             sessions,
@@ -1657,15 +1658,12 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                     if let Ok(runtime) = runtime {
-                        if let Some(activity) = runtime.execution {
-                            self.apply_execution_activity(activity);
-                        }
-                        self.apply_branch_lifecycle_snapshot(
+                        changed |= self.apply_runtime_lifecycle_snapshot(
+                            runtime.execution,
                             runtime.root_session_id,
                             runtime.family_revision,
                             runtime.branches,
                         );
-                        changed = true;
                     }
                 }
                 Ok(NeoismAgentBackgroundUpdate::OlderTimelineLoaded {

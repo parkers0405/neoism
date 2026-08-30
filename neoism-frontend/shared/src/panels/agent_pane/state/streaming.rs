@@ -55,6 +55,10 @@ impl NeoismAgentPane {
     /// viewport reaches the loaded tail.
     pub fn scroll_side_panel_pixels(&mut self, delta_pixels: f32, rows: usize) {
         self.side_panel.scroll_pixels(delta_pixels, rows);
+        self.maybe_request_side_panel_session_page();
+    }
+
+    pub fn maybe_request_side_panel_session_page(&mut self) {
         if let Some(cursor) = self.side_panel.begin_session_page_near_end() {
             self.push_outbound(OutboundAgentCommand::RefreshSessions {
                 directory: self.directory.clone(),
@@ -293,6 +297,36 @@ impl NeoismAgentPane {
         self.execution_activity.as_ref().is_some_and(|current| {
             current.execution_id == execution_id && current.revision == revision
         })
+    }
+
+    pub fn apply_runtime_lifecycle_snapshot<I>(
+        &mut self,
+        execution: Option<ExecutionActivityState>,
+        root_session_id: String,
+        family_revision: u64,
+        branches: I,
+    ) -> bool
+    where
+        I: IntoIterator<Item = (String, String, Option<u64>)>,
+    {
+        // Execution and branches are one server snapshot. Reject both when
+        // its execution revision is stale so branches cannot travel alone.
+        let (execution_current, execution_changed) = execution
+            .map(|activity| {
+                let execution_id = activity.execution_id.clone();
+                let revision = activity.revision;
+                let changed = self.apply_execution_activity(activity);
+                (
+                    changed || self.execution_activity_matches(&execution_id, revision),
+                    changed,
+                )
+            })
+            .unwrap_or((true, false));
+        if !execution_current {
+            return false;
+        }
+        self.apply_branch_lifecycle_snapshot(root_session_id, family_revision, branches)
+            || execution_changed
     }
 
     pub fn apply_branch_lifecycle_snapshot(

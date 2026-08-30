@@ -881,7 +881,7 @@ async fn deleting_child_cleans_runtime_without_deleting_root_execution() {
     store.admit_execution_activity(root_id.as_str(), "execution-delete-child", "message", "")
         .await.unwrap().unwrap();
     store.register_execution_subtask(
-        "execution-delete-child", root_id.as_str(), root_id.as_str(), child_id.as_str(), 10,
+        "execution-delete-child", root_id.as_str(), root_id.as_str(), child_id.as_str(), "owner", 10,
     ).await.unwrap();
     store.insert_execution_segment(
         root_id.as_str(), "execution-delete-child", "child-segment", "owner", child_id.as_str(), 10,
@@ -1956,7 +1956,7 @@ async fn v2_root_stream_delivers_child_deletion_without_unrelated_leak() {
         .admit_execution_activity(root_id.as_str(), "execution-delete-sse", "message", "")
         .await.unwrap().unwrap();
     state.inner.store.register_execution_subtask(
-        "execution-delete-sse", root_id.as_str(), root_id.as_str(), child_id.as_str(), 10,
+        "execution-delete-sse", root_id.as_str(), root_id.as_str(), child_id.as_str(), &state.inner.execution_owner_id, 10,
     ).await.unwrap();
 
     let response = app(state.clone()).oneshot(

@@ -26,6 +26,42 @@ const SUBTASK_COMPLETION_EXTRA_KEY: &str = "subtaskCompletion";
 const SUBTASK_COMPLETIONS_EXTRA_KEY: &str = "subtaskCompletions";
 const SUBTASK_PERSISTENCE_VERSION_KEY: &str = "subtaskPersistenceVersion";
 const SUBTASK_PERSISTENCE_VERSION: u64 = 1;
+
+pub(crate) fn recorded_subtask_terminal_status(
+    child: &SessionInfo,
+    started_at: u64,
+) -> Option<&'static str> {
+    fn terminal_status(record: &Value, started_at: u64) -> Option<&'static str> {
+        if record.get("completedAt").and_then(Value::as_u64)? < started_at {
+            return None;
+        }
+        match record.get("status").and_then(Value::as_str)? {
+            "completed" | "complete" | "done" => Some("completed"),
+            "failed" | "error" | "errored" | "stopped" | "aborted" | "cancelled" => {
+                Some("failed")
+            }
+            _ => None,
+        }
+    }
+
+    child
+        .extra
+        .get(SUBTASK_COMPLETIONS_EXTRA_KEY)
+        .and_then(Value::as_array)
+        .and_then(|records| {
+            records
+                .iter()
+                .rev()
+                .find_map(|record| terminal_status(record, started_at))
+        })
+        .or_else(|| {
+            child
+                .extra
+                .get(SUBTASK_COMPLETION_EXTRA_KEY)
+                .and_then(|record| terminal_status(record, started_at))
+        })
+}
+
 /// Set on a child when a continue-prompt is QUEUED onto it (the task tool's
 /// child-already-running branch). The queued prompt runs through the generic
 /// queue worker — no spawn wrapper exists to publish the completion — so the

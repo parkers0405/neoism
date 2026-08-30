@@ -6762,8 +6762,8 @@ export class TerminalPanel {
     };
   }
 
-  private beginBufferTabDrag(event: PointerEvent): void {
-    if (event.button !== 0) return;
+  private beginBufferTabDrag(event: PointerEvent): boolean {
+    if (event.button !== 0) return false;
     const adapter = this.wasmAdapter;
     const { x, y } = this.canvasLogicalPoint(event);
     let tabIndex = -1;
@@ -6776,14 +6776,14 @@ export class TerminalPanel {
       tabIndex = adapter.bufferTabHitTest(x, y);
     }
     if (tabIndex < 0 || tabIndex >= this.bufferTabs.length) {
-      return;
+      return false;
     }
     const tab = this.bufferTabs[tabIndex];
     const draggable =
       this.isEditorLikeTab(tab) || (tab?.kind === "terminal" && !!tab.sessionId);
     if (!draggable) {
       adapter?.bufferTabCancelDrag?.();
-      return;
+      return false;
     }
     this.bufferTabDrag = {
       pointerId: event.pointerId,
@@ -6794,6 +6794,7 @@ export class TerminalPanel {
       target: null,
     };
     this.canvas.setPointerCapture?.(event.pointerId);
+    return true;
   }
 
   private updateBufferTabDrag(event: PointerEvent): boolean {
@@ -7239,11 +7240,18 @@ export class TerminalPanel {
         return true;
       }
       // kind "none": plain click — activation flows through the
-      // strip's own PointerDown handling.
-      return false;
+      // strip's own PointerDown handling. The armed strip still owns
+      // this release, so it must not reach the newly active surface.
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
     }
     // Legacy fallback (stale bundle): pane drop only.
-    if (!drag.active || !drag.target) return false;
+    if (!drag.active || !drag.target) {
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
     this.commitWebTabPaneDrop(drag.tabIndex, drag.target);
     event.preventDefault();
     event.stopPropagation();
@@ -7426,9 +7434,17 @@ export class TerminalPanel {
 
   private handlePointerDown(event: PointerEvent): void {
     if (event.pointerType === "touch") return;
-    this.beginBufferTabDrag(event);
+    const bufferTabGesture = this.beginBufferTabDrag(event);
     this.focusSurface();
     this.updateCustomCursorFromPointer(event, true);
+    if (bufferTabGesture) {
+      this.forwardChromeEvent(
+        fromPointerDownEvent(event, event.detail || 1, this.canvas),
+      );
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
     const islandPoint = this.canvasLogicalPoint(event);
     if (this.wasmAdapter?.workspaceIslandClick?.(islandPoint.x, islandPoint.y)) {
       event.preventDefault();

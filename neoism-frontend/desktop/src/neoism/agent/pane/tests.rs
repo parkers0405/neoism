@@ -274,6 +274,39 @@ fn terminal_runtime_snapshot_settles_viewed_child_streaming_label() {
 }
 
 #[test]
+fn stale_runtime_response_cannot_resurrect_finished_desktop_child() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 2,
+            finished: true,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        2,
+        [("child-1".to_string(), "completed".to_string(), Some(1))],
+    ));
+    assert!(!pane.apply_runtime_lifecycle_snapshot(
+        Some(neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 1,
+            finished: false,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        3,
+        [("child-1".to_string(), "outstanding".to_string(), Some(1))],
+    ));
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(!pane.has_status_activity());
+    assert!(pane.side_panel.subagents().iter().all(|entry| entry.id != "child-1"));
+}
+
+#[test]
 fn active_subagent_part_updates_do_not_restart_waiting_clock() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());

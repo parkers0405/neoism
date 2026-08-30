@@ -7,6 +7,12 @@ impl NeoismAgentPane {
             .map(|anchor| (anchor.key.clone(), anchor.screen_offset))
     }
 
+    pub fn timeline_view_anchor_matches(&self, source_index: usize, source_len: usize) -> bool {
+        self.timeline_view_anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.key.is_for_source(source_index, source_len))
+    }
+
     pub fn restore_timeline_view_anchor(&mut self, content_y: f32, screen_offset: f32) {
         if self.timeline_follow_bottom {
             return;

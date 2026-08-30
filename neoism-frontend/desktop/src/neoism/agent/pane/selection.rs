@@ -1,6 +1,8 @@
 use super::*;
 
 impl NeoismAgentPane {
+    const MARKDOWN_INTERACTION_SETTLE: Duration = Duration::from_millis(90);
+
     pub fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize {
         self.register_selectable_line_with_caret_stops(text, rect, &[])
     }
@@ -148,8 +150,12 @@ impl NeoismAgentPane {
         {
             return true;
         }
+        self.timeline_interaction_settle_active()
+    }
+
+    pub(super) fn timeline_interaction_settle_active(&self) -> bool {
         self.timeline_last_scroll_at.is_some_and(|last| {
-            Instant::now().saturating_duration_since(last).as_millis() < 90
+            Instant::now().saturating_duration_since(last) < Self::MARKDOWN_INTERACTION_SETTLE
         })
     }
 

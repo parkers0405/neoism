@@ -208,7 +208,7 @@ pub fn render_tool_message(
     // rect (per-card rects are skipped below); live diff cards keep their
     // per-card toggles and register no message-level rect.
     if (diff_sections.is_none() || archived) && !suppress_interactions {
-        pane.register_tool_hit_rect(message.id().to_string(), [x, y, w, h]);
+        pane.register_tool_hit_rect(message.id().to_string(), message_clip);
     }
     let accent = tool_message_accent(message.status(), theme);
     draw_status_dot_text(
@@ -564,15 +564,18 @@ fn render_tool_group_activity(
         }
         let child_key = group_child_key(line);
         if let Some(child_key) = child_key.as_ref().filter(|_| !suppress_interactions) {
-            pane.register_tool_hit_rect(
-                format!("{}::child::{}", message.id(), child_key),
-                [
+            let rect = [
                     body_x - 8.0 * s,
                     line_y - 4.0 * s,
                     (w - 70.0 * s).max(40.0 * s),
                     row_h,
-                ],
-            );
+                ];
+            if let Some(rect) = intersect_rect(rect, message_clip) {
+                pane.register_tool_hit_rect(
+                    format!("{}::child::{}", message.id(), child_key),
+                    rect,
+                );
+            }
         }
         let selected = child_key
             .as_deref()
@@ -716,34 +719,39 @@ fn render_tool_diff_cards(
             clip_bottom,
         );
         if !suppress_interactions && !archived {
-            pane.register_tool_hit_rect(
-                card_key.clone(),
+            if let Some(rect) = intersect_rect(
                 [card_x, card_y, card_w, layout.total_height],
-            );
+                viewport_clip,
+            ) {
+                pane.register_tool_hit_rect(card_key.clone(), rect);
+            }
         }
         if let Some(target) = link_target.filter(|_| !suppress_interactions) {
-            pane.register_link_hit_rect(
-                target.to_string(),
+            if let Some(rect) = intersect_rect(
                 [
                     card_x + diff_card::HEADER_PAD_X * s,
                     card_y,
                     (card_w - diff_card::HEADER_PAD_X * 2.0 * s).max(0.0),
                     diff_card::HEADER_HEIGHT * s,
                 ],
-            );
+                viewport_clip,
+            ) {
+                pane.register_link_hit_rect(target.to_string(), rect);
+            }
         }
         if card_expanded && full_body_h > body_h + 1.0 {
             if !suppress_interactions {
-                pane.register_diff_scroll_rect(
-                    scroll_key,
+                if let Some(rect) = intersect_rect(
                     [
                         card_x,
                         card_y + diff_card::HEADER_HEIGHT * s,
                         card_w,
                         body_h,
                     ],
-                    full_body_h - body_h,
-                );
+                    viewport_clip,
+                ) {
+                    pane.register_diff_scroll_rect(scroll_key, rect, full_body_h - body_h);
+                }
             }
             draw_diff_body_scrollbar(
                 sugarloaf,

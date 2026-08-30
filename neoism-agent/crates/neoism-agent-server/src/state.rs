@@ -628,6 +628,12 @@ impl AppState {
                 {
                     tracing::warn!(%error, "failed to reconcile stale execution activity segments");
                 }
+                if let Err(error) = store
+                    .reconcile_stale_execution_subtasks(now.saturating_sub(15_000))
+                    .await
+                {
+                    tracing::warn!(%error, "failed to reconcile stale execution subtask owners");
+                }
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
                     _ = lease_control.notify.notified() => {},
@@ -1344,6 +1350,7 @@ impl SessionStore {
                 child_session_id TEXT NOT NULL,
                 root_session_id TEXT NOT NULL,
                 parent_session_id TEXT NOT NULL,
+                owner_instance_id TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 started_at INTEGER NOT NULL,
                 PRIMARY KEY (execution_id, child_session_id)
@@ -1352,6 +1359,17 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        if !self
+            .table_has_column("execution_subtasks", "owner_instance_id")
+            .await?
+        {
+            self.db
+                .execute(
+                    "ALTER TABLE execution_subtasks ADD COLUMN owner_instance_id TEXT NOT NULL DEFAULT ''",
+                    Vec::new(),
+                )
+                .await?;
+        }
         self.db
             .execute(
                 r#"
@@ -2741,14 +2759,15 @@ impl SessionStore {
         root_session_id: &str,
         parent_session_id: &str,
         child_session_id: &str,
+        owner_instance_id: &str,
         started_at: u64,
     ) -> anyhow::Result<ExecutionSubtaskRegistration> {
         let results = self.db
             .execute_transaction_with_results(vec![
                 (
                 r#"INSERT OR IGNORE INTO execution_subtasks
-                (execution_id, child_session_id, root_session_id, parent_session_id, status, started_at)
-                SELECT ?, ?, ?, ?, 'outstanding', ?
+                (execution_id, child_session_id, root_session_id, parent_session_id, owner_instance_id, status, started_at)
+                SELECT ?, ?, ?, ?, ?, 'outstanding', ?
                 WHERE EXISTS (
                     SELECT 1 FROM execution_activity
                     WHERE root_session_id = ? AND execution_id = ? AND finished = 0
@@ -2759,6 +2778,7 @@ impl SessionStore {
                     text(child_session_id),
                     text(root_session_id),
                     text(parent_session_id),
+                    text(owner_instance_id),
                     int(store_i64(started_at)),
                     text(root_session_id),
                     text(execution_id),
@@ -2905,6 +2925,44 @@ impl SessionStore {
         Ok(reconciled)
     }
 
+    pub(crate) async fn reconcile_stale_execution_subtasks(
+        &self,
+        stale_before: u64,
+    ) -> anyhow::Result<usize> {
+        let rows = self
+            .db
+            .fetch_all(
+                r#"SELECT task.execution_id, task.child_session_id
+                   FROM execution_subtasks task
+                   LEFT JOIN execution_activity_owners owner
+                     ON owner.owner_instance_id = task.owner_instance_id
+                   WHERE task.status = 'outstanding'
+                     AND (owner.owner_instance_id IS NULL OR owner.heartbeat_at < ?)"#,
+                vec![int(store_i64(stale_before))],
+            )
+            .await?;
+        let mut reconciled = 0;
+        for row in rows {
+            let execution_id = row.get_str("execution_id")?;
+            let child_session_id = row.get_str("child_session_id")?;
+            let results = self
+                .db
+                .execute_transaction_with_results(vec![
+                    (
+                        "UPDATE execution_subtasks SET status = 'failed' WHERE execution_id = ? AND child_session_id = ? AND status = 'outstanding' AND NOT EXISTS (SELECT 1 FROM execution_activity_owners owner WHERE owner.owner_instance_id = execution_subtasks.owner_instance_id AND owner.heartbeat_at >= ?)".to_string(),
+                        vec![text(&execution_id), text(&child_session_id), int(store_i64(stale_before))],
+                    ),
+                    (
+                        "UPDATE execution_activity SET family_revision = family_revision + 1, updated = ? WHERE execution_id = ? AND changes() > 0".to_string(),
+                        vec![int(store_i64(crate::now_millis())), text(&execution_id)],
+                    ),
+                ])
+                .await?;
+            reconciled += usize::from(results.first().copied().unwrap_or(0) > 0);
+        }
+        Ok(reconciled)
+    }
+
     /// Read timer segments and branch lifecycle in one SQL statement so a
     /// reconnect cannot combine revisions from different database moments.
     pub(crate) async fn get_session_runtime_snapshot(
@@ -3033,7 +3091,7 @@ impl SessionStore {
             ("DELETE FROM execution_activity_segments WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
             ("DELETE FROM execution_session_activity WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
             ("DELETE FROM execution_activity WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
-            ("DELETE FROM execution_activity_owners WHERE NOT EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.owner_instance_id = execution_activity_owners.owner_instance_id)".to_string(), Vec::new()),
+            ("DELETE FROM execution_activity_owners WHERE NOT EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.owner_instance_id = execution_activity_owners.owner_instance_id) AND NOT EXISTS (SELECT 1 FROM execution_subtasks t WHERE t.owner_instance_id = execution_activity_owners.owner_instance_id AND t.status = 'outstanding')".to_string(), Vec::new()),
         ];
         for table in ["messages", "prompt_queue", "session_runs", "session_context_epochs", "message_embeddings"] {
             statements.push((format!("DELETE FROM {table} WHERE session_id = ?"), vec![text(session_id)]));

@@ -192,6 +192,7 @@ impl Screen<'_> {
             match key.logical_key.as_ref() {
                 Key::Named(NamedKey::ArrowDown) => {
                     agent.side_panel_mut().select_next();
+                    agent.maybe_request_side_panel_session_page();
                     self.mark_dirty();
                     return true;
                 }
@@ -1589,16 +1590,6 @@ impl Screen<'_> {
             } else {
                 self.open_neoism_agent_link_target(&link);
             }
-            self.mark_dirty();
-            return true;
-        }
-        let toggled_tool = self
-            .context_manager
-            .current_mut()
-            .neoism_agent
-            .as_mut()
-            .is_some_and(|agent| agent.toggle_tool_at(mx, my));
-        if toggled_tool {
             self.mark_dirty();
             return true;
         }

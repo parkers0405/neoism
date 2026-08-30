@@ -64,8 +64,12 @@ pub(crate) struct SessionShellRequest {
 pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> bool {
     let aborted = abort_session_run_impl(state, session_id, true).await;
     if aborted {
-        crate::execution_activity::finish_subtask_for_child(state, session_id, "cancelled")
-            .await;
+        let _ = crate::execution_activity::finish_subtask_for_child(
+            state,
+            session_id,
+            "cancelled",
+        )
+        .await;
     }
     aborted
 }
@@ -305,7 +309,12 @@ pub(crate) async fn publish_background_subtask_finished(
 ) {
     // Execution lifecycle is authoritative and must not depend on whether the
     // optional UI notification runtime is loaded or still tracks this child.
-    crate::execution_activity::finish_subtask_for_child(state, child_id, status).await;
+    if let Err(error) =
+        crate::execution_activity::finish_subtask_for_child(state, child_id, status).await
+    {
+        tracing::warn!(session_id = %child_id, %error, "failed to terminalize subtask lifecycle");
+        return;
+    }
     let tracked = match state.inner.store.get_session(child_id).await {
         Ok(Some(child)) => state.inner.workspace_runtimes.loaded(&child.directory).await
             .and_then(|runtime| runtime.subagents_if_allocated()),
@@ -341,13 +350,13 @@ pub(crate) async fn publish_background_subtask_finished(
             }
         }
     };
-    let Some((child, created)) = mutation else {
+    let Some((child, _created)) = mutation else {
         return;
     };
     let Some(parent_id) = child.parent_id.as_ref().map(ToString::to_string) else {
         return;
     };
-    if created {
+    {
         let mut payload = json!({
             "sessionID": parent_id.clone(),
             "parentSessionID": parent_id.clone(),

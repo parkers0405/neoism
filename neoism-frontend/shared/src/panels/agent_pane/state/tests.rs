@@ -277,6 +277,46 @@ fn reconnect_snapshot_restores_outstanding_branch_and_stale_revision_cannot_rewi
 }
 
 #[test]
+fn terminal_runtime_snapshot_settles_shared_task_footer_and_viewed_child() {
+    let mut parent = NeoismAgentPane::default();
+    parent.session_id = Some("parent".to_string());
+    let mut task = NeoismAgentMessage::tool(
+        "Task(inspect project)",
+        "task_id: child-1\nstatus: working",
+        "running",
+        "task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    task.detail = task.text.clone();
+    parent.messages.push(task);
+    parent.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, Some(1));
+
+    assert!(parent.apply_branch_lifecycle_snapshot(
+        "parent".to_string(),
+        2,
+        [("child-1".to_string(), "completed".to_string(), Some(1))],
+    ));
+    assert_eq!(parent.messages[0].status, "completed");
+    assert!(parent.messages[0].text.contains("status: completed"));
+    assert_eq!(parent.active_subagent_count(), 0);
+    assert!(!parent.has_status_activity());
+
+    let mut child = NeoismAgentPane::default();
+    child.session_id = Some("child-1".to_string());
+    child.note_streaming(NeoismAgentStreamingState::Working, None);
+    assert!(child.is_streaming());
+    assert!(child.apply_branch_lifecycle_snapshot(
+        "parent".to_string(),
+        2,
+        [("child-1".to_string(), "completed".to_string(), Some(1))],
+    ));
+    assert!(!child.is_streaming());
+    assert_eq!(child.streaming_state(), NeoismAgentStreamingState::Idle);
+}
+
+#[test]
 fn authoritative_runtime_snapshot_deletes_absent_branch_state() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".into());

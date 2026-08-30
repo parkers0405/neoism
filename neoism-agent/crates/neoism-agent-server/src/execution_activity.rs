@@ -369,8 +369,8 @@ pub(crate) async fn finish_subtask_for_child(
     state: &AppState,
     child_session_id: &str,
     status: &str,
-) {
-    let _ = try_finish_subtask_for_child(state, child_session_id, status).await;
+) -> anyhow::Result<()> {
+    try_finish_subtask_for_child(state, child_session_id, status).await
 }
 
 async fn try_finish_subtask_for_child(
@@ -401,9 +401,10 @@ async fn try_finish_subtask_for_child(
         .store
         .finish_execution_subtask(execution_id, child_session_id, terminal)
         .await?;
-    if changed {
-        publish_snapshot(state, &root).await;
-    }
+    // A retry may observe an already-terminal row after the original event
+    // was missed. Always publish the authoritative family snapshot.
+    let _ = changed;
+    publish_snapshot(state, &root).await;
     drop(_guard);
     finish_if_quiescent(state, &root).await;
     Ok(())
@@ -485,32 +486,11 @@ async fn finish_if_quiescent_impl(
     if crate::background_job::family_has_running_jobs(state, &children, &root_id).await {
         return;
     }
-    // Every live authority is now quiescent. An outstanding durable branch at
-    // this point is an orphan from interrupted teardown; treating the row as
-    // authority creates a permanent deadlock (and resurrects the child in
-    // `/runtime` on every reopen). Terminalize it under the root lock before
-    // settling the execution.
-    for branch in branches
-        .iter()
-        .filter(|branch| branch.status == "outstanding")
-    {
-        match state
-            .inner
-            .store
-            .finish_execution_subtask(&execution.execution_id, &branch.session_id, "failed")
-            .await
-        {
-            Ok(true) => tracing::warn!(
-                root_session_id = %root_id,
-                child_session_id = %branch.session_id,
-                "terminalized orphaned outstanding subtask during quiescence"
-            ),
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(%error, child_session_id = %branch.session_id, "failed to reconcile orphaned subtask");
-                return;
-            }
-        }
+    // Outstanding is itself durable authority. Legitimate launch/between-step
+    // windows can have no run, queue, worker, provider segment, or shell job;
+    // generic quiescence must never infer death from that absence.
+    if branches.iter().any(|branch| branch.status == "outstanding") {
+        return;
     }
     // The family is quiescent by every live authority, so any store run row
     // still 'running' is a leak from an interrupted teardown. Left alone it
@@ -696,7 +676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quiescence_terminalizes_orphaned_outstanding_subtask() {
+    async fn quiescence_never_terminalizes_an_outstanding_subtask() {
         let path = std::env::temp_dir().join(format!(
             "neoism-execution-orphan-subtask-{}.sqlite3",
             neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -801,9 +781,9 @@ mod tests {
                 .await
                 .unwrap()
                 .as_deref(),
-            Some("failed")
+            Some("outstanding")
         );
-        assert!(state
+        assert!(!state
             .inner
             .store
             .get_execution_activity(root_id.as_str())

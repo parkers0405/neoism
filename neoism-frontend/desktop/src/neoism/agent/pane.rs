@@ -1720,6 +1720,9 @@ fn is_terminal_task_status(status: &str) -> bool {
 fn rewrite_task_status_markers(field: &mut String, status: &str) {
     for marker in [
         "status: running",
+        "status: queued",
+        "status: working",
+        "status: busy",
         "status: completed",
         "status: error",
         "status: stopped",

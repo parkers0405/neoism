@@ -194,6 +194,7 @@ pub(super) enum AgentSessionUpdate {
     },
     ExecutionUpdated(Value),
     RuntimeUpdated(Value),
+    McpChanged,
 }
 
 pub(crate) struct AgentSessionEventStream {
@@ -1115,6 +1116,9 @@ fn send_event_updates(
             }
             SessionEventUpdate::RuntimeUpdated(snapshot) => {
                 tx.send(AgentSessionUpdate::RuntimeUpdated(snapshot))?;
+            }
+            SessionEventUpdate::McpChanged => {
+                tx.send(AgentSessionUpdate::McpChanged)?;
             }
         }
         wake_event_loop(wake);

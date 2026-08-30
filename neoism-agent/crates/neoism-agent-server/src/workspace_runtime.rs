@@ -1056,8 +1056,17 @@ async fn publish_candidate_if_open(
             None => Err("workspace runtime was shut down before plugin publication".to_string()),
         };
     }
+    let generation = candidate.installed.snapshot().generation;
     runtime.generation.publish(candidate);
     *runtime.signature.write().unwrap_or_else(std::sync::PoisonError::into_inner) = signature;
+    state.publish(neoism_agent_core::EventPayload::new(
+        neoism_agent_core::event_type::MCP_TOOLS_CHANGED,
+        serde_json::json!({
+            "directory": runtime.root.to_string_lossy(),
+            "generation": generation,
+            "reason": "plugin_generation_reloaded",
+        }),
+    ));
     Ok(true)
 }
 

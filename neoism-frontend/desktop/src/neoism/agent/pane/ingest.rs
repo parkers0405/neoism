@@ -552,6 +552,16 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                 }
+                AgentSessionUpdate::McpChanged => {
+                    if self.picker.as_ref().is_some_and(|picker| {
+                        matches!(
+                            picker.kind,
+                            NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
+                        )
+                    }) {
+                        self.show_mcp();
+                    }
+                }
                 AgentSessionUpdate::PartDelta {
                     message_id,
                     part_id,

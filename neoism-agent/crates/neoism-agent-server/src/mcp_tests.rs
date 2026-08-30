@@ -189,7 +189,7 @@ fn default_oauth_redirect_uses_the_active_agent_server() {
     std::env::set_var("NEOISM_SERVER", "http://127.0.0.1:39319/");
     assert_eq!(
         super::mcp_oauth::redirect_uri_for_test("webflow", &Default::default()),
-        "http://127.0.0.1:39319/mcp/webflow/auth/callback"
+        "http://127.0.0.1:39319/v2/plugins/dev.neoism.mcp/webflow/auth/callback"
     );
     match previous {
         Some(value) => std::env::set_var("NEOISM_SERVER", value),

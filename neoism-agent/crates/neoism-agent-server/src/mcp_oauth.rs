@@ -478,7 +478,10 @@ fn redirect_uri(name: &str, oauth: &McpOAuthConfig) -> String {
     oauth.redirect_uri.clone().unwrap_or_else(|| {
         let server = std::env::var("NEOISM_SERVER")
             .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string());
-        format!("{}/mcp/{name}/auth/callback", server.trim_end_matches('/'))
+        format!(
+            "{}/v2/plugins/dev.neoism.mcp/{name}/auth/callback",
+            server.trim_end_matches('/')
+        )
     })
 }
 

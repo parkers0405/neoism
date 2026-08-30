@@ -548,7 +548,7 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::McpFailed { name, error } => {
             pane.system_message(name.unwrap_or_else(|| "MCP".to_string()), error);
         }
-        AgentServerMessage::McpChanged { .. } => pane.open_mcp_picker(),
+        AgentServerMessage::McpChanged { .. } => pane.refresh_mcp_if_visible(),
         AgentServerMessage::UsageUpdate { usage, .. } => {
             pane.apply_usage(map_usage(usage));
         }

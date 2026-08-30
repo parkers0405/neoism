@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -15,7 +16,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Notify, RwLock};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -34,6 +35,8 @@ pub(crate) struct BackgroundWorkspaceRuntime {
     pub(crate) jobs: RwLock<HashMap<String, BackgroundJob>>,
     pub(crate) cancellations: RwLock<HashMap<String, oneshot::Sender<()>>>,
     closed: std::sync::atomic::AtomicBool,
+    active_jobs: AtomicUsize,
+    settled: Notify,
 }
 
 impl BackgroundWorkspaceRuntime {
@@ -42,6 +45,20 @@ impl BackgroundWorkspaceRuntime {
         let cancellations = std::mem::take(&mut *self.cancellations.write().await);
         for (_, cancel) in cancellations {
             let _ = cancel.send(());
+        }
+        let drained = async {
+            while self.active_jobs.load(Ordering::Acquire) != 0 {
+                self.settled.notified().await;
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(10), drained)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                active_jobs = self.active_jobs.load(Ordering::Acquire),
+                "timed out draining background jobs during workspace shutdown"
+            );
         }
         self.jobs.write().await.clear();
     }
@@ -248,6 +265,7 @@ pub(crate) async fn start_background_task_tool(
     background.cancellations.write()
         .await
         .insert(job_id.clone(), cancel_tx);
+    background.active_jobs.fetch_add(1, Ordering::AcqRel);
     tokio::spawn(run_background_job(
         state.clone(),
         background,
@@ -327,9 +345,40 @@ pub(crate) async fn stop_background_task(
     State(state): State<AppState>,
     AxumPath((session_id, job_id)): AxumPath<(String, String)>,
 ) -> Result<Json<BackgroundJobStopResponse>, ApiError> {
-    let (background, job) = find_job(&state, &job_id).await.ok_or_else(|| {
-        ApiError::not_found(format!("background job {job_id} not found"))
-    })?;
+    let Some((background, job)) = find_job(&state, &job_id).await else {
+        if state.inner.store.get_session(&session_id).await?.is_none() {
+            return Err(ApiError::not_found(format!("session {session_id} not found")));
+        }
+        let now = now_millis();
+        let interrupted = BackgroundJob {
+            id: job_id.clone(),
+            session_id,
+            description: "Interrupted background task".to_string(),
+            command: "(process ownership was lost during restart)".to_string(),
+            cwd: "(unknown)".to_string(),
+            shell: "(unknown)".to_string(),
+            status: BackgroundJobStatus::Error,
+            started_at: now,
+            finished_at: Some(now),
+            exit_code: None,
+            signal: None,
+            pid: None,
+            timeout_ms: 0,
+            output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+            output_truncated: false,
+            output: "Background task was interrupted when its owning Neoism server stopped."
+                .to_string(),
+            error: Some("background task owner is no longer available".to_string()),
+            command_patterns: Vec::new(),
+            always_patterns: Vec::new(),
+            external_dirs: Vec::new(),
+        };
+        publish_background_job_completion(&state, &interrupted).await;
+        return Ok(Json(BackgroundJobStopResponse {
+            job_id,
+            status: "interrupted",
+        }));
+    };
     if job.session_id != session_id {
         return Err(ApiError::not_found(format!(
             "background job {job_id} not found in session {session_id}"
@@ -377,6 +426,8 @@ async fn run_background_job(
     job.error = finish.error;
     finish_background_job(&state, &background, job).await;
     drop(generation);
+    background.active_jobs.fetch_sub(1, Ordering::AcqRel);
+    background.settled.notify_waiters();
 }
 
 async fn wait_for_background_job(
@@ -470,12 +521,13 @@ async fn wait_for_background_job(
 }
 
 async fn finish_background_job(state: &AppState, background: &BackgroundWorkspaceRuntime, job: BackgroundJob) {
-    if background.closed.load(std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
     background.jobs.write()
         .await
         .insert(job.id.clone(), job.clone());
+    publish_background_job_completion(state, &job).await;
+}
+
+async fn publish_background_job_completion(state: &AppState, job: &BackgroundJob) {
     state.publish(EventPayload::new(
         event_type::SESSION_BACKGROUND_TASK_COMPLETED,
         json!({
@@ -492,7 +544,7 @@ async fn finish_background_job(state: &AppState, background: &BackgroundWorkspac
         }),
     ));
     if let Err(error) =
-        enqueue_parent_background_task_completion_prompt(state, &job).await
+        enqueue_parent_background_task_completion_prompt(state, job).await
     {
         tracing::warn!(
             session_id = %job.session_id,
@@ -945,5 +997,27 @@ mod tests {
         assert!(output.contains("status: error"));
         assert!(output.contains("<background_task_error>"));
         assert!(output.contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_background_jobs_to_settle_before_clearing() {
+        let runtime = Arc::new(BackgroundWorkspaceRuntime::default());
+        runtime
+            .jobs
+            .write()
+            .await
+            .insert("job_test".to_string(), test_job(BackgroundJobStatus::Running, ""));
+        runtime.active_jobs.store(1, Ordering::Release);
+        let worker_runtime = runtime.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            worker_runtime.active_jobs.fetch_sub(1, Ordering::AcqRel);
+            worker_runtime.settled.notify_waiters();
+        });
+
+        runtime.cancel_and_clear().await;
+
+        assert_eq!(runtime.active_jobs.load(Ordering::Acquire), 0);
+        assert!(runtime.jobs.read().await.is_empty());
     }
 }

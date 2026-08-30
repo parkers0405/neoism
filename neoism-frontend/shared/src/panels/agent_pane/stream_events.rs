@@ -319,6 +319,7 @@ pub enum SessionEventUpdate {
     },
     ExecutionUpdated(Value),
     RuntimeUpdated(Value),
+    McpChanged,
 }
 
 pub fn classify_session_event(
@@ -835,6 +836,7 @@ pub fn classify_session_event(
             title: "Neoism".to_string(),
             body: session_error_message(properties),
         }],
+        event_type::MCP_TOOLS_CHANGED => vec![SessionEventUpdate::McpChanged],
         _ => Vec::new(),
     }
 }
@@ -1125,6 +1127,9 @@ pub fn matches_session(
     session_id: &str,
     child_session_ids: &HashSet<String>,
 ) -> bool {
+    if event.get("type").and_then(Value::as_str) == Some(event_type::MCP_TOOLS_CHANGED) {
+        return true;
+    }
     let Some(properties) = event.get("properties") else {
         return false;
     };
@@ -1949,5 +1954,22 @@ mod tests {
         });
 
         assert!(classify_session_event(event, "ses_root", &mut state).is_empty());
+    }
+
+    #[test]
+    fn mcp_change_is_workspace_global_and_classifies_as_refresh() {
+        let event = json!({
+            "type": "mcp.tools.changed",
+            "properties": { "directory": "/workspace", "generation": 4 }
+        });
+        assert!(matches_session(&event, "ses_root", &HashSet::new()));
+        assert_eq!(
+            classify_session_event(
+                event,
+                "ses_root",
+                &mut SessionEventUpdateState::default()
+            ),
+            vec![SessionEventUpdate::McpChanged]
+        );
     }
 }

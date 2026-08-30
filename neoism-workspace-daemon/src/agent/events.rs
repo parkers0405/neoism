@@ -114,6 +114,15 @@ pub(crate) fn forward_agent_server_event(
         .to_string();
 
     match event_type.as_str() {
+        "mcp.tools.changed" => {
+            let name = properties
+                .get("server")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let _ = tx.send(AgentServerMessage::McpChanged { name });
+            return;
+        }
         "message.part.delta" => {
             if properties.get("field").and_then(Value::as_str) == Some("text") {
                 if let Some(delta) = properties.get("delta").and_then(Value::as_str) {
@@ -705,6 +714,27 @@ mod tests {
 
         assert_eq!(usage.total, 73_087);
         assert_eq!(usage.cache_read, 70_064);
+    }
+
+    #[test]
+    fn mcp_generation_change_maps_to_typed_refresh() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "mcp.tools.changed",
+                "properties": {
+                    "directory": "/workspace",
+                    "generation": 4,
+                    "reason": "plugin_generation_reloaded"
+                }
+            }),
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentServerMessage::McpChanged { .. }
+        ));
     }
 
     #[test]

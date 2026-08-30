@@ -54,6 +54,16 @@ impl NeoismAgentPane {
         }
     }
 
+    pub fn refresh_mcp_if_visible(&mut self) {
+        let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) else {
+            return;
+        };
+        if !matches!(kind, NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions) {
+            return;
+        }
+        self.open_mcp_picker();
+    }
+
     pub fn open_mcp_actions(&mut self, value: &str) {
         let Ok(entry) = serde_json::from_str::<Value>(value) else {
             return;
@@ -677,6 +687,31 @@ mod mcp_tests {
         assert_eq!(row("broken").footer, "failed");
         assert_eq!(row("off").footer, "disabled");
         assert_eq!(row("disabled_oauth").footer, "needs auth");
+    }
+
+    #[test]
+    fn mcp_invalidation_refreshes_only_a_visible_mcp_surface() {
+        let mut pane = NeoismAgentPane::default();
+        pane.directory = Some("/tmp/project".to_string());
+        pane.refresh_mcp_if_visible();
+        assert!(pane.drain_pending_outbound().is_empty());
+
+        pane.picker = Some(NeoismAgentPicker::new(
+            NeoismAgentPickerKind::McpActions,
+            "webflow actions",
+            Vec::new(),
+            0,
+        ));
+        pane.refresh_mcp_if_visible();
+        assert_eq!(
+            pane.picker.as_ref().map(|picker| picker.kind),
+            Some(NeoismAgentPickerKind::Mcp)
+        );
+        assert!(matches!(
+            pane.drain_pending_outbound().as_slice(),
+            [OutboundAgentCommand::RefreshMcp { directory }]
+                if directory.as_deref() == Some("/tmp/project")
+        ));
     }
 
     #[test]

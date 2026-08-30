@@ -25,6 +25,7 @@ impl Application<'_> {
             // including stale capture in this same window. The normal press
             // path below can immediately arm a new Island drag if appropriate.
             for route in self.router.routes.values_mut() {
+                route.window.screen.mouse.chrome_gesture_owned = false;
                 if route.window.screen.cancel_island_drag()
                     | route.window.screen.cancel_buffer_tab_drag()
                 {
@@ -43,12 +44,11 @@ impl Application<'_> {
             if let Some(source_window) = source_window {
                 if let Some(source) = self.router.routes.get_mut(&source_window) {
                     source.window.screen.mouse.left_button_state = ElementState::Released;
-                    let committed = source.window.screen.handle_island_drag_release();
+                    source.window.screen.handle_island_drag_release();
+                    source.window.screen.mouse.chrome_gesture_owned = false;
                     source.window.set_cursor(CursorIcon::Default);
                     source.request_redraw();
-                    if committed {
-                        return;
-                    }
+                    return;
                 }
             }
             let buffer_source = self.router.routes.iter().find_map(|(id, route)| {
@@ -66,8 +66,10 @@ impl Application<'_> {
                     if let Some(source) = self.router.routes.get_mut(&source_window) {
                         source.window.screen.mouse.left_button_state = ElementState::Released;
                         source.window.screen.cancel_buffer_tab_drag();
+                        source.window.screen.mouse.chrome_gesture_owned = false;
                         source.window.set_cursor(CursorIcon::Default);
                         source.request_redraw();
+                        return;
                     }
                 }
             }
@@ -316,11 +318,13 @@ impl Application<'_> {
 
                     if handled_by_island {
                         // Island handled the click, don't process further
+                        route.window.screen.mouse.chrome_gesture_owned = true;
                         route.request_redraw();
                         return;
                     }
 
                     if route.window.screen.handle_top_bar_click() {
+                        route.window.screen.mouse.chrome_gesture_owned = true;
                         route.request_redraw();
                         return;
                     }
@@ -336,6 +340,7 @@ impl Application<'_> {
                     }
 
                     if route.window.screen.handle_buffer_tabs_click() {
+                        route.window.screen.mouse.chrome_gesture_owned = true;
                         route.request_redraw();
                         return;
                     }
@@ -459,11 +464,14 @@ impl Application<'_> {
                 // The Island owns the left-button gesture once a workspace
                 // tab is armed. Finalize it before any overlay/sidebar release
                 // handler can consume the event and leave the tab latched.
-                // A sub-threshold click still clears Island state and falls
-                // through to the normal click pipeline.
+                // Activation already happened on press. Even a sub-threshold
+                // click owns its release; falling through would deliver it to
+                // the newly active pane underneath the chrome.
                 if button == MouseButton::Left
-                    && route.window.screen.handle_island_drag_release()
+                    && route.window.screen.has_island_drag()
                 {
+                    route.window.screen.handle_island_drag_release();
+                    route.window.screen.mouse.chrome_gesture_owned = false;
                     route.window.set_cursor(CursorIcon::Default);
                     route.request_redraw();
                     return;
@@ -475,12 +483,21 @@ impl Application<'_> {
                 if button == MouseButton::Left
                     && route.window.screen.has_active_buffer_tab_drag()
                 {
-                    let committed = route.window.screen.handle_buffer_tabs_drag_release();
+                    route.window.screen.handle_buffer_tabs_drag_release();
+                    route.window.screen.mouse.chrome_gesture_owned = false;
                     route.window.set_cursor(CursorIcon::Default);
                     route.request_redraw();
-                    if committed {
-                        return;
-                    }
+                    return;
+                }
+
+                if button == MouseButton::Left
+                    && std::mem::take(
+                        &mut route.window.screen.mouse.chrome_gesture_owned,
+                    )
+                {
+                    route.window.set_cursor(CursorIcon::Default);
+                    route.request_redraw();
+                    return;
                 }
 
                 // 5D-drag: finish a Workspaces-modal drag. A drop on a

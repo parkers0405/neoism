@@ -172,8 +172,10 @@ pub fn render_timeline_with<P, D>(
     let anchor_range =
         visible_timeline_row_range(&layout.rows, scroll_top, scroll_top + viewport_h);
     if let Some(row) = layout.rows.get(anchor_range.start) {
-        let key = TimelineViewAnchorKey::for_source(pane.messages(), row.source_index);
-        pane.set_timeline_view_anchor(key, row.top - scroll_top);
+        if !pane.timeline_view_anchor_matches(row.source_index, pane.messages().len()) {
+            let key = TimelineViewAnchorKey::for_source(pane.messages(), row.source_index);
+            pane.set_timeline_view_anchor(key, row.top - scroll_top);
+        }
     } else {
         pane.set_timeline_view_anchor(None, 0.0);
     }

@@ -104,6 +104,10 @@ pub struct TimelineViewAnchorKey {
 }
 
 impl TimelineViewAnchorKey {
+    pub fn is_for_source(&self, source_index: usize, source_len: usize) -> bool {
+        self.source_index == source_index && self.source_len == source_len
+    }
+
     pub fn at_source(
         source_index: usize,
         source_len: usize,
@@ -376,6 +380,9 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     }
     fn timeline_view_anchor(&self) -> Option<(TimelineViewAnchorKey, f32)> {
         None
+    }
+    fn timeline_view_anchor_matches(&self, _source_index: usize, _source_len: usize) -> bool {
+        false
     }
     fn restore_timeline_view_anchor(&mut self, _content_y: f32, _screen_offset: f32) {}
     fn set_timeline_view_anchor(
@@ -714,6 +721,14 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
                 f32,
             )> {
                 <$pane>::timeline_view_anchor(self)
+            }
+
+            fn timeline_view_anchor_matches(
+                &self,
+                source_index: usize,
+                source_len: usize,
+            ) -> bool {
+                <$pane>::timeline_view_anchor_matches(self, source_index, source_len)
             }
 
             fn restore_timeline_view_anchor(&mut self, content_y: f32, screen_offset: f32) {

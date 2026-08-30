@@ -7,6 +7,7 @@ use pulldown_cmark::{Event, Options, Parser};
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthChar;
 
 use crate::editor::neodraw::{render_scene, Camera, Vec2};
 use crate::panels::agent_pane::selection_model::SelectableCaretStop;
@@ -897,26 +898,77 @@ fn measure_markdown_inline_width(
     parsed_markdown_inline_line(line)
         .iter()
         .map(|segment| {
-            let (text, bold) = match segment {
-                MarkdownInlineSegment::Text(text) => (text.as_str(), opts.bold),
-                MarkdownInlineSegment::Bold(text) => (text.as_str(), true),
-                MarkdownInlineSegment::Italic(text) => (text.as_str(), opts.bold),
-                MarkdownInlineSegment::BoldItalic(text) => (text.as_str(), true),
-                MarkdownInlineSegment::Strike(text) => (text.as_str(), opts.bold),
-                MarkdownInlineSegment::Code { text, .. } => (text.as_str(), true),
-                MarkdownInlineSegment::MarkdownLink { label, .. } => {
-                    (label.as_str(), opts.bold)
+            let (text, segment_opts) = match segment {
+                MarkdownInlineSegment::Text(text) => (text.as_str(), *opts),
+                MarkdownInlineSegment::Bold(text) => {
+                    let mut styled = *opts;
+                    styled.bold = true;
+                    (text.as_str(), styled)
                 }
-                MarkdownInlineSegment::PlainToken { text, style, .. } => (
-                    text.as_str(),
-                    style.is_some_and(|style| style.bold) || opts.bold,
-                ),
+                MarkdownInlineSegment::Italic(text) => {
+                    let mut styled = *opts;
+                    styled.italic = true;
+                    (text.as_str(), styled)
+                }
+                MarkdownInlineSegment::BoldItalic(text) => {
+                    let mut styled = *opts;
+                    styled.bold = true;
+                    styled.italic = true;
+                    (text.as_str(), styled)
+                }
+                MarkdownInlineSegment::Strike(text) => (text.as_str(), *opts),
+                MarkdownInlineSegment::Code { text, .. } => {
+                    let mut styled = *opts;
+                    styled.bold = true;
+                    (text.as_str(), styled)
+                }
+                MarkdownInlineSegment::MarkdownLink {
+                    label,
+                    bold,
+                    italic,
+                    ..
+                } => {
+                    let mut styled = *opts;
+                    styled.bold |= *bold;
+                    styled.italic |= *italic;
+                    (label.as_str(), styled)
+                }
+                MarkdownInlineSegment::PlainToken { text, style, .. } => {
+                    let mut styled = *opts;
+                    styled.bold |= style.is_some_and(|style| style.bold);
+                    (text.as_str(), styled)
+                }
             };
-            let mut segment_opts = *opts;
-            segment_opts.bold = bold;
-            measure_text_cached(sugarloaf, text, &segment_opts)
+            measure_markdown_inline_run(sugarloaf, text, &segment_opts)
         })
         .sum()
+}
+
+fn measure_markdown_inline_run(
+    sugarloaf: &mut Sugarloaf,
+    text: &str,
+    opts: &DrawOpts,
+) -> f32 {
+    let measured = measure_text_cached(sugarloaf, text, opts);
+    let columns = text
+        .chars()
+        .map(|ch| {
+            if ch == '\t' {
+                4
+            } else {
+                UnicodeWidthChar::width(ch).unwrap_or(1)
+            }
+        })
+        .sum::<usize>();
+    if columns == 0 {
+        return measured;
+    }
+    let cell = measure_text_cached(sugarloaf, "M", opts).max(opts.font_size * 0.5);
+    stable_markdown_inline_advance(measured, cell, columns)
+}
+
+fn stable_markdown_inline_advance(measured: f32, cell: f32, columns: usize) -> f32 {
+    measured.max(cell * columns as f32)
 }
 
 /// The visible text the renderer actually paints for an inline line: the
@@ -1008,10 +1060,10 @@ fn markdown_inline_caret_stops(
         }
         let measured = graphemes
             .iter()
-            .map(|grapheme| measure_text_cached(sugarloaf, grapheme, &segment_opts))
+            .map(|grapheme| measure_markdown_inline_run(sugarloaf, grapheme, &segment_opts))
             .collect::<Vec<_>>();
         let measured_sum = measured.iter().sum::<f32>();
-        let painted_width = measure_text_cached(sugarloaf, text, &segment_opts);
+        let painted_width = measure_markdown_inline_run(sugarloaf, text, &segment_opts);
         let correction = if measured_sum > f32::EPSILON {
             painted_width / measured_sum
         } else {
@@ -2906,7 +2958,7 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
         match segment {
             MarkdownInlineSegment::Text(text) => {
                 draw_text_clipped(sugarloaf, x, y, text, opts, occlusion_rects);
-                let w = measure_text_cached(sugarloaf, text, opts);
+                let w = measure_markdown_inline_run(sugarloaf, text, opts);
                 if !suppress_interactions {
                     if let Some(target) =
                         bridged_inline_whitespace_target(&segments, segment_index)
@@ -2939,13 +2991,13 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                     theme.fg
                 });
                 draw_text_clipped(sugarloaf, x, y, text, &bold, occlusion_rects);
-                x += measure_text_cached(sugarloaf, text, &bold);
+                x += measure_markdown_inline_run(sugarloaf, text, &bold);
             }
             MarkdownInlineSegment::Italic(text) => {
                 let mut italic_opts = *opts;
                 italic_opts.italic = true;
                 draw_text_clipped(sugarloaf, x, y, text, &italic_opts, occlusion_rects);
-                x += measure_text_cached(sugarloaf, text, &italic_opts);
+                x += measure_markdown_inline_run(sugarloaf, text, &italic_opts);
             }
             MarkdownInlineSegment::BoldItalic(text) => {
                 let mut emphasis_opts = *opts;
@@ -2957,13 +3009,13 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                     theme.fg
                 });
                 draw_text_clipped(sugarloaf, x, y, text, &emphasis_opts, occlusion_rects);
-                x += measure_text_cached(sugarloaf, text, &emphasis_opts);
+                x += measure_markdown_inline_run(sugarloaf, text, &emphasis_opts);
             }
             MarkdownInlineSegment::Strike(text) => {
                 let mut strike_opts = *opts;
                 strike_opts.color = theme.u8(theme.muted);
                 draw_text_clipped(sugarloaf, x, y, text, &strike_opts, occlusion_rects);
-                let w = measure_text_cached(sugarloaf, text, &strike_opts);
+                let w = measure_markdown_inline_run(sugarloaf, text, &strike_opts);
                 draw_rect_clipped(
                     sugarloaf,
                     [
@@ -2987,12 +3039,12 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                     theme.syn_string
                 }));
                 draw_text_clipped(sugarloaf, x, y, text, &code, occlusion_rects);
-                x += measure_text_cached(sugarloaf, text, &code);
+                x += measure_markdown_inline_run(sugarloaf, text, &code);
                 if !suppress_interactions {
                     let Some(target) = target.as_ref() else {
                         continue;
                     };
-                    let w = measure_text_cached(sugarloaf, text, &code);
+                    let w = measure_markdown_inline_run(sugarloaf, text, &code);
                     draw_hover_underline(
                         sugarloaf,
                         pane,
@@ -3023,7 +3075,7 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                     theme.cyan
                 }));
                 draw_text_clipped(sugarloaf, x, y, label, &link_opts, occlusion_rects);
-                let w = measure_text_cached(sugarloaf, label, &link_opts);
+                let w = measure_markdown_inline_run(sugarloaf, label, &link_opts);
                 if !suppress_interactions {
                     let Some(target) = target.as_ref() else {
                         x += w;
@@ -3054,10 +3106,10 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                     token_opts.color = theme.u8(theme.readable_accent(theme.blue));
                 } else if let Some(style) = style {
                     token_opts.color = theme.u8(plain_token_color(*style, theme));
-                    token_opts.bold = style.bold;
+                    token_opts.bold |= style.bold;
                 }
                 draw_text_clipped(sugarloaf, x, y, text, &token_opts, occlusion_rects);
-                let w = measure_text_cached(sugarloaf, text, &token_opts);
+                let w = measure_markdown_inline_run(sugarloaf, text, &token_opts);
                 if !suppress_interactions {
                     let Some(target) = target.as_ref() else {
                         x += w;

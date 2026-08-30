@@ -453,12 +453,13 @@ fn apply_subagent_runtime_snapshot(
     statuses: &HashMap<String, SessionStatusSnapshot>,
 ) {
     for entry in entries.iter_mut().skip(1) {
-        if let Some(status) = statuses
-            .get(&entry.id)
-            .and_then(|status| normalize_explicit_runtime_status(&status.kind))
-        {
-            entry.runtime_status = Some(status.to_string());
-        }
+        entry.runtime_status = Some(
+            statuses
+                .get(&entry.id)
+                .and_then(|status| normalize_explicit_runtime_status(&status.kind))
+                .unwrap_or("completed")
+                .to_string(),
+        );
     }
 }
 
@@ -587,16 +588,23 @@ fn session_explicit_runtime_status(
     statuses: &HashMap<String, SessionStatusSnapshot>,
 ) -> Option<String> {
     let id = session.get("id").and_then(Value::as_str);
-    id.and_then(|id| statuses.get(id))
+    if let Some(status) = id
+        .and_then(|id| statuses.get(id))
         .and_then(|status| normalize_explicit_runtime_status(&status.kind))
-        .or_else(|| {
-            session
-                .get("externalAgent")
-                .and_then(|external| external.get("status"))
-                .and_then(Value::as_str)
-                .or_else(|| session.get("status").and_then(Value::as_str))
-                .and_then(normalize_explicit_runtime_status)
-        })
+    {
+        return Some(status.to_string());
+    }
+
+    // Persisted session JSON is useful terminal history, never live authority.
+    // If the live status endpoint omits a child, stale "running" metadata must
+    // not resurrect it during tree hydration.
+    session
+        .get("externalAgent")
+        .and_then(|external| external.get("status"))
+        .and_then(Value::as_str)
+        .or_else(|| session.get("status").and_then(Value::as_str))
+        .and_then(normalize_explicit_runtime_status)
+        .filter(|status| matches!(*status, "completed" | "error"))
         .map(str::to_string)
 }
 
@@ -615,6 +623,37 @@ fn normalize_explicit_runtime_status(status: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod subagent_runtime_snapshot_tests {
     use super::*;
+
+    #[test]
+    fn persisted_running_status_is_not_live_authority() {
+        let session = serde_json::json!({
+            "id": "child-1",
+            "externalAgent": { "status": "running" }
+        });
+        assert_eq!(session_explicit_runtime_status(&session, &HashMap::new()), None);
+
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            "child-1".to_string(),
+            SessionStatusSnapshot {
+                kind: "busy".to_string(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            session_explicit_runtime_status(&session, &statuses).as_deref(),
+            Some("running")
+        );
+    }
+
+    #[test]
+    fn persisted_terminal_status_remains_historical_evidence() {
+        let session = serde_json::json!({ "id": "child-1", "status": "completed" });
+        assert_eq!(
+            session_explicit_runtime_status(&session, &HashMap::new()).as_deref(),
+            Some("completed")
+        );
+    }
 
     #[test]
     fn desktop_agent_api_source_contains_no_deleted_http_routes() {
@@ -710,7 +749,7 @@ mod subagent_runtime_snapshot_tests {
     }
 
     #[test]
-    fn listed_child_omitted_from_live_run_snapshot_stays_outstanding() {
+    fn listed_child_omitted_from_live_run_snapshot_becomes_historical() {
         let mut entries = vec![
             NeoismAgentSessionEntry::new("root", "main session", "return"),
             NeoismAgentSessionEntry::new("child", "child", "explore")
@@ -719,7 +758,7 @@ mod subagent_runtime_snapshot_tests {
 
         apply_subagent_runtime_snapshot(&mut entries, &HashMap::new());
 
-        assert_eq!(entries[1].runtime_status.as_deref(), Some("running"));
+        assert_eq!(entries[1].runtime_status.as_deref(), Some("completed"));
     }
 
     #[test]

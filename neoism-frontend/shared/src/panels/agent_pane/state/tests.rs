@@ -317,6 +317,40 @@ fn terminal_runtime_snapshot_settles_shared_task_footer_and_viewed_child() {
 }
 
 #[test]
+fn rejected_execution_snapshot_cannot_resurrect_terminal_branch() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 2,
+            finished: true,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        2,
+        [("child-1".to_string(), "completed".to_string(), Some(1))],
+    ));
+
+    assert!(!pane.apply_runtime_lifecycle_snapshot(
+        Some(ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 1,
+            finished: false,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        3,
+        [("child-1".to_string(), "outstanding".to_string(), Some(1))],
+    ));
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(!pane.has_status_activity());
+    assert!(pane.side_panel.subagents().iter().all(|entry| entry.id != "child-1"));
+}
+
+#[test]
 fn authoritative_runtime_snapshot_deletes_absent_branch_state() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".into());
@@ -1513,18 +1547,43 @@ fn subagent_rehydrate_does_not_complete_task_without_explicit_status() {
 }
 
 #[test]
-fn initial_session_skeleton_animates_until_sessions_load() {
+fn session_skeleton_animates_only_during_a_real_request() {
     let mut pane = NeoismAgentPane::default();
 
+    assert!(!pane.side_panel.is_animating());
+    pane.side_panel.mark_refresh_kicked();
     assert!(pane.side_panel.is_animating());
     pane.side_panel.set_sessions_error("temporarily unavailable");
     assert!(matches!(
         pane.side_panel.session_catalog_state(),
         super::side_panel::SessionCatalogState::Error(_)
     ));
-    assert!(pane.side_panel.is_animating());
+    assert!(!pane.side_panel.is_animating());
     pane.side_panel.set_sessions(Vec::new());
     assert!(!pane.side_panel.is_animating());
+}
+
+#[test]
+fn timeline_interaction_settle_owns_the_final_hit_geometry_frame() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages.push(NeoismAgentMessage::assistant("settled"));
+    pane.timeline_last_scroll_at = Some(Instant::now());
+
+    assert_eq!(
+        pane.animation_reason(),
+        Some("timeline_interaction_settle")
+    );
+}
+
+#[test]
+fn invalidating_session_catalog_rejects_an_in_flight_generation() {
+    let mut panel = NeoismAgentSidePanel::default();
+    let generation = panel.next_session_request_generation();
+    assert!(panel.session_request_is_current(generation));
+
+    panel.invalidate_session_catalog();
+
+    assert!(!panel.session_request_is_current(generation));
 }
 
 #[test]

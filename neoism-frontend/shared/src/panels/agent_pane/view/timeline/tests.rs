@@ -460,6 +460,20 @@ fn anchor_distinguishes_duplicate_optimistic_empty_ids() {
 }
 
 #[test]
+fn anchor_source_match_requires_the_same_transcript_shape() {
+    let messages = vec![text_message(
+        "anchor",
+        NeoismAgentMessageKind::Assistant,
+        "held",
+    )];
+    let key = TimelineViewAnchorKey::for_source(&messages, 0).expect("anchor key");
+
+    assert!(key.is_for_source(0, 1));
+    assert!(!key.is_for_source(0, 2));
+    assert!(!key.is_for_source(1, 1));
+}
+
+#[test]
 fn optimistic_anchor_survives_durable_id_transition() {
     let before = vec![
         text_message("", NeoismAgentMessageKind::User, "optimistic"),

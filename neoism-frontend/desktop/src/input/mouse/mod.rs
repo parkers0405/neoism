@@ -41,6 +41,9 @@ pub struct Mouse {
     /// classifier needs the unclamped logical X to project past the
     /// source window's inner edge and find the destination window.
     pub raw_x: f64,
+    /// A chrome control consumed the current left-button press. Its release
+    /// must not be delivered to the content surface activated by that press.
+    pub chrome_gesture_owned: bool,
 }
 
 impl Default for Mouse {
@@ -53,6 +56,7 @@ impl Default for Mouse {
             left_button_state: ElementState::Released,
             middle_button_state: ElementState::Released,
             right_button_state: ElementState::Released,
+            chrome_gesture_owned: false,
             click_state: ClickState::None,
             square_side: Side::Left,
             inside_text_area: Default::default(),

@@ -485,6 +485,12 @@ fn semantic_lines_join_paragraphs_but_preserve_markdown_blocks() {
 }
 
 #[test]
+fn styled_inline_run_cannot_advance_less_than_its_monospace_cells() {
+    assert_eq!(super::stable_markdown_inline_advance(50.0, 12.0, 6), 72.0);
+    assert_eq!(super::stable_markdown_inline_advance(80.0, 12.0, 6), 80.0);
+}
+
+#[test]
 fn list_parser_preserves_kind_marker_depth_and_task_state() {
     assert_eq!(
         markdown_list_item("- item"),

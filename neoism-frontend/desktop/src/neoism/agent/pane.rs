@@ -597,6 +597,7 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         result: Result<Vec<NeoismAgentPickerOption>, String>,
     },
     SidePanelSessionsRefreshed {
+        generation: u64,
         requested_cursor: Option<String>,
         result: Result<(Vec<NeoismAgentSessionEntry>, Option<String>), String>,
     },

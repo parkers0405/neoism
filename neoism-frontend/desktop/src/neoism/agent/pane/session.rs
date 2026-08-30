@@ -63,6 +63,9 @@ impl NeoismAgentPane {
         if self.timeline_is_inertial() {
             return Some("timeline_inertia");
         }
+        if self.timeline_interaction_settle_active() {
+            return Some("timeline_interaction_settle");
+        }
         // Provider time, status dots, and streamed deltas advance even across
         // transient run-idle edges. Keep draining and painting until the
         // durable execution/branch activity settles.
@@ -181,11 +184,12 @@ impl NeoismAgentPane {
     }
 
     fn request_side_panel_session_page(&mut self, cursor: Option<String>) {
+        let generation = self.side_panel.next_session_request_generation();
         let server = self.server.clone();
         let current = self.session_id.clone();
         let directory = self.directory.clone();
         let tx = self.background_tx.clone();
-        std::thread::Builder::new()
+        if std::thread::Builder::new()
             .name("neoism-agent-sessions".into())
             .spawn(move || {
                 let entries = crate::neoism::agent::api::fetch_session_entries_page(
@@ -195,15 +199,26 @@ impl NeoismAgentPane {
                     cursor.as_deref(),
                 );
                 let _ = tx.send(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
+                    generation,
                     requested_cursor: cursor,
                     result: entries,
                 });
             })
-            .ok();
+            .is_err()
+        {
+            if self.side_panel.session_request_is_current(generation) {
+                self.side_panel
+                    .settle_session_page_error("couldn't start sessions request");
+            }
+        }
     }
 
     pub fn scroll_side_panel_pixels(&mut self, delta_pixels: f32, rows: usize) {
         self.side_panel.scroll_pixels(delta_pixels, rows);
+        self.maybe_request_side_panel_session_page();
+    }
+
+    pub fn maybe_request_side_panel_session_page(&mut self) {
         if let Some(cursor) = self.side_panel.begin_session_page_near_end() {
             self.request_side_panel_session_page(Some(cursor));
         }
@@ -739,6 +754,36 @@ impl NeoismAgentPane {
         self.execution_activity.as_ref().is_some_and(|current| {
             current.execution_id == execution_id && current.revision == revision
         })
+    }
+
+    pub(crate) fn apply_runtime_lifecycle_snapshot<I>(
+        &mut self,
+        execution: Option<neoism_ui::panels::agent_pane::state::ExecutionActivityState>,
+        root_session_id: String,
+        family_revision: u64,
+        branches: I,
+    ) -> bool
+    where
+        I: IntoIterator<Item = (String, String, Option<u64>)>,
+    {
+        // Execution and branches are one server snapshot. Reject both when
+        // its execution revision is stale so branches cannot travel alone.
+        let (execution_current, execution_changed) = execution
+            .map(|activity| {
+                let execution_id = activity.execution_id.clone();
+                let revision = activity.revision;
+                let changed = self.apply_execution_activity(activity);
+                (
+                    changed || self.execution_activity_matches(&execution_id, revision),
+                    changed,
+                )
+            })
+            .unwrap_or((true, false));
+        if !execution_current {
+            return false;
+        }
+        self.apply_branch_lifecycle_snapshot(root_session_id, family_revision, branches)
+            || execution_changed
     }
 
     pub(crate) fn apply_branch_lifecycle_snapshot(

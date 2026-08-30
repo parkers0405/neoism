@@ -456,7 +456,7 @@ async fn stop(
             crate::session_queue::clear_session_prompt_queue(state, child.id.as_str()).await;
         cleared_prompts += cleared;
         if cleared > 0 {
-            crate::execution_activity::finish_subtask_for_child(
+            let _ = crate::execution_activity::finish_subtask_for_child(
                 state,
                 child.id.as_str(),
                 "cancelled",

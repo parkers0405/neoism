@@ -761,7 +761,6 @@ impl NeoismAgentPane {
         }
         self.runtime_snapshot_revision = revision;
         let branches = branches.into_iter().collect::<Vec<_>>();
-        let viewed_session_id = self.session_id.clone();
         let mut viewed_terminal = false;
         let branch_ids = branches
             .iter()
@@ -795,12 +794,15 @@ impl NeoismAgentPane {
             } else {
                 self.active_subagent_ids.remove(&session_id);
                 self.active_subagent_started_at.remove(&session_id);
-                viewed_terminal |= viewed_session_id.as_deref() == Some(session_id.as_str());
+                viewed_terminal |= self.reconcile_viewed_subagent_runtime(&session_id, status);
             }
         }
         if viewed_terminal {
             self.side_panel.clear_status_display_hold();
         }
+        // Rewrite the parent task card while terminal branch evidence still
+        // exists; recovery pruning removes that evidence immediately.
+        self.reconcile_task_message_statuses();
         self.side_panel.prune_expired_completed_subagents();
         self.sync_subagent_waiting_clock();
         true

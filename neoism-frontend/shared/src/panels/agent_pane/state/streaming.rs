@@ -350,12 +350,19 @@ impl NeoismAgentPane {
             } else {
                 self.active_subagent_ids.remove(&session_id);
                 self.active_subagent_started_at.remove(&session_id);
-                viewed_terminal |= viewed_session_id.as_deref() == Some(session_id.as_str());
+                if viewed_session_id.as_deref() == Some(session_id.as_str()) {
+                    let had_activity = self.is_streaming();
+                    self.note_streaming(NeoismAgentStreamingState::Idle, None);
+                    viewed_terminal |= had_activity;
+                }
             }
         }
         if viewed_terminal {
             self.side_panel.clear_status_display_hold();
         }
+        // Reconcile parent task markers before terminal recovery rows are
+        // pruned from the side-panel lifecycle map.
+        self.reconcile_task_message_statuses();
         self.side_panel.prune_expired_completed_subagents();
         self.sync_subagent_waiting_clock();
         true

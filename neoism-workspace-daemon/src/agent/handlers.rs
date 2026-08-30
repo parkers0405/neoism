@@ -447,7 +447,7 @@ pub(crate) async fn handle_session_history(
 
 pub(crate) async fn handle_permission_reply(
     inner: Arc<AgentInner>,
-    _session_id: String,
+    session_id: String,
     request_id: String,
     decision: PermissionDecision,
 ) {
@@ -456,15 +456,28 @@ pub(crate) async fn handle_permission_reply(
         PermissionDecision::Always => "always",
         PermissionDecision::No => "reject",
     };
-    let body = json!({ "response": response });
-    if let Err(err) = http_post_json(
+    let body = json!({ "reply": response });
+    match http_post_json(
         &inner,
         &format!("/v2/interactions/permissions/{request_id}/reply"),
         &body,
     )
     .await
     {
-        emit_error(&inner.tx, err);
+        Ok(_) => {
+            let _ = inner.tx.send(AgentServerMessage::PermissionRemoved {
+                session_id,
+                request_id,
+            });
+        }
+        Err(err) => {
+            let error = err.to_string();
+            let _ = inner.tx.send(AgentServerMessage::PermissionReplyFailed {
+                request_id,
+                error: error.clone(),
+            });
+            emit_error(&inner.tx, error);
+        }
     }
 }
 
@@ -1252,6 +1265,23 @@ pub(crate) async fn push_pending_questions(inner: Arc<AgentInner>, session_id: S
         session_id,
         requests,
     });
+}
+
+pub(crate) async fn push_pending_permissions(inner: Arc<AgentInner>, session_id: String) {
+    let path = format!(
+        "/v2/interactions/permissions?sessionId={}",
+        percent_encode(&session_id)
+    );
+    let Ok(value) = http_get_json(&inner, &path).await else {
+        return;
+    };
+    for request in value.as_array().into_iter().flatten() {
+        forward_agent_server_event(
+            &inner.tx,
+            &session_id,
+            json!({ "type": "permission.asked", "properties": request }),
+        );
+    }
 }
 
 pub(crate) async fn handle_slash_command(

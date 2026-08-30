@@ -1,6 +1,26 @@
 use super::*;
 
 impl Screen<'_> {
+    pub fn cancel_buffer_tab_drag(&mut self) -> bool {
+        let Some(source) = self.renderer.drag_source.take() else {
+            return false;
+        };
+        match source {
+            crate::host::StripRef::Workspace => {
+                self.renderer.buffer_tabs.cancel_drag();
+            }
+            crate::host::StripRef::Pane(route) => {
+                if let Some(tabs) = self.renderer.pane_tabs.get_mut(&route) {
+                    tabs.cancel_drag();
+                }
+            }
+        }
+        self.renderer.drag_drop_preview = None;
+        self.renderer.pane_split_drop_preview = None;
+        self.mark_dirty();
+        true
+    }
+
     pub fn handle_buffer_tabs_drag_move(&mut self) -> bool {
         let Some(source) = self.renderer.drag_source else {
             self.renderer.drag_drop_preview = None;

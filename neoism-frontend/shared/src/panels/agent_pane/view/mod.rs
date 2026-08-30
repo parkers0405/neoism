@@ -70,7 +70,6 @@ pub trait AgentPaneView:
     + picker::AgentPickerPane
     + side_panel::AgentSidePanelPane
 {
-    fn begin_visible_animation_frame(&mut self) {}
     fn tick_timeline_scroll(&mut self) -> bool;
     fn picker_options_len(&self) -> Option<usize>;
 
@@ -109,10 +108,6 @@ pub trait AgentPaneView:
 }
 
 impl AgentPaneView for NeoismAgentPane {
-    fn begin_visible_animation_frame(&mut self) {
-        NeoismAgentPane::begin_visible_animation_frame(self);
-    }
-
     fn tick_timeline_scroll(&mut self) -> bool {
         NeoismAgentPane::tick_timeline_scroll(self)
     }
@@ -196,7 +191,6 @@ pub fn render_agent_pane_with<P, D, I>(
     }
 
     let chrome_scale = chrome_scale.clamp(0.5, 3.0);
-    pane.begin_visible_animation_frame();
     // Advance kinetic scroll one frame before laying anything out. This keeps
     // the inertial motion and the rest of the render in lockstep — no
     // jitter between tick and paint.

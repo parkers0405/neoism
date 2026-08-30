@@ -925,6 +925,7 @@ pub struct NeoismAgentPane {
     markdown_blocks_cache:
         RefCell<HashMap<MarkdownBlocksKey, (CachedMarkdownBlocks, u64)>>,
     markdown_blocks_tick: std::cell::Cell<u64>,
+    markdown_blocks_source_bytes: std::cell::Cell<usize>,
     pub(super) timeline_layout_epoch: u64,
     pub(super) timeline_layout_cache: RefCell<Option<TimelineLayoutCache>>,
     pub(super) timeline_dirty_message_ids: BTreeSet<String>,
@@ -988,7 +989,6 @@ pub struct NeoismAgentPane {
     /// fallback author for user messages with no explicit `author`, so
     /// the local user's own messages render their own presence orb.
     local_presence_name: Option<String>,
-    visible_user_orb: bool,
 }
 
 #[derive(Default)]
@@ -1155,6 +1155,7 @@ impl Default for NeoismAgentPane {
             timeline_measure_cache: RefCell::new(HashMap::new()),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: std::cell::Cell::new(0),
+            markdown_blocks_source_bytes: std::cell::Cell::new(0),
             timeline_layout_epoch: 0,
             timeline_layout_cache: RefCell::new(None),
             timeline_dirty_message_ids: BTreeSet::new(),
@@ -1193,7 +1194,6 @@ impl Default for NeoismAgentPane {
             side_panel: NeoismAgentSidePanel::default(),
             perf_frame: AgentPanePerfFrame::default(),
             local_presence_name: None,
-            visible_user_orb: false,
         }
     }
 }

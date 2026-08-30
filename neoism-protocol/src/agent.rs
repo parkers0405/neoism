@@ -569,6 +569,16 @@ pub enum AgentServerMessage {
         #[serde(default)]
         source_agent: Option<String>,
     },
+    /// A permission was answered (locally or from another client).
+    PermissionRemoved {
+        session_id: String,
+        request_id: String,
+    },
+    /// A permission reply POST failed. The picker becomes interactive again.
+    PermissionReplyFailed {
+        request_id: String,
+        error: String,
+    },
     /// Result of a finished tool invocation. Emitted regardless of
     /// whether the tool needed permission gating.
     ToolUseResult {

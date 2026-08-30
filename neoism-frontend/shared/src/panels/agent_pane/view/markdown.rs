@@ -14,7 +14,7 @@ use crate::panels::agent_pane::state::NeoismAgentPane;
 
 use super::code_block::{
     diff_line_kind, digit_count, render_code_line_background, render_code_line_text,
-    syntax_lang, warm_code_lines_render_cache,
+    syntax_lang,
 };
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped,
@@ -1041,17 +1041,8 @@ pub fn layout_assistant_markdown_cached<P: AgentMarkdownPane>(
     super::derivations::bump_markdown_layout();
     let blocks =
         std::rc::Rc::new(layout_assistant_markdown(sugarloaf, text, width, theme, s));
-    warm_markdown_code_blocks(blocks.as_slice());
     pane.store_markdown_blocks_for(text, width, s, blocks.clone());
     blocks
-}
-
-fn warm_markdown_code_blocks(blocks: &[AssistantMarkdownBlock]) {
-    for block in blocks {
-        if let AssistantMarkdownBlock::Code { lang, lines, .. } = block {
-            warm_code_lines_render_cache(lines.as_slice(), lang);
-        }
-    }
 }
 
 pub fn layout_assistant_markdown(

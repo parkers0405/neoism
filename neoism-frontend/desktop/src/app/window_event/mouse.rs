@@ -25,7 +25,9 @@ impl Application<'_> {
             // including stale capture in this same window. The normal press
             // path below can immediately arm a new Island drag if appropriate.
             for route in self.router.routes.values_mut() {
-                if route.window.screen.cancel_island_drag() {
+                if route.window.screen.cancel_island_drag()
+                    | route.window.screen.cancel_buffer_tab_drag()
+                {
                     route.window.set_cursor(CursorIcon::Default);
                     route.request_redraw();
                 }
@@ -49,6 +51,26 @@ impl Application<'_> {
                     }
                 }
             }
+            let buffer_source = self.router.routes.iter().find_map(|(id, route)| {
+                route
+                    .window
+                    .screen
+                    .has_active_buffer_tab_drag()
+                    .then_some(*id)
+            });
+            if let Some(source_window) = buffer_source {
+                if self.router.try_cross_window_tab_drop(source_window) {
+                    return;
+                }
+                if source_window != window_id {
+                    if let Some(source) = self.router.routes.get_mut(&source_window) {
+                        source.window.screen.mouse.left_button_state = ElementState::Released;
+                        source.window.screen.cancel_buffer_tab_drag();
+                        source.window.set_cursor(CursorIcon::Default);
+                        source.request_redraw();
+                    }
+                }
+            }
         }
 
         // Gathered before borrowing the route so the buffer-tab
@@ -61,7 +83,7 @@ impl Application<'_> {
                 Vec::new()
             };
 
-        let mut route = match self.router.routes.get_mut(&window_id) {
+        let route = match self.router.routes.get_mut(&window_id) {
             Some(window) => window,
             None => return,
         };
@@ -447,6 +469,20 @@ impl Application<'_> {
                     return;
                 }
 
+                // Lower buffer tabs own their armed gesture too. Clear or
+                // commit it before overlays can consume mouse-up and leave the
+                // tab following future cursor motion.
+                if button == MouseButton::Left
+                    && route.window.screen.has_active_buffer_tab_drag()
+                {
+                    let committed = route.window.screen.handle_buffer_tabs_drag_release();
+                    route.window.set_cursor(CursorIcon::Default);
+                    route.request_redraw();
+                    if committed {
+                        return;
+                    }
+                }
+
                 // 5D-drag: finish a Workspaces-modal drag. A drop on a
                 // host header emits MoveWorkspaceToHost (5D-wire then
                 // dispatches the real promote/demote); a plain click
@@ -570,33 +606,6 @@ impl Application<'_> {
                     return;
                 }
 
-                // Cross-window tab drop (C5 / R4): if a buffer-tabs
-                // drag is in progress, give the router a chance to
-                // route the release into a different OS window's
-                // `Screen` before the in-window release pipeline runs.
-                // The router call needs exclusive `self.router` access
-                // (to two routes at once), so we release the current
-                // `route` borrow and re-acquire it on fall-through.
-                if button == MouseButton::Left
-                    && route.window.screen.has_active_buffer_tab_drag()
-                {
-                    let _ = route; // end the borrow before re-borrowing router
-                    if self.router.try_cross_window_tab_drop(window_id) {
-                        return;
-                    }
-                    let Some(reacquired) = self.router.routes.get_mut(&window_id) else {
-                        return;
-                    };
-                    route = reacquired;
-                }
-
-                if button == MouseButton::Left
-                    && route.window.screen.handle_buffer_tabs_drag_release()
-                {
-                    route.request_redraw();
-                    return;
-                }
-
                 if button == MouseButton::Left
                     && route.window.screen.handle_minimap_release()
                 {
@@ -699,10 +708,13 @@ impl Application<'_> {
         // subsystem. Never let a workspace tab continue following motion
         // after the authoritative button state is already up.
         if route.window.screen.mouse.left_button_state != ElementState::Pressed
-            && route.window.screen.cancel_island_drag()
         {
-            route.window.set_cursor(CursorIcon::Default);
-            route.request_redraw();
+            if route.window.screen.cancel_island_drag()
+                | route.window.screen.cancel_buffer_tab_drag()
+            {
+                route.window.set_cursor(CursorIcon::Default);
+                route.request_redraw();
+            }
         }
 
         {

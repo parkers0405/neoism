@@ -4,6 +4,29 @@ use crate::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry;
 use crate::panels::agent_pane::state::side_panel::STATUS_LABEL_GRACE;
 
 #[test]
+fn markdown_cache_bounds_streaming_snapshot_volume() {
+    let pane = NeoismAgentPane::default();
+    let snapshot_size = 1024 * 1024;
+    for text_hash in 0..40 {
+        pane.store_markdown_blocks(
+            MarkdownBlocksKey {
+                text_hash,
+                text_len: snapshot_size,
+                width_bucket: 800,
+                scale_bucket: 100,
+            },
+            std::rc::Rc::new(Vec::new()),
+        );
+    }
+
+    assert!(
+        pane.markdown_blocks_source_bytes.get()
+            <= super::caches::MAX_MARKDOWN_SOURCE_BYTES
+    );
+    assert!(pane.markdown_blocks_cache.borrow().len() <= 32);
+}
+
+#[test]
 fn runtime_branch_status_policy_maps_daemon_statuses() {
     assert_eq!(
         branch_status_from_runtime("completed"),

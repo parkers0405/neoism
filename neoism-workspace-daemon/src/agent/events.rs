@@ -340,15 +340,17 @@ pub(crate) fn forward_agent_server_event(
             }
             // Malformed payload — fall through to the raw envelope.
         }
-        "permission.updated" | "permission.created" => {
+        "permission.asked" | "permission.updated" | "permission.created" => {
             let request_id = properties
                 .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
             let tool = properties
-                .get("tool")
+                .get("metadata")
+                .and_then(|metadata| metadata.get("tool"))
                 .and_then(Value::as_str)
+                .or_else(|| properties.get("permission").and_then(Value::as_str))
                 .unwrap_or("tool")
                 .to_string();
             let title = properties
@@ -367,7 +369,12 @@ pub(crate) fn forward_agent_server_event(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let args = properties.get("args").cloned().unwrap_or(Value::Null);
+            let args = properties
+                .get("metadata")
+                .and_then(|metadata| metadata.get("input"))
+                .or_else(|| properties.get("args"))
+                .cloned()
+                .unwrap_or(Value::Null);
             let source_agent = properties
                 .get("sourceAgent")
                 .or_else(|| properties.get("agent"))
@@ -383,6 +390,22 @@ pub(crate) fn forward_agent_server_event(
                 source_agent,
             });
             return;
+        }
+        "permission.replied" => {
+            let request_id = properties
+                .get("requestID")
+                .or_else(|| properties.get("requestId"))
+                .or_else(|| properties.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !request_id.is_empty() {
+                let _ = tx.send(AgentServerMessage::PermissionRemoved {
+                    session_id: source_session,
+                    request_id,
+                });
+                return;
+            }
         }
         "tool.completed" | "tool.updated" => {
             let tool_use_id = properties

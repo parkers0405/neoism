@@ -71,7 +71,8 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 // indicator instead of looking idle.
                 push_session_running_state(inner.clone(), session_id.clone()).await;
                 push_runtime_snapshot(inner.clone(), session_id.clone()).await;
-                push_pending_questions(inner, session_id).await;
+                push_pending_questions(inner.clone(), session_id.clone()).await;
+                push_pending_permissions(inner, session_id).await;
             });
         }
         AgentClientMessage::StopStream { session_id } => {

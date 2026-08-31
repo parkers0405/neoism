@@ -1,0 +1,29 @@
+{
+  "name": "@neoism/sdk",
+  "version": "0.7.55",
+  "description": "Official TypeScript SDK for the Neoism Agent API",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/parkers0405/neoism.git",
+    "directory": "neoism-agent/sdk/typescript/packages/sdk"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@neoism/sdk-core": "0.7.55",
+    "@neoism/sdk-http": "0.7.55",
+    "@neoism/sdk-plugin-subagents": "0.7.55"
+  }
+}

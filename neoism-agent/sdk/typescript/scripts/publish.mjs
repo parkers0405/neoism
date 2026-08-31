@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Publish the @neoism/sdk-* workspace to npm, version-locked to the server.
+// Publish the @neoism TypeScript packages to npm, version-locked to the server.
 //
 //   node scripts/publish.mjs [--version X.Y.Z] [--dry-run]
 //
@@ -18,7 +18,7 @@ const repoRoot = resolve(workspace, "../../..");
 
 // Dependency order: leaves first so a partially completed run never publishes
 // a package whose internal dependencies are missing from the registry.
-const PACKAGES = ["core", "http", "plugin-subagents", "plugin", "node", "all"];
+const PACKAGES = ["core", "http", "plugin-subagents", "plugin", "node", "all", "sdk"];
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
@@ -30,7 +30,7 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version ?? "")) {
   process.exit(2);
 }
 
-console.log(`publishing @neoism/sdk-* at ${version}${dryRun ? " (dry run)" : ""}`);
+console.log(`publishing @neoism packages at ${version}${dryRun ? " (dry run)" : ""}`);
 
 const names = new Set();
 for (const pkg of PACKAGES) {

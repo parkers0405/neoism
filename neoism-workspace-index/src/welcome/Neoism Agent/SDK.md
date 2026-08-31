@@ -1,21 +1,26 @@
 # SDK
 
-The `@neoism/sdk-*` packages are typed TypeScript clients for the Neoism Agent API. They are generated from the same OpenAPI contract the server serves, version-locked to the server release, and used by Neoism's own plugin tooling — the types cannot drift from the running server.
+`@neoism/sdk` is the typed TypeScript client for the Neoism Agent API. It is generated from the same OpenAPI contract the server serves, version-locked to the server release, and used by Neoism's own plugin tooling - the types cannot drift from the running server.
 
 ## Packages
 
 | Package | Contents |
 |---|---|
+| `@neoism/sdk` | The recommended package: typed client, HTTP transport, events, and supported plugin clients. |
 | `@neoism/sdk-core` | The generated contract (every operation and schema), a typed client façade, and the plugin-extension model. |
 | `@neoism/sdk-http` | Fetch transport with SSE streaming, `Last-Event-ID` resume, sequence dedupe, and bounded reconnect backoff. |
 | `@neoism/sdk-node` | Node re-exports of core + http. |
 | `@neoism/plugin` | The serve-plugin author API (`definePlugin` / `runPlugin`) — see [[Plugins]]. |
-| `@neoism/sdk-all` | Everything above in one dependency. |
+| `@neoism/sdk-all` | Legacy bundle retained for compatibility; prefer `@neoism/sdk`. |
 
 ## Use it
 
+```sh
+npm install @neoism/sdk
+```
+
 ```ts
-import { createHttpClient } from "@neoism/sdk-http";
+import { createHttpClient } from "@neoism/sdk";
 
 const client = createHttpClient({
   baseUrl: "http://127.0.0.1:4096",
@@ -35,7 +40,7 @@ await client.operations.request("v2.sessions.prompt", {
 The event stream is a discriminated union — `switch` on `type` and the payload narrows:
 
 ```ts
-for await (const event of client.events({ sessionId })) {
+for await (const event of client.events.subscribe({ sessionId })) {
   switch (event.type) {
     case "message.part.delta":
       process.stdout.write(event.data.delta);

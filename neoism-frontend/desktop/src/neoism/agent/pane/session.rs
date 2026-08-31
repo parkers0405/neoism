@@ -399,11 +399,8 @@ impl NeoismAgentPane {
         session_id: &str,
         statuses: &HashMap<String, super::super::api::SessionStatusSnapshot>,
     ) {
-        // Background shell jobs are not part of the runtime-status response.
-        // Do not resurrect an uncollected historical tool record as live work
-        // when reopening a session.
-        self.background_tasks_started_at = None;
-        self.background_task_details_expanded = false;
+        // Background jobs are owned by the separately versioned family
+        // runtime snapshot. A failed runtime refresh must not erase warm state.
         let active_status = statuses
             .get(session_id)
             .filter(|status| matches!(status.kind.as_str(), "busy" | "retry"));
@@ -604,10 +601,36 @@ impl NeoismAgentPane {
     }
 
     pub fn running_background_task_count(&self) -> usize {
-        // Derive from the authoritative transcript. Completion sentinels may
-        // arrive through a history merge that bypasses the cached counter's
-        // event edge; the footer must still settle immediately.
-        running_background_task_count(&self.messages)
+        self.running_background_task_count
+    }
+
+    pub(crate) fn apply_running_background_tasks(
+        &mut self,
+        epoch: &str,
+        revision: u64,
+        tasks: &[(String, u64)],
+    ) -> bool {
+        if self.background_jobs_epoch.as_deref() == Some(epoch)
+            && revision <= self.background_jobs_revision
+        {
+            return false;
+        }
+        let count = tasks.len();
+        let started_at = tasks
+            .iter()
+            .map(|(_, started_at)| *started_at)
+            .min()
+            .map(instant_from_epoch_millis);
+        let changed = self.running_background_task_count != count
+            || self.background_tasks_started_at != started_at;
+        self.running_background_task_count = count;
+        self.background_tasks_started_at = started_at;
+        self.background_jobs_epoch = Some(epoch.to_string());
+        self.background_jobs_revision = revision;
+        if count == 0 {
+            self.background_task_details_expanded = false;
+        }
+        changed
     }
 
     pub(crate) fn ensure_background_task_activity_clock(&mut self) {

@@ -474,6 +474,14 @@ pub struct SubtaskLifecycleSnapshot {
     pub started_at: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundJobRuntimeSnapshot {
+    pub job_id: String,
+    pub session_id: String,
+    pub started_at: u64,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRuntimeSnapshot {
@@ -487,6 +495,15 @@ pub struct SessionRuntimeSnapshot {
     pub branches: Vec<SubtaskLifecycleSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionActivitySnapshot>,
+    /// `None` means this event did not inspect process-local jobs. HTTP
+    /// reconnect snapshots publish `Some`, including an authoritative empty
+    /// list, so clients never infer liveness from persisted tool history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_background_tasks: Option<Vec<BackgroundJobRuntimeSnapshot>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_jobs_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_jobs_revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -231,6 +231,16 @@ impl NeoismAgentPane {
     }
 
     pub fn upsert_part_message(&mut self, message: NeoismAgentMessage) {
+        let refresh_background = message.tool == "background_task"
+            || message.tool == "background_task_result"
+            || is_background_completion_card(&message);
+        self.upsert_part_message_inner(message);
+        if refresh_background {
+            self.refresh_background_task_activity_clock();
+        }
+    }
+
+    fn upsert_part_message_inner(&mut self, message: NeoismAgentMessage) {
         if matches!(
             message.kind,
             NeoismAgentMessageKind::Reasoning

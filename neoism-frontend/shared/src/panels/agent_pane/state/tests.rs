@@ -879,8 +879,16 @@ fn dequeued_prompt_consumes_preview_and_appends_once() {
     pane.queued_prompt_count = 1;
     pane.queued_prompt_preview = Some("queued turn".to_string());
 
-    pane.note_dequeued_prompt("queued turn".to_string());
-    pane.note_dequeued_prompt("queued turn".to_string());
+    pane.note_dequeued_prompt(
+        "queued turn".to_string(),
+        Some("msg-queued-1".to_string()),
+        Some("Parker".to_string()),
+    );
+    pane.note_dequeued_prompt(
+        "queued turn".to_string(),
+        Some("msg-queued-1".to_string()),
+        Some("Parker".to_string()),
+    );
 
     assert_eq!(pane.queued_prompt_count, 0);
     assert_eq!(pane.queued_prompt_preview, None);
@@ -892,6 +900,37 @@ fn dequeued_prompt_consumes_preview_and_appends_once() {
         1
     );
     assert_eq!(pane.messages.last().unwrap().text, "queued turn");
+    assert_eq!(pane.messages.last().unwrap().id, "msg-queued-1");
+    assert_eq!(
+        pane.messages.last().unwrap().author.as_deref(),
+        Some("Parker")
+    );
+}
+
+#[test]
+fn dequeued_prompt_and_server_echo_merge_by_message_id() {
+    let mut pane = NeoismAgentPane::default();
+    pane.note_dequeued_prompt(
+        "[pasted 2 lines]".to_string(),
+        Some("msg-queued-1".to_string()),
+        Some("Parker".to_string()),
+    );
+    let server_echo =
+        crate::panels::agent_pane::api_mapping::part_block(&serde_json::json!({
+            "id": "part-user-1",
+            "messageID": "msg-queued-1",
+            "type": "text",
+            "role": "user",
+            "author": "Parker",
+            "text": "first line\nsecond line"
+        }))
+        .expect("user part");
+
+    pane.upsert_part_message(server_echo);
+
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].id, "msg-queued-1");
+    assert_eq!(pane.messages[0].author.as_deref(), Some("Parker"));
 }
 
 #[test]
@@ -2202,7 +2241,7 @@ fn running_background_task_count_tracks_started_and_collected_jobs() {
 }
 
 #[test]
-fn background_task_count_settles_when_snapshot_adds_completion_without_clock_refresh() {
+fn background_task_count_settles_when_live_upsert_adds_completion() {
     let mut pane = NeoismAgentPane::default();
     let mut started = NeoismAgentMessage::tool(
         "Background Task",
@@ -2228,9 +2267,9 @@ fn background_task_count_settles_when_snapshot_adds_completion_without_clock_ref
         Vec::new(),
     );
     completed.detail = completed.text.clone();
-    // Model a snapshot merge: the message lands without the live completion
-    // branch refreshing the cached activity clock.
-    pane.messages.push(completed);
+    // Production ingress owns cache reconciliation; callers do not need a
+    // separate clock refresh after the completion part lands.
+    pane.upsert_part_message(completed);
 
     assert_eq!(pane.running_background_task_count(), 0);
     assert!(pane.active_background_task_summaries().is_empty());
@@ -2254,7 +2293,24 @@ fn historical_unmatched_background_task_is_not_live_activity() {
     assert_eq!(pane.running_background_task_count(), 0);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
     assert!(!pane.has_status_activity());
+    assert!(pane.active_background_task_summaries().is_empty());
+    assert_eq!(pane.streaming_label(), "");
     assert_eq!(pane.animation_reason(), None);
+}
+
+#[test]
+fn background_runtime_rejects_stale_revision_and_accepts_new_server_epoch() {
+    let mut pane = NeoismAgentPane::default();
+    assert!(pane.apply_running_background_tasks(
+        "server-a",
+        2,
+        &[("job-1".into(), 100)],
+    ));
+    assert_eq!(pane.running_background_task_count(), 1);
+    assert!(!pane.apply_running_background_tasks("server-a", 1, &[]));
+    assert_eq!(pane.running_background_task_count(), 1);
+    assert!(pane.apply_running_background_tasks("server-b", 0, &[]));
+    assert_eq!(pane.running_background_task_count(), 0);
 }
 
 #[test]

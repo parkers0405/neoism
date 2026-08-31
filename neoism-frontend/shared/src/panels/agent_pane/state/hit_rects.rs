@@ -261,6 +261,9 @@ impl NeoismAgentPane {
     }
 
     pub fn active_background_task_summaries(&self) -> Vec<String> {
+        if self.running_background_task_count() == 0 {
+            return Vec::new();
+        }
         active_background_task_summaries(&self.messages)
     }
 

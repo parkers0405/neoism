@@ -249,6 +249,8 @@ pub enum SessionEventUpdate {
     },
     DequeuedPrompt {
         text: String,
+        message_id: Option<String>,
+        author: Option<String>,
     },
     SubagentStatus {
         session_id: String,
@@ -280,6 +282,11 @@ pub enum SessionEventUpdate {
         session_id: String,
         job_id: String,
         status: String,
+    },
+    BackgroundTasksUpdated {
+        epoch: String,
+        revision: u64,
+        tasks: Vec<(String, String, u64)>,
     },
     PermissionAsked(NeoismAgentPendingPermission),
     PermissionReplied {
@@ -556,6 +563,39 @@ pub fn classify_session_event(
                 }]
             }
         }
+        event_type::SESSION_BACKGROUND_TASKS_UPDATED => {
+            let epoch = properties
+                .get("backgroundJobsEpoch")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let revision = properties
+                .get("backgroundJobsRevision")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let tasks = properties
+                .get("runningBackgroundTasks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|task| {
+                    Some((
+                        task.get("jobID")?.as_str()?.to_string(),
+                        task.get("sessionID")?.as_str()?.to_string(),
+                        task.get("startedAt")?.as_u64()?,
+                    ))
+                })
+                .collect();
+            if epoch.is_empty() {
+                Vec::new()
+            } else {
+                vec![SessionEventUpdate::BackgroundTasksUpdated {
+                    epoch,
+                    revision,
+                    tasks,
+                }]
+            }
+        }
         event_type::SESSION_COMPACTION_STARTED => {
             vec![SessionEventUpdate::CompactionStarted {
                 session_id: source_session_id
@@ -739,7 +779,24 @@ pub fn classify_session_event(
                 return Vec::new();
             }
             queued_request_text(request)
-                .map(|text| vec![SessionEventUpdate::DequeuedPrompt { text }])
+                .map(|text| {
+                    vec![SessionEventUpdate::DequeuedPrompt {
+                        text,
+                        message_id: properties
+                            .get("messageID")
+                            .or_else(|| properties.get("messageId"))
+                            .or_else(|| request.get("messageID"))
+                            .or_else(|| request.get("messageId"))
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(ToString::to_string),
+                        author: request
+                            .get("author")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(ToString::to_string),
+                    }]
+                })
                 .unwrap_or_default()
         }
         event_type::PERMISSION_ASKED => vec![SessionEventUpdate::PermissionAsked(
@@ -1618,6 +1675,37 @@ mod tests {
     }
 
     #[test]
+    fn background_runtime_event_preserves_epoch_revision_and_full_job_list() {
+        let mut state = SessionEventUpdateState::default();
+        let updates = classify_session_event(
+            json!({
+                "type": "session.background_tasks.updated",
+                "properties": {
+                    "sessionID": "ses_root",
+                    "backgroundJobsEpoch": "server-a",
+                    "backgroundJobsRevision": 7,
+                    "runningBackgroundTasks": [{
+                        "jobID": "job-1",
+                        "sessionID": "ses_root",
+                        "startedAt": 123
+                    }]
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+
+        assert_eq!(
+            updates,
+            vec![SessionEventUpdate::BackgroundTasksUpdated {
+                epoch: "server-a".to_string(),
+                revision: 7,
+                tasks: vec![("job-1".to_string(), "ses_root".to_string(), 123)],
+            }]
+        );
+    }
+
+    #[test]
     fn classify_session_event_requests_idle_refresh_once_until_busy() {
         let idle = json!({
             "type": "session.status",
@@ -1879,14 +1967,16 @@ mod tests {
     }
 
     #[test]
-    fn classify_session_event_reports_dequeued_prompt_text() {
+    fn classify_session_event_reports_dequeued_prompt_identity() {
         let mut state = SessionEventUpdateState::default();
         let event = json!({
             "type": "session.queue.updated",
             "properties": {
                 "sessionID": "ses_root",
                 "action": "dequeue",
+                "messageID": "msg_queued_1",
                 "request": {
+                    "author": "Parker",
                     "parts": [
                         { "type": "text", "text": "queued turn" }
                     ]
@@ -1898,6 +1988,8 @@ mod tests {
             classify_session_event(event, "ses_root", &mut state),
             vec![SessionEventUpdate::DequeuedPrompt {
                 text: "queued turn".to_string(),
+                message_id: Some("msg_queued_1".to_string()),
+                author: Some("Parker".to_string()),
             }]
         );
     }

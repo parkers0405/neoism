@@ -524,6 +524,12 @@ pub enum AgentServerMessage {
         session_id: String,
         snapshot: AgentRuntimeSnapshot,
     },
+    BackgroundTasksUpdated {
+        session_id: String,
+        epoch: String,
+        revision: u64,
+        tasks: Vec<BackgroundJobRuntime>,
+    },
     /// Session emitted a non-fatal status line (badges like
     /// "Pondering", "Compacting", subagent counts).
     StreamingState {
@@ -988,6 +994,20 @@ pub struct AgentRuntimeSnapshot {
     pub branches: Vec<SubtaskLifecycle>,
     #[serde(default)]
     pub execution: Option<ExecutionActivity>,
+    #[serde(default)]
+    pub running_background_tasks: Option<Vec<BackgroundJobRuntime>>,
+    #[serde(default)]
+    pub background_jobs_epoch: Option<String>,
+    #[serde(default)]
+    pub background_jobs_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundJobRuntime {
+    pub job_id: String,
+    pub session_id: String,
+    pub started_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1105,6 +1125,13 @@ mod runtime_snapshot_tests {
                 root_session_id: "root".into(),
                 family_revision: 9,
                 branches_authoritative: true,
+                running_background_tasks: Some(vec![BackgroundJobRuntime {
+                    job_id: "job-1".into(),
+                    session_id: "child".into(),
+                    started_at: 123,
+                }]),
+                background_jobs_epoch: Some("server-1".into()),
+                background_jobs_revision: Some(4),
                 branches: vec![SubtaskLifecycle {
                     session_id: "child".into(),
                     parent_session_id: "root".into(),

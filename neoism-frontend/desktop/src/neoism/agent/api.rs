@@ -790,6 +790,9 @@ pub(crate) struct FamilyRuntimeSnapshot {
     pub family_revision: u64,
     pub branches: Vec<(String, String, Option<u64>)>,
     pub execution: Option<neoism_ui::panels::agent_pane::state::ExecutionActivityState>,
+    pub running_background_tasks: Option<Vec<(String, u64)>>,
+    pub background_jobs_epoch: Option<String>,
+    pub background_jobs_revision: Option<u64>,
 }
 
 pub(super) fn fetch_family_runtime(
@@ -829,6 +832,20 @@ pub(crate) fn family_runtime_from_json(
         })
         .collect();
     let execution = value.get("execution").and_then(execution_activity_from_json);
+    let running_background_tasks = value
+        .get("runningBackgroundTasks")
+        .and_then(Value::as_array)
+        .map(|tasks| {
+            tasks
+                .iter()
+                .filter_map(|task| {
+                    Some((
+                        task.get("jobId")?.as_str()?.to_string(),
+                        task.get("startedAt")?.as_u64()?,
+                    ))
+                })
+                .collect()
+        });
     Ok(FamilyRuntimeSnapshot {
         root_session_id,
         family_revision: value
@@ -838,6 +855,14 @@ pub(crate) fn family_runtime_from_json(
             .unwrap_or(0),
         branches,
         execution,
+        running_background_tasks,
+        background_jobs_epoch: value
+            .get("backgroundJobsEpoch")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        background_jobs_revision: value
+            .get("backgroundJobsRevision")
+            .and_then(Value::as_u64),
     })
 }
 

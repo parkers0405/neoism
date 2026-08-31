@@ -43,6 +43,7 @@ pub(crate) struct InnerState {
     pub(crate) subtask_parent_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) execution_activity_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) execution_owner_id: String,
+    pub(crate) background_jobs_revision: std::sync::atomic::AtomicU64,
     execution_lease_control: Arc<ExecutionLeaseControl>,
     execution_lease_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) permissions: RwLock<HashMap<String, PermissionRequestInfo>>,
@@ -576,6 +577,7 @@ impl AppState {
                 subtask_parent_locks: Mutex::new(HashMap::new()),
                 execution_activity_locks: Mutex::new(HashMap::new()),
                 execution_owner_id,
+                background_jobs_revision: std::sync::atomic::AtomicU64::new(0),
                 execution_lease_control: execution_lease_control.clone(),
                 execution_lease_handle: std::sync::Mutex::new(None),
                 permissions: RwLock::new(
@@ -623,13 +625,19 @@ impl AppState {
                     tracing::warn!(%error, "failed to heartbeat execution activity owner");
                 }
                 if let Err(error) = store
-                    .reconcile_stale_execution_segments(now.saturating_sub(15_000))
+                    .reconcile_stale_execution_segments(
+                        now.saturating_sub(15_000),
+                        &owner_id,
+                    )
                     .await
                 {
                     tracing::warn!(%error, "failed to reconcile stale execution activity segments");
                 }
                 if let Err(error) = store
-                    .reconcile_stale_execution_subtasks(now.saturating_sub(15_000))
+                    .reconcile_stale_execution_subtasks(
+                        now.saturating_sub(15_000),
+                        &owner_id,
+                    )
                     .await
                 {
                     tracing::warn!(%error, "failed to reconcile stale execution subtask owners");
@@ -2837,6 +2845,31 @@ impl SessionStore {
         Ok(results.first().copied().unwrap_or(0) > 0)
     }
 
+    pub(crate) async fn reopen_execution_subtask(
+        &self,
+        execution_id: &str,
+        root_session_id: &str,
+        parent_session_id: &str,
+        child_session_id: &str,
+        owner_instance_id: &str,
+        started_at: u64,
+    ) -> anyhow::Result<bool> {
+        let results = self
+            .db
+            .execute_transaction_with_results(vec![
+                (
+                    "UPDATE execution_subtasks SET root_session_id = ?, parent_session_id = ?, owner_instance_id = ?, status = 'outstanding', started_at = ? WHERE execution_id = ? AND child_session_id = ? AND status IN ('completed', 'failed') AND EXISTS (SELECT 1 FROM execution_activity WHERE root_session_id = ? AND execution_id = ? AND finished = 0)".to_string(),
+                    vec![text(root_session_id), text(parent_session_id), text(owner_instance_id), int(store_i64(started_at)), text(execution_id), text(child_session_id), text(root_session_id), text(execution_id)],
+                ),
+                (
+                    "UPDATE execution_activity SET family_revision = family_revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND changes() > 0".to_string(),
+                    vec![int(store_i64(crate::now_millis())), text(root_session_id), text(execution_id)],
+                ),
+            ])
+            .await?;
+        Ok(results.first().copied().unwrap_or(0) > 0)
+    }
+
     pub(crate) async fn list_execution_subtasks(
         &self,
         execution_id: &str,
@@ -2876,6 +2909,7 @@ impl SessionStore {
     pub(crate) async fn reconcile_stale_execution_segments(
         &self,
         stale_before: u64,
+        live_owner_instance_id: &str,
     ) -> anyhow::Result<usize> {
         let rows = self
             .db
@@ -2886,8 +2920,9 @@ impl SessionStore {
                    FROM execution_activity_segments s
                    LEFT JOIN execution_activity_owners o
                      ON o.owner_instance_id = s.owner_instance_id
-                   WHERE o.owner_instance_id IS NULL OR o.heartbeat_at < ?"#,
-                vec![int(store_i64(stale_before))],
+                   WHERE s.owner_instance_id <> ?
+                     AND (o.owner_instance_id IS NULL OR o.heartbeat_at < ?)"#,
+                vec![text(live_owner_instance_id), int(store_i64(stale_before))],
             )
             .await?;
         let mut reconciled = 0;
@@ -2907,12 +2942,12 @@ impl SessionStore {
                         vec![text(&segment), text(&root), text(&execution)],
                     ),
                     (
-                        "UPDATE execution_session_activity SET completed_ms = completed_ms + MAX(0, ? - ?) WHERE root_session_id = ? AND execution_id = ? AND session_id = ? AND EXISTS (SELECT 1 FROM execution_activity_segments s LEFT JOIN execution_activity_owners o ON o.owner_instance_id = s.owner_instance_id WHERE s.segment_id = ? AND s.root_session_id = ? AND s.execution_id = ? AND s.owner_instance_id = ? AND (o.owner_instance_id IS NULL OR o.heartbeat_at < ?))".to_string(),
-                        vec![int(store_i64(ended.max(started))), int(store_i64(started)), text(&root), text(&execution), text(&session), text(&segment), text(&root), text(&execution), text(&owner), int(store_i64(stale_before))],
+                        "UPDATE execution_session_activity SET completed_ms = completed_ms + MAX(0, ? - ?) WHERE root_session_id = ? AND execution_id = ? AND session_id = ? AND EXISTS (SELECT 1 FROM execution_activity_segments s LEFT JOIN execution_activity_owners o ON o.owner_instance_id = s.owner_instance_id WHERE s.segment_id = ? AND s.root_session_id = ? AND s.execution_id = ? AND s.owner_instance_id = ? AND s.owner_instance_id <> ? AND (o.owner_instance_id IS NULL OR o.heartbeat_at < ?))".to_string(),
+                        vec![int(store_i64(ended.max(started))), int(store_i64(started)), text(&root), text(&execution), text(&session), text(&segment), text(&root), text(&execution), text(&owner), text(live_owner_instance_id), int(store_i64(stale_before))],
                     ),
                     (
-                        "UPDATE execution_activity SET completed_ms = completed_ms + MAX(0, ? - ?), revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND changes() > 0 AND EXISTS (SELECT 1 FROM execution_activity_segments s LEFT JOIN execution_activity_owners o ON o.owner_instance_id = s.owner_instance_id WHERE s.segment_id = ? AND s.root_session_id = ? AND s.execution_id = ? AND s.owner_instance_id = ? AND (o.owner_instance_id IS NULL OR o.heartbeat_at < ?))".to_string(),
-                        vec![int(store_i64(ended.max(started))), int(store_i64(started)), int(store_i64(ended.max(started))), text(&root), text(&execution), text(&segment), text(&root), text(&execution), text(&owner), int(store_i64(stale_before))],
+                        "UPDATE execution_activity SET completed_ms = completed_ms + MAX(0, ? - ?), revision = revision + 1, updated = ? WHERE root_session_id = ? AND execution_id = ? AND changes() > 0 AND EXISTS (SELECT 1 FROM execution_activity_segments s LEFT JOIN execution_activity_owners o ON o.owner_instance_id = s.owner_instance_id WHERE s.segment_id = ? AND s.root_session_id = ? AND s.execution_id = ? AND s.owner_instance_id = ? AND s.owner_instance_id <> ? AND (o.owner_instance_id IS NULL OR o.heartbeat_at < ?))".to_string(),
+                        vec![int(store_i64(ended.max(started))), int(store_i64(started)), int(store_i64(ended.max(started))), text(&root), text(&execution), text(&segment), text(&root), text(&execution), text(&owner), text(live_owner_instance_id), int(store_i64(stale_before))],
                     ),
                     (
                         "DELETE FROM execution_activity_segments WHERE segment_id = ? AND root_session_id = ? AND execution_id = ? AND owner_instance_id = ? AND changes() > 0".to_string(),
@@ -2928,6 +2963,7 @@ impl SessionStore {
     pub(crate) async fn reconcile_stale_execution_subtasks(
         &self,
         stale_before: u64,
+        live_owner_instance_id: &str,
     ) -> anyhow::Result<usize> {
         let rows = self
             .db
@@ -2937,8 +2973,9 @@ impl SessionStore {
                    LEFT JOIN execution_activity_owners owner
                      ON owner.owner_instance_id = task.owner_instance_id
                    WHERE task.status = 'outstanding'
-                     AND (owner.owner_instance_id IS NULL OR owner.heartbeat_at < ?)"#,
-                vec![int(store_i64(stale_before))],
+                     AND task.owner_instance_id <> ?
+                      AND (owner.owner_instance_id IS NULL OR owner.heartbeat_at < ?)"#,
+                vec![text(live_owner_instance_id), int(store_i64(stale_before))],
             )
             .await?;
         let mut reconciled = 0;
@@ -2949,8 +2986,8 @@ impl SessionStore {
                 .db
                 .execute_transaction_with_results(vec![
                     (
-                        "UPDATE execution_subtasks SET status = 'failed' WHERE execution_id = ? AND child_session_id = ? AND status = 'outstanding' AND NOT EXISTS (SELECT 1 FROM execution_activity_owners owner WHERE owner.owner_instance_id = execution_subtasks.owner_instance_id AND owner.heartbeat_at >= ?)".to_string(),
-                        vec![text(&execution_id), text(&child_session_id), int(store_i64(stale_before))],
+                        "UPDATE execution_subtasks SET status = 'failed' WHERE execution_id = ? AND child_session_id = ? AND status = 'outstanding' AND owner_instance_id <> ? AND NOT EXISTS (SELECT 1 FROM execution_activity_owners owner WHERE owner.owner_instance_id = execution_subtasks.owner_instance_id AND owner.heartbeat_at >= ?)".to_string(),
+                        vec![text(&execution_id), text(&child_session_id), text(live_owner_instance_id), int(store_i64(stale_before))],
                     ),
                     (
                         "UPDATE execution_activity SET family_revision = family_revision + 1, updated = ? WHERE execution_id = ? AND changes() > 0".to_string(),
@@ -3008,6 +3045,9 @@ impl SessionStore {
                 family_revision: 0,
                 branches: Vec::new(),
                 execution: None,
+                running_background_tasks: None,
+                background_jobs_epoch: None,
+                background_jobs_revision: None,
             });
         };
         let execution_id = first.get_str("execution_id")?;
@@ -3069,6 +3109,9 @@ impl SessionStore {
                 revision: first.get_i64("revision")?.max(0) as u64,
                 finished: first.get_i64("finished")? != 0,
             }),
+            running_background_tasks: None,
+            background_jobs_epoch: None,
+            background_jobs_revision: None,
         })
     }
 

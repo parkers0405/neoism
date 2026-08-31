@@ -29,6 +29,8 @@ pub(in crate::panels::agent_pane::state) struct CachedAgentRuntime {
     pub subagent_waiting_started_at: Option<Instant>,
     pub background_tasks_started_at: Option<Instant>,
     pub running_background_task_count: usize,
+    pub background_jobs_epoch: Option<String>,
+    pub background_jobs_revision: u64,
     pub abort_requested_at: Option<Instant>,
 }
 
@@ -44,6 +46,8 @@ impl Default for CachedAgentRuntime {
             subagent_waiting_started_at: None,
             background_tasks_started_at: None,
             running_background_task_count: 0,
+            background_jobs_epoch: None,
+            background_jobs_revision: 0,
             abort_requested_at: None,
         }
     }
@@ -636,6 +640,8 @@ impl NeoismAgentPane {
             running_background_task_count: std::mem::take(
                 &mut self.running_background_task_count,
             ),
+            background_jobs_epoch: self.background_jobs_epoch.take(),
+            background_jobs_revision: std::mem::take(&mut self.background_jobs_revision),
             abort_requested_at: self.abort_requested_at.take(),
         }
     }
@@ -653,6 +659,8 @@ impl NeoismAgentPane {
         self.subagent_waiting_started_at = runtime.subagent_waiting_started_at;
         self.background_tasks_started_at = runtime.background_tasks_started_at;
         self.running_background_task_count = runtime.running_background_task_count;
+        self.background_jobs_epoch = runtime.background_jobs_epoch;
+        self.background_jobs_revision = runtime.background_jobs_revision;
         self.abort_requested_at = runtime.abort_requested_at;
         self.permission_choice_hit_rects.clear();
         self.question_option_hit_rects.clear();

@@ -140,6 +140,8 @@ pub(super) enum AgentSessionUpdate {
     },
     DequeuedPrompt {
         text: String,
+        message_id: Option<String>,
+        author: Option<String>,
     },
     SubagentStatus {
         session_id: String,
@@ -169,6 +171,11 @@ pub(super) enum AgentSessionUpdate {
         session_id: String,
         job_id: String,
         status: String,
+    },
+    BackgroundTasksUpdated {
+        epoch: String,
+        revision: u64,
+        tasks: Vec<(String, String, u64)>,
     },
     PermissionAsked(NeoismAgentPendingPermission),
     PermissionReplied {
@@ -1024,9 +1031,17 @@ fn send_event_updates(
                     started_at,
                 })?;
             }
-            SessionEventUpdate::DequeuedPrompt { text } => {
+            SessionEventUpdate::DequeuedPrompt {
+                text,
+                message_id,
+                author,
+            } => {
                 message_refresh_epochs.advance(session_id);
-                tx.send(AgentSessionUpdate::DequeuedPrompt { text })?
+                tx.send(AgentSessionUpdate::DequeuedPrompt {
+                    text,
+                    message_id,
+                    author,
+                })?
             }
             SessionEventUpdate::SubagentStatus {
                 session_id,
@@ -1069,6 +1084,15 @@ fn send_event_updates(
                 session_id,
                 job_id,
                 status,
+            })?,
+            SessionEventUpdate::BackgroundTasksUpdated {
+                epoch,
+                revision,
+                tasks,
+            } => tx.send(AgentSessionUpdate::BackgroundTasksUpdated {
+                epoch,
+                revision,
+                tasks,
             })?,
             SessionEventUpdate::SubagentCompleted {
                 task_id,

@@ -14,7 +14,7 @@
 //      reports idle for this session.
 //
 // Run inside this workspace:   npx tsx examples/headless.ts
-// Outside, once published:     npm i @neoism/sdk-http && adjust imports
+// Outside, once published:     npm i @neoism/sdk
 //
 // Environment:
 //   NEOISM_AGENT_URL    e.g. http://127.0.0.1:4096  (default)
@@ -22,8 +22,8 @@
 //   NEOISM_DIRECTORY    session/workspace directory (default: cwd)
 //   PROMPT              the prompt text (default: a smoke-test line)
 
-import { createHttpClient } from "@neoism/sdk-http";
-import type { Event, Part, StepFinishPart } from "@neoism/sdk-core";
+import { createHttpClient } from "@neoism/sdk";
+import type { Event, Part, StepFinishPart } from "@neoism/sdk";
 import { randomUUID } from "node:crypto";
 
 const client = createHttpClient({

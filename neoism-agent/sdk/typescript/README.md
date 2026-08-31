@@ -2,9 +2,12 @@
 
 Frontend-neutral clients for the Neoism Agent `/v2` API.
 
+```sh
+npm install @neoism/sdk
+```
+
 ```ts
-import { createHttpClient } from "@neoism/sdk-http";
-import { subagents } from "@neoism/sdk-plugin-subagents";
+import { createHttpClient, subagents } from "@neoism/sdk";
 
 const client = createHttpClient({
   baseUrl: "http://127.0.0.1:4096",

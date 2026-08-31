@@ -333,6 +333,17 @@ pub(crate) fn apply_agent_event_to_pane(
             if !pane.session_family_contains(&snapshot.root_session_id) {
                 return;
             }
+            if let (Some(epoch), Some(revision), Some(tasks)) = (
+                snapshot.background_jobs_epoch.as_deref(),
+                snapshot.background_jobs_revision,
+                snapshot.running_background_tasks.as_ref(),
+            ) {
+                let tasks = tasks
+                    .iter()
+                    .map(|task| (task.job_id.clone(), task.started_at))
+                    .collect::<Vec<_>>();
+                pane.apply_running_background_tasks(epoch, revision, &tasks);
+            }
             let execution = snapshot.execution.map(|activity| {
                 let activity = neoism_ui::panels::agent_pane::state::ExecutionActivityState {
                         execution_id: activity.execution_id,
@@ -362,6 +373,18 @@ pub(crate) fn apply_agent_event_to_pane(
             } else if let Some(execution) = execution {
                 pane.apply_execution_activity(execution);
             }
+        }
+        AgentServerMessage::BackgroundTasksUpdated {
+            epoch,
+            revision,
+            tasks,
+            ..
+        } => {
+            let tasks = tasks
+                .into_iter()
+                .map(|task| (task.job_id, task.started_at))
+                .collect::<Vec<_>>();
+            pane.apply_running_background_tasks(&epoch, revision, &tasks);
         }
         AgentServerMessage::StreamingState { state, label, .. } => {
             pane.note_streaming(map_streaming(state), label);
@@ -832,6 +855,17 @@ pub(crate) fn apply_agent_event_to_cache(
             if !pane.session_family_contains(&snapshot.root_session_id) {
                 return true;
             }
+            if let (Some(epoch), Some(revision), Some(tasks)) = (
+                snapshot.background_jobs_epoch.as_deref(),
+                snapshot.background_jobs_revision,
+                snapshot.running_background_tasks.as_ref(),
+            ) {
+                let tasks = tasks
+                    .iter()
+                    .map(|task| (task.job_id.clone(), task.started_at))
+                    .collect::<Vec<_>>();
+                pane.apply_running_background_tasks(epoch, revision, &tasks);
+            }
             let execution = snapshot.execution.map(|activity| {
                 let activity = neoism_ui::panels::agent_pane::state::ExecutionActivityState {
                         execution_id: activity.execution_id,
@@ -861,6 +895,19 @@ pub(crate) fn apply_agent_event_to_cache(
             } else if let Some(execution) = execution {
                 pane.apply_execution_activity(execution);
             }
+            true
+        }
+        AgentServerMessage::BackgroundTasksUpdated {
+            epoch,
+            revision,
+            tasks,
+            ..
+        } => {
+            let tasks = tasks
+                .into_iter()
+                .map(|task| (task.job_id, task.started_at))
+                .collect::<Vec<_>>();
+            pane.apply_running_background_tasks(&epoch, revision, &tasks);
             true
         }
         AgentServerMessage::StreamingState {
@@ -1001,6 +1048,7 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::PartRemoved { session_id, .. }
         | AgentServerMessage::SessionIdle { session_id, .. }
         | AgentServerMessage::RuntimeSnapshot { session_id, .. }
+        | AgentServerMessage::BackgroundTasksUpdated { session_id, .. }
         | AgentServerMessage::StreamingState { session_id, .. }
         | AgentServerMessage::Notice { session_id, .. }
         | AgentServerMessage::ToolUseRequest { session_id, .. }

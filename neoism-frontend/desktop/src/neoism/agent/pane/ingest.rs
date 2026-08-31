@@ -262,24 +262,49 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                 }
-                AgentSessionUpdate::DequeuedPrompt { text } => {
+                AgentSessionUpdate::DequeuedPrompt {
+                    text,
+                    message_id,
+                    author,
+                } => {
                     self.note_session_runtime_event(&stream_session_id);
                     self.terminal_idle_sessions.remove(&stream_session_id);
                     if stream_is_active {
-                        changed |= self.insert_dequeued_user_prompt(text);
+                        changed |=
+                            self.insert_dequeued_user_prompt(text, message_id, author);
                     } else {
                         let cached = self
                             .session_cache
                             .entry(stream_session_id.clone())
                             .or_insert_with(CachedAgentSession::live_only);
                         cached.runtime.consume_dequeued_prompt(&text);
-                        if !text.trim().is_empty()
-                            && !cached.messages.iter().any(|message| {
-                                message.kind == NeoismAgentMessageKind::User
-                                    && message.text.trim() == text.trim()
+                        let message_id = message_id.unwrap_or_default();
+                        let existing_index = cached
+                            .messages
+                            .iter()
+                            .position(|message| {
+                                !message_id.is_empty() && message.id == message_id
                             })
-                        {
-                            cached.messages.push(NeoismAgentMessage::user(text));
+                            .or_else(|| {
+                                cached.messages.iter().position(|message| {
+                                    message.kind == NeoismAgentMessageKind::User
+                                        && message.text.trim() == text.trim()
+                                        && (message_id.is_empty()
+                                            || message.id.is_empty())
+                                })
+                            });
+                        if let Some(index) = existing_index {
+                            if cached.messages[index].id.is_empty() {
+                                cached.messages[index].id = message_id;
+                            }
+                            if cached.messages[index].author.is_none() {
+                                cached.messages[index].author = author;
+                            }
+                        } else if !text.trim().is_empty() {
+                            let mut message = NeoismAgentMessage::user(text);
+                            message.id = message_id;
+                            message.author = author;
+                            cached.messages.push(message);
                             cached.invalidate_timeline_layout();
                         }
                         changed = true;
@@ -430,6 +455,17 @@ impl NeoismAgentPane {
                         cached.invalidate_timeline_layout();
                     }
                     changed = true;
+                }
+                AgentSessionUpdate::BackgroundTasksUpdated {
+                    epoch,
+                    revision,
+                    tasks,
+                } => {
+                    let tasks = tasks
+                        .into_iter()
+                        .map(|(job_id, _, started_at)| (job_id, started_at))
+                        .collect::<Vec<_>>();
+                    changed |= self.apply_running_background_tasks(&epoch, revision, &tasks);
                 }
                 AgentSessionUpdate::SubagentCompleted {
                     task_id,
@@ -1658,6 +1694,14 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                     if let Ok(runtime) = runtime {
+                        if let (Some(epoch), Some(revision), Some(tasks)) = (
+                            runtime.background_jobs_epoch.as_deref(),
+                            runtime.background_jobs_revision,
+                            runtime.running_background_tasks.as_deref(),
+                        ) {
+                            changed |=
+                                self.apply_running_background_tasks(epoch, revision, tasks);
+                        }
                         changed |= self.apply_runtime_lifecycle_snapshot(
                             runtime.execution,
                             runtime.root_session_id,
@@ -2160,7 +2204,12 @@ impl NeoismAgentPane {
         server_messages
     }
 
-    pub(crate) fn insert_dequeued_user_prompt(&mut self, text: String) -> bool {
+    pub(crate) fn insert_dequeued_user_prompt(
+        &mut self,
+        text: String,
+        message_id: Option<String>,
+        author: Option<String>,
+    ) -> bool {
         let text = self.compact_user_prompt_text(&text).unwrap_or(text);
         let text = text.trim().to_string();
         if text.is_empty() {
@@ -2173,13 +2222,35 @@ impl NeoismAgentPane {
             .rposition(|message| message.kind != NeoismAgentMessageKind::User)
             .map(|index| index + 1)
             .unwrap_or(0);
-        if self.messages[current_turn_start..]
+        let message_id = message_id.unwrap_or_default();
+        let existing_index = self
+            .messages
             .iter()
-            .any(|message| is_user_prompt(message, &text))
-        {
+            .position(|message| !message_id.is_empty() && message.id == message_id)
+            .or_else(|| {
+                self.messages[current_turn_start..]
+                    .iter()
+                    .position(|message| {
+                        is_user_prompt(message, &text)
+                            && (message_id.is_empty() || message.id.is_empty())
+                    })
+                    .map(|index| current_turn_start + index)
+            });
+        if let Some(index) = existing_index {
+            if self.messages[index].id.is_empty() {
+                self.messages[index].id = message_id;
+                changed = true;
+            }
+            if self.messages[index].author.is_none() && author.is_some() {
+                self.messages[index].author = author;
+                changed = true;
+            }
             return changed;
         }
-        self.messages.push(NeoismAgentMessage::user(text));
+        let mut message = NeoismAgentMessage::user(text);
+        message.id = message_id;
+        message.author = author;
+        self.messages.push(message);
         self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
         changed = true;
         changed
@@ -2313,6 +2384,8 @@ impl NeoismAgentPane {
             running_background_task_count: std::mem::take(
                 &mut self.running_background_task_count,
             ),
+            background_jobs_epoch: self.background_jobs_epoch.take(),
+            background_jobs_revision: std::mem::take(&mut self.background_jobs_revision),
             abort_requested_at: self.abort_requested_at.take(),
         }
     }
@@ -2327,6 +2400,8 @@ impl NeoismAgentPane {
         self.subagent_waiting_started_at = runtime.subagent_waiting_started_at;
         self.background_tasks_started_at = runtime.background_tasks_started_at;
         self.running_background_task_count = runtime.running_background_task_count;
+        self.background_jobs_epoch = runtime.background_jobs_epoch;
+        self.background_jobs_revision = runtime.background_jobs_revision;
         self.abort_requested_at = runtime.abort_requested_at;
         self.permission_choice_hit_rects.clear();
         self.question_option_hit_rects.clear();
@@ -2501,7 +2576,17 @@ impl NeoismAgentPane {
         let _ = (summary, kind);
     }
 
-    pub(crate) fn upsert_part_message(&mut self, mut message: NeoismAgentMessage) {
+    pub(crate) fn upsert_part_message(&mut self, message: NeoismAgentMessage) {
+        let refresh_background = message.tool == "background_task"
+            || message.tool == "background_task_result"
+            || is_background_completion_card(&message);
+        self.upsert_part_message_inner(message);
+        if refresh_background {
+            self.ensure_background_task_activity_clock();
+        }
+    }
+
+    fn upsert_part_message_inner(&mut self, mut message: NeoismAgentMessage) {
         if matches!(
             message.kind,
             NeoismAgentMessageKind::Reasoning

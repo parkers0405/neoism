@@ -782,7 +782,25 @@ pub(crate) async fn task_result_output_for_child(
     state: &AppState,
     child: &SessionInfo,
 ) -> Result<(String, String), String> {
-    if session_is_running(state, child.id.as_str()).await {
+    let lifecycle = match child
+        .extra
+        .get(crate::execution_activity::EXECUTION_ID_KEY)
+        .and_then(Value::as_str)
+    {
+        Some(execution_id) => state
+            .inner
+            .store
+            .execution_subtask_status(execution_id, child.id.as_str())
+            .await
+            .map_err(|error| error.to_string())?,
+        None => None,
+    };
+    // The durable branch lifecycle is authoritative. A cancelled provider
+    // future can leave its in-memory run entry behind until cleanup retries;
+    // reporting that zombie as running hides the actual task failure.
+    if lifecycle.as_deref() != Some("failed")
+        && session_is_running(state, child.id.as_str()).await
+    {
         return Ok((
             "running".to_string(),
             task_running_output(child.id.as_str()),
@@ -794,6 +812,27 @@ pub(crate) async fn task_result_output_for_child(
         .list_messages(child.id.as_str())
         .await
         .map_err(|error| error.to_string())?;
+    if lifecycle.as_deref() == Some("failed") {
+        let error = messages
+            .iter()
+            .rev()
+            .find_map(last_assistant_error)
+            .unwrap_or_else(|| {
+                "Subagent task terminated before producing a result.".to_string()
+            });
+        return Ok((
+            "error".to_string(),
+            [
+                format!("task_id: {}", child.id),
+                "status: error".to_string(),
+                String::new(),
+                "<task_error>".to_string(),
+                error,
+                "</task_error>".to_string(),
+            ]
+            .join("\n"),
+        ));
+    }
     if let Some(error) = messages.iter().rev().find_map(last_assistant_error) {
         let output = [
             format!("task_id: {}", child.id),

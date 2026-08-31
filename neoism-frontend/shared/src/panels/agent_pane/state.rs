@@ -689,6 +689,8 @@ pub struct NeoismAgentPane {
     subagent_waiting_started_at: Option<Instant>,
     background_tasks_started_at: Option<Instant>,
     running_background_task_count: usize,
+    background_jobs_epoch: Option<String>,
+    background_jobs_revision: u64,
     active_subagent_ids: BTreeSet<String>,
     active_subagent_started_at: HashMap<String, u64>,
     runtime_snapshot_root: Option<String>,
@@ -1021,6 +1023,8 @@ impl Default for NeoismAgentPane {
             subagent_waiting_started_at: None,
             background_tasks_started_at: None,
             running_background_task_count: 0,
+            background_jobs_epoch: None,
+            background_jobs_revision: 0,
             active_subagent_ids: BTreeSet::new(),
             active_subagent_started_at: HashMap::new(),
             runtime_snapshot_root: None,
@@ -1177,6 +1181,11 @@ impl NeoismAgentPane {
         }
         if !snapshot.messages.is_empty() || self.messages.is_empty() {
             self.messages = snapshot.messages;
+            if self.background_tasks_started_at.is_some()
+                || self.running_background_task_count > 0
+            {
+                self.refresh_background_task_activity_clock();
+            }
             self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
             self.timeline_dirty_message_ids.clear();
             self.timeline_dirty_message_indices.clear();
@@ -1528,7 +1537,12 @@ impl NeoismAgentPane {
         self.abort_requested_at = None;
     }
 
-    pub fn note_dequeued_prompt(&mut self, text: String) {
+    pub fn note_dequeued_prompt(
+        &mut self,
+        text: String,
+        message_id: Option<String>,
+        author: Option<String>,
+    ) {
         // Mirror desktop `insert_dequeued_user_prompt`: a queued prompt
         // dequeues in expanded form; show the compact composer echo.
         let text = self.compact_user_prompt_text(&text).unwrap_or(text);
@@ -1543,13 +1557,33 @@ impl NeoismAgentPane {
             .rposition(|message| message.kind != NeoismAgentMessageKind::User)
             .map(|index| index + 1)
             .unwrap_or(0);
-        if self.messages[current_turn_start..]
+        let message_id = message_id.unwrap_or_default();
+        let existing_index = self
+            .messages
             .iter()
-            .any(|message| is_user_prompt(message, &text))
-        {
+            .position(|message| !message_id.is_empty() && message.id == message_id)
+            .or_else(|| {
+                self.messages[current_turn_start..]
+                    .iter()
+                    .position(|message| {
+                        is_user_prompt(message, &text)
+                            && (message_id.is_empty() || message.id.is_empty())
+                    })
+                    .map(|index| current_turn_start + index)
+            });
+        if let Some(index) = existing_index {
+            if self.messages[index].id.is_empty() {
+                self.messages[index].id = message_id;
+            }
+            if self.messages[index].author.is_none() {
+                self.messages[index].author = author;
+            }
             return;
         }
-        self.messages.push(NeoismAgentMessage::user(text));
+        let mut message = NeoismAgentMessage::user(text);
+        message.id = message_id;
+        message.author = author;
+        self.messages.push(message);
         self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
     }
 
@@ -1674,6 +1708,9 @@ impl NeoismAgentPane {
         let messages = self.preserve_streamed_response_text(messages);
         let messages = self.preserve_background_completion_cards(messages);
         self.messages = messages;
+        if self.background_tasks_started_at.is_some() || self.running_background_task_count > 0 {
+            self.refresh_background_task_activity_clock();
+        }
         self.rebase_current_turn_trace();
         self.invalidate_timeline_layout();
         self.clamp_timeline_scroll();

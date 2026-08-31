@@ -245,13 +245,18 @@ pub(crate) async fn v2_session_runtime(
     let session = ensure_session(&state, &session_id).await?;
     let root_id = crate::execution_activity::root_session_id(&state, &session).await;
     crate::execution_activity::finish_if_quiescent(&state, &root_id).await;
-    Ok(Json(
-        state
-            .inner
-            .store
-            .get_session_runtime_snapshot(&root_id)
-            .await?,
-    ))
+    let mut runtime = state
+        .inner
+        .store
+        .get_session_runtime_snapshot(&root_id)
+        .await?;
+    let family = session_family_ids(&state, &root_id).await;
+    let (background_jobs_revision, running_background_tasks) =
+        crate::background_job::running_jobs_for_family(&state, &family).await;
+    runtime.running_background_tasks = Some(running_background_tasks);
+    runtime.background_jobs_epoch = Some(state.inner.execution_owner_id.clone());
+    runtime.background_jobs_revision = Some(background_jobs_revision);
+    Ok(Json(runtime))
 }
 
 /// Whether a live event belongs on this connection's stream, growing the
@@ -295,7 +300,7 @@ pub(crate) async fn admit_live_event(
     true
 }
 
-async fn session_family_ids(state: &AppState, root: &str) -> HashSet<String> {
+pub(crate) async fn session_family_ids(state: &AppState, root: &str) -> HashSet<String> {
     let mut family = HashSet::from([root.to_string()]);
     let Ok(sessions) = state.inner.store.list_sessions().await else {
         return family;

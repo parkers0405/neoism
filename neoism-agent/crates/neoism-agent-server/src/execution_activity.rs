@@ -359,7 +359,23 @@ pub(crate) async fn register_subtask(
             .execution_subtask_status(execution_id, child_session_id)
             .await?;
         if status.as_deref() != Some("outstanding") {
-            anyhow::bail!("subtask {child_session_id} is already terminal for execution {execution_id}");
+            let reopened = state
+                .inner
+                .store
+                .reopen_execution_subtask(
+                    execution_id,
+                    &root,
+                    parent.id.as_str(),
+                    child_session_id,
+                    &state.inner.execution_owner_id,
+                    crate::now_millis(),
+                )
+                .await?;
+            if !reopened {
+                anyhow::bail!(
+                    "subtask {child_session_id} could not be resumed for execution {execution_id}"
+                );
+            }
         }
     }
     publish_snapshot(state, &root).await;
@@ -454,7 +470,10 @@ async fn finish_if_quiescent_impl(
     if let Err(error) = state
         .inner
         .store
-        .reconcile_stale_execution_subtasks(crate::now_millis().saturating_sub(15_000))
+        .reconcile_stale_execution_subtasks(
+            crate::now_millis().saturating_sub(15_000),
+            &state.inner.execution_owner_id,
+        )
         .await
     {
         tracing::warn!(%error, root_session_id = %root_id, "failed to reconcile stale subtask owners");
@@ -1036,6 +1055,19 @@ mod tests {
             )
             .await
             .unwrap();
+        state
+            .inner
+            .store
+            .insert_execution_segment(
+                "root-stale",
+                "execution-stale",
+                "live-segment",
+                &state.inner.execution_owner_id,
+                "live-child",
+                100,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             state
                 .inner
@@ -1462,6 +1494,19 @@ mod tests {
             )
             .await
             .unwrap();
+        state
+            .inner
+            .store
+            .insert_execution_segment(
+                "root-stale",
+                "execution-stale",
+                "live-segment",
+                &state.inner.execution_owner_id,
+                "live-child",
+                100,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             state
                 .inner
@@ -1498,7 +1543,10 @@ mod tests {
             state
                 .inner
                 .store
-                .reconcile_stale_execution_segments(2_000)
+                .reconcile_stale_execution_segments(
+                    u64::MAX,
+                    &state.inner.execution_owner_id,
+                )
                 .await
                 .unwrap(),
             1
@@ -1511,11 +1559,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.completed_ms, 900);
-        assert!(snapshot.active_segments.is_empty());
+        assert!(snapshot.active_segments.contains_key("live-segment"));
         state
             .inner
             .store
-            .reconcile_stale_execution_subtasks(2_000)
+            .reconcile_stale_execution_subtasks(u64::MAX, &state.inner.execution_owner_id)
             .await
             .unwrap();
         assert_eq!(
@@ -1527,6 +1575,29 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("failed")
+        );
+        assert!(state
+            .inner
+            .store
+            .reopen_execution_subtask(
+                "execution-stale",
+                "root-stale",
+                "root-stale",
+                "dead-child",
+                &state.inner.execution_owner_id,
+                3_000,
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            state
+                .inner
+                .store
+                .execution_subtask_status("execution-stale", "dead-child")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("outstanding")
         );
         assert_eq!(
             state

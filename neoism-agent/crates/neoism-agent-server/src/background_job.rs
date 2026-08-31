@@ -83,6 +83,47 @@ pub(crate) async fn family_has_running_jobs(
     false
 }
 
+pub(crate) async fn running_jobs_for_family(
+    state: &AppState,
+    family: &std::collections::HashSet<String>,
+) -> (u64, Vec<neoism_agent_core::BackgroundJobRuntimeSnapshot>) {
+    loop {
+        let before = state.inner.background_jobs_revision.load(Ordering::Acquire);
+        let mut jobs = Vec::new();
+        for runtime in state.inner.workspace_runtimes.runtimes().await {
+            let Some(background) = runtime.background_if_allocated() else {
+                continue;
+            };
+            jobs.extend(
+                background
+                    .jobs
+                    .read()
+                    .await
+                    .values()
+                    .filter(|job| {
+                        job.status == BackgroundJobStatus::Running
+                            && family.contains(&job.session_id)
+                    })
+                    .map(|job| neoism_agent_core::BackgroundJobRuntimeSnapshot {
+                        job_id: job.id.clone(),
+                        session_id: job.session_id.clone(),
+                        started_at: job.started_at,
+                    }),
+            );
+        }
+        let after = state.inner.background_jobs_revision.load(Ordering::Acquire);
+        if before != after {
+            continue;
+        }
+        jobs.sort_by(|left, right| {
+            left.started_at
+                .cmp(&right.started_at)
+                .then_with(|| left.job_id.cmp(&right.job_id))
+        });
+        return (after, jobs);
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackgroundJob {
@@ -257,15 +298,21 @@ pub(crate) async fn start_background_task_tool(
         always_patterns: scan.always_patterns.iter().cloned().collect(),
         external_dirs: scan.external_dirs.iter().cloned().collect(),
     };
-    background.jobs.write()
-        .await
-        .insert(job_id.clone(), job.clone());
+    {
+        let mut jobs = background.jobs.write().await;
+        jobs.insert(job_id.clone(), job.clone());
+        state
+            .inner
+            .background_jobs_revision
+            .fetch_add(1, Ordering::AcqRel);
+    }
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     background.cancellations.write()
         .await
         .insert(job_id.clone(), cancel_tx);
     background.active_jobs.fetch_add(1, Ordering::AcqRel);
+    publish_background_jobs_updated(state, &background, &job.session_id).await;
     tokio::spawn(run_background_job(
         state.clone(),
         background,
@@ -521,10 +568,61 @@ async fn wait_for_background_job(
 }
 
 async fn finish_background_job(state: &AppState, background: &BackgroundWorkspaceRuntime, job: BackgroundJob) {
-    background.jobs.write()
-        .await
-        .insert(job.id.clone(), job.clone());
+    let session_id = job.session_id.clone();
+    {
+        let mut jobs = background.jobs.write().await;
+        jobs.insert(job.id.clone(), job.clone());
+        state
+            .inner
+            .background_jobs_revision
+            .fetch_add(1, Ordering::AcqRel);
+    }
+    publish_background_jobs_updated(state, background, &session_id).await;
     publish_background_job_completion(state, &job).await;
+}
+
+async fn publish_background_jobs_updated(
+    state: &AppState,
+    background: &BackgroundWorkspaceRuntime,
+    session_id: &str,
+) {
+    let root_id = match state.inner.store.get_session(session_id).await {
+        Ok(Some(session)) => crate::execution_activity::root_session_id(state, &session).await,
+        _ => session_id.to_string(),
+    };
+    let family = crate::v2_routes::session_family_ids(state, &root_id).await;
+    let (revision, jobs) = loop {
+        let before = state.inner.background_jobs_revision.load(Ordering::Acquire);
+        let jobs = background
+            .jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| {
+                job.status == BackgroundJobStatus::Running && family.contains(&job.session_id)
+            })
+            .map(|job| {
+                json!({
+                    "jobID": job.id.clone(),
+                    "sessionID": job.session_id.clone(),
+                    "startedAt": job.started_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        let after = state.inner.background_jobs_revision.load(Ordering::Acquire);
+        if before == after {
+            break (after, jobs);
+        }
+    };
+    state.publish(EventPayload::new(
+        event_type::SESSION_BACKGROUND_TASKS_UPDATED,
+        json!({
+            "sessionID": session_id,
+            "backgroundJobsEpoch": state.inner.execution_owner_id,
+            "backgroundJobsRevision": revision,
+            "runningBackgroundTasks": jobs,
+        }),
+    ));
 }
 
 async fn publish_background_job_completion(state: &AppState, job: &BackgroundJob) {

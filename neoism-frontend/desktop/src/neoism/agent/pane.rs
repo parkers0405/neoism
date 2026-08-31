@@ -295,6 +295,8 @@ pub(crate) struct CachedAgentRuntime {
     subagent_waiting_started_at: Option<Instant>,
     background_tasks_started_at: Option<Instant>,
     running_background_task_count: usize,
+    background_jobs_epoch: Option<String>,
+    background_jobs_revision: u64,
     abort_requested_at: Option<Instant>,
 }
 
@@ -310,6 +312,8 @@ impl Default for CachedAgentRuntime {
             subagent_waiting_started_at: None,
             background_tasks_started_at: None,
             running_background_task_count: 0,
+            background_jobs_epoch: None,
+            background_jobs_revision: 0,
             abort_requested_at: None,
         }
     }
@@ -954,6 +958,8 @@ pub struct NeoismAgentPane {
     subagent_waiting_started_at: Option<Instant>,
     background_tasks_started_at: Option<Instant>,
     running_background_task_count: usize,
+    background_jobs_epoch: Option<String>,
+    background_jobs_revision: u64,
     active_subagent_ids: BTreeSet<String>,
     active_subagent_started_at: HashMap<String, u64>,
     pub(super) execution_activity:
@@ -1175,6 +1181,8 @@ impl Default for NeoismAgentPane {
             subagent_waiting_started_at: None,
             background_tasks_started_at: None,
             running_background_task_count: 0,
+            background_jobs_epoch: None,
+            background_jobs_revision: 0,
             active_subagent_ids: BTreeSet::new(),
             active_subagent_started_at: HashMap::new(),
             execution_activity: None,

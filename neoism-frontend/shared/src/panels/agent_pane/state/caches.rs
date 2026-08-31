@@ -292,12 +292,36 @@ impl NeoismAgentPane {
     }
 
     pub fn running_background_task_count(&self) -> usize {
-        // Transcript lifecycle is authoritative. The cached field exists for
-        // session handoff and clock seeding, but snapshot merges can add a
-        // completion sentinel without passing through the live-event refresh
-        // path. Reading the cache here left `N background tasks running`
-        // latched forever even though the completed rows were already loaded.
-        running_background_task_count(&self.messages)
+        self.running_background_task_count
+    }
+
+    pub fn apply_running_background_tasks(
+        &mut self,
+        epoch: &str,
+        revision: u64,
+        tasks: &[(String, u64)],
+    ) -> bool {
+        if self.background_jobs_epoch.as_deref() == Some(epoch)
+            && revision <= self.background_jobs_revision
+        {
+            return false;
+        }
+        let count = tasks.len();
+        let started_at = tasks
+            .iter()
+            .map(|(_, started_at)| *started_at)
+            .min()
+            .map(super::instant_from_epoch_millis);
+        let changed = self.running_background_task_count != count
+            || self.background_tasks_started_at != started_at;
+        self.running_background_task_count = count;
+        self.background_tasks_started_at = started_at;
+        self.background_jobs_epoch = Some(epoch.to_string());
+        self.background_jobs_revision = revision;
+        if count == 0 {
+            self.background_task_details_expanded = false;
+        }
+        changed
     }
 
     pub(in crate::panels::agent_pane::state) fn running_background_task_started_at(

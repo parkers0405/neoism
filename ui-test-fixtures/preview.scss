@@ -1,0 +1,26 @@
+$added: #2ea043;
+$changed: #e3b341;
+$removed: #f85149;
+
+@mixin state-border($color) {
+  border-left: 3px solid $color;
+}
+
+.patch-preview {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr);
+  border-radius: 8px;
+  overflow: hidden;
+
+  &[data-state="added"] {
+    @include state-border($added);
+  }
+
+  &[data-state="changed"] {
+    @include state-border($changed);
+  }
+
+  &[data-state="removed"] {
+    @include state-border($removed);
+  }
+}

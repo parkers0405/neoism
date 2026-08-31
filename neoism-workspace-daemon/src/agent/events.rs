@@ -231,10 +231,54 @@ pub(crate) fn forward_agent_server_event(
                             branches_authoritative: false,
                             branches: Vec::new(),
                             execution: Some(snapshot),
+                            running_background_tasks: None,
+                            background_jobs_epoch: None,
+                            background_jobs_revision: None,
                         },
                     });
                     return;
                 }
+            }
+        }
+        "session.background_tasks.updated" => {
+            let epoch = properties
+                .get("backgroundJobsEpoch")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let revision = properties
+                .get("backgroundJobsRevision")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let tasks = properties
+                .get("runningBackgroundTasks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|task| {
+                    Some(neoism_protocol::agent::BackgroundJobRuntime {
+                        job_id: task
+                            .get("jobID")
+                            .or_else(|| task.get("jobId"))?
+                            .as_str()?
+                            .to_string(),
+                        session_id: task
+                            .get("sessionID")
+                            .or_else(|| task.get("sessionId"))?
+                            .as_str()?
+                            .to_string(),
+                        started_at: task.get("startedAt")?.as_u64()?,
+                    })
+                })
+                .collect();
+            if !epoch.is_empty() {
+                let _ = tx.send(AgentServerMessage::BackgroundTasksUpdated {
+                    session_id: source_session,
+                    epoch,
+                    revision,
+                    tasks,
+                });
+                return;
             }
         }
         "session.subtask.completed" => {
@@ -764,6 +808,40 @@ mod tests {
         };
         assert!(!snapshot.branches_authoritative);
         assert_eq!(snapshot.execution.unwrap().completed_ms, 2_500);
+    }
+
+    #[test]
+    fn background_runtime_event_maps_to_versioned_protocol_update() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "session.background_tasks.updated",
+                "properties": {
+                    "sessionID": "root",
+                    "backgroundJobsEpoch": "server-a",
+                    "backgroundJobsRevision": 7,
+                    "runningBackgroundTasks": [{
+                        "jobID": "job-1",
+                        "sessionID": "root",
+                        "startedAt": 123
+                    }]
+                }
+            }),
+        );
+        let AgentServerMessage::BackgroundTasksUpdated {
+            epoch,
+            revision,
+            tasks,
+            ..
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("expected background runtime update");
+        };
+        assert_eq!(epoch, "server-a");
+        assert_eq!(revision, 7);
+        assert_eq!(tasks[0].job_id, "job-1");
     }
 
     #[test]

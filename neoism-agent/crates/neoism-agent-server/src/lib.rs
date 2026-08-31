@@ -36,6 +36,7 @@ mod mcp_auth;
 mod mcp_routes;
 mod message_model;
 mod message_part_mutation;
+mod management;
 mod model_selection;
 mod openapi;
 pub use openapi::canonical_openapi;
@@ -100,6 +101,7 @@ pub(crate) use agent_tool_registry::{
 };
 use anyhow::Context;
 pub use app_router::app;
+pub use management::ManagementPolicy;
 #[cfg(test)]
 use command_routes::{command_arguments, expand_command_template};
 #[cfg(test)]

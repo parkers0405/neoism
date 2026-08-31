@@ -17,6 +17,9 @@
       "path": "packages/plugin-subagents"
     },
     {
+      "path": "packages/plugin-builtins"
+    },
+    {
       "path": "packages/all"
     },
     {

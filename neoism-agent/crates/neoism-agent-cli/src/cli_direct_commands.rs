@@ -137,12 +137,14 @@ pub(super) async fn run(
             Some(UserModel {
                 provider_id,
                 model_id,
+                connection_id: None,
                 variant: variant.clone(),
             })
         }
         (provider, model) => Some(UserModel {
             provider_id: provider.unwrap_or_else(|| "openai".to_string()),
             model_id: model.unwrap_or_else(|| "gpt-4.1-mini".to_string()),
+            connection_id: None,
             variant: variant.clone(),
         }),
     };

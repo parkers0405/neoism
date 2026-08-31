@@ -103,6 +103,24 @@ impl neoism_agent_builtins::plugin::lsp::LspHost for Lsp {
 
 pub(crate) struct Mcp(pub(crate) crate::state::AppState);
 
+fn route_caller_claims(
+    request: &neoism_agent_plugin_api::RouteRequest,
+) -> Option<axum::extract::Extension<crate::caller::CallerClaims>> {
+    request.tenant_id.as_ref().map(|tenant_id| axum::extract::Extension(crate::caller::CallerClaims {
+        subject: request.actor.clone().unwrap_or_else(|| "plugin-route".into()),
+        workspace_id: request.workspace_id.clone(),
+        tenant_id: tenant_id.clone(),
+        directory_prefixes: request.workspace.as_ref().map(|path| vec![path.display().to_string()]).unwrap_or_default(),
+        hosted: request.hosted,
+        max_sessions: None,
+        max_artifacts: None,
+        max_artifact_bytes: None,
+        artifact_retention_days: None,
+        requests_per_minute: None,
+        max_in_flight: None,
+    }))
+}
+
 impl neoism_agent_builtins::plugin::mcp::McpHost for Mcp {
     fn register_tools(&self, registrar: &mut PluginContributions) {
         registrar.tool("execute", None);
@@ -116,42 +134,43 @@ impl neoism_agent_builtins::plugin::mcp::McpHost for Mcp {
             let query = route_query(&request);
             let state = State(self.0.clone());
             let headers = axum::http::HeaderMap::new();
+            let claims = route_caller_claims(&request);
             let name = request.path.get("name").cloned().unwrap_or_default();
             if matches!(action, McpAction::AuthCallbackGet) {
                 let response = crate::mcp_routes::mcp_auth_callback_get(
-                    state, Path(name), Query(query_value(query)?), headers,
+                    state, claims, Path(name), Query(query_value(query)?), headers,
                 ).await.map_err(api_error)?;
                 let mut response = neoism_agent_plugin_api::RouteResponse::json(200, serde_json::Value::String(response.0));
                 response.headers.insert("content-type".into(), "text/html; charset=utf-8".into());
                 return Ok(response);
             }
             let value = match action {
-                McpAction::Status => serde_json::to_value(crate::mcp_routes::mcp_status(state, Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Status => serde_json::to_value(crate::mcp_routes::mcp_status(state, claims, Query(query_value(query)?), headers).await.map_err(api_error)?.0),
                 McpAction::Add => {
                     let body = serde_json::from_value(request.body).map_err(runtime_error)?;
-                    serde_json::to_value(crate::mcp_routes::mcp_add(Json(body)).await.0)
+                    serde_json::to_value(crate::mcp_routes::mcp_add(state, claims, Json(body)).await.map_err(api_error)?.0)
                 }
-                McpAction::Catalog => serde_json::to_value(crate::mcp_routes::mcp_catalog(state, Query(query_value(query)?), headers).await.map_err(api_error)?.0),
-                McpAction::AuthStart => serde_json::to_value(crate::mcp_routes::mcp_auth_start(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
-                McpAction::AuthRemove => serde_json::to_value(crate::mcp_routes::mcp_auth_remove(state, Query(query_value(query)?), Path(name), headers).await.map_err(api_error)?.0),
+                McpAction::Catalog => serde_json::to_value(crate::mcp_routes::mcp_catalog(state, claims, Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::AuthStart => serde_json::to_value(crate::mcp_routes::mcp_auth_start(state, claims, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::AuthRemove => serde_json::to_value(crate::mcp_routes::mcp_auth_remove(state, claims, Query(query_value(query)?), Path(name), headers).await.map_err(api_error)?.0),
                 McpAction::AuthCallbackPost => {
                     let body = serde_json::from_value(request.body).map_err(runtime_error)?;
-                    serde_json::to_value(crate::mcp_routes::mcp_auth_callback(state, Path(name), Query(query_value(query)?), headers, Json(body)).await.map_err(api_error)?.0)
+                    serde_json::to_value(crate::mcp_routes::mcp_auth_callback(state, claims, Path(name), Query(query_value(query)?), headers, Json(body)).await.map_err(api_error)?.0)
                 }
-                McpAction::Authenticate => serde_json::to_value(crate::mcp_routes::mcp_auth_authenticate(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
-                McpAction::Connect => serde_json::to_value(crate::mcp_routes::mcp_connect(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Authenticate => serde_json::to_value(crate::mcp_routes::mcp_auth_authenticate(state, claims, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Connect => serde_json::to_value(crate::mcp_routes::mcp_connect(state, claims, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
                 McpAction::Disconnect => serde_json::to_value(crate::mcp_routes::mcp_disconnect(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
                 McpAction::Config => {
                     let body = serde_json::from_value(request.body).map_err(runtime_error)?;
-                    serde_json::to_value(crate::mcp_routes::mcp_config_patch(state, Path(name), Query(query_value(query)?), headers, Json(body)).await.map_err(api_error)?.0)
+                    serde_json::to_value(crate::mcp_routes::mcp_config_patch(state, claims, Path(name), Query(query_value(query)?), headers, Json(body)).await.map_err(api_error)?.0)
                 }
-                McpAction::Tools => serde_json::to_value(crate::mcp_routes::mcp_tools(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Tools => serde_json::to_value(crate::mcp_routes::mcp_tools(state, claims, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
                 McpAction::ToolCall => {
                     let tool_name = request.path.get("tool_name").cloned().unwrap_or_default();
-                    serde_json::to_value(crate::mcp_routes::mcp_tool_call(state, Path((name, tool_name)), Query(query_value(query)?), headers, Json(request.body)).await.map_err(api_error)?.0)
+                    serde_json::to_value(crate::mcp_routes::mcp_tool_call(state, claims, Path((name, tool_name)), Query(query_value(query)?), headers, Json(request.body)).await.map_err(api_error)?.0)
                 }
-                McpAction::Resources => serde_json::to_value(crate::mcp_routes::mcp_resources(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
-                McpAction::Prompts => serde_json::to_value(crate::mcp_routes::mcp_prompts(state, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Resources => serde_json::to_value(crate::mcp_routes::mcp_resources(state, claims, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
+                McpAction::Prompts => serde_json::to_value(crate::mcp_routes::mcp_prompts(state, claims, Path(name), Query(query_value(query)?), headers).await.map_err(api_error)?.0),
                 McpAction::AuthCallbackGet => unreachable!(),
             }.map_err(runtime_error)?;
             Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
@@ -315,16 +334,23 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
             use neoism_agent_builtins::plugin::workflows::WorkflowAction;
             let query = route_query(&request);
             let state = State(self.0.clone());
-            let headers = axum::http::HeaderMap::new();
+            let headers = header_map(&request.headers);
             let workflow_id = request.path.get("workflow_id").cloned().unwrap_or_default();
+            let run_id = request.path.get("run_id").cloned().unwrap_or_default();
             let value = match action {
                 WorkflowAction::List => crate::workflow::workflow_list(state, Query(query_value(query)?), headers).await.map_err(api_error)?.0,
+                WorkflowAction::Create => return crate::workflow::workflow_create(&self.0, request.workspace.as_deref(), request.actor.as_deref(), &headers, request.body).await,
                 WorkflowAction::Get => crate::workflow::workflow_get(state, Query(query_value(query)?), headers, Path(workflow_id)).await.map_err(api_error)?.0,
+                WorkflowAction::Update => return crate::workflow::workflow_update(&self.0, request.workspace.as_deref(), request.actor.as_deref(), &headers, &workflow_id, request.body, false).await,
+                WorkflowAction::Patch => return crate::workflow::workflow_update(&self.0, request.workspace.as_deref(), request.actor.as_deref(), &headers, &workflow_id, request.body, true).await,
+                WorkflowAction::Delete => return crate::workflow::workflow_delete(&self.0, request.workspace.as_deref(), request.actor.as_deref(), &headers, &workflow_id, &request.query).await,
                 WorkflowAction::Activate => crate::workflow::workflow_activate(state, Query(query_value(query)?), headers, Path(workflow_id)).await.map_err(api_error)?.0,
                 WorkflowAction::Pause => crate::workflow::workflow_pause(state, Query(query_value(query)?), headers, Path(workflow_id)).await.map_err(api_error)?.0,
                 WorkflowAction::Run => crate::workflow::workflow_run_now(state, Query(query_value(query)?), headers, Path(workflow_id)).await.map_err(api_error)?.0,
                 WorkflowAction::Preview => crate::workflow::workflow_preview(state, Query(query_value(query)?), headers, Path(workflow_id)).await.map_err(api_error)?.0,
                 WorkflowAction::History => crate::workflow::workflow_history(state, Query(query_value(query)?), headers, Path(workflow_id)).await.map_err(api_error)?.0,
+                WorkflowAction::RunGet => crate::workflow::workflow_run_get(state, Query(query_value(query)?), headers, Path((workflow_id, run_id))).await.map_err(api_error)?.0,
+                WorkflowAction::RunRetry => crate::workflow::workflow_run_retry(state, Query(query_value(query)?), headers, Path((workflow_id, run_id))).await.map_err(api_error)?.0,
             };
             Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
         })

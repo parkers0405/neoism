@@ -1,6 +1,15 @@
 use super::*;
 
 impl NeoismAgentPane {
+    pub(crate) fn clear_pending_interactions(&mut self) {
+        self.pending_permission = None;
+        self.pending_permission_queue.clear();
+        self.pending_question = None;
+        self.pending_question_queue.clear();
+        self.permission_choice_hit_rects.clear();
+        self.clear_question_option_rects();
+    }
+
     pub fn pending_permission(&self) -> Option<&NeoismAgentPendingPermission> {
         self.pending_permission.as_ref()
     }

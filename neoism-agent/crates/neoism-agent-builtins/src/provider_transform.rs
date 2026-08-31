@@ -647,6 +647,7 @@ mod tests {
     fn openrouter_request_quirks_add_usage_and_reasoning() {
         let request = ProviderGenerationRequest {
             session_id: None,
+            connection_id: None, tenant_id: None, workspace_id: None,
             provider_id: "openrouter".to_string(),
             model_id: "openai/gpt-5".to_string(),
             variant: Some("high".to_string()),
@@ -674,6 +675,7 @@ mod tests {
     fn openai_compatible_reasoning_quirks_match_common_thinking_providers() {
         let mut request = ProviderGenerationRequest {
             session_id: None,
+            connection_id: None, tenant_id: None, workspace_id: None,
             provider_id: "alibaba-cn".to_string(),
             model_id: "qwen3-plus".to_string(),
             variant: Some("xhigh".to_string()),
@@ -706,6 +708,7 @@ mod tests {
     fn openai_sdk_gpt5_defaults_medium_reasoning_when_variant_is_absent() {
         let request = ProviderGenerationRequest {
             session_id: None,
+            connection_id: None, tenant_id: None, workspace_id: None,
             provider_id: "openai".to_string(),
             model_id: "gpt-5.5".to_string(),
             variant: None,
@@ -732,6 +735,7 @@ mod tests {
     fn normalizes_tool_call_ids_for_model_families() {
         let request = normalize_request(ProviderGenerationRequest {
             session_id: None,
+            connection_id: None, tenant_id: None, workspace_id: None,
             provider_id: "openai".to_string(),
             model_id: "claude-sonnet-4".to_string(),
             variant: None,
@@ -769,6 +773,7 @@ mod tests {
     fn normalizes_tool_call_ids_for_provider_families() {
         let request = normalize_request(ProviderGenerationRequest {
             session_id: None,
+            connection_id: None, tenant_id: None, workspace_id: None,
             provider_id: "anthropic".to_string(),
             model_id: "sonnet-latest".to_string(),
             variant: None,
@@ -801,6 +806,7 @@ mod tests {
     fn anthropic_sequence_filters_empty_messages_and_splits_tool_call_text() {
         let request = normalize_request(ProviderGenerationRequest {
             session_id: None,
+            connection_id: None, tenant_id: None, workspace_id: None,
             provider_id: "amazon-bedrock".to_string(),
             model_id: "anthropic.claude-sonnet-4".to_string(),
             variant: None,
@@ -836,6 +842,7 @@ mod tests {
     fn mistral_sequence_inserts_assistant_between_tool_and_user() {
         let request = normalize_request(ProviderGenerationRequest {
             session_id: None,
+            connection_id: None, tenant_id: None, workspace_id: None,
             provider_id: "openai".to_string(),
             model_id: "mistral-medium".to_string(),
             variant: None,

@@ -76,6 +76,16 @@ pub fn provision_from_git(
     request: GitWorkspaceRequest,
     root: &Path,
 ) -> Result<ProvisionedPath, ProvisionError> {
+    provision_from_git_with_depth(request, root, None)
+}
+
+/// Management-plane variant of the existing provisioner. Depth is bounded by
+/// the public service contract and applies only to a fresh clone.
+pub fn provision_from_git_with_depth(
+    request: GitWorkspaceRequest,
+    root: &Path,
+    depth: Option<u32>,
+) -> Result<ProvisionedPath, ProvisionError> {
     let git_url = request.git_url.trim().to_string();
     if git_url.is_empty() {
         return Err(ProvisionError::MissingGitUrl);
@@ -95,7 +105,7 @@ pub fn provision_from_git(
             updated = true;
         }
     } else {
-        clone_repo(&git_url, &path)?;
+        clone_repo(&git_url, &path, depth)?;
         cloned = true;
         if let Some(git_ref) = request.git_ref.as_deref() {
             checkout_ref(&path, git_ref)?;
@@ -154,8 +164,17 @@ fn short_hash(value: &str) -> String {
     out
 }
 
-fn clone_repo(git_url: &str, path: &Path) -> Result<(), ProvisionError> {
-    run_git(["clone", "--", git_url, path_to_str(path)?], None)
+fn clone_repo(git_url: &str, path: &Path, depth: Option<u32>) -> Result<(), ProvisionError> {
+    let mut command = Command::new("git");
+    #[cfg(windows)]
+    crate::hide_std_command(&mut command);
+    command.arg("clone");
+    let depth_value = depth.map(|value| value.to_string());
+    if let Some(value) = depth_value.as_deref() { command.args(["--depth", value]); }
+    command.arg("--").arg(git_url).arg(path);
+    let output = command.output()?;
+    if output.status.success() { return Ok(()); }
+    Err(ProvisionError::Git(command_error(&output)))
 }
 
 fn update_existing_repo(
@@ -197,9 +216,13 @@ fn run_git<const N: usize>(
     if output.status.success() {
         return Ok(());
     }
+    Err(ProvisionError::Git(command_error(&output)))
+}
+
+fn command_error(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Err(ProvisionError::Git(format!(
+    format!(
         "{}{}",
         stderr.trim(),
         if stderr.trim().is_empty() {
@@ -209,7 +232,7 @@ fn run_git<const N: usize>(
         } else {
             format!("; {}", stdout.trim())
         }
-    )))
+    )
 }
 
 fn has_upstream(path: &Path) -> bool {
@@ -242,10 +265,6 @@ fn write_marker(
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
     )?;
     Ok(())
-}
-
-fn path_to_str(path: &Path) -> Result<&str, ProvisionError> {
-    path.to_str().ok_or(ProvisionError::InvalidGitUrl)
 }
 
 #[cfg(test)]

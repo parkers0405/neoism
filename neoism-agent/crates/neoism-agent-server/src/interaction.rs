@@ -1,10 +1,8 @@
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Json};
-use neoism_agent_core::{
-    event_type, EventPayload, PermissionRequestInfo, QuestionRequestInfo,
-};
+use neoism_agent_core::{event_type, EventPayload, QuestionRequestInfo};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -32,20 +30,23 @@ pub(crate) async fn permission_list(
     State(state): State<AppState>,
     Query(query): Query<InteractionListQuery>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
-) -> Json<Vec<PermissionRequestInfo>> {
+) -> Json<Vec<Value>> {
     let allowed_sessions = allowed_sessions(&state, claims.as_ref().map(|Extension(claims)| claims)).await;
-    Json(
-        state
-            .inner
-            .permissions
-            .read()
-            .await
-            .values()
-            .filter(|request| query.session_id.as_ref().is_none_or(|id| &request.session_id == id))
-            .filter(|request| allowed_sessions.as_ref().is_none_or(|ids| ids.contains(&request.session_id)))
-            .cloned()
-            .collect(),
-    )
+    let requests = state
+        .inner
+        .permissions
+        .read()
+        .await
+        .values()
+        .filter(|request| query.session_id.as_ref().is_none_or(|id| &request.session_id == id))
+        .filter(|request| allowed_sessions.as_ref().is_none_or(|ids| ids.contains(&request.session_id)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut enriched = Vec::with_capacity(requests.len());
+    for request in requests {
+        enriched.push(crate::permission_runtime::permission_request_payload(&state, &request).await);
+    }
+    Json(enriched)
 }
 
 pub(crate) async fn permission_reply(

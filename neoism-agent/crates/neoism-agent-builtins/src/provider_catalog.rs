@@ -609,9 +609,9 @@ pub fn generation_metadata(
 /// far smaller context windows than the platform API for the same model ids
 /// (gpt-5.6-sol: ~372k vs 1.05M), so limit resolution must follow the same
 /// dispatch rule the runtime uses.
-pub fn openai_codex_oauth(auth_store: &crate::auth_store::AuthStore) -> bool {
+pub async fn openai_codex_oauth(auth_store: &crate::auth_store::AuthStore) -> bool {
     matches!(
-        auth_store.get("openai"),
+        auth_store.get("openai").await,
         Ok(Some(neoism_agent_core::AuthInfo::OAuth { .. }))
     )
 }
@@ -871,6 +871,7 @@ mod tests {
         let model = UserModel {
             provider_id: "openrouter".to_string(),
             model_id: "openai/gpt-5".to_string(),
+            connection_id: None,
             variant: None,
         };
 
@@ -897,6 +898,7 @@ mod tests {
         let model = UserModel {
             provider_id: "openai".to_string(),
             model_id: "gpt-5.5".to_string(),
+            connection_id: None,
             variant: None,
         };
 

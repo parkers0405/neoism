@@ -24,6 +24,7 @@
   "dependencies": {
     "@neoism/sdk-core": "0.7.55",
     "@neoism/sdk-http": "0.7.55",
+    "@neoism/sdk-plugin-builtins": "0.7.55",
     "@neoism/sdk-plugin-subagents": "0.7.55"
   }
 }

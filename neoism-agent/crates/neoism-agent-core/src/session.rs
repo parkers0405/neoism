@@ -11,6 +11,8 @@ use crate::permission::PermissionAction;
 pub struct ModelRef {
     pub id: String,
     pub provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
 }
@@ -136,6 +138,8 @@ pub struct AssistantMessage {
 pub struct UserModel {
     pub provider_id: String,
     pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
 }

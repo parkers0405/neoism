@@ -141,6 +141,14 @@ impl NeoismAgentPane {
         self.selection_anchor.is_some() && self.selection_focus.is_some()
     }
 
+    pub fn selection_is_plain_click(&self) -> bool {
+        self.selection_anchor
+            .zip(self.selection_focus)
+            .is_some_and(|(anchor, focus)| {
+                same_selection_row(anchor, focus) && (anchor.x - focus.x).abs() < 1.0
+            })
+    }
+
     pub fn suppress_markdown_interactions(&self) -> bool {
         if self.has_active_selection() {
             return false;
@@ -155,7 +163,8 @@ impl NeoismAgentPane {
 
     pub(super) fn timeline_interaction_settle_active(&self) -> bool {
         self.timeline_last_scroll_at.is_some_and(|last| {
-            Instant::now().saturating_duration_since(last) < Self::MARKDOWN_INTERACTION_SETTLE
+            Instant::now().saturating_duration_since(last)
+                < Self::MARKDOWN_INTERACTION_SETTLE
         })
     }
 

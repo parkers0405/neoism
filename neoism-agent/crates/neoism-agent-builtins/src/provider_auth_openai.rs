@@ -126,6 +126,8 @@ fn openai_browser_authorization(
         instructions:
             "Complete authorization in your browser. This window will close automatically."
                 .to_string(),
+        attempt_id: None,
+        expires_at: None,
     }
 }
 
@@ -223,6 +225,8 @@ pub(super) async fn authorize_openai_headless(
         url: format!("{issuer}/codex/device"),
         method: ProviderAuthAuthorizationMethod::Auto,
         instructions: format!("Enter code: {}", response.user_code),
+        attempt_id: None,
+        expires_at: None,
     })
 }
 

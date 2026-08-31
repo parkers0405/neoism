@@ -250,18 +250,25 @@ impl NeoismAgentPane {
         if let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) {
             match kind {
                 NeoismAgentPickerKind::ConnectSecret => {
-                    if let Some(provider_id) =
-                        self.connect.as_ref().and_then(|flow| flow.provider_id())
-                    {
-                        self.enter_connect_auth(&provider_id);
-                        return;
-                    }
+                    if self.connect.as_ref().and_then(|flow| flow.provider_id()).is_some() { self.open_connect_auth_methods(); return; }
                     self.close_connect();
                     return;
                 }
+                NeoismAgentPickerKind::ConnectLabel | NeoismAgentPickerKind::ConnectAccountActions | NeoismAgentPickerKind::ConnectConfirm => {
+                    if let Some((provider_id, connections)) = self.connect.as_ref().and_then(|flow| flow.provider_id().map(|id| (id, flow.connections.clone()))) {
+                        self.open_account_picker(NeoismAgentPickerKind::ConnectAccount, &provider_id, &connections);
+                        return;
+                    }
+                }
+                NeoismAgentPickerKind::ConnectAccount => { self.reopen_connect_provider_picker(); return; }
+                NeoismAgentPickerKind::ModelAccount => { self.close_connect(); self.pending_account_model = None; return; }
                 NeoismAgentPickerKind::ConnectAuth => {
-                    self.reopen_connect_provider_picker();
-                    return;
+                    if let Some((provider_id, connections)) = self.connect.as_ref().and_then(|flow| flow.provider_id().map(|id| (id, flow.connections.clone()))) {
+                        if let Some(flow) = self.connect.as_mut() { flow.reset_account_addition(); }
+                        self.open_account_picker(NeoismAgentPickerKind::ConnectAccount, &provider_id, &connections);
+                        return;
+                    }
+                    self.reopen_connect_provider_picker(); return;
                 }
                 NeoismAgentPickerKind::Connect => {
                     self.close_connect();

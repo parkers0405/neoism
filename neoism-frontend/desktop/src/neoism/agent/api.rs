@@ -10,8 +10,8 @@ use crate::neoism::agent::side_panel::{NeoismAgentSessionEntry, SessionGoal};
 use crate::neoism::icon::AgentKind;
 
 use super::pane::{
-    NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind, NeoismAgentTodo,
-    NeoismAgentUsage,
+    NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind,
+    NeoismAgentPendingPermission, NeoismAgentTodo, NeoismAgentUsage,
 };
 use super::picker::NeoismAgentPickerOption;
 
@@ -656,6 +656,25 @@ mod subagent_runtime_snapshot_tests {
     }
 
     #[test]
+    fn pending_permission_snapshot_uses_live_event_shape() {
+        let permissions = parse_pending_permissions(&serde_json::json!([{
+            "id": "perm-1",
+            "sessionId": "child-1",
+            "messageId": "msg-1",
+            "title": "Read outside workspace",
+            "permission": "external_directory",
+            "patterns": ["/tmp/shared/**"]
+        }]))
+        .unwrap();
+
+        assert_eq!(permissions.len(), 1);
+        assert_eq!(permissions[0].id, "perm-1");
+        assert_eq!(permissions[0].session_id, "child-1");
+        assert_eq!(permissions[0].permission, "external_directory");
+        assert_eq!(permissions[0].patterns, ["/tmp/shared/**"]);
+    }
+
+    #[test]
     fn desktop_agent_api_source_contains_no_deleted_http_routes() {
         let source = include_str!("api.rs");
         for route in ["config", "agent", "skill"] {
@@ -946,6 +965,86 @@ pub(super) fn fetch_session_statuses(
         .collect())
 }
 
+pub(super) fn fetch_pending_permissions(
+    server: &str,
+) -> Result<Vec<NeoismAgentPendingPermission>, String> {
+    let value = api_request_json(server, "GET", "/v2/interactions/permissions", None)?
+        .ok_or_else(|| {
+            "Neoism Agent returned an empty permissions response".to_string()
+        })?;
+    parse_pending_permissions(&value)
+}
+
+pub(super) fn fetch_pending_questions(
+    server: &str,
+) -> Result<Vec<neoism_ui::panels::agent_pane::question_policy::NeoismAgentPendingQuestion>, String>
+{
+    let value = api_request_json(server, "GET", "/v2/interactions/questions", None)?
+        .ok_or_else(|| "Neoism Agent returned an empty questions response".to_string())?;
+    let requests = value
+        .as_array()
+        .ok_or_else(|| "Neoism Agent returned malformed pending questions".to_string())?;
+    Ok(requests
+        .iter()
+        .map(
+            neoism_ui::panels::agent_pane::question_policy::question_request_from_event,
+        )
+        .filter(|question| !question.id.is_empty() && !question.questions.is_empty())
+        .collect())
+}
+
+fn parse_pending_permissions(value: &Value) -> Result<Vec<NeoismAgentPendingPermission>, String> {
+    let requests = value.as_array().ok_or_else(|| {
+        "Neoism Agent returned malformed pending permissions".to_string()
+    })?;
+    Ok(requests
+        .iter()
+        .filter_map(|request| {
+            Some(NeoismAgentPendingPermission {
+                id: request.get("id")?.as_str()?.to_string(),
+                session_id: request
+                    .get("sessionId")
+                    .or_else(|| request.get("sessionID"))?
+                    .as_str()?
+                    .to_string(),
+                parent_session_id: request
+                    .get("parentSessionID")
+                    .or_else(|| request.get("parentSessionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                source_agent: request
+                    .get("sourceAgent")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                source_title: request
+                    .get("sourceTitle")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                title: request
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Allow tool?")
+                    .to_string(),
+                permission: request
+                    .get("permission")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                patterns: request
+                    .get("patterns")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+                selected: 0,
+                responding: false,
+            })
+        })
+        .collect())
+}
+
 pub(super) fn fetch_config_defaults(
     server: &str,
     directory: Option<&str>,
@@ -1120,12 +1219,12 @@ fn response_json(response: HttpResponse) -> Result<Option<Value>, String> {
         .map_err(|error| format!("Neoism Agent returned invalid JSON: {error}"))
 }
 
-pub(super) fn prompt_model_json(model: &str, thinking: Option<&str>) -> Option<Value> {
-    neoism_ui::panels::agent_pane::api_mapping::prompt_model_json(model, thinking)
+pub(super) fn prompt_model_json(model: &str, thinking: Option<&str>, connection_id: Option<&str>) -> Option<Value> {
+    neoism_ui::panels::agent_pane::api_mapping::prompt_model_json_with_connection(model, thinking, connection_id)
 }
 
-pub(super) fn session_model_json(model: &str, thinking: Option<&str>) -> Option<Value> {
-    neoism_ui::panels::agent_pane::api_mapping::session_model_json(model, thinking)
+pub(super) fn session_model_json(model: &str, thinking: Option<&str>, connection_id: Option<&str>) -> Option<Value> {
+    neoism_ui::panels::agent_pane::api_mapping::session_model_json_with_connection(model, thinking, connection_id)
 }
 
 pub(super) fn normalize_model_ref(model: &str) -> String {

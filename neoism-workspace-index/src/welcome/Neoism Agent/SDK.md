@@ -7,11 +7,10 @@
 | Package | Contents |
 |---|---|
 | `@neoism/sdk` | The recommended package: typed client, HTTP transport, events, and supported plugin clients. |
-| `@neoism/sdk-core` | The generated contract (every operation and schema), a typed client façade, and the plugin-extension model. |
-| `@neoism/sdk-http` | Fetch transport with SSE streaming, `Last-Event-ID` resume, sequence dedupe, and bounded reconnect backoff. |
-| `@neoism/sdk-node` | Node re-exports of core + http. |
-| `@neoism/plugin` | The serve-plugin author API (`definePlugin` / `runPlugin`) — see [[Plugins]]. |
-| `@neoism/sdk-all` | Legacy bundle retained for compatibility; prefer `@neoism/sdk`. |
+| `@neoism/plugin` | The separate serve-plugin author API (`definePlugin` / `runPlugin`) - see [[Plugins]]. |
+
+Core, transport, and compatibility packages exist as implementation layers;
+applications should depend only on `@neoism/sdk`.
 
 ## Use it
 
@@ -28,12 +27,38 @@ const client = createHttpClient({
 });
 
 // Curated façade calls, or the full generated surface by operation id:
-const sessions = await client.operations.request("v2.sessions.list", {});
+const sessions = await client.sessions.list();
 await client.operations.request("v2.sessions.prompt", {
-  path: { session_id: sessions[0].id },
+  path: { session_id: sessions.items[0].id },
   body: { prompt: "summarize the last change", delivery: "queue" },
 });
 ```
+
+## Optional capabilities
+
+Plugin-owned features are typed but never assumed to exist. Use capability
+binding for agents, commands, providers, skills, goals, LSP, MCP, PTY,
+semantic search, subagents, VCS, and workflows:
+
+```ts
+import { workflows } from "@neoism/sdk";
+
+const workflowClient = await client.plugins.tryUse(workflows, {
+  directory: "/workspace",
+});
+if (workflowClient) {
+  console.log(await workflowClient.list("/workspace"));
+}
+```
+
+`use()` throws `CapabilityUnavailableError` when a required capability is not
+enabled. `tryUse()` returns `undefined` for optional UI surfaces. The complete
+generated `client.operations` surface remains available for forward-compatible
+or custom protocol use.
+
+Session-scoped event subscriptions include descendant sessions. This is how an
+external client renders main-agent and subagent activity from one SSE stream,
+just as Neoism GUI does; subagent creation remains controlled by the main agent.
 
 ## Typed events
 

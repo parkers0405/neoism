@@ -52,6 +52,11 @@ impl PluginDefinition for ProvidersPlugin {
             ("v2.providers.authRemove", RouteMethod::Delete, "/v2/providers/:provider_id/auth", ProviderRouteAction::AuthRemove),
             ("v2.providers.oauthAuthorize", RouteMethod::Post, "/v2/providers/:provider_id/oauth/authorize", ProviderRouteAction::OAuthAuthorize),
             ("v2.providers.oauthCallback", RouteMethod::Post, "/v2/providers/:provider_id/oauth/callback", ProviderRouteAction::OAuthCallback),
+            ("v2.providers.connections.list", RouteMethod::Get, "/v2/providers/:provider_id/connections", ProviderRouteAction::ConnectionsList),
+            ("v2.providers.connections.create", RouteMethod::Post, "/v2/providers/:provider_id/connections", ProviderRouteAction::ConnectionsCreate),
+            ("v2.providers.connections.rename", RouteMethod::Patch, "/v2/providers/:provider_id/connections/:connection_id", ProviderRouteAction::ConnectionsRename),
+            ("v2.providers.connections.delete", RouteMethod::Delete, "/v2/providers/:provider_id/connections/:connection_id", ProviderRouteAction::ConnectionsDelete),
+            ("v2.providers.connections.setDefault", RouteMethod::Post, "/v2/providers/:provider_id/connections/:connection_id/default", ProviderRouteAction::ConnectionsSetDefault),
         ] {
             registrar.runtime_route(RouteContribution {
                 descriptor: RouteDescriptor {
@@ -78,10 +83,15 @@ struct ProviderRoute {
 impl RouteHandler for ProviderRoute {
     fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
         let provider_id = request.path.get("provider_id").cloned();
+        let connection_id = request.path.get("connection_id").cloned();
         Box::pin(async move {
             self.service.route(ProviderRouteRequest {
                 action: self.action,
                 provider_id,
+                connection_id,
+                tenant_id: request.tenant_id,
+                workspace_id: request.workspace_id,
+                hosted: request.hosted,
                 body: request.body,
             }).await
         })

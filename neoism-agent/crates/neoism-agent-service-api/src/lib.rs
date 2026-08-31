@@ -13,6 +13,26 @@ use std::sync::atomic::AtomicBool;
 use serde_json::Value;
 
 pub mod daemon_credential;
+pub mod mcp_credentials;
+pub mod provider_credentials;
+pub use mcp_credentials::{
+    LocalMcpCredentialStore, McpConnectionRef, McpCredential, McpCredentialStore,
+    McpOAuthAttempt, McpOAuthClientRegistration, McpOAuthTokens,
+};
+
+pub mod workspace_management;
+
+pub use provider_credentials::{
+    CreateProviderConnection, CredentialScope, LocalProviderCredentialStore,
+    ProviderConnectionRef, ProviderConnectionSummary, ProviderCredential,
+    ProviderCredentialStore,
+};
+
+pub use workspace_management::{
+    CreateRepositoryRequest, CreateWorkspaceRequest, ManagedRepository,
+    ManagedRepositoryMetadata, ManagedWorkspace, StandaloneWorkspaceManagementService,
+    UpdateRepositoryRequest, UpdateWorkspaceRequest, WorkspaceManagementService,
+};
 
 pub type ServiceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -747,6 +767,9 @@ pub struct AgentServices {
     pub language_capabilities: Arc<dyn LanguageCapabilityService>,
     pub workspace_search: Arc<dyn WorkspaceSearchService>,
     pub config: Arc<dyn ConfigSourceService>,
+    pub workspace_management: Arc<dyn WorkspaceManagementService>,
+    pub provider_credentials: Arc<dyn ProviderCredentialStore>,
+    pub mcp_credentials: Arc<dyn McpCredentialStore>,
     pub notes: Option<Arc<dyn NotesService>>,
     pub documentation: Option<Arc<dyn DocumentationService>>,
     pub memory: Option<Arc<dyn MemoryService>>,
@@ -759,11 +782,17 @@ impl AgentServices {
         workspace_search: Arc<dyn WorkspaceSearchService>,
     ) -> Self {
         let config = Arc::new(StandardConfigSourceService::from_environment());
+        let workspace_management = Arc::new(StandaloneWorkspaceManagementService::from_environment());
+        let provider_credentials = Arc::new(LocalProviderCredentialStore::from_environment());
+        let mcp_credentials = Arc::new(LocalMcpCredentialStore::from_environment());
         Self {
             executables,
             language_capabilities: Arc::new(StaticLanguageCapabilityService::empty()),
             workspace_search,
             config,
+            workspace_management,
+            provider_credentials,
+            mcp_credentials,
             notes: None,
             documentation: None,
             memory: None,
@@ -773,6 +802,36 @@ impl AgentServices {
 
     pub fn with_config(mut self, config: Arc<dyn ConfigSourceService>) -> Self {
         self.config = config;
+        self
+    }
+
+    pub fn with_workspace_management(
+        mut self,
+        workspace_management: Arc<dyn WorkspaceManagementService>,
+    ) -> Self {
+        self.workspace_management = workspace_management;
+        self
+    }
+
+    /// Hosted products inject their tenant-isolated credential backend here
+    /// (for example a Synapse/Supabase adapter) without creating a dependency
+    /// from the standalone Agent crates to that product.
+    pub fn with_provider_credentials(
+        mut self,
+        provider_credentials: Arc<dyn ProviderCredentialStore>,
+    ) -> Self {
+        self.provider_credentials = provider_credentials;
+        self
+    }
+
+    /// Hosted products inject a tenant-isolated secret backend here. The
+    /// standalone default is the backward-compatible local mcp-auth.json
+    /// adapter and deliberately rejects hosted scopes.
+    pub fn with_mcp_credentials(
+        mut self,
+        mcp_credentials: Arc<dyn McpCredentialStore>,
+    ) -> Self {
+        self.mcp_credentials = mcp_credentials;
         self
     }
 

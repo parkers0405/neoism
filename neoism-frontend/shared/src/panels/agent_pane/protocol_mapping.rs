@@ -17,6 +17,7 @@ pub struct AgentProtocolMappingContext {
     pub default_directory: Option<String>,
     pub default_agent: Option<String>,
     pub default_model: Option<String>,
+    pub default_connection_id: Option<String>,
     pub default_thinking: Option<String>,
     pub local_author: Option<String>,
 }
@@ -40,6 +41,7 @@ pub struct PendingAgentProtocolPrompt {
     pub attachments: Vec<Attachment>,
     pub mode: Option<String>,
     pub model: Option<String>,
+    pub connection_id: Option<String>,
     pub thinking: Option<String>,
     pub delivery: neoism_protocol::agent::PromptDelivery,
 }
@@ -78,6 +80,7 @@ pub fn map_outbound_command(
                     attachments,
                     mode,
                     model,
+                    connection_id: context.default_connection_id.clone(),
                     thinking,
                     delivery,
                 }]),
@@ -88,6 +91,7 @@ pub fn map_outbound_command(
                     attachments,
                     mode,
                     model,
+                    connection_id: context.default_connection_id.clone(),
                     thinking,
                     delivery,
                 }),
@@ -202,10 +206,12 @@ pub fn map_outbound_command(
             Mapping::Messages(vec![Msg::SetAgent { session_id, agent }])
         }
         Cmd::ApplyModel { session_id, model } => {
+            let connection_id = model.get("connectionId").and_then(Value::as_str).map(str::to_string);
             let model = model_value_to_wire_model(&model);
             Mapping::Messages(vec![Msg::SetModel {
                 session_id,
                 model,
+                connection_id,
                 thinking: context.default_thinking.clone(),
             }])
         }
@@ -216,6 +222,7 @@ pub fn map_outbound_command(
         } => Mapping::Messages(vec![Msg::SetModel {
             session_id,
             model,
+            connection_id: context.default_connection_id.clone(),
             thinking,
         }]),
         Cmd::SlashCommand { name, args } => context
@@ -315,27 +322,38 @@ pub fn map_outbound_command(
                 directory: directory.or_else(|| context.default_directory.clone()),
             }])
         }
-        Cmd::ConnectStoreApiKey { provider_id, key } => {
-            Mapping::Messages(vec![Msg::ConnectStoreApiKey { provider_id, key }])
+        Cmd::RefreshProviderConnections { provider_id } => {
+            Mapping::Messages(vec![Msg::ConnectListConnections { provider_id }])
         }
-        Cmd::ConnectDisconnect { provider_id } => {
-            Mapping::Messages(vec![Msg::ConnectDisconnect { provider_id }])
+        Cmd::ConnectStoreApiKey { provider_id, key, label, connection_id } => {
+            Mapping::Messages(vec![Msg::ConnectStoreApiKey { provider_id, key, label, connection_id }])
         }
+        Cmd::ConnectDisconnect { provider_id, connection_id } => {
+            Mapping::Messages(vec![Msg::ConnectDisconnect { provider_id, connection_id }])
+        }
+        Cmd::ConnectRename { provider_id, connection_id, label } => Mapping::Messages(vec![Msg::ConnectRename { provider_id, connection_id, label }]),
+        Cmd::ConnectSetDefault { provider_id, connection_id } => Mapping::Messages(vec![Msg::ConnectSetDefault { provider_id, connection_id }]),
         Cmd::ConnectOauthAuthorize {
             provider_id,
             method_index,
+            label,
+            connection_id,
         } => Mapping::Messages(vec![Msg::ConnectOauthAuthorize {
             provider_id,
             method_index,
+            label,
+            connection_id,
         }]),
         Cmd::ConnectOauthCallback {
             provider_id,
             method_index,
             code,
+            attempt_id,
         } => Mapping::Messages(vec![Msg::ConnectOauthCallback {
             provider_id,
             method_index,
             code,
+            attempt_id,
         }]),
     }
 }

@@ -971,6 +971,18 @@ fn stable_markdown_inline_advance(measured: f32, cell: f32, columns: usize) -> f
     measured.max(cell * columns as f32)
 }
 
+fn draw_markdown_inline_run(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    text: &str,
+    opts: &DrawOpts,
+    occlusion_rects: &[[f32; 4]],
+) -> f32 {
+    let drawn = draw_text_clipped(sugarloaf, x, y, text, opts, occlusion_rects);
+    drawn.max(measure_markdown_inline_run(sugarloaf, text, opts))
+}
+
 /// The visible text the renderer actually paints for an inline line: the
 /// style markers (`**`, `~~`, `` ` ``, `[]()`) are dropped, link labels and
 /// inline-code content are kept without their delimiters. Selection + copy
@@ -1060,7 +1072,9 @@ fn markdown_inline_caret_stops(
         }
         let measured = graphemes
             .iter()
-            .map(|grapheme| measure_markdown_inline_run(sugarloaf, grapheme, &segment_opts))
+            .map(|grapheme| {
+                measure_markdown_inline_run(sugarloaf, grapheme, &segment_opts)
+            })
             .collect::<Vec<_>>();
         let measured_sum = measured.iter().sum::<f32>();
         let painted_width = measure_markdown_inline_run(sugarloaf, text, &segment_opts);
@@ -2957,8 +2971,14 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
     for (segment_index, segment) in segments.iter().enumerate() {
         match segment {
             MarkdownInlineSegment::Text(text) => {
-                draw_text_clipped(sugarloaf, x, y, text, opts, occlusion_rects);
-                let w = measure_markdown_inline_run(sugarloaf, text, opts);
+                let w = draw_markdown_inline_run(
+                    sugarloaf,
+                    x,
+                    y,
+                    text,
+                    opts,
+                    occlusion_rects,
+                );
                 if !suppress_interactions {
                     if let Some(target) =
                         bridged_inline_whitespace_target(&segments, segment_index)
@@ -2990,14 +3010,26 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                 } else {
                     theme.fg
                 });
-                draw_text_clipped(sugarloaf, x, y, text, &bold, occlusion_rects);
-                x += measure_markdown_inline_run(sugarloaf, text, &bold);
+                x += draw_markdown_inline_run(
+                    sugarloaf,
+                    x,
+                    y,
+                    text,
+                    &bold,
+                    occlusion_rects,
+                );
             }
             MarkdownInlineSegment::Italic(text) => {
                 let mut italic_opts = *opts;
                 italic_opts.italic = true;
-                draw_text_clipped(sugarloaf, x, y, text, &italic_opts, occlusion_rects);
-                x += measure_markdown_inline_run(sugarloaf, text, &italic_opts);
+                x += draw_markdown_inline_run(
+                    sugarloaf,
+                    x,
+                    y,
+                    text,
+                    &italic_opts,
+                    occlusion_rects,
+                );
             }
             MarkdownInlineSegment::BoldItalic(text) => {
                 let mut emphasis_opts = *opts;
@@ -3008,14 +3040,26 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                 } else {
                     theme.fg
                 });
-                draw_text_clipped(sugarloaf, x, y, text, &emphasis_opts, occlusion_rects);
-                x += measure_markdown_inline_run(sugarloaf, text, &emphasis_opts);
+                x += draw_markdown_inline_run(
+                    sugarloaf,
+                    x,
+                    y,
+                    text,
+                    &emphasis_opts,
+                    occlusion_rects,
+                );
             }
             MarkdownInlineSegment::Strike(text) => {
                 let mut strike_opts = *opts;
                 strike_opts.color = theme.u8(theme.muted);
-                draw_text_clipped(sugarloaf, x, y, text, &strike_opts, occlusion_rects);
-                let w = measure_markdown_inline_run(sugarloaf, text, &strike_opts);
+                let w = draw_markdown_inline_run(
+                    sugarloaf,
+                    x,
+                    y,
+                    text,
+                    &strike_opts,
+                    occlusion_rects,
+                );
                 draw_rect_clipped(
                     sugarloaf,
                     [
@@ -3038,13 +3082,19 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                 } else {
                     theme.syn_string
                 }));
-                draw_text_clipped(sugarloaf, x, y, text, &code, occlusion_rects);
-                x += measure_markdown_inline_run(sugarloaf, text, &code);
+                let w = draw_markdown_inline_run(
+                    sugarloaf,
+                    x,
+                    y,
+                    text,
+                    &code,
+                    occlusion_rects,
+                );
+                x += w;
                 if !suppress_interactions {
                     let Some(target) = target.as_ref() else {
                         continue;
                     };
-                    let w = measure_markdown_inline_run(sugarloaf, text, &code);
                     draw_hover_underline(
                         sugarloaf,
                         pane,
@@ -3074,8 +3124,14 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                 } else {
                     theme.cyan
                 }));
-                draw_text_clipped(sugarloaf, x, y, label, &link_opts, occlusion_rects);
-                let w = measure_markdown_inline_run(sugarloaf, label, &link_opts);
+                let w = draw_markdown_inline_run(
+                    sugarloaf,
+                    x,
+                    y,
+                    label,
+                    &link_opts,
+                    occlusion_rects,
+                );
                 if !suppress_interactions {
                     let Some(target) = target.as_ref() else {
                         x += w;
@@ -3108,8 +3164,14 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                     token_opts.color = theme.u8(plain_token_color(*style, theme));
                     token_opts.bold |= style.bold;
                 }
-                draw_text_clipped(sugarloaf, x, y, text, &token_opts, occlusion_rects);
-                let w = measure_markdown_inline_run(sugarloaf, text, &token_opts);
+                let w = draw_markdown_inline_run(
+                    sugarloaf,
+                    x,
+                    y,
+                    text,
+                    &token_opts,
+                    occlusion_rects,
+                );
                 if !suppress_interactions {
                     let Some(target) = target.as_ref() else {
                         x += w;

@@ -122,6 +122,7 @@ pub(crate) fn external_model(runtime: ExternalRuntime) -> UserModel {
     UserModel {
         provider_id: "external".to_string(),
         model_id: runtime.provider_id().to_string(),
+        connection_id: None,
         variant: None,
     }
 }

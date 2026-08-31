@@ -55,6 +55,9 @@ pub struct RouteDescriptor {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteRequest {
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub hosted: bool,
     pub workspace_id: Option<String>,
     pub workspace: Option<PathBuf>,
     pub session_id: Option<String>,

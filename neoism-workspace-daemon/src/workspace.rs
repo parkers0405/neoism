@@ -63,6 +63,7 @@ mod clipboard;
 mod dispatch;
 mod handlers;
 mod manager;
+mod management_bridge;
 mod shell_ops;
 
 #[cfg(test)]
@@ -75,6 +76,7 @@ pub use clipboard::{
     clipboard_dir, resolve_clipboard_image_path, sweep_clipboard_dir_on_startup,
 };
 pub use dispatch::{handle, handle_preauthenticated};
+pub use management_bridge::DaemonWorkspaceManagementService;
 pub(crate) use shell_ops::{
     cleanup_local_docker_sandbox, export_workspace_snapshot, start_local_docker_sandbox,
 };

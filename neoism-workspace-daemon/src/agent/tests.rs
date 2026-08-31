@@ -2,6 +2,22 @@ use super::*;
 use neoism_protocol::agent::AgentServerMessage;
 use tokio::sync::mpsc;
 
+#[test]
+fn debug_sidecar_precedes_an_installed_agent_binary() {
+    let root = std::env::temp_dir().join(format!("neoism-agent-sidecar-test-{}", std::process::id()));
+    let debug = root.join("target/debug");
+    std::fs::create_dir_all(&debug).unwrap();
+    let desktop = debug.join(binary_name("neoism"));
+    let sidecar = debug.join(binary_name("neoism-agent"));
+    let installed = root.join("installed").join(binary_name("neoism-agent"));
+    std::fs::write(&desktop, b"").unwrap();
+    std::fs::write(&sidecar, b"").unwrap();
+    assert_eq!(resolve_agent_server_binary_from(None, Some(desktop), Some(installed.clone())), Some(sidecar));
+    let explicit = root.join("explicit-agent");
+    assert_eq!(resolve_agent_server_binary_from(Some(explicit.clone()), None, Some(installed)), Some(explicit));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn spawn_without_key_emits_disabled() {
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -135,6 +151,7 @@ fn session_created_with_parent_synthesizes_subagent_update() {
             current_tool,
             started_at,
             parent_session_id,
+            ..
         } => {
             assert_eq!(session_id, "sess-child");
             assert!(matches!(status, SubagentStatus::Running));

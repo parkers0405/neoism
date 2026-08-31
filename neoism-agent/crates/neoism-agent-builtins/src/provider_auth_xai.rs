@@ -79,6 +79,8 @@ pub(super) async fn authorize_xai_loopback(
             127.0.0.1 page — copy the `code` value it shows (or from the address \
             bar) and paste it here."
             .to_string(),
+        attempt_id: None,
+        expires_at: None,
     })
 }
 
@@ -160,6 +162,8 @@ pub(super) async fn authorize_xai_device(
             "Go to {} and enter code: {}",
             response.verification_uri, response.user_code
         ),
+        attempt_id: None,
+        expires_at: None,
     })
 }
 

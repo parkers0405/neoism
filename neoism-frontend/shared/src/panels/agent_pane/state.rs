@@ -538,6 +538,9 @@ pub struct NeoismAgentPane {
     pub(super) mode: NeoismAgentMode,
     pub(super) agent: Option<String>,
     pub(super) model: String,
+    pub(super) connection_id: Option<String>,
+    /// Model waiting for secret-free connection reconciliation.
+    pub(super) pending_account_model: Option<String>,
     pub(super) thinking: Option<String>,
     pub(super) session_id: Option<String>,
     pub(super) parent_session_id: Option<String>,
@@ -695,6 +698,7 @@ pub struct NeoismAgentPane {
     active_subagent_started_at: HashMap<String, u64>,
     runtime_snapshot_root: Option<String>,
     runtime_snapshot_revision: u64,
+    terminal_subagent_revisions: HashMap<String, (String, u64)>,
     execution_activity: Option<ExecutionActivityState>,
     execution_timer_anchor: Option<ExecutionTimerAnchor>,
     pending_permission: Option<NeoismAgentPendingPermission>,
@@ -930,6 +934,8 @@ impl Default for NeoismAgentPane {
             mode: NeoismAgentMode::Build,
             agent: Some(DEFAULT_AGENT.to_string()),
             model: DEFAULT_MODEL.to_string(),
+            connection_id: None,
+            pending_account_model: None,
             thinking: None,
             session_id: None,
             parent_session_id: None,
@@ -1029,6 +1035,7 @@ impl Default for NeoismAgentPane {
             active_subagent_started_at: HashMap::new(),
             runtime_snapshot_root: None,
             runtime_snapshot_revision: 0,
+            terminal_subagent_revisions: HashMap::new(),
             execution_activity: None,
             execution_timer_anchor: None,
             pending_permission: None,
@@ -1255,6 +1262,7 @@ impl NeoismAgentPane {
             self.execution_timer_anchor = None;
             self.runtime_snapshot_root = None;
             self.runtime_snapshot_revision = 0;
+            self.terminal_subagent_revisions.clear();
         }
         self.session_id = session_id;
     }

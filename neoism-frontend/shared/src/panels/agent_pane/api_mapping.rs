@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use neoism_agent_core::{AssistantMessage, MessageInfo, UserMessage};
+use neoism_agent_core::{AssistantMessage, MessageInfo};
 use serde_json::{json, Value};
 
 use super::state::{
@@ -123,6 +123,9 @@ pub struct ConfigDefaults {
 pub struct SessionState {
     pub agent: Option<String>,
     pub model: Option<String>,
+    /// Opaque provider credential selection. Kept separate from the model ref
+    /// so account labels and connection identity never leak into model IDs.
+    pub connection_id: Option<String>,
     pub thinking: Option<String>,
     pub parent_id: Option<String>,
     pub directory: Option<String>,
@@ -319,6 +322,12 @@ pub fn session_state_from_json(value: &Value) -> SessionState {
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|s| !s.is_empty());
+    let connection_id = value
+        .get("model")
+        .and_then(|m| m.get("connectionId").or_else(|| m.get("connection_id")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
     let parent_id = value
         .get("parentId")
         .or_else(|| value.get("parentID"))
@@ -333,6 +342,7 @@ pub fn session_state_from_json(value: &Value) -> SessionState {
     SessionState {
         agent,
         model: model_ref,
+        connection_id,
         thinking,
         parent_id,
         directory,
@@ -340,22 +350,46 @@ pub fn session_state_from_json(value: &Value) -> SessionState {
 }
 
 pub fn prompt_model_json(model: &str, thinking: Option<&str>) -> Option<Value> {
+    prompt_model_json_with_connection(model, thinking, None)
+}
+
+pub fn prompt_model_json_with_connection(
+    model: &str,
+    thinking: Option<&str>,
+    connection_id: Option<&str>,
+) -> Option<Value> {
     split_model_ref(model).map(|(provider_id, model_id)| {
-        json!({
+        let mut value = json!({
             "providerId": provider_id,
             "modelId": model_id,
             "variant": thinking.filter(|value| !value.is_empty()),
-        })
+        });
+        if let Some(connection_id) = connection_id.filter(|value| !value.is_empty()) {
+            value["connectionId"] = Value::String(connection_id.to_string());
+        }
+        value
     })
 }
 
 pub fn session_model_json(model: &str, thinking: Option<&str>) -> Option<Value> {
+    session_model_json_with_connection(model, thinking, None)
+}
+
+pub fn session_model_json_with_connection(
+    model: &str,
+    thinking: Option<&str>,
+    connection_id: Option<&str>,
+) -> Option<Value> {
     split_model_ref(model).map(|(provider_id, model_id)| {
-        json!({
+        let mut value = json!({
             "providerId": provider_id,
             "id": model_id,
             "variant": thinking.filter(|value| !value.is_empty()),
-        })
+        });
+        if let Some(connection_id) = connection_id.filter(|value| !value.is_empty()) {
+            value["connectionId"] = Value::String(connection_id.to_string());
+        }
+        value
     })
 }
 
@@ -1167,6 +1201,15 @@ mod tests {
                 "variant": null
             }))
         );
+        let connected = prompt_model_json_with_connection(
+            "openai/gpt-5",
+            Some("high"),
+            Some("conn_opaque_123"),
+        )
+        .unwrap();
+        assert_eq!(connected["modelId"], "gpt-5");
+        assert_eq!(connected["connectionId"], "conn_opaque_123");
+        assert!(!connected.to_string().contains("Personal account"));
     }
 
     #[test]

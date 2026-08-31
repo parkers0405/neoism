@@ -6,7 +6,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
 use futures::StreamExt;
 use neoism_agent_core::{
-    AgentConfigDocument, AuthInfo, ProviderListResult, SessionUndoStatus, SessionUndoTree,
+    AgentConfigDocument, ProviderListResult, SessionUndoStatus, SessionUndoTree,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
@@ -133,6 +133,7 @@ fn compacted_summary_is_added_to_provider_context() {
             model: UserModel {
                 provider_id: "neoism".to_string(),
                 model_id: "stub".to_string(),
+                connection_id: None,
                 variant: None,
             },
             system: None,
@@ -197,6 +198,7 @@ fn provider_context_includes_active_run_system_once() {
             model: UserModel {
                 provider_id: "neoism".to_string(),
                 model_id: "stub".to_string(),
+                connection_id: None,
                 variant: None,
             },
             system: Some("legacy duplicated prompt".to_string()),
@@ -271,6 +273,7 @@ fn compacted_summary_trims_messages_already_covered_by_summary() {
             model: UserModel {
                 provider_id: "neoism".to_string(),
                 model_id: "stub".to_string(),
+                connection_id: None,
                 variant: None,
             },
             system: None,
@@ -295,6 +298,7 @@ fn compacted_summary_trims_messages_already_covered_by_summary() {
             model: UserModel {
                 provider_id: "neoism".to_string(),
                 model_id: "stub".to_string(),
+                connection_id: None,
                 variant: None,
             },
             system: None,
@@ -348,8 +352,9 @@ fn test_compaction_pair(
                 agent: "neoism".to_string(),
                 model: UserModel {
                     provider_id: "neoism".to_string(),
-                    model_id: "stub".to_string(),
-                    variant: None,
+                model_id: "stub".to_string(),
+                connection_id: None,
+                variant: None,
                 },
                 system: None,
                 tools: None,
@@ -455,8 +460,9 @@ async fn store_persists_sessions_and_messages() {
                     agent: "build".to_string(),
                     model: UserModel {
                         provider_id: "neoism".to_string(),
-                        model_id: "stub".to_string(),
-                        variant: None,
+                    model_id: "stub".to_string(),
+                    connection_id: None,
+                    variant: None,
                     },
                     system: None,
                     tools: None,
@@ -529,6 +535,7 @@ fn store_test_message(
             model: UserModel {
                 provider_id: "neoism".to_string(),
                 model_id: "stub".to_string(),
+                connection_id: None,
                 variant: None,
             },
             system: None,
@@ -1216,8 +1223,9 @@ async fn list_messages_page_pages_by_cursor_in_sql() {
                         agent: "build".to_string(),
                         model: UserModel {
                             provider_id: "neoism".to_string(),
-                            model_id: "stub".to_string(),
-                            variant: None,
+                    model_id: "stub".to_string(),
+                    connection_id: None,
+                    variant: None,
                         },
                         system: None,
                         tools: None,
@@ -1327,6 +1335,7 @@ async fn compact_session_publishes_streaming_compaction_events() {
         model: Some(neoism_agent_core::ModelRef {
             id: "stub".to_string(),
             provider_id: "neoism".to_string(),
+            connection_id: None,
             variant: None,
         }),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1355,8 +1364,9 @@ async fn compact_session_publishes_streaming_compaction_events() {
                     agent: "build".to_string(),
                     model: UserModel {
                         provider_id: "neoism".to_string(),
-                        model_id: "stub".to_string(),
-                        variant: None,
+                    model_id: "stub".to_string(),
+                    connection_id: None,
+                    variant: None,
                     },
                     system: None,
                     tools: None,
@@ -2433,20 +2443,29 @@ async fn provider_auth_routes_persist_api_credentials() {
     .await;
     assert!(authorization.is_none());
 
-    let stored: Option<AuthInfo> = response_json(
+    let stored: bool = response_json(
         app.clone()
             .oneshot(request(Method::GET, "/v2/providers/test-provider/auth", None))
             .await
             .unwrap(),
     )
     .await;
-    match stored.unwrap() {
-        AuthInfo::Api { key, metadata } => {
-            assert_eq!(key, "stored-key");
-            assert_eq!(metadata, Some(json!({ "accountId": "acct" })));
-        }
-        _ => panic!("expected stored API credentials"),
-    }
+    assert!(stored);
+
+    let created: Value = response_json(app.clone().oneshot(request(
+        Method::POST,
+        "/v2/providers/test-provider/connections",
+        Some(json!({ "label": "Work", "credential": { "type": "api", "key": "second-secret" } })),
+    )).await.unwrap()).await;
+    assert_eq!(created["label"], "Work");
+    assert!(created.get("credential").is_none());
+    assert!(!created.to_string().contains("second-secret"));
+    let connection_id = created["connectionId"].as_str().unwrap();
+    let listed: Vec<Value> = response_json(app.clone().oneshot(request(Method::GET, "/v2/providers/test-provider/connections", None)).await.unwrap()).await;
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().all(|summary| summary.get("key").is_none() && summary.get("credential").is_none()));
+    let selected: Value = response_json(app.clone().oneshot(request(Method::POST, &format!("/v2/providers/test-provider/connections/{connection_id}/default"), None)).await.unwrap()).await;
+    assert_eq!(selected["isDefault"], true);
 
     let providers: ProviderListResult = response_json(
         app.clone()
@@ -2469,14 +2488,16 @@ async fn provider_auth_routes_persist_api_credentials() {
     .await;
     assert!(removed);
 
-    let stored: Option<AuthInfo> = response_json(
+    let stored: bool = response_json(
         app.clone()
             .oneshot(request(Method::GET, "/v2/providers/test-provider/auth", None))
             .await
             .unwrap(),
     )
     .await;
-    assert!(stored.is_none());
+    // The compatibility delete removes only the selected scoped default; the
+    // original connection remains and becomes the sole automatic selection.
+    assert!(stored);
 
     std::env::remove_var("NEOISM_AGENT_MODELS_PATH");
     std::env::remove_var("NEOISM_AGENT_AUTH_PATH");
@@ -3563,6 +3584,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
                     model: UserModel {
                         provider_id: "neoism".to_string(),
                         model_id: "stub".to_string(),
+                        connection_id: None,
                         variant: None,
                     },
                     system: None,
@@ -3895,6 +3917,7 @@ async fn append_snapshot_test_messages(
                     model: UserModel {
                         provider_id: "neoism".to_string(),
                         model_id: "stub".to_string(),
+                        connection_id: None,
                         variant: None,
                     },
                     system: None,

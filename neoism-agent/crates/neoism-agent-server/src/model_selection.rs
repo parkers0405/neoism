@@ -5,6 +5,7 @@ pub(crate) fn user_model_from_model_ref(
     UserModel {
         provider_id: model.provider_id.clone(),
         model_id: model.id.clone(),
+        connection_id: model.connection_id.clone(),
         variant: model.variant.clone(),
     }
 }
@@ -15,6 +16,7 @@ pub(crate) fn model_ref_from_user_model(
     neoism_agent_core::ModelRef {
         provider_id: model.provider_id.clone(),
         id: model.model_id.clone(),
+        connection_id: model.connection_id.clone(),
         variant: model.variant.clone(),
     }
 }
@@ -31,6 +33,7 @@ pub(crate) fn model_ref_from_config_with_variant(
     Some(neoism_agent_core::ModelRef {
         provider_id: provider_id.to_string(),
         id: model_id.to_string(),
+        connection_id: None,
         variant: variant.filter(|value| !value.trim().is_empty()),
     })
 }
@@ -41,6 +44,7 @@ pub(crate) fn default_user_model() -> UserModel {
             .unwrap_or_else(|_| "neoism".to_string()),
         model_id: std::env::var("NEOISM_AGENT_MODEL")
             .unwrap_or_else(|_| "stub".to_string()),
+        connection_id: None,
         variant: None,
     }
 }

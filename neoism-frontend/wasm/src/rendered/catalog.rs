@@ -452,7 +452,7 @@ pub(crate) fn apply_agent_event_to_pane(
         }
         AgentServerMessage::ToolUseResult {
             tool_use_id,
-            session_id,
+            session_id: _,
             status,
             output,
             error,
@@ -532,11 +532,13 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::ProviderState {
             provider_id,
             model,
+            connection_id,
             agent,
             thinking,
             context_limit,
             ..
         } => {
+            pane.set_connection_id(connection_id);
             pane.apply_provider_state(provider_id, model, agent, thinking, context_limit);
         }
         AgentServerMessage::ProviderCatalog { providers } => {
@@ -603,8 +605,24 @@ pub(crate) fn apply_agent_event_to_pane(
             agent,
             current_tool,
             started_at,
+            root_session_id,
+            execution_id,
+            family_revision,
             ..
         } => {
+            if matches!(
+                status,
+                neoism_protocol::agent::SubagentStatus::Completed
+                    | neoism_protocol::agent::SubagentStatus::Failed
+            ) && !pane.note_subagent_terminal_revision(
+                    &session_id,
+                    root_session_id.as_deref(),
+                    execution_id.as_deref(),
+                    family_revision,
+                )
+            {
+                return;
+            }
             pane.note_subagent_event(
                 session_id,
                 map_subagent_status(status),
@@ -627,15 +645,19 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::ConnectProviderCatalog { providers, auth } => {
             pane.apply_connect_catalog(providers, auth);
         }
+        AgentServerMessage::ConnectConnections { provider, connections } => {
+            pane.apply_provider_connections(provider, connections);
+        }
         AgentServerMessage::ConnectOauthUrl {
             url,
             auto,
             instructions,
+            attempt_id,
         } => {
-            pane.apply_connect_oauth_url(url, auto, instructions);
+            pane.apply_connect_oauth_url(url, auto, instructions, attempt_id);
         }
-        AgentServerMessage::ConnectFinished { provider } => {
-            pane.note_connect_finished(provider);
+        AgentServerMessage::ConnectFinished { provider, connection_id } => {
+            pane.note_connect_finished_with_connection(provider, connection_id);
         }
         AgentServerMessage::ConnectFailed { provider, error } => {
             pane.note_connect_failed(provider, error);
@@ -969,6 +991,9 @@ pub(crate) fn apply_agent_event_to_cache(
             current_tool,
             started_at,
             parent_session_id,
+            root_session_id,
+            execution_id,
+            family_revision,
         } => {
             use neoism_protocol::agent::SubagentStatus;
             use neoism_ui::panels::agent_pane::state::side_panel::BranchStatus;
@@ -989,6 +1014,16 @@ pub(crate) fn apply_agent_event_to_cache(
                     SubagentStatus::Completed => BranchStatus::Completed,
                     SubagentStatus::Failed => BranchStatus::Stopped,
                 };
+                if matches!(status, BranchStatus::Completed | BranchStatus::Stopped)
+                    && !pane.note_subagent_terminal_revision(
+                        &session_id,
+                        root_session_id.as_deref(),
+                        execution_id.as_deref(),
+                        family_revision,
+                    )
+                {
+                    return true;
+                }
                 pane.note_subagent_event(
                     session_id,
                     status,
@@ -1092,6 +1127,7 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::McpFailed { .. }
         | AgentServerMessage::McpChanged { .. }
         | AgentServerMessage::ConnectProviderCatalog { .. }
+        | AgentServerMessage::ConnectConnections { .. }
         | AgentServerMessage::ConnectOauthUrl { .. }
         | AgentServerMessage::ConnectFinished { .. }
         | AgentServerMessage::ConnectFailed { .. }

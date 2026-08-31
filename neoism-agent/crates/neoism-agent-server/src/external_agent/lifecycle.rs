@@ -55,6 +55,7 @@ pub(crate) async fn execute_external_task(
 ) -> Result<tool::ToolExecutionResult, String> {
     let runtime = ExternalRuntime::resolve(agent_name)
         .ok_or_else(|| format!("Unknown external agent type: {agent_name}"))?;
+    let continuing = task_id.is_some();
     let child = match task_id.as_deref() {
         Some(task_id) => {
             if let Some(child) = state
@@ -99,20 +100,29 @@ pub(crate) async fn execute_external_task(
 
     if background {
         let generation = Id::ascending(IdKind::Message);
-        crate::session_actions::mark_subtask_notify_on_idle(
-            state,
-            child.id.as_str(),
-            &generation,
-        )
-        .await
+        let admission = if continuing {
+            crate::execution_activity::SubtaskAdmissionGuard::admit_continuation(
+                state,
+                parent,
+                child.id.as_str(),
+            )
+            .await
+        } else {
+            crate::execution_activity::SubtaskAdmissionGuard::admit(
+                state,
+                parent,
+                child.id.as_str(),
+            )
+            .await
+        }
         .map_err(|error| error.to_string())?;
         update_external_session_status(state, child.id.as_str(), runtime, "running")
             .await
             .map_err(|error| error.to_string())?;
-        let admission = crate::execution_activity::SubtaskAdmissionGuard::admit(
+        crate::session_actions::mark_subtask_notify_on_idle(
             state,
-            parent,
             child.id.as_str(),
+            &generation,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -131,12 +141,21 @@ pub(crate) async fn execute_external_task(
         });
     }
 
-    let admission = crate::execution_activity::SubtaskAdmissionGuard::admit(
-        state,
-        parent,
-        child.id.as_str(),
-    )
-    .await
+    let admission = if continuing {
+        crate::execution_activity::SubtaskAdmissionGuard::admit_continuation(
+            state,
+            parent,
+            child.id.as_str(),
+        )
+        .await
+    } else {
+        crate::execution_activity::SubtaskAdmissionGuard::admit(
+            state,
+            parent,
+            child.id.as_str(),
+        )
+        .await
+    }
     .map_err(|error| error.to_string())?;
     let result = run_external_subtask_prompt_with_cancel(
         state,
@@ -221,6 +240,7 @@ async fn create_external_subtask_session(
         model: Some(neoism_agent_core::ModelRef {
             provider_id: "external".to_string(),
             id: runtime.provider_id().to_string(),
+            connection_id: None,
             variant: None,
         }),
         version: env!("CARGO_PKG_VERSION").to_string(),

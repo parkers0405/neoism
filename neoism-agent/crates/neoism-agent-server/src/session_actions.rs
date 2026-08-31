@@ -345,12 +345,17 @@ pub(crate) async fn publish_background_subtask_finished(
 ) {
     // Execution lifecycle is authoritative and must not depend on whether the
     // optional UI notification runtime is loaded or still tracks this child.
-    if let Err(error) =
-        crate::execution_activity::finish_subtask_for_child(state, child_id, status).await
+    let lifecycle = match crate::execution_activity::finish_subtask_for_child(
+        state, child_id, status,
+    )
+    .await
     {
-        tracing::warn!(session_id = %child_id, %error, "failed to terminalize subtask lifecycle");
-        return;
-    }
+        Ok(lifecycle) => lifecycle,
+        Err(error) => {
+            tracing::warn!(session_id = %child_id, %error, "failed to terminalize subtask lifecycle");
+            return;
+        }
+    };
     let tracked = match state.inner.store.get_session(child_id).await {
         Ok(Some(child)) => state.inner.workspace_runtimes.loaded(&child.directory).await
             .and_then(|runtime| runtime.subagents_if_allocated()),
@@ -405,6 +410,11 @@ pub(crate) async fn publish_background_subtask_finished(
         if let Some(agent) = child.agent.as_ref() {
             payload["agent"] = json!(agent);
             payload["sourceAgent"] = json!(agent);
+        }
+        if let Some((root_session_id, execution_id, family_revision)) = lifecycle.as_ref() {
+            payload["rootSessionID"] = json!(root_session_id);
+            payload["executionID"] = json!(execution_id);
+            payload["familyRevision"] = json!(family_revision);
         }
         state.publish(EventPayload::new(
             event_type::SESSION_SUBTASK_COMPLETED,

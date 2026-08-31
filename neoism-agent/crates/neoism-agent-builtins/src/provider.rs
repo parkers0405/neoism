@@ -52,11 +52,11 @@ impl ProviderRegistry {
         }
     }
 
-    pub fn connected_ids(
+    pub async fn connected_ids(
         &self,
         providers: &[ProviderInfo],
     ) -> anyhow::Result<Vec<String>> {
-        let mut connected = self.auth_store.all()?.keys().cloned().collect::<Vec<_>>();
+        let mut connected = self.auth_store.all().await?.keys().cloned().collect::<Vec<_>>();
         for provider in providers {
             if provider.env.iter().any(|key| std::env::var(key).is_ok()) {
                 connected.push(provider.id.clone());
@@ -72,10 +72,15 @@ impl ProviderRegistry {
         Ok(connected)
     }
 
-    pub fn stream(
+    pub async fn stream(
         &self,
         mut request: ProviderGenerationRequest,
     ) -> anyhow::Result<ProviderStream> {
+        if request.tenant_id.as_deref().is_some_and(|tenant| tenant != "local")
+            && !self.auth_store.service().supports_hosted_scopes()
+        {
+            anyhow::bail!("hosted provider credentials require an injected tenant-isolated store")
+        }
         let requested_provider = request.provider_id.clone();
         let provider_id = if request.provider_id == "neoism" && request.model_id != "stub"
         {
@@ -86,7 +91,14 @@ impl ProviderRegistry {
             request.provider_id.clone()
         };
         if provider_id == "openai" {
-            let auth = self.auth_store.get("openai")?;
+            let scoped_auth = self.auth_store.scoped(
+                neoism_agent_service_api::CredentialScope {
+                    tenant_id: request.tenant_id.clone().unwrap_or_else(|| "local".into()),
+                    workspace_id: request.workspace_id.clone(),
+                },
+                request.connection_id.clone(),
+            );
+            let auth = scoped_auth.get("openai").await?;
             request.provider_id = "openai".to_string();
             if request.model_id == "stub" {
                 request.model_id = std::env::var("NEOISM_AGENT_OPENAI_MODEL")
@@ -97,7 +109,7 @@ impl ProviderRegistry {
             let runtime = OpenAiRuntime {
                 client: self.openai.clone(),
                 auth,
-                auth_store: self.auth_store.clone(),
+                auth_store: scoped_auth,
                 use_oauth_responses: true,
                 allow_openai_env_fallback: true,
             };
@@ -110,7 +122,14 @@ impl ProviderRegistry {
 
         if let Some(api) = request.api.clone() {
             if let Some(adapter) = ProviderAdapter::from_api(&api) {
-                let auth = self.provider_auth(&provider_id, &request.auth_env)?;
+                let scoped_auth = self.auth_store.scoped(
+                    neoism_agent_service_api::CredentialScope {
+                        tenant_id: request.tenant_id.clone().unwrap_or_else(|| "local".into()),
+                        workspace_id: request.workspace_id.clone(),
+                    },
+                    request.connection_id.clone(),
+                );
+                let auth = self.provider_auth(&scoped_auth, &provider_id, &request.auth_env).await?;
                 let model_id = request.model_id.clone();
                 request.provider_id = provider_id.clone();
                 return match adapter.kind {
@@ -118,7 +137,7 @@ impl ProviderRegistry {
                         let runtime = OpenAiRuntime {
                             client: OpenAiClient::with_base_url(adapter.base_url),
                             auth,
-                            auth_store: self.auth_store.clone(),
+                            auth_store: scoped_auth,
                             use_oauth_responses: false,
                             allow_openai_env_fallback: false,
                         };
@@ -161,13 +180,17 @@ impl ProviderRegistry {
         })
     }
 
-    fn provider_auth(
+    async fn provider_auth(
         &self,
+        auth_store: &AuthStore,
         provider_id: &str,
         env_keys: &[String],
     ) -> anyhow::Result<Option<AuthInfo>> {
-        if let Some(auth) = self.auth_store.get(provider_id)? {
+        if let Some(auth) = auth_store.get(provider_id).await? {
             return Ok(Some(auth));
+        }
+        if auth_store.connection_id().is_some() {
+            anyhow::bail!("provider connection not found")
         }
         for key in env_keys {
             if let Ok(value) = std::env::var(key) {

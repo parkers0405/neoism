@@ -22,6 +22,7 @@ export type { AgentClientMessage, AgentServerMessage };
 
 export interface AgentBridge {
   agentEvent(eventJson: string): void;
+  agentResumeActiveStream?(): boolean;
   /** Snapshot of the composer's sent-prompt history: JSON array of
    *  strings, newest first, capped at 1000 — the same shape (and cap)
    *  as desktop's zsh-style `prompt_history` file. Optional so older
@@ -95,6 +96,21 @@ export class AgentService {
     const persisted = loadPromptHistory();
     if (persisted.length > 0) {
       this.bridge.agentRestorePromptHistory?.(JSON.stringify(persisted));
+    }
+    document.addEventListener("visibilitychange", this.handleVisibilityChange);
+  }
+
+  private readonly handleVisibilityChange = (): void => {
+    if (document.visibilityState === "visible") {
+      this.bridge.agentResumeActiveStream?.();
+    }
+  };
+
+  dispose(): void {
+    document.removeEventListener("visibilitychange", this.handleVisibilityChange);
+    if (this.historySaveTimer !== null) {
+      clearTimeout(this.historySaveTimer);
+      this.historySaveTimer = null;
     }
   }
 

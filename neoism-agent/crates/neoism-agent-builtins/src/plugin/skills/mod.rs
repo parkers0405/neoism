@@ -141,7 +141,18 @@ pub struct Skill {
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SkillFrontmatter { name: Option<String>, description: Option<String> }
+struct SkillFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+    #[allow(dead_code)]
+    version: Option<String>,
+    #[allow(dead_code)]
+    license: Option<String>,
+    #[allow(dead_code)]
+    compatibility: Option<serde_json::Value>,
+    #[allow(dead_code)]
+    metadata: Option<BTreeMap<String, serde_json::Value>>,
+}
 
 #[derive(Deserialize)]
 struct DiscoveryIndex { skills: Vec<DiscoveryIndexSkill> }

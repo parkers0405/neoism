@@ -28,10 +28,11 @@ use serde_json::{json, Value};
 
 use super::api::{
     api_request_json, delete_session, fetch_agent_options, fetch_config_defaults,
-    fetch_model_context_limit, fetch_model_options, fetch_session_entries,
-    fetch_family_runtime, fetch_session_goal, fetch_session_options, fetch_session_statuses,
-    fetch_skill_options, fetch_subagent_entries, fetch_subagent_options,
-    neoism_agent_server, rename_session, set_session_pinned, SessionStatusSnapshot,
+    fetch_family_runtime, fetch_model_context_limit, fetch_model_options,
+    fetch_pending_permissions, fetch_pending_questions, fetch_session_entries, fetch_session_goal,
+    fetch_session_options, fetch_session_statuses, fetch_skill_options, fetch_subagent_entries,
+    fetch_subagent_options, neoism_agent_server, rename_session, set_session_pinned,
+    SessionStatusSnapshot,
 };
 use super::commands::slash_options;
 use super::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
@@ -644,6 +645,8 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         runtime_revision: u64,
         result: Result<HashMap<String, SessionStatusSnapshot>, String>,
         runtime: Result<super::api::FamilyRuntimeSnapshot, String>,
+        permissions: Result<Vec<NeoismAgentPendingPermission>, String>,
+        questions: Result<Vec<NeoismAgentPendingQuestion>, String>,
     },
     /// An older history page, fetched off the UI thread. `messages` is in
     /// ascending (oldest-first) order, ready to prepend. `raw_count` is the
@@ -684,6 +687,7 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
     /// the token exchanged/stored.
     ConnectOauthFinished {
         provider_name: String,
+        connection_id: Option<String>,
     },
     /// An auto-completing OAuth `/connect` flow failed (timed out, cancelled in
     /// the browser, or the exchange errored).
@@ -703,6 +707,7 @@ pub(crate) struct PendingPromptDispatch {
     pub(crate) system: Option<String>,
     pub(crate) agent: Option<String>,
     pub(crate) model: String,
+    pub(crate) connection_id: Option<String>,
     pub(crate) thinking: Option<String>,
     pub(crate) delivery: neoism_protocol::agent::PromptDelivery,
     pub(crate) author: Option<String>,
@@ -760,6 +765,8 @@ pub struct NeoismAgentPane {
     pub(super) mode: NeoismAgentMode,
     pub(super) agent: Option<String>,
     pub(super) model: String,
+    pub(super) connection_id: Option<String>,
+    pub(super) pending_account_model: Option<String>,
     pub(super) thinking: Option<String>,
     pub(super) session_id: Option<String>,
     pub(super) parent_session_id: Option<String>,
@@ -968,6 +975,7 @@ pub struct NeoismAgentPane {
         Option<neoism_ui::panels::agent_pane::state::ExecutionTimerAnchor>,
     pub(super) runtime_snapshot_root: Option<String>,
     pub(super) runtime_snapshot_revision: u64,
+    pub(super) terminal_subagent_revisions: HashMap<String, (String, u64)>,
     pending_permission: Option<NeoismAgentPendingPermission>,
     pending_permission_queue: VecDeque<NeoismAgentPendingPermission>,
     /// `/yolo` — while true, every permission request auto-answers
@@ -1059,6 +1067,8 @@ impl Default for NeoismAgentPane {
             mode: NeoismAgentMode::Build,
             agent: Some(DEFAULT_AGENT.to_string()),
             model: DEFAULT_MODEL.to_string(),
+            connection_id: None,
+            pending_account_model: None,
             thinking: None,
             session_id: None,
             parent_session_id: None,
@@ -1189,6 +1199,7 @@ impl Default for NeoismAgentPane {
             execution_timer_anchor: None,
             runtime_snapshot_root: None,
             runtime_snapshot_revision: 0,
+            terminal_subagent_revisions: HashMap::new(),
             pending_permission: None,
             pending_permission_queue: VecDeque::new(),
             skip_permissions: false,

@@ -196,16 +196,25 @@ pub(crate) async fn start_task_tool(
     }
     if background {
         let generation = Id::ascending(IdKind::Message);
+        let admission = if continuing {
+            crate::execution_activity::SubtaskAdmissionGuard::admit_continuation(
+                state,
+                &parent,
+                &child_session_id,
+            )
+            .await
+        } else {
+            crate::execution_activity::SubtaskAdmissionGuard::admit(
+                state,
+                &parent,
+                &child_session_id,
+            )
+            .await
+        }
+        .map_err(|error| error.to_string())?;
         crate::session_actions::mark_subtask_notify_on_idle(state, &child_session_id, &generation)
             .await
             .map_err(|error| error.to_string())?;
-        let admission = crate::execution_activity::SubtaskAdmissionGuard::admit(
-            state,
-            &parent,
-            &child_session_id,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
         spawn_background_subtask_prompt(
             state.clone(),
             child_session_id.clone(),
@@ -227,12 +236,21 @@ pub(crate) async fn start_task_tool(
             )),
         });
     }
-    let admission = crate::execution_activity::SubtaskAdmissionGuard::admit(
-        state,
-        &parent,
-        &child_session_id,
-    )
-    .await
+    let admission = if continuing {
+        crate::execution_activity::SubtaskAdmissionGuard::admit_continuation(
+            state,
+            &parent,
+            &child_session_id,
+        )
+        .await
+    } else {
+        crate::execution_activity::SubtaskAdmissionGuard::admit(
+            state,
+            &parent,
+            &child_session_id,
+        )
+        .await
+    }
     .map_err(|error| error.to_string())?;
     let result = crate::tool_runtime::run_child_task_prompt_with_cancel(
         state,

@@ -131,6 +131,7 @@ fn parse_model_ref(value: &str, variant: Option<String>) -> Option<ModelRef> {
     Some(ModelRef {
         provider_id: provider_id.to_string(),
         id: model_id.to_string(),
+        connection_id: None,
         variant,
     })
 }

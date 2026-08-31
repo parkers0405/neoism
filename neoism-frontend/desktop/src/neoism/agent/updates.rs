@@ -166,6 +166,9 @@ pub(super) enum AgentSessionUpdate {
         status: String,
         title: Option<String>,
         agent: Option<String>,
+        root_session_id: Option<String>,
+        execution_id: Option<String>,
+        family_revision: Option<u64>,
     },
     BackgroundTaskCompleted {
         session_id: String,
@@ -1099,11 +1102,17 @@ fn send_event_updates(
                 status,
                 title,
                 agent,
+                root_session_id,
+                execution_id,
+                family_revision,
             } => tx.send(AgentSessionUpdate::SubagentCompleted {
                 task_id,
                 status,
                 title,
                 agent,
+                root_session_id,
+                execution_id,
+                family_revision,
             })?,
             SessionEventUpdate::PermissionAsked(permission) => {
                 tx.send(AgentSessionUpdate::PermissionAsked(

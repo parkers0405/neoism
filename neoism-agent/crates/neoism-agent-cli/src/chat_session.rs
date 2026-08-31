@@ -72,6 +72,7 @@ pub(crate) fn user_model_from_cli_model(
     Ok(UserModel {
         provider_id,
         model_id,
+        connection_id: None,
         variant: variant.map(ToOwned::to_owned),
     })
 }
@@ -85,6 +86,7 @@ fn model_ref_from_cli_model(
     Ok(ModelRef {
         id: model_id,
         provider_id,
+        connection_id: None,
         variant: variant.map(ToOwned::to_owned),
     })
 }

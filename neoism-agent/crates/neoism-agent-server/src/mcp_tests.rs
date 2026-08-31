@@ -18,6 +18,12 @@ use crate::mcp_auth::McpAuthTokens;
 use super::mcp_runtime::MCP_PROTOCOL_VERSION;
 use super::*;
 
+#[test]
+fn standalone_server_services_inject_the_local_mcp_store() {
+    let services = crate::standard_services();
+    assert!(!services.mcp_credentials.supports_hosted_scopes());
+}
+
 struct FakeBuiltinMcp;
 
 impl neoism_agent_service_api::BuiltinMcpService for FakeBuiltinMcp {
@@ -58,7 +64,7 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
     let services = crate::standard_services()
         .with_builtin_mcp(Arc::new(FakeBuiltinMcp));
     let state = crate::state::AppState::open_database_with_services(root.join("present.db"), services).await.unwrap();
-    let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state)).unwrap();
+    let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state)).await.unwrap();
     assert!(matches!(catalog["fake-service"].status, McpStatus::Connected));
     assert_eq!(tools_with_state(root.to_str().unwrap(), "fake-service", &store, state.clone()).await.unwrap()[0].name, "fake.call");
     let result = call_tool_with_state(root.to_str().unwrap(), "fake-service", "fake.call", json!({}), &store, state.clone()).await.unwrap();
@@ -69,15 +75,15 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
         r#"{"mcp":{"fake-service":{"type":"local","command":["builtin","fake-service"],"enabled":false}}}"#,
     )
     .unwrap();
-    let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state)).unwrap();
+    let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state)).await.unwrap();
     assert!(matches!(catalog["fake-service"].status, McpStatus::Disabled));
     let error = tools_with_state(root.to_str().unwrap(), "fake-service", &store, state).await.unwrap_err();
     assert!(error.to_string().contains("disabled"));
     let _ = fs::remove_dir_all(root);
 }
 
-#[test]
-fn status_marks_remote_oauth_without_tokens_as_needs_auth() {
+#[tokio::test]
+async fn status_marks_remote_oauth_without_tokens_as_needs_auth() {
     let store = McpAuthStore::new(temp_auth_path("status"));
     let mut config = BTreeMap::new();
     config.insert(
@@ -99,7 +105,7 @@ fn status_marks_remote_oauth_without_tokens_as_needs_auth() {
         },
     );
 
-    let status = status_for_config(&config, &store);
+    let status = status_for_config(&config, &store).await;
     assert!(matches!(status["remote"], McpStatus::NeedsAuth));
 }
 
@@ -156,18 +162,11 @@ async fn auth_start_builds_authorization_url_and_persists_transient_fields() {
     assert!(response
         .authorization_url
         .contains("code_challenge_method=S256"));
-    let entry = store.get("remote").unwrap().unwrap();
-    assert_eq!(
-        entry.oauth_state.as_deref(),
-        Some(response.oauth_state.as_str())
-    );
-    assert_eq!(entry.server_url.as_deref(), Some("https://example.com/mcp"));
-    assert_eq!(entry.oauth_directory.as_deref(), Some(directory));
-    assert_eq!(
-        entry.oauth_redirect_uri.as_deref(),
-        Some("http://127.0.0.1/callback")
-    );
-    assert!(entry.code_verifier.is_some());
+    let attempt = store.consume_attempt(&response.oauth_state, true).await.unwrap().unwrap();
+    assert_eq!(attempt.connection.server_url, "https://example.com/mcp");
+    assert_eq!(attempt.directory, directory);
+    assert_eq!(attempt.redirect_uri, "http://127.0.0.1/callback");
+    assert!(!attempt.code_verifier.is_empty());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -423,14 +422,14 @@ async fn remote_http_runtime_lists_and_calls_tools_with_headers_and_bearer_token
     store
         .update_tokens(
             "remote",
+            &url,
             McpAuthTokens {
                 access_token: "secret-token".to_string(),
                 refresh_token: None,
                 expires_at: None,
-                scope: None,
             },
-            Some(&url),
         )
+        .await
         .unwrap();
     let directory = root.to_str().unwrap();
     let state = test_state(&root).await;
@@ -591,14 +590,14 @@ async fn remote_http_connect_invalidates_stale_bearer_token_on_unauthorized() {
     store
         .update_tokens(
             "remote",
+            &url,
             McpAuthTokens {
                 access_token: "stale-token".to_string(),
                 refresh_token: None,
                 expires_at: None,
-                scope: None,
             },
-            Some(&url),
         )
+        .await
         .unwrap();
 
     let state = test_state(&root).await;
@@ -607,7 +606,7 @@ async fn remote_http_connect_invalidates_stale_bearer_token_on_unauthorized() {
         .unwrap();
 
     assert!(matches!(status, McpStatus::NeedsAuth));
-    assert!(store.get("remote").unwrap().unwrap().tokens.is_none());
+    assert!(store.get_for_url("remote", &url).await.unwrap().unwrap().tokens.is_none());
 
     let _ = shutdown_tx.send(());
     let _ = server.await;
@@ -655,14 +654,14 @@ async fn expired_refresh_token_is_cleared_and_reports_needs_auth() {
     store
         .update_tokens(
             "remote",
+            &url,
             McpAuthTokens {
                 access_token: "expired-token".to_string(),
                 refresh_token: Some("revoked-refresh".to_string()),
                 expires_at: Some(1),
-                scope: None,
             },
-            Some(&url),
         )
+        .await
         .unwrap();
 
     let state = test_state(&root).await;
@@ -671,7 +670,7 @@ async fn expired_refresh_token_is_cleared_and_reports_needs_auth() {
         .unwrap();
 
     assert!(matches!(status, McpStatus::NeedsAuth));
-    assert!(store.get("remote").unwrap().unwrap().tokens.is_none());
+    assert!(store.get_for_url("remote", &url).await.unwrap().unwrap().tokens.is_none());
 
     let _ = shutdown_tx.send(());
     let _ = server.await;

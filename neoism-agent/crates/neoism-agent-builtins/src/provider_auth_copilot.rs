@@ -79,6 +79,8 @@ pub(super) async fn authorize_github_copilot(
         url: response.verification_uri,
         method: ProviderAuthAuthorizationMethod::Auto,
         instructions: format!("Enter code: {}", response.user_code),
+        attempt_id: None,
+        expires_at: None,
     })
 }
 

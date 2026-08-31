@@ -1359,6 +1359,21 @@ impl WorkspaceManager {
         self.get_workspace(id)
     }
 
+    /// Narrow management-plane bridge. These delegate to the same registry
+    /// mutations used by GUI protocol dispatch.
+    pub(crate) fn management_upsert_project_root(&self, workspace: ProjectRootSummary) {
+        self.upsert_workspace(workspace);
+    }
+
+    /// Unregister only; working-tree contents are never removed.
+    pub(crate) fn management_forget_project_root(&self, id: &str) -> bool {
+        self.forget_workspace(id)
+    }
+
+    pub(crate) fn management_project_roots(&self) -> Vec<ProjectRootSummary> {
+        self.list_workspaces()
+    }
+
     /// Resolve the project root registered at `path` (canonicalized
     /// comparison). Promote uses this to bridge the two registries: a
     /// host-workspace's `root_dir` → the project root whose sessions

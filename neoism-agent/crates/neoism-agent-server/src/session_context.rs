@@ -492,6 +492,9 @@ async fn generate_model_compaction_summary(
     let request = ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),
         model_id: model.model_id.clone(),
+        connection_id: model.connection_id.clone(),
+        tenant_id: Some(crate::caller::session_tenant(info).to_string()),
+        workspace_id: info.workspace_id.as_ref().map(ToString::to_string),
         session_id: Some(session_id.to_string()),
         variant: model.variant.clone(),
         text_verbosity: snapshot.config().text_verbosity,
@@ -508,7 +511,7 @@ async fn generate_model_compaction_summary(
     let provider = snapshot.provider_services_by_priority().into_iter().next()?;
     let activity_segment =
         crate::execution_activity::begin_provider_segment(state, session_id).await;
-    let stream = match provider.stream(request) {
+    let stream = match provider.stream(request).await {
         Ok(stream) => stream,
         Err(_) => {
             crate::execution_activity::end_provider_segment(activity_segment).await;
@@ -1615,6 +1618,7 @@ mod tests {
             model: Some(neoism_agent_core::ModelRef {
                 provider_id: "anthropic".to_string(),
                 id: "claude-opus".to_string(),
+                connection_id: None,
                 variant: Some("fast".to_string()),
             }),
             variant: None,

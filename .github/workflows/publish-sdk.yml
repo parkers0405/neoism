@@ -14,13 +14,16 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
-      - name: Publish @neoism/sdk-*
+      - name: Publish @neoism packages
         working-directory: neoism-agent/sdk/typescript
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

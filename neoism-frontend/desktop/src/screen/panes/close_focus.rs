@@ -568,7 +568,7 @@ impl Screen<'_> {
                             .as_ref()
                             .map(|island| island.focus_cursor(num_tabs) == 0)
                             .unwrap_or(false);
-                    if alt_only && at_left_edge {
+                    if alt_only && at_left_edge && self.renderer.file_tree.is_visible() {
                         // Leftmost workspace + Alt+Left hands focus off to
                         // the file tree, mirroring how the buffer-tab strip
                         // escapes left at its first tab (see StripRef::
@@ -639,7 +639,10 @@ impl Screen<'_> {
                     crate::host::StripRef::Workspace => {
                         let at_left_edge =
                             previous && self.renderer.buffer_tabs.focused_index() == 0;
-                        if alt_only && at_left_edge {
+                        if alt_only
+                            && at_left_edge
+                            && self.renderer.file_tree.is_visible()
+                        {
                             self.renderer.buffer_tabs.set_focused(false);
                             self.open_file_tree_command();
                         } else {
@@ -851,8 +854,9 @@ impl Screen<'_> {
                     self.renderer.notes_sidebar.set_focused(true);
                     self.renderer.file_tree.set_focused(false);
                     self.mark_dirty();
-                } else {
-                    self.open_file_tree_command();
+                } else if self.renderer.file_tree.is_visible() {
+                    self.renderer.file_tree.set_focused(true);
+                    self.mark_dirty();
                 }
                 return true;
             }
@@ -875,8 +879,9 @@ impl Screen<'_> {
                 self.renderer.notes_sidebar.set_focused(true);
                 self.renderer.file_tree.set_focused(false);
                 self.mark_dirty();
-            } else {
-                self.open_file_tree_command();
+            } else if self.renderer.file_tree.is_visible() {
+                self.renderer.file_tree.set_focused(true);
+                self.mark_dirty();
             }
             true
         }

@@ -8,6 +8,26 @@ export interface PluginSdk<TClient> {
   client(core: NeoismClient): TClient;
 }
 
+export interface PluginUseOptions {
+  directory?: string;
+  minimumVersion?: string;
+}
+
+export class CapabilityUnavailableError extends Error {
+  constructor(
+    readonly capability: string,
+    readonly pluginId: string,
+    readonly minimumVersion?: string,
+  ) {
+    super(
+      minimumVersion
+        ? `Capability ${capability} >= ${minimumVersion} is unavailable`
+        : `Capability ${capability} is unavailable`,
+    );
+    this.name = "CapabilityUnavailableError";
+  }
+}
+
 export interface EventReducerExtension<State> {
   readonly pluginId: string;
   readonly eventTypes: readonly string[];

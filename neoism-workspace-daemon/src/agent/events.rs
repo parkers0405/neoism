@@ -33,59 +33,87 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
         inner.agent_server,
         percent_encode(&session_id),
     );
-    let resp = match inner
-        .authorize_agent_request(inner.http.get(&url))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(err) => {
-            emit_error(&inner.tx, format!("agent-server SSE {url}: {err}"));
+    let mut retry_delay = std::time::Duration::from_millis(250);
+    let mut connected_once = false;
+    loop {
+        if inner.tx.is_closed() {
             return;
         }
-    };
-    if !resp.status().is_success() {
-        emit_error(
-            &inner.tx,
-            format!("agent-server SSE {url}: HTTP {}", resp.status()),
-        );
-        return;
-    }
-    let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(b) => b,
+        let resp = match inner
+            .authorize_agent_request(inner.http.get(&url))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp,
+            Ok(resp) => {
+                emit_error(
+                    &inner.tx,
+                    format!("agent-server SSE {url}: HTTP {}", resp.status()),
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(5));
+                continue;
+            }
             Err(err) => {
-                emit_error(&inner.tx, format!("agent-server SSE stream: {err}"));
-                break;
+                emit_error(&inner.tx, format!("agent-server SSE {url}: {err}"));
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(5));
+                continue;
             }
         };
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(idx) = buf.find("\n\n") {
-            let record = buf[..idx].to_string();
-            buf.drain(..idx + 2);
-            for line in record.lines() {
-                if let Some(payload) = line.strip_prefix("data: ") {
-                    if payload.is_empty() {
-                        continue;
-                    }
-                    if let Ok(value) = serde_json::from_str::<Value>(payload) {
-                        forward_agent_server_event(
-                            &inner.tx,
-                            &session_id,
-                            normalize_v2_event(value),
-                        );
+
+        retry_delay = std::time::Duration::from_millis(250);
+        if connected_once {
+            push_session_running_state(inner.clone(), session_id.clone()).await;
+            push_runtime_snapshot(inner.clone(), session_id.clone()).await;
+        }
+        connected_once = true;
+
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        loop {
+            let chunk = match tokio::time::timeout(
+                std::time::Duration::from_secs(45),
+                stream.next(),
+            )
+            .await
+            {
+                Ok(Some(Ok(chunk))) => chunk,
+                Ok(Some(Err(err))) => {
+                    emit_error(&inner.tx, format!("agent-server SSE stream: {err}"));
+                    break;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    emit_error(
+                        &inner.tx,
+                        format!("agent-server SSE {url}: no bytes for 45s"),
+                    );
+                    break;
+                }
+            };
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(idx) = buf.find("\n\n") {
+                let record = buf[..idx].to_string();
+                buf.drain(..idx + 2);
+                for line in record.lines() {
+                    if let Some(payload) = line.strip_prefix("data: ") {
+                        if payload.is_empty() {
+                            continue;
+                        }
+                        if let Ok(value) = serde_json::from_str::<Value>(payload) {
+                            forward_agent_server_event(
+                                &inner.tx,
+                                &session_id,
+                                normalize_v2_event(value),
+                            );
+                        }
                     }
                 }
             }
         }
+        tokio::time::sleep(retry_delay).await;
     }
-    // Emit an Idle signal so the chrome flips its streaming-state
-    // indicator back when the upstream socket goes away.
-    let _ = inner.tx.send(AgentServerMessage::SessionIdle {
-        session_id: session_id.clone(),
-    });
 }
 
 fn normalize_v2_event(event: Value) -> Value {
@@ -318,6 +346,19 @@ pub(crate) fn forward_agent_server_event(
                         .or_else(|| properties.get("parentSessionId"))
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    root_session_id: properties
+                        .get("rootSessionID")
+                        .or_else(|| properties.get("rootSessionId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    execution_id: properties
+                        .get("executionID")
+                        .or_else(|| properties.get("executionId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    family_revision: properties
+                        .get("familyRevision")
+                        .and_then(Value::as_u64),
                 });
                 return;
             }
@@ -657,6 +698,9 @@ pub(crate) fn forward_agent_server_event(
                         .and_then(|time| time.get("created"))
                         .and_then(Value::as_u64),
                     parent_session_id: Some(parent_session_id),
+                    root_session_id: None,
+                    execution_id: None,
+                    family_revision: None,
                 });
                 return;
             }
@@ -907,7 +951,10 @@ mod tests {
                     "sessionID": "root",
                     "parentSessionID": "root",
                     "taskID": "child",
-                    "status": "completed"
+                    "status": "completed",
+                    "rootSessionID": "root",
+                    "executionID": "execution-a",
+                    "familyRevision": 10
                 }
             }),
         );
@@ -916,8 +963,13 @@ mod tests {
             AgentServerMessage::SubagentUpdate {
                 session_id,
                 status: SubagentStatus::Completed,
+                root_session_id: Some(root_session_id),
+                execution_id: Some(execution_id),
+                family_revision: Some(10),
                 ..
             } if session_id == "child"
+                && root_session_id == "root"
+                && execution_id == "execution-a"
         ));
         assert!(rx.try_recv().is_err());
     }

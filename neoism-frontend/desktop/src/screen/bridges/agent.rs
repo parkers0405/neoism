@@ -569,6 +569,9 @@ impl Screen<'_> {
             self.renderer.file_tree.set_active_path(None);
             self.reapply_chrome_layout();
         }
+        if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            agent.reconcile_after_activation();
+        }
         self.renderer.trail_cursor.reset();
         self.mark_dirty();
         true
@@ -1541,10 +1544,11 @@ impl Screen<'_> {
             };
             let dragged = agent.end_scrollbar_drag();
             let markdown_dragged = agent.end_markdown_horizontal_scrollbar_drag();
+            let selection_click = agent.selection_is_plain_click();
             let selection = agent.end_selection();
-            (dragged || markdown_dragged, selection)
+            (dragged || markdown_dragged, selection_click, selection)
         };
-        if let Some(text) = release.1 {
+        if let Some(text) = release.2 {
             let chars = text.chars().count();
             clipboard.set(ClipboardType::Clipboard, text);
             if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut()
@@ -1590,6 +1594,17 @@ impl Screen<'_> {
             } else {
                 self.open_neoism_agent_link_target(&link);
             }
+            self.mark_dirty();
+            return true;
+        }
+        if release.1
+            && self
+                .context_manager
+                .current_mut()
+                .neoism_agent
+                .as_mut()
+                .is_some_and(|agent| agent.toggle_tool_at(mx, my))
+        {
             self.mark_dirty();
             return true;
         }

@@ -81,7 +81,7 @@ async fn configured_mcp_tools_with_snapshot(
         let Ok(mut items) = mcp::tools_with_snapshot(
             directory,
             &name,
-            &mcp_auth::McpAuthStore::from_env(),
+            &mcp_auth::McpAuthStore::local(runtime_state.services()),
             runtime_state.clone(),
             snapshot,
         )
@@ -238,11 +238,11 @@ fn mcp_gateway_tool(tools: &[ToolListItem]) -> ToolListItem {
             "required": ["action"],
             "properties": {
                 "action": { "type": "string", "enum": ["search", "call"] },
-                "query": { "type": "string", "description": "Search words or exact server.tool path." },
+                "query": { "type": "string", "description": "Words used only to discover a callable MCP tool in the tool catalog, or an exact server.tool path. Not a content-search query." },
                 "namespace": { "type": "string", "description": "Optional MCP server namespace." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": MCP_SEARCH_MAX_LIMIT },
                 "offset": { "type": "integer", "minimum": 0 },
-                "tool": { "type": "string", "description": "Exact server.tool path returned by search." },
+                "tool": { "type": "string", "description": "Exact server.tool path returned by catalog search or shown in Visible signatures. Requires action=call." },
                 "arguments": { "type": "object", "description": "Arguments matching the discovered signature." }
             }
         }),
@@ -258,7 +258,7 @@ fn mcp_gateway_description(tools: &[ToolListItem]) -> String {
         }
     }
     let mut description = String::from(
-        "Discover and call connected MCP tools without loading every MCP schema into context. Use action=search when the needed path/signature is not listed, then action=call with the exact server.tool path and arguments.\n\nMCP CATALOG\n",
+        "Discover and call connected MCP tools without loading every MCP schema into context. action=search searches only the catalog of connected MCP tool paths, descriptions, and signatures; it does not search documentation, files, memory, issues, or other server content, and it does not execute a tool. If a suitable signature is already visible, skip catalog search and use action=call. To search server content, discover its search/read tool, then invoke that tool with action=call and the exact server.tool path and arguments.\n\nMCP CATALOG\n",
     );
     for (namespace, count) in namespaces {
         description.push_str(&format!("- {namespace}: {count} tools\n"));
@@ -383,8 +383,8 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     else {
         anyhow::bail!("unknown MCP tool {runtime_id}");
     };
-    let auth_store = mcp_auth::McpAuthStore::from_env();
     let state = state.ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
+    let auth_store = mcp_auth::McpAuthStore::local(state.services());
     let call = mcp::call_tool_with_snapshot(
         directory,
         &tool.client,
@@ -483,7 +483,7 @@ pub(crate) async fn execute_mcp_gateway(
                     let mut requested = mcp::tools_with_state(
                         directory,
                         &name,
-                        &mcp_auth::McpAuthStore::from_env(),
+                        &mcp_auth::McpAuthStore::local(runtime_state.services()),
                         runtime_state,
                     )
                     .await?;
@@ -577,11 +577,14 @@ fn mcp_search_result(
         })
         .collect::<Vec<_>>();
     let next_offset = offset.saturating_add(items.len());
-    let payload = json!({
+    let mut payload = json!({
         "items": items,
         "remaining": total.saturating_sub(next_offset),
         "next": (next_offset < total).then(|| json!({ "offset": next_offset })),
     });
+    if total == 0 {
+        payload["hint"] = json!("No tool metadata matched. This searched the MCP tool catalog, not server content. Search for the relevant tool family (for example docs, help, or documentation), then invoke its search/read tool with action=call.");
+    }
     tool::ToolExecutionResult {
         title: format!("MCP search {query}"),
         output: serde_json::to_string_pretty(&payload)
@@ -903,5 +906,28 @@ mod tests {
         let payload: Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(payload["items"][0]["path"], "product_help.docs_search");
         assert_eq!(payload["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn gateway_distinguishes_catalog_discovery_from_content_search() {
+        let description = mcp_gateway_description(&[]);
+        assert!(description.contains("searches only the catalog"));
+        assert!(description.contains("does not search documentation"));
+        assert!(description.contains("invoke that tool with action=call"));
+    }
+
+    #[test]
+    fn skill_authoring_query_discovers_docs_content_search_tool() {
+        let tools = vec![mcp_tool(
+            "neoism-docs",
+            "docs.search",
+            "Search Neoism help, manual, and bundled product documentation by natural-language topic, including setup, configuration, Skills/SKILL.md, MCP, tools, editor, terminal, notes, and troubleshooting. Returns page paths and snippets; follow with neoism_docs.read for full content.",
+        )];
+        let result = mcp_search_result(
+            &tools,
+            &json!({"query": "skills SKILL.md create custom skill location format"}),
+        );
+        let payload: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(payload["items"][0]["path"], "neoism_docs.search");
     }
 }

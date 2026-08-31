@@ -41,6 +41,7 @@ pub fn methods(
 
 pub async fn authorize(
     provider_id: &str,
+    pending_key: &str,
     method: &Value,
     inputs: &BTreeMap<String, String>,
     providers: &[ProviderInfo],
@@ -50,11 +51,11 @@ pub async fn authorize(
     let method = select_method(provider_id, method, providers)?;
     if provider_id == "xai" && matches!(method.kind, ProviderAuthMethodKind::OAuth) {
         if provider_auth_xai::is_headless_method(&method.label) {
-            return provider_auth_xai::authorize_xai_device(provider_id, pending)
+            return provider_auth_xai::authorize_xai_device(pending_key, pending)
                 .await
                 .map(Some);
         }
-        return provider_auth_xai::authorize_xai_loopback(provider_id, pending)
+        return provider_auth_xai::authorize_xai_loopback(pending_key, pending)
             .await
             .map(Some);
     }
@@ -67,23 +68,23 @@ pub async fn authorize(
                         key: key.clone(),
                         metadata: provider_metadata(inputs),
                     },
-                )?;
+                ).await?;
             }
             Ok(None)
         }
         ProviderAuthMethodKind::OAuth => {
             if provider_id == "openai" && method.label.contains("browser") {
-                return authorize_openai_browser(provider_id, pending)
+                return authorize_openai_browser(pending_key, pending)
                     .await
                     .map(Some);
             }
             if provider_id == "openai" && method.label.contains("headless") {
-                return authorize_openai_headless(provider_id, pending)
+                return authorize_openai_headless(pending_key, pending)
                     .await
                     .map(Some);
             }
             if provider_id.starts_with("github-copilot") {
-                return authorize_github_copilot(provider_id, inputs, pending)
+                return authorize_github_copilot(pending_key, inputs, pending)
                     .await
                     .map(Some);
             }
@@ -93,6 +94,8 @@ pub async fn authorize(
                 instructions: format!(
                     "Paste an OAuth access token for {provider_id}. Neoism will store it as both access and refresh token unless a provider-specific OAuth flow is added."
                 ),
+                attempt_id: None,
+                expires_at: None,
             }))
         }
     }
@@ -100,16 +103,16 @@ pub async fn authorize(
 
 pub async fn callback(
     provider_id: &str,
+    pending_key: &str,
     method: &Value,
     code: Option<&str>,
     providers: &[ProviderInfo],
-    auth_store: &AuthStore,
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AuthInfo> {
     let method = select_method(provider_id, method, providers)?;
     if provider_id == "xai" && matches!(method.kind, ProviderAuthMethodKind::OAuth) {
         let auth = if provider_auth_xai::is_headless_method(&method.label) {
-            provider_auth_xai::poll_xai_device(provider_id, pending).await?
+            provider_auth_xai::poll_xai_device(pending_key, pending).await?
         } else {
             let code = code
                 .map(str::trim)
@@ -117,53 +120,41 @@ pub async fn callback(
                 .ok_or_else(|| {
                     anyhow::anyhow!("paste the authorization code xAI showed you")
                 })?;
-            provider_auth_xai::exchange_xai_loopback(provider_id, pending, code).await?
+            provider_auth_xai::exchange_xai_loopback(pending_key, pending, code).await?
         };
-        auth_store.set(provider_id, auth)?;
-        return Ok(());
+        return Ok(auth);
     }
     match method.kind {
         ProviderAuthMethodKind::Api => {
             let Some(key) = code.filter(|code| !code.trim().is_empty()) else {
                 anyhow::bail!("API key is required for provider {provider_id}")
             };
-            auth_store.set(
-                provider_id,
-                AuthInfo::Api {
+            Ok(AuthInfo::Api {
                     key: key.to_string(),
                     metadata: None,
-                },
-            )?;
-            Ok(())
+                })
         }
         ProviderAuthMethodKind::OAuth => {
             if provider_id == "openai" && method.label.contains("browser") {
-                let auth = exchange_openai_browser(provider_id, pending).await?;
-                auth_store.set(provider_id, auth)?;
-                return Ok(());
+                let auth = exchange_openai_browser(pending_key, pending).await?;
+                return Ok(auth);
             }
             if provider_id == "openai" && method.label.contains("headless") {
-                let auth = poll_openai_headless(provider_id, pending).await?;
-                auth_store.set(provider_id, auth)?;
-                return Ok(());
+                let auth = poll_openai_headless(pending_key, pending).await?;
+                return Ok(auth);
             }
             if provider_id.starts_with("github-copilot") {
-                let auth = poll_github_copilot(provider_id, pending).await?;
-                auth_store.set(provider_id, auth)?;
-                return Ok(());
+                let auth = poll_github_copilot(pending_key, pending).await?;
+                return Ok(auth);
             }
             if let Some(code) = code.filter(|code| !code.trim().is_empty()) {
-                auth_store.set(
-                    provider_id,
-                    AuthInfo::OAuth {
+                return Ok(AuthInfo::OAuth {
                         refresh: code.to_string(),
                         access: code.to_string(),
                         expires: 0,
                         account_id: None,
                         enterprise_url: None,
-                    },
-                )?;
-                return Ok(());
+                    });
             }
             anyhow::bail!("OAuth token is required for provider {provider_id}")
         }
@@ -197,7 +188,7 @@ pub async fn refresh_oauth_if_needed(
     let refresh = refresh.clone();
     match provider_auth_xai::refresh_xai_oauth(client, &refresh).await {
         Ok(refreshed) => {
-            let _ = auth_store.set("xai", refreshed.clone());
+            let _ = auth_store.set("xai", refreshed.clone()).await;
             Ok(Some(refreshed))
         }
         Err(_) => Ok(auth),

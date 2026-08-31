@@ -338,6 +338,20 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Reconcile the durable family projection whenever this pane becomes
+    /// visible again. Live-tail SSE intentionally has no replay window, so
+    /// activation is the correctness barrier for lifecycle edges missed while
+    /// another workspace owned the frame loop.
+    pub fn reconcile_after_activation(&mut self) {
+        self.side_panel.mark_subagent_tree_dirty();
+        let Some(session_id) = self.session_id.clone() else {
+            return;
+        };
+        self.hydrate_runtime_status_for_session(&session_id);
+        let stream_session_id = self.session_tree_root_id.clone().unwrap_or(session_id);
+        self.start_session_updates(&stream_session_id);
+    }
+
     /// Debounced background refetch of the session's persistent goal.
     /// Fires on session change / `SESSION_UPDATED` (via
     /// `invalidate_goal_refresh`) and on a slow steady cadence otherwise.
@@ -379,6 +393,8 @@ impl NeoismAgentPane {
             .spawn(move || {
                 let result = fetch_session_statuses(&server);
                 let runtime = fetch_family_runtime(&server, &worker_session_id);
+                let permissions = fetch_pending_permissions(&server);
+                let questions = fetch_pending_questions(&server);
                 let _ =
                     tx.send(NeoismAgentBackgroundUpdate::SessionRuntimeStatusRefreshed {
                         session_id: worker_session_id,
@@ -386,6 +402,8 @@ impl NeoismAgentPane {
                         runtime_revision,
                         result,
                         runtime,
+                        permissions,
+                        questions,
                     });
             })
         {
@@ -769,6 +787,12 @@ impl NeoismAgentPane {
             self.active_subagent_ids.clear();
             self.active_subagent_started_at.clear();
             self.side_panel.reset_branch_lifecycle();
+            if let Some(activity) = self.execution_activity.as_ref() {
+                self.terminal_subagent_revisions
+                    .retain(|_, (execution_id, _)| {
+                        execution_id == &activity.execution_id
+                    });
+            }
         }
         true
     }
@@ -828,6 +852,10 @@ impl NeoismAgentPane {
             self.side_panel.reset_branch_lifecycle();
         }
         self.runtime_snapshot_revision = revision;
+        let execution_id = self
+            .execution_activity
+            .as_ref()
+            .map(|activity| activity.execution_id.clone());
         let branches = branches.into_iter().collect::<Vec<_>>();
         let mut viewed_terminal = false;
         let branch_ids = branches
@@ -840,12 +868,45 @@ impl NeoismAgentPane {
             .retain(|session_id, _| branch_ids.contains(session_id));
         self.side_panel.retain_authoritative_branches(&branch_ids);
         for (session_id, status, started_at) in branches {
-            let status = match status.as_str() {
+            let mut status = match status.as_str() {
                 "outstanding" => BranchStatus::Active,
                 "completed" => BranchStatus::Completed,
                 _ => BranchStatus::Stopped,
             };
-            if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
+            if matches!(
+                status,
+                BranchStatus::Active | BranchStatus::WaitingPermission
+            ) {
+                if let (
+                    Some(current_execution),
+                    Some((terminal_execution, terminal_revision)),
+                ) = (
+                    execution_id.as_deref(),
+                    self.terminal_subagent_revisions.get(&session_id),
+                ) {
+                    if terminal_execution == current_execution
+                        && revision <= *terminal_revision
+                    {
+                        status = self
+                            .side_panel
+                            .branch_activity(&session_id)
+                            .map(|activity| activity.status)
+                            .filter(|status| {
+                                matches!(
+                                    status,
+                                    BranchStatus::Completed | BranchStatus::Stopped
+                                )
+                            })
+                            .unwrap_or(BranchStatus::Completed);
+                    } else if terminal_execution == current_execution {
+                        self.terminal_subagent_revisions.remove(&session_id);
+                    }
+                }
+            }
+            if matches!(
+                status,
+                BranchStatus::Active | BranchStatus::WaitingPermission
+            ) {
                 self.upsert_live_subagent_entry(&session_id, None, None);
             }
             // A newer family revision is authoritative proof of a genuine
@@ -854,7 +915,10 @@ impl NeoismAgentPane {
                 .set_branch_activity_status_from_recovery(session_id.clone(), status);
             self.side_panel
                 .set_branch_activity_started_at(session_id.clone(), started_at);
-            if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
+            if matches!(
+                status,
+                BranchStatus::Active | BranchStatus::WaitingPermission
+            ) {
                 self.active_subagent_ids.insert(session_id.clone());
                 if let Some(started_at) = started_at {
                     self.active_subagent_started_at.insert(session_id, started_at);
@@ -873,6 +937,46 @@ impl NeoismAgentPane {
         self.reconcile_task_message_statuses();
         self.side_panel.prune_expired_completed_subagents();
         self.sync_subagent_waiting_clock();
+        true
+    }
+
+    pub(crate) fn note_subagent_terminal_revision(
+        &mut self,
+        session_id: &str,
+        root_session_id: Option<&str>,
+        execution_id: Option<&str>,
+        family_revision: Option<u64>,
+    ) -> bool {
+        let (Some(root), Some(execution), Some(revision)) =
+            (root_session_id, execution_id, family_revision)
+        else {
+            return true;
+        };
+        if revision == 0
+            || self
+                .runtime_snapshot_root
+                .as_deref()
+                .is_some_and(|current| current != root)
+        {
+            return false;
+        }
+        if let Some(current) = self.execution_activity.as_ref() {
+            if execution < current.execution_id.as_str()
+                || (current.execution_id == execution
+                    && self.runtime_snapshot_revision > revision)
+            {
+                return false;
+            }
+        }
+        self.terminal_subagent_revisions
+            .entry(session_id.to_string())
+            .and_modify(|(current_execution, current_revision)| {
+                if current_execution != execution || revision > *current_revision {
+                    *current_execution = execution.to_string();
+                    *current_revision = revision;
+                }
+            })
+            .or_insert_with(|| (execution.to_string(), revision));
         true
     }
 

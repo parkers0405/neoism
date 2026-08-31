@@ -4,10 +4,6 @@ use super::*;
 /// WebSocket router. Routes layer-1 envelopes to the legacy direct
 /// proxy and layer-2 envelopes to the embedded agent-server.
 pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
-    // Make sure the embedded agent-server has been kicked off before
-    // we issue the first envelope. Cheap on subsequent calls (one
-    // atomic load).
-    ensure_agent_server_started();
     let inner = session.inner.clone();
     match msg {
         // -- Layer 1: direct Claude proxy --------------------------
@@ -30,9 +26,10 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             directory,
             agent,
             model,
+            connection_id,
         } => {
             tokio::spawn(async move {
-                handle_create_thread(inner, title, directory, agent, model).await;
+                handle_create_thread(inner, title, directory, agent, model, connection_id).await;
             });
         }
         AgentClientMessage::SwitchThread { session_id } => {
@@ -86,6 +83,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             attachments,
             mode,
             model,
+            connection_id,
             thinking,
             delivery,
         } => {
@@ -99,6 +97,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                     attachments,
                     mode,
                     model,
+                    connection_id,
                     thinking,
                     delivery,
                 )
@@ -213,10 +212,11 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
         AgentClientMessage::SetModel {
             session_id,
             model,
+            connection_id,
             thinking,
         } => {
             tokio::spawn(async move {
-                handle_set_model(inner, session_id, model, thinking).await;
+                handle_set_model(inner, session_id, model, connection_id, thinking).await;
             });
         }
         AgentClientMessage::SetAgent { session_id, agent } => {
@@ -395,31 +395,39 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_connect_list_providers(inner, directory).await;
             });
         }
-        AgentClientMessage::ConnectStoreApiKey { provider_id, key } => {
+        AgentClientMessage::ConnectListConnections { provider_id } => {
+            tokio::spawn(async move { handle_connect_list_connections(inner, provider_id).await; });
+        }
+        AgentClientMessage::ConnectStoreApiKey { provider_id, key, label, connection_id } => {
             tokio::spawn(async move {
-                handle_connect_store_api_key(inner, provider_id, key).await;
+                handle_connect_store_api_key(inner, provider_id, key, label, connection_id).await;
             });
         }
-        AgentClientMessage::ConnectDisconnect { provider_id } => {
+        AgentClientMessage::ConnectDisconnect { provider_id, connection_id } => {
             tokio::spawn(async move {
-                handle_connect_disconnect(inner, provider_id).await;
+                handle_connect_disconnect(inner, provider_id, connection_id).await;
             });
         }
+        AgentClientMessage::ConnectRename { provider_id, connection_id, label } => { tokio::spawn(async move { handle_connect_rename(inner, provider_id, connection_id, label).await; }); }
+        AgentClientMessage::ConnectSetDefault { provider_id, connection_id } => { tokio::spawn(async move { handle_connect_set_default(inner, provider_id, connection_id).await; }); }
         AgentClientMessage::ConnectOauthAuthorize {
             provider_id,
             method_index,
+            label,
+            connection_id,
         } => {
             tokio::spawn(async move {
-                handle_connect_oauth_authorize(inner, provider_id, method_index).await;
+                handle_connect_oauth_authorize(inner, provider_id, method_index, label, connection_id).await;
             });
         }
         AgentClientMessage::ConnectOauthCallback {
             provider_id,
             method_index,
             code,
+            attempt_id,
         } => {
             tokio::spawn(async move {
-                handle_connect_oauth_callback(inner, provider_id, method_index, code)
+                handle_connect_oauth_callback(inner, provider_id, method_index, code, attempt_id)
                     .await;
             });
         }

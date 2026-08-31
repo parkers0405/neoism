@@ -7,10 +7,8 @@ impl NeoismAgentPane {
         };
         // The `/connect` secret stage has no selectable rows — its query row is
         // the input field, so commit reads the typed query directly.
-        if picker.kind == NeoismAgentPickerKind::ConnectSecret {
-            self.submit_connect_secret(picker.query.clone());
-            return true;
-        }
+        if picker.kind == NeoismAgentPickerKind::ConnectSecret { self.submit_connect_secret(picker.query.clone()); return true; }
+        if picker.kind == NeoismAgentPickerKind::ConnectLabel { self.submit_account_label(picker.query.clone()); return true; }
         if picker.kind == NeoismAgentPickerKind::Directory {
             let query = picker.query.trim();
             let selected = picker.selected_option().map(|option| option.value.clone());
@@ -112,6 +110,10 @@ impl NeoismAgentPane {
             }
             NeoismAgentPickerKind::FileMention => self.apply_file_mention(option.value),
             NeoismAgentPickerKind::Connect => self.enter_connect_auth(&option.value),
+            NeoismAgentPickerKind::ConnectAccount => self.choose_connect_account(&option.value),
+            NeoismAgentPickerKind::ModelAccount => self.choose_model_account(option.value),
+            NeoismAgentPickerKind::ConnectAccountActions => self.run_account_action(&option.value),
+            NeoismAgentPickerKind::ConnectConfirm => self.confirm_account_disconnect(option.value == super::connect::CONFIRM_DISCONNECT_VALUE),
             NeoismAgentPickerKind::ConnectAuth => {
                 if option.value == super::connect::DISCONNECT_VALUE {
                     self.disconnect_connect_provider();
@@ -120,7 +122,7 @@ impl NeoismAgentPane {
                 }
             }
             // Handled above (no selectable row).
-            NeoismAgentPickerKind::ConnectSecret => {}
+            NeoismAgentPickerKind::ConnectSecret | NeoismAgentPickerKind::ConnectLabel => {}
         }
         true
     }
@@ -943,7 +945,19 @@ impl NeoismAgentPane {
     }
 
     pub fn apply_model(&mut self, value: String) {
+        if value.trim().is_empty() {
+            self.apply_model_with_connection(value, None);
+            return;
+        }
+        let provider_id = value.split_once('/').map(|(provider, _)| provider).unwrap_or("openai").to_string();
+        self.pending_account_model = Some(value);
+        if self.connect.is_none() { self.connect = Some(super::connect::ConnectFlow::default()); }
+        self.push_outbound(OutboundAgentCommand::RefreshProviderConnections { provider_id });
+    }
+
+    pub(in crate::panels::agent_pane::state) fn apply_model_with_connection(&mut self, value: String, connection_id: Option<String>) {
         self.remember_model_value(&value);
+        self.connection_id = connection_id;
         self.set_model_local(value.clone());
         if !value.trim().is_empty() {
             self.push_outbound(OutboundAgentCommand::PersistConfigChoice {
@@ -954,14 +968,16 @@ impl NeoismAgentPane {
         if let Some(session_id) = self.session_id.clone() {
             self.push_outbound(OutboundAgentCommand::ApplyModel {
                 session_id,
-                model: crate::panels::agent_pane::api_mapping::session_model_json(
+                model: crate::panels::agent_pane::api_mapping::session_model_json_with_connection(
                     &value,
                     self.thinking.as_deref(),
+                    self.connection_id.as_deref(),
                 )
                 .unwrap_or_else(|| serde_json::Value::String(value)),
             });
         }
         self.refresh_model_context_limit();
+        self.connect = None;
     }
 
     pub(in crate::panels::agent_pane::state) fn set_model_local(

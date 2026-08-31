@@ -241,7 +241,7 @@ async fn agent_proxy_inner(
         Ok(identity) => identity,
         Err(response) => return response,
     };
-    crate::agent::ensure_agent_server_started();
+    crate::agent::ensure_agent_server_started(state.workspaces.clone());
     let base = agent_handler::configured_agent_server();
     let mut target = if path.is_empty() {
         base

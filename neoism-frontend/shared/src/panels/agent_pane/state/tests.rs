@@ -1166,6 +1166,7 @@ fn with_directory_queues_apply_config_defaults() {
 fn first_model_and_thinking_choices_request_insert_only_config_persistence() {
     let mut pane = NeoismAgentPane::default();
     pane.apply_model("opencode/free".to_string());
+    pane.apply_provider_connections("opencode".to_string(), Vec::new());
     pane.apply_thinking("high".to_string());
 
     let drained = pane.drain_pending_outbound();
@@ -1896,6 +1897,57 @@ fn authoritative_child_continuation_reopens_completed_branch() {
         Some(BranchStatus::Active)
     );
     assert!(!pane.side_panel.branch_terminal_locked("child-1"));
+}
+
+#[test]
+fn terminal_revision_rejects_delayed_active_snapshot_then_allows_continuation() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "parent".to_string(),
+            revision: 1,
+            ..Default::default()
+        }),
+        "parent".to_string(),
+        8,
+        [("child-1".to_string(), "outstanding".to_string(), Some(1))],
+    ));
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
+    assert!(pane.note_subagent_terminal_revision(
+        "child-1",
+        Some("parent"),
+        Some("execution-a"),
+        Some(10),
+    ));
+
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "parent".to_string(),
+        9,
+        [("child-1".to_string(), "outstanding".to_string(), Some(1))],
+    ));
+    assert_eq!(
+        pane.side_panel.branch_activity("child-1").map(|a| a.status),
+        Some(BranchStatus::Completed)
+    );
+    assert!(!pane.active_subagent_ids.contains("child-1"));
+
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "parent".to_string(),
+        11,
+        [("child-1".to_string(), "outstanding".to_string(), Some(2))],
+    ));
+    assert_eq!(
+        pane.side_panel.branch_activity("child-1").map(|a| a.status),
+        Some(BranchStatus::Active)
+    );
+    assert!(!pane.note_subagent_terminal_revision(
+        "child-1",
+        Some("parent"),
+        Some("execution-a"),
+        Some(10),
+    ));
 }
 
 #[test]
@@ -4082,16 +4134,18 @@ fn connect_api_key_path_queues_store_command() {
         "connected popular provider is the default selection"
     );
     assert!(pane.commit_picker());
-    let picker = pane.picker().expect("auth-method picker opens");
+    pane.apply_provider_connections("anthropic".to_string(), Vec::new());
+    let picker = pane.picker().expect("account picker opens");
+    assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAccount);
+    assert_eq!(picker.selected_option().map(|option| option.title.as_str()), Some("Add account"));
+    assert!(pane.commit_picker());
+    assert_eq!(pane.picker().map(|picker| picker.kind), Some(NeoismAgentPickerKind::ConnectLabel));
+    pane.insert_text("Personal");
+    assert!(pane.commit_picker());
+    let picker = pane.picker().expect("auth-method picker opens after labeling the account");
     assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAuth);
-    // First row is the disconnect affordance (Anthropic is connected).
-    assert_eq!(
-        picker.selected_option().map(|option| option.value.clone()),
-        Some(connect::DISCONNECT_VALUE.to_string())
-    );
-
-    // Move to the API-key method row and commit.
-    pane.move_picker_selection(1);
+    // Adding another account must not offer to disconnect an existing one.
+    assert_ne!(picker.selected_option().map(|option| option.value.as_str()), Some(connect::DISCONNECT_VALUE));
     assert!(pane.commit_picker());
     let picker = pane.picker().expect("secret entry opens");
     assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectSecret);
@@ -4103,7 +4157,7 @@ fn connect_api_key_path_queues_store_command() {
     let stored = pane.drain_pending_outbound();
     assert!(stored.iter().any(|command| matches!(
         command,
-        OutboundAgentCommand::ConnectStoreApiKey { provider_id, key }
+        OutboundAgentCommand::ConnectStoreApiKey { provider_id, key, .. }
             if provider_id == "anthropic" && key == "sk-test-123"
     )));
 
@@ -4113,13 +4167,39 @@ fn connect_api_key_path_queues_store_command() {
 }
 
 #[test]
+fn connect_secret_paste_fills_the_secret_field_not_the_composer() {
+    let mut pane = NeoismAgentPane::default();
+    pane.open_connect_picker();
+    let (providers, auth) = sample_connect_catalog();
+    pane.apply_connect_catalog(providers, auth);
+
+    pane.commit_picker(); // Connect -> request Anthropic accounts.
+    pane.apply_provider_connections("anthropic".to_string(), Vec::new());
+    pane.commit_picker(); // ConnectAccount -> ConnectLabel.
+    pane.insert_text("Personal");
+    pane.commit_picker(); // ConnectLabel -> ConnectAuth.
+    pane.commit_picker(); // ConnectAuth -> ConnectSecret.
+
+    let key = format!("sk-test-{}", "a".repeat(512));
+    pane.insert_paste(&key);
+
+    let picker = pane.picker().expect("secret picker remains open");
+    assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectSecret);
+    assert_eq!(picker.query, key);
+    assert!(pane.input().is_empty(), "paste must not enter the composer");
+}
+
+#[test]
 fn connect_secret_escape_steps_back_to_auth_method() {
     let mut pane = NeoismAgentPane::default();
     pane.open_connect_picker();
     let (providers, auth) = sample_connect_catalog();
     pane.apply_connect_catalog(providers, auth);
-    pane.commit_picker(); // Connect → ConnectAuth (Anthropic)
-    pane.move_picker_selection(1); // API-key method
+    pane.commit_picker(); // Connect → request Anthropic accounts
+    pane.apply_provider_connections("anthropic".to_string(), Vec::new());
+    pane.commit_picker(); // ConnectAccount → ConnectLabel
+    pane.insert_text("Personal");
+    pane.commit_picker(); // ConnectLabel → ConnectAuth
     pane.commit_picker(); // ConnectAuth → ConnectSecret
     assert_eq!(
         pane.picker().map(|picker| picker.kind),
@@ -4131,6 +4211,12 @@ fn connect_secret_escape_steps_back_to_auth_method() {
         pane.picker().map(|picker| picker.kind),
         Some(NeoismAgentPickerKind::ConnectAuth)
     );
+    // ESC again → back to account management.
+    pane.close_picker();
+    assert_eq!(
+        pane.picker().map(|picker| picker.kind),
+        Some(NeoismAgentPickerKind::ConnectAccount)
+    );
     // ESC again → back to the provider list.
     pane.close_picker();
     assert_eq!(
@@ -4140,6 +4226,118 @@ fn connect_secret_escape_steps_back_to_auth_method() {
     // ESC again → dismissed entirely.
     pane.close_picker();
     assert!(pane.picker().is_none());
+}
+
+fn provider_connection(
+    id: &str,
+    label: &str,
+    auth_type: &str,
+    is_default: bool,
+) -> neoism_protocol::agent::ProviderConnectionInfo {
+    neoism_protocol::agent::ProviderConnectionInfo {
+        provider_id: "anthropic".to_string(),
+        connection_id: id.to_string(),
+        label: label.to_string(),
+        auth_type: auth_type.to_string(),
+        is_default,
+    }
+}
+
+#[test]
+fn connect_provider_always_opens_account_manager_with_add_first() {
+    let mut pane = NeoismAgentPane::default();
+    pane.open_connect_picker();
+    let (providers, auth) = sample_connect_catalog();
+    pane.apply_connect_catalog(providers, auth);
+    pane.commit_picker();
+    pane.apply_provider_connections(
+        "anthropic".to_string(),
+        vec![provider_connection("conn_work", "Work", "oauth", true)],
+    );
+
+    let picker = pane.picker().expect("account manager opens even for one account");
+    assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAccount);
+    assert_eq!(picker.title, "Anthropic");
+    assert_eq!(picker.options()[0].title, "Add account");
+    assert!(picker.options().iter().any(|option| option.is_header && option.title == "Connected accounts"));
+    assert!(picker.options().iter().any(|option| option.value == "conn_work" && option.title == "Work"));
+}
+
+#[test]
+fn model_account_reconciliation_keeps_one_account_stage_free() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("session-1".to_string()));
+    pane.apply_model("anthropic/claude-sonnet".to_string());
+    assert!(pane.picker().is_none());
+    pane.apply_provider_connections(
+        "anthropic".to_string(),
+        vec![provider_connection("conn_one", "Work", "oauth", true)],
+    );
+    assert!(pane.picker().is_none());
+    assert_eq!(pane.connection_id(), Some("conn_one"));
+    let commands = pane.drain_pending_outbound();
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        OutboundAgentCommand::ApplyModel { model, .. }
+            if model.get("connectionId").and_then(Value::as_str) == Some("conn_one")
+    )));
+}
+
+#[test]
+fn multiple_accounts_open_inline_picker_without_encoding_labels_in_model() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_model("anthropic/claude-sonnet".to_string());
+    pane.apply_provider_connections(
+        "anthropic".to_string(),
+        vec![
+            provider_connection("conn_a", "Personal", "api", false),
+            provider_connection("conn_b", "Work", "oauth", true),
+        ],
+    );
+    let picker = pane.picker().expect("multiple accounts require a picker");
+    assert_eq!(picker.kind, NeoismAgentPickerKind::ModelAccount);
+    assert!(picker.options().iter().any(|option| option.title == "Work"
+        && option.description == "oauth"
+        && option.footer == "default"));
+    assert!(picker
+        .options()
+        .iter()
+        .all(|option| !option.value.contains("Personal") && !option.value.contains("Work")));
+}
+
+#[test]
+fn explicitly_missing_connection_errors_instead_of_falling_back() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_model("anthropic/claude-sonnet".to_string());
+    pane.apply_provider_connections(
+        "anthropic".to_string(),
+        vec![provider_connection("conn_deleted", "Deleted soon", "api", true)],
+    );
+    pane.apply_model("anthropic/claude-sonnet".to_string());
+    pane.apply_provider_connections(
+        "anthropic".to_string(),
+        vec![provider_connection("conn_other", "Other", "api", true)],
+    );
+    assert_eq!(pane.connection_id(), Some("conn_deleted"));
+    assert_ne!(pane.model(), "claude-sonnet");
+    assert!(pane
+        .messages()
+        .iter()
+        .any(|message| message.text.contains("no longer exists")));
+}
+
+#[test]
+fn connection_management_ack_without_new_id_preserves_explicit_selection() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_model("anthropic/claude-sonnet".to_string());
+    pane.apply_provider_connections(
+        "anthropic".to_string(),
+        vec![provider_connection("conn_selected", "Work", "oauth", true)],
+    );
+
+    pane.note_connect_finished_with_connection("Anthropic".to_string(), None);
+
+    assert_eq!(pane.connection_id(), Some("conn_selected"));
 }
 
 #[test]

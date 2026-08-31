@@ -25,7 +25,8 @@ use mcp_oauth::origin;
 #[cfg(test)]
 pub(crate) use mcp_oauth::auth_start;
 pub(crate) use mcp_oauth::{
-    auth_callback_with_config, auth_start_with_config, authenticate_status_with_config,
+    auth_callback_with_attempt, auth_callback_with_config, auth_start_with_config,
+    authenticate_status_with_config,
 };
 use mcp_oauth::{
     refresh_oauth_tokens, remote_auth_status_async, usable_oauth_config,
@@ -45,37 +46,34 @@ pub(crate) async fn status(
 ) -> anyhow::Result<BTreeMap<String, McpStatus>> {
     let config = configured_servers(directory, Some(state))?;
     let runtime = state.inner.workspace_runtimes.loaded(directory).await;
-    Ok(config.iter().map(|(name, entry)| {
+    let mut statuses = BTreeMap::new();
+    for (name, entry) in &config {
         let status = runtime.as_ref()
             .and_then(|runtime| runtime.mcp_if_allocated())
             .and_then(|mcp| mcp.status(directory, name))
-            .unwrap_or_else(|| status_for_entry_with_directory(Some(directory), name, entry, auth_store, Some(state)));
-        (name.clone(), status)
-    }).collect())
+            .unwrap_or(status_for_entry_with_directory(Some(directory), name, entry, auth_store, Some(state)).await);
+        statuses.insert(name.clone(), status);
+    }
+    Ok(statuses)
 }
 
 #[cfg(test)]
-pub(crate) fn catalog_with_state(
+pub(crate) async fn catalog_with_state(
     directory: &str,
     auth_store: &McpAuthStore,
     state: Option<&AppState>,
 ) -> anyhow::Result<BTreeMap<String, McpCatalogEntry>> {
     let config = configured_servers(directory, state)?;
-    Ok(config
-        .iter()
-        .map(|(name, entry)| {
+    let mut catalog = BTreeMap::new();
+    for (name, entry) in &config {
             let oauth_capable = matches!(
                 entry,
                 McpConfig::Remote { oauth, .. } if usable_oauth_config(oauth).is_some()
             );
-            let status =
-                status_for_entry_with_directory(Some(directory), name, entry, auth_store, state);
-            let has_credentials =
-                auth_store.get(name).ok().flatten().is_some_and(|entry| {
-                    entry.tokens.is_some() || entry.client_info.is_some()
-                });
-            (
-                name.clone(),
+            let status = status_for_entry_with_directory(Some(directory), name, entry, auth_store, state).await;
+            let has_credentials = match entry { McpConfig::Remote { url, .. } => auth_store.get_for_url(name, url).await.ok().flatten(), _ => None }
+                .is_some_and(|entry| entry.tokens.is_some() || entry.client_registration.is_some());
+            catalog.insert(name.clone(),
                 McpCatalogEntry {
                     enabled: is_enabled(entry),
                     runtime_connected: matches!(status, McpStatus::Connected),
@@ -83,13 +81,12 @@ pub(crate) fn catalog_with_state(
                     oauth_capable,
                     has_credentials,
                     config_writable: config_source_writable(directory, name, state),
-                },
-            )
-        })
-        .collect())
+                });
+    }
+    Ok(catalog)
 }
 
-pub(crate) fn status_with_snapshot(
+pub(crate) async fn status_with_snapshot(
     directory: &str,
     auth_store: &McpAuthStore,
     state: &AppState,
@@ -98,43 +95,35 @@ pub(crate) fn status_with_snapshot(
     let mut config = snapshot.config().clone();
     crate::config::inject_builtin_mcp(&mut config, state.services());
     let runtime = snapshot.mcp().ok();
-    config
-        .mcp
-        .iter()
-        .map(|(name, entry)| {
+    let mut statuses = BTreeMap::new();
+    for (name, entry) in &config.mcp {
             let status = runtime.as_ref()
                 .and_then(|runtime| runtime.status(directory, name))
-                .unwrap_or_else(|| status_for_entry_with_directory(None, name, entry, auth_store, Some(state)));
-            (name.clone(), status)
-        })
-        .collect()
+                .unwrap_or(status_for_entry_with_directory(None, name, entry, auth_store, Some(state)).await);
+            statuses.insert(name.clone(), status);
+    }
+    statuses
 }
 
-pub(crate) fn catalog_with_snapshot(
+pub(crate) async fn catalog_with_snapshot(
     directory: &str,
     auth_store: &McpAuthStore,
     state: &AppState,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> BTreeMap<String, McpCatalogEntry> {
-    let statuses = status_with_snapshot(directory, auth_store, state, snapshot);
+    let statuses = status_with_snapshot(directory, auth_store, state, snapshot).await;
     let mut config = snapshot.config().clone();
     crate::config::inject_builtin_mcp(&mut config, state.services());
-    config
-        .mcp
-        .iter()
-        .map(|(name, entry)| {
+    let mut catalog = BTreeMap::new();
+    for (name, entry) in &config.mcp {
             let status = statuses.get(name).cloned().unwrap_or(McpStatus::Disabled);
             let oauth_capable = matches!(
                 entry,
                 McpConfig::Remote { oauth, .. } if usable_oauth_config(oauth).is_some()
             );
-            let has_credentials = auth_store
-                .get(name)
-                .ok()
-                .flatten()
-                .is_some_and(|entry| entry.tokens.is_some() || entry.client_info.is_some());
-            (
-                name.clone(),
+            let has_credentials = match entry { McpConfig::Remote { url, .. } => auth_store.get_for_url(name, url).await.ok().flatten(), _ => None }
+                .is_some_and(|entry| entry.tokens.is_some() || entry.client_registration.is_some());
+            catalog.insert(name.clone(),
                 McpCatalogEntry {
                     enabled: is_enabled(entry),
                     runtime_connected: matches!(status, McpStatus::Connected),
@@ -142,10 +131,9 @@ pub(crate) fn catalog_with_snapshot(
                     oauth_capable,
                     has_credentials,
                     config_writable: config_source_writable(directory, name, Some(state)),
-                },
-            )
-        })
-        .collect()
+                });
+    }
+    catalog
 }
 
 fn config_source_writable(directory: &str, name: &str, state: Option<&AppState>) -> bool {
@@ -156,40 +144,36 @@ fn config_source_writable(directory: &str, name: &str, state: Option<&AppState>)
 }
 
 #[cfg(test)]
-pub(crate) fn status_for_config(
+pub(crate) async fn status_for_config(
     config: &BTreeMap<String, McpConfig>,
     auth_store: &McpAuthStore,
 ) -> BTreeMap<String, McpStatus> {
-    status_for_config_with_directory(None, config, auth_store, None)
+    status_for_config_with_directory(None, config, auth_store, None).await
 }
 
 #[cfg(test)]
-fn status_for_config_with_directory(
+async fn status_for_config_with_directory(
     directory: Option<&str>,
     config: &BTreeMap<String, McpConfig>,
     auth_store: &McpAuthStore,
     state: Option<&AppState>,
 ) -> BTreeMap<String, McpStatus> {
-    config
-        .iter()
-        .map(|(name, config)| {
-            (
-                name.clone(),
-                status_for_entry_with_directory(directory, name, config, auth_store, state),
-            )
-        })
-        .collect()
+    let mut statuses = BTreeMap::new();
+    for (name, config) in config {
+        statuses.insert(name.clone(), status_for_entry_with_directory(directory, name, config, auth_store, state).await);
+    }
+    statuses
 }
 
-pub(crate) fn status_for_entry(
+pub(crate) async fn status_for_entry(
     name: &str,
     config: &McpConfig,
     auth_store: &McpAuthStore,
 ) -> McpStatus {
-    status_for_entry_with_directory(None, name, config, auth_store, None)
+    status_for_entry_with_directory(None, name, config, auth_store, None).await
 }
 
-fn status_for_entry_with_directory(
+async fn status_for_entry_with_directory(
     _directory: Option<&str>,
     name: &str,
     config: &McpConfig,
@@ -224,7 +208,7 @@ fn status_for_entry_with_directory(
                     error: "MCP client runtime is not connected yet".to_string(),
                 };
             }
-            match valid_tokens_for_url(name, url, auth_store) {
+            match valid_tokens_for_url(name, url, auth_store).await {
                 Ok(Some(true)) => McpStatus::Failed {
                     error: "MCP client runtime is not connected yet".to_string(),
                 },
@@ -333,9 +317,7 @@ async fn connect_config(
                             let status = if usable_oauth_config(oauth).is_some()
                                 && looks_like_http_auth_error(&error)
                             {
-                                let cleared = auth_store
-                                    .clear_tokens(name, Some(url))
-                                    .unwrap_or(false);
+                                let cleared = auth_store.clear_tokens(name, url).await.unwrap_or(false);
                                 tracing::warn!(
                                     mcp = name,
                                     url,
@@ -713,7 +695,7 @@ async fn refresh_remote_credentials_after_auth_error(
     };
     let refreshed = refresh_oauth_tokens(name, url, oauth, auth_store).await?;
     if !refreshed {
-        let _ = auth_store.clear_tokens(name, Some(url));
+        let _ = auth_store.clear_tokens(name, url).await;
     }
     tracing::info!(
         mcp = name,

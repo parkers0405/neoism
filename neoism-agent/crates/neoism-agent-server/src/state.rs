@@ -28,6 +28,8 @@ pub(crate) struct InnerState {
     pub(crate) artifact_root: PathBuf,
     pub(crate) provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService>,
     pub(crate) caller_policy: crate::caller::CallerPolicy,
+    pub(crate) management_policy: crate::management::ManagementPolicy,
+    pub(crate) management_lock: Mutex<()>,
     pub(crate) utilities: Arc<crate::utility_runtime::UtilityRuntime>,
     pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
     pub(crate) workspace_plugin_generations:
@@ -510,7 +512,13 @@ impl AppState {
     pub async fn open_default(services: AgentServices) -> anyhow::Result<Self> {
         let store = SessionStore::open_default().await?;
         let artifact_root = PathBuf::from(crate::default_state_dir()).join("artifacts");
-        Self::from_store(store, artifact_root, services).await
+        Self::from_store(
+            store,
+            artifact_root,
+            services,
+            crate::management::ManagementPolicy::from_env(),
+        )
+        .await
     }
 
     pub async fn open_database_with_services(
@@ -523,7 +531,18 @@ impl AppState {
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("artifacts");
         let store = SessionStore::open(path).await?;
-        Self::from_store(store, artifact_root, services).await
+        Self::from_store(store, artifact_root, services, crate::management::ManagementPolicy::from_env()).await
+    }
+
+    pub async fn open_database_with_services_and_management(
+        path: impl Into<PathBuf>,
+        services: AgentServices,
+        management_policy: crate::management::ManagementPolicy,
+    ) -> anyhow::Result<Self> {
+        let path = path.into();
+        let artifact_root = path.parent().unwrap_or_else(|| std::path::Path::new(".")).join("artifacts");
+        let store = SessionStore::open(path).await?;
+        Self::from_store(store, artifact_root, services, management_policy).await
     }
 
     #[cfg(test)]
@@ -535,6 +554,7 @@ impl AppState {
         store: SessionStore,
         artifact_root: PathBuf,
         services: AgentServices,
+        management_policy: crate::management::ManagementPolicy,
     ) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&artifact_root).await?;
         // Single ordered bus for every event (live deltas + committed edges).
@@ -544,8 +564,9 @@ impl AppState {
         // continuing with a permanently incomplete timeline.
         let (events, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
-        let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> =
-            Arc::new(neoism_agent_builtins::ProviderPlatform::from_env());
+        let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> = Arc::new(
+            neoism_agent_builtins::ProviderPlatform::new(services.provider_credentials.clone()),
+        );
         let caller_policy = crate::caller::CallerPolicy::from_env();
         let utilities = crate::utility_runtime::UtilityRuntime::new(&services);
         let permission_approvals = store.list_permission_approvals().await?;
@@ -568,6 +589,8 @@ impl AppState {
                 artifact_root,
                 provider_service,
                 caller_policy,
+                management_policy,
+                management_lock: Mutex::new(()),
                 utilities,
                 workspace_runtimes: Default::default(),
                 workspace_plugin_generations: Mutex::new(HashMap::new()),
@@ -677,6 +700,8 @@ impl AppState {
     pub fn services(&self) -> &AgentServices {
         &self.inner.services
     }
+
+    pub(crate) fn management_enabled(&self) -> bool { self.inner.management_policy.is_enabled() }
 
     pub(crate) fn start_session_list_backfill(&self) {
         let store = self.inner.store.clone();
@@ -1237,6 +1262,32 @@ impl SessionStore {
                 )
                 .await?;
         }
+        if !self.schema_migration_applied(4).await? {
+            self.db
+                .execute_transaction(vec![
+                    (
+                        r#"CREATE TABLE IF NOT EXISTS skill_versions (
+                            version_id TEXT PRIMARY KEY,
+                            skill_id TEXT NOT NULL,
+                            scope TEXT NOT NULL,
+                            revision TEXT NOT NULL,
+                            bundle_json TEXT NOT NULL,
+                            created_at INTEGER NOT NULL
+                        )"#
+                        .to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "CREATE INDEX IF NOT EXISTS idx_skill_versions_skill_created ON skill_versions(skill_id, created_at DESC, version_id DESC)".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (4, 'skill-versions', ?)".to_string(),
+                        vec![int(store_i64(crate::now_millis()))],
+                    ),
+                ])
+                .await?;
+        }
         self.db
             .execute(
                 r#"
@@ -1477,6 +1528,23 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        for (column, definition) in [
+            ("attempt", "INTEGER NOT NULL DEFAULT 1"),
+            ("root_run_id", "TEXT NOT NULL DEFAULT ''"),
+            ("retry_of", "TEXT"),
+            ("next_attempt_at", "INTEGER"),
+            ("lease_owner", "TEXT"),
+            ("lease_expires_at", "INTEGER"),
+        ] {
+            if !self.table_has_column("workflow_runs", column).await? {
+                self.db.execute(&format!("ALTER TABLE workflow_runs ADD COLUMN {column} {definition}"), Vec::new()).await?;
+            }
+        }
+        self.db.execute("UPDATE workflow_runs SET root_run_id = id WHERE root_run_id = ''", Vec::new()).await?;
+        self.db.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (5, 'workflow-run-administration', ?)",
+            vec![int(store_i64(crate::now_millis()))],
+        ).await?;
         self.db
             .execute(
                 r#"
@@ -1652,6 +1720,10 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflow_runs_retry_due ON workflow_runs(status, next_attempt_at)",
+            Vec::new(),
+        ).await?;
         self.migrate_semantic().await?;
         self.migrate_memory_semantic().await?;
         Ok(())
@@ -2294,39 +2366,31 @@ impl SessionStore {
     pub(crate) async fn claim_workflow_run(
         &self,
         run: &crate::workflow::WorkflowRun,
+        concurrency: &crate::workflow::WorkflowConcurrencyPolicy,
     ) -> anyhow::Result<bool> {
-        Ok(self
-            .db
-            .execute(
+        if concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Replace {
+            let results = self.db.execute_transaction_with_results(vec![
+                (workflow_run_insert_sql(None), workflow_run_insert_params(run, None)),
+                (
+                    "UPDATE workflow_runs SET status = 'replaced', finished_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE activation_id = ? AND id <> ? AND status IN ('queued', 'running') AND changes() > 0".to_string(),
+                    vec![int(store_i64(crate::now_millis())), text(&run.activation_id), text(&run.id)],
+                ),
+            ]).await?;
+            return Ok(results.first().copied().unwrap_or_default() > 0);
+        }
+        Ok(self.db.execute(
                 r#"INSERT OR IGNORE INTO workflow_runs
                 (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
-                  session_id, status, trigger, error, created)
-                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                  session_id, status, trigger, error, created, attempt, root_run_id, retry_of,
+                  next_attempt_at, lease_owner, lease_expires_at)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 WHERE NOT EXISTS (
                   SELECT 1 FROM workflow_runs
                   WHERE activation_id = ? AND status IN ('queued', 'running')
+                  LIMIT 1 OFFSET ?
                 )"#,
-                vec![
-                    text(&run.id),
-                    text(&run.activation_id),
-                    text(&run.workflow_id),
-                    int(store_i64(run.scheduled_at)),
-                    run.started_at
-                        .map(|v| int(store_i64(v)))
-                        .unwrap_or(SqlValue::Null),
-                    run.finished_at
-                        .map(|v| int(store_i64(v)))
-                        .unwrap_or(SqlValue::Null),
-                    opt_text(run.session_id.clone()),
-                    text(&run.status),
-                    text(&run.trigger),
-                    opt_text(run.error.clone()),
-                    int(store_i64(run.created)),
-                    text(&run.activation_id),
-                ],
-            )
-            .await?
-            > 0)
+                workflow_run_insert_params(run, Some(concurrency.max_running)),
+            ).await? > 0)
     }
 
     /// Atomically records a scheduled occurrence and advances its durable
@@ -2336,58 +2400,34 @@ impl SessionStore {
     pub(crate) async fn claim_scheduled_workflow_run(
         &self,
         run: &crate::workflow::WorkflowRun,
+        concurrency: &crate::workflow::WorkflowConcurrencyPolicy,
     ) -> anyhow::Result<bool> {
+        let insert = if concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Replace {
+            workflow_run_insert_sql(None)
+        } else {
+            r#"INSERT OR IGNORE INTO workflow_runs
+                (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
+                 session_id, status, trigger, error, created, attempt, root_run_id, retry_of,
+                 next_attempt_at, lease_owner, lease_expires_at)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                WHERE NOT EXISTS (SELECT 1 FROM workflow_runs WHERE activation_id = ? AND status IN ('queued', 'running') LIMIT 1 OFFSET ?)"#.to_string()
+        };
+        let mut statements = vec![(insert, workflow_run_insert_params(run, (concurrency.mode != crate::workflow::WorkflowConcurrencyMode::Replace).then_some(concurrency.max_running)))];
+        let result_index = 0;
+        if concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Replace {
+            statements.push(("UPDATE workflow_runs SET status = 'replaced', finished_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE activation_id = ? AND id <> ? AND status IN ('queued', 'running') AND changes() > 0".to_string(), vec![int(store_i64(crate::now_millis())), text(&run.activation_id), text(&run.id)]));
+        }
+        statements.push((
+            r#"UPDATE workflows
+                SET last_scheduled_at = CASE WHEN last_scheduled_at IS NULL OR last_scheduled_at < ? THEN ? ELSE last_scheduled_at END,
+                    updated = ? WHERE activation_id = ?"#.to_string(),
+            vec![int(store_i64(run.scheduled_at)), int(store_i64(run.scheduled_at)), int(store_i64(crate::now_millis())), text(&run.activation_id)],
+        ));
         let results = self
             .db
-            .execute_transaction_with_results(vec![
-                (
-                    r#"INSERT OR IGNORE INTO workflow_runs
-                    (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
-                      session_id, status, trigger, error, created)
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    WHERE NOT EXISTS (
-                      SELECT 1 FROM workflow_runs
-                      WHERE activation_id = ? AND status IN ('queued', 'running')
-                    )"#
-                    .to_string(),
-                    vec![
-                        text(&run.id),
-                        text(&run.activation_id),
-                        text(&run.workflow_id),
-                        int(store_i64(run.scheduled_at)),
-                        run.started_at
-                            .map(|v| int(store_i64(v)))
-                            .unwrap_or(SqlValue::Null),
-                        run.finished_at
-                            .map(|v| int(store_i64(v)))
-                            .unwrap_or(SqlValue::Null),
-                        opt_text(run.session_id.clone()),
-                        text(&run.status),
-                        text(&run.trigger),
-                        opt_text(run.error.clone()),
-                        int(store_i64(run.created)),
-                        text(&run.activation_id),
-                    ],
-                ),
-                (
-                    r#"UPDATE workflows
-                    SET last_scheduled_at = CASE
-                          WHEN last_scheduled_at IS NULL OR last_scheduled_at < ? THEN ?
-                          ELSE last_scheduled_at
-                        END,
-                        updated = ?
-                    WHERE activation_id = ?"#
-                        .to_string(),
-                    vec![
-                        int(store_i64(run.scheduled_at)),
-                        int(store_i64(run.scheduled_at)),
-                        int(store_i64(crate::now_millis())),
-                        text(&run.activation_id),
-                    ],
-                ),
-            ])
+            .execute_transaction_with_results(statements)
             .await?;
-        Ok(results.first().copied().unwrap_or_default() > 0)
+        Ok(results.get(result_index).copied().unwrap_or_default() > 0)
     }
 
     pub(crate) async fn update_workflow_run(
@@ -2397,22 +2437,24 @@ impl SessionStore {
         session_id: Option<&str>,
         error: Option<&str>,
         finished: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let now = crate::now_millis();
-        self.db
+        let updated = self.db
             .execute(
-                "UPDATE workflow_runs SET status = ?, session_id = COALESCE(?, session_id), started_at = COALESCE(started_at, ?), finished_at = ?, error = ? WHERE id = ?",
+                "UPDATE workflow_runs SET status = ?, session_id = COALESCE(?, session_id), started_at = COALESCE(started_at, ?), finished_at = ?, error = ?, lease_owner = CASE WHEN ? THEN NULL ELSE lease_owner END, lease_expires_at = CASE WHEN ? THEN NULL ELSE lease_expires_at END WHERE id = ? AND status NOT IN ('replaced')",
                 vec![
                     text(status),
                     session_id.map(text).unwrap_or(SqlValue::Null),
                     int(store_i64(now)),
                     finished.then(|| int(store_i64(now))).unwrap_or(SqlValue::Null),
                     error.map(text).unwrap_or(SqlValue::Null),
+                    int(i64::from(finished)),
+                    int(i64::from(finished)),
                     text(run_id),
                 ],
             )
             .await?;
-        Ok(())
+        Ok(updated > 0)
     }
 
     pub(crate) async fn list_workflow_runs(
@@ -2429,6 +2471,70 @@ impl SessionStore {
             .into_iter()
             .map(decode_workflow_run)
             .collect()
+    }
+
+    pub(crate) async fn get_workflow_run(&self, run_id: &str) -> anyhow::Result<Option<crate::workflow::WorkflowRun>> {
+        self.db.fetch_optional("SELECT * FROM workflow_runs WHERE id = ?", vec![text(run_id)]).await?.map(decode_workflow_run).transpose()
+    }
+
+    pub(crate) async fn schedule_workflow_retry(
+        &self,
+        failed: &crate::workflow::WorkflowRun,
+        retry: &crate::workflow::WorkflowRun,
+    ) -> anyhow::Result<bool> {
+        let results = self.db.execute_transaction_with_results(vec![
+            (
+                "UPDATE workflow_runs SET status = ?, session_id = COALESCE(?, session_id), finished_at = ?, error = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND status IN ('queued', 'running')".to_string(),
+                vec![text(&failed.status), opt_text(failed.session_id.clone()), int(store_i64(failed.finished_at.unwrap_or_else(crate::now_millis))), opt_text(failed.error.clone()), text(&failed.id)],
+            ),
+            (workflow_run_conditional_insert_sql(), workflow_run_insert_params(retry, None)),
+        ]).await?;
+        Ok(results.first().copied().unwrap_or_default() > 0 && results.get(1).copied().unwrap_or_default() > 0)
+    }
+
+    pub(crate) async fn list_due_workflow_retries(&self, now: u64) -> anyhow::Result<Vec<crate::workflow::WorkflowRun>> {
+        self.db.fetch_all(
+            "SELECT r.* FROM workflow_runs r JOIN workflows w ON w.activation_id = r.activation_id WHERE w.active = 1 AND r.status = 'retry_waiting' AND r.next_attempt_at <= ? ORDER BY r.next_attempt_at, r.created",
+            vec![int(store_i64(now))],
+        ).await?.into_iter().map(decode_workflow_run).collect()
+    }
+
+    pub(crate) async fn next_workflow_retry_at(&self) -> anyhow::Result<Option<u64>> {
+        Ok(self.db.fetch_optional(
+            "SELECT MIN(r.next_attempt_at) AS next_attempt_at FROM workflow_runs r JOIN workflows w ON w.activation_id = r.activation_id WHERE w.active = 1 AND r.status = 'retry_waiting' AND r.next_attempt_at IS NOT NULL",
+            Vec::new(),
+        ).await?.and_then(|row| row.get_opt_i64("next_attempt_at").ok().flatten()).map(|value| value.max(0) as u64))
+    }
+
+    pub(crate) async fn claim_workflow_retry(
+        &self,
+        run: &crate::workflow::WorkflowRun,
+        concurrency: &crate::workflow::WorkflowConcurrencyPolicy,
+        lease_owner: &str,
+        lease_expires_at: u64,
+    ) -> anyhow::Result<bool> {
+        let now = crate::now_millis();
+        if concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Replace {
+            let results = self.db.execute_transaction_with_results(vec![
+                ("UPDATE workflow_runs SET status = 'queued', next_attempt_at = NULL, lease_owner = ?, lease_expires_at = ? WHERE id = ? AND status = 'retry_waiting' AND next_attempt_at <= ?".to_string(), vec![text(lease_owner), int(store_i64(lease_expires_at)), text(&run.id), int(store_i64(now))]),
+                ("UPDATE workflow_runs SET status = 'replaced', finished_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE activation_id = ? AND id <> ? AND status IN ('queued', 'running') AND changes() > 0".to_string(), vec![int(store_i64(now)), text(&run.activation_id), text(&run.id)]),
+            ]).await?;
+            return Ok(results.first().copied().unwrap_or_default() > 0);
+        }
+        Ok(self.db.execute(
+            r#"UPDATE workflow_runs SET status = 'queued', next_attempt_at = NULL, lease_owner = ?, lease_expires_at = ?
+               WHERE id = ? AND status = 'retry_waiting' AND next_attempt_at <= ?
+               AND NOT EXISTS (SELECT 1 FROM workflow_runs WHERE activation_id = ? AND status IN ('queued', 'running') LIMIT 1 OFFSET ?)"#,
+            vec![text(lease_owner), int(store_i64(lease_expires_at)), text(&run.id), int(store_i64(now)), text(&run.activation_id), int(i64::from(concurrency.max_running.saturating_sub(1)))],
+        ).await? > 0)
+    }
+
+    pub(crate) async fn defer_workflow_retry(&self, run_id: &str, next_attempt_at: u64) -> anyhow::Result<()> {
+        self.db.execute(
+            "UPDATE workflow_runs SET next_attempt_at = ? WHERE id = ? AND status = 'retry_waiting'",
+            vec![int(store_i64(next_attempt_at)), text(run_id)],
+        ).await?;
+        Ok(())
     }
 
     pub(crate) async fn list_unfinished_workflow_runs(
@@ -3769,6 +3875,55 @@ impl SessionStore {
             .max(0) as u64)
     }
 
+    pub(crate) async fn append_skill_version(
+        &self,
+        skill_id: &str,
+        scope: crate::management::ResourceScope,
+        revision: &str,
+        bundle: &crate::management::SkillWriteRequest,
+    ) -> anyhow::Result<crate::management::SkillVersion> {
+        static VERSION_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let created_at = crate::now_millis();
+        let sequence = VERSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let version = crate::management::SkillVersion {
+            id: format!("sv_{created_at}_{sequence}_{}", revision.trim_start_matches("sha256:").chars().take(12).collect::<String>()),
+            skill_id: skill_id.to_string(),
+            scope,
+            revision: revision.to_string(),
+            created_at,
+            bundle: bundle.clone(),
+        };
+        self.db.execute(
+            "INSERT INTO skill_versions (version_id, skill_id, scope, revision, bundle_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            vec![
+                text(&version.id), text(skill_id), text(match scope { crate::management::ResourceScope::Installation => "installation", crate::management::ResourceScope::Workspace => "workspace" }),
+                text(revision), text(serde_json::to_string(bundle)?), int(store_i64(created_at)),
+            ],
+        ).await?;
+        Ok(version)
+    }
+
+    pub(crate) async fn list_skill_versions(
+        &self,
+        skill_id: &str,
+    ) -> anyhow::Result<Vec<crate::management::SkillVersion>> {
+        self.db.fetch_all(
+            "SELECT version_id, skill_id, scope, revision, bundle_json, created_at FROM skill_versions WHERE skill_id = ? ORDER BY created_at DESC, version_id DESC",
+            vec![text(skill_id)],
+        ).await?.into_iter().map(skill_version_from_row).collect()
+    }
+
+    pub(crate) async fn get_skill_version(
+        &self,
+        skill_id: &str,
+        version_id: &str,
+    ) -> anyhow::Result<Option<crate::management::SkillVersion>> {
+        self.db.fetch_optional(
+            "SELECT version_id, skill_id, scope, revision, bundle_json, created_at FROM skill_versions WHERE skill_id = ? AND version_id = ?",
+            vec![text(skill_id), text(version_id)],
+        ).await?.map(skill_version_from_row).transpose()
+    }
+
     pub(crate) async fn insert_artifact(
         &self,
         artifact: &ArtifactInfo,
@@ -4157,6 +4312,22 @@ impl SessionStore {
     pub(crate) async fn close(&self) {}
 }
 
+fn skill_version_from_row(row: DbRow) -> anyhow::Result<crate::management::SkillVersion> {
+    let scope = match row.get_str("scope")?.as_str() {
+        "installation" => crate::management::ResourceScope::Installation,
+        "workspace" => crate::management::ResourceScope::Workspace,
+        value => anyhow::bail!("invalid skill version scope `{value}`"),
+    };
+    Ok(crate::management::SkillVersion {
+        id: row.get_str("version_id")?,
+        skill_id: row.get_str("skill_id")?,
+        scope,
+        revision: row.get_str("revision")?,
+        created_at: row.get_i64("created_at")?.max(0) as u64,
+        bundle: decode_json(row.get_str("bundle_json")?)?,
+    })
+}
+
 fn artifact_from_row(row: DbRow) -> anyhow::Result<ArtifactInfo> {
     Ok(ArtifactInfo {
         id: row.get_str("id")?,
@@ -4206,7 +4377,46 @@ fn decode_workflow_run(row: DbRow) -> anyhow::Result<crate::workflow::WorkflowRu
         trigger: row.get_str("trigger")?,
         error: row.get_opt_str("error")?,
         created: row.get_i64("created")?.max(0) as u64,
+        attempt: row.get_i64("attempt")?.max(1) as u32,
+        root_run_id: row.get_str("root_run_id")?,
+        retry_of: row.get_opt_str("retry_of")?,
+        next_attempt_at: row.get_opt_i64("next_attempt_at")?.map(|value| value.max(0) as u64),
+        lease_owner: row.get_opt_str("lease_owner")?,
+        lease_expires_at: row.get_opt_i64("lease_expires_at")?.map(|value| value.max(0) as u64),
     })
+}
+
+fn workflow_run_insert_sql(_: Option<u32>) -> String {
+    r#"INSERT OR IGNORE INTO workflow_runs
+       (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
+        session_id, status, trigger, error, created, attempt, root_run_id, retry_of,
+        next_attempt_at, lease_owner, lease_expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#.to_string()
+}
+
+fn workflow_run_conditional_insert_sql() -> String {
+    r#"INSERT OR IGNORE INTO workflow_runs
+       (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
+        session_id, status, trigger, error, created, attempt, root_run_id, retry_of,
+        next_attempt_at, lease_owner, lease_expires_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() > 0"#.to_string()
+}
+
+fn workflow_run_insert_params(run: &crate::workflow::WorkflowRun, max_running: Option<u32>) -> Vec<SqlValue> {
+    let mut params = vec![
+        text(&run.id), text(&run.activation_id), text(&run.workflow_id), int(store_i64(run.scheduled_at)),
+        run.started_at.map(|value| int(store_i64(value))).unwrap_or(SqlValue::Null),
+        run.finished_at.map(|value| int(store_i64(value))).unwrap_or(SqlValue::Null),
+        opt_text(run.session_id.clone()), text(&run.status), text(&run.trigger), opt_text(run.error.clone()),
+        int(store_i64(run.created)), int(i64::from(run.attempt)), text(&run.root_run_id),
+        opt_text(run.retry_of.clone()), run.next_attempt_at.map(|value| int(store_i64(value))).unwrap_or(SqlValue::Null),
+        opt_text(run.lease_owner.clone()), run.lease_expires_at.map(|value| int(store_i64(value))).unwrap_or(SqlValue::Null),
+    ];
+    if let Some(max_running) = max_running {
+        params.push(text(&run.activation_id));
+        params.push(int(i64::from(max_running.saturating_sub(1))));
+    }
+    params
 }
 
 fn message_id(message: &MessageWithParts) -> String {

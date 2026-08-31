@@ -413,8 +413,15 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn apply_model(&mut self, value: String) {
+        if self.reconcile_model_account(value) {
+            return;
+        }
+    }
+
+    pub(in crate::neoism::agent) fn apply_model_with_connection(&mut self, value: String, connection_id: Option<String>) {
         self.remember_model_value(&value);
         self.model = value;
+        self.connection_id = connection_id;
         if !self.model.trim().is_empty() {
             self.push_outbound(OutboundAgentCommand::PersistConfigChoice {
                 model: Some(self.model.clone()),
@@ -425,7 +432,7 @@ impl NeoismAgentPane {
         self.close_picker();
         if let Some(session_id) = self.session_id.clone() {
             if let Some(model) =
-                session_model_json(self.model.as_str(), self.thinking.as_deref())
+                session_model_json(self.model.as_str(), self.thinking.as_deref(), self.connection_id.as_deref())
             {
                 self.push_outbound(OutboundAgentCommand::ApplyModel {
                     session_id,
@@ -477,7 +484,7 @@ impl NeoismAgentPane {
         model: String,
         thinking: Option<String>,
     ) {
-        let Some(model_json) = session_model_json(model.as_str(), thinking.as_deref())
+        let Some(model_json) = session_model_json(model.as_str(), thinking.as_deref(), self.connection_id.as_deref())
         else {
             return;
         };
@@ -657,6 +664,7 @@ impl NeoismAgentPane {
         let state = neoism_ui::panels::agent_pane::api_mapping::SessionState {
             agent: self.agent.clone(),
             model: (!self.model.is_empty()).then(|| self.model.clone()),
+            connection_id: self.connection_id.clone(),
             thinking: self.thinking.clone(),
             parent_id: self.parent_session_id.clone(),
             directory: self.directory.clone(),
@@ -781,10 +789,12 @@ impl NeoismAgentPane {
         self.side_panel.set_show_home_override(false);
         if !stays_in_family {
             self.side_panel.invalidate_subagent_refresh();
+            self.clear_pending_interactions();
             self.execution_activity = None;
             self.execution_timer_anchor = None;
             self.runtime_snapshot_root = None;
             self.runtime_snapshot_revision = 0;
+            self.terminal_subagent_revisions.clear();
         }
         self.side_panel.reset_session_goal();
         if let Some((goal, version)) = self.session_goal_cache.get(session_id).cloned() {
@@ -804,6 +814,7 @@ impl NeoismAgentPane {
         if let Some(model) = state.model {
             self.model = model;
         }
+        self.connection_id = state.connection_id;
         self.thinking = state.thinking;
         self.model_context_limit = cached.model_context_limit;
         if self.model_context_limit.is_none() && !self.model.is_empty() {
@@ -838,7 +849,7 @@ impl NeoismAgentPane {
             // instead of flashing as leftover titles from the previous visit.
             self.invalidate_timeline_layout();
         }
-        if !self.runtime_hydrated_sessions.contains(session_id) {
+        if !stays_in_family || !self.runtime_hydrated_sessions.contains(session_id) {
             self.hydrate_runtime_status_for_session(session_id);
         }
         let stream_session_id = self
@@ -928,6 +939,7 @@ impl NeoismAgentPane {
                 system,
                 agent,
                 model,
+                connection_id: self.connection_id.clone(),
                 thinking,
                 delivery,
                 author,
@@ -1739,7 +1751,7 @@ impl NeoismAgentPane {
         };
         let body = json!({
             "messageId": null,
-            "model": prompt_model_json(self.model.as_str(), self.thinking.as_deref()),
+            "model": prompt_model_json(self.model.as_str(), self.thinking.as_deref(), self.connection_id.as_deref()),
             "agent": self.agent.clone(),
             "command": command,
             "arguments": command_args,
@@ -1775,7 +1787,7 @@ impl NeoismAgentPane {
             "parentId": null,
             "title": null,
             "agent": self.agent.clone(),
-            "model": session_model_json(self.model.as_str(), self.thinking.as_deref()),
+            "model": session_model_json(self.model.as_str(), self.thinking.as_deref(), self.connection_id.as_deref()),
             "permission": null,
             "workspaceId": null,
         });
@@ -1839,7 +1851,7 @@ fn dispatch_prompt_request(
     };
     let body = json!({
         "messageId": request.message_id,
-        "model": prompt_model_json(request.model.as_str(), request.thinking.as_deref()),
+        "model": prompt_model_json(request.model.as_str(), request.thinking.as_deref(), request.connection_id.as_deref()),
         "agent": request.agent,
         "noReply": false,
         "system": request.system,
@@ -1870,7 +1882,7 @@ fn create_prompt_session(request: &PendingPromptDispatch) -> Result<String, Stri
         "parentId": null,
         "title": null,
         "agent": request.agent.clone(),
-        "model": session_model_json(request.model.as_str(), request.thinking.as_deref()),
+        "model": session_model_json(request.model.as_str(), request.thinking.as_deref(), request.connection_id.as_deref()),
         "permission": null,
         "workspaceId": null,
     });

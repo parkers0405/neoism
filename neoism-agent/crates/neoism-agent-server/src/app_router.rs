@@ -126,6 +126,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             "/v2/sessions/:session_id/jobs/:job_id",
             delete(crate::background_job::stop_background_task),
         )
+        .merge(management_routes(&state))
         .fallback(plugin_route_dispatch)
         .with_state(state)
         .layer(
@@ -164,6 +165,26 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
                 .allow_headers(Any),
         )
     }
+}
+
+fn management_routes(state: &AppState) -> Router<AppState> {
+    if !state.management_enabled() { return Router::new(); }
+    use crate::management as management;
+    Router::new()
+        .route("/v2/management/workspaces", get(management::list_workspaces).post(management::create_workspace))
+        .route("/v2/management/workspaces/:id", get(management::get_workspace).put(management::update_workspace).delete(management::delete_workspace))
+        .route("/v2/management/repositories", get(management::list_repositories).post(management::create_repository))
+        .route("/v2/management/repositories/:id", get(management::get_repository).put(management::update_repository).delete(management::delete_repository))
+        .route("/v2/management/agents", get(management::list_agents))
+        .route("/v2/management/agents/:id", get(management::get_agent).post(management::create_agent).put(management::update_agent).delete(management::delete_agent))
+        .route("/v2/management/commands", get(management::list_commands))
+        .route("/v2/management/commands/:id", get(management::get_command).post(management::create_command).put(management::update_command).delete(management::delete_command))
+        .route("/v2/management/skills", get(management::list_skills))
+        .route("/v2/management/skills/install", post(management::install_skill))
+        .route("/v2/management/skills/:id", get(management::get_skill).post(management::create_skill).put(management::update_skill).delete(management::delete_skill))
+        .route("/v2/management/skills/:id/versions", get(management::list_skill_versions))
+        .route("/v2/management/skills/:id/versions/:version", get(management::get_skill_version))
+        .route("/v2/management/skills/:id/versions/:version/restore", post(management::restore_skill_version))
 }
 
 async fn plugin_route_dispatch(
@@ -351,6 +372,8 @@ async fn dispatch_websocket_route(
     let headers = parts.headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.to_string(), value.to_string()))).collect();
     let claims = parts.extensions.get::<crate::caller::CallerClaims>();
     let route_request = neoism_agent_plugin_api::RouteRequest {
+        tenant_id: claims.map(|claims| claims.tenant_id.clone()),
+        hosted: claims.is_some_and(|claims| claims.hosted),
         workspace_id: claims.and_then(|claims| claims.workspace_id.clone()),
         workspace: Some(std::path::PathBuf::from(directory)),
         session_id: path.get("session_id").cloned(),
@@ -439,9 +462,15 @@ async fn dispatch_runtime_route(
         .extensions
         .get::<crate::caller::CallerClaims>();
     let actor = claims.map(|claims| claims.subject.clone());
-    let workspace_id = claims.and_then(|claims| claims.workspace_id.clone());
+    let workspace_id = claims.and_then(|claims| claims.workspace_id.clone()).or_else(|| {
+        (!claims.is_some_and(|claims| claims.hosted))
+            .then(|| query.get("workspaceId").and_then(|values| values.first()).cloned())
+            .flatten()
+    });
     let session_id = path_params.get("session_id").cloned();
     let request = neoism_agent_plugin_api::RouteRequest {
+        tenant_id: claims.map(|claims| claims.tenant_id.clone()),
+        hosted: claims.is_some_and(|claims| claims.hosted),
         workspace_id,
         workspace: Some(std::path::PathBuf::from(directory)),
         session_id,
@@ -591,7 +620,11 @@ async fn authenticate_request(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if request.method() == Method::OPTIONS || request.uri().path() == "/v2/health" {
+    if request.method() == Method::OPTIONS
+        || request.uri().path() == "/v2/health"
+        || is_ticketed_pty_connect(&request)
+        || is_mcp_oauth_callback_get(&request)
+    {
         return next.run(request).await;
     }
     let supplied = request
@@ -625,7 +658,7 @@ async fn authenticate_request(
                 );
             }
         }
-        if claims.hosted && hosted_restricted_path(request.uri().path()) {
+        if claims.hosted && matches!(operation_class(&request), OperationClass::HostedUnsupported | OperationClass::ManagementRead | OperationClass::ManagementMutation) {
             return auth_error(
                 StatusCode::FORBIDDEN,
                 "auth.hosted_route_forbidden",
@@ -735,6 +768,67 @@ async fn authenticate_request(
     response
 }
 
+fn is_mcp_oauth_callback_get(request: &Request<Body>) -> bool {
+    request.method() == Method::GET
+        && request.uri().path().starts_with("/v2/plugins/dev.neoism.mcp/")
+        && request.uri().path().ends_with("/auth/callback")
+        && url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+            .any(|(key, value)| key == "state" && !value.is_empty())
+}
+
+fn is_ticketed_pty_connect(request: &Request<Body>) -> bool {
+    let path = request.uri().path();
+    request.method() == Method::GET
+        && path.starts_with("/v2/plugins/dev.neoism.pty/")
+        && path.ends_with("/connect")
+        && url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+            .any(|(key, value)| key == "ticket" && !value.is_empty())
+}
+
+#[cfg(test)]
+mod ticket_auth_tests {
+    use super::*;
+
+    fn request(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn only_exact_ticketed_pty_connect_bypasses_bearer_auth() {
+        assert!(is_ticketed_pty_connect(&request(
+            "/v2/plugins/dev.neoism.pty/pty-1/connect?ticket=single-use"
+        )));
+        assert!(!is_ticketed_pty_connect(&request(
+            "/v2/plugins/dev.neoism.pty/pty-1/connect"
+        )));
+        assert!(!is_ticketed_pty_connect(&request(
+            "/v2/plugins/dev.neoism.pty/pty-1/connect?ticket="
+        )));
+        assert!(!is_ticketed_pty_connect(&request(
+            "/v2/plugins/dev.example/pty-1/connect?ticket=single-use"
+        )));
+        assert!(!is_ticketed_pty_connect(&request(
+            "/v2/plugins/dev.neoism.pty/pty-1?ticket=single-use"
+        )));
+    }
+
+    #[test]
+    fn only_state_bearing_mcp_oauth_get_callback_bypasses_bearer_auth() {
+        assert!(is_mcp_oauth_callback_get(&request(
+            "/v2/plugins/dev.neoism.mcp/github/auth/callback?code=abc&state=nonce"
+        )));
+        assert!(!is_mcp_oauth_callback_get(&request(
+            "/v2/plugins/dev.neoism.mcp/github/auth/callback?code=abc"
+        )));
+        let post = Request::builder()
+            .method(Method::POST)
+            .uri("/v2/plugins/dev.neoism.mcp/github/auth/callback?state=nonce")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_mcp_oauth_callback_get(&post));
+    }
+}
+
 fn auth_error(status: StatusCode, code: &str, message: &str) -> Response {
     (
         status,
@@ -806,6 +900,32 @@ fn hosted_restricted_path(path: &str) -> bool {
         "/v2/config" | "/v2/config/validate"
     ) || (path.starts_with("/v2/providers/")
             && (path.ends_with("/auth") || path.contains("/oauth/")))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OperationClass { Standard, HostedUnsupported, ManagementRead, ManagementMutation }
+
+fn operation_class(request: &Request<Body>) -> OperationClass {
+    let path = request.uri().path();
+    if (path == "/v2/plugins/dev.neoism.workflows"
+        && request.method() == Method::POST)
+        || (path.starts_with("/v2/plugins/dev.neoism.workflows/")
+            && !path.ends_with("/activate")
+            && !path.ends_with("/pause")
+            && !path.ends_with("/run")
+            && !path.contains("/runs/")
+            && matches!(*request.method(), Method::PUT | Method::PATCH | Method::DELETE))
+    {
+        return OperationClass::ManagementMutation;
+    }
+    if path.starts_with("/v2/management/") {
+        return if matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+            OperationClass::ManagementRead
+        } else {
+            OperationClass::ManagementMutation
+        };
+    }
+    if hosted_restricted_path(path) { OperationClass::HostedUnsupported } else { OperationClass::Standard }
 }
 
 fn requires_directory_scope(path: &str) -> bool {

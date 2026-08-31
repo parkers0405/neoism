@@ -8,6 +8,7 @@ pub(crate) async fn handle_create_thread(
     directory: Option<String>,
     agent: Option<String>,
     model: Option<String>,
+    connection_id: Option<String>,
 ) {
     let mut body = serde_json::Map::new();
     if let Some(title) = title.clone() {
@@ -23,6 +24,7 @@ pub(crate) async fn handle_create_thread(
                 json!({
                     "providerId": provider_id,
                     "id": model_id,
+                    "connectionId": connection_id,
                 }),
             );
         }
@@ -79,10 +81,19 @@ pub(crate) async fn handle_switch_thread(inner: Arc<AgentInner>, session_id: Str
     // Verify the session exists; if it does, bind the SSE stream and
     // ack with `ThreadSwitched`.
     match http_get_json(&inner, &format!("/v2/sessions/{session_id}")).await {
-        Ok(_value) => {
+        Ok(value) => {
             start_event_stream(&inner, &session_id);
             let _ = inner.tx.send(AgentServerMessage::ThreadSwitched {
                 session_id: session_id.clone(),
+            });
+            let _ = inner.tx.send(AgentServerMessage::ProviderState {
+                session_id,
+                provider_id: value.get("model").and_then(|model| model.get("providerId")).and_then(Value::as_str).map(str::to_string),
+                model: value.get("model").and_then(model_label_from_value),
+                connection_id: value.get("model").and_then(|model| model.get("connectionId")).and_then(Value::as_str).map(str::to_string),
+                agent: value.get("agent").and_then(Value::as_str).map(str::to_string),
+                thinking: value.get("model").and_then(|model| model.get("variant")).and_then(Value::as_str).map(str::to_string),
+                context_limit: None,
             });
         }
         Err(err) => emit_error(&inner.tx, err),
@@ -342,6 +353,7 @@ pub(crate) async fn handle_submit_prompt(
     attachments: Vec<neoism_protocol::agent::Attachment>,
     mode: Option<String>,
     model: Option<String>,
+    connection_id: Option<String>,
     thinking: Option<String>,
     delivery: neoism_protocol::agent::PromptDelivery,
 ) {
@@ -386,6 +398,7 @@ pub(crate) async fn handle_submit_prompt(
                 json!({
                     "providerId": provider_id,
                     "modelId": model_id,
+                    "connectionId": connection_id,
                     "variant": thinking.clone().filter(|t| !t.is_empty()),
                 }),
             );
@@ -492,6 +505,7 @@ pub(crate) async fn handle_set_provider(
         session_id,
         provider_id: Some(provider_id),
         model: None,
+        connection_id: None,
         agent: None,
         thinking: None,
         context_limit: None,
@@ -506,6 +520,7 @@ pub(crate) async fn handle_set_model(
     inner: Arc<AgentInner>,
     session_id: String,
     model: String,
+    connection_id: Option<String>,
     thinking: Option<String>,
 ) {
     let Some((provider_id, model_id)) = split_model_ref(&model) else {
@@ -516,6 +531,7 @@ pub(crate) async fn handle_set_model(
         "model": {
             "providerId": provider_id,
             "id": model_id,
+            "connectionId": connection_id.clone(),
             "variant": thinking.clone().filter(|t| !t.is_empty()),
         }
     });
@@ -531,6 +547,7 @@ pub(crate) async fn handle_set_model(
                 session_id,
                 provider_id: Some(provider_id),
                 model: Some(resolved_model),
+                connection_id,
                 agent: value
                     .get("agent")
                     .and_then(Value::as_str)
@@ -555,6 +572,7 @@ pub(crate) async fn handle_set_agent(
                 session_id,
                 provider_id: None,
                 model: value.get("model").and_then(model_label_from_value),
+                connection_id: value.get("model").and_then(|model| model.get("connectionId")).and_then(Value::as_str).map(str::to_string),
                 agent: Some(agent),
                 thinking: None,
                 context_limit: None,
@@ -597,6 +615,7 @@ pub(crate) async fn handle_set_thinking(
                 session_id,
                 provider_id: None,
                 model: value.get("model").and_then(model_label_from_value),
+                connection_id: value.get("model").and_then(|model| model.get("connectionId")).and_then(Value::as_str).map(str::to_string),
                 agent: value
                     .get("agent")
                     .and_then(Value::as_str)
@@ -661,6 +680,24 @@ pub(crate) async fn handle_connect_list_providers(
         .send(AgentServerMessage::ConnectProviderCatalog { providers, auth });
 }
 
+pub(crate) async fn handle_connect_list_connections(inner: Arc<AgentInner>, provider_id: String) {
+    match http_get_json(&inner, &format!("/v2/providers/{provider_id}/connections")).await {
+        Ok(value) => {
+            let connections = value.as_array().into_iter().flatten().filter_map(|item| {
+                Some(neoism_protocol::agent::ProviderConnectionInfo {
+                    provider_id: item.get("providerId")?.as_str()?.to_string(),
+                    connection_id: item.get("connectionId")?.as_str()?.to_string(),
+                    label: item.get("label")?.as_str()?.to_string(),
+                    auth_type: item.get("authType")?.as_str()?.to_string(),
+                    is_default: item.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
+                })
+            }).collect();
+            let _ = inner.tx.send(AgentServerMessage::ConnectConnections { provider: provider_id, connections });
+        }
+        Err(error) => { let _ = inner.tx.send(AgentServerMessage::ConnectFailed { provider: provider_id, error }); }
+    }
+}
+
 /// Store an API key for a provider: `PUT /auth/{id}` with
 /// `{ "type": "api", "key": <key> }`. Mirrors the desktop pane's API-key /
 /// Meridian one-click store.
@@ -668,12 +705,20 @@ pub(crate) async fn handle_connect_store_api_key(
     inner: Arc<AgentInner>,
     provider_id: String,
     key: String,
+    label: Option<String>,
+    _connection_id: Option<String>,
 ) {
     let body = json!({ "type": "api", "key": key });
-    match http_put_json(&inner, &format!("/v2/providers/{provider_id}/auth"), &body).await {
-        Ok(_) => {
+    let result = if let Some(label) = label {
+        http_post_json(&inner, &format!("/v2/providers/{provider_id}/connections"), &json!({ "label": label, "credential": body, "setDefault": false })).await
+    } else {
+        http_put_json(&inner, &format!("/v2/providers/{provider_id}/auth"), &body).await
+    };
+    match result {
+        Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
                 provider: provider_id,
+                connection_id: value.get("connectionId").and_then(Value::as_str).map(str::to_string),
             });
         }
         Err(err) => {
@@ -689,11 +734,18 @@ pub(crate) async fn handle_connect_store_api_key(
 pub(crate) async fn handle_connect_disconnect(
     inner: Arc<AgentInner>,
     provider_id: String,
+    connection_id: Option<String>,
 ) {
-    match http_delete(&inner, &format!("/v2/providers/{provider_id}/auth")).await {
+    let path = connection_id.as_ref().map(|id| format!("/v2/providers/{provider_id}/connections/{}", percent_encode(id))).unwrap_or_else(|| format!("/v2/providers/{provider_id}/auth"));
+    match http_delete(&inner, &path).await {
         Ok(()) => {
             let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
                 provider: provider_id,
+                // Deletion acknowledges the target but must not look like a
+                // newly selected connection. The pane deliberately retains a
+                // deleted explicit selection and surfaces it as missing until
+                // the user chooses another account.
+                connection_id: None,
             });
         }
         Err(err) => {
@@ -705,6 +757,22 @@ pub(crate) async fn handle_connect_disconnect(
     }
 }
 
+pub(crate) async fn handle_connect_rename(inner: Arc<AgentInner>, provider_id: String, connection_id: String, label: String) {
+    let path = format!("/v2/providers/{provider_id}/connections/{}", percent_encode(&connection_id));
+    match http_patch_json(&inner, &path, &json!({ "label": label })).await {
+        Ok(_) => { let _ = inner.tx.send(AgentServerMessage::ConnectFinished { provider: provider_id, connection_id: Some(connection_id) }); }
+        Err(error) => { let _ = inner.tx.send(AgentServerMessage::ConnectFailed { provider: provider_id, error }); }
+    }
+}
+
+pub(crate) async fn handle_connect_set_default(inner: Arc<AgentInner>, provider_id: String, connection_id: String) {
+    let path = format!("/v2/providers/{provider_id}/connections/{}/default", percent_encode(&connection_id));
+    match post_no_body(&inner, &path).await {
+        Ok(_) => { let _ = inner.tx.send(AgentServerMessage::ConnectFinished { provider: provider_id, connection_id: Some(connection_id) }); }
+        Err(error) => { let _ = inner.tx.send(AgentServerMessage::ConnectFailed { provider: provider_id, error }); }
+    }
+}
+
 /// Begin an OAuth method: `POST /provider/{id}/oauth/authorize` with
 /// `{ "method": <index>, "inputs": {} }`. Surfaces the auth URL, whether the
 /// flow auto-completes on a local callback, and any provider instructions.
@@ -712,8 +780,10 @@ pub(crate) async fn handle_connect_oauth_authorize(
     inner: Arc<AgentInner>,
     provider_id: String,
     method_index: usize,
+    label: Option<String>,
+    connection_id: Option<String>,
 ) {
-    let body = json!({ "method": method_index, "inputs": {} });
+    let body = json!({ "method": method_index, "inputs": {}, "label": label, "connectionId": connection_id });
     match http_post_json(
         &inner,
         &format!("/v2/providers/{provider_id}/oauth/authorize"),
@@ -733,10 +803,12 @@ pub(crate) async fn handle_connect_oauth_authorize(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let attempt_id = value.get("attemptId").and_then(Value::as_str).map(str::to_string);
             let _ = inner.tx.send(AgentServerMessage::ConnectOauthUrl {
                 url,
                 auto,
                 instructions,
+                attempt_id,
             });
         }
         Err(err) => {
@@ -758,10 +830,11 @@ pub(crate) async fn handle_connect_oauth_callback(
     provider_id: String,
     method_index: usize,
     code: Option<String>,
+    attempt_id: Option<String>,
 ) {
     let body = match code {
-        Some(code) => json!({ "method": method_index, "code": code }),
-        None => json!({ "method": method_index }),
+        Some(code) => json!({ "method": method_index, "code": code, "attemptId": attempt_id }),
+        None => json!({ "method": method_index, "attemptId": attempt_id }),
     };
     match http_post_json(
         &inner,
@@ -770,9 +843,10 @@ pub(crate) async fn handle_connect_oauth_callback(
     )
     .await
     {
-        Ok(_) => {
+        Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
                 provider: provider_id,
+                connection_id: value.get("connectionId").and_then(Value::as_str).map(str::to_string),
             });
         }
         Err(err) => {

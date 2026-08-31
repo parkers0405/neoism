@@ -63,7 +63,21 @@ pub(crate) async fn v2_capabilities(
 ) -> Json<Vec<CapabilityInfo>> {
     let directory = resolve_directory(query.directory, &headers);
     let snapshot = state.plugin_snapshot(&directory).await;
-    Json(crate::plugins::capabilities(snapshot.as_ref()))
+    let mut capabilities = crate::plugins::capabilities(snapshot.as_ref());
+    if state.management_enabled() {
+        capabilities.push(CapabilityInfo {
+            id: crate::management::CAPABILITY.into(),
+            version: "1.0.0".into(),
+            enabled: true,
+            disableable: false,
+            source: "server".into(),
+            plugin_id: None,
+            api_prefix: Some("/v2/management".into()),
+            reason: None,
+        });
+        capabilities.sort_by(|left, right| left.id.cmp(&right.id));
+    }
+    Json(capabilities)
 }
 
 pub(crate) async fn v2_plugins(

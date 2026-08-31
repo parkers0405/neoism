@@ -166,6 +166,9 @@ impl NeoismAgentPane {
                     // tree/status snapshot to cover anything missed while the
                     // transport was down; it does not start a timer loop.
                     self.side_panel.mark_subagent_tree_dirty();
+                    if let Some(session_id) = self.session_id.clone() {
+                        self.hydrate_runtime_status_for_session(&session_id);
+                    }
                     changed = true;
                 }
                 AgentSessionUpdate::SessionIdle => {
@@ -472,9 +475,20 @@ impl NeoismAgentPane {
                     status,
                     title,
                     agent,
+                    root_session_id,
+                    execution_id,
+                    family_revision,
                 } => {
                     self.side_panel.invalidate_inflight_subagent_refresh();
                     if !task_id.is_empty() {
+                        if !self.note_subagent_terminal_revision(
+                            &task_id,
+                            root_session_id.as_deref(),
+                            execution_id.as_deref(),
+                            family_revision,
+                        ) {
+                            continue;
+                        }
                         self.ensure_session_preloaded(task_id.clone(), true);
                         self.upsert_live_subagent_entry(&task_id, title, agent);
                         let branch_status = branch_status_from_runtime(&status);
@@ -488,6 +502,7 @@ impl NeoismAgentPane {
                     changed = true;
                 }
                 AgentSessionUpdate::PermissionAsked(permission) => {
+                    self.note_session_runtime_event(&permission.session_id);
                     self.enqueue_pending_permission(permission);
                     changed = true;
                 }
@@ -495,15 +510,20 @@ impl NeoismAgentPane {
                     request_id,
                     session_id,
                 } => {
+                    self.note_session_runtime_event(
+                        session_id.as_deref().unwrap_or(&stream_session_id),
+                    );
                     if self.note_permission_replied(&request_id, session_id.as_deref()) {
                         changed = true;
                     }
                 }
                 AgentSessionUpdate::QuestionAsked(question) => {
+                    self.note_session_runtime_event(&question.session_id);
                     self.enqueue_pending_question(question);
                     changed = true;
                 }
                 AgentSessionUpdate::QuestionRemoved { request_id } => {
+                    self.note_session_runtime_event(&stream_session_id);
                     if self.remove_pending_question(&request_id) {
                         changed = true;
                     }
@@ -1147,8 +1167,11 @@ impl NeoismAgentPane {
                 // connect commands; they exist for the web/wasm host. Kept
                 // as no-ops so the exhaustive match stays complete.
                 OutboundAgentCommand::RefreshConnectProviders { .. }
+                | OutboundAgentCommand::RefreshProviderConnections { .. }
                 | OutboundAgentCommand::ConnectStoreApiKey { .. }
                 | OutboundAgentCommand::ConnectDisconnect { .. }
+                | OutboundAgentCommand::ConnectRename { .. }
+                | OutboundAgentCommand::ConnectSetDefault { .. }
                 | OutboundAgentCommand::ConnectOauthAuthorize { .. }
                 | OutboundAgentCommand::ConnectOauthCallback { .. } => {}
             }
@@ -1675,6 +1698,8 @@ impl NeoismAgentPane {
                     runtime_revision,
                     result,
                     runtime,
+                    permissions,
+                    questions,
                 }) => {
                     let is_latest = self
                         .runtime_status_requests
@@ -1693,6 +1718,11 @@ impl NeoismAgentPane {
                         self.apply_runtime_status_for_session(&session_id, &statuses);
                         changed = true;
                     }
+                    let runtime_family = runtime.as_ref().ok().map(|runtime| {
+                        std::iter::once(runtime.root_session_id.clone())
+                            .chain(runtime.branches.iter().map(|branch| branch.0.clone()))
+                            .collect::<HashSet<_>>()
+                    });
                     if let Ok(runtime) = runtime {
                         if let (Some(epoch), Some(revision), Some(tasks)) = (
                             runtime.background_jobs_epoch.as_deref(),
@@ -1708,6 +1738,36 @@ impl NeoismAgentPane {
                             runtime.family_revision,
                             runtime.branches,
                         );
+                    }
+                    if let Ok(permissions) = permissions {
+                        self.pending_permission = None;
+                        self.pending_permission_queue.clear();
+                        for permission in permissions {
+                            if !self.session_family_contains(&permission.session_id)
+                                && !runtime_family.as_ref().is_some_and(|family| {
+                                    family.contains(&permission.session_id)
+                                })
+                            {
+                                continue;
+                            }
+                            self.enqueue_pending_permission(permission);
+                        }
+                        changed = true;
+                    }
+                    if let Ok(questions) = questions {
+                        self.pending_question = None;
+                        self.pending_question_queue.clear();
+                        for question in questions {
+                            if !self.session_family_contains(&question.session_id)
+                                && !runtime_family.as_ref().is_some_and(|family| {
+                                    family.contains(&question.session_id)
+                                })
+                            {
+                                continue;
+                            }
+                            self.enqueue_pending_question(question);
+                        }
+                        changed = true;
                     }
                 }
                 Ok(NeoismAgentBackgroundUpdate::OlderTimelineLoaded {
@@ -1765,7 +1825,9 @@ impl NeoismAgentPane {
                 }
                 Ok(NeoismAgentBackgroundUpdate::ConnectOauthFinished {
                     provider_name,
+                    connection_id,
                 }) => {
+                    if connection_id.is_some() { self.connection_id = connection_id; }
                     self.system_message(
                         "Connected",
                         format!(

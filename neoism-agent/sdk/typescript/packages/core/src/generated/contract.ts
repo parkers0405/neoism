@@ -18,13 +18,15 @@ export type CodeRequest = { code: string; };
 export type Command = { agent?: string; description?: string; model?: string; name: string; subtask?: boolean; template?: string; };
 export type CommandList = Array<Command>;
 export type CompactionPart = { id: string; messageId: string; reason: string; sessionId: string; summary: boolean; tailStartMessageId?: string; type: "compaction"; [key: string]: unknown; };
+export type ConfigDefaults = { defaultAgent: string | null; model: string | null; variant: string | null; };
 export type ConfigDiagnostic = { level: "error" | "warning"; message: string; path: string; };
 export type ConfigDocument = { [key: string]: unknown; };
 export type ConfigProvidersResult = { default: { [key: string]: string; }; providers: Array<Provider>; };
 export type ConfigValidation = { diagnostics: Array<ConfigDiagnostic>; ok: boolean; };
 export type CreateSessionRequest = { agent?: string; model?: ModelRef; parentId?: string; permission?: Array<PermissionRule>; title?: string; workspaceId?: string; };
+export type CredentialScope = { tenantId: string; workspaceId?: string; };
 export type EmptyObject = Record<string, unknown>;
-export type Event = (EventMessagePartUpdated) | (EventMessagePartRemoved) | (EventMessagePartDelta) | (EventMessageUpdated) | (EventMessageRemoved) | (EventMcpToolsChanged) | (EventLspUpdated) | (EventPermissionAsked) | (EventPermissionReplied) | (EventQuestionAsked) | (EventQuestionRejected) | (EventQuestionReplied) | (EventPtyCreated) | (EventPtyUpdated) | (EventPtyDeleted) | (EventPtyExited) | (EventSessionNextCompactionStarted) | (EventSessionNextCompactionDelta) | (EventSessionNextCompactionEnded) | (EventSessionCompacted) | (EventSessionContextUpdated) | (EventSessionCreated) | (EventSessionDeleted) | (EventSessionError) | (EventSessionExecutionUpdated) | (EventSessionBackgroundTaskCompleted) | (EventSessionQueueUpdated) | (EventSessionPromptAdmitted) | (EventSessionStatus) | (EventSessionSubtaskCompleted) | (EventSessionUpdated) | (EventTodoUpdated) | (EventWorkflowUpdated) | (EventWorkflowRunUpdated);
+export type Event = (EventMessagePartUpdated) | (EventMessagePartRemoved) | (EventMessagePartDelta) | (EventMessageUpdated) | (EventMessageRemoved) | (EventMcpToolsChanged) | (EventLspUpdated) | (EventPermissionAsked) | (EventPermissionReplied) | (EventQuestionAsked) | (EventQuestionRejected) | (EventQuestionReplied) | (EventPtyCreated) | (EventPtyUpdated) | (EventPtyDeleted) | (EventPtyExited) | (EventSessionNextCompactionStarted) | (EventSessionNextCompactionDelta) | (EventSessionNextCompactionEnded) | (EventSessionCompacted) | (EventSessionContextUpdated) | (EventSessionCreated) | (EventSessionDeleted) | (EventSessionError) | (EventSessionExecutionUpdated) | (EventSessionBackgroundTasksUpdated) | (EventSessionBackgroundTaskCompleted) | (EventSessionQueueUpdated) | (EventSessionPromptAdmitted) | (EventSessionStatus) | (EventSessionSubtaskCompleted) | (EventSessionUpdated) | (EventTodoUpdated) | (EventWorkflowUpdated) | (EventWorkflowRunUpdated);
 export type EventEnvelope = { data: unknown; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: string; };
 export type EventLspUpdated = { data: Record<string, unknown>; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "lsp.updated"; };
 export type EventMcpToolsChanged = { data: { directory: string; server: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "mcp.tools.changed"; };
@@ -43,6 +45,7 @@ export type EventQuestionAsked = { data: QuestionRequest; id: string; schemaVers
 export type EventQuestionRejected = { data: { info?: (QuestionRequest) | (null); reason?: string; requestID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "question.rejected"; };
 export type EventQuestionReplied = { data: { info?: (QuestionRequest) | (null); reply: { answers: Array<Array<string>>; }; requestID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "question.replied"; };
 export type EventSessionBackgroundTaskCompleted = { data: { command: string; cwd: string; exitCode: (number) | (null); jobID: string; parentSessionID: string; result: string; sessionID: string; status: string; taskID: string; title: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.background_task.completed"; };
+export type EventSessionBackgroundTasksUpdated = { data: { backgroundJobsEpoch: string; backgroundJobsRevision: number; runningBackgroundTasks: Array<{ jobID: string; sessionID: string; startedAt: number; }>; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.background_tasks.updated"; };
 export type EventSessionCompacted = { data: { info: Session; sessionID: string; summary: { kind: string; messageID: string; text: string; throughMessageID: string; updated: number; }; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.compacted"; };
 export type EventSessionContextUpdated = { data: { epoch: { [key: string]: unknown; }; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.context.updated"; };
 export type EventSessionCreated = { data: { info: Session; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.created"; };
@@ -55,7 +58,7 @@ export type EventSessionNextCompactionStarted = { data: { messageID: string; rea
 export type EventSessionPromptAdmitted = { data: { delivery: string; request: PromptRequest; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.prompt.admitted"; };
 export type EventSessionQueueUpdated = { data: { action: string; delivery?: string; messageID?: string; queue: SessionQueueInfo; removed: number; request?: PromptRequest; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.queue.updated"; };
 export type EventSessionStatus = { data: { parentSessionID?: string; queue?: number; runID?: string; sessionID: string; sourceAgent?: string; sourceSessionID?: string; sourceTitle?: string; startedAt?: number; status: SessionStatus; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.status"; };
-export type EventSessionSubtaskCompleted = { data: { agent?: string; childSessionID: string; parentSessionID: string; result: string; sessionID: string; sourceAgent?: string; status: string; taskID: string; title: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.subtask.completed"; };
+export type EventSessionSubtaskCompleted = { data: { agent?: string; childSessionID: string; executionID?: string; familyRevision?: number; parentSessionID: string; result: string; rootSessionID?: string; sessionID: string; sourceAgent?: string; status: string; taskID: string; title: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.subtask.completed"; };
 export type EventSessionUpdated = { data: { info: Session; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.updated"; };
 export type EventSubject = { id: string; kind: string; };
 export type EventTodoUpdated = { data: { sessionID: string; todos: Array<Todo>; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "todo.updated"; };
@@ -69,7 +72,7 @@ export type ForkSessionRequest = { messageId?: string; };
 export type GoalResearchNote = { captured: number; content: string; source: string; };
 export type GoalResearchRequest = { url: string; };
 export type GoalResponse = { goal: (SessionGoal) | (null); researchEnabled: boolean; };
-export type HealthResponse = { healthy: true; version: string; };
+export type HealthResponse = { executablePath?: string; healthy: true; providerCredentialStore: string; version: string; };
 export type ImportSessionRequest = { bundle: SessionBundle; targetWorkspaceRoot: string; };
 export type ImportSessionResponse = { sessionId: string; };
 export type LspCallHierarchyCall = { direction: string; item: LspCallHierarchyItem; language?: string | null; ranges: Array<LspRange>; };
@@ -86,6 +89,11 @@ export type LspShutdownResponse = { shutdown: true; };
 export type LspSignatureHelp = { path: string; signatures: Array<{ [key: string]: unknown; }>; [key: string]: unknown; };
 export type LspStatus = { command: Array<string>; command_source: string; id: string; language: string; name: string; status: "available" | "connected" | "error"; [key: string]: unknown; };
 export type LspTouchRequest = { directory?: string; file: string; text?: string | null; };
+export type ManagedRepository = { createdAt: number; gitRef?: string; id: string; name: string; path: string; remoteUrl?: string; revision: string; updatedAt: number; workspaceId: string; };
+export type ManagedRepositoryMetadata = { gitRef?: string; remoteUrl?: string; };
+export type ManagedResource = { createdAt: number | null; definition: unknown; id: string; managed: boolean; origin: "builtIn" | "discovered" | "managed"; provenance: string; revision: string | null; scope: (ResourceScope) | (null); updatedAt: number | null; writable: boolean; };
+export type ManagedWorkspace = { createdAt: number; id: string; name: string; repository?: ManagedRepositoryMetadata; revision: string; root: string; updatedAt: number; };
+export type MarkdownWriteRequest = { content: string; expectedRevision?: string; frontmatter?: { [key: string]: unknown; }; scope?: ResourceScope; };
 export type McpAddRequest = { config: McpConfig; name: string; };
 export type McpAuthRemoveResponse = { success: boolean; };
 export type McpAuthStartResponse = { authorizationUrl: string; oauthState: string; };
@@ -103,7 +111,7 @@ export type Message = { info: MessageInfo; parts: Array<Part>; };
 export type MessageInfo = { id: string; role: "user" | "assistant"; sessionId: string; time: { [key: string]: unknown; }; [key: string]: unknown; };
 export type MessageList = Array<Message>;
 export type MessagePage = { cursor: PageCursor; items: Array<Message>; };
-export type ModelRef = { id: string; providerId: string; variant?: string; };
+export type ModelRef = { connectionId?: string; id: string; providerId: string; variant?: string; };
 export type OpenApiDocument = { info: { [key: string]: unknown; }; openapi: string; paths: { [key: string]: unknown; }; [key: string]: unknown; };
 export type PageCursor = { next?: string; previous?: string; };
 export type Part = (TextPart) | (CompactionPart) | (AgentPart) | (SubtaskPart) | (ReasoningPart) | (ToolPart) | (StepStartPart) | (StepFinishPart) | (FilePart);
@@ -116,12 +124,15 @@ export type PluginManifest = { active: boolean; apiPrefix?: string; capabilities
 export type PromptPart = ({ text: string; type: "text"; }) | ({ name: string; source?: unknown; type: "agent"; }) | ({ filename: string; mime: string; type: "file"; url: string; }) | ({ agent: string; command?: string; description: string; model?: UserModel; prompt: string; type: "subtask"; });
 export type PromptRequest = { agent?: string; author?: string; delivery?: "steer" | "queue"; messageId?: string; model?: UserModel; noReply?: boolean; parts?: Array<PromptPart>; prompt?: string; system?: string; tools?: { [key: string]: boolean; }; variant?: string; } & (({ prompt: string; }) | ({ parts: Array<PromptPart>; }));
 export type Provider = { env: Array<string>; id: string; key?: string; models: { [key: string]: ProviderModel; }; name: string; options: { [key: string]: unknown; }; source: "env" | "config" | "custom" | "api" | "builtin"; };
-export type ProviderAuthAuthorization = { instructions: string; method: "auto" | "code"; url: string; };
+export type ProviderAuthAuthorization = { attemptId?: string; expiresAt?: number; instructions: string; method: "auto" | "code"; url: string; };
 export type ProviderAuthMethod = { label: string; prompts?: Array<ProviderAuthPrompt>; type: "api" | "oauth"; };
 export type ProviderAuthMethods = { [key: string]: Array<ProviderAuthMethod>; };
 export type ProviderAuthPrompt = { key: string; message: string; type: "text" | "select"; [key: string]: unknown; };
-export type ProviderAuthorizeRequest = { inputs?: { [key: string]: string; }; method: unknown; };
-export type ProviderCallbackRequest = { code?: string | null; method: unknown; };
+export type ProviderAuthorizeRequest = { connectionId?: string; inputs?: { [key: string]: string; }; label?: string; method: unknown; };
+export type ProviderCallbackRequest = { attemptId?: string; code?: string | null; method: unknown; };
+export type ProviderConnectionCreateRequest = { credential: AuthInfo; label: string; setDefault?: boolean; };
+export type ProviderConnectionRenameRequest = { label: string; };
+export type ProviderConnectionSummary = { authType: "api" | "oauth" | "wellknown"; connectionId: string; isDefault: boolean; label: string; providerId: string; scope: CredentialScope; };
 export type ProviderList = Array<{ [key: string]: unknown; }>;
 export type ProviderListResult = { all: Array<Provider>; connected: Array<string>; default: { [key: string]: string; }; };
 export type ProviderModel = { api: { [key: string]: unknown; }; id: string; name: string; providerId: string; releaseDate: string; status: "alpha" | "beta" | "deprecated" | "active"; [key: string]: unknown; };
@@ -134,6 +145,11 @@ export type QuestionRequest = { id: string; messageId: string; questions: Array<
 export type QueuedPrompt = { agent?: string; author?: string; messageId?: string; model?: UserModel; noReply: boolean; parts: Array<PromptPart>; system?: string; tools?: { [key: string]: boolean; }; };
 export type QueuedPromptBundleItem = { delivery: string; request: QueuedPrompt; };
 export type ReasoningPart = { id: string; messageId: string; metadata?: unknown; sessionId: string; text: string; time: PartTime; type: "reasoning"; [key: string]: unknown; };
+export type RepositoryCloneRequest = { depth?: number; id?: string; kind: "clone"; name?: string; ref?: string; remoteUrl: string; };
+export type RepositoryCreateRequest = (RepositoryExistingRequest) | (RepositoryCloneRequest);
+export type RepositoryExistingRequest = { id?: string; kind: "existing"; name?: string; path: string; };
+export type RepositoryUpdateRequest = { expectedRevision?: string; name?: string; };
+export type ResourceScope = "installation" | "workspace";
 export type RevertRequest = { messageId?: string; partId?: string; };
 export type SemanticSearchHit = { created: number; distance: number; excerpt: string; messageId: string; role: string; sessionId: string; };
 export type SemanticSearchResponse = { available: boolean; hits: Array<SemanticSearchHit>; };
@@ -145,7 +161,7 @@ export type SessionPage = { cursor: PageCursor; items: Array<Session>; };
 export type SessionQueueInfo = { count: number; items: Array<SessionQueueItem>; running: boolean; sessionId: string; worker: boolean; };
 export type SessionQueueItem = { agent?: string | null; index: number; model?: (UserModel) | (null); noReply: boolean; partCount: number; text?: string | null; };
 export type SessionQueueMutation = { queue: SessionQueueInfo; removed: number; sessionId: string; };
-export type SessionRuntimeSnapshot = { branches: Array<SubtaskLifecycleSnapshot>; execution?: (ExecutionActivitySnapshot) | (null); revision: number; rootSessionId: string; };
+export type SessionRuntimeSnapshot = { backgroundJobsEpoch?: string; backgroundJobsRevision?: number; branches: Array<SubtaskLifecycleSnapshot>; execution?: (ExecutionActivitySnapshot) | (null); revision: number; rootSessionId: string; runningBackgroundTasks?: Array<{ jobId: string; sessionId: string; startedAt: number; }>; };
 export type SessionShellRequest = { agent?: string; command: string; messageId?: string; model?: UserModel; };
 export type SessionStatus = { type: "idle" | "busy" | "retry"; [key: string]: unknown; };
 export type SessionStatusMap = { [key: string]: SessionStatus; };
@@ -155,7 +171,10 @@ export type SetGoalRequest = { paused?: boolean; researchUrls?: Array<string>; t
 export type SetPinRequest = { pinned?: boolean; };
 export type Shell = { acceptable: boolean; name: string; path: string; };
 export type Skill = { description?: string | null; name: string; path?: string; };
+export type SkillInstallRequest = (SkillWriteRequest) & ({ id: string; });
 export type SkillList = Array<Skill>;
+export type SkillVersion = { bundle: SkillWriteRequest; createdAt: number; id: string; revision: string; scope: ResourceScope; skillId: string; };
+export type SkillWriteRequest = { compatibility?: unknown; content: string; description?: string; expectedRevision?: string; files?: { [key: string]: string; }; license?: string; metadata?: { [key: string]: unknown; }; name?: string; scope?: ResourceScope; version?: string; };
 export type StepFinishPart = { cost: number; id: string; messageId: string; reason: string; sessionId: string; snapshot?: string; tokens: TokenUsage; type: "step-finish"; [key: string]: unknown; };
 export type StepStartPart = { id: string; messageId: string; sessionId: string; snapshot?: string; type: "step-start"; [key: string]: unknown; };
 export type StopSubagentsRequest = { taskId?: string; };
@@ -177,8 +196,8 @@ export type ToolStateRunning = { input: unknown; status: "running"; time: PartTi
 export type UnknownObject = { [key: string]: unknown; };
 export type UnknownValue = unknown;
 export type UpdateSessionRequest = { agent?: string; directory?: string; model?: ModelRef; permission?: Array<PermissionRule>; time?: { archived?: number; }; title?: string; };
-export type UserModel = { modelId: string; providerId: string; variant?: string; };
-export type UserModelRef = { modelId: string; providerId: string; variant?: string; };
+export type UserModel = { connectionId?: string; modelId: string; providerId: string; variant?: string; };
+export type UserModelRef = { connectionId?: string; modelId: string; providerId: string; variant?: string; };
 export type VcsApplyRequest = { directory?: string; patch: string; [key: string]: unknown; };
 export type VcsApplyResult = { error?: string | null; success: boolean; };
 export type VcsDiffList = Array<VcsFileDiff>;
@@ -187,14 +206,19 @@ export type VcsFileStatus = { additions: number; deletions: number; file: string
 export type VcsInfo = { branch?: string | null; default_branch?: string | null; };
 export type VcsStatusList = Array<VcsFileStatus>;
 export type WorkflowCatalog = { diagnostics: Array<WorkflowDiagnostic>; workflows: Array<WorkflowView>; };
-export type WorkflowDefinition = { active: boolean; agent?: string; directory?: string; id: string; model?: ModelRef; name: string; permissions?: { [key: string]: unknown; }; prompt: string; schedule: WorkflowSchedule; skill?: string; };
+export type WorkflowConcurrencyPolicy = { maxRunning?: number; mode?: "forbid" | "replace" | "allow"; };
+export type WorkflowDefinition = { active: boolean; agent?: string; concurrency?: WorkflowConcurrencyPolicy; directory?: string; id: string; model?: ModelRef; name: string; permissions?: { [key: string]: unknown; }; prompt: string; retry?: WorkflowRetryPolicy; schedule: WorkflowSchedule; skill?: string; };
+export type WorkflowDefinitionPatch = { active?: boolean; agent?: string | null; concurrency?: WorkflowConcurrencyPolicy; directory?: string | null; id?: string; model?: (ModelRef) | (null); name?: string; permissions?: { [key: string]: unknown; }; prompt?: string; retry?: WorkflowRetryPolicy; schedule?: WorkflowSchedule; skill?: string | null; };
 export type WorkflowDiagnostic = { message: string; sourcePath: string; };
 export type WorkflowHistory = { runs: Array<WorkflowRun>; };
 export type WorkflowPreview = { definition: WorkflowDefinition; sourcePath: string; upcoming: Array<{ local: string; scheduledAt: number; }>; };
 export type WorkflowProjection = { activatedAt: number; activationId: string; active: boolean; definition: WorkflowDefinition; lastScheduledAt?: number | null; sourceHash: string; sourcePath: string; updated: number; workflowId: string; workspaceRoot: string; };
-export type WorkflowRun = { activationId: string; created: number; error?: string | null; finishedAt?: number | null; id: string; scheduledAt: number; sessionId?: string | null; startedAt?: number | null; status: string; trigger: string; workflowId: string; };
+export type WorkflowRetryPolicy = { backoff?: "fixed" | "exponential"; initialDelayMs?: number; maxAttempts?: number; maxDelayMs?: number; retryableErrors?: Array<string>; };
+export type WorkflowRun = { activationId: string; attempt: number; created: number; error?: string | null; finishedAt?: number | null; id: string; leaseExpiresAt?: number | null; leaseOwner?: string | null; nextAttemptAt?: number | null; retryOf?: string | null; rootRunId: string; scheduledAt: number; sessionId?: string | null; startedAt?: number | null; status: string; trigger: string; workflowId: string; };
 export type WorkflowSchedule = { at?: string; date?: string; frequency: string; interval: number; minute?: number; monthDay?: number; time?: string; timezone: string; weekdays?: Array<string>; };
-export type WorkflowView = { activationID?: string | null; active: boolean; definition: WorkflowDefinition; lastScheduledAt?: number | null; sourceHash: string; sourcePath: string; };
+export type WorkflowView = { activationID?: string | null; active: boolean; definition: WorkflowDefinition; lastScheduledAt?: number | null; revision?: string; sourceHash: string; sourcePath: string; writable?: boolean; };
+export type WorkspaceCreateRequest = { createDirectory?: boolean; id?: string; name?: string; root: string; };
+export type WorkspaceUpdateRequest = { expectedRevision?: string; name?: string; root?: string; };
 
 export interface ApiOperations {
   "v2.agents.get": { method: "GET"; path: "/v2/agents/{name}"; input: { path: { name: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Agent; }; response: Agent; };
@@ -207,6 +231,7 @@ export interface ApiOperations {
   "v2.audit.list": { method: "GET"; path: "/v2/audit"; input: { query?: { limit?: number; }; signal?: AbortSignal; }; responses: { "200": Array<AuditEntry>; }; response: Array<AuditEntry>; };
   "v2.capabilities.list": { method: "GET"; path: "/v2/capabilities"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Array<Capability>; }; response: Array<Capability>; };
   "v2.commands.list": { method: "GET"; path: "/v2/commands"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": CommandList; }; response: CommandList; };
+  "v2.config.defaults": { method: "GET"; path: "/v2/config/defaults"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ConfigDefaults; }; response: ConfigDefaults; };
   "v2.config.get": { method: "GET"; path: "/v2/config"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ConfigDocument; }; response: ConfigDocument; };
   "v2.config.update": { method: "PATCH"; path: "/v2/config"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; body: ConfigDocument; signal?: AbortSignal; }; responses: { "200": ConfigDocument; }; response: ConfigDocument; };
   "v2.config.validate": { method: "GET"; path: "/v2/config/validate"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ConfigValidation; }; response: ConfigValidation; };
@@ -217,6 +242,35 @@ export interface ApiOperations {
   "v2.interactions.questions.list": { method: "GET"; path: "/v2/interactions/questions"; input: { query?: { sessionId?: string; }; signal?: AbortSignal; }; responses: { "200": Array<QuestionRequest>; }; response: Array<QuestionRequest>; };
   "v2.interactions.questions.reject": { method: "POST"; path: "/v2/interactions/questions/{request_id}/reject"; input: { path: { request_id: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.interactions.questions.reply": { method: "POST"; path: "/v2/interactions/questions/{request_id}/reply"; input: { path: { request_id: string; }; body: QuestionReply; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
+  "v2.management.agents.create": { method: "POST"; path: "/v2/management/agents/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; body: MarkdownWriteRequest; signal?: AbortSignal; }; responses: { "201": ManagedResource; }; response: ManagedResource; };
+  "v2.management.agents.delete": { method: "DELETE"; path: "/v2/management/agents/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
+  "v2.management.agents.get": { method: "GET"; path: "/v2/management/agents/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ManagedResource; }; response: ManagedResource; };
+  "v2.management.agents.list": { method: "GET"; path: "/v2/management/agents"; input: { query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Array<ManagedResource>; }; response: Array<ManagedResource>; };
+  "v2.management.agents.update": { method: "PUT"; path: "/v2/management/agents/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; body: MarkdownWriteRequest; signal?: AbortSignal; }; responses: { "200": ManagedResource; }; response: ManagedResource; };
+  "v2.management.commands.create": { method: "POST"; path: "/v2/management/commands/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; body: MarkdownWriteRequest; signal?: AbortSignal; }; responses: { "201": ManagedResource; }; response: ManagedResource; };
+  "v2.management.commands.delete": { method: "DELETE"; path: "/v2/management/commands/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
+  "v2.management.commands.get": { method: "GET"; path: "/v2/management/commands/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ManagedResource; }; response: ManagedResource; };
+  "v2.management.commands.list": { method: "GET"; path: "/v2/management/commands"; input: { query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Array<ManagedResource>; }; response: Array<ManagedResource>; };
+  "v2.management.commands.update": { method: "PUT"; path: "/v2/management/commands/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; body: MarkdownWriteRequest; signal?: AbortSignal; }; responses: { "200": ManagedResource; }; response: ManagedResource; };
+  "v2.management.repositories.create": { method: "POST"; path: "/v2/management/repositories"; input: { body: RepositoryCreateRequest; signal?: AbortSignal; }; responses: { "201": ManagedRepository; }; response: ManagedRepository; };
+  "v2.management.repositories.delete": { method: "DELETE"; path: "/v2/management/repositories/{id}"; input: { path: { id: string; }; query?: { expectedRevision?: string; }; headers?: { "If-Match"?: string; }; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
+  "v2.management.repositories.get": { method: "GET"; path: "/v2/management/repositories/{id}"; input: { path: { id: string; }; signal?: AbortSignal; }; responses: { "200": ManagedRepository; }; response: ManagedRepository; };
+  "v2.management.repositories.list": { method: "GET"; path: "/v2/management/repositories"; input: { signal?: AbortSignal; }; responses: { "200": Array<ManagedRepository>; }; response: Array<ManagedRepository>; };
+  "v2.management.repositories.update": { method: "PUT"; path: "/v2/management/repositories/{id}"; input: { path: { id: string; }; headers?: { "If-Match"?: string; }; body: RepositoryUpdateRequest; signal?: AbortSignal; }; responses: { "200": ManagedRepository; }; response: ManagedRepository; };
+  "v2.management.skills.create": { method: "POST"; path: "/v2/management/skills/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; body: SkillWriteRequest; signal?: AbortSignal; }; responses: { "201": ManagedResource; }; response: ManagedResource; };
+  "v2.management.skills.delete": { method: "DELETE"; path: "/v2/management/skills/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
+  "v2.management.skills.get": { method: "GET"; path: "/v2/management/skills/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ManagedResource; }; response: ManagedResource; };
+  "v2.management.skills.install": { method: "POST"; path: "/v2/management/skills/install"; input: { query?: { directory?: string; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; body: SkillInstallRequest; signal?: AbortSignal; }; responses: { "201": ManagedResource; }; response: ManagedResource; };
+  "v2.management.skills.list": { method: "GET"; path: "/v2/management/skills"; input: { query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Array<ManagedResource>; }; response: Array<ManagedResource>; };
+  "v2.management.skills.update": { method: "PUT"; path: "/v2/management/skills/{id}"; input: { path: { id: string; }; query?: { directory?: string; scope?: "installation" | "workspace"; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; body: SkillWriteRequest; signal?: AbortSignal; }; responses: { "200": ManagedResource; }; response: ManagedResource; };
+  "v2.management.skills.versions.get": { method: "GET"; path: "/v2/management/skills/{id}/versions/{version}"; input: { path: { id: string; version: string; }; signal?: AbortSignal; }; responses: { "200": SkillVersion; }; response: SkillVersion; };
+  "v2.management.skills.versions.list": { method: "GET"; path: "/v2/management/skills/{id}/versions"; input: { path: { id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Array<SkillVersion>; }; response: Array<SkillVersion>; };
+  "v2.management.skills.versions.restore": { method: "POST"; path: "/v2/management/skills/{id}/versions/{version}/restore"; input: { path: { id: string; version: string; }; query?: { directory?: string; expectedRevision?: string; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ManagedResource; }; response: ManagedResource; };
+  "v2.management.workspaces.create": { method: "POST"; path: "/v2/management/workspaces"; input: { body: WorkspaceCreateRequest; signal?: AbortSignal; }; responses: { "201": ManagedWorkspace; }; response: ManagedWorkspace; };
+  "v2.management.workspaces.delete": { method: "DELETE"; path: "/v2/management/workspaces/{id}"; input: { path: { id: string; }; query?: { expectedRevision?: string; }; headers?: { "If-Match"?: string; }; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
+  "v2.management.workspaces.get": { method: "GET"; path: "/v2/management/workspaces/{id}"; input: { path: { id: string; }; signal?: AbortSignal; }; responses: { "200": ManagedWorkspace; }; response: ManagedWorkspace; };
+  "v2.management.workspaces.list": { method: "GET"; path: "/v2/management/workspaces"; input: { signal?: AbortSignal; }; responses: { "200": Array<ManagedWorkspace>; }; response: Array<ManagedWorkspace>; };
+  "v2.management.workspaces.update": { method: "PUT"; path: "/v2/management/workspaces/{id}"; input: { path: { id: string; }; headers?: { "If-Match"?: string; }; body: WorkspaceUpdateRequest; signal?: AbortSignal; }; responses: { "200": ManagedWorkspace; }; response: ManagedWorkspace; };
   "v2.meta.get": { method: "GET"; path: "/v2/meta"; input: { signal?: AbortSignal; }; responses: { "200": ApiMeta; }; response: ApiMeta; };
   "v2.openapi.get": { method: "GET"; path: "/v2/openapi.json"; input: { signal?: AbortSignal; }; responses: { "200": OpenApiDocument; }; response: OpenApiDocument; };
   "v2.plugins.get": { method: "GET"; path: "/v2/plugins/{plugin_id}/manifest"; input: { path: { plugin_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": PluginManifest; }; response: PluginManifest; };
@@ -272,20 +326,31 @@ export interface ApiOperations {
   "v2.plugins.vcs.get": { method: "GET"; path: "/v2/plugins/dev.neoism.vcs"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": VcsInfo; }; response: VcsInfo; };
   "v2.plugins.vcs.status": { method: "GET"; path: "/v2/plugins/dev.neoism.vcs/status"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": VcsStatusList; }; response: VcsStatusList; };
   "v2.plugins.workflows.activate": { method: "POST"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}/activate"; input: { path: { workflow_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": WorkflowProjection; }; response: WorkflowProjection; };
+  "v2.plugins.workflows.create": { method: "POST"; path: "/v2/plugins/dev.neoism.workflows"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; body: WorkflowDefinition; signal?: AbortSignal; }; responses: { "201": WorkflowView; }; response: WorkflowView; };
+  "v2.plugins.workflows.delete": { method: "DELETE"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}"; input: { path: { workflow_id: string; }; query?: { directory?: string; expectedRevision?: string; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
   "v2.plugins.workflows.get": { method: "GET"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}"; input: { path: { workflow_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": WorkflowView; }; response: WorkflowView; };
   "v2.plugins.workflows.history": { method: "GET"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}/runs"; input: { path: { workflow_id: string; }; query?: { directory?: string; limit?: number; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": WorkflowHistory; }; response: WorkflowHistory; };
   "v2.plugins.workflows.list": { method: "GET"; path: "/v2/plugins/dev.neoism.workflows"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": WorkflowCatalog; }; response: WorkflowCatalog; };
+  "v2.plugins.workflows.patch": { method: "PATCH"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}"; input: { path: { workflow_id: string; }; query?: { directory?: string; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; body: WorkflowDefinitionPatch; signal?: AbortSignal; }; responses: { "200": WorkflowView; }; response: WorkflowView; };
   "v2.plugins.workflows.pause": { method: "POST"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}/pause"; input: { path: { workflow_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": WorkflowProjection; }; response: WorkflowProjection; };
   "v2.plugins.workflows.preview": { method: "GET"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}/preview"; input: { path: { workflow_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": WorkflowPreview; }; response: WorkflowPreview; };
   "v2.plugins.workflows.run": { method: "POST"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}/run"; input: { path: { workflow_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": WorkflowRun; }; response: WorkflowRun; };
-  "v2.providers.auth.delete": { method: "DELETE"; path: "/v2/providers/{provider_id}/auth"; input: { path: { provider_id: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
-  "v2.providers.auth.get": { method: "GET"; path: "/v2/providers/{provider_id}/auth"; input: { path: { provider_id: string; }; signal?: AbortSignal; }; responses: { "200": (AuthInfo) | (null); }; response: (AuthInfo) | (null); };
-  "v2.providers.auth.set": { method: "PUT"; path: "/v2/providers/{provider_id}/auth"; input: { path: { provider_id: string; }; body: AuthInfo; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
+  "v2.plugins.workflows.runs.get": { method: "GET"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}"; input: { path: { workflow_id: string; run_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": WorkflowRun; }; response: WorkflowRun; };
+  "v2.plugins.workflows.runs.retry": { method: "POST"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}/retry"; input: { path: { workflow_id: string; run_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": WorkflowRun; }; response: WorkflowRun; };
+  "v2.plugins.workflows.update": { method: "PUT"; path: "/v2/plugins/dev.neoism.workflows/{workflow_id}"; input: { path: { workflow_id: string; }; query?: { directory?: string; }; headers?: { "If-Match"?: string; "X-Neoism-Directory"?: string; }; body: WorkflowDefinition; signal?: AbortSignal; }; responses: { "200": WorkflowView; }; response: WorkflowView; };
+  "v2.providers.auth.delete": { method: "DELETE"; path: "/v2/providers/{provider_id}/auth"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
+  "v2.providers.auth.get": { method: "GET"; path: "/v2/providers/{provider_id}/auth"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
+  "v2.providers.auth.set": { method: "PUT"; path: "/v2/providers/{provider_id}/auth"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; body: AuthInfo; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.providers.authMethods": { method: "GET"; path: "/v2/providers/auth-methods"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ProviderAuthMethods; }; response: ProviderAuthMethods; };
   "v2.providers.configured": { method: "GET"; path: "/v2/providers/configured"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ConfigProvidersResult; }; response: ConfigProvidersResult; };
+  "v2.providers.connections.create": { method: "POST"; path: "/v2/providers/{provider_id}/connections"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; body: ProviderConnectionCreateRequest; signal?: AbortSignal; }; responses: { "200": ProviderConnectionSummary; }; response: ProviderConnectionSummary; };
+  "v2.providers.connections.delete": { method: "DELETE"; path: "/v2/providers/{provider_id}/connections/{connection_id}"; input: { path: { provider_id: string; connection_id: string; }; query?: { workspaceId?: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
+  "v2.providers.connections.list": { method: "GET"; path: "/v2/providers/{provider_id}/connections"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; signal?: AbortSignal; }; responses: { "200": Array<ProviderConnectionSummary>; }; response: Array<ProviderConnectionSummary>; };
+  "v2.providers.connections.rename": { method: "PATCH"; path: "/v2/providers/{provider_id}/connections/{connection_id}"; input: { path: { provider_id: string; connection_id: string; }; query?: { workspaceId?: string; }; body: ProviderConnectionRenameRequest; signal?: AbortSignal; }; responses: { "200": ProviderConnectionSummary; }; response: ProviderConnectionSummary; };
+  "v2.providers.connections.setDefault": { method: "POST"; path: "/v2/providers/{provider_id}/connections/{connection_id}/default"; input: { path: { provider_id: string; connection_id: string; }; query?: { workspaceId?: string; }; signal?: AbortSignal; }; responses: { "200": ProviderConnectionSummary; }; response: ProviderConnectionSummary; };
   "v2.providers.list": { method: "GET"; path: "/v2/providers"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ProviderListResult; }; response: ProviderListResult; };
-  "v2.providers.oauth.authorize": { method: "POST"; path: "/v2/providers/{provider_id}/oauth/authorize"; input: { path: { provider_id: string; }; body: ProviderAuthorizeRequest; signal?: AbortSignal; }; responses: { "200": (ProviderAuthAuthorization) | (null); }; response: (ProviderAuthAuthorization) | (null); };
-  "v2.providers.oauth.callback": { method: "POST"; path: "/v2/providers/{provider_id}/oauth/callback"; input: { path: { provider_id: string; }; body: ProviderCallbackRequest; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
+  "v2.providers.oauth.authorize": { method: "POST"; path: "/v2/providers/{provider_id}/oauth/authorize"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; body: ProviderAuthorizeRequest; signal?: AbortSignal; }; responses: { "200": (ProviderAuthAuthorization) | (null); }; response: (ProviderAuthAuthorization) | (null); };
+  "v2.providers.oauth.callback": { method: "POST"; path: "/v2/providers/{provider_id}/oauth/callback"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; body: ProviderCallbackRequest; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.sessions.abort": { method: "POST"; path: "/v2/sessions/{session_id}/abort"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.sessions.children": { method: "GET"; path: "/v2/sessions/{session_id}/children"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": SessionPage; }; response: SessionPage; };
   "v2.sessions.commands.execute": { method: "POST"; path: "/v2/sessions/{session_id}/commands"; input: { path: { session_id: string; }; body: SessionCommandRequest; signal?: AbortSignal; }; responses: { "200": Message; }; response: Message; };
@@ -300,7 +365,7 @@ export interface ApiOperations {
   "v2.sessions.get": { method: "GET"; path: "/v2/sessions/{session_id}"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
   "v2.sessions.import": { method: "POST"; path: "/v2/sessions/import"; input: { body: ImportSessionRequest; signal?: AbortSignal; }; responses: { "200": ImportSessionResponse; }; response: ImportSessionResponse; };
   "v2.sessions.jobs.cancel": { method: "DELETE"; path: "/v2/sessions/{session_id}/jobs/{job_id}"; input: { path: { session_id: string; job_id: string; }; signal?: AbortSignal; }; responses: { "200": BackgroundJobStopResponse; }; response: BackgroundJobStopResponse; };
-  "v2.sessions.list": { method: "GET"; path: "/v2/sessions"; input: { query?: { directory?: string; path?: string; roots?: string; start?: number; search?: string; limit?: number; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": SessionPage; }; response: SessionPage; };
+  "v2.sessions.list": { method: "GET"; path: "/v2/sessions"; input: { query?: { directory?: string; path?: string; roots?: string; start?: number; search?: string; limit?: number; cursor?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": SessionPage; }; response: SessionPage; };
   "v2.sessions.messages": { method: "GET"; path: "/v2/sessions/{session_id}/messages"; input: { path: { session_id: string; }; query?: { limit?: number; order?: "asc" | "desc"; slim?: boolean; cursor?: string; }; signal?: AbortSignal; }; responses: { "200": MessagePage; }; response: MessagePage; };
   "v2.sessions.messages.delete": { method: "DELETE"; path: "/v2/sessions/{session_id}/messages/{message_id}"; input: { path: { session_id: string; message_id: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.sessions.messages.get": { method: "GET"; path: "/v2/sessions/{session_id}/messages/{message_id}"; input: { path: { session_id: string; message_id: string; }; signal?: AbortSignal; }; responses: { "200": Message; }; response: Message; };
@@ -355,6 +420,7 @@ export const operationDescriptors = {
   "v2.audit.list": {"method":"GET","path":"/v2/audit","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.capabilities.list": {"method":"GET","path":"/v2/capabilities","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.commands.list": {"method":"GET","path":"/v2/commands","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.config.defaults": {"method":"GET","path":"/v2/config/defaults","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.config.get": {"method":"GET","path":"/v2/config","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.config.update": {"method":"PATCH","path":"/v2/config","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.config.validate": {"method":"GET","path":"/v2/config/validate","transport":"http","response":"json","responses":{"200":["application/json"]}},
@@ -365,6 +431,35 @@ export const operationDescriptors = {
   "v2.interactions.questions.list": {"method":"GET","path":"/v2/interactions/questions","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.interactions.questions.reject": {"method":"POST","path":"/v2/interactions/questions/{request_id}/reject","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.interactions.questions.reply": {"method":"POST","path":"/v2/interactions/questions/{request_id}/reply","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.agents.create": {"method":"POST","path":"/v2/management/agents/{id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"201":["application/json"]}},
+  "v2.management.agents.delete": {"method":"DELETE","path":"/v2/management/agents/{id}","transport":"http","responses":{"204":[]}},
+  "v2.management.agents.get": {"method":"GET","path":"/v2/management/agents/{id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.agents.list": {"method":"GET","path":"/v2/management/agents","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.agents.update": {"method":"PUT","path":"/v2/management/agents/{id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.commands.create": {"method":"POST","path":"/v2/management/commands/{id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"201":["application/json"]}},
+  "v2.management.commands.delete": {"method":"DELETE","path":"/v2/management/commands/{id}","transport":"http","responses":{"204":[]}},
+  "v2.management.commands.get": {"method":"GET","path":"/v2/management/commands/{id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.commands.list": {"method":"GET","path":"/v2/management/commands","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.commands.update": {"method":"PUT","path":"/v2/management/commands/{id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.repositories.create": {"method":"POST","path":"/v2/management/repositories","transport":"http","requestMediaType":"application/json","response":"json","responses":{"201":["application/json"]}},
+  "v2.management.repositories.delete": {"method":"DELETE","path":"/v2/management/repositories/{id}","transport":"http","responses":{"204":[]}},
+  "v2.management.repositories.get": {"method":"GET","path":"/v2/management/repositories/{id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.repositories.list": {"method":"GET","path":"/v2/management/repositories","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.repositories.update": {"method":"PUT","path":"/v2/management/repositories/{id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.skills.create": {"method":"POST","path":"/v2/management/skills/{id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"201":["application/json"]}},
+  "v2.management.skills.delete": {"method":"DELETE","path":"/v2/management/skills/{id}","transport":"http","responses":{"204":[]}},
+  "v2.management.skills.get": {"method":"GET","path":"/v2/management/skills/{id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.skills.install": {"method":"POST","path":"/v2/management/skills/install","transport":"http","requestMediaType":"application/json","response":"json","responses":{"201":["application/json"]}},
+  "v2.management.skills.list": {"method":"GET","path":"/v2/management/skills","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.skills.update": {"method":"PUT","path":"/v2/management/skills/{id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.skills.versions.get": {"method":"GET","path":"/v2/management/skills/{id}/versions/{version}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.skills.versions.list": {"method":"GET","path":"/v2/management/skills/{id}/versions","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.skills.versions.restore": {"method":"POST","path":"/v2/management/skills/{id}/versions/{version}/restore","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.workspaces.create": {"method":"POST","path":"/v2/management/workspaces","transport":"http","requestMediaType":"application/json","response":"json","responses":{"201":["application/json"]}},
+  "v2.management.workspaces.delete": {"method":"DELETE","path":"/v2/management/workspaces/{id}","transport":"http","responses":{"204":[]}},
+  "v2.management.workspaces.get": {"method":"GET","path":"/v2/management/workspaces/{id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.workspaces.list": {"method":"GET","path":"/v2/management/workspaces","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.management.workspaces.update": {"method":"PUT","path":"/v2/management/workspaces/{id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.meta.get": {"method":"GET","path":"/v2/meta","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.openapi.get": {"method":"GET","path":"/v2/openapi.json","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.get": {"method":"GET","path":"/v2/plugins/{plugin_id}/manifest","transport":"http","response":"json","responses":{"200":["application/json"]}},
@@ -420,17 +515,28 @@ export const operationDescriptors = {
   "v2.plugins.vcs.get": {"method":"GET","path":"/v2/plugins/dev.neoism.vcs","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.vcs.status": {"method":"GET","path":"/v2/plugins/dev.neoism.vcs/status","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.workflows.activate": {"method":"POST","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}/activate","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.plugins.workflows.create": {"method":"POST","path":"/v2/plugins/dev.neoism.workflows","transport":"http","requestMediaType":"application/json","response":"json","responses":{"201":["application/json"]}},
+  "v2.plugins.workflows.delete": {"method":"DELETE","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}","transport":"http","responses":{"204":[]}},
   "v2.plugins.workflows.get": {"method":"GET","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.workflows.history": {"method":"GET","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}/runs","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.workflows.list": {"method":"GET","path":"/v2/plugins/dev.neoism.workflows","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.plugins.workflows.patch": {"method":"PATCH","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.workflows.pause": {"method":"POST","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}/pause","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.workflows.preview": {"method":"GET","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}/preview","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.workflows.run": {"method":"POST","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}/run","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.plugins.workflows.runs.get": {"method":"GET","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.plugins.workflows.runs.retry": {"method":"POST","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}/retry","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.plugins.workflows.update": {"method":"PUT","path":"/v2/plugins/dev.neoism.workflows/{workflow_id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.auth.delete": {"method":"DELETE","path":"/v2/providers/{provider_id}/auth","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.auth.get": {"method":"GET","path":"/v2/providers/{provider_id}/auth","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.auth.set": {"method":"PUT","path":"/v2/providers/{provider_id}/auth","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.authMethods": {"method":"GET","path":"/v2/providers/auth-methods","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.configured": {"method":"GET","path":"/v2/providers/configured","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.providers.connections.create": {"method":"POST","path":"/v2/providers/{provider_id}/connections","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.providers.connections.delete": {"method":"DELETE","path":"/v2/providers/{provider_id}/connections/{connection_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.providers.connections.list": {"method":"GET","path":"/v2/providers/{provider_id}/connections","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.providers.connections.rename": {"method":"PATCH","path":"/v2/providers/{provider_id}/connections/{connection_id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.providers.connections.setDefault": {"method":"POST","path":"/v2/providers/{provider_id}/connections/{connection_id}/default","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.list": {"method":"GET","path":"/v2/providers","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.oauth.authorize": {"method":"POST","path":"/v2/providers/{provider_id}/oauth/authorize","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.oauth.callback": {"method":"POST","path":"/v2/providers/{provider_id}/oauth/callback","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},

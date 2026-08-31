@@ -5,6 +5,9 @@
     "moduleResolution": "NodeNext",
     "baseUrl": ".",
     "paths": {
+      "@neoism/sdk": [
+        "packages/sdk/src/index.ts"
+      ],
       "@neoism/sdk-core": [
         "packages/core/src/index.ts"
       ],
@@ -16,6 +19,9 @@
       ],
       "@neoism/sdk-plugin-subagents": [
         "packages/plugin-subagents/src/index.ts"
+      ],
+      "@neoism/sdk-plugin-builtins": [
+        "packages/plugin-builtins/src/index.ts"
       ],
       "@neoism/plugin": [
         "packages/plugin/src/index.ts"

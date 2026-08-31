@@ -87,10 +87,15 @@ pub struct SelectOption {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderAuthAuthorization {
     pub url: String,
     pub method: ProviderAuthAuthorizationMethod,
     pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -98,4 +103,26 @@ pub struct ProviderAuthAuthorization {
 pub enum ProviderAuthAuthorizationMethod {
     Auto,
     Code,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderAuthAuthorization, ProviderAuthAuthorizationMethod};
+
+    #[test]
+    fn authorization_uses_public_camel_case_field_names() {
+        let value = serde_json::to_value(ProviderAuthAuthorization {
+            url: "https://example.com/authorize".into(),
+            method: ProviderAuthAuthorizationMethod::Auto,
+            instructions: "Sign in".into(),
+            attempt_id: Some("attempt_123".into()),
+            expires_at: Some(123),
+        })
+        .unwrap();
+
+        assert_eq!(value["attemptId"], "attempt_123");
+        assert_eq!(value["expiresAt"], 123);
+        assert!(value.get("attempt_id").is_none());
+        assert!(value.get("expires_at").is_none());
+    }
 }

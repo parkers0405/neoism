@@ -1445,6 +1445,7 @@ interface ChromeBridgeInstance {
     toggle_vi_mode?(): void;
     font_scale(): number;
     agent_event(eventJson: string): void;
+    agent_resume_active_stream?(): boolean;
     agent_set_input(text: string): void;
     agent_input(): string;
     agent_clear_input(): void;
@@ -2895,6 +2896,9 @@ class ChromeAdapter implements TerminalAdapter {
     }
     agentEvent(eventJson: string): void {
         this.inner.agent_event(eventJson);
+    }
+    agentResumeActiveStream(): boolean {
+        return this.inner.agent_resume_active_stream?.() ?? false;
     }
     agentSetInput(text: string): void {
         this.inner.agent_set_input(text);

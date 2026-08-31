@@ -517,7 +517,7 @@ fn openai_oauth_responses_stream(
             }) => {
                 if should_refresh_oauth(expires) {
                     let refreshed = refresh_openai_oauth(&client.client, &refresh, account_id.clone(), enterprise_url.clone()).await?;
-                    auth_store.set("openai", refreshed.clone())?;
+                    auth_store.set("openai", refreshed.clone()).await?;
                     match refreshed {
                         AuthInfo::OAuth { access, account_id, .. } => (access, account_id),
                         _ => unreachable!("refresh_openai_oauth returns OAuth auth"),

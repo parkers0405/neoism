@@ -1,8 +1,39 @@
+use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
 
-pub(crate) async fn canonical_openapi_doc() -> Json<Value> {
-    Json(canonical_openapi())
+pub(crate) async fn canonical_openapi_doc(State(state): State<crate::state::AppState>) -> Json<Value> {
+    let mut document = canonical_openapi();
+    if !state.management_enabled() {
+        strip_management_contract(&mut document);
+    }
+    Json(document)
+}
+
+fn strip_management_contract(document: &mut Value) {
+    if let Some(paths) = document["paths"].as_object_mut() {
+        paths.retain(|path, _| !path.starts_with("/v2/management/"));
+        if let Some(collection) = paths.get_mut("/v2/plugins/dev.neoism.workflows").and_then(Value::as_object_mut) {
+            collection.remove("post");
+        }
+        if let Some(item) = paths.get_mut("/v2/plugins/dev.neoism.workflows/{workflow_id}").and_then(Value::as_object_mut) {
+            for method in ["put", "patch", "delete"] { item.remove(method); }
+        }
+    }
+    if let Some(tags) = document["tags"].as_array_mut() {
+        tags.retain(|tag| tag.get("name").and_then(Value::as_str) != Some("management"));
+    }
+    if let Some(schemas) = document["components"]["schemas"].as_object_mut() {
+        for name in [
+            "ManagedResource", "MarkdownWriteRequest", "ResourceScope", "SkillInstallRequest",
+            "SkillVersion", "SkillWriteRequest", "ManagedWorkspace", "ManagedRepository",
+            "ManagedRepositoryMetadata", "WorkspaceCreateRequest", "WorkspaceUpdateRequest",
+            "RepositoryCreateRequest", "RepositoryExistingRequest", "RepositoryCloneRequest",
+            "RepositoryUpdateRequest",
+        ] {
+            schemas.remove(name);
+        }
+    }
 }
 
 pub fn canonical_openapi() -> Value {
@@ -27,7 +58,7 @@ pub fn canonical_openapi() -> Value {
         },
         "tags": [
             { "name": "system" }, { "name": "plugins" }, { "name": "events" },
-            { "name": "sessions" }, { "name": "catalog" }, { "name": "artifacts" }, { "name": "interactions" }, { "name": "subagents" }
+            { "name": "sessions" }, { "name": "catalog" }, { "name": "management" }, { "name": "artifacts" }, { "name": "interactions" }, { "name": "subagents" }
         ],
         "security": [{ "BearerAuth": [] }],
         "paths": {},
@@ -93,12 +124,18 @@ pub fn canonical_openapi() -> Value {
         ("/v2/plugins/dev.neoism.goals/{session_id}/research", "post", "v2.plugins.goals.research"),
         ("/v2/plugins/dev.neoism.semantic/search", "get", "v2.plugins.semantic.search"),
         ("/v2/plugins/dev.neoism.workflows", "get", "v2.plugins.workflows.list"),
+        ("/v2/plugins/dev.neoism.workflows", "post", "v2.plugins.workflows.create"),
         ("/v2/plugins/dev.neoism.workflows/{workflow_id}", "get", "v2.plugins.workflows.get"),
+        ("/v2/plugins/dev.neoism.workflows/{workflow_id}", "put", "v2.plugins.workflows.update"),
+        ("/v2/plugins/dev.neoism.workflows/{workflow_id}", "patch", "v2.plugins.workflows.patch"),
+        ("/v2/plugins/dev.neoism.workflows/{workflow_id}", "delete", "v2.plugins.workflows.delete"),
         ("/v2/plugins/dev.neoism.workflows/{workflow_id}/activate", "post", "v2.plugins.workflows.activate"),
         ("/v2/plugins/dev.neoism.workflows/{workflow_id}/pause", "post", "v2.plugins.workflows.pause"),
         ("/v2/plugins/dev.neoism.workflows/{workflow_id}/run", "post", "v2.plugins.workflows.run"),
         ("/v2/plugins/dev.neoism.workflows/{workflow_id}/preview", "get", "v2.plugins.workflows.preview"),
         ("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs", "get", "v2.plugins.workflows.history"),
+        ("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}", "get", "v2.plugins.workflows.runs.get"),
+        ("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}/retry", "post", "v2.plugins.workflows.runs.retry"),
         ("/v2/plugins/dev.neoism.lsp", "get", "v2.plugins.lsp.status"),
         ("/v2/plugins/dev.neoism.lsp/hover", "get", "v2.plugins.lsp.hover"),
         ("/v2/plugins/dev.neoism.lsp/signature-help", "get", "v2.plugins.lsp.signatureHelp"),
@@ -374,6 +411,7 @@ fn apply_authoritative_contract(document: &mut Value) {
     let query = |name: &str, required: bool, schema: Value| p(name, "query", required, schema);
     let header = |name: &str, required: bool, schema: Value| p(name, "header", required, schema);
     let directory = || query("directory", false, json!({ "type": "string" }));
+    let credential_workspace = || query("workspaceId", false, json!({ "type": "string" }));
     let json_request = |required: bool, schema: Value| json!({
         "required": required, "content": { "application/json": { "schema": schema } }
     });
@@ -444,11 +482,40 @@ fn apply_authoritative_contract(document: &mut Value) {
         ("/v2/tools", "v2.tools.list", "ToolList")
     ] { add(route, "get", op(id, "catalog", json!([directory()]), None, success("200", "Catalog result", r(schema)))); }
     add("/v2/agents/{name}", "get", op("v2.agents.get", "catalog", json!([path("name"), directory()]), None, success("200", "Agent", r("Agent"))));
-    add("/v2/providers/{provider_id}/auth", "get", op("v2.providers.auth.get", "catalog", json!([path("provider_id")]), None, success("200", "Authentication state", json!({ "anyOf": [r("AuthInfo"), { "type": "null" }] }))));
-    add("/v2/providers/{provider_id}/auth", "put", op("v2.providers.auth.set", "catalog", json!([path("provider_id")]), Some(json_request(true, r("AuthInfo"))), success("200", "Authentication updated", json!({ "type": "boolean" }))));
-    add("/v2/providers/{provider_id}/auth", "delete", op("v2.providers.auth.delete", "catalog", json!([path("provider_id")]), None, success("200", "Authentication removed", json!({ "type": "boolean" }))));
-    add("/v2/providers/{provider_id}/oauth/authorize", "post", op("v2.providers.oauth.authorize", "catalog", json!([path("provider_id")]), Some(json_request(true, r("ProviderAuthorizeRequest"))), success("200", "OAuth authorization", json!({ "anyOf": [r("ProviderAuthAuthorization"), { "type": "null" }] }))));
-    add("/v2/providers/{provider_id}/oauth/callback", "post", op("v2.providers.oauth.callback", "catalog", json!([path("provider_id")]), Some(json_request(true, r("ProviderCallbackRequest"))), success("200", "OAuth callback accepted", json!({ "type": "boolean" }))));
+    let revision_parameters = || json!([query("expectedRevision", false, json!({ "type": "string" })), header("If-Match", false, json!({ "type": "string" }))]);
+    add("/v2/management/workspaces", "get", op("v2.management.workspaces.list", "management", json!([]), None, success("200", "Managed workspaces", json!({ "type": "array", "items": r("ManagedWorkspace") }))));
+    add("/v2/management/workspaces", "post", op("v2.management.workspaces.create", "management", json!([]), Some(json_request(true, r("WorkspaceCreateRequest"))), success("201", "Registered workspace", r("ManagedWorkspace"))));
+    add("/v2/management/workspaces/{id}", "get", op("v2.management.workspaces.get", "management", json!([path("id")]), None, success("200", "Managed workspace", r("ManagedWorkspace"))));
+    add("/v2/management/workspaces/{id}", "put", op("v2.management.workspaces.update", "management", json!([path("id"), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("WorkspaceUpdateRequest"))), success("200", "Updated workspace", r("ManagedWorkspace"))));
+    add("/v2/management/workspaces/{id}", "delete", op("v2.management.workspaces.delete", "management", { let mut parameters = vec![path("id")]; parameters.extend(revision_parameters().as_array().cloned().unwrap_or_default()); Value::Array(parameters) }, None, empty("204", "Workspace unregistered; files are retained")));
+    add("/v2/management/repositories", "get", op("v2.management.repositories.list", "management", json!([]), None, success("200", "Managed repositories", json!({ "type": "array", "items": r("ManagedRepository") }))));
+    add("/v2/management/repositories", "post", op("v2.management.repositories.create", "management", json!([]), Some(json_request(true, r("RepositoryCreateRequest"))), success("201", "Registered or cloned repository", r("ManagedRepository"))));
+    add("/v2/management/repositories/{id}", "get", op("v2.management.repositories.get", "management", json!([path("id")]), None, success("200", "Managed repository", r("ManagedRepository"))));
+    add("/v2/management/repositories/{id}", "put", op("v2.management.repositories.update", "management", json!([path("id"), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("RepositoryUpdateRequest"))), success("200", "Updated repository registration", r("ManagedRepository"))));
+    add("/v2/management/repositories/{id}", "delete", op("v2.management.repositories.delete", "management", { let mut parameters = vec![path("id")]; parameters.extend(revision_parameters().as_array().cloned().unwrap_or_default()); Value::Array(parameters) }, None, empty("204", "Repository unregistered; working tree is retained")));
+    let management_parameters = || json!([directory(), query("scope", false, json!({ "type": "string", "enum": ["installation", "workspace"] }))]);
+    let management_item_parameters = || json!([path("id"), directory(), query("scope", false, json!({ "type": "string", "enum": ["installation", "workspace"] })), header("If-Match", false, json!({ "type": "string" }))]);
+    for (kind, write_schema) in [("agents", "MarkdownWriteRequest"), ("commands", "MarkdownWriteRequest"), ("skills", "SkillWriteRequest")] {
+        add(&format!("/v2/management/{kind}"), "get", op(&format!("v2.management.{kind}.list"), "management", management_parameters(), None, success("200", "Managed resource catalog", json!({ "type": "array", "items": r("ManagedResource") }))));
+        add(&format!("/v2/management/{kind}/{{id}}"), "get", op(&format!("v2.management.{kind}.get"), "management", management_item_parameters(), None, success("200", "Managed resource", r("ManagedResource"))));
+        add(&format!("/v2/management/{kind}/{{id}}"), "post", op(&format!("v2.management.{kind}.create"), "management", management_item_parameters(), Some(json_request(true, r(write_schema))), success("201", "Created managed resource", r("ManagedResource"))));
+        add(&format!("/v2/management/{kind}/{{id}}"), "put", op(&format!("v2.management.{kind}.update"), "management", management_item_parameters(), Some(json_request(true, r(write_schema))), success("200", "Updated managed resource", r("ManagedResource"))));
+        add(&format!("/v2/management/{kind}/{{id}}"), "delete", op(&format!("v2.management.{kind}.delete"), "management", management_item_parameters(), None, empty("204", "Managed resource deleted")));
+    }
+    add("/v2/management/skills/install", "post", op("v2.management.skills.install", "management", json!([directory(), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("SkillInstallRequest"))), success("201", "Installed skill bundle", r("ManagedResource"))));
+    add("/v2/management/skills/{id}/versions", "get", op("v2.management.skills.versions.list", "management", json!([path("id"), directory()]), None, success("200", "Immutable skill versions", json!({ "type": "array", "items": r("SkillVersion") }))));
+    add("/v2/management/skills/{id}/versions/{version}", "get", op("v2.management.skills.versions.get", "management", json!([path("id"), path("version")]), None, success("200", "Immutable skill version", r("SkillVersion"))));
+    add("/v2/management/skills/{id}/versions/{version}/restore", "post", op("v2.management.skills.versions.restore", "management", json!([path("id"), path("version"), directory(), query("expectedRevision", false, json!({ "type": "string" })), header("If-Match", false, json!({ "type": "string" }))]), None, success("200", "Restored skill", r("ManagedResource"))));
+    add("/v2/providers/{provider_id}/auth", "get", op("v2.providers.auth.get", "catalog", json!([path("provider_id"), credential_workspace()]), None, success("200", "Whether a scoped connection is available", json!({ "type": "boolean" }))));
+    add("/v2/providers/{provider_id}/auth", "put", op("v2.providers.auth.set", "catalog", json!([path("provider_id"), credential_workspace()]), Some(json_request(true, r("AuthInfo"))), success("200", "Authentication updated", json!({ "type": "boolean" }))));
+    add("/v2/providers/{provider_id}/auth", "delete", op("v2.providers.auth.delete", "catalog", json!([path("provider_id"), credential_workspace()]), None, success("200", "Authentication removed", json!({ "type": "boolean" }))));
+    add("/v2/providers/{provider_id}/oauth/authorize", "post", op("v2.providers.oauth.authorize", "catalog", json!([path("provider_id"), credential_workspace()]), Some(json_request(true, r("ProviderAuthorizeRequest"))), success("200", "OAuth authorization", json!({ "anyOf": [r("ProviderAuthAuthorization"), { "type": "null" }] }))));
+    add("/v2/providers/{provider_id}/oauth/callback", "post", op("v2.providers.oauth.callback", "catalog", json!([path("provider_id"), credential_workspace()]), Some(json_request(true, r("ProviderCallbackRequest"))), success("200", "OAuth callback accepted", json!({ "type": "boolean" }))));
+    add("/v2/providers/{provider_id}/connections", "get", op("v2.providers.connections.list", "catalog", json!([path("provider_id"), credential_workspace()]), None, success("200", "Secret-free provider connections", json!({ "type": "array", "items": r("ProviderConnectionSummary") }))));
+    add("/v2/providers/{provider_id}/connections", "post", op("v2.providers.connections.create", "catalog", json!([path("provider_id"), credential_workspace()]), Some(json_request(true, r("ProviderConnectionCreateRequest"))), success("200", "Created provider connection", r("ProviderConnectionSummary"))));
+    add("/v2/providers/{provider_id}/connections/{connection_id}", "patch", op("v2.providers.connections.rename", "catalog", json!([path("provider_id"), path("connection_id"), credential_workspace()]), Some(json_request(true, r("ProviderConnectionRenameRequest"))), success("200", "Renamed provider connection", r("ProviderConnectionSummary"))));
+    add("/v2/providers/{provider_id}/connections/{connection_id}", "delete", op("v2.providers.connections.delete", "catalog", json!([path("provider_id"), path("connection_id"), credential_workspace()]), None, success("200", "Provider connection deleted", json!({ "type": "boolean" }))));
+    add("/v2/providers/{provider_id}/connections/{connection_id}/default", "post", op("v2.providers.connections.setDefault", "catalog", json!([path("provider_id"), path("connection_id"), credential_workspace()]), None, success("200", "Scoped default provider connection", r("ProviderConnectionSummary"))));
 
     let session_id = || path("session_id");
     add("/v2/sessions", "get", op("v2.sessions.list", "sessions", json!([
@@ -513,12 +580,18 @@ fn apply_authoritative_contract(document: &mut Value) {
     let workflow_params = || json!([directory()]);
     let workflow_id_params = || json!([path("workflow_id"), directory()]);
     add("/v2/plugins/dev.neoism.workflows", "get", op("v2.plugins.workflows.list", "plugins", workflow_params(), None, success("200", "Workflow catalog", r("WorkflowCatalog"))));
+    add("/v2/plugins/dev.neoism.workflows", "post", op("v2.plugins.workflows.create", "plugins", workflow_params(), Some(json_request(true, r("WorkflowDefinition"))), success("201", "Created workflow definition", r("WorkflowView"))));
     add("/v2/plugins/dev.neoism.workflows/{workflow_id}", "get", op("v2.plugins.workflows.get", "plugins", workflow_id_params(), None, success("200", "Workflow", r("WorkflowView"))));
+    add("/v2/plugins/dev.neoism.workflows/{workflow_id}", "put", op("v2.plugins.workflows.update", "plugins", json!([path("workflow_id"), directory(), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("WorkflowDefinition"))), success("200", "Updated workflow definition", r("WorkflowView"))));
+    add("/v2/plugins/dev.neoism.workflows/{workflow_id}", "patch", op("v2.plugins.workflows.patch", "plugins", json!([path("workflow_id"), directory(), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("WorkflowDefinitionPatch"))), success("200", "Patched workflow definition", r("WorkflowView"))));
+    add("/v2/plugins/dev.neoism.workflows/{workflow_id}", "delete", op("v2.plugins.workflows.delete", "plugins", json!([path("workflow_id"), directory(), query("expectedRevision", false, json!({ "type": "string" })), header("If-Match", false, json!({ "type": "string" }))]), None, empty("204", "Workflow definition deleted")));
     for (suffix, id, schema) in [("activate", "v2.plugins.workflows.activate", "WorkflowProjection"), ("pause", "v2.plugins.workflows.pause", "WorkflowProjection"), ("run", "v2.plugins.workflows.run", "WorkflowRun")] {
         add(&format!("/v2/plugins/dev.neoism.workflows/{{workflow_id}}/{suffix}"), "post", op(id, "plugins", workflow_id_params(), None, success("200", "Workflow result", r(schema))));
     }
     add("/v2/plugins/dev.neoism.workflows/{workflow_id}/preview", "get", op("v2.plugins.workflows.preview", "plugins", workflow_id_params(), None, success("200", "Workflow preview", r("WorkflowPreview"))));
     add("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs", "get", op("v2.plugins.workflows.history", "plugins", json!([path("workflow_id"), directory(), query("limit", false, json!({ "type": "integer", "minimum": 1 }))]), None, success("200", "Workflow runs", r("WorkflowHistory"))));
+    add("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}", "get", op("v2.plugins.workflows.runs.get", "plugins", json!([path("workflow_id"), path("run_id"), directory()]), None, success("200", "Workflow run", r("WorkflowRun"))));
+    add("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}/retry", "post", op("v2.plugins.workflows.runs.retry", "plugins", json!([path("workflow_id"), path("run_id"), directory()]), None, success("200", "Retried workflow run", r("WorkflowRun"))));
 
     let lsp_position = || json!([directory(), query("file", true, json!({ "type": "string" })), query("line", true, json!({ "type": "integer", "minimum": 0 })), query("character", true, json!({ "type": "integer", "minimum": 0 }))]);
     let lsp_document = || json!([directory(), query("file", true, json!({ "type": "string" }))]);
@@ -690,8 +763,8 @@ fn canonical_schemas() -> Value {
             "id": { "type": "string" }, "description": { "type": "string" }, "parameters": {}, "outputSchema": {}
         }},
         "ToolList": { "type": "array", "items": { "$ref": "#/components/schemas/Tool" } },
-        "ModelRef": { "type": "object", "additionalProperties": false, "required": ["id", "providerId"], "properties": { "id": { "type": "string" }, "providerId": { "type": "string" }, "variant": { "type": "string" } } },
-        "UserModel": { "type": "object", "additionalProperties": false, "required": ["providerId", "modelId"], "properties": { "providerId": { "type": "string" }, "modelId": { "type": "string" }, "variant": { "type": "string" } } },
+        "ModelRef": { "type": "object", "additionalProperties": false, "required": ["id", "providerId"], "properties": { "id": { "type": "string" }, "providerId": { "type": "string" }, "connectionId": { "type": "string" }, "variant": { "type": "string" } } },
+        "UserModel": { "type": "object", "additionalProperties": false, "required": ["providerId", "modelId"], "properties": { "providerId": { "type": "string" }, "modelId": { "type": "string" }, "connectionId": { "type": "string" }, "variant": { "type": "string" } } },
         "PermissionRule": { "type": "object", "additionalProperties": false, "required": ["permission", "pattern", "action"], "properties": { "permission": { "type": "string" }, "pattern": { "type": "string" }, "action": { "type": "string" } } },
         "SessionTime": { "type": "object", "additionalProperties": false, "required": ["created", "updated"], "properties": { "created": { "type": "integer", "minimum": 0 }, "updated": { "type": "integer", "minimum": 0 }, "compacting": { "type": "integer", "minimum": 0 }, "archived": { "type": "integer" } } },
         "Session": { "type": "object", "additionalProperties": true, "required": ["id", "slug", "projectId", "directory", "title", "version", "time"], "properties": {
@@ -773,7 +846,7 @@ fn typed_part_schemas() -> Value {
             "cache": r("CacheUsage")
         }},
         "UserModelRef": { "type": "object", "additionalProperties": false, "required": ["providerId", "modelId"], "properties": {
-            "providerId": { "type": "string" }, "modelId": { "type": "string" }, "variant": { "type": "string" }
+            "providerId": { "type": "string" }, "modelId": { "type": "string" }, "connectionId": { "type": "string" }, "variant": { "type": "string" }
         }},
         "ToolState": {
             "description": "Tool call lifecycle, discriminated by `status`.",
@@ -1013,7 +1086,9 @@ fn event_data_schema(event_type: &str) -> Value {
             "sessionID": { "type": "string" }, "parentSessionID": { "type": "string" },
             "childSessionID": { "type": "string" }, "taskID": { "type": "string" },
             "status": { "type": "string" }, "title": { "type": "string" }, "result": { "type": "string" },
-            "agent": { "type": "string" }, "sourceAgent": { "type": "string" }
+            "agent": { "type": "string" }, "sourceAgent": { "type": "string" },
+            "rootSessionID": { "type": "string" }, "executionID": { "type": "string" },
+            "familyRevision": { "type": "integer" }
         }}),
         _ if event_type == et::TODO_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "todos"], "properties": {
             "sessionID": { "type": "string" }, "todos": { "type": "array", "items": r("Todo") }
@@ -1061,8 +1136,8 @@ fn authoritative_schemas() -> Value {
         "OpenApiDocument": { "type": "object", "additionalProperties": true, "required": ["openapi", "info", "paths"], "properties": {
             "openapi": { "type": "string" }, "info": { "type": "object", "additionalProperties": true }, "paths": { "type": "object", "additionalProperties": true }
         }},
-        "HealthResponse": { "type": "object", "additionalProperties": false, "required": ["healthy", "version"], "properties": {
-            "healthy": { "type": "boolean", "const": true }, "version": { "type": "string" }
+        "HealthResponse": { "type": "object", "additionalProperties": false, "required": ["healthy", "version", "providerCredentialStore"], "properties": {
+            "healthy": { "type": "boolean", "const": true }, "version": { "type": "string" }, "executablePath": { "type": "string" }, "providerCredentialStore": { "type": "string" }
         }},
         "ConfigDocument": { "type": "object", "additionalProperties": true, "description": "Canonical agent configuration; extension/plugin keys are preserved." },
         "ConfigDefaults": {
@@ -1110,14 +1185,65 @@ fn authoritative_schemas() -> Value {
             { "type": "object", "additionalProperties": false, "required": ["type", "key", "token"], "properties": { "type": { "const": "wellknown" }, "key": { "type": "string" }, "token": { "type": "string" } } }
         ]},
         "ProviderAuthorizeRequest": { "type": "object", "additionalProperties": false, "required": ["method"], "properties": {
-            "method": {}, "inputs": { "type": "object", "additionalProperties": { "type": "string" } }
+            "method": {}, "inputs": { "type": "object", "additionalProperties": { "type": "string" } }, "connectionId": { "type": "string" }, "label": { "type": "string" }
         }},
-        "ProviderCallbackRequest": { "type": "object", "additionalProperties": false, "required": ["method"], "properties": { "method": {}, "code": { "type": ["string", "null"] } } },
+        "ProviderCallbackRequest": { "type": "object", "additionalProperties": false, "required": ["method"], "properties": { "method": {}, "code": { "type": ["string", "null"] }, "attemptId": { "type": "string" } } },
         "ProviderAuthAuthorization": { "type": "object", "additionalProperties": false, "required": ["url", "method", "instructions"], "properties": {
-            "url": { "type": "string" }, "method": { "type": "string", "enum": ["auto", "code"] }, "instructions": { "type": "string" }
+            "url": { "type": "string" }, "method": { "type": "string", "enum": ["auto", "code"] }, "instructions": { "type": "string" }, "attemptId": { "type": "string" }, "expiresAt": { "type": "integer", "minimum": 0 }
         }},
+        "CredentialScope": { "type": "object", "additionalProperties": false, "required": ["tenantId"], "properties": { "tenantId": { "type": "string" }, "workspaceId": { "type": "string" } } },
+        "ProviderConnectionSummary": { "type": "object", "additionalProperties": false, "required": ["providerId", "connectionId", "label", "scope", "authType", "isDefault"], "properties": { "providerId": { "type": "string" }, "connectionId": { "type": "string" }, "label": { "type": "string" }, "scope": r("CredentialScope"), "authType": { "type": "string", "enum": ["api", "oauth", "wellknown"] }, "isDefault": { "type": "boolean" } } },
+        "ProviderConnectionCreateRequest": { "type": "object", "additionalProperties": false, "required": ["label", "credential"], "properties": { "label": { "type": "string" }, "credential": r("AuthInfo"), "setDefault": { "type": "boolean", "default": false } } },
+        "ProviderConnectionRenameRequest": { "type": "object", "additionalProperties": false, "required": ["label"], "properties": { "label": { "type": "string" } } },
         "Skill": { "type": "object", "additionalProperties": false, "required": ["name"], "properties": { "name": { "type": "string" }, "description": { "type": ["string", "null"] }, "path": { "type": "string" } } },
         "SkillList": { "type": "array", "items": r("Skill") },
+        "ResourceScope": { "type": "string", "enum": ["installation", "workspace"] },
+        "ManagedRepositoryMetadata": { "type": "object", "additionalProperties": false, "properties": {
+            "remoteUrl": { "type": "string" }, "gitRef": { "type": "string" }
+        }},
+        "ManagedWorkspace": { "type": "object", "additionalProperties": false, "required": ["id", "name", "root", "revision", "createdAt", "updatedAt"], "properties": {
+            "id": { "type": "string" }, "name": { "type": "string" }, "root": { "type": "string" }, "revision": { "type": "string" },
+            "createdAt": { "type": "integer", "minimum": 0 }, "updatedAt": { "type": "integer", "minimum": 0 }, "repository": r("ManagedRepositoryMetadata")
+        }},
+        "ManagedRepository": { "type": "object", "additionalProperties": false, "required": ["id", "workspaceId", "name", "path", "revision", "createdAt", "updatedAt"], "properties": {
+            "id": { "type": "string" }, "workspaceId": { "type": "string" }, "name": { "type": "string" }, "path": { "type": "string" },
+            "remoteUrl": { "type": "string" }, "gitRef": { "type": "string" }, "revision": { "type": "string" },
+            "createdAt": { "type": "integer", "minimum": 0 }, "updatedAt": { "type": "integer", "minimum": 0 }
+        }},
+        "WorkspaceCreateRequest": { "type": "object", "additionalProperties": false, "required": ["root"], "properties": {
+            "id": { "type": "string" }, "name": { "type": "string", "maxLength": 160 }, "root": { "type": "string" }, "createDirectory": { "type": "boolean", "default": false }
+        }},
+        "WorkspaceUpdateRequest": { "type": "object", "additionalProperties": false, "properties": {
+            "name": { "type": "string", "maxLength": 160 }, "root": { "type": "string" }, "expectedRevision": { "type": "string" }
+        }},
+        "RepositoryExistingRequest": { "type": "object", "additionalProperties": false, "required": ["kind", "path"], "properties": {
+            "kind": { "const": "existing" }, "id": { "type": "string" }, "name": { "type": "string", "maxLength": 160 }, "path": { "type": "string" }
+        }},
+        "RepositoryCloneRequest": { "type": "object", "additionalProperties": false, "required": ["kind", "remoteUrl"], "properties": {
+            "kind": { "const": "clone" }, "id": { "type": "string" }, "name": { "type": "string", "maxLength": 160 }, "remoteUrl": { "type": "string", "maxLength": 4096 },
+            "ref": { "type": "string", "maxLength": 256 }, "depth": { "type": "integer", "minimum": 1, "maximum": 10000 }
+        }},
+        "RepositoryCreateRequest": { "oneOf": [r("RepositoryExistingRequest"), r("RepositoryCloneRequest")], "discriminator": { "propertyName": "kind" } },
+        "RepositoryUpdateRequest": { "type": "object", "additionalProperties": false, "properties": {
+            "name": { "type": "string", "maxLength": 160 }, "expectedRevision": { "type": "string" }
+        }},
+        "ManagedResource": { "type": "object", "additionalProperties": false, "required": ["id", "scope", "origin", "provenance", "writable", "managed", "revision", "createdAt", "updatedAt", "definition"], "properties": {
+            "id": { "type": "string" }, "scope": { "anyOf": [r("ResourceScope"), { "type": "null" }] }, "origin": { "type": "string", "enum": ["builtIn", "discovered", "managed"] },
+            "provenance": { "type": "string" }, "writable": { "type": "boolean" }, "managed": { "type": "boolean" }, "revision": { "type": ["string", "null"] },
+            "createdAt": { "type": ["integer", "null"], "minimum": 0 }, "updatedAt": { "type": ["integer", "null"], "minimum": 0 }, "definition": {}
+        }},
+        "MarkdownWriteRequest": { "type": "object", "additionalProperties": false, "required": ["content"], "properties": {
+            "scope": r("ResourceScope"), "expectedRevision": { "type": "string" }, "frontmatter": { "type": "object", "additionalProperties": true }, "content": { "type": "string", "maxLength": 524288 }
+        }},
+        "SkillWriteRequest": { "type": "object", "additionalProperties": false, "required": ["content"], "properties": {
+            "scope": r("ResourceScope"), "expectedRevision": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "content": { "type": "string", "maxLength": 524288 },
+            "version": { "type": "string" }, "license": { "type": "string" }, "compatibility": {}, "metadata": { "type": "object", "additionalProperties": true },
+            "files": { "type": "object", "maxProperties": 32, "additionalProperties": { "type": "string", "maxLength": 262144 } }
+        }},
+        "SkillInstallRequest": { "allOf": [r("SkillWriteRequest"), { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }] },
+        "SkillVersion": { "type": "object", "additionalProperties": false, "required": ["id", "skillId", "scope", "revision", "createdAt", "bundle"], "properties": {
+            "id": { "type": "string" }, "skillId": { "type": "string" }, "scope": r("ResourceScope"), "revision": { "type": "string" }, "createdAt": { "type": "integer", "minimum": 0 }, "bundle": r("SkillWriteRequest")
+        }},
         "Agent": { "type": "object", "additionalProperties": false, "required": ["name", "mode", "native", "hidden", "permission", "options"], "properties": {
             "name": { "type": "string" }, "description": { "type": "string" }, "mode": { "type": "string" }, "native": { "type": "boolean" }, "hidden": { "type": "boolean" },
             "topP": { "type": "number" }, "temperature": { "type": "number" }, "color": { "type": "string" }, "permission": { "type": "object", "additionalProperties": true },
@@ -1171,12 +1297,15 @@ fn authoritative_schemas() -> Value {
         "SemanticSearchHit": { "type": "object", "additionalProperties": false, "required": ["sessionId", "messageId", "role", "created", "excerpt", "distance"], "properties": { "sessionId": { "type": "string" }, "messageId": { "type": "string" }, "role": { "type": "string" }, "created": { "type": "integer", "minimum": 0 }, "excerpt": { "type": "string" }, "distance": { "type": "number" } } },
         "SemanticSearchResponse": { "type": "object", "additionalProperties": false, "required": ["available", "hits"], "properties": { "available": { "type": "boolean" }, "hits": { "type": "array", "items": r("SemanticSearchHit") } } },
         "WorkflowSchedule": { "type": "object", "additionalProperties": false, "required": ["frequency", "interval", "timezone"], "properties": { "frequency": { "type": "string" }, "interval": { "type": "integer", "minimum": 1 }, "timezone": { "type": "string" }, "minute": { "type": "integer" }, "time": { "type": "string" }, "weekdays": { "type": "array", "items": { "type": "string" } }, "monthDay": { "type": "integer" }, "date": { "type": "string" }, "at": { "type": "string" } } },
-        "WorkflowDefinition": { "type": "object", "additionalProperties": false, "required": ["id", "name", "active", "schedule", "prompt"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "active": { "type": "boolean" }, "schedule": r("WorkflowSchedule"), "prompt": { "type": "string" }, "directory": { "type": "string" }, "skill": { "type": "string" }, "agent": { "type": "string" }, "model": r("ModelRef"), "permissions": { "type": "object", "additionalProperties": true } } },
-        "WorkflowView": { "type": "object", "additionalProperties": false, "required": ["definition", "sourcePath", "sourceHash", "active"], "properties": { "definition": r("WorkflowDefinition"), "sourcePath": { "type": "string" }, "sourceHash": { "type": "string" }, "active": { "type": "boolean" }, "activationID": { "type": ["string", "null"] }, "lastScheduledAt": { "type": ["integer", "null"] } } },
+        "WorkflowRetryPolicy": { "type": "object", "additionalProperties": false, "properties": { "maxAttempts": { "type": "integer", "minimum": 1, "default": 1 }, "backoff": { "type": "string", "enum": ["fixed", "exponential"], "default": "fixed" }, "initialDelayMs": { "type": "integer", "minimum": 0, "default": 0 }, "maxDelayMs": { "type": "integer", "minimum": 0, "default": 0 }, "retryableErrors": { "type": "array", "items": { "type": "string" }, "default": [] } } },
+        "WorkflowConcurrencyPolicy": { "type": "object", "additionalProperties": false, "properties": { "mode": { "type": "string", "enum": ["forbid", "replace", "allow"], "default": "forbid" }, "maxRunning": { "type": "integer", "minimum": 1, "default": 1 } } },
+        "WorkflowDefinition": { "type": "object", "additionalProperties": false, "required": ["id", "name", "active", "schedule", "prompt"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "active": { "type": "boolean" }, "schedule": r("WorkflowSchedule"), "prompt": { "type": "string" }, "directory": { "type": "string" }, "skill": { "type": "string" }, "agent": { "type": "string" }, "model": r("ModelRef"), "permissions": { "type": "object", "additionalProperties": true }, "retry": r("WorkflowRetryPolicy"), "concurrency": r("WorkflowConcurrencyPolicy") } },
+        "WorkflowDefinitionPatch": { "type": "object", "additionalProperties": false, "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "active": { "type": "boolean" }, "schedule": r("WorkflowSchedule"), "prompt": { "type": "string" }, "directory": { "type": ["string", "null"] }, "skill": { "type": ["string", "null"] }, "agent": { "type": ["string", "null"] }, "model": { "anyOf": [r("ModelRef"), { "type": "null" }] }, "permissions": { "type": ["object", "null"], "additionalProperties": true }, "retry": r("WorkflowRetryPolicy"), "concurrency": r("WorkflowConcurrencyPolicy") } },
+        "WorkflowView": { "type": "object", "additionalProperties": false, "required": ["definition", "sourcePath", "sourceHash", "active"], "properties": { "definition": r("WorkflowDefinition"), "sourcePath": { "type": "string" }, "sourceHash": { "type": "string" }, "revision": { "type": "string" }, "writable": { "type": "boolean" }, "active": { "type": "boolean" }, "activationID": { "type": ["string", "null"] }, "lastScheduledAt": { "type": ["integer", "null"] } } },
         "WorkflowDiagnostic": { "type": "object", "additionalProperties": false, "required": ["sourcePath", "message"], "properties": { "sourcePath": { "type": "string" }, "message": { "type": "string" } } },
         "WorkflowCatalog": { "type": "object", "additionalProperties": false, "required": ["workflows", "diagnostics"], "properties": { "workflows": { "type": "array", "items": r("WorkflowView") }, "diagnostics": { "type": "array", "items": r("WorkflowDiagnostic") } } },
         "WorkflowProjection": { "type": "object", "additionalProperties": false, "required": ["activationId", "workflowId", "workspaceRoot", "sourcePath", "sourceHash", "definition", "active", "activatedAt", "updated"], "properties": { "activationId": { "type": "string" }, "workflowId": { "type": "string" }, "workspaceRoot": { "type": "string" }, "sourcePath": { "type": "string" }, "sourceHash": { "type": "string" }, "definition": r("WorkflowDefinition"), "active": { "type": "boolean" }, "activatedAt": { "type": "integer" }, "lastScheduledAt": { "type": ["integer", "null"] }, "updated": { "type": "integer" } } },
-        "WorkflowRun": { "type": "object", "additionalProperties": false, "required": ["id", "activationId", "workflowId", "scheduledAt", "status", "trigger", "created"], "properties": { "id": { "type": "string" }, "activationId": { "type": "string" }, "workflowId": { "type": "string" }, "scheduledAt": { "type": "integer" }, "startedAt": { "type": ["integer", "null"] }, "finishedAt": { "type": ["integer", "null"] }, "sessionId": { "type": ["string", "null"] }, "status": { "type": "string" }, "trigger": { "type": "string" }, "error": { "type": ["string", "null"] }, "created": { "type": "integer" } } },
+        "WorkflowRun": { "type": "object", "additionalProperties": false, "required": ["id", "activationId", "workflowId", "scheduledAt", "status", "trigger", "created", "attempt", "rootRunId"], "properties": { "id": { "type": "string" }, "activationId": { "type": "string" }, "workflowId": { "type": "string" }, "scheduledAt": { "type": "integer" }, "startedAt": { "type": ["integer", "null"] }, "finishedAt": { "type": ["integer", "null"] }, "sessionId": { "type": ["string", "null"] }, "status": { "type": "string" }, "trigger": { "type": "string" }, "error": { "type": ["string", "null"] }, "created": { "type": "integer" }, "attempt": { "type": "integer", "minimum": 1 }, "rootRunId": { "type": "string" }, "retryOf": { "type": ["string", "null"] }, "nextAttemptAt": { "type": ["integer", "null"] }, "leaseOwner": { "type": ["string", "null"] }, "leaseExpiresAt": { "type": ["integer", "null"] } } },
         "WorkflowPreview": { "type": "object", "additionalProperties": false, "required": ["definition", "sourcePath", "upcoming"], "properties": { "definition": r("WorkflowDefinition"), "sourcePath": { "type": "string" }, "upcoming": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["scheduledAt", "local"], "properties": { "scheduledAt": { "type": "integer" }, "local": { "type": "string" } } } } } },
         "WorkflowHistory": { "type": "object", "additionalProperties": false, "required": ["runs"], "properties": { "runs": { "type": "array", "items": r("WorkflowRun") } } },
         "LspPosition": { "type": "object", "additionalProperties": false, "required": ["line", "character"], "properties": { "line": { "type": "integer" }, "character": { "type": "integer" } } },
@@ -1459,6 +1588,27 @@ mod tests {
         let paths = document["paths"].as_object().expect("paths object");
         assert!(!paths.is_empty());
         assert!(paths.keys().all(|path| path.starts_with("/v2/")));
+    }
+
+    #[test]
+    fn disabled_management_contract_preserves_the_existing_surface() {
+        let mut document = canonical_openapi();
+        strip_management_contract(&mut document);
+        assert!(document["paths"].as_object().unwrap().keys().all(|path| !path.starts_with("/v2/management/")));
+        assert!(document["tags"].as_array().unwrap().iter().all(|tag| tag["name"] != "management"));
+        assert!(document["components"]["schemas"].get("ManagedResource").is_none());
+        assert!(document["components"]["schemas"].get("ManagedWorkspace").is_none());
+        assert!(document["components"]["schemas"].get("RepositoryCreateRequest").is_none());
+    }
+
+    #[test]
+    fn workspace_and_repository_management_contract_is_discriminated_and_safe() {
+        let document = canonical_openapi();
+        assert_eq!(document["paths"]["/v2/management/workspaces"]["post"]["operationId"], "v2.management.workspaces.create");
+        assert_eq!(document["paths"]["/v2/management/repositories"]["post"]["operationId"], "v2.management.repositories.create");
+        assert_eq!(document["components"]["schemas"]["RepositoryCreateRequest"]["discriminator"]["propertyName"], "kind");
+        assert_eq!(document["components"]["schemas"]["RepositoryCloneRequest"]["properties"]["depth"]["maximum"], 10_000);
+        assert!(document["paths"]["/v2/management/repositories/{id}"]["delete"]["responses"].get("204").is_some());
     }
 
     #[test]

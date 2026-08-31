@@ -868,6 +868,7 @@ mod tests {
                 model: UserModel {
                     provider_id: "openai".to_string(),
                     model_id: "gpt-5.5".to_string(),
+                    connection_id: None,
                     variant: None,
                 },
                 system: None,
@@ -919,6 +920,7 @@ mod tests {
                 model: UserModel {
                     provider_id: "openai".to_string(),
                     model_id: "gpt-5.5".to_string(),
+                    connection_id: None,
                     variant: None,
                 },
                 system: None,
@@ -1002,6 +1004,7 @@ mod tests {
                 model: UserModel {
                     provider_id: "openai".to_string(),
                     model_id: "gpt-5.5".to_string(),
+                    connection_id: None,
                     variant: None,
                 },
                 system: Some("legacy agent prompt that should not replay".to_string()),
@@ -1038,6 +1041,7 @@ mod tests {
                 model: UserModel {
                     provider_id: "openai".to_string(),
                     model_id: "gpt-5.5".to_string(),
+                    connection_id: None,
                     variant: None,
                 },
                 system: Some("Agent runtime notification: background subagent completion.".to_string()),

@@ -328,18 +328,24 @@ pub enum OutboundAgentCommand {
     RefreshConnectProviders {
         directory: Option<String>,
     },
+    RefreshProviderConnections { provider_id: String },
 
     /// Store an API key (or the Meridian one-click marker) for a provider.
     /// `PUT /auth/{provider_id}` with `{ "type": "api", "key": <key> }`.
     ConnectStoreApiKey {
         provider_id: String,
         key: String,
+        label: Option<String>,
+        connection_id: Option<String>,
     },
 
     /// Remove a provider's stored auth. `DELETE /auth/{provider_id}`.
     ConnectDisconnect {
         provider_id: String,
+        connection_id: Option<String>,
     },
+    ConnectRename { provider_id: String, connection_id: String, label: String },
+    ConnectSetDefault { provider_id: String, connection_id: String },
 
     /// Begin an OAuth method: request the authorization URL.
     /// `POST /provider/{provider_id}/oauth/authorize` with
@@ -347,6 +353,8 @@ pub enum OutboundAgentCommand {
     ConnectOauthAuthorize {
         provider_id: String,
         method_index: usize,
+        label: Option<String>,
+        connection_id: Option<String>,
     },
 
     /// Complete an OAuth method. `POST /provider/{provider_id}/oauth/callback`
@@ -357,6 +365,7 @@ pub enum OutboundAgentCommand {
         provider_id: String,
         method_index: usize,
         code: Option<String>,
+        attempt_id: Option<String>,
     },
 }
 

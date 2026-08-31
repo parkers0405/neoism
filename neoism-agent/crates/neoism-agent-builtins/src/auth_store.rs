@@ -1,104 +1,92 @@
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
+use std::sync::Arc;
 
-use anyhow::Context;
 use neoism_agent_core::AuthInfo;
+use neoism_agent_service_api::{
+    CreateProviderConnection, CredentialScope, LocalProviderCredentialStore,
+    ProviderCredential, ProviderCredentialStore,
+};
 
 #[derive(Clone)]
 pub struct AuthStore {
-    path: PathBuf,
+    store: Arc<dyn ProviderCredentialStore>,
+    scope: CredentialScope,
+    connection_id: Option<String>,
 }
 
 impl AuthStore {
     #[cfg(test)]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self::from_service(Arc::new(LocalProviderCredentialStore::new(path)))
     }
 
     pub fn from_env() -> Self {
-        let path = std::env::var("NEOISM_AGENT_AUTH_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| crate::default_state_dir().join("auth.json"));
-        Self { path }
+        Self::from_service(Arc::new(LocalProviderCredentialStore::from_environment()))
     }
 
-    pub fn all(&self) -> anyhow::Result<BTreeMap<String, AuthInfo>> {
-        if let Ok(content) = std::env::var("NEOISM_AGENT_AUTH_CONTENT") {
-            return decode_auth(&content)
-                .context("failed to parse NEOISM_AGENT_AUTH_CONTENT");
+    pub fn from_service(store: Arc<dyn ProviderCredentialStore>) -> Self {
+        Self { store, scope: CredentialScope::local(), connection_id: None }
+    }
+
+    pub fn scoped(&self, scope: CredentialScope, connection_id: Option<String>) -> Self {
+        Self { store: self.store.clone(), scope, connection_id }
+    }
+
+    pub fn service(&self) -> &Arc<dyn ProviderCredentialStore> { &self.store }
+    pub fn scope(&self) -> &CredentialScope { &self.scope }
+    pub fn connection_id(&self) -> Option<&str> { self.connection_id.as_deref() }
+
+    pub async fn all(&self) -> anyhow::Result<BTreeMap<String, AuthInfo>> {
+        let mut all = BTreeMap::new();
+        for summary in self.store.list(None, &self.scope).await.map_err(service_error)? {
+            if let Some((_, credential)) = self.store.resolve(&summary.provider_id, None, &self.scope).await.map_err(service_error)? {
+                all.insert(summary.provider_id, from_credential(credential));
+            }
         }
-        let Ok(content) = std::fs::read_to_string(&self.path) else {
-            return Ok(BTreeMap::new());
-        };
-        decode_auth(&content)
-            .with_context(|| format!("failed to parse {}", self.path.display()))
+        Ok(all)
     }
 
-    pub fn get(&self, provider_id: &str) -> anyhow::Result<Option<AuthInfo>> {
-        Ok(self.all()?.remove(normalize_key(provider_id).as_str()))
-    }
-
-    pub fn set(&self, provider_id: &str, info: AuthInfo) -> anyhow::Result<()> {
+    pub async fn get(&self, provider_id: &str) -> anyhow::Result<Option<AuthInfo>> {
         let key = normalize_key(provider_id);
-        let mut all = self.all()?;
-        all.remove(provider_id);
-        all.remove(format!("{key}/").as_str());
-        all.insert(key, info);
-        self.write(&all)
+        Ok(self.store.resolve(&key, self.connection_id.as_deref(), &self.scope).await.map_err(service_error)?.map(|(_, value)| from_credential(value)))
     }
 
-    pub fn remove(&self, provider_id: &str) -> anyhow::Result<()> {
-        let key = normalize_key(provider_id);
-        let mut all = self.all()?;
-        all.remove(provider_id);
-        all.remove(key.as_str());
-        all.remove(format!("{key}/").as_str());
-        self.write(&all)
+    pub async fn set(&self, provider_id: &str, info: AuthInfo) -> anyhow::Result<()> {
+        let provider_id = normalize_key(provider_id);
+        let credential = into_credential(info);
+        if let Some((connection, _)) = self.store.resolve(&provider_id, self.connection_id.as_deref(), &self.scope).await.map_err(service_error)? {
+            self.store.update_credential(&connection, &self.scope, credential).await.map_err(service_error)?;
+        } else if self.connection_id.is_some() {
+            anyhow::bail!("provider connection not found")
+        } else {
+            self.store.create(CreateProviderConnection { provider_id, label: "Default".into(), scope: self.scope.clone(), credential, set_default: true }).await.map_err(service_error)?;
+        }
+        Ok(())
     }
 
-    fn write(&self, all: &BTreeMap<String, AuthInfo>) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = self.path.with_extension("tmp");
-        let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp)?;
-        file.write_all(serde_json::to_string_pretty(all)?.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        std::fs::rename(tmp, &self.path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        // Windows counterpart of the 0o600 above: owner+SYSTEM-only DACL.
-        // Warn-and-go — ACL-less filesystems must not fail credential writes.
-        #[cfg(windows)]
-        if let Err(error) = crate::windows_acl::harden_owner_only(&self.path) {
-            tracing::warn!(
-                error = %error,
-                path = %self.path.display(),
-                "could not tighten auth store ACL; continuing",
-            );
+    pub async fn remove(&self, provider_id: &str) -> anyhow::Result<()> {
+        let provider_id = normalize_key(provider_id);
+        if let Some((connection, _)) = self.store.resolve(&provider_id, self.connection_id.as_deref(), &self.scope).await.map_err(service_error)? {
+            self.store.delete(&connection, &self.scope).await.map_err(service_error)?;
         }
         Ok(())
     }
 }
 
-fn decode_auth(content: &str) -> anyhow::Result<BTreeMap<String, AuthInfo>> {
-    if content.trim().is_empty() {
-        return Ok(BTreeMap::new());
+fn service_error(error: neoism_agent_service_api::ServiceError) -> anyhow::Error { anyhow::anyhow!(error.to_string()) }
+fn into_credential(info: AuthInfo) -> ProviderCredential {
+    match info {
+        AuthInfo::Api { key, metadata } => ProviderCredential::Api { key, metadata },
+        AuthInfo::OAuth { refresh, access, expires, account_id, enterprise_url } => ProviderCredential::OAuth { refresh, access, expires, account_id, enterprise_url },
+        AuthInfo::WellKnown { key, token } => ProviderCredential::WellKnown { key, token },
     }
-    Ok(serde_json::from_str(content)?)
+}
+fn from_credential(info: ProviderCredential) -> AuthInfo {
+    match info {
+        ProviderCredential::Api { key, metadata } => AuthInfo::Api { key, metadata },
+        ProviderCredential::OAuth { refresh, access, expires, account_id, enterprise_url } => AuthInfo::OAuth { refresh, access, expires, account_id, enterprise_url },
+        ProviderCredential::WellKnown { key, token } => AuthInfo::WellKnown { key, token },
+    }
 }
 
 fn normalize_key(provider_id: &str) -> String {
@@ -113,8 +101,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn auth_store_persists_normalized_credentials() {
+    #[tokio::test]
+    async fn auth_store_persists_normalized_credentials() {
         std::env::remove_var("NEOISM_AGENT_AUTH_CONTENT");
         let path = std::env::temp_dir().join(format!(
             "neoism-agent-auth-{}.json",
@@ -133,7 +121,7 @@ mod tests {
                     metadata: Some(json!({ "accountId": "acct" })),
                 },
             )
-            .unwrap();
+            .await.unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("\"example\""));
@@ -144,7 +132,7 @@ mod tests {
             0o600
         );
 
-        let stored = store.get("example").unwrap().unwrap();
+        let stored = store.get("example").await.unwrap().unwrap();
         match stored {
             AuthInfo::Api { key, metadata } => {
                 assert_eq!(key, "stored-key");
@@ -153,8 +141,8 @@ mod tests {
             _ => panic!("expected API credentials"),
         }
 
-        store.remove("example/").unwrap();
-        assert!(store.get("example").unwrap().is_none());
+        store.remove("example/").await.unwrap();
+        assert!(store.get("example").await.unwrap().is_none());
         let _ = std::fs::remove_file(path);
     }
 }

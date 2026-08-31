@@ -318,6 +318,7 @@ impl ChromeBridge {
             attachments: prompt.attachments,
             mode: prompt.mode,
             model: prompt.model,
+            connection_id: prompt.connection_id,
             thinking: prompt.thinking,
             delivery: prompt.delivery,
         });
@@ -343,11 +344,16 @@ impl ChromeBridge {
             return;
         }
         self.agent_state.thread_create_inflight = true;
+        let connection_id = self
+            .chrome
+            .agent_pane()
+            .and_then(|pane| pane.connection_id().map(str::to_string));
         self.send_agent_envelope(&AgentClientMessage::CreateThread {
             title: None,
             directory: self.agent_state.default_directory.clone(),
             agent: self.agent_state.default_agent.clone(),
             model: self.agent_state.default_model.clone(),
+            connection_id,
         });
     }
 
@@ -615,6 +621,19 @@ impl ChromeBridge {
         true
     }
 
+    /// Browser visibility/reconnect barrier. The daemon treats ResumeStream
+    /// as idempotent and immediately follows it with authoritative status and
+    /// family-runtime snapshots, repairing lifecycle events missed while the
+    /// tab was suspended without replaying the transcript.
+    pub fn agent_resume_active_stream(&mut self) -> bool {
+        let Some(session_id) = self.agent_state.session_id.clone() else {
+            return false;
+        };
+        self.send_agent_envelope(
+            &neoism_protocol::agent::AgentClientMessage::ResumeStream { session_id },
+        )
+    }
+
     /// Step through input history. `delta < 0` walks back in time
     /// (older entries); `delta > 0` walks forward toward the live
     /// edit. Returns the resulting input text so JS can mirror it
@@ -861,6 +880,7 @@ impl ChromeBridge {
             attachments: Vec::new(),
             mode,
             model,
+            connection_id: None,
             thinking,
             delivery: neoism_protocol::agent::PromptDelivery::Steer,
         });
@@ -1007,6 +1027,7 @@ impl ChromeBridge {
                 attachments,
                 mode,
                 model,
+                connection_id: None,
                 thinking,
                 delivery: neoism_protocol::agent::PromptDelivery::Steer,
             });
@@ -1019,6 +1040,7 @@ impl ChromeBridge {
                 attachments,
                 mode,
                 model,
+                connection_id: None,
                 thinking,
                 delivery: neoism_protocol::agent::PromptDelivery::Steer,
             });
@@ -1287,6 +1309,7 @@ impl ChromeBridge {
                 default_directory: self.agent_state.default_directory.clone(),
                 default_agent: self.agent_state.default_agent.clone(),
                 default_model: self.agent_state.default_model.clone(),
+                default_connection_id: self.chrome.agent_pane().and_then(|pane| pane.connection_id().map(str::to_string)),
                 default_thinking: self.agent_state.default_thinking.clone(),
                 local_author: self.agent_state.local_presence_name.clone(),
             };
@@ -1313,6 +1336,7 @@ impl ChromeBridge {
                         attachments: prompt.attachments,
                         mode: prompt.mode,
                         model: prompt.model,
+                        connection_id: prompt.connection_id,
                         thinking: prompt.thinking,
                         delivery: prompt.delivery,
                     });

@@ -551,7 +551,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.smallModel",
+            "agent.small-model",
             "Small model",
             "Model used for lightweight agent tasks.",
             Kind::String,
@@ -562,7 +562,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.defaultAgent",
+            "agent.default-agent",
             "Default agent",
             "Agent selected for new sessions.",
             Kind::String,
@@ -573,7 +573,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.variant",
+            "agent.reasoning-effort",
             "Reasoning effort",
             "How much supported models reason.",
             Kind::String,
@@ -584,7 +584,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.textVerbosity",
+            "agent.text-verbosity",
             "Response length",
             "Final-answer detail for supported models.",
             Kind::String,
@@ -595,7 +595,7 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
-            "agent.dangerouslySkipPermissions",
+            "agent.dangerously-skip-permissions",
             "Skip permission prompts",
             "Allow actions that would otherwise ask.",
             Kind::Boolean,
@@ -866,7 +866,7 @@ fn apply_schema_metadata(rows: &mut Vec<D>) {
     }
     for path in [
         "agent.model",
-        "agent.smallModel",
+        "agent.small-model",
         "agent.agent.*.model",
         "agent.mode.*.model",
     ] {
@@ -874,7 +874,7 @@ fn apply_schema_metadata(rows: &mut Vec<D>) {
             row.provider = Some(Provider::Models);
         }
     }
-    for path in ["agent.enabledProviders", "agent.disabledProviders"] {
+    for path in ["agent.enabled-providers", "agent.disabled-providers"] {
         if let Some(row) = rows.iter_mut().find(|row| row.path == path) {
             row.provider = Some(Provider::ProviderIds);
         }
@@ -1086,7 +1086,7 @@ fn enrich_runtime_suggestions(rows: &mut [D]) {
                 }
                 "appearance.mashup-pack" => (Some(Provider::MashupPacks), packs.clone()),
                 "terminal.shell.program" => (Some(Provider::Shells), shells.clone()),
-                "agent.defaultAgent" | "agent.agent" | "agent.mode" => {
+                "agent.default-agent" | "agent.agent" | "agent.mode" => {
                     (Some(Provider::AgentNames), agents.clone())
                 }
                 _ => (None, Vec::new()),
@@ -1205,14 +1205,14 @@ mod tests {
         }
         assert!(paths.contains("platform.windows.renderer.backend"));
         assert!(paths.contains("renderer.disable-unfocused-render"));
-        assert!(paths.contains("agent.enabledProviders"));
+        assert!(paths.contains("agent.enabled-providers"));
         assert!(paths.contains("agent.instructions"));
         assert!(paths.contains("agent.mcp"));
         assert!(paths.contains("agent.agent.*.model"));
         assert!(paths.contains("agent.mode.*.permission"));
         assert!(descriptors
             .iter()
-            .find(|row| row.path == "agent.defaultAgent")
+            .find(|row| row.path == "agent.default-agent")
             .unwrap()
             .static_suggestions
             .contains(&"build".to_string()));

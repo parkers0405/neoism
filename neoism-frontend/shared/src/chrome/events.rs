@@ -820,7 +820,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 LogicalKey::Named(NamedKey::ArrowLeft) => {
                     self.hide_focus_modals();
                     if self.buffer_tabs.is_focused() {
-                        if self.buffer_tabs.focused_index() == 0 {
+                        if self.buffer_tabs.focused_index() == 0
+                            && self.file_tree.as_ref().is_some_and(|t| t.is_visible())
+                        {
                             self.buffer_tabs.set_focused(false);
                             self.blur(PanelKey::BufferTabs);
                             self.show_file_tree();
@@ -845,8 +847,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     // walks notes -> tree and editor -> notes.
                     if self.notes_sidebar.is_visible() && self.notes_sidebar.is_focused()
                     {
-                        self.notes_sidebar.set_focused(false);
                         if self.file_tree.as_ref().is_some_and(|t| t.is_visible()) {
+                            self.notes_sidebar.set_focused(false);
                             self.show_file_tree();
                         }
                         return true;
@@ -855,7 +857,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         self.focus_notes_sidebar();
                         return true;
                     }
-                    self.show_file_tree();
+                    if self.file_tree.as_ref().is_some_and(|t| t.is_visible()) {
+                        self.show_file_tree();
+                    }
                     return true;
                 }
                 LogicalKey::Named(NamedKey::ArrowRight) => {

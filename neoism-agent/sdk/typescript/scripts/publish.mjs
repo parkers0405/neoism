@@ -18,7 +18,7 @@ const repoRoot = resolve(workspace, "../../..");
 
 // Dependency order: leaves first so a partially completed run never publishes
 // a package whose internal dependencies are missing from the registry.
-const PACKAGES = ["core", "http", "plugin-subagents", "plugin", "node", "all", "sdk"];
+const PACKAGES = ["core", "http", "plugin-subagents", "plugin-builtins", "plugin", "node", "all", "sdk"];
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
@@ -33,39 +33,48 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version ?? "")) {
 console.log(`publishing @neoism packages at ${version}${dryRun ? " (dry run)" : ""}`);
 
 const names = new Set();
+const rewrittenFiles = new Map();
 for (const pkg of PACKAGES) {
   const manifest = manifestPath(pkg);
-  const parsed = JSON.parse(readFileSync(manifest, "utf8"));
+  const source = readFileSync(manifest, "utf8");
+  if (dryRun) rewrittenFiles.set(manifest, source);
+  const parsed = JSON.parse(source);
   names.add(parsed.name);
 }
+const lockfile = join(workspace, "package-lock.json");
+if (dryRun) rewrittenFiles.set(lockfile, readFileSync(lockfile, "utf8"));
 
-for (const pkg of PACKAGES) {
-  const manifest = manifestPath(pkg);
-  const parsed = JSON.parse(readFileSync(manifest, "utf8"));
-  parsed.version = version;
-  for (const group of ["dependencies", "peerDependencies"]) {
-    for (const dep of Object.keys(parsed[group] ?? {})) {
-      if (names.has(dep)) parsed[group][dep] = version;
+try {
+  for (const pkg of PACKAGES) {
+    const manifest = manifestPath(pkg);
+    const parsed = JSON.parse(readFileSync(manifest, "utf8"));
+    parsed.version = version;
+    for (const group of ["dependencies", "peerDependencies"]) {
+      for (const dep of Object.keys(parsed[group] ?? {})) {
+        if (names.has(dep)) parsed[group][dep] = version;
+      }
     }
+    writeFileSync(manifest, `${JSON.stringify(parsed, null, 2)}\n`);
   }
-  writeFileSync(manifest, `${JSON.stringify(parsed, null, 2)}\n`);
-}
 
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-run(npm, ["install", "--no-audit", "--no-fund"], workspace);
-run(npm, ["run", "build"], workspace);
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  run(npm, ["install", "--no-audit", "--no-fund"], workspace);
+  run(npm, ["run", "build"], workspace);
 
-for (const pkg of PACKAGES) {
-  const dir = join(workspace, "packages", pkg);
-  const { name } = JSON.parse(readFileSync(manifestPath(pkg), "utf8"));
-  if (alreadyPublished(name, version)) {
-    console.log(`skip ${name}@${version} (already on npm)`);
-    continue;
+  for (const pkg of PACKAGES) {
+    const dir = join(workspace, "packages", pkg);
+    const { name } = JSON.parse(readFileSync(manifestPath(pkg), "utf8"));
+    if (alreadyPublished(name, version)) {
+      console.log(`skip ${name}@${version} (already on npm)`);
+      continue;
+    }
+    const publishArgs = ["publish", "--access", "public", "--provenance"];
+    if (dryRun) publishArgs.push("--dry-run");
+    run(npm, publishArgs, dir);
+    console.log(`${dryRun ? "validated" : "published"} ${name}@${version}`);
   }
-  const publishArgs = ["publish", "--access", "public"];
-  if (dryRun) publishArgs.push("--dry-run");
-  run(npm, publishArgs, dir);
-  console.log(`published ${name}@${version}`);
+} finally {
+  for (const [path, source] of rewrittenFiles) writeFileSync(path, source);
 }
 
 function manifestPath(pkg) {

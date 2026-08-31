@@ -38,10 +38,6 @@ fn now_millis() -> u64 {
         .unwrap_or_default().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
-fn default_state_dir() -> PathBuf {
-    default_data_dir("NEOISM_AGENT_STATE_DIR", "XDG_STATE_HOME", ".local/state", ".neoism/state")
-}
-
 fn default_cache_dir() -> PathBuf {
     default_data_dir("NEOISM_AGENT_CACHE_DIR", "XDG_CACHE_HOME", ".cache", ".neoism/cache")
 }

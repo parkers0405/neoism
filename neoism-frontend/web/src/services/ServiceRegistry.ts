@@ -119,6 +119,7 @@ export function attachBridgeServices(
   const search = new SearchService(client, bridge);
   search.install();
   registry.search = search;
+  registry.agent?.dispose();
   registry.agent = new AgentService(client, bridge);
   const gitPanel = new GitPanelService(client, bridge);
   gitPanel.install();

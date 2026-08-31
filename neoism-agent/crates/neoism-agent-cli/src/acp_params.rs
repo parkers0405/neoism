@@ -38,6 +38,7 @@ pub(crate) fn model_param(params: &Value) -> Option<UserModel> {
     Some(UserModel {
         provider_id: provider_id.to_string(),
         model_id: model_id.to_string(),
+        connection_id: model.get("connectionId").and_then(Value::as_str).map(ToOwned::to_owned),
         variant: model
             .get("variant")
             .and_then(Value::as_str)
@@ -50,6 +51,7 @@ pub(super) fn parse_model_ref(value: &str) -> Option<UserModel> {
     Some(UserModel {
         provider_id: provider_id.to_string(),
         model_id: model_id.to_string(),
+        connection_id: None,
         variant: None,
     })
 }
@@ -58,6 +60,7 @@ pub(super) fn model_ref_from_user_model(model: UserModel) -> ModelRef {
     ModelRef {
         id: model.model_id,
         provider_id: model.provider_id,
+        connection_id: model.connection_id,
         variant: model.variant,
     }
 }

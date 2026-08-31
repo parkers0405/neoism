@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": "dist" },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../core" }, { "path": "../http" }, { "path": "../plugin-subagents" }]
+  "references": [{ "path": "../core" }, { "path": "../http" }, { "path": "../plugin-builtins" }, { "path": "../plugin-subagents" }]
 }

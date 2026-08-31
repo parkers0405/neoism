@@ -75,6 +75,9 @@ pub enum AgentClientMessage {
         /// default.
         #[serde(default)]
         model: Option<String>,
+        /// Opaque provider connection selected for this model.
+        #[serde(default)]
+        connection_id: Option<String>,
     },
     /// Resume / focus an existing session by id. The daemon swaps the
     /// active session for this client and starts streaming its event
@@ -139,6 +142,8 @@ pub enum AgentClientMessage {
         /// the session default.
         #[serde(default)]
         model: Option<String>,
+        #[serde(default)]
+        connection_id: Option<String>,
         /// Override the session's reasoning effort variant
         /// (`"low"|"medium"|"high"|"xhigh"`).
         #[serde(default)]
@@ -200,6 +205,8 @@ pub enum AgentClientMessage {
     SetModel {
         session_id: String,
         model: String,
+        #[serde(default)]
+        connection_id: Option<String>,
         /// Optional reasoning-effort variant.
         #[serde(default)]
         thinking: Option<String>,
@@ -364,14 +371,33 @@ pub enum AgentClientMessage {
         #[serde(default)]
         directory: Option<String>,
     },
+    /// Fetch secret-free account summaries for one provider.
+    ConnectListConnections { provider_id: String },
     /// Store an API key (or the Meridian one-click marker) for a
     /// provider: `PUT /auth/{provider_id}` with
     /// `{ "type": "api", "key": <key> }`. Reply is
     /// [`AgentServerMessage::ConnectFinished`] / `ConnectFailed`.
-    ConnectStoreApiKey { provider_id: String, key: String },
+    ConnectStoreApiKey {
+        provider_id: String,
+        key: String,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        connection_id: Option<String>,
+    },
     /// Remove a provider's stored auth: `DELETE /auth/{provider_id}`.
     /// Reply is [`AgentServerMessage::ConnectFinished`] / `ConnectFailed`.
-    ConnectDisconnect { provider_id: String },
+    ConnectDisconnect {
+        provider_id: String,
+        #[serde(default)]
+        connection_id: Option<String>,
+    },
+    ConnectRename {
+        provider_id: String,
+        connection_id: String,
+        label: String,
+    },
+    ConnectSetDefault { provider_id: String, connection_id: String },
     /// Begin an OAuth method — request the authorization URL via
     /// `POST /provider/{provider_id}/oauth/authorize` with
     /// `{ "method": <index>, "inputs": {} }`. Reply is
@@ -379,6 +405,10 @@ pub enum AgentClientMessage {
     ConnectOauthAuthorize {
         provider_id: String,
         method_index: usize,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        connection_id: Option<String>,
     },
     /// Complete an OAuth method via
     /// `POST /provider/{provider_id}/oauth/callback`. `code` is `None`
@@ -390,6 +420,8 @@ pub enum AgentClientMessage {
         method_index: usize,
         #[serde(default)]
         code: Option<String>,
+        #[serde(default)]
+        attempt_id: Option<String>,
     },
 
     /// Lightweight ping — daemon replies with
@@ -689,6 +721,8 @@ pub enum AgentServerMessage {
         #[serde(default)]
         model: Option<String>,
         #[serde(default)]
+        connection_id: Option<String>,
+        #[serde(default)]
         agent: Option<String>,
         #[serde(default)]
         thinking: Option<String>,
@@ -764,6 +798,12 @@ pub enum AgentServerMessage {
         started_at: Option<u64>,
         #[serde(default)]
         parent_session_id: Option<String>,
+        #[serde(default)]
+        root_session_id: Option<String>,
+        #[serde(default)]
+        execution_id: Option<String>,
+        #[serde(default)]
+        family_revision: Option<u64>,
     },
     /// Context-window compaction lifecycle. `phase` tells the
     /// chrome whether this is a `Started` / `Delta` / `Ended` event.
@@ -785,6 +825,11 @@ pub enum AgentServerMessage {
         providers: serde_json::Value,
         auth: serde_json::Value,
     },
+    /// Secret-free summaries from `/v2/providers/:id/connections`.
+    ConnectConnections {
+        provider: String,
+        connections: Vec<ProviderConnectionInfo>,
+    },
     /// Reply to [`AgentClientMessage::ConnectOauthAuthorize`]. `auto`
     /// flags a flow that finishes on a local browser callback (nothing
     /// to paste); otherwise the chrome opens the paste-a-token field.
@@ -794,11 +839,15 @@ pub enum AgentServerMessage {
         auto: bool,
         #[serde(default)]
         instructions: String,
+        #[serde(default)]
+        attempt_id: Option<String>,
     },
     /// A `/connect` mutation (store key / disconnect / OAuth callback)
     /// succeeded. `provider` is the provider id it targeted.
     ConnectFinished {
         provider: String,
+        #[serde(default)]
+        connection_id: Option<String>,
     },
     /// A `/connect` mutation failed. `provider` is the provider id it
     /// targeted; `error` is the human-readable reason.
@@ -1071,6 +1120,17 @@ pub struct ModelInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConnectionInfo {
+    pub provider_id: String,
+    pub connection_id: String,
+    pub label: String,
+    pub auth_type: String,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentInfo {
     pub name: String,
     pub description: String,
@@ -1160,5 +1220,19 @@ mod runtime_snapshot_tests {
         let json = serde_json::to_string(&message).unwrap();
         let decoded: AgentServerMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn provider_oauth_attempt_id_round_trips_opaquely() {
+        let message = AgentClientMessage::ConnectOauthCallback {
+            provider_id: "openai".into(),
+            method_index: 0,
+            code: Some("callback-code".into()),
+            attempt_id: Some("attempt_opaque".into()),
+        };
+        let encoded = serde_json::to_string(&message).unwrap();
+        assert!(encoded.contains("attempt_opaque"));
+        assert!(!encoded.contains("Personal"));
+        assert_eq!(serde_json::from_str::<AgentClientMessage>(&encoded).unwrap(), message);
     }
 }

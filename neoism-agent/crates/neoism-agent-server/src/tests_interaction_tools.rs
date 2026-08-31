@@ -20,6 +20,25 @@ async fn wait_for_session_message_count(
     );
 }
 
+async fn wait_for_queued_prompt(
+    state: &AppState,
+    session_id: &str,
+) -> Vec<(PromptRequest, String)> {
+    for _ in 0..500 {
+        let queued = state
+            .inner
+            .store
+            .list_queued_prompt_entries(session_id)
+            .await
+            .unwrap();
+        if !queued.is_empty() {
+            return queued;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("session {session_id} did not receive a queued prompt");
+}
+
 #[tokio::test]
 async fn subtask_command_creates_linked_child_session() {
     let root = std::env::temp_dir().join(format!(
@@ -490,7 +509,7 @@ async fn task_tool_creates_background_child_session_and_result_can_be_collected(
     cleanup_sqlite_files(&db_path);
     let state = AppState::open_database(db_path.clone()).await.unwrap();
     let app = app(state.clone());
-    let parent: SessionInfo = response_json(
+    let mut parent: SessionInfo = response_json(
         app.oneshot(request(
             Method::POST,
             &format!("/v2/sessions?directory={}", root.display()),
@@ -506,6 +525,16 @@ async fn task_tool_creates_background_child_session_and_result_can_be_collected(
         .unwrap(),
     )
     .await;
+    crate::execution_activity::ensure_for_prompt(
+        &state,
+        &mut parent,
+        "message-parent-background-task",
+        true,
+    )
+    .await
+    .unwrap()
+    .expect("parent execution");
+    state.inner.store.update_session(&parent).await.unwrap();
 
     let result = execute_tool_call_with_permission_wait(
         &state,
@@ -598,7 +627,7 @@ async fn task_tool_resumes_existing_child_session() {
     cleanup_sqlite_files(&db_path);
     let state = AppState::open_database(db_path.clone()).await.unwrap();
     let app = app(state.clone());
-    let parent: SessionInfo = response_json(
+    let mut parent: SessionInfo = response_json(
         app.oneshot(request(
             Method::POST,
             &format!("/v2/sessions?directory={}", root.display()),
@@ -613,6 +642,27 @@ async fn task_tool_resumes_existing_child_session() {
         pattern: "*".to_string(),
         action: PermissionAction::Allow,
     }];
+    let first_execution = crate::execution_activity::ensure_for_prompt(
+        &state,
+        &mut parent,
+        "message-parent-first",
+        true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    state.inner.store.update_session(&parent).await.unwrap();
+    let first_parent_run = crate::state::SessionRun {
+        id: "parent-task-resume-e1".to_string(),
+        started_at: 1,
+        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    state
+        .inner
+        .session_coordinator
+        .try_start_run(parent.id.as_str(), first_parent_run.clone())
+        .await
+        .unwrap();
 
     let first = execute_tool_call_with_permission_wait(
         &state,
@@ -626,7 +676,7 @@ async fn task_tool_resumes_existing_child_session() {
             "description": "Inspect runtime",
             "prompt": "First child turn",
             "subagent_type": "general",
-            "background": false
+            "background": true
         }),
     )
     .await
@@ -638,6 +688,108 @@ async fn task_tool_resumes_existing_child_session() {
         .and_then(Value::as_str)
         .expect("child id")
         .to_string();
+    let first_notifications = wait_for_queued_prompt(&state, parent.id.as_str()).await;
+    assert_eq!(first_notifications.len(), 1);
+    assert!(matches!(
+        first_notifications[0].0.parts.first(),
+        Some(PromptPart::Text { text }) if text.contains(child_id.as_str())
+    ));
+    let (first_notification, _) = state
+        .inner
+        .store
+        .pop_queued_prompt_with_delivery(parent.id.as_str(), None)
+        .await
+        .unwrap()
+        .expect("first completion notification");
+    crate::session_actions::acknowledge_parent_subtask_completion_delivery(
+        &state,
+        parent.id.as_str(),
+        &first_notification,
+    )
+    .await
+    .unwrap();
+    assert!(
+        state
+            .inner
+            .session_coordinator
+            .finish_run(parent.id.as_str(), &first_parent_run.id)
+            .await
+    );
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        state
+            .inner
+            .session_coordinator
+            .wait_until_idle(parent.id.as_str()),
+    )
+    .await
+    .expect("parent queue worker should settle after E1 notification is consumed");
+    let mut settled_first = state
+        .inner
+        .store
+        .get_execution_activity(parent.id.as_str())
+        .await
+        .unwrap()
+        .expect("first execution");
+    for _ in 0..100 {
+        crate::execution_activity::finish_if_quiescent(&state, parent.id.as_str()).await;
+        settled_first = state
+            .inner
+            .store
+            .get_execution_activity(parent.id.as_str())
+            .await
+            .unwrap()
+            .expect("first execution");
+        if settled_first.finished {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let first_branches = state
+        .inner
+        .store
+        .list_execution_subtasks(&first_execution.execution_id)
+        .await
+        .unwrap();
+    let parent_store_runs = state
+        .inner
+        .store
+        .session_run_statuses(parent.id.as_str())
+        .await
+        .unwrap();
+    let child_store_runs = state
+        .inner
+        .store
+        .session_run_statuses(&child_id)
+        .await
+        .unwrap();
+    assert_eq!(settled_first.execution_id, first_execution.execution_id);
+    assert!(
+        settled_first.finished,
+        "E1 remained active after its parent run, worker, queue, and child branch settled: snapshot={settled_first:?} branches={first_branches:?} parent_runs={parent_store_runs:?} child_runs={child_store_runs:?}"
+    );
+    let second_execution = crate::execution_activity::ensure_for_prompt(
+        &state,
+        &mut parent,
+        "message-parent-second",
+        true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_ne!(second_execution.execution_id, first_execution.execution_id);
+    state.inner.store.update_session(&parent).await.unwrap();
+    let second_parent_run = crate::state::SessionRun {
+        id: "parent-task-resume-e2".to_string(),
+        started_at: 2,
+        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    state
+        .inner
+        .session_coordinator
+        .try_start_run(parent.id.as_str(), second_parent_run)
+        .await
+        .unwrap();
 
     let second = execute_tool_call_with_permission_wait(
         &state,
@@ -652,7 +804,7 @@ async fn task_tool_resumes_existing_child_session() {
             "prompt": "Second child turn",
             "subagent_type": "general",
             "task_id": &child_id,
-            "background": false
+            "background": true
         }),
     )
     .await
@@ -665,6 +817,35 @@ async fn task_tool_resumes_existing_child_session() {
         .expect("resumed child id");
     assert_eq!(resumed_id, child_id);
 
+    let second_notifications = wait_for_queued_prompt(&state, parent.id.as_str()).await;
+    assert_eq!(second_notifications.len(), 1);
+    let second_notification = &second_notifications[0].0;
+    assert_ne!(
+        second_notification.message_id,
+        first_notification.message_id
+    );
+    assert!(matches!(
+        second_notification.parts.first(),
+        Some(PromptPart::Text { text }) if text.contains(child_id.as_str())
+    ));
+    let current_runtime = state
+        .inner
+        .store
+        .get_session_runtime_snapshot(parent.id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        current_runtime
+            .execution
+            .as_ref()
+            .map(|execution| execution.execution_id.as_str()),
+        Some(second_execution.execution_id.as_str())
+    );
+    assert!(current_runtime
+        .branches
+        .iter()
+        .any(|branch| { branch.session_id == child_id && branch.status == "completed" }));
+
     let child_messages = state.inner.store.list_messages(&child_id).await.unwrap();
     let user_prompts = child_messages
         .iter()
@@ -676,6 +857,16 @@ async fn task_tool_resumes_existing_child_session() {
         })
         .collect::<Vec<_>>();
     assert_eq!(user_prompts, vec!["First child turn", "Second child turn"]);
+    let stored_child = state
+        .inner
+        .store
+        .get_session(&child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let completions = stored_child.extra["subtaskCompletions"].as_array().unwrap();
+    assert_eq!(completions.len(), 2);
+    assert_ne!(completions[0]["generation"], completions[1]["generation"]);
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);

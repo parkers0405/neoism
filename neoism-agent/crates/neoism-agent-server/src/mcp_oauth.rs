@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::mcp_auth::{McpAuthClientInfo, McpAuthStore, McpAuthTokens};
+use neoism_agent_service_api::McpOAuthAttempt;
 
 #[path = "mcp_oauth_discovery.rs"]
 mod mcp_oauth_discovery;
@@ -33,7 +34,7 @@ pub(super) async fn remote_auth_status_async(
     let Some(oauth) = usable_oauth_config(oauth) else {
         return McpStatus::Connected;
     };
-    match valid_tokens_for_url(name, url, auth_store) {
+    match valid_tokens_for_url(name, url, auth_store).await {
         Ok(Some(true)) => McpStatus::Connected,
         Ok(Some(false)) => match refresh_oauth_tokens(name, url, oauth, auth_store).await
         {
@@ -76,18 +77,8 @@ pub(crate) async fn auth_start_with_config(
     let oauth = usable_oauth_config(oauth)
         .ok_or_else(|| anyhow!("MCP server {name} does not support OAuth"))?;
     let redirect_uri = redirect_uri(name, oauth);
-    let mut existing = auth_store.get(name)?.unwrap_or_default();
-    if existing
-        .oauth_redirect_uri
-        .as_deref()
-        .is_some_and(|stored| stored != redirect_uri)
-    {
-        existing.client_info = None;
-        existing.tokens = None;
-        auth_store.set(name, existing)?;
-    }
     let needs_registration = configured_client_id(oauth).is_none()
-        && stored_client_info(name, url, auth_store)?.is_none();
+        && stored_client_info(name, url, auth_store).await?.is_none();
     let endpoints = oauth_endpoints(url, oauth, true, false, needs_registration).await;
     let client =
         oauth_client_credentials(name, url, oauth, &endpoints, auth_store, true).await?;
@@ -107,15 +98,19 @@ pub(crate) async fn auth_start_with_config(
         params.push(("scope", scope.clone()));
     }
 
-    let mut entry = auth_store.get(name)?.unwrap_or_default();
+    let mut entry = auth_store.get_for_url(name, url).await?.unwrap_or_default();
     entry.tokens = None;
-    entry.client_info = client.client_info;
-    entry.code_verifier = Some(code_verifier);
-    entry.oauth_state = Some(state.clone());
-    entry.oauth_directory = Some(directory.to_string());
-    entry.oauth_redirect_uri = Some(redirect_uri.clone());
-    entry.server_url = Some(url.clone());
-    auth_store.set(name, entry)?;
+    entry.client_registration = client.client_info;
+    auth_store.set_for_url(name, url, entry).await?;
+    auth_store.put_attempt(McpOAuthAttempt {
+        scope: auth_store.scope().clone(),
+        connection: McpAuthStore::connection(name, url),
+        state: state.clone(),
+        code_verifier,
+        redirect_uri: redirect_uri.clone(),
+        directory: directory.to_string(),
+        expires_at: unix_timestamp().saturating_add(600),
+    }).await?;
 
     Ok(McpAuthStartResponse {
         authorization_url: append_query(&authorization_url, &params),
@@ -137,35 +132,40 @@ pub(crate) async fn auth_callback_with_config(
     let McpConfig::Remote { url, oauth, .. } = remote else {
         return Err(anyhow!("MCP server {name} does not support OAuth"));
     };
-    let oauth = usable_oauth_config(oauth)
+    usable_oauth_config(oauth)
         .ok_or_else(|| anyhow!("MCP server {name} does not support OAuth"))?;
-    let entry = auth_store
-        .get(name)?
-        .ok_or_else(|| anyhow!("MCP OAuth flow for {name} was not started"))?;
-    if let Some(state) = state {
-        let expected = entry.oauth_state.as_deref().unwrap_or_default();
-        if expected != state {
-            return Err(anyhow!("MCP OAuth state mismatch"));
-        }
+    let attempt = match state {
+        Some(state) => auth_store.consume_attempt(state, true).await?,
+        None => auth_store.consume_connection_attempt(name, url).await?,
+    }.ok_or_else(|| anyhow!("MCP OAuth flow for {name} was not started, expired, or was already used"))?;
+    auth_callback_with_attempt(config, name, code, attempt, auth_store).await
+}
+
+pub(crate) async fn auth_callback_with_attempt(
+    config: &BTreeMap<String, McpConfig>,
+    name: &str,
+    code: &str,
+    attempt: McpOAuthAttempt,
+    auth_store: &McpAuthStore,
+) -> anyhow::Result<McpStatus> {
+    let remote = config.get(name).ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
+    let McpConfig::Remote { url, oauth, .. } = remote else { return Err(anyhow!("MCP server {name} does not support OAuth")); };
+    let oauth = usable_oauth_config(oauth).ok_or_else(|| anyhow!("MCP server {name} does not support OAuth"))?;
+    if attempt.scope != *auth_store.scope() || attempt.connection != McpAuthStore::connection(name, url) {
+        return Err(anyhow!("MCP OAuth callback scope or connection mismatch"));
     }
-    let code_verifier = entry
-        .code_verifier
-        .as_deref()
-        .ok_or_else(|| anyhow!("MCP OAuth code verifier is missing"))?;
+    let code_verifier = attempt.code_verifier;
     let endpoints = oauth_endpoints(url, oauth, false, true, false).await;
     let client =
         oauth_client_credentials(name, url, oauth, &endpoints, auth_store, false).await?;
     let token_url = endpoints.token_url;
-    let redirect_uri = entry
-        .oauth_redirect_uri
-        .clone()
-        .unwrap_or_else(|| redirect_uri(name, oauth));
+    let redirect_uri = attempt.redirect_uri;
     let mut params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code.to_string()),
         ("client_id", client.client_id),
         ("redirect_uri", redirect_uri),
-        ("code_verifier", code_verifier.to_string()),
+        ("code_verifier", code_verifier),
     ];
     if let Some(secret) = client.client_secret.filter(|secret| !secret.is_empty()) {
         params.push(("client_secret", secret));
@@ -182,12 +182,12 @@ pub(crate) async fn auth_callback_with_config(
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(anyhow!(
-            "MCP OAuth token exchange failed with {status}: {body}"
+            "MCP OAuth token exchange failed with {status}"
         ));
     }
     let tokens: OAuthTokenResponse = serde_json::from_str(&body)
         .context("failed to parse MCP OAuth token response")?;
-    let mut entry = entry;
+    let mut entry = auth_store.get_for_url(name, url).await?.unwrap_or_default();
     entry.tokens = Some(McpAuthTokens {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
@@ -196,19 +196,14 @@ pub(crate) async fn auth_callback_with_config(
                 .expires_in
                 .map(|expires_in| unix_timestamp() + expires_in)
         }),
-        scope: tokens.scope,
     });
-    entry.code_verifier = None;
-    entry.oauth_state = None;
-    entry.oauth_directory = None;
-    entry.oauth_redirect_uri = None;
-    entry.server_url = Some(url.clone());
-    auth_store.set(name, entry)?;
+    if let Some(scope) = tokens.scope { entry.scopes = scope.split_whitespace().map(str::to_owned).collect(); }
+    auth_store.set_for_url(name, url, entry).await?;
 
-    Ok(super::status_for_entry(name, remote, auth_store))
+    Ok(super::status_for_entry(name, remote, auth_store).await)
 }
 
-pub(crate) fn authenticate_status_with_config(
+pub(crate) async fn authenticate_status_with_config(
     config: &BTreeMap<String, McpConfig>,
     name: &str,
     auth_store: &McpAuthStore,
@@ -216,7 +211,7 @@ pub(crate) fn authenticate_status_with_config(
     let remote = config
         .get(name)
         .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
-    Ok(super::status_for_entry(name, remote, auth_store))
+    Ok(super::status_for_entry(name, remote, auth_store).await)
 }
 pub(super) fn usable_oauth_config(
     oauth: &Option<McpOAuthSetting>,
@@ -231,12 +226,12 @@ fn configured_client_id(oauth: &McpOAuthConfig) -> Option<&str> {
     oauth.client_id.as_deref().filter(|value| !value.is_empty())
 }
 
-pub(super) fn valid_tokens_for_url(
+pub(super) async fn valid_tokens_for_url(
     name: &str,
     url: &str,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<Option<bool>> {
-    let Some(entry) = auth_store.get_for_url(name, url)? else {
+    let Some(entry) = auth_store.get_for_url(name, url).await? else {
         return Ok(None);
     };
     let Some(tokens) = entry.tokens else {
@@ -251,7 +246,7 @@ pub(super) async fn refresh_oauth_tokens(
     oauth: &McpOAuthConfig,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<bool> {
-    let Some(entry) = auth_store.get_for_url(name, url)? else {
+    let Some(entry) = auth_store.get_for_url(name, url).await? else {
         return Ok(false);
     };
     let Some(existing_tokens) = entry.tokens else {
@@ -291,7 +286,7 @@ pub(super) async fn refresh_oauth_tokens(
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
         if oauth_token_invalid_status(status) {
-            let cleared = auth_store.clear_tokens(name, Some(url)).unwrap_or(false);
+            let cleared = auth_store.clear_tokens(name, url).await.unwrap_or(false);
             tracing::warn!(
                 mcp = name,
                 url,
@@ -302,14 +297,13 @@ pub(super) async fn refresh_oauth_tokens(
             return Ok(false);
         }
         return Err(anyhow!(
-            "MCP OAuth token refresh failed with {status}: {body}"
+            "MCP OAuth token refresh failed with {status}"
         ));
     }
     let tokens: OAuthTokenResponse = serde_json::from_str(&body)
         .context("failed to parse MCP OAuth refresh response")?;
-    auth_store.update_tokens(
-        name,
-        McpAuthTokens {
+    let mut entry = auth_store.get_for_url(name, url).await?.unwrap_or_default();
+    entry.tokens = Some(McpAuthTokens {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token.or(existing_tokens.refresh_token),
             expires_at: tokens.expires_at.or_else(|| {
@@ -317,10 +311,9 @@ pub(super) async fn refresh_oauth_tokens(
                     .expires_in
                     .map(|expires_in| unix_timestamp() + expires_in)
             }),
-            scope: tokens.scope.or(existing_tokens.scope),
-        },
-        Some(url),
-    )?;
+        });
+    if let Some(scope) = tokens.scope { entry.scopes = scope.split_whitespace().map(str::to_owned).collect(); }
+    auth_store.set_for_url(name, url, entry).await?;
     Ok(true)
 }
 
@@ -335,15 +328,15 @@ fn tokens_expired(tokens: &McpAuthTokens) -> bool {
         .unwrap_or(false)
 }
 
-fn stored_client_info(
+async fn stored_client_info(
     name: &str,
     url: &str,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<Option<McpAuthClientInfo>> {
-    let Some(entry) = auth_store.get_for_url(name, url)? else {
+    let Some(entry) = auth_store.get_for_url(name, url).await? else {
         return Ok(None);
     };
-    let Some(client_info) = entry.client_info else {
+    let Some(client_info) = entry.client_registration else {
         return Ok(None);
     };
     if client_secret_expired(&client_info) {
@@ -386,7 +379,7 @@ async fn oauth_client_credentials(
         });
     }
 
-    if let Some(client_info) = stored_client_info(name, url, auth_store)? {
+    if let Some(client_info) = stored_client_info(name, url, auth_store).await? {
         return Ok(OAuthClientCredentials {
             client_id: client_info.client_id.clone(),
             client_secret: client_info.client_secret.clone(),
@@ -447,7 +440,7 @@ async fn register_oauth_client(
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(anyhow!(
-            "MCP OAuth client registration failed with {status}: {body}"
+            "MCP OAuth client registration failed with {status}"
         ));
     }
     let registered: OAuthClientRegistrationResponse = serde_json::from_str(&body)
@@ -458,17 +451,19 @@ async fn register_oauth_client(
         client_id_issued_at: registered.client_id_issued_at,
         client_secret_expires_at: registered.client_secret_expires_at,
     };
-    auth_store.update_client_info(name, client_info.clone(), Some(url))?;
+    let mut entry = auth_store.get_for_url(name, url).await?.unwrap_or_default();
+    entry.client_registration = Some(client_info.clone());
+    auth_store.set_for_url(name, url, entry).await?;
     Ok(client_info)
 }
 
-pub(super) fn bearer_token_for_url(
+pub(super) async fn bearer_token_for_url(
     name: &str,
     url: &str,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<Option<String>> {
     Ok(auth_store
-        .get_for_url(name, url)?
+        .get_for_url(name, url).await?
         .and_then(|entry| entry.tokens)
         .filter(|tokens| !tokens_expired(tokens))
         .map(|tokens| tokens.access_token))
@@ -563,8 +558,8 @@ struct OAuthTokenResponse {
 mod tests {
     use super::*;
 
-    #[test]
-    fn bearer_token_for_url_ignores_expired_tokens() {
+    #[tokio::test]
+    async fn bearer_token_for_url_ignores_expired_tokens() {
         let path = std::env::temp_dir().join(format!(
             "neoism-agent-mcp-oauth-{}.json",
             Id::ascending(IdKind::Event)
@@ -574,17 +569,17 @@ mod tests {
         store
             .update_tokens(
                 "remote",
+                "https://mcp.example.com",
                 McpAuthTokens {
                     access_token: "old-token".to_string(),
                     refresh_token: Some("refresh-token".to_string()),
                     expires_at: Some(unix_timestamp().saturating_sub(1)),
-                    scope: None,
                 },
-                Some("https://mcp.example.com"),
             )
+            .await
             .unwrap();
         assert_eq!(
-            bearer_token_for_url("remote", "https://mcp.example.com", &store).unwrap(),
+            bearer_token_for_url("remote", "https://mcp.example.com", &store).await.unwrap(),
             None
         );
         let _ = std::fs::remove_file(path);

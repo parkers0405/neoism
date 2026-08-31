@@ -99,6 +99,11 @@ pub enum ProviderRouteAction {
     AuthRemove,
     OAuthAuthorize,
     OAuthCallback,
+    ConnectionsList,
+    ConnectionsCreate,
+    ConnectionsRename,
+    ConnectionsDelete,
+    ConnectionsSetDefault,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -106,16 +111,21 @@ pub enum ProviderRouteAction {
 pub struct ProviderRouteRequest {
     pub action: ProviderRouteAction,
     pub provider_id: Option<String>,
+    pub connection_id: Option<String>,
+    pub tenant_id: Option<String>,
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub hosted: bool,
     #[serde(default)]
     pub body: Value,
 }
 
 pub trait ProviderService: Send + Sync + 'static {
     fn descriptor(&self) -> ProviderDescriptor;
-    fn stream(
-        &self,
+    fn stream<'a>(
+        &'a self,
         request: ProviderGenerationRequest,
-    ) -> Result<ProviderStream, crate::PluginRuntimeError>;
+    ) -> PluginFuture<'a, ProviderStream>;
 
     fn model_metadata<'a>(
         &'a self,

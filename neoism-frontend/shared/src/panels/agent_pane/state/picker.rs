@@ -32,6 +32,10 @@ pub enum NeoismAgentPickerKind {
     /// `/connect` stage 1 — the "Connect a provider" list (Popular +
     /// Providers, checkmark for already-connected).
     Connect,
+    /// Account selection for a provider with multiple stored connections.
+    ConnectAccount,
+    /// Management actions for one selected provider connection.
+    ConnectAccountActions,
     /// `/connect` stage 2 — "Select auth method" for the chosen provider
     /// (OAuth variants and "Manually enter API Key").
     ConnectAuth,
@@ -39,6 +43,13 @@ pub enum NeoismAgentPickerKind {
     /// row IS the input field (API key, or an OAuth token to paste); Enter
     /// submits it. Carries no selectable rows.
     ConnectSecret,
+    /// Single-line account label entry used by add/rename.
+    ConnectLabel,
+    /// Explicit destructive-action confirmation.
+    ConnectConfirm,
+    /// Account selection inserted after choosing a model from a provider with
+    /// multiple stored connections.
+    ModelAccount,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

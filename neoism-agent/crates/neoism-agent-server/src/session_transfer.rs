@@ -354,6 +354,7 @@ mod tests {
                 model: UserModel {
                     provider_id: "neoism".to_string(),
                     model_id: "stub".to_string(),
+                    connection_id: None,
                     variant: None,
                 },
                 system: None,

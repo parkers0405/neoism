@@ -228,6 +228,14 @@ impl NeoismAgentPane {
         }
     }
 
+    pub fn connection_id(&self) -> Option<&str> {
+        self.connection_id.as_deref()
+    }
+
+    pub fn set_connection_id(&mut self, connection_id: Option<String>) {
+        self.connection_id = connection_id.filter(|value| !value.is_empty());
+    }
+
     pub fn agent_label(&self) -> &str {
         match self.agent.as_deref() {
             Some("build") => "Build",

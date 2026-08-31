@@ -136,7 +136,6 @@ pub(crate) async fn append_prompt(
     }
     let message_id = message_id.unwrap_or_else(|| Id::ascending(IdKind::Message));
     let parent_message_id = message_id.clone();
-    let starts_top_level_execution = info.parent_id.is_none() && system.is_none();
     let model = model
         .or_else(|| info.model.as_ref().map(user_model_from_model_ref))
         .or_else(|| agent_info.model.as_ref().map(user_model_from_model_ref))
@@ -144,6 +143,10 @@ pub(crate) async fn append_prompt(
     let reply_model = model.clone();
     info.model = Some(model_ref_from_user_model(&reply_model));
     let request_system = system.filter(|system| !system.trim().is_empty());
+    let starts_top_level_execution = request_may_start_execution(
+        info.parent_id.is_none(),
+        request_system.as_deref(),
+    );
     // Runtime notifications (background-job / subagent completions) are
     // injected as user-role turns so the model sees the captured output, but
     // they must NOT render as user bubbles. The live part broadcast below
@@ -286,13 +289,18 @@ pub(crate) async fn append_prompt(
     // Execution ownership begins only after the user turn is durably
     // admitted. Validation failures, dedupe conflicts, and failed message
     // writes therefore cannot create or replace the family's work cycle.
-    crate::execution_activity::ensure_for_prompt(
+    let execution = crate::execution_activity::ensure_for_prompt(
         state,
         &mut info,
         message_id.as_str(),
         starts_top_level_execution,
     )
     .await?;
+    if create_stub_reply && execution.is_none() {
+        return Err(ApiError::conflict(format!(
+            "session {session_id_text} has no active execution for model generation"
+        )));
+    }
     state
         .update_session_with_event(
             &info,
@@ -500,6 +508,7 @@ pub(crate) async fn append_prompt(
         build_provider_generation_request(
             state,
             &reply_model,
+            Some(&session_id_text),
             provider_messages,
             provider_tools,
             Some(&plugin_snapshot),
@@ -642,6 +651,12 @@ pub(crate) async fn append_prompt(
         }
     });
     Ok(final_assistant_message)
+}
+
+fn request_may_start_execution(is_root_session: bool, system: Option<&str>) -> bool {
+    is_root_session
+        && (system.is_none()
+            || system.is_some_and(crate::message_model::is_runtime_system_notification))
 }
 
 fn render_plugin_prompt(
@@ -1301,6 +1316,7 @@ async fn auto_compaction_threshold_for_model(
     let model = UserModel {
         provider_id: assistant.provider_id.clone(),
         model_id: assistant.model_id.clone(),
+        connection_id: info.model.as_ref().and_then(|model| model.connection_id.clone()),
         variant,
     };
     auto_compaction_threshold_for_user_model(state, &model).await
@@ -1591,6 +1607,7 @@ async fn generate_model_title(
     let request = build_provider_generation_request(
         &state,
         &model,
+        Some(&session_id),
         vec![
             ProviderMessage::text(
                 ProviderRole::System,
@@ -1606,7 +1623,7 @@ async fn generate_model_title(
     let Some(provider) = snapshot.provider_services_by_priority().into_iter().next() else {
         return;
     };
-    let Ok(stream) = provider.stream(request) else {
+    let Ok(stream) = provider.stream(request).await else {
         crate::execution_activity::end_provider_segment(activity_segment).await;
         return;
     };
@@ -1708,6 +1725,23 @@ mod tests {
             clean_model_title("<think>hidden</think>\n\"Fix edit tool\"").as_deref(),
             Some("Fix edit tool")
         );
+    }
+
+    #[test]
+    fn trusted_runtime_notification_can_admit_a_root_execution() {
+        assert!(request_may_start_execution(
+            true,
+            Some("runtime notification: background subagent completion.")
+        ));
+        assert!(request_may_start_execution(true, None));
+        assert!(!request_may_start_execution(
+            true,
+            Some("ordinary internal system prompt")
+        ));
+        assert!(!request_may_start_execution(
+            false,
+            Some("runtime notification: background subagent completion.")
+        ));
     }
 
     #[test]
@@ -2099,6 +2133,7 @@ mod tests {
                 model: UserModel {
                     provider_id: "neoism".to_string(),
                     model_id: "stub".to_string(),
+                    connection_id: None,
                     variant: None,
                 },
                 system: None,
@@ -2148,6 +2183,7 @@ mod tests {
                 model: UserModel {
                     provider_id: "neoism".to_string(),
                     model_id: "stub".to_string(),
+                    connection_id: None,
                     variant: None,
                 },
                 system: None,
@@ -2283,6 +2319,7 @@ async fn run_followup_assistant_step(
         build_provider_generation_request(
             state,
             reply_model,
+            Some(session_id_text),
             provider_messages,
             provider_tools,
             Some(plugin_snapshot),
@@ -2297,11 +2334,16 @@ async fn run_followup_assistant_step(
 async fn build_provider_generation_request(
     state: &AppState,
     model: &UserModel,
+    scope_session_id: Option<&str>,
     messages: Vec<ProviderMessage>,
     tools: Vec<ToolListItem>,
     workspace: Option<&crate::workspace_runtime::PluginGenerationLease>,
     hook_ctx: Option<&plugin::ChatHookContext>,
 ) -> ProviderGenerationRequest {
+    let scope_session = match scope_session_id {
+        Some(session_id) => state.inner.store.get_session(session_id).await.ok().flatten(),
+        None => None,
+    };
     let metadata = provider_generation_metadata(state, model).await;
     let mut options = metadata.options;
     let mut headers = metadata.headers;
@@ -2314,6 +2356,9 @@ async fn build_provider_generation_request(
     ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),
         model_id: model.model_id.clone(),
+        connection_id: model.connection_id.clone(),
+        tenant_id: scope_session.as_ref().map(|session| crate::caller::session_tenant(session).to_string()),
+        workspace_id: scope_session.as_ref().and_then(|session| session.workspace_id.as_ref().map(ToString::to_string)),
         session_id: hook_ctx.map(|ctx| ctx.session_id.clone()),
         variant: model.variant.clone(),
         text_verbosity: workspace
@@ -2348,7 +2393,7 @@ async fn run_provider_stream_step_with_retry(
             ctx.session_id_text,
         )
         .await;
-        let provider_stream = match provider.stream(request.clone()) {
+        let provider_stream = match provider.stream(request.clone()).await {
             Ok(stream) => stream,
             Err(error) => {
                 crate::execution_activity::end_provider_segment(activity_segment).await;

@@ -243,11 +243,6 @@ impl EmbeddedDaemonHandle {
                     #[cfg(not(unix))]
                     let _ = ready_tx.send(Ok(Some(primary_port)));
 
-                    // The workspace daemon owns the Agent process. Start its
-                    // supervisor eagerly so native desktop HTTP requests do
-                    // not depend on a WebSocket agent message arriving first.
-                    neoism_workspace_daemon::agent::ensure_agent_server_started();
-
                     // Build the same AppState the binary's main()
                     // constructs. Auth + pairing degrade to in-memory
                     // for the embedded case. Local-mode users don't
@@ -270,6 +265,12 @@ impl EmbeddedDaemonHandle {
                         }
                     };
                     let workspaces = WorkspaceManager::bootstrap();
+                    // The workspace daemon owns the Agent process. Start its
+                    // supervisor eagerly so native desktop HTTP requests do
+                    // not depend on a WebSocket agent message arriving first.
+                    neoism_workspace_daemon::agent::ensure_agent_server_started(
+                        workspaces.clone(),
+                    );
                     let pairing_tokens = handshake::PairingTokenStore::in_memory();
                     // Paired hosts DO persist (unlike pairing tokens):
                     // a cross-host pairing the user set up from the

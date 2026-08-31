@@ -204,12 +204,6 @@ pub fn render_tool_message(
             .map(|sections| sections.as_slice())
     };
     let archived = pane.tool_archived(message.id());
-    // Archived diff cards toggle as one unit through the message-level hit
-    // rect (per-card rects are skipped below); live diff cards keep their
-    // per-card toggles and register no message-level rect.
-    if (diff_sections.is_none() || archived) && !suppress_interactions {
-        pane.register_tool_hit_rect(message.id().to_string(), message_clip);
-    }
     let accent = tool_message_accent(message.status(), theme);
     draw_status_dot_text(
         sugarloaf,
@@ -299,6 +293,14 @@ pub fn render_tool_message(
             suppress_interactions,
         );
         return h;
+    }
+
+    // Archived diff cards toggle as one unit through the message-level hit
+    // rect (per-card rects are skipped below); live diff cards keep their
+    // per-card toggles and register no message-level rect. Todos are not
+    // foldable, so they return above without installing an inert target.
+    if (diff_sections.is_none() || archived) && !suppress_interactions {
+        pane.register_tool_hit_rect(message.id().to_string(), message_clip);
     }
 
     let render_expanded = pane.tool_expanded(message.id())
@@ -565,11 +567,11 @@ fn render_tool_group_activity(
         let child_key = group_child_key(line);
         if let Some(child_key) = child_key.as_ref().filter(|_| !suppress_interactions) {
             let rect = [
-                    body_x - 8.0 * s,
-                    line_y - 4.0 * s,
-                    (w - 70.0 * s).max(40.0 * s),
-                    row_h,
-                ];
+                body_x - 8.0 * s,
+                line_y - 4.0 * s,
+                (w - 70.0 * s).max(40.0 * s),
+                row_h,
+            ];
             if let Some(rect) = intersect_rect(rect, message_clip) {
                 pane.register_tool_hit_rect(
                     format!("{}::child::{}", message.id(), child_key),
@@ -727,15 +729,10 @@ fn render_tool_diff_cards(
             }
         }
         if let Some(target) = link_target.filter(|_| !suppress_interactions) {
-            if let Some(rect) = intersect_rect(
-                [
-                    card_x + diff_card::HEADER_PAD_X * s,
-                    card_y,
-                    (card_w - diff_card::HEADER_PAD_X * 2.0 * s).max(0.0),
-                    diff_card::HEADER_HEIGHT * s,
-                ],
-                viewport_clip,
-            ) {
+            if let Some(rect) = layout
+                .header_link_rect
+                .and_then(|rect| intersect_rect(rect, viewport_clip))
+            {
                 pane.register_link_hit_rect(target.to_string(), rect);
             }
         }
@@ -750,7 +747,11 @@ fn render_tool_diff_cards(
                     ],
                     viewport_clip,
                 ) {
-                    pane.register_diff_scroll_rect(scroll_key, rect, full_body_h - body_h);
+                    pane.register_diff_scroll_rect(
+                        scroll_key,
+                        rect,
+                        full_body_h - body_h,
+                    );
                 }
             }
             draw_diff_body_scrollbar(

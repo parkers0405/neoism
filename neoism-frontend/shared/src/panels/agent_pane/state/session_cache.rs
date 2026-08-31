@@ -421,6 +421,7 @@ impl NeoismAgentPane {
         let state = crate::panels::agent_pane::api_mapping::SessionState {
             agent: self.agent.clone(),
             model: (!self.model.is_empty()).then(|| self.model.clone()),
+            connection_id: self.connection_id.clone(),
             thinking: self.thinking.clone(),
             parent_id: self.parent_session_id.clone(),
             directory: self.directory.clone(),
@@ -555,6 +556,7 @@ impl NeoismAgentPane {
         if let Some(model) = state.model {
             self.model = model;
         }
+        self.connection_id = state.connection_id;
         self.thinking = state.thinking;
         self.model_context_limit = cached.model_context_limit;
         if self.model_context_limit.is_none() && !self.model.is_empty() {

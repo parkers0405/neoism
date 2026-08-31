@@ -44,9 +44,9 @@ impl BuiltinMcpService for NeoismDocumentationService {
 
     fn tools(&self) -> Vec<BuiltinMcpTool> {
         vec![
-            tool("docs.list", "List bundled product documentation", json!({"type":"object","properties":{}})),
-            tool("docs.search", "Search bundled product documentation", json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20}},"required":["query"]})),
-            tool("docs.read", "Read one bundled product documentation page by path", json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})),
+            tool("docs.list", "List bundled Neoism product documentation pages and paths", json!({"type":"object","properties":{}})),
+            tool("docs.search", "Search Neoism help, manual, and bundled product documentation by natural-language topic, including setup, configuration, Skills/SKILL.md, MCP, tools, editor, terminal, notes, and troubleshooting. Returns page paths and snippets; follow with neoism_docs.read for full content.", json!({"type":"object","properties":{"query":{"type":"string","description":"Natural-language topic to search in Neoism documentation content."},"limit":{"type":"integer","minimum":1,"maximum":20}},"required":["query"]})),
+            tool("docs.read", "Read the complete bundled Neoism documentation page returned by docs.search", json!({"type":"object","properties":{"path":{"type":"string","description":"Exact documentation page path returned by docs.search or docs.list."}},"required":["path"]})),
         ]
     }
 
@@ -95,5 +95,27 @@ mod tests {
     fn reads_and_searches_product_owned_docs() {
         assert!(NeoismDocumentationService.read("Start Here.md").unwrap().content.contains("Welcome to Neoism"));
         assert!(NeoismDocumentationService.search("shader", 8).unwrap().iter().any(|hit| hit.path == "Neoism/Appearance.md"));
+    }
+
+    #[test]
+    fn skill_authoring_query_finds_complete_instructions() {
+        let service = NeoismDocumentationService;
+        let hit = service
+            .search("skills SKILL.md create custom skill location format", 8)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.path == "Neoism Agent/Skills.md")
+            .expect("Skills documentation should match authoring queries");
+        let page = service.read(&hit.path).unwrap();
+        for required in [
+            "<project>/.neoism/skills/database-migrations/SKILL.md",
+            "~/.config/neoism/skills/database-migrations/SKILL.md",
+            "name: database-migrations",
+            "description:",
+            "agent.skills.paths",
+            "/skills",
+        ] {
+            assert!(page.content.contains(required), "missing {required}");
+        }
     }
 }

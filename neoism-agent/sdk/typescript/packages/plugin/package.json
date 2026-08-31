@@ -1,6 +1,13 @@
 {
   "name": "@neoism/plugin",
   "version": "0.7.55",
+  "description": "Author and run process plugins for Neoism Agent",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/parkers0405/neoism.git",
+    "directory": "neoism-agent/sdk/typescript/packages/plugin"
+  },
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",

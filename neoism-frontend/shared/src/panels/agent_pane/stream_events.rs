@@ -277,6 +277,9 @@ pub enum SessionEventUpdate {
         status: String,
         title: Option<String>,
         agent: Option<String>,
+        root_session_id: Option<String>,
+        execution_id: Option<String>,
+        family_revision: Option<u64>,
     },
     BackgroundTaskCompleted {
         session_id: String,
@@ -847,6 +850,19 @@ pub fn classify_session_event(
                     .or_else(|| properties.get("agent"))
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                root_session_id: properties
+                    .get("rootSessionID")
+                    .or_else(|| properties.get("rootSessionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                execution_id: properties
+                    .get("executionID")
+                    .or_else(|| properties.get("executionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                family_revision: properties
+                    .get("familyRevision")
+                    .and_then(Value::as_u64),
             }]
         }
         event_type::SESSION_EXECUTION_UPDATED => {

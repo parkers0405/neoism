@@ -30,8 +30,50 @@ for await (const event of client.transport.events()) {
 ```
 
 Unknown events and plugin payloads remain `unknown` and are preserved. The HTTP
-transport resumes with `Last-Event-ID`, deduplicates by durable sequence, and
+transport resumes with `Last-Event-ID`, deduplicates by durable event ID, and
 reconnects with bounded exponential backoff.
+
+## Optional capabilities
+
+Agent Server features supplied by plugins remain optional at runtime even
+though their types ship in the one SDK package. Bind them through capability
+discovery instead of assuming they are enabled:
+
+```ts
+import { createHttpClient, subagents, vcs, workflows } from "@neoism/sdk";
+
+const client = createHttpClient({ baseUrl: "http://127.0.0.1:4096" });
+const workflowClient = await client.plugins.tryUse(workflows, {
+  directory: "/workspace",
+});
+
+if (workflowClient) {
+  const catalog = await workflowClient.list("/workspace");
+  console.log(catalog.workflows);
+}
+
+// The main agent starts subagents. Clients observe their child sessions and
+// may list or stop tasks, matching the Neoism GUI control surface.
+const subagentClient = await client.plugins.tryUse(subagents);
+```
+
+`client.events.subscribe({ sessionId })` includes that session's descendants,
+matching Neoism GUI's one-stream session-family model. The main agent starts
+subagents; SDK clients observe their child-session events and may list or stop
+tasks through the optional subagents client.
+
+The package exports capability-gated clients for agents, commands, providers,
+skills, goals, LSP, MCP, PTY, semantic search, subagents, VCS, and workflows.
+`client.operations` remains the complete generated protocol escape hatch.
+
+Authenticated local management is exposed through `client.management`,
+including `workspaces` and `repositories`. Repository creation accepts either
+`{ kind: "existing", path }` or `{ kind: "clone", remoteUrl, ref?, depth? }`.
+Deleting either registration never removes files from its working tree.
+Management reads and writes require a local operator token; trusted loopback
+runtime access and workspace-scoped daemon credentials do not grant management
+authority. Shared provider/MCP credential tenancy is explicitly deferred, so
+the existing local provider/MCP runtime and OAuth APIs are unchanged.
 
 Loopback servers may run in trusted mode without a token. Non-loopback
 `neoism-agent serve` requires `NEOISM_AGENT_TOKEN` or

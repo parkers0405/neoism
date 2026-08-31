@@ -62,7 +62,24 @@ impl SubtaskAdmissionGuard {
         parent: &SessionInfo,
         child_session_id: &str,
     ) -> anyhow::Result<Self> {
-        let armed = register_subtask(state, parent, child_session_id).await?;
+        Self::admit_inner(state, parent, child_session_id, false).await
+    }
+
+    pub(crate) async fn admit_continuation(
+        state: &AppState,
+        parent: &SessionInfo,
+        child_session_id: &str,
+    ) -> anyhow::Result<Self> {
+        Self::admit_inner(state, parent, child_session_id, true).await
+    }
+
+    async fn admit_inner(
+        state: &AppState,
+        parent: &SessionInfo,
+        child_session_id: &str,
+        allow_resume: bool,
+    ) -> anyhow::Result<Self> {
+        let armed = register_subtask_inner(state, parent, child_session_id, allow_resume).await?;
         Ok(Self {
             state: state.clone(),
             child_session_id: child_session_id.to_string(),
@@ -311,10 +328,20 @@ pub(crate) async fn end_provider_segment(segment: Option<ProviderSegmentGuard>) 
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn register_subtask(
     state: &AppState,
     parent: &SessionInfo,
     child_session_id: &str,
+) -> anyhow::Result<bool> {
+    register_subtask_inner(state, parent, child_session_id, false).await
+}
+
+async fn register_subtask_inner(
+    state: &AppState,
+    parent: &SessionInfo,
+    child_session_id: &str,
+    allow_resume: bool,
 ) -> anyhow::Result<bool> {
     let Some(execution_id) = parent
         .extra
@@ -359,6 +386,11 @@ pub(crate) async fn register_subtask(
             .execution_subtask_status(execution_id, child_session_id)
             .await?;
         if status.as_deref() != Some("outstanding") {
+            if !allow_resume {
+                anyhow::bail!(
+                    "subtask {child_session_id} is already terminal for execution {execution_id}"
+                );
+            }
             let reopened = state
                 .inner
                 .store
@@ -386,7 +418,7 @@ pub(crate) async fn finish_subtask_for_child(
     state: &AppState,
     child_session_id: &str,
     status: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<(String, String, u64)>> {
     try_finish_subtask_for_child(state, child_session_id, status).await
 }
 
@@ -394,16 +426,16 @@ async fn try_finish_subtask_for_child(
     state: &AppState,
     child_session_id: &str,
     status: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<(String, String, u64)>> {
     let Ok(Some(child)) = state.inner.store.get_session(child_session_id).await else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(execution_id) = child
         .extra
         .get(EXECUTION_ID_KEY)
         .and_then(|value| value.as_str())
     else {
-        return Ok(());
+        return Ok(None);
     };
     let root = root_session_id(state, &child).await;
     let lock = keyed_lock(state, &root).await;
@@ -422,9 +454,15 @@ async fn try_finish_subtask_for_child(
     // was missed. Always publish the authoritative family snapshot.
     let _ = changed;
     publish_snapshot(state, &root).await;
+    let family_revision = state
+        .inner
+        .store
+        .get_session_runtime_snapshot(&root)
+        .await?
+        .family_revision;
     drop(_guard);
     finish_if_quiescent(state, &root).await;
-    Ok(())
+    Ok(Some((root, execution_id.to_string(), family_revision)))
 }
 
 async fn publish_snapshot(state: &AppState, root: &str) {

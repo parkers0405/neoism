@@ -399,15 +399,16 @@ pub fn draw_text_clipped(
     text: &str,
     opts: &DrawOpts,
     occlusion_rects: &[[f32; 4]],
-) {
+) -> f32 {
     let y = snap_text_y(y);
     if occlusion_rects.is_empty() {
-        sugarloaf.text_mut().draw(x, y, text, opts);
-        return;
+        return sugarloaf.text_mut().draw(x, y, text, opts);
     }
-    let width = measure_text_cached(sugarloaf, text, opts);
+    // Keep this tied to the draw shaper rather than the process-global
+    // measurement cache. Font state can change without changing DrawOpts.
+    let width = sugarloaf.text_mut().measure(text, opts);
     if width <= 0.0 {
-        return;
+        return 0.0;
     }
     // Rasterized ink can overhang the advance-sum `width` (nerd-font
     // icons in the patched primary font raster ~1px wider than their
@@ -451,7 +452,7 @@ pub fn draw_text_clipped(
         }
         intervals = next;
         if intervals.is_empty() {
-            return;
+            return width;
         }
     }
 
@@ -464,6 +465,7 @@ pub fn draw_text_clipped(
         clipped.clip_rect = Some([start, base_clip[1], clip_w, base_clip[3]]);
         sugarloaf.text_mut().draw(x, y, text, &clipped);
     }
+    width
 }
 
 fn snap_text_y(y: f32) -> f32 {

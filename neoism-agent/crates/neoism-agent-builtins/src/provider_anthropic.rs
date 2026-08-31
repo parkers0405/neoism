@@ -649,6 +649,9 @@ mod tests {
         });
         let request = ProviderGenerationRequest {
             session_id: None,
+            connection_id: None,
+            tenant_id: None,
+            workspace_id: None,
             provider_id: "anthropic".to_string(),
             model_id: "claude-sonnet-4".to_string(),
             variant: None,
@@ -691,6 +694,9 @@ mod tests {
     fn anthropic_body_enables_thinking_for_reasoning_variant() {
         let request = ProviderGenerationRequest {
             session_id: None,
+            connection_id: None,
+            tenant_id: None,
+            workspace_id: None,
             provider_id: "anthropic".to_string(),
             model_id: "claude-sonnet-4".to_string(),
             variant: Some("high".to_string()),

@@ -177,7 +177,7 @@ impl McpRuntimeManager {
         let client = Arc::new(HttpJsonRpcClient::new(
             url,
             headers,
-            bearer_token_for_url(name, url, auth_store)?,
+            bearer_token_for_url(name, url, auth_store).await?,
             request_timeout,
             notification_handler(directory, name, state, Arc::downgrade(self)),
         )?);

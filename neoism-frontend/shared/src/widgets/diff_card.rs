@@ -169,6 +169,7 @@ pub struct CardLayout {
     pub header_height: f32,
     pub body_height: f32,
     pub total_height: f32,
+    pub header_link_rect: Option<[f32; 4]>,
 }
 
 /// Compute the card's full height when nothing is clipped.
@@ -179,6 +180,7 @@ pub fn measure(_spec: &CardSpec, scale: f32, available_body_height: f32) -> Card
         header_height: header_h,
         body_height: body_h,
         total_height: header_h + body_h,
+        header_link_rect: None,
     }
 }
 
@@ -281,7 +283,7 @@ pub fn render(
     clip_top: f32,
     clip_bottom: f32,
 ) -> CardLayout {
-    let layout = measure(spec, scale, body_height);
+    let mut layout = measure(spec, scale, body_height);
     let header_h = layout.header_height;
     let body_h = layout.body_height;
     let total_h = layout.total_height;
@@ -424,6 +426,12 @@ pub fn render(
                 .max(0.0);
         let path_fit = truncate_to_fit(spec.path, path_budget, sugarloaf, &path_opts);
         let path_w = sugarloaf.text_mut().measure(path_fit.as_str(), &path_opts);
+        if spec.link_target.is_some() && path_w > 0.0 {
+            let hit_pad = 3.0 * scale;
+            let hit_left = (hx - hit_pad).max(x);
+            let hit_right = (hx + path_w + hit_pad).min(x + width);
+            layout.header_link_rect = Some([hit_left, y, hit_right - hit_left, header_h]);
+        }
         sugarloaf
             .text_mut()
             .draw(hx, header_text_y, path_fit.as_str(), &path_opts);

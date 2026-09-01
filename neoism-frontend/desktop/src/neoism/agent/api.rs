@@ -16,9 +16,9 @@ use super::pane::{
 use super::picker::NeoismAgentPickerOption;
 
 use neoism_ui::panels::agent_pane::api_mapping::{
-    config_defaults_from_json, model_context_limit_from_providers_json,
-    model_options_from_providers_json, session_state_from_json, ConfigDefaults,
-    SessionState,
+    config_defaults_from_json, default_model_from_providers_json,
+    model_context_limit_from_providers_json, model_options_from_providers_json,
+    session_state_from_json, ConfigDefaults, SessionState,
 };
 use neoism_ui::panels::agent_pane::session_group::{
     group_session_options, SessionOptionInput,
@@ -1063,7 +1063,24 @@ pub(super) fn fetch_config_defaults(
         std::time::Duration::from_secs(12),
     )?
         .ok_or_else(|| "Neoism Agent returned an empty config response".to_string())?;
-    Ok(config_defaults_from_json(&value))
+    let mut defaults = config_defaults_from_json(&value);
+    if defaults.model.is_none() {
+        let provider_path = directory
+            .map(|dir| format!("/v2/providers/configured?directory={}", percent_encode(dir)))
+            .unwrap_or_else(|| "/v2/providers/configured".to_string());
+        // `server` is also the joined host's reverse-proxy URL. Resolve from
+        // that host's provider catalog, never from the guest's local catalog.
+        if let Ok(Some(providers)) = api_request_json_with_read_timeout(
+            server,
+            "GET",
+            &provider_path,
+            None,
+            std::time::Duration::from_secs(12),
+        ) {
+            defaults.model = default_model_from_providers_json(&providers);
+        }
+    }
+    Ok(defaults)
 }
 
 pub(super) fn fetch_session_state(

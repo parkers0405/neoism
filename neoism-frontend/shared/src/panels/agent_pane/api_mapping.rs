@@ -132,11 +132,7 @@ pub struct SessionState {
 }
 
 pub fn model_options_from_providers_json(value: &Value) -> Vec<NeoismAgentPickerOption> {
-    let providers = value
-        .get("providers")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    let providers = provider_catalog_entries(value);
     let mut groups = Vec::new();
     for provider in providers {
         let provider_id = provider.get("id").and_then(Value::as_str).unwrap_or("");
@@ -200,6 +196,51 @@ pub fn model_options_from_providers_json(value: &Value) -> Vec<NeoismAgentPicker
     out
 }
 
+fn provider_catalog_entries(value: &Value) -> &[Value] {
+    value
+        .get("providers")
+        .or_else(|| value.get("all"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+/// Resolve the catalog's concrete default model. Connected providers win over
+/// the always-available OpenCode free fallback; otherwise provider order is
+/// preserved. This is used only when workspace config has no explicit model.
+pub fn default_model_from_providers_json(value: &Value) -> Option<String> {
+    let defaults = value.get("default").and_then(Value::as_object)?;
+    let providers = provider_catalog_entries(value);
+    let connected = value.get("connected").and_then(Value::as_array);
+    let is_connected = |provider_id: &str| {
+        connected.is_some_and(|items| {
+            items.iter().any(|item| item.as_str() == Some(provider_id))
+        })
+    };
+    let has_connected = connected.is_some_and(|items| !items.is_empty());
+
+    for prefer_fallback in [false, true] {
+        for provider in providers {
+            let Some(provider_id) = provider.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let is_fallback = provider_id == "opencode";
+            if is_fallback != prefer_fallback || (has_connected && !is_connected(provider_id)) {
+                continue;
+            }
+            let Some(model_id) = defaults
+                .get(provider_id)
+                .and_then(Value::as_str)
+                .filter(|model| !model.trim().is_empty())
+            else {
+                continue;
+            };
+            return Some(format!("{provider_id}/{model_id}"));
+        }
+    }
+    None
+}
+
 fn model_is_free(provider_id: &str, model: &Value) -> bool {
     if provider_id != "opencode" {
         return false;
@@ -240,11 +281,7 @@ pub fn model_context_limit_from_providers_json(
     model_ref: &str,
 ) -> Option<u64> {
     let (provider_id, model_id) = split_model_ref(model_ref)?;
-    let providers = value
-        .get("providers")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    let providers = provider_catalog_entries(value);
     for provider in providers {
         if provider.get("id").and_then(Value::as_str) != Some(provider_id.as_str()) {
             continue;
@@ -1146,6 +1183,68 @@ mod tests {
         assert!(options[2].is_header);
         assert_eq!(options[2].title, "OpenAI");
         assert_eq!(options[3].value, "openai/gpt");
+    }
+
+    #[test]
+    fn provider_default_resolves_connected_model_before_public_fallback() {
+        let configured = json!({
+            "providers": [
+                { "id": "opencode", "models": { "free": { "id": "free" } } },
+                { "id": "openai", "models": { "gpt": { "id": "gpt" } } }
+            ],
+            "default": {
+                "opencode": "free",
+                "openai": "gpt-5.6-terra-pro"
+            }
+        });
+        assert_eq!(
+            default_model_from_providers_json(&configured).as_deref(),
+            Some("openai/gpt-5.6-terra-pro")
+        );
+    }
+
+    #[test]
+    fn host_catalog_default_uses_hosts_connected_provider() {
+        let host_catalog = json!({
+            "all": [
+                { "id": "openai", "models": {} },
+                { "id": "xai", "models": {} },
+                { "id": "opencode", "models": {} }
+            ],
+            "connected": ["xai"],
+            "default": {
+                "openai": "gpt-5.6-sol",
+                "xai": "grok-code-fast-1",
+                "opencode": "free"
+            }
+        });
+        assert_eq!(
+            default_model_from_providers_json(&host_catalog).as_deref(),
+            Some("xai/grok-code-fast-1")
+        );
+    }
+
+    #[test]
+    fn model_options_accept_full_provider_catalog_shape() {
+        let providers = json!({
+            "all": [{
+                "id": "openai",
+                "name": "OpenAI",
+                "models": {
+                    "gpt": {
+                        "id": "gpt-5.6-sol",
+                        "name": "GPT-5.6 Sol",
+                        "limit": { "context": 372000 }
+                    }
+                }
+            }]
+        });
+        let options = model_options_from_providers_json(&providers);
+        assert_eq!(options[1].value, "openai/gpt-5.6-sol");
+        assert_eq!(
+            model_context_limit_from_providers_json(&providers, "openai/gpt-5.6-sol"),
+            Some(372000)
+        );
     }
 
     #[test]

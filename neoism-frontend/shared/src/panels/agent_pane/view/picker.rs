@@ -58,6 +58,11 @@ pub fn render_picker(
             | NeoismAgentPickerKind::FileMention
             | NeoismAgentPickerKind::SkillMention
     );
+    let empty_message = (!matches!(
+        picker.kind,
+        NeoismAgentPickerKind::ConnectLabel | NeoismAgentPickerKind::ConnectSecret
+    ))
+    .then_some("No results");
     let list_scroll_offset = picker.tick_list_scroll();
     let cursor_offset = picker.tick_cursor();
     let rows = picker
@@ -97,6 +102,7 @@ pub fn render_picker(
             show_search_caret,
             search_placeholder: picker.search_placeholder.as_deref().unwrap_or("Search"),
             loading: picker.loading,
+            empty_message,
             loading_elapsed: picker.loading_elapsed(),
         },
         input_rect,

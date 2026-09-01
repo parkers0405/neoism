@@ -732,12 +732,6 @@ impl WorkspaceRuntime {
         Ok(LeasedResource { resource, _generation: generation })
     }
 
-    pub(crate) fn subagents_if_allocated(&self) -> Option<LeasedResource<crate::plugins::subagents::SubagentWorkspaceRuntime>> {
-        let generation = self.snapshot();
-        let resource = generation.inner.lifecycle.state_if_allocated(neoism_agent_builtins::plugin::subagents::ID)?;
-        Some(LeasedResource { resource, _generation: generation })
-    }
-
     pub(crate) async fn teardown(&self, _state: &crate::state::AppState) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
         self.teardown_with_timeout(PLUGIN_LIFECYCLE_TIMEOUT).await
     }

@@ -356,17 +356,14 @@ pub(crate) async fn publish_background_subtask_finished(
             return;
         }
     };
-    let tracked = match state.inner.store.get_session(child_id).await {
-        Ok(Some(child)) => state.inner.workspace_runtimes.loaded(&child.directory).await
-            .and_then(|runtime| runtime.subagents_if_allocated()),
-        _ => None,
-    };
-    let Some(tracked) = tracked else {
-        return;
-    };
-    if !tracked.contains(child_id).await {
-        return;
-    }
+    // Completion delivery is durable session state, not optional UI runtime
+    // state. In particular, the embedded Neoism server may finish a child
+    // after the workspace/plugin tracker generation that launched it has been
+    // retired or before a replacement tracker is allocated. Requiring the
+    // in-memory tracker here strands the result even though the child still
+    // carries the exact generation it owes its parent. The durable generation
+    // check in `mark_subtask_completion_pending` is the authority and also
+    // preserves exactly-once delivery.
     if subtask_has_active_work(state, child_id).await {
         return;
     }
@@ -1341,6 +1338,13 @@ mod tests {
         }
     }
 
+    async fn insert_session_without_subagent_tracker(
+        state: &AppState,
+        session: &SessionInfo,
+    ) {
+        state.inner.store.insert_session(session).await.unwrap();
+    }
+
     async fn hold_parent_run(state: &AppState, parent: &SessionInfo) {
         let run = crate::state::SessionRun {
             id: "parent-active-run".to_string(),
@@ -1435,6 +1439,69 @@ mod tests {
             Some(true),
             "queue admission must not acknowledge delivery"
         );
+    }
+
+    #[tokio::test]
+    async fn completed_subtask_notifies_parent_without_allocated_runtime_tracker() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-no-runtime-tracker-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut child = test_child_session();
+        child.parent_id = Some(parent.id.clone());
+        insert_session_without_subagent_tracker(&state, &parent).await;
+        insert_session_without_subagent_tracker(&state, &child).await;
+        hold_parent_run(&state, &parent).await;
+
+        let generation = Id::ascending(IdKind::Message);
+        let mut stored_child = state
+            .inner
+            .store
+            .get_session(child.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        stored_child.extra.insert(
+            SUBTASK_NOTIFY_ON_IDLE_KEY.to_string(),
+            json!({ "generation": generation.to_string() }),
+        );
+        state.inner.store.update_session(&stored_child).await.unwrap();
+
+        assert!(state
+            .inner
+            .workspace_runtimes
+            .loaded(&child.directory)
+            .await
+            .is_none());
+        publish_background_subtask_finished(
+            &state,
+            child.id.as_str(),
+            &generation,
+            "completed",
+            "embedded server child result",
+        )
+        .await;
+
+        let queued = state
+            .inner
+            .store
+            .list_queued_prompt_entries(parent.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 1, "parent completion must not depend on the runtime tracker");
+        assert_eq!(queued[0].1, "continue");
+        let stored_child = state
+            .inner
+            .store
+            .get_session(child.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion_pending(&stored_child, 0), Some(true));
+        assert!(stored_child.extra.get(SUBTASK_NOTIFY_ON_IDLE_KEY).is_none());
     }
 
     #[tokio::test]

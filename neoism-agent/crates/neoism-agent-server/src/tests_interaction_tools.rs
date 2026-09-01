@@ -324,6 +324,225 @@ async fn workflow_permission_asks_are_denied_without_waiting() {
 }
 
 #[tokio::test]
+async fn multi_file_apply_patch_uses_one_permission_request_for_every_path() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-multi-patch-permission-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/v2/sessions?directory={}", root.display()),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let expected = (0..6)
+        .map(|index| format!("file-{index}.txt"))
+        .collect::<Vec<_>>();
+    let mut patch_text = "*** Begin Patch\n".to_string();
+    for (index, path) in expected.iter().enumerate() {
+        patch_text.push_str(&format!("*** Add File: {path}\n+value {index}\n"));
+    }
+    patch_text.push_str("*** End Patch");
+
+    let tool_state = state.clone();
+    let session_id = session.id.clone();
+    let message_id = Id::ascending(IdKind::Message);
+    let directory = session.directory.clone();
+    let handle = tokio::spawn(async move {
+        execute_tool_call_with_permission_wait(
+            &tool_state,
+            &session_id,
+            &message_id,
+            &directory,
+            vec![PermissionRule {
+                permission: "edit".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionAction::Ask,
+            }],
+            "call-multi-patch",
+            "apply_patch",
+            json!({ "patchText": patch_text }),
+        )
+        .await
+    });
+
+    let permission = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(request) = state
+                .inner
+                .permissions
+                .read()
+                .await
+                .values()
+                .next()
+                .cloned()
+            {
+                break request;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("multi-file patch should ask for permission");
+    assert_eq!(permission.permission, "edit");
+    assert_eq!(permission.patterns, expected);
+
+    let allowed: bool = response_json(
+        app.oneshot(request(
+            Method::POST,
+            &format!("/v2/interactions/permissions/{}/reply", permission.id),
+            Some(json!({ "reply": "once" })),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(allowed);
+    let result = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("approved patch should finish")
+        .unwrap()
+        .unwrap();
+    assert!(result.output.contains("Applied patch to"));
+    for path in &expected {
+        assert!(root.join(path).is_file(), "{path} was not created");
+    }
+    assert!(state.inner.permissions.read().await.is_empty());
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn skip_permissions_applies_multi_file_patch_without_a_permission_request() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-multi-patch-skip-permissions-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
+    std::fs::write(
+        root.join(".agent/agent.json"),
+        r#"{"dangerouslySkipPermissions":true}"#,
+    )
+    .unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions?directory={}", root.display()),
+            None,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    let expected = (0..6)
+        .map(|index| format!("file-{index}.txt"))
+        .collect::<Vec<_>>();
+    let mut patch_text = "*** Begin Patch\n".to_string();
+    for (index, path) in expected.iter().enumerate() {
+        patch_text.push_str(&format!("*** Add File: {path}\n+value {index}\n"));
+    }
+    patch_text.push_str("*** End Patch");
+
+    let result = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "edit".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionAction::Ask,
+        }],
+        "call-multi-patch-skip-permissions",
+        "apply_patch",
+        json!({ "patchText": patch_text }),
+    )
+    .await
+    .unwrap();
+
+    assert!(result.output.contains("Applied patch to"));
+    assert!(state.inner.permissions.read().await.is_empty());
+    for path in &expected {
+        assert!(root.join(path).is_file(), "{path} was not created");
+    }
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn skip_permissions_does_not_override_an_explicit_edit_deny() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-plan-edit-deny-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
+    std::fs::write(
+        root.join(".agent/agent.json"),
+        r#"{"dangerouslySkipPermissions":true}"#,
+    )
+    .unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions?directory={}", root.display()),
+            None,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+
+    let result = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "edit".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionAction::Deny,
+        }],
+        "call-plan-edit-deny",
+        "apply_patch",
+        json!({
+            "patchText": "*** Begin Patch\n*** Add File: denied.txt\n+blocked\n*** End Patch"
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(result.contains("tool permission edit for denied.txt is denied"));
+    assert!(state.inner.permissions.read().await.is_empty());
+    assert!(!root.join("denied.txt").exists());
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn question_tool_waits_for_route_reply() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-question-{}",

@@ -142,11 +142,11 @@ pub(super) fn build_agent() -> AgentInfo {
 
 fn plan_agent() -> AgentInfo {
     AgentInfo {
-        name: "plan".into(), description: Some("Planning agent that can inspect context but cannot edit project files.".into()), mode: "primary".into(), native: true, hidden: false,
+        name: "plan".into(), description: Some("Read-only planning agent that can inspect context and write plan files.".into()), mode: "primary".into(), native: true, hidden: false,
         top_p: None, temperature: None, color: Some("secondary".into()),
         permission: permissions(&[("*", json!("allow")), ("doom_loop", json!("ask")), ("edit", plan_edit_permission()), ("write", json!({ "*": "deny" })), ("question", json!("allow")), ("plan_enter", json!("deny")), ("plan_exit", json!("allow")), ("read", read_permission()), ("external_directory", external_directory_permission())]),
         model: None, variant: None,
-        prompt: Some(format!("You are operating as the plan agent. Inspect and reason freely, but do not modify files or run write-adjacent tools unless the user exits planning mode.\n\n{}", ENGINEERING_AGENT_PROMPT)),
+        prompt: Some(format!("You are operating as the plan agent. Inspect and reason freely, but do not modify project files or run write-adjacent tools. You may write plan files in the allowed plan directories. Use plan_exit when the user wants to switch to Build mode for implementation.\n\n{}", ENGINEERING_AGENT_PROMPT)),
         options: BTreeMap::new(), steps: None,
     }
 }
@@ -209,7 +209,7 @@ fn external_directory_permission() -> Value {
 
 fn plan_edit_permission() -> Value {
     let mut permissions = serde_json::Map::new();
-    permissions.insert("*".into(), json!("ask"));
+    permissions.insert("*".into(), json!("deny"));
     permissions.insert(".agent/plans/*.md".into(), json!("allow"));
     if let Some(data) = data_dir() {
         permissions.insert(data.join("agent").join("plans/*.md").to_string_lossy().to_string(), json!("allow"));

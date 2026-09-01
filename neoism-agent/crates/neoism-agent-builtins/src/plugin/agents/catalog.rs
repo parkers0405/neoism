@@ -201,8 +201,9 @@ mod tests {
             .as_object()
             .cloned()
             .unwrap();
-        assert_eq!(edit["*"], json!("ask"));
+        assert_eq!(edit["*"], json!("deny"));
         assert_eq!(edit[".agent/plans/*.md"], json!("allow"));
+        assert_eq!(catalog.get("build").unwrap().permission["*"], json!("allow"));
     }
 
     #[test]

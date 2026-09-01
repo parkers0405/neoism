@@ -34,6 +34,7 @@ async fn apply_v4a_patch(
         anyhow::bail!("V4A patch had no file operations");
     }
     let mut lock_paths = Vec::new();
+    let mut permission_targets = Vec::new();
     for hunk in &hunks {
         let path_str = match hunk {
             patch::V4AHunk::Add { path, .. }
@@ -41,7 +42,7 @@ async fn apply_v4a_patch(
             | patch::V4AHunk::Update { path, .. } => path.clone(),
         };
         let target = project_path_for_write(&context, &path_str)?;
-        context.ensure_allowed("edit", &display_path(&context.cwd, &target))?;
+        permission_targets.push(display_path(&context.cwd, &target));
         lock_paths.push(target.clone());
         if let patch::V4AHunk::Update {
             move_path: Some(new_path),
@@ -49,10 +50,11 @@ async fn apply_v4a_patch(
         } = hunk
         {
             let new_target = project_path_for_write(&context, new_path)?;
-            context.ensure_allowed("edit", &display_path(&context.cwd, &new_target))?;
+            permission_targets.push(display_path(&context.cwd, &new_target));
             lock_paths.push(new_target.clone());
         }
     }
+    context.ensure_allowed_many("edit", &permission_targets)?;
 
     tracing::info!(paths = ?lock_paths, "V4A apply_patch waiting for file locks");
     let _locks = context.utilities().file_locks.lock_files(lock_paths).await;

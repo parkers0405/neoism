@@ -207,6 +207,38 @@ impl ToolContext {
         }
     }
 
+    pub(crate) fn ensure_allowed_many(
+        &self,
+        permission: &str,
+        targets: &[String],
+    ) -> anyhow::Result<()> {
+        let mut pending = Vec::new();
+        for target in targets {
+            match self.permission_decision(permission, target) {
+                PermissionDecision::Allow => {}
+                PermissionDecision::Ask => {
+                    if !pending.contains(target) {
+                        pending.push(target.clone());
+                    }
+                }
+                PermissionDecision::Deny => {
+                    return Err(crate::permission_runtime::permission_denied(
+                        permission, target,
+                    )
+                    .into());
+                }
+            }
+        }
+        if pending.is_empty() {
+            Ok(())
+        } else {
+            Err(
+                crate::permission_runtime::permission_required_many(permission, pending)
+                    .into(),
+            )
+        }
+    }
+
     pub(crate) fn ensure_explicit_allowed(
         &self,
         permission: &str,

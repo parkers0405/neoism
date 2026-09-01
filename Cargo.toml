@@ -36,7 +36,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.77"
+version = "0.7.78"
 authors = ["Parker Settle", "Neoism contributors"]
 edition = "2021"
 license = "MIT"

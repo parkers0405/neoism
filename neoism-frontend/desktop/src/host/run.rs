@@ -818,9 +818,16 @@ impl Renderer {
         // space above the strips.
         let num_tabs = context_manager.len();
         let chrome_top = self.chrome_top(num_tabs);
-        let overlay_top =
-            (chrome_top + self.buffer_tabs.height() + 8.0 * self.chrome_scale())
-                * scale_factor;
+        // Overlays belong to the window viewport, not to the variable-height
+        // workspace chrome. Using the live tab count here made every palette,
+        // finder, search surface, and modal jump down by one island strip as
+        // soon as a second workspace/tab appeared (especially obvious in the
+        // browser client). Keep the established single-workspace baseline;
+        // late-overlay rendering already places these surfaces above tabs.
+        let overlay_top = (self.chrome_top(1)
+            + self.buffer_tabs.height()
+            + 8.0 * self.chrome_scale())
+            * scale_factor;
         self.command_palette.set_top_anchor(overlay_top);
         self.finder.set_top_anchor(overlay_top);
         self.search.set_top_anchor(overlay_top);

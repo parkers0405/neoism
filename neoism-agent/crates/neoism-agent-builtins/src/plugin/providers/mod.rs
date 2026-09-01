@@ -80,20 +80,103 @@ struct ProviderRoute {
     action: ProviderRouteAction,
 }
 
+fn provider_request_scope(
+    action: ProviderRouteAction,
+    tenant_id: Option<String>,
+    workspace_id: Option<String>,
+    hosted: bool,
+) -> (Option<String>, Option<String>, bool) {
+    let peer_workspace = workspace_id.as_deref().is_some_and(|workspace_id| {
+        tenant_id.as_deref() == Some(format!("workspace:{workspace_id}").as_str())
+    });
+    let host_read = matches!(
+        action,
+        ProviderRouteAction::List
+            | ProviderRouteAction::Configured
+            | ProviderRouteAction::AuthMethods
+            | ProviderRouteAction::AuthGet
+            | ProviderRouteAction::ConnectionsList
+    );
+    if peer_workspace && host_read {
+        (Some("local".to_string()), None, false)
+    } else {
+        (tenant_id, workspace_id, hosted)
+    }
+}
+
 impl RouteHandler for ProviderRoute {
     fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
         let provider_id = request.path.get("provider_id").cloned();
         let connection_id = request.path.get("connection_id").cloned();
+        // A workspace-daemon proxy is an authenticated guest using a
+        // self-hosted Neoism instance, not a multi-tenant hosted deployment.
+        // Provider calls execute on the host and intentionally use the host's
+        // local provider connection; the guest never receives the credential.
+        // Keep direct hosted API callers scoped and fail-closed as before.
+        let (tenant_id, workspace_id, hosted) = provider_request_scope(
+            self.action,
+            request.tenant_id,
+            request.workspace_id,
+            request.hosted,
+        );
         Box::pin(async move {
             self.service.route(ProviderRouteRequest {
                 action: self.action,
                 provider_id,
                 connection_id,
-                tenant_id: request.tenant_id,
-                workspace_id: request.workspace_id,
-                hosted: request.hosted,
+                tenant_id,
+                workspace_id,
+                hosted,
                 body: request.body,
             }).await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_request_scope, ProviderRouteAction};
+
+    #[test]
+    fn workspace_daemon_guests_use_the_hosts_local_provider_scope() {
+        assert_eq!(
+            provider_request_scope(
+                ProviderRouteAction::Configured,
+                Some("workspace:workspace-a".into()),
+                Some("workspace-a".into()),
+                true,
+            ),
+            (Some("local".into()), None, false),
+        );
+    }
+
+    #[test]
+    fn direct_hosted_tenants_keep_their_isolated_scope() {
+        assert_eq!(
+            provider_request_scope(
+                ProviderRouteAction::Configured,
+                Some("tenant-a".into()),
+                None,
+                true,
+            ),
+            (Some("tenant-a".into()), None, true),
+        );
+    }
+
+    #[test]
+    fn workspace_daemon_guests_cannot_edit_host_credentials() {
+        assert_eq!(
+            provider_request_scope(
+                ProviderRouteAction::ConnectionsDelete,
+                Some("workspace:workspace-a".into()),
+                Some("workspace-a".into()),
+                true,
+            ),
+            (
+                Some("workspace:workspace-a".into()),
+                Some("workspace-a".into()),
+                true,
+            ),
+        );
     }
 }

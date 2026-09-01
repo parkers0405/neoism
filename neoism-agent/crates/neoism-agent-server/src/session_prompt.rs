@@ -1958,6 +1958,35 @@ mod tests {
     }
 
     #[test]
+    fn workspace_daemon_session_uses_host_provider_credentials() {
+        let mut info = test_session_info(None);
+        info.workspace_id = Some("workspace-a".into());
+        info.extra.insert(
+            crate::caller::TENANT_EXTRA_KEY.to_string(),
+            json!("workspace:workspace-a"),
+        );
+
+        assert_eq!(
+            provider_credential_scope(Some(&info)),
+            (Some("local".into()), None),
+        );
+    }
+
+    #[test]
+    fn hosted_tenant_session_keeps_isolated_provider_credentials() {
+        let mut info = test_session_info(None);
+        info.extra.insert(
+            crate::caller::TENANT_EXTRA_KEY.to_string(),
+            json!("tenant-a"),
+        );
+
+        assert_eq!(
+            provider_credential_scope(Some(&info)),
+            (Some("tenant-a".into()), None),
+        );
+    }
+
+    #[test]
     fn usable_context_matches_opencode_overflow_formula() {
         let split_limit = ModelLimit {
             context: 200_000,
@@ -2353,12 +2382,13 @@ async fn build_provider_generation_request(
             let _ = plugin::chat_headers(&snapshot, hook_ctx, &mut headers);
         }
     }
+    let (tenant_id, workspace_id) = provider_credential_scope(scope_session.as_ref());
     ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),
         model_id: model.model_id.clone(),
         connection_id: model.connection_id.clone(),
-        tenant_id: scope_session.as_ref().map(|session| crate::caller::session_tenant(session).to_string()),
-        workspace_id: scope_session.as_ref().and_then(|session| session.workspace_id.as_ref().map(ToString::to_string)),
+        tenant_id,
+        workspace_id,
         session_id: hook_ctx.map(|ctx| ctx.session_id.clone()),
         variant: model.variant.clone(),
         text_verbosity: workspace
@@ -2369,6 +2399,27 @@ async fn build_provider_generation_request(
         tools,
         options,
         headers,
+    }
+}
+
+fn provider_credential_scope(
+    session: Option<&neoism_agent_core::SessionInfo>,
+) -> (Option<String>, Option<String>) {
+    let Some(session) = session else {
+        return (None, None);
+    };
+    let tenant_id = crate::caller::session_tenant(session);
+    let workspace_id = session.workspace_id.as_ref().map(ToString::to_string);
+    // Workspace-daemon guests run models on the host. Resolve the host's
+    // local provider connection without exposing its secret to the guest.
+    // Direct hosted tenants retain their isolated scope.
+    if workspace_id
+        .as_deref()
+        .is_some_and(|workspace_id| tenant_id == format!("workspace:{workspace_id}"))
+    {
+        (Some("local".to_string()), None)
+    } else {
+        (Some(tenant_id.to_string()), workspace_id)
     }
 }
 

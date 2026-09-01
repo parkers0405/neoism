@@ -30,10 +30,6 @@ impl SubagentWorkspaceRuntime {
         self.sessions.lock().await.insert(session_id.into());
     }
 
-    pub(crate) async fn contains(&self, session_id: &str) -> bool {
-        self.sessions.lock().await.contains(session_id)
-    }
-
     pub(crate) async fn teardown(&self) {
         self.sessions.lock().await.clear();
     }

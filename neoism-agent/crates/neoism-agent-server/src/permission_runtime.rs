@@ -9,7 +9,10 @@ const PERMISSION_REQUIRED_PREFIX: &str = "NEOISM_PERMISSION_REQUIRED:";
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PermissionChallenge {
     pub(crate) permission: String,
-    pub(crate) target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) patterns: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -29,7 +32,12 @@ impl std::fmt::Display for PermissionCheckError {
             Self::Denied(challenge) => write!(
                 formatter,
                 "tool permission {} for {} is denied",
-                challenge.permission, challenge.target
+                challenge.permission,
+                challenge
+                    .target
+                    .as_deref()
+                    .or_else(|| challenge.patterns.first().map(String::as_str))
+                    .unwrap_or("*")
             ),
         }
     }
@@ -49,7 +57,19 @@ pub(crate) fn permission_required(
 ) -> PermissionCheckError {
     PermissionCheckError::Required(PermissionChallenge {
         permission: permission.into(),
-        target: target.into(),
+        target: Some(target.into()),
+        patterns: Vec::new(),
+    })
+}
+
+pub(crate) fn permission_required_many(
+    permission: impl Into<String>,
+    patterns: Vec<String>,
+) -> PermissionCheckError {
+    PermissionCheckError::Required(PermissionChallenge {
+        permission: permission.into(),
+        target: None,
+        patterns,
     })
 }
 
@@ -59,18 +79,25 @@ pub(crate) fn permission_denied(
 ) -> PermissionCheckError {
     PermissionCheckError::Denied(PermissionChallenge {
         permission: permission.into(),
-        target: target.into(),
+        target: Some(target.into()),
+        patterns: Vec::new(),
     })
 }
 
 use crate::permission;
 use crate::state::{AppState, PermissionPending};
 
-pub(crate) fn parse_permission_required_error(error: &str) -> Option<(String, String)> {
+pub(crate) fn parse_permission_required_error(
+    error: &str,
+) -> Option<(String, Vec<String>)> {
     let marker = error.find(PERMISSION_REQUIRED_PREFIX)?;
     let payload = &error[marker + PERMISSION_REQUIRED_PREFIX.len()..];
-    let challenge: PermissionChallenge = serde_json::from_str(payload).ok()?;
-    Some((challenge.permission, challenge.target))
+    let mut challenge: PermissionChallenge = serde_json::from_str(payload).ok()?;
+    if let Some(target) = challenge.target.take() {
+        challenge.patterns.push(target);
+    }
+    challenge.patterns.dedup();
+    (!challenge.patterns.is_empty()).then_some((challenge.permission, challenge.patterns))
 }
 
 pub(crate) async fn ask_permission_for_tool(
@@ -82,7 +109,7 @@ pub(crate) async fn ask_permission_for_tool(
     input: &Value,
     error: &str,
 ) -> Result<Vec<PermissionRule>, String> {
-    let (permission, target) = parse_permission_required_error(error)
+    let (permission, patterns) = parse_permission_required_error(error)
         .ok_or_else(|| format!("permission request could not be parsed: {error}"))?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let request = PermissionRequestInfo {
@@ -91,8 +118,8 @@ pub(crate) async fn ask_permission_for_tool(
         message_id: message_id.to_string(),
         title: format!("Allow {tool_name}?"),
         permission,
-        patterns: vec![target.clone()],
-        always: vec![target],
+        patterns: patterns.clone(),
+        always: patterns,
         tool: Some(json!({ "messageID": message_id, "callID": call_id })),
         metadata: Some(json!({
             "tool": tool_name,

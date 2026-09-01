@@ -1062,7 +1062,8 @@ pub(crate) async fn execute_tool_call_in_generation(
                 return Ok(result);
             }
             Err(error) => {
-                let Some((permission, target)) = parse_permission_required_error(&error)
+                let Some((permission, patterns)) =
+                    parse_permission_required_error(&error)
                 else {
                     tracing::warn!(
                         target: "neoism_agent::perf",
@@ -1080,7 +1081,8 @@ pub(crate) async fn execute_tool_call_in_generation(
                 };
                 if unattended {
                     return Err(crate::permission_runtime::permission_denied(
-                        permission, target,
+                        permission,
+                        patterns.first().cloned().unwrap_or_else(|| "*".to_string()),
                     )
                     .to_string());
                 }
@@ -1091,11 +1093,13 @@ pub(crate) async fn execute_tool_call_in_generation(
                 // denies — e.g. `task` for sub-agents — keep denying even
                 // in skip-permissions mode.
                 if dangerously_skip_permissions_enabled(snapshot.config()) {
-                    one_time_rules.push(PermissionRule {
-                        permission,
-                        pattern: target,
-                        action: PermissionAction::Allow,
-                    });
+                    one_time_rules.extend(patterns.into_iter().map(|pattern| {
+                        PermissionRule {
+                            permission: permission.clone(),
+                            pattern,
+                            action: PermissionAction::Allow,
+                        }
+                    }));
                     continue;
                 }
                 let grant = ask_permission_for_tool(

@@ -171,12 +171,34 @@ fn set_external_clipboard(_ty: ClipboardType, _text: &str) {}
 fn get_external_clipboard(ty: ClipboardType) -> Option<String> {
     let commands: &[(&str, &[&str])] = match ty {
         ClipboardType::Clipboard => &[
-            ("wl-paste", &["--type", "text/plain"]),
+            ("wl-paste", &["--no-newline", "--type", "text/plain"]),
+            (
+                "wl-paste",
+                &[
+                    "--no-newline",
+                    "--type",
+                    "text/plain;charset=utf-8",
+                ],
+            ),
+            ("wl-paste", &["--no-newline"]),
             ("xclip", &["-selection", "clipboard", "-out"]),
             ("xsel", &["--clipboard", "--output"]),
         ],
         ClipboardType::Selection => &[
-            ("wl-paste", &["--primary", "--type", "text/plain"]),
+            (
+                "wl-paste",
+                &["--primary", "--no-newline", "--type", "text/plain"],
+            ),
+            (
+                "wl-paste",
+                &[
+                    "--primary",
+                    "--no-newline",
+                    "--type",
+                    "text/plain;charset=utf-8",
+                ],
+            ),
+            ("wl-paste", &["--primary", "--no-newline"]),
             ("xclip", &["-selection", "primary", "-out"]),
             ("xsel", &["--primary", "--output"]),
         ],

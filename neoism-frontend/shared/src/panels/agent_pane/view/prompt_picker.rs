@@ -137,6 +137,7 @@ fn render_permission_prompt(
             show_search_caret: false,
             search_placeholder: &meta,
             loading: false,
+            empty_message: Some("No results"),
             loading_elapsed: 0.0,
         },
         input_rect,
@@ -234,6 +235,7 @@ fn render_question_prompt(
                 "Type your answer"
             },
             loading: false,
+            empty_message: Some("No results"),
             loading_elapsed: 0.0,
         },
         input_rect,

@@ -862,23 +862,36 @@ pub(crate) async fn handle_get_config_defaults(
     inner: Arc<AgentInner>,
     directory: Option<String>,
 ) {
-    let path = match directory {
-        Some(dir) => format!("/v2/config/defaults?directory={}", percent_encode(&dir)),
+    let path = match directory.as_deref() {
+        Some(dir) => format!("/v2/config/defaults?directory={}", percent_encode(dir)),
         None => "/v2/config/defaults".to_string(),
     };
     match http_get_json(&inner, &path).await {
         Ok(value) => {
+            let configured_model = value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|s| !s.is_empty());
+            let model = if configured_model.is_some() {
+                configured_model
+            } else {
+                let provider_path = match directory.as_deref() {
+                    Some(dir) => format!("/v2/providers/configured?directory={}", percent_encode(dir)),
+                    None => "/v2/providers/configured".to_string(),
+                };
+                http_get_json(&inner, &provider_path)
+                    .await
+                    .ok()
+                    .and_then(|providers| neoism_ui::panels::agent_pane::api_mapping::default_model_from_providers_json(&providers))
+            };
             let _ = inner.tx.send(AgentServerMessage::ConfigDefaults {
                 agent: value
                     .get("defaultAgent")
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
-                model: value
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .filter(|s| !s.is_empty()),
+                model,
                 thinking: value
                     .get("variant")
                     .and_then(Value::as_str)

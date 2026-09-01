@@ -87,6 +87,10 @@ pub struct InlinePickerView<'a> {
     /// Draw shimmering skeleton rows in place of "No results" while an async
     /// search (e.g. semantic session search) is still in flight.
     pub loading: bool,
+    /// Message rendered in the list area when there are no rows. Input-only
+    /// pickers (account label / API key) pass `None` so the card ends after
+    /// its input row instead of pretending a search returned no matches.
+    pub empty_message: Option<&'a str>,
     /// Seconds since loading began — drives the shimmer phase.
     pub loading_elapsed: f32,
 }
@@ -159,13 +163,32 @@ pub fn layout_limited(
     max_rows: usize,
     min_y: f32,
 ) -> Option<[f32; 4]> {
+    layout_limited_with_empty_row(
+        row_count, input_rect, scale, has_footer, max_rows, min_y, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_limited_with_empty_row(
+    row_count: usize,
+    input_rect: [f32; 4],
+    scale: f32,
+    has_footer: bool,
+    max_rows: usize,
+    min_y: f32,
+    reserve_empty_row: bool,
+) -> Option<[f32; 4]> {
     let s = scale.clamp(0.5, 3.0);
     let row_h = ROW_H * s;
     let title_h = TITLE_H * s;
     let footer_h = if has_footer { FOOTER_H * s } else { 0.0 };
     // An empty picker still shows one row ("No results") and stays open, so
     // a filter that matches nothing doesn't make the modal vanish.
-    let visible_rows = row_count.min(max_rows.clamp(1, MAX_ROWS)).max(1);
+    let visible_rows = if row_count == 0 && !reserve_empty_row {
+        0
+    } else {
+        row_count.min(max_rows.clamp(1, MAX_ROWS)).max(1)
+    };
     // Lock to the composer's width and x position so the popover lines up
     // edge-to-edge with the input chrome.
     let width = input_rect[2];
@@ -214,9 +237,21 @@ pub fn render_limited(
     } else {
         view.rows.len()
     };
-    let [x, y, width, height] =
-        layout_limited(layout_rows, input_rect, scale, has_footer, max_rows, min_y)?;
-    let visible_rows = layout_rows.min(max_rows.clamp(1, MAX_ROWS)).max(1);
+    let reserve_empty_row = view.loading || view.empty_message.is_some();
+    let [x, y, width, height] = layout_limited_with_empty_row(
+        layout_rows,
+        input_rect,
+        scale,
+        has_footer,
+        max_rows,
+        min_y,
+        reserve_empty_row,
+    )?;
+    let visible_rows = if layout_rows == 0 && !reserve_empty_row {
+        0
+    } else {
+        layout_rows.min(max_rows.clamp(1, MAX_ROWS)).max(1)
+    };
     let selected = view.selected.min(view.rows.len().saturating_sub(1));
     let first = view
         .scroll_offset
@@ -628,11 +663,11 @@ pub fn render_limited(
                     ORDER + 2,
                 );
             }
-        } else {
+        } else if let Some(empty_message) = view.empty_message {
             sugarloaf.overlay_text_mut().draw(
                 x + 22.0 * s,
                 list_y + (row_h - 14.0 * s) / 2.0 + 7.0 * s,
-                "No results",
+                empty_message,
                 &DrawOpts {
                     font_size: 13.0 * s,
                     color: theme.u8(theme.muted),
@@ -719,5 +754,14 @@ mod tests {
         assert!(rows < DEFAULT_MAX_ROWS);
         assert!(card[1] >= pane_content_top);
         assert!(card[1] + card[3] + 6.0 <= input[1]);
+    }
+
+    #[test]
+    fn input_only_picker_does_not_reserve_a_fake_result_row() {
+        let input = [20.0, 360.0, 420.0, 80.0];
+        let card = layout_limited_with_empty_row(0, input, 1.0, false, 8, 8.0, false)
+            .expect("input-only picker layout");
+
+        assert_eq!(card[3], TITLE_H);
     }
 }

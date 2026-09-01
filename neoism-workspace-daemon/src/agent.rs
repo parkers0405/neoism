@@ -26,7 +26,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
-use std::path::PathBuf;
 
 use neoism_protocol::agent::{
     AgentClientMessage, AgentInfo, AgentServerMessage, Attachment, CompactionPhase,
@@ -82,22 +81,24 @@ pub fn ensure_agent_server_started(workspaces: crate::workspace::WorkspaceManage
     if AGENT_SERVER_STARTED.set(()).is_err() {
         return;
     }
-    let services = neoism_agent_neoism_adapter::neoism_services().with_workspace_management(
-        Arc::new(crate::workspace::DaemonWorkspaceManagementService::new(workspaces)),
-    );
+    let services = neoism_agent_neoism_adapter::neoism_services()
+        .with_workspace_management(Arc::new(
+            crate::workspace::DaemonWorkspaceManagementService::new(workspaces),
+        ));
     // Supervisor rather than a one-shot: when another process (usually
     // the desktop app) already owns the port, `listen` exits with
     // AddrInUse immediately — that's fine while the desktop serves the
     // same API, but the daemon must take the port over once the
     // desktop exits or the web agent goes dark. Probe health between
     // attempts so we never fight a healthy owner.
+    //
+    // This must remain the linked Neoism server. The standalone
+    // `neoism-agent serve` binary intentionally uses the product-neutral
+    // `~/.config/agent/agent.json` service. Launching it as a sidecar here
+    // bypasses `NeoismConfigSourceService` and makes release builds ignore
+    // the GUI-owned `~/.config/neoism/config.json` while debug builds work.
     tokio::spawn(async move {
-        let agent_binary = resolve_agent_server_binary();
-        if let Some(path) = &agent_binary {
-            tracing::info!(target: "neoism_workspace_daemon::agent", binary = %path.display(), %server, "selected external Neoism Agent server");
-        } else {
-            tracing::info!(target: "neoism_workspace_daemon::agent", %server, "no Agent server sidecar found; using the freshly linked in-process server");
-        }
+        tracing::info!(target: "neoism_workspace_daemon::agent", %server, "using linked Neoism Agent server with product config services");
         let health_url = format!("{server}{AGENT_SERVER_HEALTH_PATH}");
         let probe = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
@@ -112,80 +113,20 @@ pub fn ensure_agent_server_started(workspaces: crate::workspace::WorkspaceManage
                 None => false,
             };
             if !healthy {
-                if let Some(binary) = &agent_binary {
-                    match tokio::process::Command::new(binary)
-                        .arg("serve")
-                        .arg("--hostname").arg(&hostname)
-                        .arg("--port").arg(port.to_string())
-                        .kill_on_drop(true)
-                        .spawn()
-                    {
-                        Ok(mut child) => {
-                            tracing::info!(target: "neoism_workspace_daemon::agent", binary = %binary.display(), pid = child.id(), "launched Neoism Agent server sidecar");
-                            if let Err(error) = child.wait().await {
-                                tracing::warn!(target: "neoism_workspace_daemon::agent", %error, "Agent server sidecar wait failed");
-                            }
-                        }
-                        Err(error) => tracing::warn!(target: "neoism_workspace_daemon::agent", binary = %binary.display(), %error, "failed to launch Agent server sidecar; retrying"),
-                    }
-                } else {
-                    let options = neoism_agent_server::ServerOptions { hostname: hostname.clone(), port, cors: Vec::new() };
-                    if let Err(error) = neoism_agent_server::listen(options, services.clone()).await {
-                        tracing::warn!(target: "neoism_workspace_daemon::agent", %error, "embedded Neoism Agent server exited; retrying");
-                    }
+                let options = neoism_agent_server::ServerOptions {
+                    hostname: hostname.clone(),
+                    port,
+                    cors: Vec::new(),
+                };
+                if let Err(error) =
+                    neoism_agent_server::listen(options, services.clone()).await
+                {
+                    tracing::warn!(target: "neoism_workspace_daemon::agent", %error, "embedded Neoism Agent server exited; retrying");
                 }
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
-}
-
-/// Binary precedence: an explicit path always wins; otherwise a sidecar next
-/// to the running debug/release Neoism binary wins over PATH. This keeps
-/// `target/debug/neoism` pinned to `target/debug/neoism-agent` rather than an
-/// older installed or release binary. In-process serving is the final fallback.
-fn resolve_agent_server_binary() -> Option<PathBuf> {
-    resolve_agent_server_binary_from(
-        std::env::var_os("NEOISM_AGENT_SERVER_BINARY").filter(|value| !value.is_empty()).map(PathBuf::from),
-        std::env::current_exe().ok(),
-        find_on_path("neoism-agent"),
-    )
-}
-
-fn resolve_agent_server_binary_from(explicit: Option<PathBuf>, current_exe: Option<PathBuf>, path_binary: Option<PathBuf>) -> Option<PathBuf> {
-    if explicit.is_some() { return explicit; }
-    if let Some(executable) = current_exe {
-        if let Some(directory) = executable.parent() {
-            let candidate = directory.join(binary_name("neoism-agent"));
-            if candidate.is_file() && !is_older_than(&candidate, &executable) { return Some(candidate); }
-            // A Cargo development launch must never fall through to an old
-            // installed/release binary. The in-process server is freshly
-            // linked and is the safe fallback until the debug sidecar exists.
-            if is_cargo_target_profile(directory) { return None; }
-        }
-    }
-    path_binary
-}
-
-fn is_cargo_target_profile(directory: &std::path::Path) -> bool {
-    matches!(directory.file_name().and_then(|value| value.to_str()), Some("debug" | "release"))
-        && directory.parent().is_some_and(|parent| parent.file_name().and_then(|value| value.to_str()) == Some("target"))
-}
-
-fn is_older_than(candidate: &std::path::Path, executable: &std::path::Path) -> bool {
-    let modified = |path: &std::path::Path| std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok();
-    matches!((modified(candidate), modified(executable)), (Some(candidate), Some(executable)) if candidate < executable)
-}
-
-fn binary_name(name: &str) -> String {
-    if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
-}
-
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let name = binary_name(name);
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path).map(|directory| directory.join(&name)).find(|candidate| candidate.is_file())
-    })
 }
 
 pub(crate) fn configured_agent_server() -> String {

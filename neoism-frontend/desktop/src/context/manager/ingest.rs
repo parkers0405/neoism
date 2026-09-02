@@ -85,6 +85,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 // detection (guest tree, guards, icon) randomly turned
                 // off whenever one of these pushes landed.
                 for workspace in workspaces {
+                    self.remember_workspace_icon_kind(&workspace);
                     if let Some(existing) = self
                         .daemon
                         .cache
@@ -128,6 +129,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                             workspaces.push(existing);
                         }
                     }
+                }
+                for workspace in &workspaces {
+                    self.remember_workspace_icon_kind(workspace);
                 }
                 self.daemon.cache.daemon_hosts = hosts;
                 self.daemon.cache.daemon_host_workspaces = workspaces;

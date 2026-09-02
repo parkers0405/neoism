@@ -170,6 +170,9 @@ impl Daemon {
         let workspaces = WorkspaceManager::bootstrap();
 
         let router = server::router(AppState {
+            lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+                neoism_agent_neoism_adapter::neoism_services(),
+            ),
             auth,
             sessions: SessionRegistry::shared(),
             // Clone so the bound server, the oneshot router, and the test share

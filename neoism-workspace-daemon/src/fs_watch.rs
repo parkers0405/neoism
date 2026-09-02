@@ -99,8 +99,13 @@ fn is_ignored_watch_path(root: &Path, path: &Path) -> bool {
 
 pub struct FsWatchHub {
     tx: broadcast::Sender<FsChanged>,
-    /// Root → live watcher. Keeping the watcher alive keeps the watch.
-    watchers: Mutex<HashMap<PathBuf, notify::RecommendedWatcher>>,
+    /// (workspace root, listed directory) → live watcher. Keeping the
+    /// watcher alive keeps the watch. We deliberately watch only directories
+    /// the client has listed instead of recursively watching an entire
+    /// workspace: a Quick-SSH workspace can be `$HOME` (or even `/`), and
+    /// registering a recursive inotify/FSEvents watch there can take seconds
+    /// or minutes while also exhausting OS watch limits.
+    watchers: Mutex<HashMap<(PathBuf, PathBuf), notify::RecommendedWatcher>>,
     /// Raw (root, path) events from every watcher thread, drained by
     /// the debouncer thread.
     event_tx: std::sync::mpsc::Sender<(PathBuf, PathBuf)>,
@@ -171,14 +176,27 @@ impl FsWatchHub {
         self.tx.subscribe()
     }
 
-    /// Idempotently start watching `root` (recursive). Called from the
-    /// files handler on every request, so the first `ListDir` a client
-    /// sends is what arms liveness for that root.
+    /// Idempotently watch `root` itself. This compatibility entry point is
+    /// used by CRDT buffers whose parent directory is both the notification
+    /// scope and the directory being watched.
     pub fn ensure_watched(&self, root: &Path) {
+        self.ensure_watched_dir(root, root);
+    }
+
+    /// Watch one directory that the client has actually listed, while
+    /// reporting changes against the containing workspace `root`.
+    ///
+    /// This is the same demand-driven strategy used by mature editors: the
+    /// root and expanded directories stay live, but unopened subtrees cost
+    /// nothing. Most importantly, `watch()` is non-recursive, so opening a
+    /// remote `$HOME` cannot stall that client's websocket and starve PTY
+    /// input/output behind a filesystem crawl.
+    pub fn ensure_watched_dir(&self, root: &Path, directory: &Path) {
         let Ok(mut watchers) = self.watchers.lock() else {
             return;
         };
-        if watchers.contains_key(root) {
+        let key = (root.to_path_buf(), directory.to_path_buf());
+        if watchers.contains_key(&key) {
             return;
         }
         let event_tx = self.event_tx.clone();
@@ -203,11 +221,13 @@ impl FsWatchHub {
         );
         match watcher {
             Ok(mut watcher) => {
-                if let Err(error) = watcher.watch(root, RecursiveMode::Recursive) {
+                if let Err(error) = watcher.watch(directory, RecursiveMode::NonRecursive)
+                {
                     tracing::warn!(
                         target: "neoism::fs_watch",
                         %error,
                         root = %root.display(),
+                        directory = %directory.display(),
                         "fs watch failed; live tree pushes disabled for this root"
                     );
                     return;
@@ -215,9 +235,10 @@ impl FsWatchHub {
                 tracing::info!(
                     target: "neoism::fs_watch",
                     root = %root.display(),
-                    "watching files root for live tree pushes"
+                    directory = %directory.display(),
+                    "watching listed directory for live tree pushes"
                 );
-                watchers.insert(root.to_path_buf(), watcher);
+                watchers.insert(key, watcher);
             }
             Err(error) => {
                 tracing::warn!(

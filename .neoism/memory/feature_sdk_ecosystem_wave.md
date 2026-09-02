@@ -1,0 +1,26 @@
+---
+name: feature-sdk-ecosystem-wave
+description: "2026-08-26 wave shipping items 1-5 — typed events, committed spec, SDK publish pipeline, serve-plugin third-party runtime, typed frontend"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 39912326-ef2c-4184-a6b4-eec06c374bd3
+  modified: 2026-08-26T23:14:33.352Z
+---
+
+SDK/ecosystem wave (2026-08-26, commits eb79e84e6 + 0b8a0e4a5 + f4a92bafe on neoism_agent_v2):
+
+**Typed events (eb79e84e6):** `components/schemas/Event` = discriminated oneOf of all 34 published event types (payload shapes surveyed from actual publish sites; 4 dead constants removed — mcp.browser.open.failed, server.connected/heartbeat/instance.disposed). `event_type::ALL` in core is the authoritative list; exhaustiveness test `every_published_event_type_has_exactly_one_typed_union_variant`. SDK SSE stream yields typed `Event` union. Spec committed at `neoism-agent/openapi/v2.json`; `info.version` pinned to API_VERSION. Publish: `sdk/typescript/scripts/publish.mjs` (version-locked to workspace Cargo version, leaves-first, skip-if-published), `.github/workflows/publish-sdk.yml` (needs NPM_TOKEN secret), SDK typecheck+tests in CI.
+
+**Serve-plugin runtime (0b8a0e4a5)** — the opencode-style ecosystem: `plugin_host_process.rs`, protocol `neoism-plugin/2` (long-lived, newline JSON stdio; initialize→{tools,hooks,eventNamespaces}; tool.invoke/hook.invoke with id+result/error; event notify; shutdown). Config forms in the plugins map options: `serve:[cmd]`, `entry:path`, `npm:spec`. npm installs background into `default_state_dir()/plugin-cache/<sanitized>`; **entry-existence feeds config_signature** so a finished install rebuilds the generation live. Failure policy: Degraded-with-reason, never fails the workspace generation. Sandbox reuses `build_plugin_command` (bwrap); network defaults TRUE (SDK loopback callbacks). TS author API `@neoism/plugin` (definePlugin/runPlugin, SDK client via NEOISM_AGENT_SERVER_URL env); e2e tests on both sides (Rust: node fixture; TS: scripts/plugin-host.test.mjs).
+
+**Typed frontend (f4a92bafe):** shared+desktop depend on neoism-agent-core (wasm-safe via getrandom js). `stream_events.rs` classifier matches `event_type::` constants. api_mapping turn-assembly (roles/ids/parent/time/tokens/footer/TPS) parses typed `MessageInfo` once — vestigial parentID/modelID casing fallbacks deleted; fixtures canonicalized via `canonical_user_info`/`canonical_assistant_info` helpers (several fixtures only passed through fallback chains before). REMAINING (known tail): `part_block`-level part reads (~130 `.get` sites: tool state/text/file quirks) still Value-based.
+
+Gotchas: coordinator `install_run` is #[cfg(test)]; `latest_event_sequence` is #[cfg(test)]; loop_* server tests are load-flaky (timeout under full-suite parallelism, instant isolated); embedded_daemon unix test requires port 4096 free.
+
+**Handbook (079f69297):** bundled welcome docs gained `Server and API.md`, `Plugins.md`, `SDK.md` (modeled on opencode's docs coverage), architecture section in the overview, `plugins` field in Configure, custom-tools pointer in Tools, fixed pre-V2 MCP OAuth callback path. New pages MUST be registered in `neoism-product-docs/src/lib.rs::BUNDLED_DOCS` AND the `.neoism-welcome-seeded-vN` marker bumped (now v11) in `neoism-workspace-index/src/config.rs`. Vault-test flake FIXED (8b574d859): temp_notes_home mutated process-global NEOISM_NOTES_HOME under parallel test threads; now an RAII guard (shared lock + env restore on drop). Any new test touching notes-home env must take lock_notes_home().
+
+
+**2026-08-28 completion wave (67835c78c, eb1ca6a09, bbdae5d84):** typed parts DONE — per-variant schemas (tag=type kebab-case) + status-discriminated ToolState + typed TokenUsage/StepFinish (billing), exhaustiveness test constructs every variant and validates serialized samples; message.part.updated events carry typed Part; SDK re-exports the union. **CRITICAL protocol bug found by RUNNING the example**: live SSE events all had sequence:0 → SDK's seq<=cursor dedupe dropped EVERYTHING after the first event (GUI unaffected — it sends sessionID which serde ignores → global stream + client filter; SDK's sessionId exercises server-side family filter). Fix: wire-monotone sequence stamped at broadcast (AtomicU64 seeded from store max seq, order lock), transactional events allocate pre-write, durable rows persist stamped seq (explicit column; NULL→autoincrement fallback), SSE carries Last-Event-ID; SDK dedupes by bounded id window (8192) not sequence order; events.subscribe now yields typed Event (was EventEnvelope w/ data:unknown). examples/headless.ts = full embedding loop, typechecked vs BUILT package + ran green vs live server (session→subscribe→prompt w/ idempotent messageId→typed deltas→step-finish usage→idle→transcript). Handbook: Server and API gained Embedding + API-stability sections; SDK page gained typed-parts + example. Server auth was ALREADY complete (NEOISM_AGENT_TOKEN, NEOISM_AGENT_AUTH_CONFIG multi-tenant w/ directoryPrefixes jail + quotas, daemon credentials) — was purely undocumented. REMAINING: npm publish needs user's NPM_TOKEN secret + dispatch; frontend part_block ~130 .get sites still Value-based (internal only, not SDK-blocking).
+
+Related: [[project-v2-hardening-wave]], [[bug-agent-double-stream-tail]]

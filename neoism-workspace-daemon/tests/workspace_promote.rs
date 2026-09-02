@@ -145,6 +145,9 @@ impl TargetDaemon {
 
         let auth = AuthService::bootstrap(data_dir.path()).expect("auth bootstrap");
         let app = server::router(AppState {
+            lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+                neoism_agent_neoism_adapter::neoism_services(),
+            ),
             auth,
             sessions: SessionRegistry::shared(),
             workspaces: WorkspaceManager::bootstrap(),
@@ -210,6 +213,9 @@ fn build_source() -> Source {
     let workspaces = WorkspaceManager::bootstrap();
 
     let router = server::router(AppState {
+        lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+            neoism_agent_neoism_adapter::neoism_services(),
+        ),
         auth,
         sessions: SessionRegistry::shared(),
         // Clone so the route's AppState and the test share the same registry
@@ -253,10 +259,9 @@ fn register_host_workspace(
         .replies
         .iter()
         .find_map(|reply| match reply {
-            WorkspaceServerMessage::HostWorkspaceChanged {
-                workspace_id: Some(id),
-                ..
-            } => Some(id.clone()),
+            WorkspaceServerMessage::HostWorkspaceUpserted { workspace } => {
+                Some(workspace.id.clone())
+            }
             _ => None,
         })
         .expect("CreateHostWorkspace must yield a workspace id")

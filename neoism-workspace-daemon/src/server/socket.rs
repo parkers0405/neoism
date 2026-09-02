@@ -736,7 +736,18 @@ pub(crate) async fn handle_socket(
                         if let Err(denial) =
                             check_permission(&device, Permission::PtyCreate)
                         {
-                            let _ = send_json(&mut sink, &denial).await;
+                            // Keep service-envelope correlation intact. A bare
+                            // PTY error has request id 0 on desktop, so the
+                            // pending remote pane never resolves and merely
+                            // looks connected while swallowing commands.
+                            let _ = send_json(
+                                &mut sink,
+                                &ServiceServerMessage::PtyReply {
+                                    request_id,
+                                    message: denial,
+                                },
+                            )
+                            .await;
                             continue;
                         }
                     }
@@ -775,7 +786,21 @@ pub(crate) async fn handle_socket(
                         }
                     };
                     if let Err(denial) = check_permission(&device, required) {
-                        let _ = send_json(&mut sink, &denial).await;
+                        let message = match denial {
+                            ServerMessage::Error { message } => message,
+                            _ => "permission denied".to_string(),
+                        };
+                        // The tree tracks this request id. Returning the
+                        // legacy bare PTY-shaped Error made it wait forever
+                        // instead of surfacing a files-plane failure.
+                        let _ = send_json(
+                            &mut sink,
+                            &ServiceServerMessage::FilesReply {
+                                request_id,
+                                message: FilesServerMessage::Error { message },
+                            },
+                        )
+                        .await;
                         continue;
                     }
                     let root =
@@ -790,11 +815,22 @@ pub(crate) async fn handle_socket(
                                 continue;
                             }
                         };
-                    // First files activity for a root arms the fs
-                    // watcher for it — from then on every connected
-                    // client gets `Changed` pushes for that root, so
-                    // a guest's remote tree stays live without polls.
-                    crate::fs_watch::hub().ensure_watched(&root);
+                    // Watch only directories the tree actually lists, and
+                    // register the OS watcher off the socket task. A recursive
+                    // synchronous watch on Quick SSH's `$HOME` used to block
+                    // this entire client connection: the tree stayed empty
+                    // and PTY commands queued behind the inotify crawl. The
+                    // listed directory is validated against `root` before it
+                    // reaches the watcher.
+                    if let FilesClientMessage::ListDir { path } = &message {
+                        if let Ok(directory) = files_handler::resolve_path(&root, path) {
+                            let watch_root = root.clone();
+                            tokio::task::spawn_blocking(move || {
+                                crate::fs_watch::hub()
+                                    .ensure_watched_dir(&watch_root, &directory);
+                            });
+                        }
+                    }
                     if matches!(
                         &message,
                         FilesClientMessage::ListDir { .. }
@@ -1402,7 +1438,10 @@ pub(crate) async fn handle_socket(
                             {
                                 if let Some(parent) = std::path::Path::new(path).parent()
                                 {
-                                    crate::fs_watch::hub().ensure_watched(parent);
+                                    let parent = parent.to_path_buf();
+                                    tokio::task::spawn_blocking(move || {
+                                        crate::fs_watch::hub().ensure_watched(&parent);
+                                    });
                                 }
                             }
                             CrdtClientMessage::OpenBuffer {

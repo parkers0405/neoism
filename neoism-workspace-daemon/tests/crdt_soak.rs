@@ -113,6 +113,9 @@ impl Daemon {
         let hub = CrdtSyncHub::default();
 
         let app = server::router(AppState {
+            lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+                neoism_agent_neoism_adapter::neoism_services(),
+            ),
             auth,
             sessions: neoism_workspace_daemon::sessions::SessionRegistry::shared(),
             workspaces,

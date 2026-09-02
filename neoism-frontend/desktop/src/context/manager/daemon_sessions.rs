@@ -31,6 +31,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let Some(endpoint) = self.daemon_endpoint().map(str::to_string) else {
             return;
         };
+        let transport = self
+            .daemon
+            .link
+            .as_ref()
+            .and_then(|link| link.handle_and_runtime());
         let routes = self
             .contexts
             .iter()
@@ -55,6 +60,14 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .collect::<Vec<_>>();
 
         for (route_id, session_id, binding) in routes {
+            if let Some((handle, runtime)) = transport.clone() {
+                crate::context::remote_pty::bind_session(
+                    &binding,
+                    &session_id,
+                    handle,
+                    runtime,
+                );
+            }
             self.daemon
                 .cache
                 .route_sessions
@@ -479,8 +492,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     pub fn workspace_icon_kind_for_index(&self, index: usize) -> Option<String> {
-        use neoism_protocol::workspace::{WorkspaceHostKind, WorkspaceVisibility};
-
         // Joined-ness belongs to the grid, not whichever server cache happens
         // to be active for the window. This is the durable fallback that
         // keeps server A's link icon after server B is joined.
@@ -495,31 +506,22 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
 
         let workspace_id = self.workspace_tree_id_for_index(index)?;
-        let local_host = self.local_host_id();
         self.daemon
             .cache
             .daemon_host_workspaces
             .iter()
             .find(|workspace| workspace.id == workspace_id)
-            .map(|workspace| {
-                // A workspace owned by ANOTHER host that we're showing
-                // is one we JOINED — the guest side of sharing gets its
-                // own glyph (the owner keeps seeing "shared").
-                if workspace.host_id != local_host {
-                    return "joined".to_string();
-                }
-                match workspace.host_kind {
-                    WorkspaceHostKind::CloudSandbox => "cloud_sandbox".to_string(),
-                    WorkspaceHostKind::DockerSandbox => "docker_sandbox".to_string(),
-                    WorkspaceHostKind::Tailscale => "tailscale".to_string(),
-                    WorkspaceHostKind::Local => match workspace.visibility {
-                        WorkspaceVisibility::Shared | WorkspaceVisibility::Team => {
-                            "shared".to_string()
-                        }
-                        WorkspaceVisibility::Private => "local".to_string(),
-                    },
-                }
-            })
+            .map(|workspace| workspace_icon_kind(workspace, &self.local_host_id()))
+            // An unfocused workspace may be backed by a parked/different
+            // daemon, so it is absent from the active connection's cache.
+            // Fall back to the last authoritative state received for that
+            // workspace instead of dropping its hosting badge.
+            .or_else(|| self.workspace_icon_kinds.get(&workspace_id).cloned())
+    }
+
+    pub(crate) fn remember_workspace_icon_kind(&mut self, workspace: &WorkspaceSummary) {
+        let kind = workspace_icon_kind(workspace, &self.local_host_id());
+        self.workspace_icon_kinds.insert(workspace.id.clone(), kind);
     }
 
     pub fn workspace_tree_id_for_route(&self, route_id: usize) -> Option<String> {
@@ -931,6 +933,25 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             neoism_extensions: None,
             neoworld: None,
         })
+    }
+}
+
+fn workspace_icon_kind(workspace: &WorkspaceSummary, local_host: &str) -> String {
+    use neoism_protocol::workspace::{WorkspaceHostKind, WorkspaceVisibility};
+
+    // A workspace owned by ANOTHER host that we're showing is one we JOINED;
+    // the owner keeps seeing the hosting/share mark.
+    if workspace.host_id != local_host {
+        return "joined".to_string();
+    }
+    match workspace.host_kind {
+        WorkspaceHostKind::CloudSandbox => "cloud_sandbox".to_string(),
+        WorkspaceHostKind::DockerSandbox => "docker_sandbox".to_string(),
+        WorkspaceHostKind::Tailscale => "tailscale".to_string(),
+        WorkspaceHostKind::Local => match workspace.visibility {
+            WorkspaceVisibility::Shared | WorkspaceVisibility::Team => "shared".to_string(),
+            WorkspaceVisibility::Private => "local".to_string(),
+        },
     }
 }
 

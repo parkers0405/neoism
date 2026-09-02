@@ -843,28 +843,11 @@ mod tests {
         );
     }
 
-    /// End-to-end reproduction of the DESKTOP editor path: spawn the
-    /// in-process embedded daemon over a unix socket, connect a real
-    /// `DaemonClient` to it (exactly as the live app does), then send
-    /// `Resize` + `OpenBuffer` for a real file via `send_editor` and
-    /// assert the file's text streams back as an editor redraw.
-    ///
-    /// The daemon-side path is already proven by the workspace-daemon
-    /// integration test; this isolates the CLIENT/connection layer the
-    /// app actually uses (unix socket + `DaemonClient` + `into_channels`).
-    /// A blank editor in the app with this test PASSING means the bug is
-    /// above the connection (routing into the pane); FAILING means it's
-    /// the connection itself.
+    /// Exercise the desktop's real Unix `DaemonClient` editor route. The
+    /// daemon no longer hosts an embedded-Neovim grid, so grid requests must
+    /// return an error while `OpenBuffer` returns the Rust-owned LSP snapshot.
     #[test]
-    fn desktop_daemonclient_streams_file_redraw_over_unix() {
-        if std::process::Command::new("nvim")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("nvim not installed; skipping");
-            return;
-        }
+    fn desktop_daemonclient_streams_editor_replies_over_unix() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 "neoism=info,neoism_workspace_daemon=info,neoism_backend=info",
@@ -893,7 +876,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let saw_marker = rt.block_on(async {
+        let received_replies = rt.block_on(async {
             for _ in 0..200 {
                 if socket_path.exists() {
                     break;
@@ -929,8 +912,8 @@ mod tests {
                 .await
                 .expect("send open");
 
-            let mut grid_text = String::new();
-            let mut editor_msgs = 0usize;
+            let mut saw_grid_error = false;
+            let mut saw_lsp_snapshot = false;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
             while tokio::time::Instant::now() < deadline {
                 match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
@@ -938,19 +921,25 @@ mod tests {
                         message,
                         ..
                     })) => {
-                        editor_msgs += 1;
-                        let s = serde_json::to_string(&message).unwrap_or_default();
-                        let mut idx = 0;
-                        while let Some(pos) = s[idx..].find("\"ch\":\"") {
-                            let start = idx + pos + 6;
-                            if let Some(end) = s[start..].find('"') {
-                                grid_text.push_str(&s[start..start + end]);
-                                idx = start + end;
-                            } else {
-                                break;
+                        match message {
+                            neoism_protocol::editor::EditorServerMessage::Error {
+                                surface_id,
+                                ..
+                            } if surface_id.as_deref() == Some("s1") => {
+                                saw_grid_error = true;
                             }
+                            neoism_protocol::editor::EditorServerMessage::LspSnapshot {
+                                surface_id,
+                                file_path,
+                                ..
+                            } if surface_id.as_deref() == Some("s1")
+                                && file_path.as_deref() == Some(file.as_path()) =>
+                            {
+                                saw_lsp_snapshot = true;
+                            }
+                            _ => {}
                         }
-                        if grid_text.contains("MARKERNVIMREPRO") {
+                        if saw_grid_error && saw_lsp_snapshot {
                             break;
                         }
                     }
@@ -959,17 +948,12 @@ mod tests {
                     Err(_) => {}
                 }
             }
-            eprintln!(
-                "REPRO(client): editor_msgs={editor_msgs} grid_text_len={} saw_marker={}",
-                grid_text.len(),
-                grid_text.contains("MARKERNVIMREPRO")
-            );
-            grid_text.contains("MARKERNVIMREPRO")
+            saw_grid_error && saw_lsp_snapshot
         });
 
         assert!(
-            saw_marker,
-            "DESKTOP DaemonClient path: the file's text never streamed back over the unix daemon connection — the bug is in the client/connection layer"
+            received_replies,
+            "desktop DaemonClient did not stream the expected editor replies over Unix"
         );
     }
 }

@@ -442,8 +442,52 @@ impl Application<'_> {
             // workspace activates its server, route/session bindings are
             // rehydrated first and that connection's queued frames are then
             // drained normally.
+            self.queue_dead_ssh_reconnect(window_id);
             self.process_window_server_requests(window_id);
             self.flush_window_outbound(window_id);
+        }
+    }
+
+    /// Turn a dead Quick-SSH transport back into the same workspace attach.
+    /// The daemon client intentionally retries forever, but a dead `ssh -L`
+    /// child can never make that local port live again. Without this bridge
+    /// the window remained branded `SSH >>>` while its tree and commands were
+    /// permanently disconnected; reopening the workspace was the only code
+    /// path that noticed the dead child.
+    fn queue_dead_ssh_reconnect(&mut self, window_id: WindowId) {
+        if self.ssh_attach_inflight.contains(&window_id) {
+            return;
+        }
+        let Some(endpoint) = self.window_sessions.get(&window_id).and_then(|session| {
+            matches!(
+                session.status,
+                ServerConnectionStatus::Reconnecting | ServerConnectionStatus::Offline
+            )
+            .then(|| session.connection.endpoint().to_string())
+        }) else {
+            return;
+        };
+        let reconnect = self.ssh_attaches.get_mut(&endpoint).and_then(|attach| {
+            (!attach.is_running()).then(|| (attach.alias.clone(), attach.ssh_args.clone()))
+        });
+        let Some((target, ssh_args)) = reconnect else {
+            return;
+        };
+
+        self.ssh_attaches.remove(&endpoint);
+        if let Some(session) = self.window_sessions.get_mut(&window_id) {
+            session.parked_connections.remove(&endpoint);
+        }
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
+            route
+                .window
+                .screen
+                .request_ssh_workspace_attach(target.clone(), ssh_args);
+            route.window.screen.renderer.notifications.push(
+                format!("SSH connection to {target} dropped; reconnecting…"),
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+            route.request_redraw();
         }
     }
 

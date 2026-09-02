@@ -29,11 +29,11 @@ fn seed_peer_from_hub(
 fn save_buffer_writes_converged_doc_and_broadcasts_saved() {
     let work = tempfile::TempDir::new().unwrap();
     let file = work.path().join("note.md");
-    std::fs::write(&file, "stale on-disk text").unwrap();
+    std::fs::write(&file, "hello").unwrap();
 
     let hub = CrdtSyncHub::new(CrdtBufferRegistry::with_daemon_client_id(910));
     let buffer_id = crdt_buffer_id_for_path(&file);
-    hub.open_buffer(buffer_id.clone(), "hello");
+    hub.open_buffer(buffer_id.clone(), "stale client cache");
 
     // A peer's accepted edit joins the doc before the save.
     let peer = seed_peer_from_hub(&hub, &buffer_id, 31);
@@ -65,8 +65,8 @@ fn save_buffer_writes_converged_doc_and_broadcasts_saved() {
             bytes_written: "hello world".len() as u64,
         }]
     );
-    // ...the file holds the DOC text (peer's edit included, stale disk
-    // bytes gone)...
+    // ...the file holds the DOC text (the disk baseline plus the peer's
+    // accepted edit, not the stale client cache)...
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello world");
     // ...and every subscriber hears `Saved` (doc-level dirty bit).
     let mut saw_saved = false;

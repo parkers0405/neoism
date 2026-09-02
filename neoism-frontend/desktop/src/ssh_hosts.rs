@@ -6,7 +6,7 @@
 //! reaching a *remote* daemon the same way Codex does:
 //!
 //! 1. Pick a free local port `<port>`.
-//! 2. Spawn `ssh -N -L <port>:127.0.0.1:7878 <alias>` — a port-forward only,
+//! 2. Spawn `ssh -N -L <port>:127.0.0.1:17878 <alias>` — a port-forward only,
 //!    no remote shell.
 //! 3. Hand back `ws://127.0.0.1:<port>/session`, which the existing daemon
 //!    plumbing dials as if the daemon were local.
@@ -14,7 +14,7 @@
 //! ## Security model (loopback-only forward)
 //!
 //! The forward binds the *local* end to `127.0.0.1:<port>` (ssh's default for
-//! `-L` without an explicit bind address) and targets `127.0.0.1:7878` on the
+//! `-L` without an explicit bind address) and targets `127.0.0.1:17878` on the
 //! *remote* host. Both ends are loopback:
 //!   - Locally, only this machine can reach `<port>`; nothing is exposed to the
 //!     LAN.
@@ -29,12 +29,28 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Default port the remote workspace-daemon listens on (loopback).
-const REMOTE_DAEMON_PORT: u16 = 7878;
+/// Dedicated loopback port for the persistent Quick-SSH daemon.
+///
+/// The desktop's embedded daemon owns 7878. Reusing that port meant an older
+/// Neoism GUI on the SSH host silently became Quick SSH's backend, bypassing
+/// the standalone daemon bootstrap and coupling the remote workspace to the
+/// GUI process's lifetime/version. Keep Quick SSH on its own service port.
+const REMOTE_DAEMON_PORT: u16 = 17878;
 /// Stable daemon workspace used for Quick SSH. It is scoped by the remote
 /// daemon/user, so reconnecting through a different local tunnel still finds
 /// the same remote home workspace and PTYs.
 pub const QUICK_SSH_WORKSPACE_ID: &str = "neoism-quick-ssh-home";
+
+/// Whether an adopted daemon workspace is Neoism's private Quick-SSH home.
+/// Quick SSH deliberately behaves like a local terminal (including cwd-driven
+/// Explorer re-rooting), unlike a shared hosted workspace whose declared root
+/// remains stable for every participant.
+pub(crate) fn is_quick_ssh_workspace_id(workspace_id: &str) -> bool {
+    workspace_id == QUICK_SSH_WORKSPACE_ID
+        || workspace_id
+            .strip_prefix(QUICK_SSH_WORKSPACE_ID)
+            .is_some_and(|suffix| suffix.starts_with('-'))
+}
 
 /// Stable per-target workspace id. The remote daemon may serve several Quick
 /// SSH aliases, and one desktop may keep several SSH hosts in the same window;
@@ -179,7 +195,8 @@ pub struct AttachOptions {
     /// listening before we forward. The minimal path (default) assumes the
     /// daemon is already up on the remote loopback.
     pub launch_remote_daemon: bool,
-    /// Remote port the daemon listens on (loopback). Defaults to 7878.
+    /// Remote port the daemon listens on (loopback). Defaults to the dedicated
+    /// Quick-SSH daemon port, 17878.
     pub remote_port: u16,
     /// Connection options parsed from the user's interactive `ssh` command
     /// (`-p`, `-i`, `-F`, `-J`, ...). They are passed as distinct argv items
@@ -345,7 +362,7 @@ fn pick_free_local_port() -> Result<u16, io::Error> {
 }
 
 /// Attach to a remote daemon over SSH using default options (port-forward only,
-/// assume the remote daemon is already listening on 127.0.0.1:7878).
+/// assume the remote daemon is already listening on 127.0.0.1:17878).
 pub fn attach_over_ssh(alias: &str) -> Result<DaemonAttach, SshAttachError> {
     attach_over_ssh_with(alias, &AttachOptions::default())
 }
@@ -784,6 +801,13 @@ Host real
     }
 
     #[test]
+    fn quick_ssh_uses_a_dedicated_remote_daemon_port() {
+        let options = AttachOptions::default();
+        assert_eq!(options.remote_port, 17878);
+        assert_ne!(options.remote_port, 7878);
+    }
+
+    #[test]
     fn tunnel_replays_only_connection_options() {
         let args = vec![
             "-p".into(),
@@ -815,5 +839,10 @@ Host real
             quick_ssh_workspace_id_with_args("host", &[]),
             quick_ssh_workspace_id_with_args("host", &["-p".into(), "2222".into()])
         );
+        assert!(is_quick_ssh_workspace_id(QUICK_SSH_WORKSPACE_ID));
+        assert!(is_quick_ssh_workspace_id(
+            &quick_ssh_workspace_id_with_args("host", &[])
+        ));
+        assert!(!is_quick_ssh_workspace_id("neoism-quick-ssh-homebrew"));
     }
 }

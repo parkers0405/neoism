@@ -18,9 +18,10 @@ pub fn scan_root_with_workspace(
     git_statuses: &HashMap<PathBuf, GitStatus>,
     open_dirs: &HashSet<PathBuf>,
     _default_open_workspace: bool,
+    show_hidden: bool,
     files: &dyn FilesService,
 ) -> Vec<TreeEntry> {
-    scan_dir_with_open(root, 0, git_statuses, open_dirs, files)
+    scan_dir_with_open(root, 0, git_statuses, open_dirs, show_hidden, files)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -29,6 +30,7 @@ pub fn workspace_virtual_children(
     _depth: u8,
     _git_statuses: &HashMap<PathBuf, GitStatus>,
     _open_dirs: &HashSet<PathBuf>,
+    _show_hidden: bool,
     _files: &dyn FilesService,
 ) -> Vec<TreeEntry> {
     Vec::new()
@@ -50,10 +52,11 @@ pub fn scan_root_with_workspace(
     git_statuses: &HashMap<PathBuf, GitStatus>,
     open_dirs: &HashSet<PathBuf>,
     default_open_workspace: bool,
+    show_hidden: bool,
     files: &dyn FilesService,
 ) -> Vec<TreeEntry> {
     let _ = default_open_workspace;
-    scan_dir_with_open(root, 0, git_statuses, open_dirs, files)
+    scan_dir_with_open(root, 0, git_statuses, open_dirs, show_hidden, files)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -62,9 +65,10 @@ pub fn workspace_virtual_children(
     depth: u8,
     git_statuses: &HashMap<PathBuf, GitStatus>,
     open_dirs: &HashSet<PathBuf>,
+    show_hidden: bool,
     files: &dyn FilesService,
 ) -> Vec<TreeEntry> {
-    let _ = (root, depth, git_statuses, open_dirs, files);
+    let _ = (root, depth, git_statuses, open_dirs, show_hidden, files);
     Vec::new()
 }
 

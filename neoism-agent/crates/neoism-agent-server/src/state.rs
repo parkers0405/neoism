@@ -510,15 +510,46 @@ impl AppState {
             .is_some()
     }
     pub async fn open_default(services: AgentServices) -> anyhow::Result<Self> {
+        Self::open_default_with_recovery(services, false).await
+    }
+
+    /// Open the long-lived HTTP server state without making read-only routes
+    /// wait for the durable subtask-outbox scan. The scan still starts
+    /// automatically just after the serve loop becomes runnable; direct state
+    /// opens retain blocking recovery for deterministic callers and tests.
+    pub(crate) async fn open_default_for_server(
+        services: AgentServices,
+    ) -> anyhow::Result<Self> {
+        Self::open_default_with_recovery(services, true).await
+    }
+
+    async fn open_default_with_recovery(
+        services: AgentServices,
+        defer_subtask_recovery: bool,
+    ) -> anyhow::Result<Self> {
+        let started = crate::perf::now();
+        let store_started = crate::perf::now();
         let store = SessionStore::open_default().await?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            store_open_ms = crate::perf::elapsed_ms(store_started),
+            "default session store opened"
+        );
         let artifact_root = PathBuf::from(crate::default_state_dir()).join("artifacts");
-        Self::from_store(
+        let state = Self::from_store_with_recovery(
             store,
             artifact_root,
             services,
             crate::management::ManagementPolicy::from_env(),
+            defer_subtask_recovery,
         )
-        .await
+        .await?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            total_ms = crate::perf::elapsed_ms(started),
+            "default app state opened"
+        );
+        Ok(state)
     }
 
     pub async fn open_database_with_services(
@@ -556,6 +587,24 @@ impl AppState {
         services: AgentServices,
         management_policy: crate::management::ManagementPolicy,
     ) -> anyhow::Result<Self> {
+        Self::from_store_with_recovery(
+            store,
+            artifact_root,
+            services,
+            management_policy,
+            false,
+        )
+        .await
+    }
+
+    async fn from_store_with_recovery(
+        store: SessionStore,
+        artifact_root: PathBuf,
+        services: AgentServices,
+        management_policy: crate::management::ManagementPolicy,
+        defer_subtask_recovery: bool,
+    ) -> anyhow::Result<Self> {
+        let started = crate::perf::now();
         tokio::fs::create_dir_all(&artifact_root).await?;
         // Single ordered bus for every event (live deltas + committed edges).
         // Capacity must absorb a full streaming burst per subscriber. A
@@ -569,19 +618,61 @@ impl AppState {
         );
         let caller_policy = crate::caller::CallerPolicy::from_env();
         let utilities = crate::utility_runtime::UtilityRuntime::new(&services);
+        let recovery_started = crate::perf::now();
+        let phase_started = crate::perf::now();
         let permission_approvals = store.list_permission_approvals().await?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            phase_ms = crate::perf::elapsed_ms(phase_started),
+            "startup permission approvals loaded"
+        );
+        let phase_started = crate::perf::now();
         let durable_permissions = store.list_pending_permissions().await?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            phase_ms = crate::perf::elapsed_ms(phase_started),
+            "startup pending permissions loaded"
+        );
+        let phase_started = crate::perf::now();
         let durable_questions = store.list_pending_questions().await?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            phase_ms = crate::perf::elapsed_ms(phase_started),
+            "startup pending questions loaded"
+        );
+        let phase_started = crate::perf::now();
         store.interrupt_stale_runs().await?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            phase_ms = crate::perf::elapsed_ms(phase_started),
+            "startup stale runs interrupted"
+        );
+        let phase_started = crate::perf::now();
         let event_sequence_seed = store.latest_event_sequence().await?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            phase_ms = crate::perf::elapsed_ms(phase_started),
+            "startup event sequence loaded"
+        );
         let execution_owner_id = Id::ascending(IdKind::Event).to_string();
         let execution_lease_control = Arc::new(ExecutionLeaseControl {
             stopping: AtomicBool::new(false),
             notify: Notify::new(),
         });
+        let phase_started = crate::perf::now();
         store
             .heartbeat_execution_owner(&execution_owner_id, crate::now_millis())
             .await?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            phase_ms = crate::perf::elapsed_ms(phase_started),
+            "startup execution owner registered"
+        );
+        tracing::info!(
+            target: "neoism_agent::perf",
+            recovery_ms = crate::perf::elapsed_ms(recovery_started),
+            "startup recovery state loaded"
+        );
         let state = Self {
             inner: Arc::new(InnerState {
                 services,
@@ -692,8 +783,44 @@ impl AppState {
                 }
             }
         });
+        let resume_started = crate::perf::now();
+        let phase_started = crate::perf::now();
         crate::session_queue::resume_prompt_queues(state.clone()).await?;
-        crate::session_actions::resume_pending_subtask_completions(&state).await;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            phase_ms = crate::perf::elapsed_ms(phase_started),
+            "startup prompt queues resumed"
+        );
+        if defer_subtask_recovery {
+            let recovery_state = state.clone();
+            tokio::spawn(async move {
+                // Let health and the first catalog request win scheduling and
+                // database access. This compatibility scan can touch years of
+                // session metadata, but it does not affect catalog validity.
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let phase_started = crate::perf::now();
+                crate::session_actions::resume_pending_subtask_completions(&recovery_state).await;
+                tracing::info!(
+                    target: "neoism_agent::perf",
+                    phase_ms = crate::perf::elapsed_ms(phase_started),
+                    "deferred startup subtask completions resumed"
+                );
+            });
+        } else {
+            let phase_started = crate::perf::now();
+            crate::session_actions::resume_pending_subtask_completions(&state).await;
+            tracing::info!(
+                target: "neoism_agent::perf",
+                phase_ms = crate::perf::elapsed_ms(phase_started),
+                "startup subtask completions resumed"
+            );
+        }
+        tracing::info!(
+            target: "neoism_agent::perf",
+            resume_ms = crate::perf::elapsed_ms(resume_started),
+            total_ms = crate::perf::elapsed_ms(started),
+            "startup queues resumed"
+        );
         Ok(state)
     }
 
@@ -1144,6 +1271,7 @@ impl SessionStore {
     }
 
     pub(crate) async fn open(path: PathBuf) -> anyhow::Result<Self> {
+        let started = crate::perf::now();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create database directory {}", parent.display())
@@ -1153,16 +1281,29 @@ impl SessionStore {
         let path = path
             .to_str()
             .context("turso database path is not valid UTF-8")?;
+        let database_started = crate::perf::now();
         let database = turso::Builder::new_local(path)
             .build()
             .await
             .with_context(|| format!("failed to open turso database {path}"))?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            database_open_ms = crate::perf::elapsed_ms(database_started),
+            "turso database opened"
+        );
         let db = Db {
             database,
             write_gate: Arc::new(Mutex::new(())),
         };
         let store = Self { db };
+        let migration_started = crate::perf::now();
         store.migrate().await?;
+        tracing::info!(
+            target: "neoism_agent::perf",
+            migration_ms = crate::perf::elapsed_ms(migration_started),
+            total_ms = crate::perf::elapsed_ms(started),
+            "session store schema ready"
+        );
         Ok(store)
     }
 
@@ -3870,7 +4011,10 @@ impl SessionStore {
     pub(crate) async fn latest_event_sequence(&self) -> anyhow::Result<u64> {
         Ok(self
             .db
-            .fetch_scalar_i64("SELECT COALESCE(MAX(seq), 0) FROM events", vec![])
+            .fetch_scalar_i64(
+                "SELECT COALESCE((SELECT seq FROM events ORDER BY seq DESC LIMIT 1), 0)",
+                vec![],
+            )
             .await?
             .max(0) as u64)
     }

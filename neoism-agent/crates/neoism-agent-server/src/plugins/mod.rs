@@ -144,6 +144,24 @@ async fn build_host_with_config(
             std::sync::Arc::new(plugin_adapters::NotesTools(state.clone())),
         )));
     }
+    if services.documentation.is_some()
+        && enabled_in(&config, neoism_agent_builtins::plugin::documentation_tools::ID)
+    {
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::DocumentationToolsPlugin::new(
+                std::sync::Arc::new(plugin_adapters::DocumentationTools(state.clone())),
+            ),
+        ));
+    }
+    if services.memory.is_some()
+        && enabled_in(&config, neoism_agent_builtins::plugin::memory_tools::ID)
+    {
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::MemoryToolsPlugin::new(
+                std::sync::Arc::new(plugin_adapters::MemoryTools(state.clone())),
+            ),
+        ));
+    }
     if enabled_in(&config, neoism_agent_builtins::plugin::skills::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::SkillsPlugin::new(
             config.clone(),

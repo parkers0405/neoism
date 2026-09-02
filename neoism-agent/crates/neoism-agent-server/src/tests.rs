@@ -4365,7 +4365,7 @@ async fn app_states_keep_workspace_search_services_isolated() {
     let second = AppState::open_database_with_services(root.join("second.db"), second_services).await.unwrap();
     first.services().workspace_search.warm(&root).unwrap();
     let search_request = neoism_agent_service_api::FindFilesRequest {
-        root: root.clone(), query: "rs".into(), offset: 0, limit: 10, control: Default::default(),
+        root: root.clone(), query: "rs".into(), include_hidden: false, offset: 0, limit: 10, control: Default::default(),
     };
     assert_eq!(first.services().workspace_search.find_files(&search_request).unwrap().items[0].path, "first.rs");
     assert_eq!(second.services().workspace_search.find_files(&search_request).unwrap().items[0].path, "second.rs");

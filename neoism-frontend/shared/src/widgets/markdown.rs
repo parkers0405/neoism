@@ -1203,6 +1203,22 @@ mod tests {
     }
 
     #[test]
+    fn web_links_are_detected_inside_emphasis_markers() {
+        let text = "**[Sira — Founding Engineer](https://www.ycombinator.com/companies/sira/jobs/founding-engineer)**";
+        let links = web_link_spans(text);
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            &text[links[0].label_start..links[0].label_end],
+            "Sira — Founding Engineer"
+        );
+        assert_eq!(
+            links[0].target,
+            "https://www.ycombinator.com/companies/sira/jobs/founding-engineer"
+        );
+    }
+
+    #[test]
     fn phone_links_support_markdown_labels_and_bare_tel_targets() {
         let text = "Call [support](tel:+15551234567) or tel:+15557654321.";
         let links = web_link_spans(text);

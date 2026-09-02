@@ -438,6 +438,7 @@ async fn wait_until_session_not_running(state: &AppState, session_id: &str) {
 }
 
 pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
+    let mut prompt_failed = false;
     loop {
         wait_until_session_not_running(&state, &session_id).await;
         let Some((request, delivery, remaining)) =
@@ -526,6 +527,7 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
                 event_type::SESSION_ERROR,
                 json!({ "sessionID": session_id, "error": { "code": "prompt.failed", "message": error.to_string(), "retryable": false, "details": {} } }),
             ));
+                prompt_failed = true;
             }
         }
     }
@@ -545,6 +547,17 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
     // ownership above — or the execution stays unfinished and the next
     // top-level prompt inherits the previous run's timer.
     crate::execution_activity::finish_if_quiescent(&state, &session_id).await;
+    // A completion can arrive while this worker owns the dequeue/in-flight
+    // window. Reconcile only after ownership is released, so it is neither
+    // duplicated nor stranded. Hard failures stay pending for a later run or
+    // restart instead of immediately hot-looping the same poisoned prompt.
+    if !prompt_failed {
+        crate::session_actions::reconcile_pending_subtask_completions_for_parent(
+            &state,
+            &session_id,
+        )
+        .await;
+    }
 }
 
 pub(crate) fn spawn_drain_prompt_queue(state: AppState, session_id: String) {

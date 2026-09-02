@@ -1276,6 +1276,10 @@ impl NeoismAgentPane {
 
     pub(crate) fn drain_background_updates(&mut self) -> bool {
         const MAX_BACKGROUND_UPDATES_PER_FRAME: usize = 64;
+        // Clear the coalesced wake before draining. A worker that races this
+        // pass will then schedule the next frame instead of leaving its result
+        // stranded in the channel.
+        self.background_tx.begin_drain();
         let mut changed = false;
         let mut remaining = MAX_BACKGROUND_UPDATES_PER_FRAME;
         loop {
@@ -2172,6 +2176,7 @@ impl NeoismAgentPane {
 
     pub(crate) fn set_event_wake(&mut self, wake: AgentEventWake) {
         self.event_wake = Some(wake.clone());
+        self.background_tx.set_wake(wake.clone());
         if let Some(stream) = self.event_stream.as_mut() {
             stream.set_wake(wake);
         }

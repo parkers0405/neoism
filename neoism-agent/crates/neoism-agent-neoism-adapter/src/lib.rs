@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use neoism_agent_service_api::{
-    AgentServices, BuiltinMcpService, ConfigSourceService, DocumentationService, ExecutableError,
+    AgentServices, ConfigSourceService, DocumentationService, ExecutableError,
     ExecutableRequest, ExecutableResult, ExecutableService, ExecutableSource, MemoryService, NotesService,
     StandardExecutableService,
 };
@@ -33,9 +33,6 @@ pub fn neoism_services() -> AgentServices {
         .with_notes(notes.clone() as Arc<dyn NotesService>)
         .with_documentation(documentation.clone() as Arc<dyn DocumentationService>)
         .with_memory(memory.clone() as Arc<dyn MemoryService>)
-        .with_builtin_mcp(notes as Arc<dyn BuiltinMcpService>)
-        .with_builtin_mcp(documentation as Arc<dyn BuiltinMcpService>)
-        .with_builtin_mcp(memory as Arc<dyn BuiltinMcpService>)
 }
 
 pub fn language_capability_snapshot(

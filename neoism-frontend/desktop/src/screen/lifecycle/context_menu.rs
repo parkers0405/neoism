@@ -186,6 +186,13 @@ impl Screen<'_> {
             neoism_ui::panels::context_menu::ContextMenuAction::Modal(action) => {
                 self.execute_modal_action(action.into());
             }
+            neoism_ui::panels::context_menu::ContextMenuAction::ToggleFileTreeHidden => {
+                let shown = self.renderer.file_tree.toggle_hidden();
+                self.file_tree_notify(
+                    if shown { "Dotfiles shown" } else { "Dotfiles hidden" },
+                    neoism_ui::panels::notifications::NotificationLevel::Info,
+                );
+            }
             neoism_ui::panels::context_menu::ContextMenuAction::Agent(action) => {
                 match action {
                     neoism_ui::panels::context_menu::AgentContextAction::StopBackgroundTask {

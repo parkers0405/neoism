@@ -461,6 +461,63 @@ fn failed_subagent_refresh_preserves_sidebar_and_footer_activity() {
 }
 
 #[test]
+fn background_results_wake_the_window_and_replace_restored_placeholder_titles() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel
+        .ensure_subagent_main_entry("parent".to_string());
+    pane.side_panel
+        .upsert_subagent("child", "subagent", "subagent");
+
+    let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wake_count_for_callback = wake_count.clone();
+    pane.set_event_wake(AgentEventWake::for_test(move || {
+        wake_count_for_callback.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+
+    pane.side_panel.mark_subagent_tree_dirty();
+    let generation = pane
+        .side_panel
+        .begin_subagent_refresh()
+        .expect("refresh generation");
+    pane.background_sender()
+        .send(NeoismAgentBackgroundUpdate::SidePanelSubagentsRefreshed {
+            session_id: "parent".to_string(),
+            generation,
+            result: Ok(vec![
+                NeoismAgentSessionEntry::new("parent", "main session", "return"),
+                NeoismAgentSessionEntry::new(
+                    "child",
+                    "Inspect session catalogue (@explore subagent)",
+                    "explore",
+                )
+                .with_runtime_status(Some("running".to_string())),
+            ]),
+        })
+        .unwrap();
+
+    assert_eq!(wake_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(pane.drain_background_updates());
+    assert_eq!(
+        pane.side_panel
+            .subagents()
+            .iter()
+            .find(|entry| entry.id == "child")
+            .map(|entry| entry.title.as_str()),
+        Some("Inspect session catalogue (@explore subagent)")
+    );
+
+    // Draining releases the coalesced wake, so another independent result
+    // schedules another frame rather than getting stranded.
+    pane.background_sender()
+        .send(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(Ok(
+            Vec::new(),
+        )))
+        .unwrap();
+    assert_eq!(wake_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+#[test]
 fn event_stream_reconnect_requests_exactly_one_recovery_snapshot() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
@@ -2313,6 +2370,30 @@ fn connect_secret_paste_fills_the_secret_field_not_the_composer() {
 }
 
 #[test]
+fn pending_question_paste_fills_the_typed_answer_not_the_composer() {
+    let mut pane = NeoismAgentPane::default();
+    let question = neoism_ui::panels::agent_pane::question_policy::question_request_from_event(
+        &serde_json::json!({
+            "id": "question-email",
+            "sessionId": "session-1",
+            "questions": [{
+                "question": "Who should receive the recording?",
+                "options": []
+            }]
+        }),
+    );
+    pane.enqueue_pending_question(question);
+
+    pane.insert_paste("dusty@elevatedintx.com");
+
+    assert_eq!(
+        pane.pending_question().map(|question| question.typed.as_str()),
+        Some("dusty@elevatedintx.com")
+    );
+    assert!(pane.input().is_empty(), "paste must not enter the composer");
+}
+
+#[test]
 fn submit_prompt_while_streaming_queues_bottom_preview_without_transcript_echo() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("sess-1".to_string());
@@ -2680,6 +2761,19 @@ fn agent_model_and_thinking_changes_preserve_composer_draft() {
 
     pane.apply_agent("plan".to_string());
     assert_eq!(pane.input(), draft);
+}
+
+#[test]
+fn tab_mode_switch_rearms_agent_chip_transition() {
+    let mut pane = NeoismAgentPane::default();
+    assert_eq!(pane.agent_label(), "Build");
+    assert_eq!(pane.agent_label_changed_elapsed_ms(), None);
+
+    pane.toggle_mode();
+
+    assert_eq!(pane.agent_label(), "Plan");
+    assert!(pane.agent_label_changed_elapsed_ms().is_some());
+    assert_eq!(pane.animation_reason(), Some("agent_label_transition"));
 }
 
 #[test]

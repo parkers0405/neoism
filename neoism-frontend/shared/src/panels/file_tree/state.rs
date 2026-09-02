@@ -12,6 +12,9 @@ use crate::editor::crdt::PresenceAvatarPeer;
 pub struct FileTree {
     pub(super) visible: bool,
     pub(super) focused: bool,
+    /// Whether ordinary project dotfiles are visible. Hard-excluded metadata
+    /// and cache paths are filtered by the shared scan policy regardless.
+    pub(super) show_hidden: bool,
     pub(super) entries: Vec<TreeEntry>,
     pub(super) selected: usize,
     pub(super) scroll_top: usize,
@@ -108,6 +111,7 @@ impl FileTree {
         FileTree {
             visible: false,
             focused: false,
+            show_hidden: true,
             entries: Vec::new(),
             selected: 0,
             scroll_top: 0,
@@ -144,6 +148,7 @@ impl FileTree {
         FileTree {
             visible: false,
             focused: false,
+            show_hidden: true,
             entries: Vec::new(),
             selected: 0,
             scroll_top: 0,

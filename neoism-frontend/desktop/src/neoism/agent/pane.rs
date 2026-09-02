@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -697,6 +697,53 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
     },
 }
 
+/// Sender for work completed off the UI thread. A plain `mpsc::Sender`
+/// leaves a finished result parked until some unrelated input happens to
+/// schedule another frame. Keep the channel cheap, but explicitly wake the
+/// owning window after enqueueing so cold session catalogues, restored branch
+/// metadata, OAuth results, and other background work paint immediately.
+#[derive(Clone)]
+pub(crate) struct AgentBackgroundSender {
+    tx: mpsc::Sender<NeoismAgentBackgroundUpdate>,
+    wake: Arc<Mutex<Option<AgentEventWake>>>,
+}
+
+impl AgentBackgroundSender {
+    fn new(
+        tx: mpsc::Sender<NeoismAgentBackgroundUpdate>,
+        wake: Arc<Mutex<Option<AgentEventWake>>>,
+    ) -> Self {
+        Self { tx, wake }
+    }
+
+    pub(crate) fn send(
+        &self,
+        update: NeoismAgentBackgroundUpdate,
+    ) -> Result<(), mpsc::SendError<NeoismAgentBackgroundUpdate>> {
+        self.tx.send(update)?;
+        if let Ok(wake) = self.wake.lock() {
+            if let Some(wake) = wake.as_ref() {
+                wake.wake();
+            }
+        }
+        Ok(())
+    }
+
+    fn set_wake(&self, wake: AgentEventWake) {
+        if let Ok(mut current) = self.wake.lock() {
+            *current = Some(wake);
+        }
+    }
+
+    fn begin_drain(&self) {
+        if let Ok(wake) = self.wake.lock() {
+            if let Some(wake) = wake.as_ref() {
+                wake.begin_drain();
+            }
+        }
+    }
+}
+
 pub(crate) struct PendingPromptDispatch {
     pub(crate) origin_session_id: Option<String>,
     pub(crate) origin_draft_id: u64,
@@ -764,6 +811,9 @@ pub struct NeoismAgentPane {
     pub(super) messages: Vec<NeoismAgentMessage>,
     pub(super) mode: NeoismAgentMode,
     pub(super) agent: Option<String>,
+    /// Rearms the footer chip's rainbow/scramble transition when the user
+    /// switches agents (including Build/Plan via Tab).
+    pub(super) agent_label_changed_at: Option<Instant>,
     pub(super) model: String,
     pub(super) connection_id: Option<String>,
     pub(super) pending_account_model: Option<String>,
@@ -823,7 +873,7 @@ pub struct NeoismAgentPane {
     /// real busy/retry/new-prompt edge starts another run.
     pub(super) terminal_idle_sessions: BTreeSet<String>,
     pub(super) session_goal_cache: HashMap<String, (Option<SessionGoal>, u64)>,
-    background_tx: Sender<NeoismAgentBackgroundUpdate>,
+    background_tx: AgentBackgroundSender,
     background_rx: Receiver<NeoismAgentBackgroundUpdate>,
     /// Semantic session-search coalescing: at most one fetch in flight; a
     /// query typed meanwhile waits in `semantic_pending_query` and is kicked
@@ -1059,13 +1109,16 @@ fn order_endpoints(
 
 impl Default for NeoismAgentPane {
     fn default() -> Self {
-        let (background_tx, background_rx) = mpsc::channel();
+        let (background_raw_tx, background_rx) = mpsc::channel();
+        let background_tx =
+            AgentBackgroundSender::new(background_raw_tx, Arc::new(Mutex::new(None)));
         Self {
             input: String::new(),
             input_help_visible: true,
             messages: Vec::new(),
             mode: NeoismAgentMode::Build,
             agent: Some(DEFAULT_AGENT.to_string()),
+            agent_label_changed_at: None,
             model: DEFAULT_MODEL.to_string(),
             connection_id: None,
             pending_account_model: None,
@@ -1282,6 +1335,7 @@ fn file_mention_search(
     search.find_files(&neoism_agent_service_api::FindFilesRequest {
         root: root.to_path_buf(),
         query: query.to_string(),
+        include_hidden: false,
         offset: 0,
         limit,
         control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),

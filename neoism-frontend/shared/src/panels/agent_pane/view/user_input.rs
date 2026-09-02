@@ -58,6 +58,16 @@ fn streaming_status_accent(theme: &IdeTheme, state: AgentStreamingStatus) -> u32
     theme.readable_accent(color)
 }
 
+fn agent_chip_accent(theme: &IdeTheme, label: &str) -> u32 {
+    if label.eq_ignore_ascii_case("build") {
+        theme.cyan
+    } else if label.eq_ignore_ascii_case("plan") {
+        theme.yellow
+    } else {
+        theme.accent
+    }
+}
+
 fn mix_status_color(from: [u8; 4], to: [u8; 4], amount: f32) -> [u8; 4] {
     let amount = amount.clamp(0.0, 1.0);
     let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
@@ -128,6 +138,17 @@ mod streaming_status_theme_tests {
         assert_eq!(
             streaming_status_accent(&theme, AgentStreamingStatus::WaitingSubagents),
             theme.readable_accent(theme.yellow)
+        );
+    }
+
+    #[test]
+    fn build_and_plan_chips_use_distinct_theme_roles() {
+        let theme = IdeTheme::pastel_dark();
+        assert_eq!(agent_chip_accent(&theme, "Build"), theme.cyan);
+        assert_eq!(agent_chip_accent(&theme, "Plan"), theme.yellow);
+        assert_ne!(
+            agent_chip_accent(&theme, "Build"),
+            agent_chip_accent(&theme, "Plan")
         );
     }
 
@@ -213,6 +234,7 @@ pub trait AgentUserInputPane {
     fn register_status_chip_rect(&mut self, index: usize, rect: [f32; 4]);
     fn usage_summary_label(&self) -> Option<String>;
     fn agent_label(&self) -> &str;
+    fn agent_label_changed_elapsed_ms(&self) -> Option<f32>;
     fn model(&self) -> &str;
     fn thinking_label(&self) -> &str;
     fn streaming_label(&self) -> String;
@@ -336,6 +358,10 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn agent_label(&self) -> &str {
                 <$pane>::agent_label(self)
+            }
+
+            fn agent_label_changed_elapsed_ms(&self) -> Option<f32> {
+                <$pane>::agent_label_changed_elapsed_ms(self)
             }
 
             fn model(&self) -> &str {
@@ -551,6 +577,10 @@ impl AgentUserInputPane for NeoismAgentPane {
 
     fn agent_label(&self) -> &str {
         NeoismAgentPane::agent_label(self)
+    }
+
+    fn agent_label_changed_elapsed_ms(&self) -> Option<f32> {
+        NeoismAgentPane::agent_label_changed_elapsed_ms(self)
     }
 
     fn model(&self) -> &str {
@@ -1886,10 +1916,13 @@ pub fn render_status_chips(
 ) {
     // Dropdown-look chips: label ˅ — each registers a hit rect so a
     // click opens the matching "/" picker (agent / model / thinking).
-    // Colors keep the old chip identity (agent = accent, model = blue,
-    // thinking = magenta).
+    // Build and Plan have explicit, distinct identities; custom agents retain
+    // the normal accent while model and thinking keep their existing roles.
+    let agent_label = pane.agent_label().to_string();
+    let agent_transition = pane.agent_label_changed_elapsed_ms();
+    let agent_color = agent_chip_accent(theme, &agent_label);
     let chips: [(String, u32); 3] = [
-        (pane.agent_label().to_string(), theme.accent),
+        (agent_label, agent_color),
         (pane.model().to_string(), theme.blue),
         (pane.thinking_label().to_string(), theme.magenta),
     ];
@@ -1918,7 +1951,22 @@ pub fn render_status_chips(
         if x + chip_w > start_x + max_w {
             break;
         }
-        draw_text_clipped(sugarloaf, x, y, &label, &opts, occlusion_rects);
+        if index == 0 {
+            if let Some(elapsed_ms) = agent_transition {
+                super::side_panel::draw::render_scramble_text(
+                    sugarloaf,
+                    x,
+                    y,
+                    &label,
+                    &opts,
+                    elapsed_ms,
+                );
+            } else {
+                draw_text_clipped(sugarloaf, x, y, &label, &opts, occlusion_rects);
+            }
+        } else {
+            draw_text_clipped(sugarloaf, x, y, &label, &opts, occlusion_rects);
+        }
         draw_text_clipped(
             sugarloaf,
             x + label_w + 6.0 * s,

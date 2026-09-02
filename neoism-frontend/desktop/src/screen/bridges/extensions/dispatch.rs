@@ -18,11 +18,6 @@ impl Screen<'_> {
         if self.renderer.install_tracker.in_flight.contains_key(id) {
             return;
         }
-        if is_builtin_extension_id(id) {
-            tracing::info!(target: "neoism::extensions", id = %id, "routing to built-in MCP install");
-            self.dispatch_builtin_mcp_install(id);
-            return;
-        }
         if id == NEOISM_PYTHON_KERNEL_ID {
             self.dispatch_python_kernel_install(InstallSource::ExtensionsPanel);
             return;
@@ -109,46 +104,6 @@ impl Screen<'_> {
             },
         );
         self.mark_dirty();
-    }
-
-    fn dispatch_builtin_mcp_install(&mut self, id: &str) {
-        let Some(manifest) = self.resolve_bundled_manifest(id) else {
-            self.renderer.notifications.push(
-                format!("Unknown built-in extension `{}`", id),
-                NotificationLevel::Error,
-            );
-            return;
-        };
-        match install_builtin_mcp_record(&manifest) {
-            Ok(()) => {
-                if let Some(pane) = self
-                    .context_manager
-                    .current_mut()
-                    .neoism_extensions
-                    .as_mut()
-                {
-                    for entry in pane.entries_mut().iter_mut() {
-                        if entry.id == id {
-                            entry.status = ExtensionStatus::Installed {
-                                version: manifest.version.clone(),
-                            };
-                            break;
-                        }
-                    }
-                }
-                self.renderer.notifications.push(
-                    format!("Installed {}", manifest.name),
-                    NotificationLevel::Info,
-                );
-                self.mark_dirty();
-            }
-            Err(error) => {
-                self.renderer.notifications.push(
-                    format!("Could not install {}: {}", manifest.name, error),
-                    NotificationLevel::Error,
-                );
-            }
-        }
     }
 
     pub(crate) fn dispatch_python_kernel_install(&mut self, source: InstallSource) {
@@ -347,10 +302,9 @@ impl Screen<'_> {
         // uninstalling zls), which then SKIPPED the managed-bin cleanup below
         // and left dangling symlinks. `resolve` rebuilds the cache once.
         let manifest = self.resolve_bundled_manifest(id);
-        let builtin = is_builtin_extension_id(id)
-            || manifest
-                .as_ref()
-                .is_some_and(|m| m.categories.iter().any(|c| c == "Built-in"));
+        let builtin = manifest
+            .as_ref()
+            .is_some_and(|m| m.categories.iter().any(|c| c == "Built-in"));
         let mut index = InstalledIndex::load().unwrap_or_default();
         let removed = if builtin {
             index.disable_builtin(id);

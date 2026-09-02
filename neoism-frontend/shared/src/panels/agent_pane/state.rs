@@ -537,6 +537,9 @@ pub struct NeoismAgentPane {
     pub(super) messages: Vec<NeoismAgentMessage>,
     pub(super) mode: NeoismAgentMode,
     pub(super) agent: Option<String>,
+    /// Rearms the footer chip's rainbow/scramble transition when the user
+    /// switches agents (including Build/Plan via Tab).
+    agent_label_changed_at: Option<Instant>,
     pub(super) model: String,
     pub(super) connection_id: Option<String>,
     /// Model waiting for secret-free connection reconciliation.
@@ -933,6 +936,7 @@ impl Default for NeoismAgentPane {
             messages: Vec::new(),
             mode: NeoismAgentMode::Build,
             agent: Some(DEFAULT_AGENT.to_string()),
+            agent_label_changed_at: None,
             model: DEFAULT_MODEL.to_string(),
             connection_id: None,
             pending_account_model: None,

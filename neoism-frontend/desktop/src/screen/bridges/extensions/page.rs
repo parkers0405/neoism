@@ -140,7 +140,7 @@ impl Screen<'_> {
         }
     }
 
-    /// Build the `ExtensionEntry` list: the bundled MCP registry and
+    /// Build the `ExtensionEntry` list: the bundled external MCP registry and
     /// kernels joined against the local `installed.json`, plus one card
     /// per adapter in the Neoism LSP engine's runtime registry (real
     /// connected/installed state) and the compiled-in tree-sitter
@@ -148,15 +148,9 @@ impl Screen<'_> {
     /// install/uninstall dispatcher can re-resolve a full manifest from
     /// an `ExtensionEntry` id.
     fn load_bundled_extension_entries(&mut self) -> Vec<ExtensionEntry> {
-        let notes_manifest = neoism_notes_mcp_manifest();
-        let memory_manifest = neoism_memory_mcp_manifest();
-        let docs_manifest = neoism_docs_mcp_manifest();
-        let builtins = vec![
-            notes_manifest.clone(),
-            memory_manifest.clone(),
-            docs_manifest.clone(),
-        ];
-        let mut installed = ensure_builtin_mcp_installed(&builtins);
+        // Neoism notes, memory, and docs are injected native Agent tools.
+        // Only genuine external MCP servers belong in this extension catalog.
+        let mut installed = InstalledIndex::load().unwrap_or_default();
 
         // MCP entries: tag each with the literal "MCP Server" category
         // so the panel's `McpServers` tab filter (which substring-
@@ -181,9 +175,6 @@ impl Screen<'_> {
         let mut manifests = mcp_manifests;
         manifests.insert(0, rust_kernel_manifest);
         manifests.insert(0, python_kernel_manifest);
-        manifests.insert(0, memory_manifest);
-        manifests.insert(0, notes_manifest);
-        manifests.insert(0, docs_manifest);
 
         match neoism_extensions::reconcile_managed_installs(&manifests) {
             Ok(report) => {

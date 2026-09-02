@@ -245,6 +245,11 @@ impl NeoismAgentPane {
         }
     }
 
+    pub fn agent_label_changed_elapsed_ms(&self) -> Option<f32> {
+        let elapsed = self.agent_label_changed_at?.elapsed().as_secs_f32() * 1000.0;
+        (elapsed < 320.0).then_some(elapsed)
+    }
+
     pub fn thinking_label(&self) -> &str {
         self.thinking.as_deref().unwrap_or("none")
     }

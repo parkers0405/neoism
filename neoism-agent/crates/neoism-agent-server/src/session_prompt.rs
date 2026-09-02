@@ -245,46 +245,64 @@ pub(crate) async fn append_prompt(
         info: MessageInfo::User(user),
         parts,
     };
+    let resume_existing_runtime = create_stub_reply && broadcast_system.is_some();
+    let mut newly_persisted = false;
     if let Some(existing) = state
         .inner
         .store
         .get_message(&session_id_text, &message_id.to_string())
         .await?
     {
-        if same_user_prompt(&existing, &user_message) {
-            return Ok(existing);
-        }
-        return Err(ApiError::conflict(format!(
-            "message {} already exists with different prompt content",
-            message_id
-        )));
-    }
-    let message_event = EventPayload::new(
-        event_type::MESSAGE_UPDATED,
-        json!({ "sessionID": session_id, "info": user_message.info }),
-    );
-    if let Err(error) = state
-        .append_message_with_event(&session_id_text, &user_message, message_event)
-        .await
-    {
-        // Close the race between the lookup above and the unique message-id
-        // insert. An exact concurrent retry succeeds idempotently; a reused id
-        // with different content is a conflict.
-        if let Some(existing) = state
-            .inner
-            .store
-            .get_message(&session_id_text, &message_id.to_string())
-            .await?
+        if same_user_prompt(&existing, &user_message)
+            || (resume_existing_runtime
+                && same_runtime_user_prompt(&existing, &user_message))
         {
-            if same_user_prompt(&existing, &user_message) {
+            if !resume_existing_runtime {
                 return Ok(existing);
             }
+        } else {
             return Err(ApiError::conflict(format!(
                 "message {} already exists with different prompt content",
                 message_id
             )));
         }
-        return Err(error.into());
+    } else {
+        let message_event = EventPayload::new(
+            event_type::MESSAGE_UPDATED,
+            json!({ "sessionID": session_id, "info": user_message.info }),
+        );
+        if let Err(error) = state
+            .append_message_with_event(&session_id_text, &user_message, message_event)
+            .await
+        {
+            // Close the race between the lookup above and the unique message-id
+            // insert. Exact runtime-notification retries resume model generation
+            // from the durable user turn; ordinary exact retries remain no-ops.
+            if let Some(existing) = state
+                .inner
+                .store
+                .get_message(&session_id_text, &message_id.to_string())
+                .await?
+            {
+                if same_user_prompt(&existing, &user_message)
+                    || (resume_existing_runtime
+                        && same_runtime_user_prompt(&existing, &user_message))
+                {
+                    if !resume_existing_runtime {
+                        return Ok(existing);
+                    }
+                } else {
+                    return Err(ApiError::conflict(format!(
+                        "message {} already exists with different prompt content",
+                        message_id
+                    )));
+                }
+            } else {
+                return Err(error.into());
+            }
+        } else {
+            newly_persisted = true;
+        }
     }
     // Execution ownership begins only after the user turn is durably
     // admitted. Validation failures, dedupe conflicts, and failed message
@@ -317,34 +335,36 @@ pub(crate) async fn append_prompt(
     // user text that started the turn. Parts have no role of their
     // own, so tag these events explicitly; consumers that predate the
     // field ignore it.
-    for part in &user_message.parts {
-        let mut part_value = match serde_json::to_value(part) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if let Some(obj) = part_value.as_object_mut() {
-            obj.insert("role".to_string(), json!("user"));
-            if let Some(system) = &broadcast_system {
-                obj.insert("system".to_string(), json!(system));
+    if newly_persisted {
+        for part in &user_message.parts {
+            let mut part_value = match serde_json::to_value(part) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if let Some(obj) = part_value.as_object_mut() {
+                obj.insert("role".to_string(), json!("user"));
+                if let Some(system) = &broadcast_system {
+                    obj.insert("system".to_string(), json!(system));
+                }
+                // Stamp the true sender onto the live part so remote viewers
+                // render THEIR presence orb + name (the frontend `part_block`
+                // reads `part["author"]`). Absent when the sender didn't send a
+                // name — remote falls back to its own local presence name.
+                if let Some(author) = &author {
+                    obj.insert("author".to_string(), json!(author));
+                }
             }
-            // Stamp the true sender onto the live part so remote viewers
-            // render THEIR presence orb + name (the frontend `part_block`
-            // reads `part["author"]`). Absent when the sender didn't send a
-            // name — remote falls back to its own local presence name.
-            if let Some(author) = &author {
-                obj.insert("author".to_string(), json!(author));
-            }
+            state.publish(EventPayload::new(
+                event_type::MESSAGE_PART_UPDATED,
+                json!({
+                    "sessionID": session_id,
+                    "part": part_value,
+                    "time": now_millis(),
+                }),
+            ));
         }
-        state.publish(EventPayload::new(
-            event_type::MESSAGE_PART_UPDATED,
-            json!({
-                "sessionID": session_id,
-                "part": part_value,
-                "time": now_millis(),
-            }),
-        ));
     }
-    if create_stub_reply {
+    if create_stub_reply && newly_persisted {
         if let (Some(source), Some(fallback)) = (title_source, fallback_title) {
             let activity_segment = crate::execution_activity::begin_provider_segment(
                 state,
@@ -792,6 +812,39 @@ fn same_user_prompt(existing: &MessageWithParts, proposed: &MessageWithParts) ->
     }
     matches!(existing.info, MessageInfo::User(_))
         && canonical(existing) == canonical(proposed)
+}
+
+fn same_runtime_user_prompt(
+    existing: &MessageWithParts,
+    proposed: &MessageWithParts,
+) -> bool {
+    fn canonical(message: &MessageWithParts) -> Option<serde_json::Value> {
+        let MessageInfo::User(info) = &message.info else {
+            return None;
+        };
+        if !info
+            .system
+            .as_deref()
+            .is_some_and(crate::message_model::is_runtime_system_notification)
+        {
+            return None;
+        }
+        let mut value = serde_json::to_value(message).ok()?;
+        let object = value.as_object_mut()?;
+        let info = object.get_mut("info")?.as_object_mut()?;
+        for field in ["time", "agent", "model", "tools", "author"] {
+            info.remove(field);
+        }
+        for part in object.get_mut("parts")?.as_array_mut()? {
+            let part = part.as_object_mut()?;
+            part.remove("id");
+            part.remove("sessionId");
+            part.remove("messageId");
+        }
+        Some(value)
+    }
+
+    canonical(existing).is_some_and(|existing| Some(existing) == canonical(proposed))
 }
 
 fn run_system_for_request(
@@ -1745,6 +1798,33 @@ mod tests {
     }
 
     #[test]
+    fn runtime_retry_ignores_changed_resolved_connection_metadata() {
+        let session_id = Id::ascending(IdKind::Session);
+        let mut existing = user_message(session_id, "Subagent finished.\ntask_id: ses_child");
+        let MessageInfo::User(existing_info) = &mut existing.info else {
+            unreachable!();
+        };
+        existing_info.system = Some(
+            "runtime notification: background subagent completion.".to_string(),
+        );
+        let mut proposed = existing.clone();
+        let MessageInfo::User(proposed_info) = &mut proposed.info else {
+            unreachable!();
+        };
+        proposed_info.time.created += 1;
+        proposed_info.model.connection_id = Some("conn_default".to_string());
+
+        assert!(!same_user_prompt(&existing, &proposed));
+        assert!(same_runtime_user_prompt(&existing, &proposed));
+
+        let Part::Text(text) = &mut proposed.parts[0] else {
+            unreachable!();
+        };
+        text.text.push_str("\ndifferent result");
+        assert!(!same_runtime_user_prompt(&existing, &proposed));
+    }
+
+    #[test]
     fn assistant_tool_parts_need_followup_even_without_finish_reason() {
         let message: MessageWithParts = serde_json::from_value(json!({
             "info": {
@@ -1964,6 +2044,21 @@ mod tests {
         info.extra.insert(
             crate::caller::TENANT_EXTRA_KEY.to_string(),
             json!("workspace:workspace-a"),
+        );
+
+        assert_eq!(
+            provider_credential_scope(Some(&info)),
+            (Some("local".into()), None),
+        );
+    }
+
+    #[test]
+    fn host_created_shared_workspace_session_uses_host_provider_credentials() {
+        let mut info = test_session_info(None);
+        info.workspace_id = Some("workspace-a".into());
+        info.extra.insert(
+            crate::caller::TENANT_EXTRA_KEY.to_string(),
+            json!("local"),
         );
 
         assert_eq!(
@@ -2413,10 +2508,9 @@ fn provider_credential_scope(
     // Workspace-daemon guests run models on the host. Resolve the host's
     // local provider connection without exposing its secret to the guest.
     // Direct hosted tenants retain their isolated scope.
-    if workspace_id
-        .as_deref()
-        .is_some_and(|workspace_id| tenant_id == format!("workspace:{workspace_id}"))
-    {
+    if workspace_id.as_deref().is_some_and(|workspace_id| {
+        tenant_id == "local" || tenant_id == format!("workspace:{workspace_id}")
+    }) {
         (Some("local".to_string()), None)
     } else {
         (Some(tenant_id.to_string()), workspace_id)

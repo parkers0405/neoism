@@ -361,7 +361,8 @@ fn web_links_render_as_clickable_labels_or_blue_bare_urls() {
     let wrapped = inline_wrap_tokens("https://neoism.dev/a-very-long-path");
     assert!(wrapped.iter().all(|token| matches!(
         &token.style,
-        InlineWrapStyle::MarkdownLink(target) if target == "https://neoism.dev/a-very-long-path"
+        InlineWrapStyle::MarkdownLink { target, bold: false, italic: false }
+            if target == "https://neoism.dev/a-very-long-path"
     )));
 }
 
@@ -412,6 +413,32 @@ fn hard_wrapped_file_link_is_joined_without_touching_fenced_code() {
         normalize_multiline_markdown_links(prose),
         std::borrow::Cow::Borrowed(_)
     ));
+}
+
+#[test]
+fn hard_wrapped_ordered_list_web_link_remains_clickable() {
+    let source = "5. **[Sira — Founding\nEngineer](https://www.ycombinator.com/companies/sira/jobs/NwjdNxG-founding-en\ngineer)**";
+    let normalized = normalize_multiline_markdown_links(source);
+    assert_eq!(
+        normalized,
+        "5. **[Sira — Founding Engineer](https://www.ycombinator.com/companies/sira/jobs/NwjdNxG-founding-engineer)**"
+    );
+
+    let lines = semantic_markdown_lines(normalized.as_ref());
+    assert_eq!(lines.len(), 1);
+    let (_, _, item) = markdown_list_item(&lines[0]).expect("ordered list item");
+    let segments = parsed_markdown_inline_line(item);
+    assert!(segments.iter().any(|segment| matches!(
+        segment,
+        MarkdownInlineSegment::MarkdownLink { label, target: Some(target), bold: true, italic: false, .. }
+            if label == "Sira — Founding Engineer"
+                && target == "https://www.ycombinator.com/companies/sira/jobs/NwjdNxG-founding-engineer"
+    )));
+    assert!(inline_wrap_tokens(item).iter().all(|token| matches!(
+        &token.style,
+        InlineWrapStyle::MarkdownLink { target, bold: true, italic: false }
+            if target == "https://www.ycombinator.com/companies/sira/jobs/NwjdNxG-founding-engineer"
+    )));
 }
 
 #[test]

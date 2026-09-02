@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 const GUI_SOURCE: &str = "neoism:user-gui";
 const MCP_SOURCE: &str = "neoism:user-mcp";
 const PROJECT_SOURCE: &str = "neoism:project";
+const LEGACY_NATIVE_MCP_IDS: [&str; 3] = ["neoism-docs", "neoism-memory", "neoism-notes"];
 
 #[derive(Clone, Debug)]
 pub struct NeoismConfigSourceService {
@@ -68,7 +69,17 @@ impl NeoismConfigSourceService {
     }
 
     fn mcp_document(value: &Value) -> Value {
-        let map = value.get("mcp").cloned().unwrap_or_else(|| json!({}));
+        let mut map = value
+            .get("mcp")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        // These product-owned services are injected in-process and exposed as
+        // native tools. Ignore stale extension-era subprocess entries so an
+        // old mcp.json cannot shadow or duplicate the native capability.
+        for id in LEGACY_NATIVE_MCP_IDS {
+            map.remove(id);
+        }
         json!({ "mcp": map })
     }
 
@@ -253,6 +264,26 @@ fn strip_trailing_commas(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_product_mcp_entries_cannot_shadow_native_tools() {
+        let document = NeoismConfigSourceService::mcp_document(&json!({
+            "mcp": {
+                "neoism-docs": { "type": "local", "command": ["broken", "docs"] },
+                "neoism-memory": { "type": "local", "command": ["broken", "memory"] },
+                "neoism-notes": { "type": "local", "command": ["broken", "notes"] },
+                "external-search": { "type": "remote", "url": "https://example.test/mcp" }
+            }
+        }));
+
+        assert_eq!(
+            document.pointer("/mcp/external-search/type"),
+            Some(&json!("remote")),
+        );
+        for id in LEGACY_NATIVE_MCP_IDS {
+            assert!(document.pointer(&format!("/mcp/{id}")).is_none());
+        }
+    }
 
     #[test]
     fn projects_grouped_gui_config_to_canonical_agent_json() {

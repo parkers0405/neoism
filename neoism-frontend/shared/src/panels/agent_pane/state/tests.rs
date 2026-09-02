@@ -934,6 +934,19 @@ fn dequeued_prompt_and_server_echo_merge_by_message_id() {
 }
 
 #[test]
+fn tab_mode_switch_rearms_agent_chip_transition() {
+    let mut pane = NeoismAgentPane::default();
+    assert_eq!(pane.agent_label(), "Build");
+    assert_eq!(pane.agent_label_changed_elapsed_ms(), None);
+
+    pane.toggle_mode();
+
+    assert_eq!(pane.agent_label(), "Plan");
+    assert!(pane.agent_label_changed_elapsed_ms().is_some());
+    assert_eq!(pane.animation_reason(), Some("agent_label_transition"));
+}
+
+#[test]
 fn slash_compact_queues_compact_session_only_with_session() {
     // Call `execute_slash_text` directly to bypass the slash
     // picker (which `submit()` commits to its own selection). The
@@ -4186,6 +4199,30 @@ fn connect_secret_paste_fills_the_secret_field_not_the_composer() {
     let picker = pane.picker().expect("secret picker remains open");
     assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectSecret);
     assert_eq!(picker.query, key);
+    assert!(pane.input().is_empty(), "paste must not enter the composer");
+}
+
+#[test]
+fn pending_question_paste_fills_the_typed_answer_not_the_composer() {
+    let mut pane = NeoismAgentPane::default();
+    let question = crate::panels::agent_pane::question_policy::question_request_from_event(
+        &serde_json::json!({
+            "id": "question-email",
+            "sessionId": "session-1",
+            "questions": [{
+                "question": "Who should receive the recording?",
+                "options": []
+            }]
+        }),
+    );
+    pane.enqueue_pending_question(question);
+
+    pane.insert_paste("dusty@elevatedintx.com");
+
+    assert_eq!(
+        pane.pending_question().map(|question| question.typed.as_str()),
+        Some("dusty@elevatedintx.com")
+    );
     assert!(pane.input().is_empty(), "paste must not enter the composer");
 }
 

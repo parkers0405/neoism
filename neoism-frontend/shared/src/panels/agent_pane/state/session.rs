@@ -553,6 +553,7 @@ impl NeoismAgentPane {
         &mut self,
         value: String,
     ) -> String {
+        let previous_label = self.agent_label().to_string();
         let trimmed = value.trim().to_string();
         if trimmed.is_empty() {
             self.agent = None;
@@ -563,6 +564,9 @@ impl NeoismAgentPane {
             self.mode = NeoismAgentMode::Plan;
         } else if trimmed == "build" {
             self.mode = NeoismAgentMode::Build;
+        }
+        if self.agent_label() != previous_label {
+            self.agent_label_changed_at = Some(Instant::now());
         }
         trimmed
     }

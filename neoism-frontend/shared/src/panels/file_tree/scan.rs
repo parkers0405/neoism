@@ -6,19 +6,22 @@ use crate::services::{DirEntry, FilesService, IoError};
 use super::types::{GitStatus, NodeKind, TreeEntry};
 
 /// Single-level directory scan that returns entries at `depth`.
-/// Hidden files skipped; dirs sorted before files; both alphabetical
-/// case-insensitive. Failed reads return an empty Vec so the caller
-/// degrades gracefully.
+/// Visibility follows the caller's hidden-entry policy; dirs sort before
+/// files and both sort case-insensitively. Failed reads return an empty Vec
+/// so the caller degrades gracefully.
 pub fn scan_dir(
     root: &Path,
     depth: u8,
     git_statuses: &HashMap<PathBuf, GitStatus>,
+    show_hidden: bool,
     files: &dyn FilesService,
 ) -> Vec<TreeEntry> {
-    match scan_dir_result(root, depth, git_statuses, files) {
+    match scan_dir_result(root, depth, git_statuses, show_hidden, files) {
         Ok(entries) => entries,
         Err(IoError::Pending(_)) => Vec::new(),
-        Err(_) => entries_from_dir_listing(root, depth, git_statuses, Vec::new()),
+        Err(_) => {
+            entries_from_dir_listing(root, depth, git_statuses, Vec::new(), show_hidden)
+        }
     }
 }
 
@@ -26,10 +29,17 @@ pub fn scan_dir_result(
     root: &Path,
     depth: u8,
     git_statuses: &HashMap<PathBuf, GitStatus>,
+    show_hidden: bool,
     files: &dyn FilesService,
 ) -> Result<Vec<TreeEntry>, IoError> {
     let read = files.list_dir(root)?;
-    Ok(entries_from_dir_listing(root, depth, git_statuses, read))
+    Ok(entries_from_dir_listing(
+        root,
+        depth,
+        git_statuses,
+        read,
+        show_hidden,
+    ))
 }
 
 pub fn entries_from_dir_listing(
@@ -37,12 +47,13 @@ pub fn entries_from_dir_listing(
     depth: u8,
     git_statuses: &HashMap<PathBuf, GitStatus>,
     read: Vec<DirEntry>,
+    show_hidden: bool,
 ) -> Vec<TreeEntry> {
     let mut dirs: Vec<TreeEntry> = Vec::new();
     let mut files_out: Vec<TreeEntry> = Vec::new();
     let mut seen = HashSet::new();
     for dent in read {
-        if dent.name.starts_with('.') {
+        if !entry_is_visible(root, &dent.name, show_hidden) {
             continue;
         }
         let label = dent.name.clone();
@@ -71,7 +82,15 @@ pub fn entries_from_dir_listing(
             });
         }
     }
-    append_deleted_children(root, depth, git_statuses, &seen, &mut dirs, &mut files_out);
+    append_deleted_children(
+        root,
+        depth,
+        git_statuses,
+        &seen,
+        &mut dirs,
+        &mut files_out,
+        show_hidden,
+    );
     dirs.sort_by_key(|e| e.label.to_lowercase());
     files_out.sort_by_key(|e| e.label.to_lowercase());
     dirs.append(&mut files_out);
@@ -85,6 +104,7 @@ fn append_deleted_children(
     seen: &HashSet<PathBuf>,
     dirs: &mut Vec<TreeEntry>,
     files: &mut Vec<TreeEntry>,
+    show_hidden: bool,
 ) {
     let root = normalize_path(root);
     for leaf in deleted_leaf_paths(git_statuses) {
@@ -98,7 +118,10 @@ fn append_deleted_children(
         let Some(Component::Normal(name)) = components.next() else {
             continue;
         };
-        let Some(label) = name.to_str().filter(|label| !label.starts_with('.')) else {
+        let Some(label) = name
+            .to_str()
+            .filter(|label| entry_is_visible(&root, label, show_hidden))
+        else {
             continue;
         };
         let has_descendant = components.next().is_some();
@@ -163,10 +186,11 @@ pub fn scan_dir_with_open(
     depth: u8,
     git_statuses: &HashMap<PathBuf, GitStatus>,
     open_dirs: &HashSet<PathBuf>,
+    show_hidden: bool,
     files: &dyn FilesService,
 ) -> Vec<TreeEntry> {
     let mut out = Vec::new();
-    for mut entry in scan_dir(root, depth, git_statuses, files) {
+    for mut entry in scan_dir(root, depth, git_statuses, show_hidden, files) {
         let should_open = matches!(entry.kind, NodeKind::Dir { .. })
             && entry
                 .path
@@ -183,6 +207,7 @@ pub fn scan_dir_with_open(
                     depth + 1,
                     git_statuses,
                     open_dirs,
+                    show_hidden,
                     files,
                 ));
             }
@@ -191,6 +216,32 @@ pub fn scan_dir_with_open(
         }
     }
     out
+}
+
+/// One portable presentation policy for local, daemon, SSH, and web trees.
+/// Source-control internals and product-generated caches remain unavailable
+/// even when hidden entries are shown. Dependency/build folders stay manually
+/// browsable; native watcher exclusions keep them from causing background churn.
+pub fn entry_is_visible(root: &Path, name: &str, show_hidden: bool) -> bool {
+    if name.eq_ignore_ascii_case(".git")
+        || name.eq_ignore_ascii_case(".hg")
+        || name.eq_ignore_ascii_case(".svn")
+        || name.eq_ignore_ascii_case("CVS")
+        || name.eq_ignore_ascii_case(".DS_Store")
+        || name.eq_ignore_ascii_case("Thumbs.db")
+        || name.eq_ignore_ascii_case("desktop.ini")
+    {
+        return false;
+    }
+    let parent = root.file_name().and_then(|component| component.to_str());
+    if (parent.is_some_and(|component| component.eq_ignore_ascii_case(".neoism"))
+        && name.eq_ignore_ascii_case("cache"))
+        || (parent.is_some_and(|component| component.eq_ignore_ascii_case(".claude"))
+            && name.eq_ignore_ascii_case("worktrees"))
+    {
+        return false;
+    }
+    show_hidden || !name.starts_with('.')
 }
 
 pub fn apply_git_statuses(

@@ -1194,10 +1194,20 @@ fn file_tree_fs_event_relevant(root: &Path, event: &notify::Event) -> bool {
 
 fn file_tree_fs_path_relevant(root: &Path, path: &Path) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
+    let mut previous = None;
     for component in relative.components() {
-        if matches!(component, Component::Normal(part) if file_tree_fs_ignored_component(part))
-        {
-            return false;
+        if let Component::Normal(part) = component {
+            if file_tree_fs_ignored_component(part)
+                || matches!(
+                    previous,
+                    Some(parent)
+                        if (parent == OsStr::new(".claude") && part == OsStr::new("worktrees"))
+                            || (parent == OsStr::new(".neoism") && part == OsStr::new("cache"))
+                )
+            {
+                return false;
+            }
+            previous = Some(part);
         }
     }
 
@@ -1210,7 +1220,16 @@ fn file_tree_fs_path_relevant(root: &Path, path: &Path) -> bool {
 fn file_tree_fs_ignored_component(part: &OsStr) -> bool {
     matches!(
         part.to_str(),
-        Some(".git" | ".claude" | "target" | "node_modules" | ".direnv" | ".cache")
+        Some(
+            ".git"
+                | ".hg"
+                | ".svn"
+                | "CVS"
+                | "target"
+                | "node_modules"
+                | ".direnv"
+                | ".cache"
+        )
     )
 }
 

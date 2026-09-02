@@ -721,7 +721,11 @@ enum InlineWrapStyle {
     BoldItalic,
     Strike,
     Code,
-    MarkdownLink(String),
+    MarkdownLink {
+        target: String,
+        bold: bool,
+        italic: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -740,8 +744,18 @@ impl InlineWrapToken {
             InlineWrapStyle::BoldItalic => format!("***{}***", self.text),
             InlineWrapStyle::Strike => format!("~~{}~~", self.text),
             InlineWrapStyle::Code => format!("`{}`", self.text),
-            InlineWrapStyle::MarkdownLink(target) => {
-                format!("[{}]({target})", self.text)
+            InlineWrapStyle::MarkdownLink {
+                target,
+                bold,
+                italic,
+            } => {
+                let label = match (*bold, *italic) {
+                    (true, true) => format!("***{}***", self.text),
+                    (true, false) => format!("**{}**", self.text),
+                    (false, true) => format!("*{}*", self.text),
+                    (false, false) => self.text.clone(),
+                };
+                format!("[{label}]({target})")
             }
         }
     }
@@ -792,17 +806,27 @@ fn inline_wrap_tokens(text: &str) -> Vec<InlineWrapToken> {
             MarkdownInlineSegment::MarkdownLink {
                 label,
                 source_target,
+                bold,
+                italic,
                 ..
             } => push_inline_segment_words(
                 label,
-                InlineWrapStyle::MarkdownLink(source_target.clone()),
+                InlineWrapStyle::MarkdownLink {
+                    target: source_target.clone(),
+                    bold: *bold,
+                    italic: *italic,
+                },
                 &mut pending_whitespace,
                 &mut tokens,
             ),
             MarkdownInlineSegment::PlainToken { text, target, .. } => {
                 let style = target
                     .as_ref()
-                    .map(|target| InlineWrapStyle::MarkdownLink(target.clone()))
+                    .map(|target| InlineWrapStyle::MarkdownLink {
+                        target: target.clone(),
+                        bold: false,
+                        italic: false,
+                    })
                     .unwrap_or(InlineWrapStyle::Plain);
                 push_inline_segment_words(
                     text,

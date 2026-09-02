@@ -25,7 +25,7 @@ const SUBTASK_RESULT_INLINE_CHARS: usize = 32_000;
 const SUBTASK_COMPLETION_EXTRA_KEY: &str = "subtaskCompletion";
 const SUBTASK_COMPLETIONS_EXTRA_KEY: &str = "subtaskCompletions";
 const SUBTASK_PERSISTENCE_VERSION_KEY: &str = "subtaskPersistenceVersion";
-const SUBTASK_PERSISTENCE_VERSION: u64 = 1;
+const SUBTASK_PERSISTENCE_VERSION: u64 = 3;
 
 pub(crate) fn recorded_subtask_terminal_status(
     child: &SessionInfo,
@@ -303,7 +303,6 @@ pub(crate) fn spawn_background_subtask_prompt(
         .await
         {
             Ok(message) => {
-                admission.complete("completed").await;
                 let result = last_text_part(&message).unwrap_or_default();
                 publish_background_subtask_finished(
                     &state,
@@ -313,9 +312,9 @@ pub(crate) fn spawn_background_subtask_prompt(
                     &result,
                 )
                 .await;
+                admission.complete("completed").await;
             }
             Err(error) => {
-                admission.complete("failed").await;
                 let message = error.to_string();
                 tracing::warn!(
                     session_id = %child_id,
@@ -330,6 +329,7 @@ pub(crate) fn spawn_background_subtask_prompt(
                     &message,
                 )
                 .await;
+                admission.complete("failed").await;
             }
         }
         drop(plugin_generation);
@@ -343,19 +343,6 @@ pub(crate) async fn publish_background_subtask_finished(
     status: &str,
     text: &str,
 ) {
-    // Execution lifecycle is authoritative and must not depend on whether the
-    // optional UI notification runtime is loaded or still tracks this child.
-    let lifecycle = match crate::execution_activity::finish_subtask_for_child(
-        state, child_id, status,
-    )
-    .await
-    {
-        Ok(lifecycle) => lifecycle,
-        Err(error) => {
-            tracing::warn!(session_id = %child_id, %error, "failed to terminalize subtask lifecycle");
-            return;
-        }
-    };
     // Completion delivery is durable session state, not optional UI runtime
     // state. In particular, the embedded Neoism server may finish a child
     // after the workspace/plugin tracker generation that launched it has been
@@ -388,10 +375,46 @@ pub(crate) async fn publish_background_subtask_finished(
             }
         }
     };
-    let Some((child, _created)) = mutation else {
-        return;
+    let completion = mutation.and_then(|(child, _created)| {
+        child
+            .parent_id
+            .as_ref()
+            .map(ToString::to_string)
+            .map(|parent_id| (child, parent_id))
+    });
+
+    // Admit the parent continuation while this branch is still outstanding.
+    // Otherwise the last child can make the family quiescent first, and a
+    // freshly-finished execution then rejects the continuation because its
+    // own queue row counts as active work. The pending outbox record remains
+    // authoritative if admission fails and is retried by reconciliation.
+    if let Some((child, parent_id)) = completion.as_ref() {
+        if let Err(error) =
+            enqueue_parent_subtask_completion_prompts_if_ready(state, parent_id).await
+        {
+            tracing::warn!(
+                session_id = %child.id,
+                parent_id = %parent_id,
+                error = %error,
+                "failed to notify parent session about completed subtask"
+            );
+        }
+    }
+
+    // Execution lifecycle is authoritative and must not depend on whether the
+    // optional UI notification runtime is loaded or still tracks this child.
+    let lifecycle = match crate::execution_activity::finish_subtask_for_child(
+        state, child_id, status,
+    )
+    .await
+    {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => {
+            tracing::warn!(session_id = %child_id, %error, "failed to terminalize subtask lifecycle");
+            return;
+        }
     };
-    let Some(parent_id) = child.parent_id.as_ref().map(ToString::to_string) else {
+    let Some((child, parent_id)) = completion else {
         return;
     };
     {
@@ -417,16 +440,6 @@ pub(crate) async fn publish_background_subtask_finished(
             event_type::SESSION_SUBTASK_COMPLETED,
             payload,
         ));
-    }
-    if let Err(error) =
-        enqueue_parent_subtask_completion_prompts_if_ready(state, &parent_id).await
-    {
-        tracing::warn!(
-            session_id = %child.id,
-            parent_id = %parent_id,
-            error = %error,
-            "failed to notify parent session about completed subtask"
-        );
     }
 }
 
@@ -624,26 +637,41 @@ async fn enqueue_parent_subtask_completion_prompts_if_ready(
     if pending.is_empty() {
         return Ok(());
     }
+    // A worker owns the dequeue -> durable-message -> model-run interval. A
+    // popped completion is intentionally absent from prompt_queue during that
+    // interval, so a concurrent reconciliation must not enqueue a second copy.
+    // The worker acknowledges success itself and re-reconciles after releasing
+    // ownership, covering completions that arrived while it was active.
+    let worker_was_active = state
+        .inner
+        .session_coordinator
+        .worker_active(parent_id)
+        .await;
+    let parent_messages = state.inner.store.list_messages(parent_id).await?;
+    let persisted_user_messages = parent_messages
+        .iter()
+        .filter_map(|message| match &message.info {
+            MessageInfo::User(info) => Some(info.id.to_string()),
+            MessageInfo::Assistant(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let successful_replies = successful_parent_reply_ids(&parent_messages);
     let mut start_worker = false;
     let mut queue_len = 0;
     for completion in &pending {
         let request =
             parent_subtask_completions_request(std::slice::from_ref(completion));
-        // append_prompt persists the runtime user message before the provider
-        // run finishes. That run's teardown reconciles this still-pending
-        // outbox record before the queue worker gets to acknowledge it. If the
-        // stable completion MessageId is already in parent history, delivery
-        // crossed the durable append boundary: acknowledge the exact record
-        // instead of admitting a redundant queue row/busy cycle.
-        if state
-            .inner
-            .store
-            .get_message(parent_id, completion.message_id.as_str())
-            .await?
-            .is_some()
-        {
+        // A persisted runtime user turn is only half a delivery. A crash or
+        // admission failure can leave it with no parent assistant response;
+        // only a completed, non-error reply proves the parent actually ran.
+        if successful_replies.contains(completion.message_id.as_str()) {
             acknowledge_parent_subtask_completion_delivery(state, parent_id, &request)
                 .await?;
+            continue;
+        }
+        if worker_was_active
+            && persisted_user_messages.contains(completion.message_id.as_str())
+        {
             continue;
         }
         let event_request = request.clone();
@@ -671,6 +699,33 @@ async fn enqueue_parent_subtask_completion_prompts_if_ready(
         );
     }
     Ok(())
+}
+
+fn successful_parent_reply_ids(messages: &[MessageWithParts]) -> BTreeSet<String> {
+    let mut awaiting_runtime_notifications = BTreeSet::new();
+    let mut delivered = BTreeSet::new();
+    for message in messages {
+        match &message.info {
+            MessageInfo::User(info)
+                if info
+                    .system
+                    .as_deref()
+                    .is_some_and(crate::message_model::is_runtime_system_notification) =>
+            {
+                awaiting_runtime_notifications.insert(info.id.to_string());
+            }
+            MessageInfo::Assistant(info)
+                if info.time.completed.is_some()
+                    && info.error.is_none()
+                    && info.finish.as_deref() != Some("error") =>
+            {
+                delivered.insert(info.parent_id.to_string());
+                delivered.append(&mut awaiting_runtime_notifications);
+            }
+            MessageInfo::User(_) | MessageInfo::Assistant(_) => {}
+        }
+    }
+    delivered
 }
 
 /// Mark a child so its next true-idle point publishes a subtask completion
@@ -714,19 +769,19 @@ pub(crate) async fn mark_subtask_notify_on_idle(
 pub(crate) async fn publish_deferred_subtask_completion_if_idle(
     state: &AppState,
     session_id: &str,
-) {
+) -> bool {
     let child = match state.inner.store.get_session(session_id).await {
         Ok(Some(child)) => child,
-        _ => return,
+        _ => return false,
     };
     if child.parent_id.is_none() {
-        return;
+        return false;
     }
     let Some(generation) = owed_completion_generation(&child) else {
-        return;
+        return false;
     };
     if subtask_has_active_work(state, session_id).await {
-        return;
+        return false;
     }
     let result = last_assistant_text(state, session_id).await;
     publish_background_subtask_finished(
@@ -737,6 +792,7 @@ pub(crate) async fn publish_deferred_subtask_completion_if_idle(
         &result,
     )
     .await;
+    true
 }
 
 async fn latest_child_user_message_id(
@@ -839,7 +895,12 @@ pub(crate) async fn reconcile_parent_subtask_completions_for_child(
     // A queued continue-prompt owes its completion at the child's next
     // idle point — check before forwarding, so the freshly-published
     // pending entry rides the same delivery attempt below.
-    publish_deferred_subtask_completion_if_idle(state, child_id).await;
+    if publish_deferred_subtask_completion_if_idle(state, child_id).await {
+        // The standard publish path scans every pending completion for this
+        // parent. Calling the scanner again here races its newly-started queue
+        // worker and was the source of duplicate in-flight notifications.
+        return;
+    }
     let parent_id = match state.inner.store.get_session(child_id).await {
         Ok(Some(child)) => child.parent_id.map(|parent| parent.to_string()),
         Ok(None) => None,
@@ -902,6 +963,40 @@ async fn migrate_subtask_persistence_v1(state: &AppState) -> Result<(), ApiError
             .extra
             .insert(SUBTASK_COMPLETIONS_EXTRA_KEY.to_string(), records);
         migrate_completion_records(&mut child);
+
+        // Versions 1 and 2 treated persistence of the runtime user message as
+        // proof that the parent model had consumed it. A failed execution
+        // admission could therefore leave `pending: false` with no assistant
+        // reply. Conversely, a completion steered into an already-active run
+        // is consumed by the next assistant step whose parent remains the
+        // original user turn. Version 3 derives delivery from transcript order
+        // and normalizes both cases without replaying historical completions.
+        if let Some(parent_id) = child.parent_id.as_ref() {
+            let parent_messages = state.inner.store.list_messages(parent_id.as_str()).await?;
+            let successful_replies = successful_parent_reply_ids(&parent_messages);
+            if let Some(records) = child
+                .extra
+                .get_mut(SUBTASK_COMPLETIONS_EXTRA_KEY)
+                .and_then(Value::as_array_mut)
+            {
+                for record in records {
+                    let message_id = record.get("id").and_then(Value::as_str);
+                    if let Some(message_id) = message_id {
+                        if successful_replies.contains(message_id) {
+                            record["pending"] = json!(false);
+                            record["notifiedAt"] = json!(now_millis());
+                        } else if record.get("pending").and_then(Value::as_bool)
+                            == Some(false)
+                        {
+                            record["pending"] = json!(true);
+                            if let Some(record) = record.as_object_mut() {
+                                record.remove("notifiedAt");
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if child.extra.get(SUBTASK_NOTIFY_ON_IDLE_KEY).and_then(Value::as_bool) == Some(true) {
             let generation = latest_child_user_message_id(state, child.id.as_str())
@@ -969,9 +1064,11 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
     };
     let parent_ids = sessions
         .into_iter()
-        .filter(|session| {
-            session.extra.contains_key(SUBTASK_COMPLETIONS_EXTRA_KEY)
-        })
+        // Historical children retain delivered completion records for audit
+        // and dedupe. Do not reconcile every one of their parents on each
+        // launch: each reconciliation scans the child set again. Only a
+        // genuinely pending outbox record requires startup delivery.
+        .filter(has_pending_subtask_completion)
         .filter_map(|session| session.parent_id.map(|parent| parent.to_string()))
         .collect::<BTreeSet<_>>();
     for parent_id in parent_ids {
@@ -981,6 +1078,18 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
             tracing::warn!(parent_id = %parent_id, %error, "failed to resume pending subtask completions");
         }
     }
+}
+
+fn has_pending_subtask_completion(session: &SessionInfo) -> bool {
+    session
+        .extra
+        .get(SUBTASK_COMPLETIONS_EXTRA_KEY)
+        .and_then(Value::as_array)
+        .is_some_and(|completions| {
+            completions.iter().any(|completion| {
+                completion.get("pending").and_then(Value::as_bool) == Some(true)
+            })
+        })
 }
 
 async fn pending_parent_subtask_completions(
@@ -1345,6 +1454,13 @@ mod tests {
         state.inner.store.insert_session(session).await.unwrap();
     }
 
+    fn cleanup_test_database(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
     async fn hold_parent_run(state: &AppState, parent: &SessionInfo) {
         let run = crate::state::SessionRun {
             id: "parent-active-run".to_string(),
@@ -1371,6 +1487,22 @@ mod tests {
             .and_then(|items| items.get(index))
             .and_then(|item| item.get("pending"))
             .and_then(Value::as_bool)
+    }
+
+    #[test]
+    fn startup_recovery_ignores_delivered_completion_history() {
+        let mut child = test_child_session();
+        child.extra.insert(
+            SUBTASK_COMPLETIONS_EXTRA_KEY.to_string(),
+            json!([{ "pending": false }]),
+        );
+        assert!(!has_pending_subtask_completion(&child));
+
+        child.extra.insert(
+            SUBTASK_COMPLETIONS_EXTRA_KEY.to_string(),
+            json!([{ "pending": false }, { "pending": true }]),
+        );
+        assert!(has_pending_subtask_completion(&child));
     }
 
     async fn owe_completion(state: &AppState, child_id: &str) -> MessageId {
@@ -2292,6 +2424,398 @@ mod tests {
             }
         }
         assert_eq!(queue_actions, vec!["enqueue", "dequeue"]);
+    }
+
+    #[tokio::test]
+    async fn child_idle_reconciliation_admits_parent_completion_once() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-single-admission-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path.clone()).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut child = test_child_session();
+        child.parent_id = Some(parent.id.clone());
+        insert_session(&state, &parent).await;
+        insert_session(&state, &child).await;
+        hold_parent_run(&state, &parent).await;
+        let _generation = owe_completion(&state, child.id.as_str()).await;
+        let mut events = state.subscribe();
+
+        reconcile_parent_subtask_completions_for_child(&state, child.id.as_str()).await;
+
+        let queued = state
+            .inner
+            .store
+            .list_queued_prompt_entries(parent.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        let completion_message_id = queued[0]
+            .0
+            .message_id
+            .as_ref()
+            .expect("completion message id")
+            .to_string();
+        let mut enqueue_events = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.kind == event_type::SESSION_QUEUE_UPDATED
+                && event.properties.get("action").and_then(Value::as_str)
+                    == Some("enqueue")
+                && event.properties.get("messageID").and_then(Value::as_str)
+                    == Some(completion_message_id.as_str())
+            {
+                enqueue_events += 1;
+            }
+        }
+        assert_eq!(
+            enqueue_events, 1,
+            "the idle hook and its caller must not both admit the completion"
+        );
+
+        state.shutdown().await.unwrap();
+        cleanup_test_database(&db_path);
+    }
+
+    #[tokio::test]
+    async fn persisted_completion_without_parent_reply_resumes_generation() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-partial-delivery-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path.clone()).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut child = test_child_session();
+        child.parent_id = Some(parent.id.clone());
+        insert_session(&state, &parent).await;
+        insert_session(&state, &child).await;
+        hold_parent_run(&state, &parent).await;
+
+        let generation = owe_completion(&state, child.id.as_str()).await;
+        mark_subtask_completion_pending(
+            &state,
+            child.id.as_str(),
+            &generation,
+            "completed",
+            "persisted result",
+        )
+        .await
+        .unwrap();
+        let completion = pending_parent_subtask_completions(&state, parent.id.as_str())
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("pending completion");
+        let completion_message_id = completion.message_id.clone();
+        let request =
+            parent_subtask_completions_request(std::slice::from_ref(&completion));
+
+        // Reproduce the observed crash boundary: the runtime user message was
+        // durable, but execution admission failed before an assistant run.
+        append_prompt(&state, parent.id.as_str(), request, false)
+            .await
+            .unwrap();
+        enqueue_parent_subtask_completion_prompts_if_ready(&state, parent.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .inner
+                .store
+                .list_queued_prompt_entries(parent.id.as_str())
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a user message without a successful assistant reply is still pending"
+        );
+        assert_eq!(
+            completion_pending(
+                &state
+                    .inner
+                    .store
+                    .get_session(child.id.as_str())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0,
+            ),
+            Some(true)
+        );
+
+        assert!(
+            state
+                .inner
+                .session_coordinator
+                .finish_run(parent.id.as_str(), "parent-active-run")
+                .await
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let child = state
+                    .inner
+                    .store
+                    .get_session(child.id.as_str())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if completion_pending(&child, 0) == Some(false) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("persisted completion should resume and be acknowledged");
+        let messages = state
+            .inner
+            .store
+            .list_messages(parent.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(
+                    &message.info,
+                    MessageInfo::User(info) if info.id == completion_message_id
+                ))
+                .count(),
+            1,
+            "resuming must not duplicate the runtime user message"
+        );
+        assert!(messages.iter().any(|message| matches!(
+            &message.info,
+            MessageInfo::Assistant(info)
+                if info.parent_id == completion_message_id
+                    && info.time.completed.is_some()
+                    && info.error.is_none()
+        )));
+
+        state.shutdown().await.unwrap();
+        cleanup_test_database(&db_path);
+    }
+
+    #[tokio::test]
+    async fn v1_false_ack_without_parent_reply_is_reopened_on_startup() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-v1-false-ack-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path.clone()).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut child = test_child_session();
+        child.parent_id = Some(parent.id.clone());
+        insert_session(&state, &parent).await;
+        insert_session(&state, &child).await;
+        hold_parent_run(&state, &parent).await;
+
+        let generation = owe_completion(&state, child.id.as_str()).await;
+        mark_subtask_completion_pending(
+            &state,
+            child.id.as_str(),
+            &generation,
+            "completed",
+            "v1 stranded result",
+        )
+        .await
+        .unwrap();
+        let completion = pending_parent_subtask_completions(&state, parent.id.as_str())
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("pending completion");
+        let request =
+            parent_subtask_completions_request(std::slice::from_ref(&completion));
+        append_prompt(&state, parent.id.as_str(), request.clone(), false)
+            .await
+            .unwrap();
+        acknowledge_parent_subtask_completion_delivery(
+            &state,
+            parent.id.as_str(),
+            &request,
+        )
+        .await
+        .unwrap();
+        let mut stored_child = state
+            .inner
+            .store
+            .get_session(child.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion_pending(&stored_child, 0), Some(false));
+        stored_child.extra.insert(
+            SUBTASK_PERSISTENCE_VERSION_KEY.to_string(),
+            json!(1),
+        );
+        state
+            .inner
+            .store
+            .update_session(&stored_child)
+            .await
+            .unwrap();
+
+        resume_pending_subtask_completions(&state).await;
+
+        let repaired_child = state
+            .inner
+            .store
+            .get_session(child.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion_pending(&repaired_child, 0), Some(true));
+        assert_eq!(
+            repaired_child
+                .extra
+                .get(SUBTASK_PERSISTENCE_VERSION_KEY)
+                .and_then(Value::as_u64),
+            Some(SUBTASK_PERSISTENCE_VERSION)
+        );
+        assert_eq!(
+            state
+                .inner
+                .store
+                .list_queued_prompt_entries(parent.id.as_str())
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "startup must requeue the v1 partial delivery"
+        );
+
+        state.shutdown().await.unwrap();
+        cleanup_test_database(&db_path);
+    }
+
+    #[tokio::test]
+    async fn legacy_completion_consumed_inside_active_run_is_not_replayed() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-active-run-history-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path.clone()).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut child = test_child_session();
+        child.parent_id = Some(parent.id.clone());
+        insert_session(&state, &parent).await;
+        insert_session(&state, &child).await;
+
+        let generation = owe_completion(&state, child.id.as_str()).await;
+        mark_subtask_completion_pending(
+            &state,
+            child.id.as_str(),
+            &generation,
+            "completed",
+            "historical active-run result",
+        )
+        .await
+        .unwrap();
+        let completion = pending_parent_subtask_completions(&state, parent.id.as_str())
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("pending completion");
+        let runtime_message_id = completion.message_id.clone();
+        let request =
+            parent_subtask_completions_request(std::slice::from_ref(&completion));
+        append_prompt(&state, parent.id.as_str(), request.clone(), false)
+            .await
+            .unwrap();
+        acknowledge_parent_subtask_completion_delivery(
+            &state,
+            parent.id.as_str(),
+            &request,
+        )
+        .await
+        .unwrap();
+
+        let ordinary_message_id = Id::ascending(IdKind::Message);
+        append_prompt(
+            &state,
+            parent.id.as_str(),
+            PromptRequest {
+                message_id: Some(ordinary_message_id.clone()),
+                model: None,
+                agent: None,
+                no_reply: false,
+                system: None,
+                tools: None,
+                author: None,
+                parts: vec![PromptPart::Text {
+                    text: "continue after the runtime notification".to_string(),
+                }],
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        let messages = state
+            .inner
+            .store
+            .list_messages(parent.id.as_str())
+            .await
+            .unwrap();
+        assert!(messages.iter().any(|message| matches!(
+            &message.info,
+            MessageInfo::Assistant(info)
+                if info.parent_id == ordinary_message_id
+                    && info.parent_id != runtime_message_id
+                    && info.time.completed.is_some()
+        )));
+
+        let mut stored_child = state
+            .inner
+            .store
+            .get_session(child.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        stored_child.extra.insert(
+            SUBTASK_PERSISTENCE_VERSION_KEY.to_string(),
+            json!(2),
+        );
+        let records = stored_child
+            .extra
+            .get_mut(SUBTASK_COMPLETIONS_EXTRA_KEY)
+            .and_then(Value::as_array_mut)
+            .unwrap();
+        records[0]["pending"] = json!(true);
+        state
+            .inner
+            .store
+            .update_session(&stored_child)
+            .await
+            .unwrap();
+
+        resume_pending_subtask_completions(&state).await;
+
+        let repaired_child = state
+            .inner
+            .store
+            .get_session(child.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion_pending(&repaired_child, 0), Some(false));
+        assert!(state
+            .inner
+            .store
+            .list_queued_prompt_entries(parent.id.as_str())
+            .await
+            .unwrap()
+            .is_empty());
+
+        state.shutdown().await.unwrap();
+        cleanup_test_database(&db_path);
     }
 
     #[tokio::test]

@@ -1,14 +1,19 @@
+#[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use neoism_ui::services::DirEntry;
 
+#[cfg(test)]
 use super::types::{GitStatus, TreeEntry};
 #[cfg(test)]
 use super::NativeFiles;
 
+#[cfg(test)]
 pub(super) fn scan_dir(
     root: &Path,
     depth: u8,
@@ -34,6 +39,7 @@ pub(super) fn scan_dir(
         depth,
         git_statuses,
         read,
+        true,
     )
 }
 
@@ -49,6 +55,7 @@ pub(super) fn scan_dir_with_open(
         depth,
         git_statuses,
         open_dirs,
+        true,
         &NativeFiles,
     )
 }

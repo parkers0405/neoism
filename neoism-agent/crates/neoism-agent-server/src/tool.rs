@@ -21,6 +21,8 @@ pub(crate) mod artifact;
 pub(crate) mod bash;
 #[path = "tool_support/diagnostics.rs"]
 mod diagnostics;
+#[path = "tool_support/documentation.rs"]
+mod documentation;
 #[path = "tool_support/edit_match.rs"]
 mod edit_match;
 #[path = "tool_support/workspace_search.rs"]
@@ -31,6 +33,8 @@ mod file;
 mod format;
 #[path = "tool_support/locks.rs"]
 pub(crate) mod locks;
+#[path = "tool_support/memory.rs"]
+mod memory;
 #[path = "tool_support/notes.rs"]
 mod notes;
 #[path = "tool_support/patch.rs"]
@@ -409,6 +413,14 @@ fn notes_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(async move { notes::notes_tool(context, arguments) })
 }
 
+fn documentation_handler(context: ToolContext, arguments: Value) -> ToolFuture {
+    Box::pin(async move { documentation::documentation_tool(context, arguments) })
+}
+
+fn memory_handler(context: ToolContext, arguments: Value) -> ToolFuture {
+    Box::pin(memory::memory_tool(context, arguments))
+}
+
 fn skill_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(crate::skill::skill_tool(context, arguments))
 }
@@ -525,6 +537,8 @@ pub(crate) fn workspace_tool_items() -> Vec<ToolListItem> {
     registry::definitions(registry::ToolOwner::Workspace).into_iter().map(|tool| tool.item()).collect()
 }
 pub(crate) fn register_notes_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Notes); }
+pub(crate) fn register_documentation_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Documentation); }
+pub(crate) fn register_memory_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Memory); }
 pub(crate) fn register_skill_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Skills); }
 pub(crate) fn register_lsp_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Lsp); }
 pub(crate) fn register_subagent_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Subagents); }

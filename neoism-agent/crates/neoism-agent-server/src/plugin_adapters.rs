@@ -20,6 +20,16 @@ impl neoism_agent_builtins::plugin::notes_tools::NotesToolsHost for NotesTools {
     fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_notes_tools(registrar, &self.0); }
 }
 
+pub(crate) struct DocumentationTools(pub(crate) crate::state::AppState);
+impl neoism_agent_builtins::plugin::documentation_tools::DocumentationToolsHost for DocumentationTools {
+    fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_documentation_tools(registrar, &self.0); }
+}
+
+pub(crate) struct MemoryTools(pub(crate) crate::state::AppState);
+impl neoism_agent_builtins::plugin::memory_tools::MemoryToolsHost for MemoryTools {
+    fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_memory_tools(registrar, &self.0); }
+}
+
 pub(crate) struct CustomTools(pub(crate) Vec<crate::custom_tool::CustomTool>);
 impl neoism_agent_builtins::plugin::custom_tools::CustomToolsHost for CustomTools {
     fn register_tools(&self, registrar: &mut PluginContributions) {

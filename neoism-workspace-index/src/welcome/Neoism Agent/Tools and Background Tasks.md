@@ -13,12 +13,12 @@ Neoism's built-in inventory includes:
 | Search | FFF-backed `grep` and `glob` |
 | Web | `webfetch`, `websearch` |
 | Code intelligence | `lsp` |
-| Knowledge | `notes`, `skill`, built-in Memory/Docs MCP tools |
+| Knowledge | Native `memory`, `docs`, and `skill`; Desktop-provided Notes MCP |
 | Workflow | `question`, `plan_enter`, `todowrite` |
 | Delegation | `task`, `task_result`, `stop_task` |
 | Runtime | `complete_goal`, background-task cancellation routes |
 
-MCP servers are exposed through one `execute` discovery/call gateway so their schemas do not flood every model request. The effective tool list is filtered by global and per-agent `tools` maps.
+MCP servers are exposed through one `execute` discovery/call gateway so their schemas do not flood every model request. Neoism Desktop preinstalls its vault-backed Notes MCP; standalone Agent hosts do not receive Notes unless their product supplies it. The effective tool list is filtered by global and per-agent `tools` maps.
 
 ```jsonc
 {

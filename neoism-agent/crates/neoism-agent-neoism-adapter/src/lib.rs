@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use neoism_agent_service_api::{
     AgentServices, ConfigSourceService, DocumentationService, ExecutableError,
-    ExecutableRequest, ExecutableResult, ExecutableService, ExecutableSource, MemoryService, NotesService,
+    ExecutableRequest, ExecutableResult, ExecutableService, ExecutableSource, MemoryService,
     StandardExecutableService,
 };
 
@@ -12,7 +12,6 @@ mod docs;
 mod config;
 mod lsp;
 mod memory;
-mod notes;
 
 #[cfg(test)]
 fn test_env_lock() -> &'static std::sync::Mutex<()> {
@@ -21,7 +20,6 @@ fn test_env_lock() -> &'static std::sync::Mutex<()> {
 }
 
 pub fn neoism_services() -> AgentServices {
-    let notes = Arc::new(notes::NeoismNotesService);
     let documentation = Arc::new(docs::NeoismDocumentationService);
     let memory = Arc::new(memory::NeoismMemoryService::new());
     AgentServices::new(
@@ -30,7 +28,6 @@ pub fn neoism_services() -> AgentServices {
     )
         .with_language_capabilities(Arc::new(lsp::NeoismLanguageCapabilityService::new()))
         .with_config(Arc::new(config::NeoismConfigSourceService::new()) as Arc<dyn ConfigSourceService>)
-        .with_notes(notes.clone() as Arc<dyn NotesService>)
         .with_documentation(documentation.clone() as Arc<dyn DocumentationService>)
         .with_memory(memory.clone() as Arc<dyn MemoryService>)
 }

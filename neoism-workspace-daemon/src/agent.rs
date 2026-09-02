@@ -62,6 +62,16 @@ static AGENT_SERVER_STARTED: OnceLock<()> = OnceLock::new();
 /// Each WebSocket connection invokes this so an agent-server is
 /// guaranteed to be reachable before the first envelope is routed.
 pub fn ensure_agent_server_started(workspaces: crate::workspace::WorkspaceManager) {
+    ensure_agent_server_started_with_services(
+        workspaces,
+        neoism_agent_neoism_adapter::neoism_services(),
+    );
+}
+
+pub fn ensure_agent_server_started_with_services(
+    workspaces: crate::workspace::WorkspaceManager,
+    services: neoism_agent_service_api::AgentServices,
+) {
     if AGENT_SERVER_STARTED.get().is_some() {
         return;
     }
@@ -81,10 +91,9 @@ pub fn ensure_agent_server_started(workspaces: crate::workspace::WorkspaceManage
     if AGENT_SERVER_STARTED.set(()).is_err() {
         return;
     }
-    let services = neoism_agent_neoism_adapter::neoism_services()
-        .with_workspace_management(Arc::new(
-            crate::workspace::DaemonWorkspaceManagementService::new(workspaces),
-        ));
+    let services = services.with_workspace_management(Arc::new(
+        crate::workspace::DaemonWorkspaceManagementService::new(workspaces),
+    ));
     // Supervisor rather than a one-shot: when another process (usually
     // the desktop app) already owns the port, `listen` exits with
     // AddrInUse immediately — that's fine while the desktop serves the

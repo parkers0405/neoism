@@ -45,6 +45,271 @@ struct InlineWrappedLine {
     row_width: f32,
 }
 
+/// A rendered slice of one CommonMark paragraph. The source remains split into
+/// physical lines; this is only the text presented to layout. Keeping this
+/// small transform independent of Sugarloaf makes measurement and drawing use
+/// exactly the same soft/hard-break decisions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PlainParagraphSegment {
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) text: String,
+    spans: Vec<PlainParagraphSourceSpan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlainParagraphSourceSpan {
+    line: usize,
+    projected_start: usize,
+    projected_end: usize,
+    source_start: usize,
+}
+
+fn is_plain_paragraph_line(raw: &str) -> bool {
+    matches!(
+        parse_markdown_block_line(raw, false).kind,
+        MarkdownBlockKind::Paragraph
+    ) && !looks_like_inline_table_line(raw)
+}
+
+/// Return the semantic paragraph segment beginning at `start`, but only when
+/// layout differs from the old one-physical-line path. A revealed source line
+/// is a hard boundary: it stays byte-for-byte visible and adjacent text can
+/// still reflow on either side without invalidating cursor/source mapping.
+pub(super) fn plain_paragraph_segment(
+    lines: &[String],
+    start: usize,
+    revealed_line: Option<usize>,
+) -> Option<PlainParagraphSegment> {
+    let first = lines.get(start)?.trim_end_matches(['\r', '\n']);
+    if revealed_line == Some(start) || !is_plain_paragraph_line(first) {
+        return None;
+    }
+
+    let mut text = String::new();
+    let mut line_ix = start;
+    let mut end;
+    let mut changed = false;
+    let mut spans = Vec::new();
+    loop {
+        let raw = lines.get(line_ix)?.trim_end_matches(['\r', '\n']);
+        let source_start = if line_ix > start {
+            raw.len() - raw.trim_start_matches([' ', '\t']).len()
+        } else {
+            0
+        };
+        let raw = if source_start > 0 {
+            raw.trim_start_matches([' ', '\t'])
+        } else {
+            raw
+        };
+        let (visible, hard_break) = commonmark_line_break(raw);
+        end = line_ix + 1;
+        let continues = !hard_break
+            && revealed_line != Some(end)
+            && lines.get(end).is_some_and(|next| is_plain_paragraph_line(next));
+        let visible = if continues {
+            visible.trim_end_matches([' ', '\t'])
+        } else {
+            visible
+        };
+        let projected_start = text.len();
+        text.push_str(visible);
+        spans.push(PlainParagraphSourceSpan {
+            line: line_ix,
+            projected_start,
+            projected_end: text.len(),
+            source_start,
+        });
+        changed |= hard_break;
+        if !continues {
+            break;
+        }
+        text.push(' ');
+        changed = true;
+        line_ix = end;
+    }
+
+    changed.then_some(PlainParagraphSegment {
+        start,
+        end,
+        text,
+        spans,
+    })
+}
+
+impl PlainParagraphSegment {
+    fn source_position_for_projected(
+        &self,
+        projected: usize,
+        source_line_base: usize,
+    ) -> MarkdownPosition {
+        let projected = projected.min(self.text.len());
+        let span = self
+            .spans
+            .iter()
+            .find(|span| projected <= span.projected_end)
+            .unwrap_or_else(|| self.spans.last().expect("paragraph segment has a source span"));
+        MarkdownPosition {
+            line: source_line_base + span.line,
+            col: span.source_start
+                + projected
+                    .clamp(span.projected_start, span.projected_end)
+                    .saturating_sub(span.projected_start),
+        }
+    }
+
+    pub(super) fn hit_positions(&self, source_line_base: usize) -> Vec<MarkdownPosition> {
+        let map = InlineSourceMap::new(&self.text);
+        (0..=map.visible_len())
+            .map(|visible| {
+                self.source_position_for_projected(
+                    map.source_for_visible(visible),
+                    source_line_base,
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn visible_offset_for_source(
+        &self,
+        line: usize,
+        col: usize,
+        source_line_base: usize,
+    ) -> Option<usize> {
+        let local_line = line.checked_sub(source_line_base)?;
+        let span = self.spans.iter().find(|span| span.line == local_line)?;
+        let projected = span.projected_start
+            + col
+                .saturating_sub(span.source_start)
+                .min(span.projected_end - span.projected_start);
+        Some(InlineSourceMap::new(&self.text).visible_for_source(projected))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_and_place_plain_paragraph(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut MarkdownPane,
+    segment: &PlainParagraphSegment,
+    lines: &[InlineWrappedLine],
+    source_line_base: usize,
+    x: f32,
+    y: f32,
+    opts: &DrawOpts,
+) {
+    let source_line = source_line_base + segment.start;
+    pane.register_block_wrap_row_spans(source_line, inline_wrap_rows(lines));
+    pane.register_block_wrap_hit_stops(
+        source_line,
+        measured_inline_wrap_hit_rows(sugarloaf, lines, 0.0, opts),
+    );
+    pane.register_paragraph_hit_map(
+        source_line,
+        segment.hit_positions(source_line_base),
+    );
+
+    if pane.read_only
+        || !(source_line_base + segment.start..source_line_base + segment.end)
+            .contains(&pane.cursor_line)
+    {
+        return;
+    }
+    let Some(visible) =
+        segment.visible_offset_for_source(pane.cursor_line, pane.cursor_col, source_line_base)
+    else {
+        return;
+    };
+    let row_index = lines
+        .iter()
+        .rposition(|line| line.visible_start <= visible)
+        .unwrap_or(0);
+    let line = &lines[row_index];
+    let stops = measured_inline_stops_for_line(sugarloaf, line, opts);
+    let local = visible
+        .saturating_sub(line.visible_start)
+        .min(stops.len().saturating_sub(1));
+    pane.set_cursor_rect(Some([
+        x + line.x_offset + stops.get(local).copied().unwrap_or_default(),
+        cursor_y_for_text_line(y + row_index as f32 * line_height(opts), opts),
+        cursor_cell_width(opts),
+        caret_height(opts),
+    ]));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_plain_paragraph_selection(
+    sugarloaf: &mut Sugarloaf,
+    pane: &MarkdownPane,
+    segment: &PlainParagraphSegment,
+    lines: &[InlineWrappedLine],
+    source_line_base: usize,
+    x: f32,
+    y: f32,
+    opts: &DrawOpts,
+    theme: &IdeTheme,
+    clip: [f32; 4],
+) {
+    let line_h = line_height(opts);
+    for source_line in
+        source_line_base + segment.start..source_line_base + segment.end
+    {
+        let Some((source_start, source_end)) = pane.selection_for_line(source_line) else {
+            continue;
+        };
+        let Some(visible_start) =
+            segment.visible_offset_for_source(source_line, source_start, source_line_base)
+        else {
+            continue;
+        };
+        let Some(visible_end) =
+            segment.visible_offset_for_source(source_line, source_end, source_line_base)
+        else {
+            continue;
+        };
+        for (row_index, line) in lines.iter().enumerate() {
+            let row_start = line.visible_start;
+            let row_end = row_start + line.visible_len();
+            let start = visible_start.max(row_start).min(row_end);
+            let end = visible_end.max(start).min(row_end);
+            if end <= start {
+                continue;
+            }
+            let stops = measured_inline_stops_for_line(sugarloaf, line, opts);
+            let local_start = start - row_start;
+            let local_end = end - row_start;
+            let left = stops.get(local_start).copied().unwrap_or_default();
+            let right = stops.get(local_end).copied().unwrap_or(left);
+            draw_rect_clipped(
+                sugarloaf,
+                clip,
+                x + line.x_offset + left,
+                y + row_index as f32 * line_h,
+                (right - left).max(cursor_cell_width(opts) * 0.35),
+                line_h,
+                theme.f32_alpha(theme.accent, 0.26),
+                DEPTH,
+                ORDER_BG + 3,
+            );
+        }
+    }
+}
+
+/// Visible content and whether the physical newline is a hard break. Two or
+/// more trailing spaces and an odd trailing backslash are CommonMark's two
+/// hard-break spellings; their source markers are not painted in preview.
+fn commonmark_line_break(raw: &str) -> (&str, bool) {
+    let spaces = raw.len().saturating_sub(raw.trim_end_matches(' ').len());
+    if spaces >= 2 {
+        return (raw.trim_end_matches(' '), true);
+    }
+    let slashes = raw.as_bytes().iter().rev().take_while(|&&b| b == b'\\').count();
+    if slashes % 2 == 1 {
+        return (&raw[..raw.len() - 1], true);
+    }
+    (raw, false)
+}
+
 impl InlineWrappedLine {
     fn visible_len(&self) -> usize {
         self.text.chars().count()
@@ -1141,5 +1406,77 @@ mod inline_layout_tests {
             "target".to_string()
         )));
         assert!(!inline_style_is_spellcheckable(&InlineRunStyle::Tag));
+    }
+
+    fn source_lines(source: &[&str]) -> Vec<String> {
+        source.iter().map(|line| (*line).to_string()).collect()
+    }
+
+    #[test]
+    fn soft_breaks_form_one_reflowable_plain_paragraph() {
+        let source = source_lines(&["one physical", "  second line", "third"]);
+        let segment = plain_paragraph_segment(&source, 0, None).unwrap();
+        assert_eq!(segment.start, 0);
+        assert_eq!(segment.end, 3);
+        assert_eq!(segment.text, "one physical second line third");
+        // Layout projection never mutates or normalizes the editor/CRDT text.
+        assert_eq!(source, source_lines(&["one physical", "  second line", "third"]));
+    }
+
+    #[test]
+    fn commonmark_hard_breaks_split_visual_paragraph_segments() {
+        let source = source_lines(&["space break  ", "after", "slash break\\", "last"]);
+
+        let first = plain_paragraph_segment(&source, 0, None).unwrap();
+        assert_eq!((first.start, first.end), (0, 1));
+        assert_eq!(first.text, "space break");
+
+        let second = plain_paragraph_segment(&source, 1, None).unwrap();
+        assert_eq!((second.start, second.end), (1, 3));
+        assert_eq!(second.text, "after slash break");
+
+        assert!(plain_paragraph_segment(&source, 3, None).is_none());
+        assert_eq!(commonmark_line_break(r"escaped\\"), (r"escaped\\", false));
+    }
+
+    #[test]
+    fn blank_blocks_and_revealed_lines_are_semantic_join_boundaries() {
+        let source = source_lines(&["before", "editing", "after", "", "# heading", "tail"]);
+
+        assert!(plain_paragraph_segment(&source, 0, Some(1)).is_none());
+        assert!(plain_paragraph_segment(&source, 1, Some(1)).is_none());
+        assert!(plain_paragraph_segment(&source, 2, Some(1)).is_none());
+        assert!(plain_paragraph_segment(&source, 3, None).is_none());
+        assert!(plain_paragraph_segment(&source, 4, None).is_none());
+        assert!(plain_paragraph_segment(&source, 5, None).is_none());
+
+        let source = source_lines(&["a", "b", "editing", "c", "d"]);
+        assert_eq!(
+            plain_paragraph_segment(&source, 0, Some(2)).unwrap().text,
+            "a b"
+        );
+        assert_eq!(
+            plain_paragraph_segment(&source, 3, Some(2)).unwrap().text,
+            "c d"
+        );
+    }
+
+    #[test]
+    fn joined_visible_offsets_map_back_to_later_source_lines_and_columns() {
+        let source = source_lines(&["**first**", "  second"]);
+        let segment = plain_paragraph_segment(&source, 0, None).unwrap();
+        assert_eq!(segment.text, "**first** second");
+
+        let positions = segment.hit_positions(0);
+        assert_eq!(positions[0], MarkdownPosition { line: 0, col: 2 });
+        assert_eq!(positions[5], MarkdownPosition { line: 0, col: 9 });
+        assert_eq!(positions[6], MarkdownPosition { line: 1, col: 2 });
+        assert_eq!(positions[8], MarkdownPosition { line: 1, col: 4 });
+        assert_eq!(segment.visible_offset_for_source(1, 4, 0), Some(8));
+        assert_eq!(
+            segment.hit_positions(40)[8],
+            MarkdownPosition { line: 41, col: 4 }
+        );
+        assert_eq!(segment.visible_offset_for_source(41, 4, 40), Some(8));
     }
 }

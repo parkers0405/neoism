@@ -77,7 +77,7 @@ Neoism's public config does **not** define an arbitrary `providers` package-over
 ## Security
 
 - Prefer the connection UI or environment variables over literal JSONC secrets.
-- Do not place provider keys in project `neoism.json`.
+- Do not place provider keys in workspace `.neoism/config.json`.
 - A compatible/custom endpoint can receive prompts, attachments, instructions, and tool results.
 - Removing a credential does not delete past session content.
 

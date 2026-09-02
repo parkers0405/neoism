@@ -268,8 +268,9 @@ impl EmbeddedDaemonHandle {
                     // The workspace daemon owns the Agent process. Start its
                     // supervisor eagerly so native desktop HTTP requests do
                     // not depend on a WebSocket agent message arriving first.
-                    neoism_workspace_daemon::agent::ensure_agent_server_started(
+                    neoism_workspace_daemon::agent::ensure_agent_server_started_with_services(
                         workspaces.clone(),
+                        neoism_desktop::notes_mcp::install(neoism_agent_neoism_adapter::neoism_services()),
                     );
                     let pairing_tokens = handshake::PairingTokenStore::in_memory();
                     // Paired hosts DO persist (unlike pairing tokens):

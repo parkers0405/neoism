@@ -193,6 +193,33 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .map(|binding| binding.endpoint.as_str())
     }
 
+    /// Rebind an already-open adopted grid to the currently attached daemon.
+    /// Quick SSH uses this after recreating a dropped local tunnel: workspace
+    /// identity and PTYs remain daemon-owned, while file/Agent traffic must use
+    /// the fresh loopback endpoint rather than the dead forward.
+    pub fn rebind_adopted_workspace_at(&mut self, index: usize, workspace_id: &str) {
+        let Some(stable) = self
+            .contexts
+            .get(index)
+            .and_then(ContextGrid::workspace_route_id)
+        else {
+            return;
+        };
+        let endpoint = self.daemon_endpoint().unwrap_or_default().to_string();
+        let credential = self
+            .daemon
+            .link
+            .as_ref()
+            .and_then(|link| link.credential.clone());
+        if let Some(binding) = self.adopted_workspaces.get_mut(&stable) {
+            if binding.workspace_id == workspace_id {
+                binding.endpoint = endpoint;
+                binding.credential = credential;
+                binding.is_peer = self.daemon.link_is_peer;
+            }
+        }
+    }
+
     pub fn daemon_endpoint(&self) -> Option<&str> {
         self.daemon.link.as_ref().map(|link| link.endpoint.as_str())
     }

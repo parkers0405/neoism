@@ -262,15 +262,6 @@ impl Screen<'_> {
         root: PathBuf,
         force_tree_refresh: bool,
     ) -> bool {
-        // While the tree is following a terminal `ssh` session, every
-        // cwd heuristic below reports the LOCAL `ssh` process's
-        // directory — the wrong disk. Letting it re-root would
-        // repopulate (and clobber) the remote listing every frame, so
-        // freeze the workspace root until `leave_ssh_file_tree` restores
-        // it.
-        if self.file_tree_follows_ssh() {
-            return false;
-        }
         // Same clobber guard for a JOINED workspace: its tree root is the
         // daemon-declared HOST path, authoritative for the whole session.
         // The per-frame cwd heuristics (`cwd_drain`) report the guest's
@@ -471,24 +462,8 @@ impl Screen<'_> {
             let had_workspace = self.file_tree_workspace.is_some();
             if let Some(old_id) = self.file_tree_workspace.take() {
                 let outgoing = std::mem::take(&mut self.renderer.file_tree);
-                // Stash the ssh-follow root WITH the outgoing tree — it is
-                // per-workspace state, not a screen global. Without this,
-                // ssh'ing in one workspace then switching away leaves
-                // `ssh_pre_local_root` set, which freezes `set_active_workspace_root`
-                // for every later workspace (tree stuck on the remote listing,
-                // can't re-root).
-                if let Some(ssh_root) = self.ssh_pre_local_root.take() {
-                    self.workspace_ssh_pre_local_roots
-                        .insert(old_id.clone(), ssh_root);
-                } else {
-                    self.workspace_ssh_pre_local_roots.remove(&old_id);
-                }
                 self.workspace_file_trees.insert(old_id, outgoing);
             }
-            // Restore the incoming workspace's ssh-follow root (None unless it
-            // was actively following an ssh session when we left it) so its
-            // freeze guard matches its stashed remote/local tree.
-            self.ssh_pre_local_root = self.workspace_ssh_pre_local_roots.remove(&id);
             let mut incoming =
                 self.workspace_file_trees.remove(&id).unwrap_or_else(|| {
                     if had_workspace {

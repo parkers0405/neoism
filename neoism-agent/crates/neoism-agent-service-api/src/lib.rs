@@ -473,104 +473,6 @@ pub struct ScopeChoice {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NotesRequest {
-    pub working_directory: PathBuf,
-    pub scope_id: Option<String>,
-}
-
-impl NotesRequest {
-    pub fn new(working_directory: impl Into<PathBuf>) -> Self {
-        Self {
-            working_directory: working_directory.into(),
-            scope_id: None,
-        }
-    }
-
-    pub fn with_scope(mut self, scope_id: impl Into<String>) -> Self {
-        self.scope_id = Some(scope_id.into());
-        self
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NotesLocation {
-    pub scope_id: String,
-    pub scope_label: String,
-    pub root: PathBuf,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ScopedNotes<T> {
-    pub location: NotesLocation,
-    pub items: Vec<T>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NoteSearchHit {
-    pub path: String,
-    pub line: usize,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NoteTask {
-    pub path: String,
-    pub line: usize,
-    pub checked: bool,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NoteDocument {
-    pub location: NotesLocation,
-    pub path: String,
-    pub absolute_path: PathBuf,
-    pub content: String,
-}
-
-pub trait NotesService: Send + Sync {
-    fn scope_choices(&self) -> Vec<ScopeChoice>;
-    fn default_scope_id(&self) -> &str;
-    fn tool_description(&self) -> String;
-    fn list(
-        &self,
-        request: &NotesRequest,
-        limit: usize,
-    ) -> Result<Vec<ScopedNotes<String>>, ServiceError>;
-    fn search(
-        &self,
-        request: &NotesRequest,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<ScopedNotes<NoteSearchHit>>, ServiceError>;
-    fn read(&self, request: &NotesRequest, path: &str) -> Result<NoteDocument, ServiceError>;
-    fn tasks(
-        &self,
-        request: &NotesRequest,
-        limit: usize,
-    ) -> Result<Vec<ScopedNotes<NoteTask>>, ServiceError>;
-    fn create(
-        &self,
-        request: &NotesRequest,
-        title: &str,
-        content: Option<&str>,
-    ) -> Result<NoteDocument, ServiceError>;
-    fn write(
-        &self,
-        request: &NotesRequest,
-        path: &str,
-        content: &str,
-    ) -> Result<NoteDocument, ServiceError>;
-    fn task_toggle(
-        &self,
-        request: &NotesRequest,
-        path: &str,
-        line: usize,
-        checked: Option<bool>,
-    ) -> Result<NoteTask, ServiceError>;
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentationPageSummary {
     pub path: String,
     pub title: String,
@@ -776,7 +678,6 @@ pub struct AgentServices {
     pub workspace_management: Arc<dyn WorkspaceManagementService>,
     pub provider_credentials: Arc<dyn ProviderCredentialStore>,
     pub mcp_credentials: Arc<dyn McpCredentialStore>,
-    pub notes: Option<Arc<dyn NotesService>>,
     pub documentation: Option<Arc<dyn DocumentationService>>,
     pub memory: Option<Arc<dyn MemoryService>>,
     builtin_mcp: BTreeMap<String, Arc<dyn BuiltinMcpService>>,
@@ -799,7 +700,6 @@ impl AgentServices {
             workspace_management,
             provider_credentials,
             mcp_credentials,
-            notes: None,
             documentation: None,
             memory: None,
             builtin_mcp: BTreeMap::new(),
@@ -846,11 +746,6 @@ impl AgentServices {
         language_capabilities: Arc<dyn LanguageCapabilityService>,
     ) -> Self {
         self.language_capabilities = language_capabilities;
-        self
-    }
-
-    pub fn with_notes(mut self, notes: Arc<dyn NotesService>) -> Self {
-        self.notes = Some(notes);
         self
     }
 

@@ -3,17 +3,14 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use neoism_agent_service_api::{
-    BuiltinMcpCallResult, BuiltinMcpContent, BuiltinMcpService, BuiltinMcpTool,
     MemoryEntry, MemoryLocation, MemoryRequest, MemoryService, MemoryWriteRequest,
     ScopeChoice, SemanticMemoryIndex, ServiceError, ServiceFuture, SystemContextFragment,
 };
-use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const MCP_ID: &str = "neoism-memory";
 const INDEX_FILE: &str = "MEMORY.md";
-const PROJECT_DIR: &str = "Memory";
-const USER_DIR: &str = "Memory/Personal";
+const PROJECT_DIR: &str = ".neoism/memory";
+const USER_DIR: &str = "user";
 const MAX_INDEX_CHARS: usize = 12_000;
 const MAX_EMBED_CHARS: usize = 8_000;
 
@@ -22,7 +19,6 @@ struct Root {
     scope: &'static str,
     label: String,
     path: PathBuf,
-    workspace: neoism_workspace_index::config::NeoismWorkspace,
 }
 
 pub(crate) struct NeoismMemoryService {
@@ -37,7 +33,7 @@ impl NeoismMemoryService {
     fn roots(&self, request: &MemoryRequest, include_missing: bool) -> Result<Vec<Root>, ServiceError> {
         roots_for_scope(
             &request.working_directory,
-            request.scope_id.as_deref().unwrap_or("auto"),
+            request.scope_id.as_deref().unwrap_or("project"),
             include_missing,
         )
     }
@@ -74,14 +70,14 @@ impl NeoismMemoryService {
 impl MemoryService for NeoismMemoryService {
     fn scope_choices(&self) -> Vec<ScopeChoice> {
         vec![
-            choice("auto", "Project and user", "Search project memory and personal memory."),
-            choice("project", "Project", "Use the most-specific linked project memory."),
-            choice("user", "User", "Use personal memory in the default vault."),
+            choice("auto", "Project and user", "Search workspace memory and personal memory."),
+            choice("project", "Project", "Use agent-owned memory for this workspace."),
+            choice("user", "User", "Use personal Neoism Agent memory."),
             choice("all", "All", "Search project and personal memory."),
         ]
     }
 
-    fn default_scope_id(&self) -> &str { "auto" }
+    fn default_scope_id(&self) -> &str { "project" }
 
     fn init(&self, request: &MemoryRequest) -> Result<Vec<MemoryLocation>, ServiceError> {
         let roots = self.roots(request, true)?;
@@ -151,7 +147,7 @@ impl MemoryService for NeoismMemoryService {
     }
 
     fn context_fragments(&self, working_directory: &Path) -> Vec<SystemContextFragment> {
-        let request = MemoryRequest::new(working_directory).with_scope("auto");
+        let request = MemoryRequest::new(working_directory).with_scope("project");
         let Ok(roots) = self.roots(&request, false) else { return Vec::new() };
         roots.into_iter().filter_map(|root| {
             let text = std::fs::read_to_string(root.path.join(INDEX_FILE)).ok()?;
@@ -160,7 +156,7 @@ impl MemoryService for NeoismMemoryService {
             Some(SystemContextFragment {
                 id: format!("memory:{}:{}", root.scope, root.path.display()),
                 content: format!(
-                    "Persistent {} memory index (vault {}), stored in {}. That folder is OUTSIDE the workspace directory. Access it only with the native memory tool. Use memory with operation=recall before repeating project discovery, operation=read for linked topic files, and operation=write for new durable facts.\n{}",
+                    "Persistent {} memory index ({}), stored in {}. Access it only with the native memory tool. Use memory with operation=recall before repeating project discovery, operation=read for linked topic files, and operation=write for new durable facts.\n{}",
                     root.scope, root.label, root.path.display(), text
                 ),
             })
@@ -169,74 +165,6 @@ impl MemoryService for NeoismMemoryService {
 
     fn set_semantic_index(&self, index: Option<Arc<dyn SemanticMemoryIndex>>) {
         *self.semantic.write().unwrap() = index;
-    }
-}
-
-impl BuiltinMcpService for NeoismMemoryService {
-    fn id(&self) -> &str { MCP_ID }
-
-    fn tools(&self) -> Vec<BuiltinMcpTool> {
-        let description = "Scope defaults to project and user memory. Use user only for facts about the user; use project for codebase and workflow facts.";
-        let scope = json!({"type":"string","enum":["auto","project","user","all"]});
-        vec![
-            tool("memory.init", "Create Neoism memory folders and compact indexes", json!({"type":"object","properties":{"scope":scope.clone()},"description":description})),
-            tool("memory.list", "List Neoism memory files", json!({"type":"object","properties":{"scope":scope.clone(),"limit":{"type":"integer"}},"description":description})),
-            tool("memory.recall", "Search Neoism memory by meaning with keyword fallback", json!({"type":"object","properties":{"query":{"type":"string"},"scope":scope.clone(),"limit":{"type":"integer"}},"required":["query"],"description":description})),
-            tool("memory.search", "Search Neoism memory text", json!({"type":"object","properties":{"query":{"type":"string"},"scope":scope.clone(),"limit":{"type":"integer"}},"required":["query"],"description":description})),
-            tool("memory.read", "Read a memory file by memory-relative path", json!({"type":"object","properties":{"path":{"type":"string"},"scope":scope.clone()},"required":["path"]})),
-            tool("memory.write", "Write or update a Neoism memory topic and compact index", json!({"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"type":{"type":"string","description":"project, feedback, bug, feature, reference, perf, preference, workflow, or personal"},"scope":scope,"body":{"type":"string"},"content":{"type":"string"},"fileName":{"type":"string"},"created":{"type":"string"},"updated":{"type":"string"},"origin":{"type":"string"}},"required":["name","description"]})),
-        ]
-    }
-
-    fn call_tool(&self, cwd: &Path, tool_name: &str, arguments: Value) -> Result<BuiltinMcpCallResult, ServiceError> {
-        if tool_name == "memory.recall" { return Err(ServiceError::new("memory.recall requires asynchronous dispatch")); }
-        self.call_sync(cwd, tool_name, arguments)
-    }
-
-    fn call_tool_async<'a>(&'a self, cwd: &'a Path, tool_name: &'a str, arguments: Value) -> ServiceFuture<'a, Result<BuiltinMcpCallResult, ServiceError>> {
-        Box::pin(async move {
-            if tool_name != "memory.recall" { return self.call_sync(cwd, tool_name, arguments); }
-            let request = request(cwd, &arguments);
-            let query = required(&arguments, "query")?;
-            let limit = limit(&arguments);
-            match self.semantic_recall(&request, &query, limit).await {
-                Ok(Some(entries)) => text_result(json!({"operation":"recall","query":query,"mode":"semantic","hits":entries.iter().map(entry_json).collect::<Vec<_>>() })),
-                Ok(None) => {
-                    let entries = self.search(&request, &query, limit)?;
-                    text_result(json!({"operation":"recall","query":query,"hits":grouped_json(&entries)}))
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "semantic memory recall failed; falling back to keyword recall");
-                    let entries = self.search(&request, &query, limit)?;
-                    text_result(json!({"operation":"recall","query":query,"hits":grouped_json(&entries)}))
-                }
-            }
-        })
-    }
-}
-
-impl NeoismMemoryService {
-    fn call_sync(&self, cwd: &Path, name: &str, arguments: Value) -> Result<BuiltinMcpCallResult, ServiceError> {
-        let request = request(cwd, &arguments);
-        let output = match name {
-            "memory.init" => json!({"operation":"init","roots":self.init(&request)?.iter().map(location_json).collect::<Vec<_>>() }),
-            "memory.list" => json!({"operation":"list","entries":grouped_json(&self.list(&request, limit(&arguments))?) }),
-            "memory.search" => { let query = required(&arguments,"query")?; json!({"operation":"search","query":query,"hits":self.search(&request,&query,limit(&arguments))?.iter().map(entry_json).collect::<Vec<_>>()}) },
-            "memory.read" => { let path = required(&arguments,"path")?; let value=self.read(&request,&path)?; json!({"operation":"read","scope":value.location.scope_id,"path":value.path,"absolutePath":value.location.storage_key.to_string()+"/"+&value.path,"text":value.content}) },
-            "memory.write" => {
-                let write = MemoryWriteRequest { request, name: required(&arguments,"name")?, description: required(&arguments,"description")?, kind: optional(&arguments,"type"), body: optional(&arguments,"body").or_else(||optional(&arguments,"content")), file_name: optional(&arguments,"fileName"), created: optional(&arguments,"created"), updated: optional(&arguments,"updated"), origin: optional(&arguments,"origin") };
-                let kind = write.kind.as_deref().unwrap_or("project");
-                let root = write_root(&write.request, kind)?;
-                let target_name = write.file_name.as_deref().map(safe_file_name).filter(|name| !name.is_empty()).unwrap_or_else(||memory_file_name(kind,&write.name));
-                if let Some(existing) = find_similar(&root,&root.path.join(target_name),&write.name,&write.description)? {
-                    return text_result(json!({"operation":"write","status":"duplicate","scope":root.scope,"existingPath":relative(&root,&existing),"absolutePath":existing,"hint":"a memory covering this already exists; read it and update that file instead of creating a duplicate"}));
-                }
-                let value = self.write(&write)?;
-                json!({"operation":"write","scope":value.location.scope_id,"path":value.path,"absolutePath":value.location.storage_key.to_string()+"/"+&value.path})
-            }
-            other => return Err(ServiceError::new(format!("unknown memory MCP tool {other}"))),
-        };
-        text_result(output)
     }
 }
 
@@ -267,8 +195,8 @@ async fn sync_semantic(index: &dyn SemanticMemoryIndex, root: &Root, model: &str
 fn roots_for_scope(cwd: &Path, scope: &str, include_missing: bool) -> Result<Vec<Root>, ServiceError> {
     let mut roots = match scope {
         "project" => project_roots(cwd, include_missing)?,
-        "user" => vec![user_root()],
-        "auto" | "all" | "" => { let mut roots=project_roots(cwd,include_missing)?; roots.push(user_root()); roots },
+        "user" => vec![user_root()?],
+        "auto" | "all" | "" => { let mut roots=project_roots(cwd,include_missing)?; roots.push(user_root()?); roots },
         other => return Err(ServiceError::new(format!("unknown memory scope {other}"))),
     };
     if !include_missing { roots.retain(|root| root.path.is_dir()); }
@@ -276,33 +204,100 @@ fn roots_for_scope(cwd: &Path, scope: &str, include_missing: bool) -> Result<Vec
 }
 
 fn project_roots(cwd: &Path, include_missing: bool) -> Result<Vec<Root>, ServiceError> {
-    let scoped = project_root(cwd)?;
-    if include_missing { return Ok(vec![scoped]); }
-    let vault = scoped.workspace.as_vault_workspace();
-    let path = vault.notes_workspace_dir().join(PROJECT_DIR);
-    if path == scoped.path { return Ok(vec![scoped]); }
-    Ok(vec![scoped, Root { scope:"project", label:vault.config.notes.workspace.clone(), path, workspace:vault }])
+    let root = project_root(cwd)?;
+    if include_missing || root.path.is_dir() { Ok(vec![root]) } else { Ok(Vec::new()) }
 }
 
 fn project_root(cwd: &Path) -> Result<Root, ServiceError> {
-    let workspace = neoism_workspace_index::linked_project_for_code_dir(cwd).map_err(error)?.unwrap_or_else(neoism_workspace_index::default_notes_workspace);
-    let path = workspace.notes_workspace_dir().join(PROJECT_DIR);
-    let relative = workspace.notes_scope_relative();
-    let label = if relative == Path::new(".") { workspace.config.notes.workspace.clone() } else { format!("{}/{}",workspace.config.notes.workspace,relative.display()) };
-    Ok(Root { scope:"project",label,path,workspace })
+    let workspace = crate::config::NeoismConfigSourceService::workspace_root(cwd);
+    let label = workspace.file_name().and_then(|value| value.to_str()).unwrap_or("workspace").to_string();
+    let root = Root { scope:"project", label, path:workspace.join(PROJECT_DIR) };
+    move_vault_memory(&root, &vault_memory_roots(cwd)?)?;
+    Ok(root)
 }
 
-fn user_root() -> Root {
-    let workspace = neoism_workspace_index::default_notes_workspace();
-    Root { scope:"user", label:format!("{}/Memory/Personal",workspace.config.notes.workspace), path:workspace.notes_workspace_dir().join(USER_DIR), workspace }
+fn user_root() -> Result<Root, ServiceError> {
+    let root = Root { scope:"user", label:"Neoism user".to_string(), path:memory_home().join(USER_DIR) };
+    let old = neoism_workspace_index::default_notes_workspace().notes_workspace_dir().join("Memory/Personal");
+    move_vault_memory(&root, &[old])?;
+    Ok(root)
 }
 
 fn write_root(request: &MemoryRequest, kind: &str) -> Result<Root, ServiceError> {
-    match request.scope_id.as_deref().unwrap_or("auto") {
-        "user" => Ok(user_root()), "project" | "all" => project_root(&request.working_directory),
-        "auto" | "" if matches!(kind,"personal"|"preference"|"workflow") => Ok(user_root()),
+    match request.scope_id.as_deref().unwrap_or("project") {
+        "user" => user_root(), "project" | "all" => project_root(&request.working_directory),
+        "auto" | "" if matches!(kind,"personal"|"preference") => user_root(),
         "auto" | "" => project_root(&request.working_directory), other => Err(ServiceError::new(format!("unknown memory scope {other}"))),
     }
+}
+
+fn memory_home() -> PathBuf {
+    if let Some(path) = std::env::var_os("NEOISM_AGENT_MEMORY_HOME") { return PathBuf::from(path); }
+    if let Some(path) = std::env::var_os("XDG_DATA_HOME") { return PathBuf::from(path).join("neoism/memory"); }
+    if let Some(home) = std::env::var_os("HOME") { return PathBuf::from(home).join(".local/share/neoism/memory"); }
+    PathBuf::from(".neoism-user-memory")
+}
+
+fn vault_memory_roots(cwd: &Path) -> Result<Vec<PathBuf>, ServiceError> {
+    let Some(workspace) = neoism_workspace_index::linked_project_for_code_dir(cwd).map_err(error)? else {
+        return Ok(Vec::new());
+    };
+    let scoped = workspace.notes_workspace_dir().join("Memory");
+    let vault = workspace.as_vault_workspace().notes_workspace_dir().join("Memory");
+    Ok(if scoped == vault { vec![scoped] } else { vec![scoped, vault] })
+}
+
+fn move_vault_memory(root: &Root, sources: &[PathBuf]) -> Result<(), ServiceError> {
+    if !sources.iter().any(|path| path.is_dir()) { return Ok(()); }
+    std::fs::create_dir_all(&root.path)?;
+    for source_root in sources {
+        let Ok(entries) = std::fs::read_dir(source_root) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let source = entry.path();
+            if !source.is_file() || source.extension().and_then(|value| value.to_str()) != Some("md") { continue; }
+            let target = root.path.join(entry.file_name());
+            if target.exists() {
+                if source.file_name().and_then(|value| value.to_str()) == Some(INDEX_FILE) {
+                    merge_memory_index(&target, &source)?;
+                    std::fs::remove_file(source)?;
+                    continue;
+                }
+                if std::fs::read(&target)? == std::fs::read(&source)? {
+                    std::fs::remove_file(source)?;
+                    continue;
+                }
+            }
+            let target = available_import_path(&target);
+            if std::fs::rename(&source, &target).is_err() {
+                std::fs::copy(&source, &target)?;
+                std::fs::remove_file(source)?;
+            }
+        }
+        let _ = std::fs::remove_dir(source_root);
+    }
+    Ok(())
+}
+
+fn merge_memory_index(target: &Path, source: &Path) -> Result<(), ServiceError> {
+    let mut current = std::fs::read_to_string(target)?;
+    let incoming = std::fs::read_to_string(source)?;
+    for line in incoming.lines().filter(|line| line.trim_start().starts_with("- [")) {
+        if !current.lines().any(|existing| existing == line) {
+            if !current.ends_with('\n') { current.push('\n'); }
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    std::fs::write(target, current)?;
+    Ok(())
+}
+
+fn available_import_path(path: &Path) -> PathBuf {
+    if !path.exists() { return path.to_path_buf(); }
+    let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("memory");
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    (1..).map(|index| parent.join(format!("{stem}_imported_{index}.md")))
+        .find(|candidate| !candidate.exists()).expect("memory import path")
 }
 
 fn ensure_root(root: &Root) -> Result<(), ServiceError> {
@@ -317,7 +312,7 @@ fn files(root: &Root) -> Result<Vec<PathBuf>, ServiceError> {
     let mut paths=entries.filter_map(Result::ok).map(|e|e.path()).filter(|p|p.is_file()&&p.extension().and_then(|v|v.to_str())==Some("md")&&p.file_name().and_then(|v|v.to_str())!=Some(INDEX_FILE)).collect::<Vec<_>>(); paths.sort(); Ok(paths)
 }
 
-fn safe_path(root:&Root,raw:&str)->Result<PathBuf,ServiceError>{let path=Path::new(raw);if path.is_absolute(){return path.starts_with(&root.path).then(||path.to_path_buf()).ok_or_else(||ServiceError::new("memory path is outside the selected memory root"));}if path.components().any(|c|matches!(c,Component::ParentDir|Component::RootDir|Component::Prefix(_))){return Err(ServiceError::new("memory path must be relative"));}let mut relative=path;for prefix in [USER_DIR,PROJECT_DIR]{if root.path.ends_with(prefix){if let Ok(rest)=path.strip_prefix(prefix){relative=rest;break}}}Ok(root.path.join(relative))}
+fn safe_path(root:&Root,raw:&str)->Result<PathBuf,ServiceError>{let path=Path::new(raw);if path.is_absolute(){return path.starts_with(&root.path).then(||path.to_path_buf()).ok_or_else(||ServiceError::new("memory path is outside the selected memory root"));}if path.components().any(|c|matches!(c,Component::ParentDir|Component::RootDir|Component::Prefix(_))){return Err(ServiceError::new("memory path must be relative"));}let relative=path.strip_prefix(PROJECT_DIR).or_else(|_|path.strip_prefix(USER_DIR)).unwrap_or(path);Ok(root.path.join(relative))}
 fn existing_file<'a>(roots:&'a[Root],raw:&str)->Result<(&'a Root,PathBuf),ServiceError>{for root in roots{if let Ok(path)=safe_path(root,raw){if path.is_file(){return Ok((root,path))}}}Err(ServiceError::new(format!("no memory file {raw}")))}
 fn location(root:&Root)->MemoryLocation{MemoryLocation{scope_id:root.scope.to_string(),label:root.label.clone(),storage_key:root.path.to_string_lossy().to_string()}}
 fn entry(root:&Root,path:&Path,text:&str,content:Option<String>)->MemoryEntry{MemoryEntry{location:location(root),path:relative(root,path),description:frontmatter(text,"description"),kind:frontmatter(text,"type"),content,snippet:None,semantic_distance:None}}
@@ -335,16 +330,7 @@ fn safe_file_name(value:&str)->String{let value=value.trim().strip_suffix(".md")
 fn slug(value:&str)->String{let mut out=String::new();let mut separator=false;for ch in value.trim().chars(){if ch.is_ascii_alphanumeric(){out.push(ch.to_ascii_lowercase());separator=false}else if !separator{out.push('_');separator=true}}out.trim_matches('_').to_string()}
 fn yaml(value:&str)->String{format!("\"{}\"",value.replace('\\',"\\\\").replace('"',"\\\""))}
 fn truncate(text:&str,max:usize)->String{if text.len()<=max{return text.to_string()}let mut out=String::new();for line in text.lines(){if out.len()+line.len()+1>max{break}out.push_str(line);out.push('\n')}out.push_str("(index truncated - use memory.list or memory.recall for omitted entries)");out}
-fn request(cwd:&Path,args:&Value)->MemoryRequest{let mut request=MemoryRequest::new(cwd);request.scope_id=args.get("scope").and_then(Value::as_str).map(str::to_string);request}
-fn required(args:&Value,key:&str)->Result<String,ServiceError>{args.get(key).and_then(Value::as_str).map(str::to_string).ok_or_else(||ServiceError::new(format!("{key} is required")))}
-fn optional(args:&Value,key:&str)->Option<String>{args.get(key).and_then(Value::as_str).map(str::to_string)}
-fn limit(args:&Value)->usize{args.get("limit").and_then(Value::as_u64).unwrap_or(40).max(1)as usize}
 fn choice(id:&str,label:&str,description:&str)->ScopeChoice{ScopeChoice{id:id.to_string(),label:label.to_string(),description:Some(description.to_string())}}
-fn tool(name:&str,description:&str,input_schema:Value)->BuiltinMcpTool{BuiltinMcpTool{name:name.to_string(),description:Some(description.to_string()),input_schema,annotations:None}}
-fn text_result(value:Value)->Result<BuiltinMcpCallResult,ServiceError>{Ok(BuiltinMcpCallResult{content:vec![BuiltinMcpContent::Text{text:serde_json::to_string_pretty(&value).map_err(error)?,annotations:None}],is_error:None})}
-fn entry_json(value:&MemoryEntry)->Value{let mut object=serde_json::Map::new();object.insert("scope".into(),json!(value.location.scope_id));object.insert("vault".into(),json!(value.location.label));object.insert("path".into(),json!(value.path));object.insert("description".into(),json!(value.description));object.insert("type".into(),json!(value.kind));if let Some(snippet)=&value.snippet{object.insert("snippet".into(),json!(snippet));}if let Some(distance)=value.semantic_distance{object.insert("distance".into(),json!(distance));}Value::Object(object)}
-fn grouped_json(entries:&[MemoryEntry])->Vec<Value>{let mut groups:Vec<(MemoryLocation,Vec<Value>)>=Vec::new();for entry in entries{if let Some((_,items))=groups.iter_mut().find(|(location,_)|location.storage_key==entry.location.storage_key){items.push(entry_json(entry));}else{groups.push((entry.location.clone(),vec![entry_json(entry)]));}}groups.into_iter().map(|(location,result)|json!({"scope":location.scope_id,"vault":location.label,"memoryRoot":location.storage_key,"result":result})).collect()}
-fn location_json(value:&MemoryLocation)->Value{json!({"scope":value.scope_id,"vault":value.label,"memoryRoot":value.storage_key,"index":format!("{}/{}",value.storage_key,INDEX_FILE)})}
 fn error(error:impl std::fmt::Display)->ServiceError{ServiceError::new(error.to_string())}
 fn unix_millis()->i64{std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()as i64).unwrap_or(0)}
 fn snippet(value:&str)->String{value.chars().take(240).collect::<String>().replace('\n'," ")}
@@ -356,7 +342,8 @@ mod tests {
 
     struct NotesHome {
         root: PathBuf,
-        previous: Option<std::ffi::OsString>,
+        previous_notes: Option<std::ffi::OsString>,
+        previous_memory: Option<std::ffi::OsString>,
     }
 
     impl NotesHome {
@@ -367,17 +354,23 @@ mod tests {
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
             ));
             std::fs::create_dir_all(&root).unwrap();
-            let previous = std::env::var_os("NEOISM_NOTES_HOME");
+            let previous_notes = std::env::var_os("NEOISM_NOTES_HOME");
+            let previous_memory = std::env::var_os("NEOISM_AGENT_MEMORY_HOME");
             unsafe { std::env::set_var("NEOISM_NOTES_HOME", &root); }
-            Self { root, previous }
+            unsafe { std::env::set_var("NEOISM_AGENT_MEMORY_HOME", root.join("agent-memory")); }
+            Self { root, previous_notes, previous_memory }
         }
     }
 
     impl Drop for NotesHome {
         fn drop(&mut self) {
-            match self.previous.take() {
+            match self.previous_notes.take() {
                 Some(value) => unsafe { std::env::set_var("NEOISM_NOTES_HOME", value) },
                 None => unsafe { std::env::remove_var("NEOISM_NOTES_HOME") },
+            }
+            match self.previous_memory.take() {
+                Some(value) => unsafe { std::env::set_var("NEOISM_AGENT_MEMORY_HOME", value) },
+                None => unsafe { std::env::remove_var("NEOISM_AGENT_MEMORY_HOME") },
             }
             let _ = std::fs::remove_dir_all(&self.root);
         }
@@ -398,28 +391,28 @@ mod tests {
     }
 
     #[test]
-    fn canonical_default_and_user_layout_is_the_only_runtime_layout() {
+    fn memory_is_agent_owned_and_moves_old_user_memory() {
         let _lock = crate::test_env_lock().lock().unwrap_or_else(|error| error.into_inner());
         let home = NotesHome::new("canonical");
         let cwd = home.root.join("code");
         std::fs::create_dir_all(&cwd).unwrap();
-        let legacy = home.root.join("Default/Personal/Memory");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("personal_legacy.md"), "legacy data must remain untouched").unwrap();
+        let legacy_user = home.root.join("Default/Memory/Personal");
+        std::fs::create_dir_all(&legacy_user).unwrap();
+        std::fs::write(legacy_user.join("personal_legacy.md"), "legacy user fact").unwrap();
 
         let service = NeoismMemoryService::new();
         service.init(&MemoryRequest::new(&cwd).with_scope("all")).unwrap();
         service.write(&write_request(&cwd, "project", "feature", "project fact")).unwrap();
         service.write(&write_request(&cwd, "user", "personal", "user fact")).unwrap();
 
-        assert!(home.root.join("Default/Memory/feature_project_fact.md").is_file());
-        assert!(home.root.join("Default/Memory/Personal/personal_user_fact.md").is_file());
-        assert!(legacy.join("personal_legacy.md").is_file());
-        assert!(service.search(&MemoryRequest::new(&cwd).with_scope("user"), "legacy", 10).unwrap().is_empty());
+        assert!(cwd.join(".neoism/memory/feature_project_fact.md").is_file());
+        assert!(home.root.join("agent-memory/user/personal_user_fact.md").is_file());
+        assert!(home.root.join("agent-memory/user/personal_legacy.md").is_file());
+        assert!(!legacy_user.join("personal_legacy.md").exists());
     }
 
     #[test]
-    fn linked_folder_reads_its_memory_and_the_owning_vault_memory() {
+    fn linked_vault_memory_is_moved_into_workspace_memory() {
         let _lock = crate::test_env_lock().lock().unwrap_or_else(|error| error.into_inner());
         let home = NotesHome::new("linked");
         let cwd = home.root.join("code/project");
@@ -441,6 +434,8 @@ mod tests {
         let entries = service.search(&MemoryRequest::new(&cwd).with_scope("project"), "fact", 10).unwrap();
         assert!(entries.iter().any(|entry| entry.path == "feature_specific_fact.md"));
         assert!(entries.iter().any(|entry| entry.path == "shared.md"));
-        assert!(vault.join("Projects/Specific/Memory/feature_specific_fact.md").is_file());
+        assert!(cwd.join(".neoism/memory/feature_specific_fact.md").is_file());
+        assert!(cwd.join(".neoism/memory/shared.md").is_file());
+        assert!(!vault.join("Memory/shared.md").exists());
     }
 }

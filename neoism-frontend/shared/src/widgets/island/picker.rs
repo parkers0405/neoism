@@ -65,6 +65,26 @@ impl Island {
         });
     }
 
+    /// Clear chrome that belonged to a workspace replaced in the same slot.
+    /// Unlike `remove_tab_state`, indices after `index` do not move.
+    pub fn reset_tab_state(&mut self, index: usize) {
+        self.tab_colors.remove(&index);
+        self.tab_custom_titles.remove(&index);
+        if self.color_picker_tab == Some(index) {
+            self.color_picker_tab = None;
+            self.rename_input.clear();
+        }
+        if self.hover == Some(index) {
+            self.hover = None;
+        }
+        if self.hover_from == Some(index) {
+            self.hover_from = None;
+        }
+        if self.hover_to == Some(index) {
+            self.hover_to = None;
+        }
+    }
+
     /// Apply the rename input as a custom title for the current picker tab
     pub(crate) fn apply_rename(&mut self) {
         if let Some(tab) = self.color_picker_tab {

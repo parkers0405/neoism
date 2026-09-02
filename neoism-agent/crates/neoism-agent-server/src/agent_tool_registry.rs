@@ -119,16 +119,6 @@ async fn available_tools_for_snapshot(
             output_schema: Some(definition.output_schema),
         });
     }
-    if state.services().notes.is_none() {
-        tools.retain(|tool| tool.id != "notes");
-    } else if let Some(notes) = state.services().notes.as_ref() {
-        if let Some(tool) = tools.iter_mut().find(|tool| tool.id == "notes") {
-            tool.description = notes.tool_description();
-            if let Some(operation) = tool.parameters.pointer_mut("/properties/operation") {
-                operation["enum"] = json!(["create", "list", "read", "write", "search", "tasks", "taskToggle"]);
-            }
-        }
-    }
     tools.extend(
         crate::custom_tool::list(state.services(), directory)
             .into_iter()
@@ -888,6 +878,10 @@ mod tests {
         assert_eq!(mcp_canonical_path(&docs), "neoism_docs.search");
         let external = mcp_tool("product-help", "docs.search", "Search product docs");
         assert_eq!(mcp_canonical_path(&external), "product_help.docs_search");
+
+        let notes = mcp_tool("notes", "taskToggle", "Toggle a note task");
+        assert_eq!(mcp_canonical_path(&notes), "notes.taskToggle");
+        assert!(mcp_path_matches(&notes, "notes.taskToggle"));
     }
 
     #[test]

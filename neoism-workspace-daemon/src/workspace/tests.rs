@@ -1091,3 +1091,15 @@ async fn set_preferences_broadcasts_to_subscribers() {
     assert_eq!(b.workspace_id, "ws-broadcast");
     assert_eq!(b.prefs, prefs);
 }
+
+#[test]
+fn quick_ssh_home_sentinel_resolves_on_the_daemon_host() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    assert_eq!(expand_workspace_home(PathBuf::from("~")), home);
+    assert_eq!(
+        expand_workspace_home(PathBuf::from("relative-project")),
+        PathBuf::from("relative-project")
+    );
+}

@@ -42,9 +42,11 @@ base64 = { workspace = true }
 web-time = "1.1"
 
 [dev-dependencies]
+axum = { workspace = true }
 pretty_assertions = "1.4.1"
 criterion = { workspace = true }
 tempfile = "3"
+tower = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bitflags = { workspace = true }

@@ -212,13 +212,6 @@ pub enum RioEvent {
     /// requests and reconnect races without polling.
     RemoteFileTreeCheck,
 
-    /// A shelled-out `ssh` file-tree backend has queued directory
-    /// listings / file-content replies for the desktop UI thread to
-    /// drain. Carries no payload (this crate can't depend on
-    /// `neoism-protocol`): the frontend keeps the actual replies on an
-    /// `mpsc` channel and this variant is only the "go drain it" nudge.
-    SshFilesReady,
-
     /// Background ACP worker has new session/file/debug events to drain.
     AcpWake,
 
@@ -358,7 +351,6 @@ impl Debug for RioEvent {
             RioEvent::RemoteFileTreeCheck => {
                 write!(f, "RemoteFileTreeCheck")
             }
-            RioEvent::SshFilesReady => write!(f, "SshFilesReady"),
             RioEvent::AcpWake => write!(f, "AcpWake"),
             RioEvent::WorkspaceNotesWake => write!(f, "WorkspaceNotesWake"),
             RioEvent::UpdateTitles => write!(f, "UpdateTitles"),

@@ -21,6 +21,7 @@ impl MarkdownPane {
         self.block_rects.clear();
         self.block_wrap_rows.clear();
         self.block_wrap_hit_stops.clear();
+        self.paragraph_hit_maps.clear();
         self.table_rects.clear();
         self.table_cell_rects.clear();
         self.table_action_rects.clear();
@@ -226,6 +227,19 @@ impl MarkdownPane {
             self.block_wrap_hit_stops.insert(line, rows);
         } else {
             self.block_wrap_hit_stops.remove(&line);
+        }
+    }
+
+    pub(super) fn register_paragraph_hit_map(
+        &mut self,
+        line: usize,
+        positions: Vec<MarkdownPosition>,
+    ) {
+        if positions.is_empty() {
+            self.paragraph_hit_maps.remove(&line);
+        } else {
+            self.paragraph_hit_maps
+                .insert(line, MarkdownParagraphHitMap { positions });
         }
     }
 

@@ -35,8 +35,6 @@ mod format;
 pub(crate) mod locks;
 #[path = "tool_support/memory.rs"]
 mod memory;
-#[path = "tool_support/notes.rs"]
-mod notes;
 #[path = "tool_support/patch.rs"]
 mod patch;
 #[path = "tool_support/patch_tool.rs"]
@@ -409,10 +407,6 @@ fn webfetch_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(webfetch_tool(context, arguments))
 }
 
-fn notes_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(async move { notes::notes_tool(context, arguments) })
-}
-
 fn documentation_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(async move { documentation::documentation_tool(context, arguments) })
 }
@@ -536,7 +530,6 @@ pub(crate) fn register_workspace_tools(registrar: &mut neoism_agent_plugin_api::
 pub(crate) fn workspace_tool_items() -> Vec<ToolListItem> {
     registry::definitions(registry::ToolOwner::Workspace).into_iter().map(|tool| tool.item()).collect()
 }
-pub(crate) fn register_notes_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Notes); }
 pub(crate) fn register_documentation_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Documentation); }
 pub(crate) fn register_memory_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Memory); }
 pub(crate) fn register_skill_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Skills); }

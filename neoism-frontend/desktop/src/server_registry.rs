@@ -49,7 +49,7 @@ pub struct WindowProfile {
     pub servers: HashMap<String, ServerWorkspaceSubscription>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerWorkspaceSubscription {
     #[serde(default)]
     pub subscribed_workspace_ids: Vec<String>,
@@ -120,6 +120,36 @@ impl ServerRegistry {
             .servers
             .insert(server_id.to_string(), subscription);
         self.persist().map_err(|error| error.to_string())
+    }
+
+    /// Reconcile a persisted subscription with a server's authoritative
+    /// workspace tree. Deleted workspace ids are removed from BOTH memory and
+    /// disk, so they cannot be resurrected on the next app start or server
+    /// reconnect.
+    pub fn prune_workspace_subscription<'a>(
+        &mut self,
+        profile_id: &str,
+        server_id: &str,
+        live_workspace_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<ServerWorkspaceSubscription, String> {
+        let live: std::collections::HashSet<&str> =
+            live_workspace_ids.into_iter().collect();
+        let mut subscription = self.workspace_subscription(profile_id, server_id);
+        let before = subscription.clone();
+        subscription
+            .subscribed_workspace_ids
+            .retain(|workspace_id| live.contains(workspace_id.as_str()));
+        if subscription
+            .last_active_workspace_id
+            .as_ref()
+            .is_some_and(|workspace_id| !live.contains(workspace_id.as_str()))
+        {
+            subscription.last_active_workspace_id = None;
+        }
+        if subscription != before {
+            self.set_workspace_subscription(profile_id, server_id, subscription.clone())?;
+        }
+        Ok(subscription)
     }
 
     /// Stop restoring `workspace_id` for this window/server profile.
@@ -541,6 +571,35 @@ mod tests {
         assert_eq!(
             subscription.last_active_workspace_id.as_deref(),
             Some("website")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_workspace_subscriptions_are_pruned_persistently() {
+        let directory = test_dir();
+        let mut registry = ServerRegistry::load(directory.clone()).unwrap();
+        registry
+            .set_workspace_subscription(
+                "window-a",
+                "work",
+                ServerWorkspaceSubscription {
+                    subscribed_workspace_ids: vec!["live".into(), "deleted".into()],
+                    last_active_workspace_id: Some("deleted".into()),
+                },
+            )
+            .unwrap();
+
+        let reconciled = registry
+            .prune_workspace_subscription("window-a", "work", ["live"])
+            .unwrap();
+        assert_eq!(reconciled.subscribed_workspace_ids, vec!["live"]);
+        assert_eq!(reconciled.last_active_workspace_id, None);
+
+        let loaded = ServerRegistry::load(directory.clone()).unwrap();
+        assert_eq!(
+            loaded.workspace_subscription("window-a", "work"),
+            reconciled
         );
         fs::remove_dir_all(directory).unwrap();
     }

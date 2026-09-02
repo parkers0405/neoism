@@ -391,6 +391,31 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         true
     }
 
+    /// Remove one whole top-level grid by index while keeping the currently
+    /// selected grid stable. Quick SSH uses this when the requested remote
+    /// workspace is already open: the source local grid is retired and the
+    /// existing remote grid occupies the user's workflow without a duplicate.
+    pub fn remove_grid_at(&mut self, index: usize, sugarloaf: &mut Sugarloaf) -> bool {
+        if self.contexts.len() <= 1 || index >= self.contexts.len() {
+            return false;
+        }
+        if let Some(stable) = self.contexts[index].workspace_route_id() {
+            self.adopted_workspaces.remove(&stable);
+        }
+        self.contexts[index].remove_all_rich_text(sugarloaf);
+        self.contexts.remove(index);
+        self.remove_title_at_index(index);
+        if index < self.current_index {
+            self.current_index -= 1;
+        } else if index == self.current_index {
+            self.current_index = self.current_index.min(self.contexts.len() - 1);
+        }
+        self.current_route = self.current().route_id;
+        self.keep_only_active_context_visible(sugarloaf);
+        self.sync_daemon_workspaces();
+        true
+    }
+
     #[inline]
     pub fn current_grid_mut(&mut self) -> &mut ContextGrid<T> {
         &mut self.contexts[self.current_index]

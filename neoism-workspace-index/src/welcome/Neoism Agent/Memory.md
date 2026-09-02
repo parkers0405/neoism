@@ -1,6 +1,6 @@
 # Memory
 
-Neoism Memory stores durable facts in Markdown files inside a vault. It is designed for information that should survive session compaction, a new conversation, or a different connected device.
+Neoism Memory stores durable facts in agent-owned Markdown files. It is designed for information that should survive session compaction or a new conversation without coupling agent state to Notes vault selection.
 
 Memory is not hidden model state. You can open, edit, link, search, and delete the files yourself.
 
@@ -8,8 +8,8 @@ Memory is not hidden model state. You can open, edit, link, search, and delete t
 
 | Scope | Use it for | Location |
 |---|---|---|
-| `project` | Architecture, bugs, feature status, project workflows, technical decisions | The linked project's notes folder `Memory/`, or the default vault when no folder is linked |
-| `user` | Facts about the person: durable preferences, personal environment, recurring personal workflow | The default vault's `Memory/Personal/` |
+| `project` | Architecture, bugs, feature status, project workflows, technical decisions | `<workspace>/.neoism/memory/` |
+| `user` | Facts about the person: durable preferences and personal environment | `~/.local/share/neoism/memory/user/` on Linux, or the platform data-directory equivalent |
 | `auto` / `all` | Recall from both scopes | Both roots |
 
 Never store project facts in user memory merely because one user mentioned them.
@@ -19,7 +19,7 @@ Never store project facts in user memory merely because one user mentioned them.
 Each root contains a compact `MEMORY.md` index and detailed topic files:
 
 ```text
-Memory/
+.neoism/memory/
 ├── MEMORY.md
 ├── bug_session_replay.md
 ├── feature_background_tasks.md
@@ -31,15 +31,15 @@ Memory/
 
 ## Operations
 
-The built-in Memory MCP exposes:
+The native `memory` tool exposes:
 
 | Operation | Purpose |
 |---|---|
-| `memory_init` | Create memory folders and indexes. |
-| `memory_list` | List topic files. |
-| `memory_read` | Read one topic by relative path. |
-| `memory_recall` | Semantic/keyword search across indexes and topics. |
-| `memory_write` | Write/update a topic and keep the index compact. |
+| `init` | Create memory folders and indexes. |
+| `list` | List topic files. |
+| `read` | Read one topic by relative path. |
+| `recall` | Semantic/keyword search across indexes and topics. |
+| `write` | Write/update a topic and keep the index compact. |
 
 Recall uses semantic ranking when embeddings are available and falls back to keyword matching.
 
@@ -74,10 +74,10 @@ Poor candidates:
 
 ## Memory versus notes
 
-Notes are user knowledge and documents. Memory is a compact agent recall layer implemented using notes-compatible Markdown. A project plan can be a normal note; the invariant learned while implementing it may become a memory topic.
+Notes are user knowledge and documents. Memory is a separate compact agent recall layer that also uses portable Markdown. A project plan can be a normal note; the invariant learned while implementing it may become a memory topic.
 
 ## Cross-device behavior
 
-Because project memory is stored in the linked vault folder, it follows that vault's normal sync behavior. User memory lives in whichever vault is currently designated as the default. The Agent server reads the same files regardless of which attached Neoism client displays the session.
+Project memory belongs to the declared workspace and is available to every client attached to the Agent server hosting that workspace. User memory remains local to the user's Neoism data directory. Existing vault memory is moved automatically into the agent-owned layout.
 
 See [[Instructions]], [[Skills]], and [[Compaction]].

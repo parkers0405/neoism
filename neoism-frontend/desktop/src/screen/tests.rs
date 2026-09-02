@@ -115,6 +115,20 @@ fn parse_ssh_target_extracts_host_and_passthrough_opts() {
             vec!["-i".to_string(), "~/.ssh/id_ed25519".to_string()]
         ))
     );
+    assert_eq!(
+        parse_ssh_target("ssh -p2222 'user@box'"),
+        Some((
+            "user@box".to_string(),
+            vec!["-p".to_string(), "2222".to_string()]
+        ))
+    );
+    assert_eq!(
+        parse_ssh_target("ssh -i '/tmp/key with spaces' -- devbox"),
+        Some((
+            "devbox".to_string(),
+            vec!["-i".to_string(), "/tmp/key with spaces".to_string()]
+        ))
+    );
     // Bare toggle (`-t`) is dropped.
     assert_eq!(
         parse_ssh_target("ssh -t devbox"),
@@ -127,6 +141,7 @@ fn parse_ssh_target_extracts_host_and_passthrough_opts() {
     );
     // A one-shot remote command is NOT a session to follow.
     assert_eq!(parse_ssh_target("ssh devbox ls"), None);
+    assert_eq!(parse_ssh_target("ssh devbox && echo nope"), None);
     // No target.
     assert_eq!(parse_ssh_target("ssh"), None);
     // Not ssh.

@@ -16,7 +16,7 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::helpers::notebook_markdown_cell_index;
-use crate::editor::markdown::{MarkdownPane, MarkdownWrapKey};
+use crate::editor::markdown::{MarkdownPane, MarkdownWrapHitRow, MarkdownWrapKey};
 use crate::primitives::truncate_to_fit;
 
 use crate::editor::markdown::source_map::InlineSourceMap;
@@ -293,6 +293,136 @@ pub fn render(
                     cursor_y = rendered_y;
                     continue;
                 }
+            }
+        }
+
+        // Keep the fallback renderer CommonMark-compatible too. As in the
+        // virtual surface, the cursor line is deliberately excluded so its
+        // source/caret mapping remains byte-for-byte editable.
+        if matches!(parsed.kind, RenderLineKind::Paragraph) {
+            let revealed_line = (pane.cursor_reveal_active()
+                && pane.reveals_source_line(cursor_line))
+            .then_some(cursor_line);
+            if let Some(segment) =
+                virtualized::plain_paragraph_segment(&lines, line_ix, revealed_line)
+            {
+                let paragraph_opts = DrawOpts {
+                    font_size: markdown_font(17.0, font_scale),
+                    color: theme.u8(theme.fg),
+                    clip_rect: Some(clip),
+                    ..DrawOpts::default()
+                };
+                let clean = clean_inline_with_active_link(&segment.text, None);
+                let wrap_width = content_w - 44.0;
+                let wrapped = wrap_lines_cached(
+                    sugarloaf,
+                    pane,
+                    &clean,
+                    wrap_width,
+                    &paragraph_opts,
+                );
+                let paragraph_line_h = line_height(&paragraph_opts);
+                let text_h = paragraph_line_h * wrapped.len().max(1) as f32;
+                let mut visible_start = 0usize;
+                let wrapped_len = wrapped.len();
+                let hit_rows = wrapped
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rendered)| {
+                        let row = MarkdownWrapHitRow {
+                            start: visible_start,
+                            stops: measured_text_stops(
+                                sugarloaf,
+                                rendered,
+                                &paragraph_opts,
+                            ),
+                        };
+                        visible_start += rendered.chars().count();
+                        if index + 1 < wrapped_len {
+                            visible_start += 1;
+                        }
+                        row
+                    })
+                    .collect::<Vec<_>>();
+                let top_pad = if is_same_paragraph_neighbor(&parsed_lines, line_ix, -1) {
+                    0.0
+                } else {
+                    4.0
+                };
+                let text_x = content_x + 10.0;
+                let text_y = cursor_y + top_pad;
+                let block_h = text_h + 24.0;
+                pane.register_block_rect(
+                    line_ix,
+                    [
+                        content_x - 18.0,
+                        cursor_y + top_pad - 12.0,
+                        content_w + 36.0,
+                        block_h,
+                    ],
+                    [content_x - 54.0, cursor_y + top_pad - 12.0, 34.0, block_h],
+                    text_x,
+                    text_y,
+                    0,
+                    cursor_cell_width(&paragraph_opts),
+                    paragraph_line_h,
+                    wrap_width,
+                    mouse,
+                );
+                pane.register_block_wrap_hit_stops(line_ix, hit_rows.clone());
+                pane.register_paragraph_hit_map(line_ix, segment.hit_positions(0));
+                draw_fallback_paragraph_selection(
+                    sugarloaf,
+                    pane,
+                    &segment,
+                    &hit_rows,
+                    text_x,
+                    text_y,
+                    paragraph_line_h,
+                    theme,
+                    clip,
+                );
+                if !pane.read_only && (segment.start..segment.end).contains(&cursor_line)
+                {
+                    if let Some(visible) =
+                        segment.visible_offset_for_source(cursor_line, cursor_col, 0)
+                    {
+                        let row_index = hit_rows
+                            .iter()
+                            .rposition(|row| row.start <= visible)
+                            .unwrap_or(0);
+                        let row = &hit_rows[row_index];
+                        let local = visible
+                            .saturating_sub(row.start)
+                            .min(row.stops.len().saturating_sub(1));
+                        pane.set_cursor_rect(Some([
+                            text_x + row.stops.get(local).copied().unwrap_or_default(),
+                            cursor_y_for_text_line(
+                                text_y + row_index as f32 * paragraph_line_h,
+                                &paragraph_opts,
+                            ),
+                            cursor_cell_width(&paragraph_opts),
+                            caret_height(&paragraph_opts),
+                        ]));
+                    }
+                }
+                let mut line_y = text_y;
+                for rendered in wrapped {
+                    draw_if_visible(
+                        sugarloaf,
+                        text_x,
+                        line_y,
+                        &rendered,
+                        &paragraph_opts,
+                        y,
+                        bottom,
+                        text_occlusions,
+                    );
+                    line_y += paragraph_line_h;
+                }
+                cursor_y += top_pad + text_h + 12.0;
+                skip_until = segment.end;
+                continue;
             }
         }
 
@@ -1624,6 +1754,70 @@ fn wrap_lines_cached(
     let lines = wrap_lines(sugarloaf, text, max_w, opts);
     pane.store_wrap_lines(key, lines.clone());
     lines
+}
+
+fn measured_text_stops(
+    sugarloaf: &mut Sugarloaf,
+    text: &str,
+    opts: &DrawOpts,
+) -> Vec<f32> {
+    let mut stops = Vec::with_capacity(text.chars().count() + 1);
+    let mut prefix = String::new();
+    stops.push(0.0);
+    for ch in text.chars() {
+        prefix.push(ch);
+        stops.push(sugarloaf.text_mut().measure(&prefix, opts));
+    }
+    stops
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_fallback_paragraph_selection(
+    sugarloaf: &mut Sugarloaf,
+    pane: &MarkdownPane,
+    segment: &virtualized::PlainParagraphSegment,
+    rows: &[MarkdownWrapHitRow],
+    x: f32,
+    y: f32,
+    line_h: f32,
+    theme: &IdeTheme,
+    clip: [f32; 4],
+) {
+    for source_line in segment.start..segment.end {
+        let Some((source_start, source_end)) = pane.selection_for_line(source_line)
+        else {
+            continue;
+        };
+        let Some(start) = segment.visible_offset_for_source(source_line, source_start, 0)
+        else {
+            continue;
+        };
+        let Some(end) = segment.visible_offset_for_source(source_line, source_end, 0)
+        else {
+            continue;
+        };
+        for (row_index, row) in rows.iter().enumerate() {
+            let row_end = row.start + row.stops.len().saturating_sub(1);
+            let range_start = start.max(row.start).min(row_end);
+            let range_end = end.max(range_start).min(row_end);
+            if range_end <= range_start {
+                continue;
+            }
+            let left = row.stops[range_start - row.start];
+            let right = row.stops[range_end - row.start];
+            draw_rect_clipped(
+                sugarloaf,
+                clip,
+                x + left,
+                y + row_index as f32 * line_h,
+                (right - left).max(2.0),
+                line_h,
+                theme.f32_alpha(theme.accent, 0.26),
+                DEPTH,
+                ORDER_BG + 3,
+            );
+        }
+    }
 }
 
 #[cfg(test)]

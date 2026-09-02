@@ -1,13 +1,7 @@
-use std::path::Path;
-
 use neoism_agent_service_api::{
-    BuiltinMcpCallResult, BuiltinMcpContent, BuiltinMcpService, BuiltinMcpTool,
     DocumentationPage, DocumentationPageSummary, DocumentationSearchHit,
     DocumentationService, ServiceError,
 };
-use serde_json::{json, Value};
-
-const MCP_ID: &str = "neoism-docs";
 
 pub(crate) struct NeoismDocumentationService;
 
@@ -39,36 +33,6 @@ impl DocumentationService for NeoismDocumentationService {
     }
 }
 
-impl BuiltinMcpService for NeoismDocumentationService {
-    fn id(&self) -> &str { MCP_ID }
-
-    fn tools(&self) -> Vec<BuiltinMcpTool> {
-        vec![
-            tool("docs.list", "List bundled Neoism product documentation pages and paths", json!({"type":"object","properties":{}})),
-            tool("docs.search", "Search Neoism help, manual, and bundled product documentation by natural-language topic, including setup, configuration, Skills/SKILL.md, MCP, tools, editor, terminal, notes, and troubleshooting. Returns page paths and snippets; follow with neoism_docs.read for full content.", json!({"type":"object","properties":{"query":{"type":"string","description":"Natural-language topic to search in Neoism documentation content."},"limit":{"type":"integer","minimum":1,"maximum":20}},"required":["query"]})),
-            tool("docs.read", "Read the complete bundled Neoism documentation page returned by docs.search", json!({"type":"object","properties":{"path":{"type":"string","description":"Exact documentation page path returned by docs.search or docs.list."}},"required":["path"]})),
-        ]
-    }
-
-    fn call_tool(&self, _working_directory: &Path, tool: &str, arguments: Value) -> Result<BuiltinMcpCallResult, ServiceError> {
-        let output = match tool {
-            "docs.list" => json!({"documents":self.list()?.into_iter().map(|doc| json!({"path":doc.path,"title":doc.title})).collect::<Vec<_>>() }),
-            "docs.read" => {
-                let doc = self.read(&required_string(&arguments, "path")?)?;
-                json!({"path":doc.path,"title":doc.title,"content":doc.content})
-            }
-            "docs.search" => {
-                let query = required_string(&arguments, "query")?;
-                let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1, 20) as usize;
-                let hits = self.search(&query, limit)?.into_iter().map(|hit| json!({"path":hit.path,"title":hit.title,"snippet":hit.snippet})).collect::<Vec<_>>();
-                json!({"query":query,"hits":hits})
-            }
-            other => return Err(ServiceError::new(format!("unknown documentation MCP tool {other}"))),
-        };
-        Ok(BuiltinMcpCallResult { content: vec![BuiltinMcpContent::Text { text: serde_json::to_string_pretty(&output).map_err(|error| ServiceError::new(error.to_string()))?, annotations: None }], is_error: None })
-    }
-}
-
 fn page(doc: &neoism_product_docs::BundledDoc) -> DocumentationPage {
     DocumentationPage { path: doc.path.to_string(), title: neoism_product_docs::title(doc).to_string(), content: doc.body.to_string() }
 }
@@ -76,15 +40,6 @@ fn page(doc: &neoism_product_docs::BundledDoc) -> DocumentationPage {
 fn snippet(body: &str, terms: &[String]) -> String {
     body.lines().find(|line| { let lower = line.to_lowercase(); terms.iter().any(|term| lower.contains(term)) })
         .unwrap_or_else(|| body.lines().next().unwrap_or_default()).trim().chars().take(240).collect()
-}
-
-fn required_string(arguments: &Value, key: &str) -> Result<String, ServiceError> {
-    arguments.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
-        .ok_or_else(|| ServiceError::new(format!("{key} is required")))
-}
-
-fn tool(name: &str, description: &str, input_schema: Value) -> BuiltinMcpTool {
-    BuiltinMcpTool { name: name.to_string(), description: Some(description.to_string()), input_schema, annotations: None }
 }
 
 #[cfg(test)]

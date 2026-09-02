@@ -61,14 +61,9 @@ pub(super) async fn memory_tool(
             ))
         }
         "read" => {
-            let displayed_path = optional_string(&arguments, "path")
+            let path = optional_string(&arguments, "path")
                 .ok_or_else(|| anyhow::anyhow!("memory read requires path"))?;
-            // Early native-tool builds displayed `project:file.md` even
-            // though the service contract keeps scope and path separate.
-            // Accept that old form while returning only reusable plain paths.
-            let (read_scope, path) = split_scoped_path(&displayed_path, &scope);
-            let read_request = MemoryRequest::new(&context.cwd).with_scope(read_scope);
-            let entry = service.read(&read_request, &path)?;
+            let entry = service.read(&request, &path)?;
             Ok(result(
                 "Memory",
                 entry.content.clone().unwrap_or_default(),
@@ -134,16 +129,6 @@ fn entries_result(
         output,
         json!({"operation":operation,"query":query,"entries":entries}),
     )
-}
-
-fn split_scoped_path(path: &str, default_scope: &str) -> (String, String) {
-    let path = path.trim();
-    if let Some((scope, path)) = path.split_once(':') {
-        if matches!(scope, "auto" | "project" | "user" | "all") && !path.trim().is_empty() {
-            return (scope.to_string(), path.trim().to_string());
-        }
-    }
-    (default_scope.to_string(), path.to_string())
 }
 
 fn location_json(location: &MemoryLocation) -> Value {

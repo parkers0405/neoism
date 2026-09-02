@@ -23,7 +23,7 @@
 //!     rides inside the authenticated, encrypted SSH channel.
 //! This is the minimal-trust reach: no daemon port is ever world-reachable.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -31,6 +31,27 @@ use std::time::{Duration, Instant};
 
 /// Default port the remote workspace-daemon listens on (loopback).
 const REMOTE_DAEMON_PORT: u16 = 7878;
+/// Stable daemon workspace used for Quick SSH. It is scoped by the remote
+/// daemon/user, so reconnecting through a different local tunnel still finds
+/// the same remote home workspace and PTYs.
+pub const QUICK_SSH_WORKSPACE_ID: &str = "neoism-quick-ssh-home";
+
+/// Stable per-target workspace id. The remote daemon may serve several Quick
+/// SSH aliases, and one desktop may keep several SSH hosts in the same window;
+/// including the target prevents their otherwise-identical "home" ids from
+/// colliding in the local workspace strip.
+fn quick_ssh_workspace_id_with_args(target: &str, ssh_args: &[String]) -> String {
+    // Deterministic FNV-1a avoids a new hashing dependency and keeps the id
+    // stable across processes/platforms.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for part in std::iter::once(target).chain(safe_connection_args(ssh_args)) {
+        for byte in part.as_bytes().iter().copied().chain(std::iter::once(0)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{QUICK_SSH_WORKSPACE_ID}-{hash:016x}")
+}
 /// How long to wait for the local forwarded port to start accepting
 /// connections before giving up. Kept short so we never block startup.
 const FORWARD_READY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -85,6 +106,8 @@ pub enum SshAttachError {
     SpawnFailed(io::Error),
     #[error("ssh exited before the forward came up: {0}")]
     SshExited(String),
+    #[error("could not read the remote Neoism daemon credential: {0}")]
+    CredentialUnavailable(String),
     #[error("ssh forward on 127.0.0.1:{port} did not come up within {timeout:?}")]
     ForwardTimeout { port: u16, timeout: Duration },
 }
@@ -99,6 +122,14 @@ pub struct DaemonAttach {
     pub local_port: u16,
     /// The alias this attachment was opened for.
     pub alias: String,
+    /// Stable identity for this exact host + transport/auth route.
+    pub workspace_id: String,
+    /// Original transport/auth options, retained so a dropped tunnel can be
+    /// recreated without asking the user to type the SSH command again.
+    pub ssh_args: Vec<String>,
+    /// Remote daemon bearer read through the authenticated SSH channel. Kept
+    /// in memory only and deliberately omitted from `Debug`.
+    pub credential: String,
     /// Held only for its `Drop` guard — keeps the ssh forward alive for as
     /// long as this `DaemonAttach` lives, then kills it.
     #[allow(dead_code)]
@@ -111,7 +142,18 @@ impl std::fmt::Debug for DaemonAttach {
             .field("daemon_url", &self.daemon_url)
             .field("local_port", &self.local_port)
             .field("alias", &self.alias)
+            .field("workspace_id", &self.workspace_id)
+            .field("ssh_args", &self.ssh_args)
             .finish()
+    }
+}
+
+impl DaemonAttach {
+    /// Non-blocking liveness check for the SSH control process. The daemon is
+    /// probed during bootstrap and websocket dialing; tab switching must not
+    /// pause the UI for a network health timeout.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.child.try_wait(), Ok(None))
     }
 }
 
@@ -139,6 +181,10 @@ pub struct AttachOptions {
     pub launch_remote_daemon: bool,
     /// Remote port the daemon listens on (loopback). Defaults to 7878.
     pub remote_port: u16,
+    /// Connection options parsed from the user's interactive `ssh` command
+    /// (`-p`, `-i`, `-F`, `-J`, ...). They are passed as distinct argv items
+    /// before the host, never through a shell.
+    pub ssh_args: Vec<String>,
 }
 
 impl Default for AttachOptions {
@@ -146,8 +192,26 @@ impl Default for AttachOptions {
         Self {
             launch_remote_daemon: false,
             remote_port: REMOTE_DAEMON_PORT,
+            ssh_args: Vec::new(),
         }
     }
+}
+
+/// Quick-SSH entry point used by the command composer. It bootstraps (or
+/// reuses) a persistent daemon on the SSH host, then returns the same local
+/// loopback endpoint used by ordinary hosted workspaces.
+pub fn attach_workspace_over_ssh(
+    alias: &str,
+    ssh_args: Vec<String>,
+) -> Result<DaemonAttach, SshAttachError> {
+    attach_over_ssh_with(
+        alias,
+        &AttachOptions {
+            launch_remote_daemon: true,
+            ssh_args,
+            ..AttachOptions::default()
+        },
+    )
 }
 
 /// Path to the user's SSH config (`~/.ssh/config`).
@@ -317,6 +381,11 @@ pub fn attach_over_ssh_with(
         // Fail fast on host-key / auth prompts rather than hanging forever.
         .arg("-o")
         .arg("BatchMode=yes")
+        // Match modern OpenSSH's safe non-interactive first-connect policy:
+        // record a brand-new host key, but still reject a changed key (which
+        // can indicate a MITM or a rebuilt host that needs explicit cleanup).
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
         .arg("-o")
         .arg("ExitOnForwardFailure=yes")
         .arg("-o")
@@ -327,25 +396,45 @@ pub fn attach_over_ssh_with(
         .arg("-o")
         .arg("ServerAliveCountMax=3");
 
+    // Preserve the transport/auth choices from the command the user typed.
+    // Forwarding options are deliberately excluded: Neoism owns this one
+    // loopback forward, and replaying a user `-L/-R/-D/-W` here could bind a
+    // second listener or turn the control connection into a proxy.
+    for arg in safe_connection_args(&options.ssh_args) {
+        command.arg(arg);
+    }
+
     if options.launch_remote_daemon {
-        // Optional: bring the remote daemon up ourselves. We run a remote
-        // command (so no `-N`) that binds the daemon to its own loopback. The
-        // daemon stays attached to this ssh session in the foreground, so the
-        // forward and the daemon share a lifetime — killing the tunnel stops
-        // both. `ExitOnForwardFailure` tears everything down on a bad bind.
+        // Start one persistent per-user remote engine when the well-known
+        // loopback port is not already occupied, then keep this SSH control
+        // connection alive for the forward. Reusing one daemon preserves PTYs,
+        // file caches, Agent conversations, and workspace state across
+        // reconnects instead of recreating a slow per-request ssh/cat process.
         command.arg(alias);
-        // Run the daemon through the remote user's *login* shell. A bare
-        // `ssh host neoism-workspace-daemon` executes with a stripped,
-        // non-login environment: no `~/.local/bin` on PATH (so the daemon
-        // binary may not even be found) and, crucially, no usable `$SHELL`,
-        // which makes the PTYs the daemon spawns fall back to `/bin/sh` with
-        // no OSC 133 integration — so every command's block timer spins
-        // forever. `-l` restores the interactive PATH/`$SHELL`; `exec` keeps
-        // the daemon tied to this ssh session's lifetime.
+        // Use the remote login shell so ~/.local/bin and the user's real shell
+        // are available to daemon-created PTYs. The bash/nc probe prevents a
+        // second daemon from overwriting the live daemon's pidfile merely to
+        // fail its bind. The daemon itself is detached; closing Neoism only
+        // closes the tunnel, so returning later resumes the same remote state.
         command.arg(format!(
-            "exec \"${{SHELL:-/bin/bash}}\" -lc \
-             'neoism-workspace-daemon --addr 127.0.0.1:{}'",
-            options.remote_port
+            "exec /bin/sh -lc \
+             'PATH=\"$HOME/.local/bin:$PATH\"; export PATH; \
+              command -v neoism-workspace-daemon >/dev/null 2>&1 || \
+                {{ echo \"neoism-workspace-daemon is not installed on the SSH host\" >&2; exit 127; }}; \
+              daemon_up=0; \
+              if command -v bash >/dev/null 2>&1 && \
+                 bash -c \"exec 3<>/dev/tcp/127.0.0.1/{port}\" 2>/dev/null; then daemon_up=1; \
+              elif command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 {port} >/dev/null 2>&1; then daemon_up=1; fi; \
+              if [ \"$daemon_up\" -eq 0 ]; then \
+                cd \"$HOME\" && \
+                unset NEOISM_DAEMON_TOKEN && \
+                neoism-workspace-daemon --background --no-unix-socket \
+                  --addr 127.0.0.1:{port} \
+                  --state-dir \"$HOME/.local/state/neoism/ssh-daemon\" \
+                  --pidfile \"$HOME/.local/state/neoism/ssh-daemon/daemon.pid\"; \
+              fi; \
+              exec sleep 2147483647'",
+            port = options.remote_port,
         ));
     } else {
         // No remote command; `-N` holds the forward open and nothing else.
@@ -378,7 +467,8 @@ pub fn attach_over_ssh_with(
             }
         }
 
-        if local_port_is_open(local_port) {
+        if daemon_health_is_ready(local_port) {
+            let credential = read_remote_daemon_credential(alias, &options.ssh_args)?;
             let daemon_url = format!("ws://127.0.0.1:{local_port}/session");
             tracing::info!(
                 alias,
@@ -390,6 +480,9 @@ pub fn attach_over_ssh_with(
                 daemon_url,
                 local_port,
                 alias: alias.to_string(),
+                workspace_id: quick_ssh_workspace_id_with_args(alias, &options.ssh_args),
+                ssh_args: options.ssh_args.clone(),
+                credential,
                 child: tunnel,
             });
         }
@@ -412,13 +505,107 @@ fn looks_like_direct_host(alias: &str) -> bool {
     !alias.is_empty() && !alias.contains(char::is_whitespace) && !is_wildcard(alias)
 }
 
-/// Probe whether the local forwarded port accepts TCP connections yet.
-fn local_port_is_open(port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-        Duration::from_millis(250),
-    )
-    .is_ok()
+/// Keep only SSH options that describe how to reach/authenticate to the host.
+/// The parser already emits flag/value pairs; this second boundary makes the
+/// tunnel safe even if another caller supplies `AttachOptions` directly.
+fn safe_connection_args(args: &[String]) -> Vec<&str> {
+    const SAFE_VALUE_FLAGS: &[&str] =
+        &["-p", "-i", "-o", "-l", "-F", "-J", "-b", "-c", "-I"];
+    let mut safe = Vec::new();
+    let mut index = 0;
+    while index + 1 < args.len() {
+        if SAFE_VALUE_FLAGS.contains(&args[index].as_str()) {
+            safe.push(args[index].as_str());
+            safe.push(args[index + 1].as_str());
+        }
+        index += 2;
+    }
+    safe
+}
+
+/// Read the daemon bearer over a second short-lived SSH exec channel. The
+/// long-lived forwarding channel never exposes it on argv or in logs, and the
+/// desktop keeps the returned value in memory only. Both Unix token locations
+/// are checked because a GUI-launched daemon and an sshd login shell can have
+/// different `XDG_RUNTIME_DIR` environments.
+fn read_remote_daemon_credential(
+    alias: &str,
+    ssh_args: &[String],
+) -> Result<String, SshAttachError> {
+    let mut command = Command::new("ssh");
+    command
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("ConnectTimeout=8");
+    for arg in safe_connection_args(ssh_args) {
+        command.arg(arg);
+    }
+    command.arg(alias).arg(
+        "runtime_token=; \
+         if [ -n \"${XDG_RUNTIME_DIR:-}\" ] && [ -r \"$XDG_RUNTIME_DIR/neoism/daemon-token\" ]; then \
+           runtime_token=\"$XDG_RUNTIME_DIR/neoism/daemon-token\"; \
+         else \
+           fallback=\"/tmp/neoism-$(id -u)/daemon-token\"; \
+           [ -r \"$fallback\" ] && runtime_token=\"$fallback\"; \
+         fi; \
+         [ -n \"$runtime_token\" ] || exit 1; \
+         IFS= read -r token < \"$runtime_token\"; \
+         [ -n \"$token\" ] || exit 1; \
+         printf '%s\\n' \"$token\"",
+    );
+    let output = command
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| SshAttachError::CredentialUnavailable(error.to_string()))?;
+    if !output.status.success() {
+        return Err(SshAttachError::CredentialUnavailable(format!(
+            "ssh exited with {}",
+            output.status
+        )));
+    }
+    let credential = String::from_utf8(output.stdout).map_err(|_| {
+        SshAttachError::CredentialUnavailable("token was not UTF-8".into())
+    })?;
+    let credential = credential.trim().to_string();
+    if credential.is_empty() || credential.contains('\r') || credential.contains('\n') {
+        return Err(SshAttachError::CredentialUnavailable(
+            "token file was empty or malformed".into(),
+        ));
+    }
+    Ok(credential)
+}
+
+/// Probe the daemon itself rather than merely the SSH listener. An `ssh -L`
+/// socket starts accepting locally even while nothing is listening on the
+/// remote side; treating that as ready caused a race where the websocket dial
+/// failed immediately after a successful-looking attach.
+fn daemon_health_is_ready(port: u16) -> bool {
+    let address = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250))
+    else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(350)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(350)));
+    if stream
+        .write_all(
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = [0_u8; 64];
+    let Ok(read) = stream.read(&mut response) else {
+        return false;
+    };
+    response[..read].starts_with(b"HTTP/1.1 200")
+        || response[..read].starts_with(b"HTTP/1.0 200")
 }
 
 #[cfg(test)]
@@ -594,5 +781,39 @@ Host real
         assert!(!looks_like_direct_host("has space"));
         assert!(!looks_like_direct_host("wild*card"));
         assert!(!looks_like_direct_host(""));
+    }
+
+    #[test]
+    fn tunnel_replays_only_connection_options() {
+        let args = vec![
+            "-p".into(),
+            "2222".into(),
+            "-i".into(),
+            "/tmp/key".into(),
+            "-L".into(),
+            "9000:localhost:9".into(),
+            "-W".into(),
+            "bad-proxy".into(),
+        ];
+        assert_eq!(
+            safe_connection_args(&args),
+            vec!["-p", "2222", "-i", "/tmp/key"]
+        );
+    }
+
+    #[test]
+    fn quick_ssh_workspace_ids_are_stable_and_target_scoped() {
+        assert_eq!(
+            quick_ssh_workspace_id_with_args("user@host", &[]),
+            quick_ssh_workspace_id_with_args("user@host", &[])
+        );
+        assert_ne!(
+            quick_ssh_workspace_id_with_args("user@host", &[]),
+            quick_ssh_workspace_id_with_args("other@host", &[])
+        );
+        assert_ne!(
+            quick_ssh_workspace_id_with_args("host", &[]),
+            quick_ssh_workspace_id_with_args("host", &["-p".into(), "2222".into()])
+        );
     }
 }

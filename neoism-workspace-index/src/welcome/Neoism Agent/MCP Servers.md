@@ -12,10 +12,10 @@ For a custom server, add its definition to one of these locations:
 |---|---|
 | Global application config | `~/.config/neoism/config.json` under `agent.mcp` |
 | Global MCP catalog | `~/.config/neoism/mcp.json`, as a bare server map or under `mcp` |
-| Project agent config | `<project>/neoism.json` under top-level `mcp` |
-| Project MCP catalog | `<project>/.neoism/mcp.json`, as a bare server map or under `mcp` |
+| Workspace application config | `<workspace>/.neoism/config.json` under `agent.mcp` |
+| Workspace MCP catalog | `<workspace>/.neoism/mcp.json`, as a bare server map or under `mcp` |
 
-Closer project configuration overrides more distant configuration. A dedicated `mcp.json` is merged after ordinary config files in the same configuration directory. `NEOISM_AGENT_CONFIG` and `NEOISM_AGENT_CONFIG_CONTENT` are applied last.
+Workspace configuration overrides global configuration. A dedicated `mcp.json` is merged after `config.json` in the same scope.
 
 Reopen `/mcp` after editing configuration. Restart Neoism if an existing process still shows an old catalog.
 
@@ -70,16 +70,18 @@ Webflow is a remote OAuth MCP. In `~/.config/neoism/mcp.json`:
 }
 ```
 
-The equivalent project `neoism.json` wraps the entry under `mcp`:
+The equivalent workspace `.neoism/config.json` nests the entry under `agent.mcp`:
 
 ```jsonc
 {
-  "mcp": {
-    "webflow": {
-      "type": "remote",
-      "url": "https://mcp.webflow.com/mcp",
-      "oauth": true,
-      "enabled": true
+  "agent": {
+    "mcp": {
+      "webflow": {
+        "type": "remote",
+        "url": "https://mcp.webflow.com/mcp",
+        "oauth": true,
+        "enabled": true
+      }
     }
   }
 }

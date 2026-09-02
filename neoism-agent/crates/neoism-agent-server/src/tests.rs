@@ -3005,7 +3005,6 @@ async fn runtime_source_plugins_are_workspace_disableable() {
             "dev.neoism.mcp": { "enabled": false },
             "dev.neoism.lsp": { "enabled": false },
             "dev.neoism.workflows": { "enabled": false },
-            "dev.neoism.tools.notes": { "enabled": false },
             "dev.neoism.tools.workspace": { "enabled": false },
             "dev.neoism.semantic": { "enabled": false },
             "dev.neoism.goals": { "enabled": false },
@@ -3037,7 +3036,7 @@ async fn runtime_source_plugins_are_workspace_disableable() {
     let disabled_ids = [
         "dev.neoism.skills", "dev.neoism.commands", "dev.neoism.websearch",
         "dev.neoism.agents", "dev.neoism.mcp", "dev.neoism.lsp",
-        "dev.neoism.workflows", "dev.neoism.tools.notes",
+        "dev.neoism.workflows",
         "dev.neoism.tools.workspace", "dev.neoism.semantic", "dev.neoism.goals",
         "dev.neoism.subagents", "dev.neoism.vcs", "dev.neoism.pty",
         "dev.neoism.artifacts", "dev.neoism.interactions",

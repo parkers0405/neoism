@@ -363,6 +363,18 @@ impl Screen<'_> {
     /// Ctrl+Shift+W, but attached to the existing shells — instead of
     /// only flipping the daemon's active-workspace pointer.
     pub(crate) fn open_or_adopt_daemon_workspace(&mut self, workspace_id: String) {
+        let replacement_source = (self.pending_ssh_workspace_id.as_deref()
+            == Some(workspace_id.as_str()))
+        .then(|| self.pending_ssh_workspace_replacement.clone())
+        .flatten();
+        let replacement_index = replacement_source.as_deref().and_then(|source| {
+            (0..self.context_manager.len()).find(|index| {
+                self.context_manager
+                    .workspace_tree_id_for_index(*index)
+                    .as_deref()
+                    == Some(source)
+            })
+        });
         let matched_index = self
             .context_manager
             .grid_index_for_workspace_id(&workspace_id);
@@ -379,6 +391,10 @@ impl Screen<'_> {
             "open_or_adopt_daemon_workspace",
         );
         if let Some(index) = matched_index {
+            if replacement_source.is_some() {
+                self.context_manager
+                    .rebind_adopted_workspace_at(index, &workspace_id);
+            }
             // A match on the CURRENT grid while that grid isn't actually
             // this daemon workspace is a FALSE positive (a guest sitting
             // on a local grid whose synthetic id collided): treat it as
@@ -392,6 +408,10 @@ impl Screen<'_> {
                 == Some(workspace_id.as_str());
             if index != current_index {
                 self.select_top_level_workspace_at(index);
+                if let Some(source) = replacement_source.as_deref() {
+                    self.retire_replaced_workspace(source);
+                    self.cancel_ssh_workspace_replacement();
+                }
                 self.context_manager
                     .switch_daemon_host_workspace(workspace_id);
                 return;
@@ -401,6 +421,12 @@ impl Screen<'_> {
                 // the home daemon workspace. Treat it as open. The old
                 // adopted-only check called this a collision and created a
                 // second, inert-looking copy of the local Island tab.
+                if let Some(source) = replacement_source.as_deref() {
+                    if source != workspace_id.as_str() {
+                        self.retire_replaced_workspace(source);
+                    }
+                    self.cancel_ssh_workspace_replacement();
+                }
                 self.context_manager
                     .switch_daemon_host_workspace(workspace_id);
                 return;
@@ -441,7 +467,7 @@ impl Screen<'_> {
         // new root pane's rich-text under it.
         self.save_current_workspace_chrome();
         let num_tabs = self.ctx().len();
-        let future_tab_count = num_tabs + 1;
+        let future_tab_count = num_tabs + usize::from(replacement_index.is_none());
         let old_index = self.context_manager.current_index();
         self.resize_top_or_bottom_line(future_tab_count);
         #[cfg(not(target_os = "macos"))]
@@ -464,6 +490,7 @@ impl Screen<'_> {
             &workspace_id,
             rich_text_id,
             &mut self.sugarloaf,
+            replacement_index,
         ) {
             // Adopt failed (no live link/runtime yet, or capacity). Undo
             // the strip reservation. On a HOME link the pointer switch is
@@ -499,32 +526,38 @@ impl Screen<'_> {
             new_index,
         );
 
-        self.renderer.buffer_tabs = neoism_ui::panels::buffer_tabs::BufferTabs::<
-            crate::neoism::icon::AgentKind,
-        >::new();
-        self.renderer
-            .buffer_tabs
-            .set_scale(self.renderer.chrome_scale());
-        self.renderer.buffer_tabs.ensure_terminal_tab();
         let adopted_root = self
             .context_manager
             .daemon_host_workspace_root(&workspace_id);
         self.active_workspace_root =
             adopted_root.or_else(|| self.active_pane_workspace_root());
-        // Populate INDEPENDENTLY of the chrome-key bookkeeping — the
-        // old `(Some(id), Some(root))` tuple silently skipped the tree
-        // whenever the freshly adopted grid had no workspace key yet,
-        // which left a visible tree stuck on the previous workspace's
-        // (local) listing after a join.
-        if let Some(root) = self.active_workspace_root.clone() {
-            if self.renderer.file_tree.is_visible() {
-                self.populate_file_tree_from_dir(&root);
-            }
-            if let Some(id) = self.current_workspace_id() {
-                self.workspace_roots.insert(id, root);
-            }
+        if let (Some(id), Some(root)) = (
+            self.current_workspace_id(),
+            self.active_workspace_root.clone(),
+        ) {
+            self.workspace_roots.insert(id, root);
         }
-        self.sync_agent_server_for_current_workspace();
+
+        // Adoption is a real top-level workspace switch. Run the SAME
+        // canonical chrome swap used by keyboard/mouse workspace navigation
+        // before touching the new root. The old path reset the visible tabs
+        // and repopulated the live tree directly while `file_tree_workspace`
+        // still named the outgoing local workspace. A later save then filed
+        // that remote tree under the local key, making unrelated tabs vanish
+        // or appear to change workspace after a shared workspace was opened.
+        // The canonical load atomically swaps tabs, tree, notes, Agent URL,
+        // and their ownership keys, so every grid in the window stays
+        // isolated.
+        self.load_current_workspace_chrome();
+        if let Some(source) = replacement_source.as_deref() {
+            self.discard_workspace_chrome(source);
+            if let (Some(island), Some(index)) =
+                (self.renderer.island.as_mut(), replacement_index)
+            {
+                island.reset_tab_state(index);
+            }
+            self.cancel_ssh_workspace_replacement();
+        }
         self.reapply_chrome_layout();
 
         // A workspace holds it ALL — for its OWNER: re-adopting your
@@ -544,6 +577,41 @@ impl Screen<'_> {
         self.context_manager
             .switch_daemon_host_workspace(workspace_id);
         self.mark_dirty();
+    }
+
+    fn discard_workspace_chrome(&mut self, workspace_id: &str) {
+        self.workspace_roots.remove(workspace_id);
+        self.workspace_buffer_tabs.remove(workspace_id);
+        self.workspace_buf_enter_targets.remove(workspace_id);
+        self.workspace_editor_active_paths.remove(workspace_id);
+        self.workspace_file_trees.remove(workspace_id);
+        self.workspace_notes_sidebars.remove(workspace_id);
+        self.workspace_notes_vaults.remove(workspace_id);
+    }
+
+    fn retire_replaced_workspace(&mut self, workspace_id: &str) {
+        let index = (0..self.context_manager.len()).find(|index| {
+            self.context_manager
+                .workspace_tree_id_for_index(*index)
+                .as_deref()
+                == Some(workspace_id)
+        });
+        let Some(index) = index else {
+            self.discard_workspace_chrome(workspace_id);
+            return;
+        };
+        if self
+            .context_manager
+            .remove_grid_at(index, &mut self.sugarloaf)
+        {
+            self.discard_workspace_chrome(workspace_id);
+            if let Some(island) = self.renderer.island.as_mut() {
+                island.remove_tab_state(index);
+            }
+            self.resize_top_or_bottom_line(self.context_manager.len());
+            self.reapply_chrome_layout();
+            self.mark_dirty();
+        }
     }
 }
 

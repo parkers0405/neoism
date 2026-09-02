@@ -25,39 +25,41 @@ Neoism's application configuration uses domain blocks. Agent settings belong und
 
 Do not place `model`, `permission`, or `mcp` beside `appearance` and `terminal`. The desktop passes the contents of the top-level `agent` block to Neoism Agent.
 
-## Project configuration
+## Workspace configuration
 
-A workspace may contain `neoism.json` or `neoism.jsonc`. These files are agent-specific, so their keys are direct:
+A workspace uses `.neoism/config.json`, with the same domain-based JSONC schema as the global file:
 
 ```jsonc
 {
-  "model": "anthropic/claude-sonnet-4-5",
-  "defaultAgent": "build",
-  "instructions": ["AGENTS.md", "docs/engineering.md"],
-  "permission": {
-    "bash": {
-      "git status": "allow",
-      "git push*": "ask"
+  "agent": {
+    "model": "anthropic/claude-sonnet-4-5",
+    "defaultAgent": "build",
+    "instructions": ["AGENTS.md", "docs/engineering.md"],
+    "permission": {
+      "bash": {
+        "git status": "allow",
+        "git push*": "ask"
+      }
     }
   }
 }
 ```
 
-Neoism walks from the filesystem root toward the active workspace directory and merges project configuration in that order. A closer project file overrides a more distant one.
+Neoism reads configuration from the declared workspace root. Workspace values are partial overrides: every missing key continues to use the global `~/.config/neoism/config.json` value. If `.neoism/config.json` is absent, the global configuration is used unchanged. An existing root `neoism.json` is moved into the canonical workspace file automatically.
 
 ## Precedence
 
 Configuration is merged from lower to higher precedence:
 
-1. Global configuration directories.
-2. The unified Neoism `agent` block supplied by the desktop.
-3. Project configuration discovered from parent directories toward the workspace.
-4. Explicit runtime overrides, including `NEOISM_AGENT_CONFIG` and `NEOISM_AGENT_CONFIG_CONTENT`.
+1. Global `~/.config/neoism/config.json`.
+2. Global `~/.config/neoism/mcp.json`.
+3. Workspace `.neoism/config.json`.
+4. Workspace `.neoism/mcp.json`.
 5. Session choices such as a model or agent selected in the UI.
 
-Objects are deep-merged. Arrays and scalar values are replaced by the higher-precedence value. This lets a project override one permission without repeating every global setting.
+Objects are deep-merged. Arrays and scalar values are replaced by the higher-precedence value. This lets a workspace override one permission without repeating every global setting.
 
-MCP definitions may also live in a dedicated `mcp.json` or `mcp.jsonc`. A dedicated MCP catalog is merged after ordinary configuration files in the same directory. See [[MCP Servers]] for global/project shapes, OAuth fields, and management commands.
+MCP definitions may also live in a dedicated `mcp.json`. A dedicated MCP catalog is merged after ordinary configuration in the same scope. See [[MCP Servers]] for global/workspace shapes, OAuth fields, and management commands.
 
 ## Main fields
 

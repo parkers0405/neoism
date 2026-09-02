@@ -137,13 +137,6 @@ async fn build_host_with_config(
             std::sync::Arc::new(plugin_adapters::WorkspaceTools(state.clone())),
         )));
     }
-    if services.notes.is_some()
-        && enabled_in(&config, neoism_agent_builtins::plugin::notes_tools::ID)
-    {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::NotesToolsPlugin::new(
-            std::sync::Arc::new(plugin_adapters::NotesTools(state.clone())),
-        )));
-    }
     if services.documentation.is_some()
         && enabled_in(&config, neoism_agent_builtins::plugin::documentation_tools::ID)
     {

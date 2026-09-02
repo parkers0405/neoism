@@ -114,6 +114,7 @@ pub(crate) async fn append_prompt(
         author,
         parts: prompt_parts,
     } = request;
+    let turn_tools = tools.clone();
     // Sender identity for shared/joined sessions: the display name of the
     // human who actually sent this prompt (a guest's presence name, or the
     // host's own). Normalized to `None` when blank so an empty string never
@@ -498,6 +499,7 @@ pub(crate) async fn append_prompt(
     if let Some(session_rules) = info.permission.clone() {
         tool_permissions.extend(session_rules);
     }
+    apply_turn_tool_restrictions(&mut tool_permissions, turn_tools.as_ref());
     let provider_tools = provider_tools_for_agent(
         state,
         &info.directory,
@@ -1729,6 +1731,21 @@ fn clean_model_title(raw: &str) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
+fn apply_turn_tool_restrictions(
+    permissions: &mut Vec<PermissionRule>,
+    tools: Option<&std::collections::BTreeMap<String, bool>>,
+) {
+    let Some(tools) = tools else { return };
+    // Turn policy can narrow configured permissions, never widen them.
+    permissions.extend(tools.iter().filter_map(|(tool, enabled)| {
+        (!enabled).then_some(PermissionRule {
+            permission: tool.clone(),
+            pattern: "*".to_string(),
+            action: neoism_agent_core::PermissionAction::Deny,
+        })
+    }));
+}
+
 fn strip_think_blocks(raw: &str) -> String {
     let mut remaining = raw;
     let mut output = String::new();
@@ -1750,6 +1767,22 @@ fn strip_think_blocks(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_tool_policy_only_narrows_configured_permissions() {
+        let mut permissions = vec![PermissionRule {
+            permission: "memory".into(), pattern: "*".into(),
+            action: neoism_agent_core::PermissionAction::Deny,
+        }];
+        let tools = std::collections::BTreeMap::from([
+            ("memory".to_string(), true),
+            ("bash".to_string(), false),
+        ]);
+        apply_turn_tool_restrictions(&mut permissions, Some(&tools));
+
+        assert_eq!(permission::evaluate("memory", "*", &permissions).action, neoism_agent_core::PermissionAction::Deny);
+        assert_eq!(permission::evaluate("bash", "*", &permissions).action, neoism_agent_core::PermissionAction::Deny);
+    }
 
     #[tokio::test]
     async fn generation_config_reads_project_text_verbosity() {

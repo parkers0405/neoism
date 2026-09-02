@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 const GUI_SOURCE: &str = "neoism:user-gui";
 const MCP_SOURCE: &str = "neoism:user-mcp";
 const PROJECT_SOURCE: &str = "neoism:project";
+const PROJECT_MCP_SOURCE: &str = "neoism:project-mcp";
 const LEGACY_NATIVE_MCP_IDS: [&str; 3] = ["neoism-docs", "neoism-memory", "neoism-notes"];
 
 #[derive(Clone, Debug)]
@@ -29,7 +30,13 @@ impl NeoismConfigSourceService {
         self.gui_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
     }
 
-    fn project_root(workspace: &Path) -> PathBuf {
+    pub(crate) fn workspace_root(workspace: &Path) -> PathBuf {
+        if workspace.is_absolute() { workspace.to_path_buf() } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(workspace)
+        }
+    }
+
+    fn git_root(workspace: &Path) -> PathBuf {
         let mut command = std::process::Command::new("git");
         command.args(["rev-parse", "--show-toplevel"]).current_dir(workspace);
         command.output().ok().filter(|output| output.status.success()).and_then(|output| {
@@ -42,6 +49,31 @@ impl NeoismConfigSourceService {
         if !path.is_file() { return Ok(json!({})); }
         let text = std::fs::read_to_string(path)?;
         parse_jsonc(&text).map_err(|error| ServiceError::new(format!("failed to parse {}: {error}", path.display())))
+    }
+
+    fn write(path: &Path, document: &Value) -> Result<(), ServiceError> {
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        let temp = path.with_extension("tmp");
+        std::fs::write(&temp, format!("{}\n", serde_json::to_string_pretty(document).map_err(|error| ServiceError::new(error.to_string()))?))?;
+        std::fs::rename(temp, path)?;
+        Ok(())
+    }
+
+    fn migrate_project_config(workspace: &Path) -> Result<(), ServiceError> {
+        let project = Self::git_root(workspace);
+        if project != workspace { return Ok(()); }
+        let source = project.join("neoism.json");
+        if !source.is_file() { return Ok(()); }
+        let target = workspace.join(".neoism/config.json");
+        let migrated = Self::project_document(Self::read(&source)?);
+        let mut document = Self::read(&target)?;
+        if !document.is_object() { document = json!({}); }
+        let agent = document.as_object_mut().expect("object initialized")
+            .entry("agent").or_insert_with(|| json!({}));
+        merge_missing(agent, migrated);
+        Self::write(&target, &document)?;
+        std::fs::remove_file(source)?;
+        Ok(())
     }
 
     fn project_gui(value: &Value) -> Value {
@@ -69,11 +101,8 @@ impl NeoismConfigSourceService {
     }
 
     fn mcp_document(value: &Value) -> Value {
-        let mut map = value
-            .get("mcp")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        let mut map = value.get("mcp").and_then(Value::as_object).or_else(|| value.as_object())
+            .cloned().unwrap_or_default();
         // These product-owned services are injected in-process and exposed as
         // native tools. Ignore stale extension-era subprocess entries so an
         // old mcp.json cannot shadow or duplicate the native capability.
@@ -84,11 +113,12 @@ impl NeoismConfigSourceService {
     }
 
     fn update_path(&self, workspace: &Path, source_id: &str) -> Result<(PathBuf, Vec<String>), ServiceError> {
-        let project = Self::project_root(workspace);
+        let workspace = Self::workspace_root(workspace);
         match source_id {
             GUI_SOURCE => Ok((self.gui_path.clone(), vec!["agent".into()])),
             MCP_SOURCE => Ok((self.user_root().join("mcp.json"), Vec::new())),
-            PROJECT_SOURCE => Ok((project.join("neoism.json"), Vec::new())),
+            PROJECT_SOURCE => Ok((workspace.join(".neoism/config.json"), vec!["agent".into()])),
+            PROJECT_MCP_SOURCE => Ok((workspace.join(".neoism/mcp.json"), Vec::new())),
             _ => Err(ServiceError::new(format!("config source `{source_id}` is not writable"))),
         }
     }
@@ -144,28 +174,28 @@ impl Default for NeoismConfigSourceService {
 
 impl ConfigSourceService for NeoismConfigSourceService {
     fn snapshot(&self, request: &ConfigSnapshotRequest) -> Result<ConfigSnapshot, ServiceError> {
-        let workspace = if request.workspace.is_absolute() { request.workspace.clone() } else {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(&request.workspace)
-        };
-        let project = Self::project_root(&workspace);
+        let workspace = Self::workspace_root(&request.workspace);
+        Self::migrate_project_config(&workspace)?;
         let gui = Self::read(&self.gui_path)?;
         let mcp = Self::read(&self.user_root().join("mcp.json"))?;
-        let project_document = Self::project_document(Self::read(&project.join("neoism.json"))?);
+        let project_config = Self::read(&workspace.join(".neoism/config.json"))?;
+        let project_mcp = Self::read(&workspace.join(".neoism/mcp.json"))?;
         let layers = vec![
             ConfigLayer { source_id: GUI_SOURCE.into(), document: Self::project_gui(&gui), writable: true },
             ConfigLayer { source_id: MCP_SOURCE.into(), document: Self::mcp_document(&mcp), writable: true },
-            ConfigLayer { source_id: PROJECT_SOURCE.into(), document: project_document, writable: true },
+            ConfigLayer { source_id: PROJECT_SOURCE.into(), document: Self::project_gui(&project_config), writable: true },
+            ConfigLayer { source_id: PROJECT_MCP_SOURCE.into(), document: Self::mcp_document(&project_mcp), writable: true },
         ];
         let identity = layers.iter().map(|layer| format!("{}\0{}", layer.source_id, layer.document)).collect::<Vec<_>>().join("\0");
         Ok(ConfigSnapshot {
             identity,
-            workspace,
+            workspace: workspace.clone(),
             layers,
             discovery_roots: vec![
                 ConfigDiscoveryRoot { source_id: "neoism:user-root".into(), path: self.user_root() },
-                ConfigDiscoveryRoot { source_id: "neoism:project-root".into(), path: project.join(".neoism") },
+                ConfigDiscoveryRoot { source_id: "neoism:project-root".into(), path: workspace.join(".neoism") },
             ],
-            writable_target: ConfigWritableTarget { source_id: PROJECT_SOURCE.into(), label: "Neoism project Agent config".into() },
+            writable_target: ConfigWritableTarget { source_id: PROJECT_SOURCE.into(), label: "Neoism workspace config".into() },
         })
     }
 
@@ -182,10 +212,7 @@ impl ConfigSourceService for NeoismConfigSourceService {
                     set_value(&mut document, &full, value.clone());
                 }
             }
-            if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
-            let temp = path.with_extension("tmp");
-            std::fs::write(&temp, format!("{}\n", serde_json::to_string_pretty(&document).map_err(|error| ServiceError::new(error.to_string()))?))?;
-            std::fs::rename(temp, path)?;
+            Self::write(&path, &document)?;
             self.snapshot(&ConfigSnapshotRequest::new(&request.workspace))
         })
     }
@@ -200,6 +227,17 @@ fn set_value(document: &mut Value, path: &[String], value: Value) {
     }
     if !current.is_object() { *current = json!({}); }
     current.as_object_mut().expect("object initialized").insert(path.last().unwrap().clone(), value);
+}
+
+fn merge_missing(target: &mut Value, source: Value) {
+    let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) else { return };
+    for (key, value) in source {
+        match target.get_mut(key) {
+            Some(existing) if existing.is_object() && value.is_object() => merge_missing(existing, value.clone()),
+            Some(_) => {}
+            None => { target.insert(key.clone(), value.clone()); }
+        }
+    }
 }
 
 fn project_shell(value: &Value) -> Option<String> {
@@ -347,6 +385,31 @@ mod tests {
             "agent": { "build": { "topP": 0.8 } }
         });
         assert_eq!(NeoismConfigSourceService::project_document(canonical.clone()), canonical);
+    }
+
+    #[test]
+    fn root_project_config_is_moved_into_workspace_config() {
+        let root = std::env::temp_dir().join(format!("neoism-workspace-config-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".neoism")).unwrap();
+        let gui = root.join("user/config.json");
+        std::fs::create_dir_all(gui.parent().unwrap()).unwrap();
+        std::fs::write(&gui, r#"{"agent":{"model":"global/model"}}"#).unwrap();
+        std::fs::write(root.join("neoism.json"), r#"{"model":"old/model","smallModel":"old/small"}"#).unwrap();
+        std::fs::write(root.join(".neoism/config.json"), r#"{
+            "appearance":{"theme":"ignored-by-agent"},
+            "agent":{"model":"workspace/model","defaultAgent":"build"}
+        }"#).unwrap();
+        std::fs::write(root.join(".neoism/mcp.json"), r#"{"search":{"type":"remote","url":"https://example.test/mcp"}}"#).unwrap();
+
+        let snapshot = NeoismConfigSourceService::at(gui).snapshot(&ConfigSnapshotRequest::new(&root)).unwrap();
+        assert_eq!(snapshot.layers[2].source_id, PROJECT_SOURCE);
+        assert_eq!(snapshot.layers[2].document["model"], "workspace/model");
+        assert_eq!(snapshot.layers[2].document["smallModel"], "old/small");
+        assert_eq!(snapshot.layers[2].document["defaultAgent"], "build");
+        assert_eq!(snapshot.layers[3].document["mcp"]["search"]["type"], "remote");
+        assert_eq!(snapshot.writable_target.source_id, PROJECT_SOURCE);
+        assert!(!root.join("neoism.json").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

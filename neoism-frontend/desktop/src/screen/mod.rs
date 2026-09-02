@@ -361,8 +361,8 @@ fn ends_passthrough_session(command: &str) -> bool {
 }
 
 /// Parse the `[user@]host` target — plus any connection flags worth
-/// carrying onto the browsing connection — out of an `ssh` command
-/// line, for the follow-the-terminal file tree.
+/// carrying onto the daemon tunnel — out of an `ssh` command line for
+/// Quick SSH workspace takeover.
 ///
 /// Returns `None` when the command is NOT an interactive `ssh` login we
 /// can follow: a non-`ssh` program (including `mosh` — its file ops need
@@ -371,7 +371,7 @@ fn ends_passthrough_session(command: &str) -> bool {
 /// flipping the tree would be wrong).
 ///
 /// Value-taking flags (`-p 2222`, `-i key`, `-o Opt=…`, …) are kept as
-/// pass-through opts so the multiplexed browsing connection matches the
+/// pass-through opts so the daemon tunnel matches the
 /// interactive one; bare toggles (`-t`, `-v`, …) are dropped — they're
 /// irrelevant to (or actively fight) the file-op connection.
 fn parse_ssh_target(command: &str) -> Option<(String, Vec<String>)> {
@@ -381,7 +381,8 @@ fn parse_ssh_target(command: &str) -> Option<(String, Vec<String>)> {
         "-m", "-Q", "-R", "-S", "-W", "-w",
     ];
 
-    let mut tokens = command.split_whitespace();
+    let tokens = split_ssh_command_words(command)?;
+    let mut tokens = tokens.iter().map(String::as_str);
     let program = tokens.next()?;
     let program = Path::new(program)
         .file_name()
@@ -394,12 +395,21 @@ fn parse_ssh_target(command: &str) -> Option<(String, Vec<String>)> {
     let mut opts: Vec<String> = Vec::new();
     let mut target: Option<String> = None;
     while let Some(token) = tokens.next() {
+        if token == "--" {
+            target = tokens.next().map(str::to_string);
+            break;
+        }
         if token.starts_with('-') {
             if VALUE_FLAGS.contains(&token) {
                 opts.push(token.to_string());
                 if let Some(value) = tokens.next() {
                     opts.push(value.to_string());
+                } else {
+                    return None;
                 }
+            } else if token.len() > 2 && VALUE_FLAGS.contains(&&token[..2]) {
+                opts.push(token[..2].to_string());
+                opts.push(token[2..].to_string());
             }
             // Bare toggles are dropped.
             continue;
@@ -416,6 +426,46 @@ fn parse_ssh_target(command: &str) -> Option<(String, Vec<String>)> {
         return None;
     }
     Some((target, opts))
+}
+
+/// Tokenize one plain command line without invoking a shell. Quotes and
+/// backslash escapes are honored; shell operators deliberately opt out of
+/// Quick SSH so compound commands keep their ordinary terminal semantics.
+fn split_ssh_command_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            } else if ch == '\\' && active == '"' {
+                current.push(chars.next()?);
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '\\' => current.push(chars.next()?),
+            ' ' | '\t' | '\n' | '\r' => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            ';' | '|' | '&' | '<' | '>' => return None,
+            _ => current.push(ch),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Some(words)
 }
 
 use crate::app::window_event::touch::TouchPurpose;
@@ -722,6 +772,17 @@ pub struct Screen<'screen> {
     pending_daemon_go_home: bool,
     /// Host-level server switch selected from the shared server picker.
     pending_server_connect: Option<String>,
+    /// Interactive `ssh host` entered in a local workspace. The app drains
+    /// this and upgrades the command into a daemon-backed remote workspace
+    /// instead of starting the legacy raw-shell/per-file SSH mode.
+    pending_ssh_workspace_attach: Option<(String, Vec<String>)>,
+    /// Local workspace key that a top-level Quick SSH attach must replace.
+    /// The async SSH/server handshake may finish after the user visits another
+    /// tab, so identity—not the then-current index—is retained here.
+    pending_ssh_workspace_replacement: Option<WorkspaceKey>,
+    /// Exact daemon workspace id produced for the in-flight SSH target. Kept
+    /// separate because the app learns it after draining the Screen request.
+    pending_ssh_workspace_id: Option<String>,
     pending_server_manager_open: bool,
     pending_server_add: Option<(String, Option<String>, Option<String>)>,
     pending_server_edit: Option<String>,
@@ -775,21 +836,6 @@ pub struct Screen<'screen> {
     /// re-lists the notes sidebar (not the file tree) — the notes
     /// counterpart of `pending_remote_file_ops`.
     pending_remote_notes_mutations: std::collections::HashSet<u64>,
-    /// Follow-the-terminal `ssh` file browsing. When a terminal pane
-    /// enters an `ssh` session the tree flips onto a
-    /// [`crate::daemon_client::ssh_files::SshFiles`] backend whose
-    /// listing threads have no runtime handle — they push finished
-    /// replies onto `ssh_files_tx` and fire `RioEvent::SshFilesReady`,
-    /// and `drain_ssh_files_replies` applies them on the UI thread.
-    ssh_files_tx: std_mpsc::Sender<crate::daemon_client::ssh_files::SshFilesReply>,
-    ssh_files_rx: std_mpsc::Receiver<crate::daemon_client::ssh_files::SshFilesReply>,
-    /// Monotonic id source for each `SshFiles` session's ControlMaster
-    /// socket name (this screen owns the counter so the backend takes
-    /// no rand/clock dependency).
-    ssh_files_next_id: u64,
-    /// Local workspace root captured when the tree flipped to `ssh`, so
-    /// `exit`/`logout` restores the exact tree the user left.
-    ssh_pre_local_root: Option<PathBuf>,
     workspace_roots: HashMap<WorkspaceKey, PathBuf>,
     workspace_buffer_tabs: HashMap<
         WorkspaceKey,
@@ -805,12 +851,6 @@ pub struct Screen<'screen> {
     /// alike). Mirrors `workspace_buffer_tabs`.
     workspace_file_trees: HashMap<WorkspaceKey, crate::editor::file_tree::FileTree>,
     file_tree_workspace: Option<WorkspaceKey>,
-    /// Per-workspace ssh-follow root (`ssh_pre_local_root`), stashed WITH the
-    /// tree on a workspace switch. `ssh_pre_local_root` is a screen global, so
-    /// without this swap an `ssh` in one workspace then a switch away leaves it
-    /// set — freezing every other workspace's tree re-root ("tree stuck on the
-    /// remote listing"). Keyed like `workspace_file_trees`.
-    workspace_ssh_pre_local_roots: HashMap<WorkspaceKey, PathBuf>,
     /// Per-workspace NOTES panel state (viewed vault, entries, open
     /// dirs, selection) — workspace switches SWAP whole panels exactly
     /// like `workspace_file_trees`, so a joined workspace never shows
@@ -1681,8 +1721,6 @@ impl Screen<'_> {
         #[cfg(not(target_arch = "wasm32"))]
         let (acp_events_tx, acp_events_rx) = std_mpsc::channel();
 
-        let (ssh_files_tx, ssh_files_rx) = std_mpsc::channel();
-
         // We always launch with a terminal, so seed its tab now — otherwise
         // the buffer-tab strip (and the trailing "+" button) start empty until
         // the first tab op. `ensure_terminal_tab` is a no-op once a terminal
@@ -1760,6 +1798,9 @@ impl Screen<'_> {
             pending_peer_workspace_join: None,
             pending_daemon_go_home: false,
             pending_server_connect: None,
+            pending_ssh_workspace_attach: None,
+            pending_ssh_workspace_replacement: None,
+            pending_ssh_workspace_id: None,
             pending_server_manager_open: false,
             pending_server_add: None,
             pending_server_edit: None,
@@ -1776,10 +1817,6 @@ impl Screen<'_> {
             pending_remote_notes_listing: std::collections::HashSet::new(),
             pending_remote_notes_creates: HashMap::new(),
             pending_remote_notes_mutations: std::collections::HashSet::new(),
-            ssh_files_tx,
-            ssh_files_rx,
-            ssh_files_next_id: 1,
-            ssh_pre_local_root: None,
             workspace_roots: HashMap::new(),
             workspace_buffer_tabs: HashMap::new(),
             workspace_notes_sidebars: HashMap::new(),
@@ -1787,7 +1824,6 @@ impl Screen<'_> {
             notes_sidebar_workspace: None,
             workspace_file_trees: HashMap::new(),
             file_tree_workspace: None,
-            workspace_ssh_pre_local_roots: HashMap::new(),
             workspace_buf_enter_targets: HashMap::new(),
             workspace_editor_active_paths: HashMap::new(),
             file_tree_clipboard: None,

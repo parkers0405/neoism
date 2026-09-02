@@ -281,6 +281,25 @@ fn measure_item(
                     local_ix += 1;
                     continue;
                 }
+                if let Some(segment) = plain_paragraph_segment(
+                    &local_lines,
+                    local_ix,
+                    cursor_line.and_then(|line| line.checked_sub(item.first_line)),
+                )
+                {
+                    let inline_lines = inline_wrapped_lines_dropcap(
+                        sugarloaf,
+                        &segment.text,
+                        width.max(24.0),
+                        &opts,
+                    )
+                    .0;
+                    let lines = inline_visual_row_count(&inline_lines);
+                    height += lines as f32 * line_height(&opts);
+                    visual_lines += lines;
+                    local_ix = segment.end;
+                    continue;
+                }
                 // Mirror draw_markdown_line: the cursor's line wraps RAW (full
                 // marker prefix shown, hanging continuation rows) — measuring
                 // the rendered body instead let the revealed line grow a row
@@ -1411,6 +1430,77 @@ fn draw_markdown_line(
                 ORDER_BG + 2,
             );
             text_y += 18.0;
+            if text_y > clip_bottom + line_h * 2.0 {
+                break;
+            }
+            continue;
+        }
+        if let Some(segment) = plain_paragraph_segment(
+            &local_lines,
+            local_ix,
+            (pane.cursor_reveal_active() && pane.reveals_source_line(pane.cursor_line))
+                .then(|| pane.cursor_line.checked_sub(item.first_line))
+                .flatten(),
+        ) {
+            let inline_lines = inline_wrapped_lines_dropcap(
+                sugarloaf,
+                &segment.text,
+                width.max(24.0),
+                &opts,
+            )
+            .0;
+            let visual_lines = inline_visual_row_count(&inline_lines);
+            let block_h = line_h * visual_lines as f32 + 8.0;
+            register_and_place_plain_paragraph(
+                sugarloaf,
+                pane,
+                &segment,
+                &inline_lines,
+                item.first_line,
+                x,
+                text_y,
+                &opts,
+            );
+            pane.register_block_rect(
+                item.first_line + segment.start,
+                [x - 18.0, text_y - 4.0, width + 36.0, block_h],
+                [x - 42.0, text_y - 4.0, 22.0, block_h],
+                x,
+                text_y,
+                0,
+                cursor_cell_width(&opts).max(1.0),
+                line_h,
+                width,
+                None,
+            );
+            draw_plain_paragraph_selection(
+                sugarloaf,
+                pane,
+                &segment,
+                &inline_lines,
+                item.first_line,
+                x,
+                text_y,
+                &opts,
+                theme,
+                clip,
+            );
+            draw_inline_wrapped_lines(
+                sugarloaf,
+                pane,
+                &inline_lines,
+                x,
+                text_y,
+                0.0,
+                &opts,
+                theme,
+                clip,
+                clip_top,
+                clip_bottom,
+                text_occlusions,
+            );
+            text_y += line_h * visual_lines as f32;
+            skip_until_local_ix = segment.end;
             if text_y > clip_bottom + line_h * 2.0 {
                 break;
             }

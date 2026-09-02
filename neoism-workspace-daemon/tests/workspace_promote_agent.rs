@@ -187,6 +187,7 @@ impl Drop for FakeAgentServer {
 
 struct Daemon {
     router: Router,
+    workspaces: WorkspaceManager,
     _config_dir: TempDir,
     _data_dir: TempDir,
     _registry_dir: TempDir,
@@ -202,16 +203,21 @@ fn build_daemon() -> Daemon {
     std::env::set_var("NEOISM_WORKSPACE_REGISTRY", &registry_file);
 
     let auth = AuthService::bootstrap(data_dir.path()).expect("auth bootstrap");
+    let workspaces = WorkspaceManager::bootstrap();
     let router = server::router(AppState {
+        lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+            neoism_agent_neoism_adapter::neoism_services(),
+        ),
         auth,
         sessions: SessionRegistry::shared(),
-        workspaces: WorkspaceManager::bootstrap(),
+        workspaces: workspaces.clone(),
         pairing_tokens: PairingTokenStore::in_memory(),
         crdt: CrdtSyncHub::default(),
         paired_hosts: neoism_workspace_daemon::hosts::PairedHostStore::in_memory(),
     });
     Daemon {
         router,
+        workspaces,
         _config_dir: config_dir,
         _data_dir: data_dir,
         _registry_dir: registry_dir,
@@ -277,7 +283,13 @@ async fn receive_agent_forwards_each_bundle() {
     ]);
 
     let daemon = build_daemon();
-    let target_root = "/srv/work/relocated-proj";
+    let target = TempDir::new().expect("target workspace tempdir");
+    let target_root = target.path().to_string_lossy().into_owned();
+    let workspace_id = register_host_workspace(
+        &daemon.workspaces,
+        "target-host",
+        target.path(),
+    );
 
     let (status, json) = post_json(
         daemon.router.clone(),
@@ -285,6 +297,7 @@ async fn receive_agent_forwards_each_bundle() {
         Some(TOKEN),
         serde_json::json!({
             "bundles": [bundle("sess-aaa"), bundle("sess-bbb")],
+            "workspace_id": workspace_id,
             "target_workspace_root": target_root,
         }),
     )
@@ -365,7 +378,7 @@ fn agent_endpoint_helpers_append_paths() {
     };
     assert_eq!(
         agent_export_endpoint("http://127.0.0.1:4096"),
-        "http://127.0.0.1:4096/sessions/export"
+        "http://127.0.0.1:4096/v2/sessions/export"
     );
     assert_eq!(
         agent_import_endpoint("http://127.0.0.1:4096/"),
@@ -396,6 +409,7 @@ async fn receive_agent_requires_auth() {
         None, // no bearer
         serde_json::json!({
             "bundles": [],
+            "workspace_id": "relocated-workspace",
             "target_workspace_root": "/srv/work/proj",
         }),
     )
@@ -461,6 +475,9 @@ impl TargetDaemon {
 
         let auth = AuthService::bootstrap(data_dir.path()).expect("auth bootstrap");
         let app = server::router(AppState {
+            lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+                neoism_agent_neoism_adapter::neoism_services(),
+            ),
             auth,
             sessions: SessionRegistry::shared(),
             workspaces: WorkspaceManager::bootstrap(),
@@ -517,10 +534,9 @@ fn register_host_workspace(
         .replies
         .iter()
         .find_map(|reply| match reply {
-            WorkspaceServerMessage::HostWorkspaceChanged {
-                workspace_id: Some(id),
-                ..
-            } => Some(id.clone()),
+            WorkspaceServerMessage::HostWorkspaceUpserted { workspace } => {
+                Some(workspace.id.clone())
+            }
             _ => None,
         })
         .expect("CreateHostWorkspace must yield a workspace id")
@@ -592,6 +608,9 @@ async fn promote_succeeds_when_agent_export_unreachable() {
     let auth = AuthService::bootstrap(data_dir.path()).expect("auth");
     let workspaces = WorkspaceManager::bootstrap();
     let router = server::router(AppState {
+        lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+            neoism_agent_neoism_adapter::neoism_services(),
+        ),
         auth,
         sessions: SessionRegistry::shared(),
         workspaces: workspaces.clone(),

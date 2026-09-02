@@ -447,6 +447,13 @@ impl FileTree {
         }
     }
 
+    /// Clear a failed asynchronous directory request. Returning whether the
+    /// id belonged to the tree lets the desktop surface a useful error rather
+    /// than leaving an invisible pending listing that retries forever.
+    pub fn fail_service_request(&mut self, request_id: RequestId) -> bool {
+        self.pending_dir_requests.remove(&request_id).is_some()
+    }
+
     /// Replace entries with a single-level scan of `root`. Directories
     /// sort first, then files; both are alphabetical (case-insensitive).
     /// Hidden entries (leading `.`) are skipped — matches nvim-tree's

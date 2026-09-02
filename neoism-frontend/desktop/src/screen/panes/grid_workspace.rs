@@ -151,12 +151,13 @@ impl Screen<'_> {
     }
 
     pub(crate) fn active_pane_workspace_root(&self) -> Option<PathBuf> {
-        // JOINED workspace: the authoritative root is the daemon
-        // tree's root_dir on the HOST — every local-pane heuristic
-        // below (proc cwd, env cwd, local is_dir checks) is either
-        // meaningless or silently None for it.
+        // A shared JOINED workspace keeps the host's declared root stable for
+        // every participant. Quick SSH is intentionally different: it is a
+        // private remote terminal workspace and must follow its main shell's
+        // daemon-reported cwd exactly like a local workspace.
+        let quick_ssh = self.context_manager.current_workspace_is_quick_ssh();
         if let Some(id) = self.context_manager.current_adopted_workspace_id() {
-            if !self.context_manager.workspace_owned_locally(&id) {
+            if !quick_ssh && !self.context_manager.workspace_owned_locally(&id) {
                 if let Some(root) = self.context_manager.daemon_host_workspace_root(&id) {
                     return Some(root);
                 }
@@ -272,6 +273,7 @@ impl Screen<'_> {
         // only freeze the ambient (non-forced) per-frame path.
         if !force_tree_refresh
             && self.context_manager.current_workspace_is_remote_joined()
+            && !self.context_manager.current_workspace_is_quick_ssh()
         {
             return false;
         }

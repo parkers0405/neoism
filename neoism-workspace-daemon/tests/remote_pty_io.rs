@@ -346,6 +346,9 @@ impl Daemon {
         let pairing_tokens = PairingTokenStore::in_memory();
 
         let app = server::router(AppState {
+            lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
+                neoism_agent_neoism_adapter::neoism_services(),
+            ),
             auth,
             // The production-shared registry: one broadcast channel +
             // backlog for the whole daemon. This is the wiring under

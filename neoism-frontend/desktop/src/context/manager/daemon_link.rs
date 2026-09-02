@@ -211,12 +211,69 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .link
             .as_ref()
             .and_then(|link| link.credential.clone());
-        if let Some(binding) = self.adopted_workspaces.get_mut(&stable) {
+        let rebound = if let Some(binding) = self.adopted_workspaces.get_mut(&stable) {
             if binding.workspace_id == workspace_id {
                 binding.endpoint = endpoint;
                 binding.credential = credential;
                 binding.is_peer = self.daemon.link_is_peer;
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        if !rebound {
+            return;
+        }
+
+        // The replacement SSH tunnel has a different websocket handle even
+        // though the pane and its daemon-side PTY session stay the same.
+        // Rebuild both the routing maps and the input sink's transport now;
+        // metadata-only rebinding left the pane displaying `SSH >>>` while
+        // every command was still sent to the dead connection.
+        let Some(link) = self.daemon.link.clone() else {
+            return;
+        };
+        let Some((handle, runtime)) = link.handle_and_runtime() else {
+            return;
+        };
+        let routes = self.contexts[index]
+            .contexts()
+            .values()
+            .filter_map(|item| {
+                let context = item.context();
+                let binding = context.remote_pty.as_ref()?.clone();
+                let session_id = binding
+                    .shared
+                    .lock()
+                    .ok()
+                    .and_then(|shared| shared.session_id.clone())?;
+                Some((context.route_id, session_id, binding))
+            })
+            .collect::<Vec<_>>();
+        for (route_id, session_id, binding) in routes {
+            crate::context::remote_pty::bind_session(
+                &binding,
+                &session_id,
+                handle.clone(),
+                runtime.clone(),
+            );
+            self.daemon
+                .cache
+                .route_sessions
+                .insert(route_id, session_id.clone());
+            self.daemon
+                .cache
+                .session_routes
+                .insert(session_id.clone(), route_id);
+            self.daemon.cache.remote_routes.insert(route_id, binding);
+            // The fresh websocket's eager backlog arrived before this grid's
+            // route map was rebound and was intentionally ignored. Ask for a
+            // one-shot retained replay now that output has a destination.
+            link.send_pty(neoism_protocol::pty::ClientMessage::AttachPty {
+                session_id,
+            });
         }
     }
 
@@ -249,6 +306,16 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .iter()
             .find(|workspace| workspace.id == workspace_id)
             .is_some_and(|workspace| workspace.host_id != local)
+    }
+
+    /// True for the private, per-target home workspace created by Quick SSH.
+    /// It travels over a peer daemon connection but follows the active remote
+    /// shell's cwd like a local workspace instead of freezing its Explorer at
+    /// a collaborative host workspace's declared root.
+    pub fn current_workspace_is_quick_ssh(&self) -> bool {
+        self.current_adopted_workspace_id()
+            .as_deref()
+            .is_some_and(crate::ssh_hosts::is_quick_ssh_workspace_id)
     }
 
     /// The CURRENT workspace participates in a shared daemon session.
@@ -607,6 +674,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     pub(crate) fn upsert_daemon_host_workspace(&mut self, workspace: WorkspaceSummary) {
+        self.remember_workspace_icon_kind(&workspace);
         if let Some(existing) = self
             .daemon
             .cache

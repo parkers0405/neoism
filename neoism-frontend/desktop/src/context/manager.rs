@@ -72,6 +72,11 @@ pub struct ContextManager<T: EventListener> {
     /// outside `daemon`: that state is replaced when the window attaches to
     /// another server, while grids from earlier servers remain open.
     adopted_workspaces: HashMap<usize, AdoptedWorkspaceBinding>,
+    /// Last authoritative network badge for every workspace id. The active
+    /// daemon cache is replaced when focus moves to a workspace backed by a
+    /// different server; badges belong to workspace tabs and must survive
+    /// that server switch just like adopted-workspace identity does.
+    workspace_icon_kinds: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -758,6 +758,21 @@ impl Screen<'_> {
                 self.mark_dirty();
                 true
             }
+            FilesServerMessage::Error { message } => {
+                if !self
+                    .renderer
+                    .file_tree
+                    .fail_service_request(request_id)
+                {
+                    return false;
+                }
+                self.file_tree_notify(
+                    format!("Could not list the host directory: {message}"),
+                    NotificationLevel::Error,
+                );
+                self.mark_dirty();
+                true
+            }
             _ => false,
         }
     }

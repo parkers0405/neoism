@@ -33,6 +33,18 @@ pub struct RemoteRouteShared {
     /// Ops issued before the daemon confirmed the session — replayed
     /// in order by [`bind_session`].
     pub queued: Vec<RemotePtyOp>,
+    /// Transport currently serving this route. Quick SSH can recreate its
+    /// local forward without recreating the pane or the daemon-owned shell;
+    /// keeping the transport here lets that existing pane atomically move to
+    /// the replacement connection instead of continuing to write into the
+    /// dead websocket captured when it was first created.
+    transport: Option<RemotePtyTransport>,
+}
+
+#[derive(Clone)]
+struct RemotePtyTransport {
+    handle: DaemonClientHandle,
+    runtime: tokio::runtime::Handle,
 }
 
 /// What the context manager retains per daemon-backed route.
@@ -66,24 +78,25 @@ pub fn prepare(
     let shared = Arc::new(Mutex::new(RemoteRouteShared {
         session_id: None,
         queued: Vec::new(),
+        transport: Some(RemotePtyTransport { handle, runtime }),
     }));
     let sink_shared = shared.clone();
     let sink = Box::new(move |op: RemotePtyOp| {
-        let session_id = {
+        let dispatch = {
             let mut guard = match sink_shared.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            match guard.session_id.clone() {
-                Some(id) => Some(id),
-                None => {
+            match (guard.session_id.clone(), guard.transport.clone()) {
+                (Some(id), Some(transport)) => Some((id, transport)),
+                _ => {
                     guard.queued.push(op.clone());
                     None
                 }
             }
         };
-        if let Some(id) = session_id {
-            send_op(&handle, &runtime, &id, op);
+        if let Some((id, transport)) = dispatch {
+            send_op(&transport.handle, &transport.runtime, &id, op);
         }
     });
     PreparedRemotePty { sink, shared }
@@ -103,6 +116,10 @@ pub fn bind_session(
             Err(poisoned) => poisoned.into_inner(),
         };
         guard.session_id = Some(session_id.to_string());
+        guard.transport = Some(RemotePtyTransport {
+            handle: handle.clone(),
+            runtime: runtime.clone(),
+        });
         std::mem::take(&mut guard.queued)
     };
     for op in queued {

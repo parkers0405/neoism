@@ -555,6 +555,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         workspace_id: &str,
         rich_text_id: usize,
         sugarloaf: &mut Sugarloaf,
+        replace_index: Option<usize>,
     ) -> bool {
         let workspace_owned_locally = self.workspace_owned_locally(workspace_id);
         let terminal_uses_remote_pty = workspace_terminal_uses_remote_pty(
@@ -599,7 +600,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             );
             return false;
         }
-        if self.contexts.len() >= self.capacity {
+        if replace_index.is_none() && self.contexts.len() >= self.capacity {
             tracing::warn!(
                 target: "neoism::workspaces",
                 workspace_id,
@@ -613,7 +614,8 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             target: "neoism::workspaces",
             workspace_id,
             tab_count = tabs.len(),
-            "adopting daemon workspace as a new tab",
+            replacing = replace_index.is_some(),
+            "adopting daemon workspace into a top-level slot",
         );
 
         let root_dir = self
@@ -629,12 +631,22 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             cloned_config.working_dir = Some(root.to_string_lossy().to_string());
         }
 
-        let current = self.current();
+        let source_index = replace_index.unwrap_or(self.current_index);
+        let Some(current) = self.contexts.get(source_index).map(ContextGrid::current)
+        else {
+            tracing::warn!(
+                target: "neoism::workspaces",
+                workspace_id,
+                ?replace_index,
+                "workspace not adopted: replacement grid disappeared",
+            );
+            return false;
+        };
         let cursor = current.cursor_from_ref();
         let blinking = self.config.cursor_blinking;
         let mut dimension = current.dimension;
-        if self.current_grid().len() > 1 {
-            dimension = self.current_grid().grid_dimension();
+        if self.contexts[source_index].len() > 1 {
+            dimension = self.contexts[source_index].grid_dimension();
         }
 
         // Root pane = the workspace's active session, or a FRESH
@@ -666,22 +678,36 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             None => {}
         }
 
-        let last_index = self.contexts.len();
-        let previous_scaled_margin = self.contexts[self.current_index].scaled_margin;
-        self.contexts.push(ContextGrid::new(
+        let previous_scaled_margin = self.contexts[source_index].scaled_margin;
+        let adopted_grid = ContextGrid::new(
             root_context,
             previous_scaled_margin,
             self.config.split_color,
             self.config.split_active_color,
             self.config.panel,
-        ));
-        self.current_index = last_index;
+        );
+        let adopted_index = if let Some(index) = replace_index {
+            if let Some(stable) = self.contexts[index].workspace_route_id() {
+                self.adopted_workspaces.remove(&stable);
+            }
+            self.contexts[index].remove_all_rich_text(sugarloaf);
+            self.contexts[index] = adopted_grid;
+            // A custom title or terminal-derived title belongs to the local
+            // workspace being replaced, not the SSH host.
+            self.titles.titles.remove(&index);
+            index
+        } else {
+            let index = self.contexts.len();
+            self.contexts.push(adopted_grid);
+            index
+        };
+        self.current_index = adopted_index;
         self.current_route = self.current().route_id;
 
         // Remember the daemon identity BEFORE publishing, so the
         // snapshot re-homes the EXISTING workspace here instead of
         // minting a desktop-flavored duplicate.
-        if let Some(stable) = self.contexts[last_index].workspace_route_id() {
+        if let Some(stable) = self.contexts[adopted_index].workspace_route_id() {
             let endpoint = self.daemon_endpoint().unwrap_or_default().to_string();
             let credential = self
                 .daemon

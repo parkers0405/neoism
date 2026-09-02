@@ -1577,6 +1577,10 @@ fn self_update(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_arch = "wasm32"))]
+    if neoism_desktop::notes_mcp::maybe_run()? {
+        return Ok(());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(result) = service_process::maybe_run_internal_service() {
         return result;
     }

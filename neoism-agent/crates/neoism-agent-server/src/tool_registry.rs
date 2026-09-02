@@ -3,14 +3,13 @@ use serde_json::{json, Value};
 use super::{
     apply_patch_handler, artifact_read_handler, artifact_search_handler, bash_handler,
     documentation_handler, edit_handler, glob_handler, grep_handler, lsp_handler,
-    memory_handler, notes_handler, read_handler, skill_handler, stateful_handler,
+    memory_handler, read_handler, skill_handler, stateful_handler,
     webfetch_handler, write_handler, BuiltinTool, ToolHandler,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum ToolOwner {
     Workspace,
-    Notes,
     Documentation,
     Memory,
     Skills,
@@ -200,23 +199,6 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
             webfetch_handler,
         ),
         tool(
-            ToolOwner::Notes, owner,
-            "notes",
-            "Injected note service operations: create, list, read, write, search, tasks, or taskToggle.",
-            object(&[
-                ("operation", "string"),
-                ("path", "string"),
-                ("content", "string"),
-                ("query", "string"),
-                ("tag", "string"),
-                ("limit", "integer"),
-                ("line", "integer"),
-                ("checked", "boolean"),
-                ("title", "string"),
-            ]),
-            notes_handler,
-        ),
-        tool(
             ToolOwner::Documentation, owner,
             "docs",
             "Search and read Neoism's bundled product documentation. This is the first-class documentation tool, not a Skill. Use search for a topic, then read the returned path.",
@@ -235,12 +217,12 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Memory, owner,
             "memory",
-            "Use Neoism's injected persistent memory service. Operations are init, list, recall, search, read, and write. Prefer recall before repeating project discovery.",
+            "Use Neoism Agent's persistent memory. Project memory lives in the declared workspace's .neoism/memory directory and is writable through this tool. Operations are init, list, recall, search, read, and write. Scope defaults to project; prefer recall before repeating project discovery.",
             json!({
                 "type": "object",
                 "properties": {
                     "operation": { "type": "string", "enum": ["init", "list", "recall", "search", "read", "write"] },
-                    "scope": { "type": "string", "enum": ["auto", "project", "user", "all"] },
+                    "scope": { "type": "string", "enum": ["auto", "project", "user", "all"], "description": "Defaults to project. Hosted policies may allow only project memory." },
                     "query": { "type": "string" },
                     "path": { "type": "string", "description": "Exact plain path returned by memory list, recall, search, or write. Pass scope separately; do not prefix the path with project: or user:." },
                     "limit": { "type": "integer", "minimum": 1 },
@@ -522,10 +504,6 @@ fn tool(
         handler,
         state: None,
     })
-}
-
-fn object(properties: &[(&str, &str)]) -> Value {
-    object_with_required(properties, &[])
 }
 
 fn object_required(properties: &[(&str, &str)], required: &[&str]) -> Value {

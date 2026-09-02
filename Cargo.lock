@@ -4807,6 +4807,7 @@ name = "neoism"
 version = "0.7.81"
 dependencies = [
  "ahash",
+ "axum",
  "base64",
  "bitflags 2.11.0",
  "clap",
@@ -4869,6 +4870,7 @@ dependencies = [
  "tinyvec",
  "tokio",
  "tokio-tungstenite",
+ "tower",
  "tower-service",
  "tracing",
  "tracing-subscriber",

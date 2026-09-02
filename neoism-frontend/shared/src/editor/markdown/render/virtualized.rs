@@ -15,7 +15,7 @@ use crate::editor::markdown::helpers::{
 use crate::editor::markdown::{
     is_misspelled_word, source_map::InlineSourceMap, spellcheck_dictionary,
     spellcheck_words, MarkdownListMarker, MarkdownListMarkerKind, MarkdownOutlineEntry,
-    MarkdownPane, MarkdownPendingLineEdit, MarkdownVirtualMeasureKey,
+    MarkdownPane, MarkdownPendingLineEdit, MarkdownPosition, MarkdownVirtualMeasureKey,
     MarkdownVirtualMeasurement, MarkdownVirtualRenderState, MarkdownWrapHitRow,
     MarkdownWrapRow, CURSOR_REVEAL_FAST_REPEAT,
 };
@@ -25,7 +25,8 @@ use crate::primitives::truncate_to_fit;
 use crate::syntax::{highlight_line, syn_color, Lang};
 use crate::widgets::markdown::{
     backslash_escape_at_start, callout_kind_for_quote_line, list_depth_from_indent,
-    parse_callout_line, parse_heading_line, web_link_at_start,
+    parse_callout_line, parse_heading_line, parse_line as parse_markdown_block_line,
+    web_link_at_start, MarkdownBlockKind,
 };
 use crate::widgets::mermaid::{mermaid_scene, parse_mermaid_diagram};
 

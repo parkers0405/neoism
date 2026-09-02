@@ -1,0 +1,17 @@
+@added: #2ea043;
+@changed: #e3b341;
+@removed: #f85149;
+
+.state-border(@color) when (iscolor(@color)) {
+  border-left: 3px solid @color;
+}
+
+.patch-preview {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr);
+  overflow: hidden;
+
+  &[data-state="added"] { .state-border(@added); }
+  &[data-state="changed"] { .state-border(@changed); }
+  &[data-state="removed"] { .state-border(@removed); }
+}

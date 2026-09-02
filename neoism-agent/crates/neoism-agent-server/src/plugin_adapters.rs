@@ -15,11 +15,6 @@ impl neoism_agent_builtins::plugin::workspace_tools::WorkspaceToolsHost for Work
     fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_workspace_tools(registrar, &self.0); }
 }
 
-pub(crate) struct NotesTools(pub(crate) crate::state::AppState);
-impl neoism_agent_builtins::plugin::notes_tools::NotesToolsHost for NotesTools {
-    fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_notes_tools(registrar, &self.0); }
-}
-
 pub(crate) struct DocumentationTools(pub(crate) crate::state::AppState);
 impl neoism_agent_builtins::plugin::documentation_tools::DocumentationToolsHost for DocumentationTools {
     fn register_tools(&self, registrar: &mut PluginContributions) { crate::tool::register_documentation_tools(registrar, &self.0); }

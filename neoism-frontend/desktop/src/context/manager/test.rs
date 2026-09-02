@@ -146,6 +146,49 @@ fn adopted_workspace_identity_survives_active_server_cache_reset() {
 }
 
 #[test]
+fn adopted_workspace_rebind_updates_the_workspace_scoped_agent_endpoint() {
+    let window_id: WindowId = WindowId::from(0);
+    let mut context_manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+    let stable = context_manager
+        .current_grid()
+        .workspace_route_id()
+        .expect("test grid has a stable root");
+    context_manager.adopted_workspaces.insert(
+        stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: "quick-ssh".to_string(),
+            endpoint: "ws://127.0.0.1:1/session".to_string(),
+            credential: Some("stale".to_string()),
+            is_peer: true,
+        },
+    );
+    let _runtime = attach_unconnected_daemon(&mut context_manager);
+    let fresh_endpoint = "ws://127.0.0.1:43210/session";
+    if let Some(link) = context_manager.daemon.link.as_mut() {
+        link.endpoint = fresh_endpoint.to_string();
+        link.credential = Some("fresh".to_string());
+    }
+    context_manager.daemon.link_is_peer = true;
+
+    context_manager.rebind_adopted_workspace_at(0, "quick-ssh");
+
+    let rebound = context_manager
+        .adopted_workspaces
+        .get(&stable)
+        .expect("adopted binding remains present");
+    assert_eq!(rebound.endpoint, fresh_endpoint);
+    assert_eq!(rebound.credential.as_deref(), Some("fresh"));
+    assert!(rebound.is_peer);
+    assert_eq!(
+        context_manager
+            .agent_server_override_for_current()
+            .as_deref(),
+        Some("http://127.0.0.1:43210/agent/workspaces/quick-ssh")
+    );
+}
+
+#[test]
 fn joined_workspace_icon_survives_missing_terminal_title() {
     // Validate the same fallback fields used by the Island bridge.
 

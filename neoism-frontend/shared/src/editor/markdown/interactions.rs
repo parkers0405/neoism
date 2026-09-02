@@ -320,7 +320,11 @@ impl MarkdownPane {
         let Some(block) = self.block_for_click(x, y) else {
             return false;
         };
-        self.cursor_line = block.line.min(self.lines.len().saturating_sub(1));
+        let paragraph_position = self.paragraph_position_from_point(block, x, y, false);
+        self.cursor_line = paragraph_position
+            .map(|position| position.line)
+            .unwrap_or(block.line)
+            .min(self.lines.len().saturating_sub(1));
         if self
             .lines
             .get(self.cursor_line)
@@ -331,11 +335,15 @@ impl MarkdownPane {
                 .saturating_add(1)
                 .min(self.lines.len().saturating_sub(1));
         }
-        self.cursor_col = if self.read_only {
-            self.glyph_col_from_point(block, x, y)
-        } else {
-            self.cursor_col_from_point(block, x, y)
-        };
+        self.cursor_col = paragraph_position
+            .map(|position| position.col)
+            .unwrap_or_else(|| {
+                if self.read_only {
+                    self.glyph_col_from_point(block, x, y)
+                } else {
+                    self.cursor_col_from_point(block, x, y)
+                }
+            });
         if !self.vim_enabled {
             self.mode = MarkdownMode::Insert;
         }
@@ -362,7 +370,12 @@ impl MarkdownPane {
     }
 
     pub fn source_line_at_point(&self, x: f32, y: f32) -> Option<usize> {
-        self.block_for_click(x, y).map(|block| block.line)
+        let block = self.block_for_click(x, y)?;
+        Some(
+            self.paragraph_position_from_point(block, x, y, self.read_only)
+                .map(|position| position.line)
+                .unwrap_or(block.line),
+        )
     }
 
     pub fn reveal_source_line(&mut self, line: usize) {
@@ -378,7 +391,12 @@ impl MarkdownPane {
     /// whether a click should select text or open annotation actions.
     pub fn text_position_at_point(&self, x: f32, y: f32) -> Option<MarkdownPosition> {
         let block = self.block_for_click(x, y)?;
-        let mut line = block.line.min(self.lines.len().saturating_sub(1));
+        let paragraph_position =
+            self.paragraph_position_from_point(block, x, y, self.read_only);
+        let mut line = paragraph_position
+            .map(|position| position.line)
+            .unwrap_or(block.line)
+            .min(self.lines.len().saturating_sub(1));
         if self
             .lines
             .get(line)
@@ -388,12 +406,16 @@ impl MarkdownPane {
                 .saturating_add(1)
                 .min(self.lines.len().saturating_sub(1));
         }
-        let column = if self.read_only {
-            self.glyph_col_from_point(block, x, y)
-        } else {
-            self.cursor_col_from_point(block, x, y)
-        }
-        .min(self.lines.get(line).map(String::len).unwrap_or_default());
+        let column = paragraph_position
+            .map(|position| position.col)
+            .unwrap_or_else(|| {
+                if self.read_only {
+                    self.glyph_col_from_point(block, x, y)
+                } else {
+                    self.cursor_col_from_point(block, x, y)
+                }
+            })
+            .min(self.lines.get(line).map(String::len).unwrap_or_default());
         Some(MarkdownPosition { line, col: column })
     }
 
@@ -468,12 +490,21 @@ impl MarkdownPane {
             }) else {
                 return false;
             };
-            self.cursor_line = block.line.min(self.lines.len().saturating_sub(1));
-            self.cursor_col = if self.read_only {
-                self.glyph_col_from_point(block, x, y)
-            } else {
-                self.cursor_col_from_point(block, x, y)
-            };
+            let paragraph_position =
+                self.paragraph_position_from_point(block, x, y, self.read_only);
+            self.cursor_line = paragraph_position
+                .map(|position| position.line)
+                .unwrap_or(block.line)
+                .min(self.lines.len().saturating_sub(1));
+            self.cursor_col = paragraph_position
+                .map(|position| position.col)
+                .unwrap_or_else(|| {
+                    if self.read_only {
+                        self.glyph_col_from_point(block, x, y)
+                    } else {
+                        self.cursor_col_from_point(block, x, y)
+                    }
+                });
             self.clamp_cursor();
             if self.cursor_position() != anchor {
                 self.mode = MarkdownMode::Visual;
@@ -800,6 +831,38 @@ impl MarkdownPane {
             }
         }
         (line >= start && line < end).then_some(start..end)
+    }
+
+    fn paragraph_position_from_point(
+        &self,
+        block: MarkdownBlockRect,
+        x: f32,
+        y: f32,
+        glyph: bool,
+    ) -> Option<MarkdownPosition> {
+        let map = self.paragraph_hit_maps.get(&block.line)?;
+        let rows = self.block_wrap_hit_stops.get(&block.line)?;
+        if rows.is_empty() || map.positions.is_empty() {
+            return None;
+        }
+        let row_index = (((y - block.text_y) / block.line_height.max(1.0))
+            .floor()
+            .max(0.0) as usize)
+            .min(rows.len() - 1);
+        let row = &rows[row_index];
+        let stop = measured_stop_index_with_row_width(
+            &row.stops,
+            (x - block.text_x).max(0.0),
+            block.wrap_width,
+            block.cell_width,
+        );
+        let mut visible = row.start.saturating_add(stop);
+        if glyph && stop > 0 {
+            visible = visible.saturating_sub(1).max(row.start);
+        }
+        map.positions
+            .get(visible.min(map.positions.len() - 1))
+            .copied()
     }
 
     pub(super) fn cursor_col_from_point(

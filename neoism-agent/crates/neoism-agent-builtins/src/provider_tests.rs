@@ -6,6 +6,43 @@ use std::collections::BTreeMap;
 use neoism_agent_core::{AuthInfo, ProviderStreamEvent};
 
 #[test]
+fn local_store_uses_host_credentials_for_matching_workspace_delegation() {
+    let scope = super::generation_credential_scope(
+        Some("workspace:workspace-1"),
+        Some("workspace-1"),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(scope.tenant_id, "local");
+    assert_eq!(scope.workspace_id, None);
+}
+
+#[test]
+fn local_store_rejects_non_workspace_hosted_scopes() {
+    assert!(super::generation_credential_scope(Some("tenant-a"), None, false).is_err());
+    assert!(super::generation_credential_scope(
+        Some("workspace:workspace-1"),
+        Some("workspace-2"),
+        false,
+    )
+    .is_err());
+}
+
+#[test]
+fn hosted_store_preserves_workspace_scope() {
+    let scope = super::generation_credential_scope(
+        Some("workspace:workspace-1"),
+        Some("workspace-1"),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(scope.tenant_id, "workspace:workspace-1");
+    assert_eq!(scope.workspace_id.as_deref(), Some("workspace-1"));
+}
+
+#[test]
 fn stored_openai_auth_precedes_environment_keys() {
     std::env::set_var("NEOISM_AGENT_OPENAI_API_KEY", "env-key");
     let auth = AuthInfo::Api {

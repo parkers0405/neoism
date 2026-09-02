@@ -7,7 +7,7 @@ Start with the smallest failing boundary: agent process, provider connection, mo
 1. Open the command palette and try **New Agent** again.
 2. Check whether the workspace daemon is connected.
 3. Inspect Neoism logs for `neoism-agent-server` startup errors.
-4. Validate global JSONC and project `neoism.json` / `neoism.jsonc`.
+4. Validate global `config.json` and workspace `.neoism/config.json` JSONC.
 5. Remove or correct a conflicting provider allowlist/denylist.
 
 Neoism supervises the Agent server. A failed child should be reported and restarted rather than leaving a permanently silent pane.
@@ -78,7 +78,7 @@ Confirm a usable model remains connected. Interrupting compaction does not delet
 
 ## Configuration paths
 
-Neoism's main configuration path is shown in [[Getting Started/06 Configure Neoism]]. Agent project overlays are `neoism.json` or `neoism.jsonc` discovered from parent directories toward the workspace. `NEOISM_AGENT_CONFIG` and `NEOISM_AGENT_CONFIG_CONTENT` are explicit deployment overrides.
+Neoism's main configuration path is shown in [[Getting Started/06 Configure Neoism]]. Workspace overrides live in `.neoism/config.json`; an existing root `neoism.json` is moved there automatically.
 
 ## Report a useful failure
 

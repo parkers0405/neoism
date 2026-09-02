@@ -14,9 +14,6 @@ pub mod move_workspace;
 /// Wave 6A: `GET /tailnet-peers` fetch + lifting discovered peers into
 /// Workspaces-modal drop targets.
 pub mod remote_files;
-/// Follow-the-terminal remote file browsing: shells out to the system
-/// `ssh` when the user opens an `ssh` session in a terminal pane.
-pub mod ssh_files;
 pub mod tailnet_peers;
 
 use std::collections::VecDeque;

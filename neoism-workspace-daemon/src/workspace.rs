@@ -351,8 +351,25 @@ fn declare_workspace_dir(root_dir: Option<PathBuf>) -> PathBuf {
     let dir = root_dir
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(crate::files::workspace_root);
+    let dir = expand_workspace_home(dir);
     let _ = std::fs::create_dir_all(&dir);
     crate::path::canonicalize_lossy(&dir)
+}
+
+/// Resolve the conventional `~` root on the daemon host. Remote clients send
+/// this sentinel for Quick SSH so the selected workspace always lands in the
+/// SSH user's home directory even when an already-running daemon was started
+/// from a project-specific cwd. Other relative paths keep their historical
+/// cwd-relative behavior.
+fn expand_workspace_home(path: PathBuf) -> PathBuf {
+    if path == Path::new("~") {
+        return dirs::home_dir().unwrap_or(path);
+    }
+    path.strip_prefix("~")
+        .ok()
+        .filter(|suffix| !suffix.as_os_str().is_empty())
+        .and_then(|suffix| dirs::home_dir().map(|home| home.join(suffix)))
+        .unwrap_or(path)
 }
 
 /// Resolve the ONE notes scope the host has linked to a workspace's code

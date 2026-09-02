@@ -57,6 +57,7 @@ mod tests {
             notebook_image_preview_dimensions: HashMap::new(),
             block_wrap_rows: HashMap::new(),
             block_wrap_hit_stops: HashMap::new(),
+            paragraph_hit_maps: HashMap::new(),
             table_rects: Vec::new(),
             table_cell_rects: Vec::new(),
             table_action_rects: Vec::new(),
@@ -1715,6 +1716,58 @@ mod tests {
         assert_eq!(pane.mode, MarkdownMode::Visual);
         assert_eq!(pane.selection_for_line(0), Some((0, 4)));
         assert_eq!(pane.yank_selection().as_deref(), Some("hell"));
+    }
+
+    #[test]
+    fn collapsed_paragraph_click_targets_later_physical_source_line() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["first".to_string(), "second".to_string()];
+        pane.register_block_rect(
+            0,
+            [0.0, 0.0, 200.0, 24.0],
+            [-30.0, 0.0, 20.0, 24.0],
+            0.0,
+            0.0,
+            0,
+            10.0,
+            20.0,
+            200.0,
+            None,
+        );
+        pane.register_block_wrap_hit_stops(
+            0,
+            vec![MarkdownWrapHitRow {
+                start: 0,
+                stops: (0..=12).map(|stop| stop as f32 * 10.0).collect(),
+            }],
+        );
+        pane.register_paragraph_hit_map(
+            0,
+            (0..=11)
+                .map(|visible| {
+                    if visible <= 5 {
+                        MarkdownPosition {
+                            line: 0,
+                            col: visible,
+                        }
+                    } else {
+                        MarkdownPosition {
+                            line: 1,
+                            col: visible - 6,
+                        }
+                    }
+                })
+                .collect(),
+        );
+
+        assert!(pane.click_at(80.0, 4.0));
+        assert_eq!(pane.cursor_position(), MarkdownPosition { line: 1, col: 2 });
+        assert_eq!(pane.source_line_at_point(100.0, 4.0), Some(1));
+
+        assert!(pane.update_drag(20.0, 4.0));
+        assert_eq!(pane.cursor_position(), MarkdownPosition { line: 0, col: 2 });
+        assert_eq!(pane.mode, MarkdownMode::Visual);
+        assert!(pane.end_drag());
     }
 
     #[test]

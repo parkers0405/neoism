@@ -49,6 +49,26 @@ struct PendingServerSwitch {
     result: Result<DesktopDaemonConnection, String>,
 }
 
+/// Result of the SSH bootstrap/tunnel phase. Daemon websocket dialing stays
+/// in the existing server-switch pipeline; keeping the phases separate means
+/// neither SSH authentication nor daemon startup can block the UI thread.
+struct PendingSshAttach {
+    window_id: WindowId,
+    target: String,
+    result: Result<crate::ssh_hosts::DaemonAttach, String>,
+}
+
+#[derive(Clone)]
+struct PendingSshWorkspace {
+    daemon_url: String,
+    workspace_id: String,
+    title: String,
+}
+
+fn ssh_server_id(workspace_id: &str) -> String {
+    format!("ssh:{workspace_id}")
+}
+
 const NOTEBOOK_STATUS_TICK_MS: u64 = 500;
 const FRAME_WATCHDOG_NOTE_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -94,6 +114,16 @@ pub struct Application<'a> {
     server_switch_tx: mpsc::Sender<PendingServerSwitch>,
     server_switch_rx: mpsc::Receiver<PendingServerSwitch>,
     server_switch_inflight: HashSet<WindowId>,
+    ssh_attach_tx: mpsc::Sender<PendingSshAttach>,
+    ssh_attach_rx: mpsc::Receiver<PendingSshAttach>,
+    ssh_attach_inflight: HashSet<WindowId>,
+    /// Live tunnel guards keyed by their normalized daemon endpoint. They
+    /// outlive workspace switches so returning to an SSH workspace can reuse
+    /// its parked daemon connection and remote PTYs immediately.
+    ssh_attaches: HashMap<String, crate::ssh_hosts::DaemonAttach>,
+    /// Workspace to create/adopt once the tunnel's websocket server switch
+    /// completes.
+    pending_ssh_workspaces: HashMap<WindowId, PendingSshWorkspace>,
     scheduler: Scheduler,
     app_id: Option<String>,
     initial_open_paths: Vec<PathBuf>,
@@ -162,6 +192,7 @@ impl Application<'_> {
                 });
         let (server_health_tx, server_health_rx) = mpsc::channel();
         let (server_switch_tx, server_switch_rx) = mpsc::channel();
+        let (ssh_attach_tx, ssh_attach_rx) = mpsc::channel();
         event_loop.listen_device_events(DeviceEvents::Never);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -186,6 +217,11 @@ impl Application<'_> {
             server_switch_tx,
             server_switch_rx,
             server_switch_inflight: HashSet::new(),
+            ssh_attach_tx,
+            ssh_attach_rx,
+            ssh_attach_inflight: HashSet::new(),
+            ssh_attaches: HashMap::new(),
+            pending_ssh_workspaces: HashMap::new(),
             scheduler,
             app_id,
             initial_open_paths,
@@ -293,6 +329,7 @@ impl Application<'_> {
 
     fn pump_daemon(&mut self, event_loop: &ActiveEventLoop) {
         self.drain_server_health_results();
+        self.drain_ssh_attach_results();
         self.drain_server_switch_results();
         let window_ids = self.window_sessions.keys().copied().collect::<Vec<_>>();
         for window_id in window_ids {
@@ -448,6 +485,7 @@ impl Application<'_> {
     fn process_window_server_requests(&mut self, window_id: WindowId) {
         let (
             server_request,
+            ssh_attach_request,
             add_request,
             edit_request,
             edit_submit,
@@ -463,6 +501,7 @@ impl Application<'_> {
             };
             (
                 route.window.screen.take_server_connect(),
+                route.window.screen.take_ssh_workspace_attach(),
                 route.window.screen.take_server_add(),
                 route.window.screen.take_server_edit(),
                 route.window.screen.take_server_edit_submit(),
@@ -474,6 +513,10 @@ impl Application<'_> {
                 route.window.screen.take_workspace_unsubscriptions(),
             )
         };
+
+        if let Some((target, ssh_args)) = ssh_attach_request {
+            self.start_ssh_workspace_attach(window_id, target, ssh_args);
+        }
 
         if let Some(workspace_id) = workspace_subscription {
             self.persist_workspace_subscription(window_id, workspace_id);
@@ -603,27 +646,54 @@ impl Application<'_> {
             if let Some(session) = self.window_sessions.get_mut(&window_id) {
                 session.pending_peer_adopt = Some(workspace_id);
             }
-            let already_connected = self
-                .window_sessions
-                .get(&window_id)
-                .is_some_and(|session| session.connection.endpoint() == daemon_url);
-            if !already_connected {
-                let saved = self
-                    .server_registry
-                    .servers()
-                    .iter()
-                    .find(|server| server.endpoint == daemon_url)
-                    .map(|server| server.id.clone());
-                let token = saved
-                    .as_deref()
-                    .and_then(|id| self.server_registry.token(id))
-                    .map(str::to_string);
-                self.switch_window_server(window_id, &daemon_url, token, saved);
+            // A parked Quick-SSH workspace may outlive its tunnel. Recreate
+            // that transport lazily when the user selects the workspace;
+            // retain the original -p/-i/-F/-J options and never probe the
+            // network on the UI thread.
+            let stale_ssh = self.ssh_attaches.get_mut(&daemon_url).and_then(|attach| {
+                (!attach.is_running())
+                    .then(|| (attach.alias.clone(), attach.ssh_args.clone()))
+            });
+            if let Some((target, ssh_args)) = stale_ssh {
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    route
+                        .window
+                        .screen
+                        .request_ssh_workspace_attach(target.clone(), ssh_args);
+                    route.window.screen.renderer.notifications.push(
+                        format!("Reconnecting to {target}…"),
+                        neoism_ui::panels::notifications::NotificationLevel::Info,
+                    );
+                    route.request_redraw();
+                }
+            } else {
+                let already_connected = self
+                    .window_sessions
+                    .get(&window_id)
+                    .is_some_and(|session| session.connection.endpoint() == daemon_url);
+                if !already_connected {
+                    let server_id = self.remote_server_id_for_endpoint(&daemon_url);
+                    let token = self
+                        .server_registry
+                        .token(&server_id)
+                        .map(str::to_string)
+                        .or_else(|| {
+                            self.ssh_attaches
+                                .get(&daemon_url)
+                                .map(|attach| attach.credential.clone())
+                        });
+                    self.switch_window_server(
+                        window_id,
+                        &daemon_url,
+                        token,
+                        Some(server_id),
+                    );
+                }
+                self.send_window_message(
+                    window_id,
+                    WorkspaceClientMessage::RequestHostWorkspaceTree,
+                );
             }
-            self.send_window_message(
-                window_id,
-                WorkspaceClientMessage::RequestHostWorkspaceTree,
-            );
         }
 
         if go_home {
@@ -996,32 +1066,52 @@ impl Application<'_> {
             }
         }
 
-        let summaries = Self::workspace_summaries_from_message(&message);
-        if !summaries.is_empty() {
+        // Persisted subscriptions may only be pruned by a COMPLETE inventory.
+        // `WorkspaceControlChanged` intentionally carries one workspace; the
+        // old shared helper treated that singleton as the whole server and
+        // silently deleted every other subscription, which later looked like
+        // tabs disappearing when another shared workspace changed.
+        let authoritative_summaries = match &message {
+            WorkspaceServerMessage::HostWorkspaceTree { workspaces, .. }
+            | WorkspaceServerMessage::HostWorkspaceList { workspaces } => {
+                Some(workspaces.as_slice())
+            }
+            _ => None,
+        };
+        if let Some(summaries) = authoritative_summaries {
             let subscription =
                 self.window_sessions.get(&source_window_id).map(|session| {
                     let server_id =
                         session.active_server_id.as_deref().unwrap_or("local");
-                    self.server_registry
-                        .workspace_subscription(&session.profile_id, server_id)
+                    self.server_registry.prune_workspace_subscription(
+                        &session.profile_id,
+                        server_id,
+                        summaries.iter().map(|workspace| workspace.id.as_str()),
+                    )
                 });
-            if let Some(mut subscription) = subscription {
-                subscription
-                    .subscribed_workspace_ids
-                    .retain(|workspace_id| {
-                        summaries
-                            .iter()
-                            .any(|workspace| workspace.id == *workspace_id)
-                    });
-                if subscription.last_active_workspace_id.as_ref().is_some_and(
-                    |workspace_id| {
-                        !summaries
-                            .iter()
-                            .any(|workspace| workspace.id == *workspace_id)
-                    },
-                ) {
-                    subscription.last_active_workspace_id = None;
-                }
+            if let Some(subscription) = subscription {
+                let subscription = match subscription {
+                    Ok(subscription) => subscription,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "neoism::desktop_daemon",
+                            window = ?source_window_id,
+                            %error,
+                            "failed to persist pruned workspace subscription"
+                        );
+                        // Persistence errors must not prevent the current tree
+                        // from rendering; use the in-memory snapshot as a
+                        // best-effort fallback for this pump.
+                        let Some(session) = self.window_sessions.get(&source_window_id)
+                        else {
+                            return;
+                        };
+                        self.server_registry.workspace_subscription(
+                            &session.profile_id,
+                            session.active_server_id.as_deref().unwrap_or("local"),
+                        )
+                    }
+                };
                 let restored_any = !subscription.subscribed_workspace_ids.is_empty()
                     || subscription.last_active_workspace_id.is_some();
                 if let Some(route) = self.router.routes.get_mut(&source_window_id) {
@@ -1094,7 +1184,218 @@ impl Application<'_> {
             }
         }
         if let Some(daemon_url) = rehome_target {
-            self.switch_window_server(source_window_id, &daemon_url, None, None);
+            let server_id = self.remote_server_id_for_endpoint(&daemon_url);
+            let token = self
+                .server_registry
+                .token(&server_id)
+                .map(str::to_string)
+                .or_else(|| {
+                    self.ssh_attaches
+                        .get(&daemon_url)
+                        .map(|attach| attach.credential.clone())
+                });
+            self.switch_window_server(
+                source_window_id,
+                &daemon_url,
+                token,
+                Some(server_id),
+            );
+        }
+    }
+
+    /// Stable persistence scope for a non-home daemon, including ad-hoc
+    /// tailnet peers that are not saved in the server manager. Falling back to
+    /// `local` for those peers mixed their workspace subscriptions with the
+    /// home daemon and let one shared-workspace update hide local tabs.
+    fn remote_server_id_for_endpoint(&self, daemon_url: &str) -> String {
+        self.server_registry
+            .servers()
+            .iter()
+            .find(|server| server.endpoint == daemon_url)
+            .map(|server| server.id.clone())
+            .or_else(|| {
+                self.ssh_attaches
+                    .get(daemon_url)
+                    .map(|attach| ssh_server_id(&attach.workspace_id))
+            })
+            .unwrap_or_else(|| format!("peer:{daemon_url}"))
+    }
+
+    fn start_ssh_workspace_attach(
+        &mut self,
+        window_id: WindowId,
+        target: String,
+        ssh_args: Vec<String>,
+    ) {
+        let existing = self
+            .ssh_attaches
+            .iter_mut()
+            .find(|(_, attach)| attach.alias == target && attach.ssh_args == ssh_args)
+            .map(|(endpoint, attach)| {
+                (
+                    endpoint.clone(),
+                    attach.is_running(),
+                    attach.workspace_id.clone(),
+                    attach.credential.clone(),
+                )
+            });
+        if let Some((endpoint, true, workspace_id, credential)) = existing {
+            self.begin_ssh_workspace_switch(
+                window_id,
+                target,
+                endpoint,
+                workspace_id,
+                credential,
+            );
+            return;
+        }
+        if let Some((endpoint, false, _, _)) = existing {
+            self.ssh_attaches.remove(&endpoint);
+            if let Some(session) = self.window_sessions.get_mut(&window_id) {
+                session.parked_connections.remove(&endpoint);
+            }
+        }
+        if !self.ssh_attach_inflight.insert(window_id) {
+            return;
+        }
+        let tx = self.ssh_attach_tx.clone();
+        let event_proxy = self.event_proxy.clone();
+        let thread_target = target.clone();
+        let spawn = std::thread::Builder::new()
+            .name(format!("neoism-ssh-attach-{window_id:?}"))
+            .spawn(move || {
+                let result =
+                    crate::ssh_hosts::attach_workspace_over_ssh(&thread_target, ssh_args)
+                        .map_err(|error| error.to_string());
+                let _ = tx.send(PendingSshAttach {
+                    window_id,
+                    target: thread_target,
+                    result,
+                });
+                event_proxy.send_event(RioEventType::Rio(RioEvent::Render), unsafe {
+                    neoism_window::window::WindowId::dummy()
+                });
+            });
+        if let Err(error) = spawn {
+            self.ssh_attach_inflight.remove(&window_id);
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.window.screen.cancel_ssh_workspace_replacement();
+                route.window.screen.renderer.notifications.push(
+                    format!("Could not start SSH connection to {target}: {error}"),
+                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                );
+                route.request_redraw();
+            }
+        }
+    }
+
+    fn begin_ssh_workspace_switch(
+        &mut self,
+        window_id: WindowId,
+        target: String,
+        daemon_url: String,
+        workspace_id: String,
+        credential: String,
+    ) {
+        let server_id = ssh_server_id(&workspace_id);
+        let workspace = PendingSshWorkspace {
+            daemon_url: daemon_url.clone(),
+            workspace_id: workspace_id.clone(),
+            title: format!("{target} · Home"),
+        };
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
+            route
+                .window
+                .screen
+                .prepare_ssh_workspace_replacement(workspace_id.clone());
+        }
+        if let Some(session) = self.window_sessions.get_mut(&window_id) {
+            session.pending_peer_adopt = Some(workspace_id);
+        }
+        self.pending_ssh_workspaces.insert(window_id, workspace);
+        if self
+            .window_sessions
+            .get(&window_id)
+            .is_some_and(|session| session.connection.endpoint() == daemon_url)
+        {
+            self.create_pending_ssh_workspace(window_id);
+            return;
+        }
+        self.switch_window_server(
+            window_id,
+            &daemon_url,
+            Some(credential),
+            Some(server_id),
+        );
+    }
+
+    fn create_pending_ssh_workspace(&mut self, window_id: WindowId) {
+        let Some(ssh_workspace) = self.pending_ssh_workspaces.remove(&window_id) else {
+            return;
+        };
+        // `~` is resolved by the daemon on the SSH host, not by this desktop.
+        // A stable id makes reconnects reopen the same remote home workspace
+        // and its daemon-owned PTYs instead of accumulating duplicates.
+        self.send_window_message(
+            window_id,
+            WorkspaceClientMessage::CreateWorkspace {
+                workspace_id: Some(ssh_workspace.workspace_id),
+                title: Some(ssh_workspace.title.clone()),
+                root_dir: Some(PathBuf::from("~")),
+            },
+        );
+        self.send_window_message(
+            window_id,
+            WorkspaceClientMessage::RequestHostWorkspaceTree,
+        );
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
+            route.window.screen.renderer.notifications.push(
+                format!("Connected to {}", ssh_workspace.title),
+                neoism_ui::panels::notifications::NotificationLevel::Info,
+            );
+            route.request_redraw();
+        }
+    }
+
+    fn drain_ssh_attach_results(&mut self) {
+        while let Ok(pending) = self.ssh_attach_rx.try_recv() {
+            self.ssh_attach_inflight.remove(&pending.window_id);
+            let attach = match pending.result {
+                Ok(attach) => attach,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "neoism::ssh_workspace",
+                        window = ?pending.window_id,
+                        target_host = %pending.target,
+                        %error,
+                        "SSH workspace attach failed"
+                    );
+                    if let Some(route) = self.router.routes.get_mut(&pending.window_id) {
+                        route.window.screen.cancel_ssh_workspace_replacement();
+                        route.window.screen.renderer.notifications.push(
+                            format!(
+                                "Could not open SSH workspace {}: {error}",
+                                pending.target
+                            ),
+                            neoism_ui::panels::notifications::NotificationLevel::Error,
+                        );
+                        route.request_redraw();
+                    }
+                    continue;
+                }
+            };
+
+            let daemon_url = attach.daemon_url.clone();
+            let workspace_id = attach.workspace_id.clone();
+            let credential = attach.credential.clone();
+            self.ssh_attaches.insert(daemon_url.clone(), attach);
+            self.begin_ssh_workspace_switch(
+                pending.window_id,
+                pending.target,
+                daemon_url,
+                workspace_id,
+                credential,
+            );
         }
     }
 
@@ -1105,11 +1406,16 @@ impl Application<'_> {
         token: Option<String>,
         server_id: Option<String>,
     ) {
-        if self
-            .router
-            .routes
-            .get_mut(&window_id)
-            .is_some_and(|route| route.window.screen.has_unsaved_server_buffers())
+        let is_ssh_attach = self
+            .pending_ssh_workspaces
+            .get(&window_id)
+            .is_some_and(|pending| pending.daemon_url == daemon_url);
+        if !is_ssh_attach
+            && self
+                .router
+                .routes
+                .get_mut(&window_id)
+                .is_some_and(|route| route.window.screen.has_unsaved_server_buffers())
         {
             if let Some(route) = self.router.routes.get_mut(&window_id) {
                 route.window.screen.renderer.notifications.push(
@@ -1209,6 +1515,17 @@ impl Application<'_> {
             let connection = match result {
                 Ok(connection) => connection,
                 Err(error) => {
+                    if self
+                        .pending_ssh_workspaces
+                        .get(&window_id)
+                        .is_some_and(|pending| pending.daemon_url == daemon_url)
+                    {
+                        self.pending_ssh_workspaces.remove(&window_id);
+                        self.ssh_attaches.remove(&daemon_url);
+                        if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            route.window.screen.cancel_ssh_workspace_replacement();
+                        }
+                    }
                     // A server we host may just have died with a previous app
                     // session. Relaunch its daemon ONCE (per session) and
                     // re-dial before giving up — the dial retries with backoff,
@@ -1339,7 +1656,15 @@ impl Application<'_> {
         // not: this window's local grids are already alive. Auto-adopting the
         // home tree here duplicated the remaining local workspace after a
         // guest closed their last joined tab.
-        session.pending_peer_adopt = pending_peer_adopt;
+        let ssh_workspace = self
+            .pending_ssh_workspaces
+            .get(&window_id)
+            .filter(|pending| pending.daemon_url == session.connection.endpoint())
+            .cloned();
+        session.pending_peer_adopt = ssh_workspace
+            .as_ref()
+            .map(|pending| pending.workspace_id.clone())
+            .or(pending_peer_adopt);
         session.needs_initial_workspace_adopt =
             !switching_home && session.pending_peer_adopt.is_none();
         session.parked_connections = parked_connections;
@@ -1352,6 +1677,9 @@ impl Application<'_> {
         // `load_current_workspace_chrome` resolves and applies the correct
         // endpoint to the active grid after adoption and on every workspace
         // switch.
+        if ssh_workspace.is_some() {
+            self.create_pending_ssh_workspace(window_id);
+        }
         self.send_window_message(window_id, WorkspaceClientMessage::ListWindows);
         self.send_window_message(
             window_id,
@@ -1973,12 +2301,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             RioEventType::Rio(RioEvent::RemoteFileTreeCheck) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
                     route.window.screen.retry_remote_file_tree_if_stalled();
-                    route.request_redraw();
-                }
-            }
-            RioEventType::Rio(RioEvent::SshFilesReady) => {
-                if let Some(route) = self.router.routes.get_mut(&window_id) {
-                    route.window.screen.drain_ssh_files_replies();
                     route.request_redraw();
                 }
             }

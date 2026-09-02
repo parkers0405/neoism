@@ -4,6 +4,7 @@ use futures_core::Stream;
 use neoism_agent_core::{
     AuthInfo, ProviderApiInfo, ProviderGenerationRequest, ProviderInfo, ProviderStreamEvent,
 };
+use neoism_agent_service_api::CredentialScope;
 
 use crate::auth_store::AuthStore;
 
@@ -76,11 +77,11 @@ impl ProviderRegistry {
         &self,
         mut request: ProviderGenerationRequest,
     ) -> anyhow::Result<ProviderStream> {
-        if request.tenant_id.as_deref().is_some_and(|tenant| tenant != "local")
-            && !self.auth_store.service().supports_hosted_scopes()
-        {
-            anyhow::bail!("hosted provider credentials require an injected tenant-isolated store")
-        }
+        let credential_scope = generation_credential_scope(
+            request.tenant_id.as_deref(),
+            request.workspace_id.as_deref(),
+            self.auth_store.service().supports_hosted_scopes(),
+        )?;
         let requested_provider = request.provider_id.clone();
         let provider_id = if request.provider_id == "neoism" && request.model_id != "stub"
         {
@@ -92,10 +93,7 @@ impl ProviderRegistry {
         };
         if provider_id == "openai" {
             let scoped_auth = self.auth_store.scoped(
-                neoism_agent_service_api::CredentialScope {
-                    tenant_id: request.tenant_id.clone().unwrap_or_else(|| "local".into()),
-                    workspace_id: request.workspace_id.clone(),
-                },
+                credential_scope.clone(),
                 request.connection_id.clone(),
             );
             let auth = scoped_auth.get("openai").await?;
@@ -123,10 +121,7 @@ impl ProviderRegistry {
         if let Some(api) = request.api.clone() {
             if let Some(adapter) = ProviderAdapter::from_api(&api) {
                 let scoped_auth = self.auth_store.scoped(
-                    neoism_agent_service_api::CredentialScope {
-                        tenant_id: request.tenant_id.clone().unwrap_or_else(|| "local".into()),
-                        workspace_id: request.workspace_id.clone(),
-                    },
+                    credential_scope,
                     request.connection_id.clone(),
                 );
                 let auth = self.provider_auth(&scoped_auth, &provider_id, &request.auth_env).await?;
@@ -210,6 +205,24 @@ impl ProviderRegistry {
         }
         Ok(None)
     }
+}
+
+fn generation_credential_scope(
+    tenant_id: Option<&str>,
+    workspace_id: Option<&str>,
+    supports_hosted_scopes: bool,
+) -> anyhow::Result<CredentialScope> {
+    let tenant_id = tenant_id.unwrap_or("local");
+    if tenant_id == "local" || supports_hosted_scopes {
+        return Ok(CredentialScope {
+            tenant_id: tenant_id.to_string(),
+            workspace_id: workspace_id.map(str::to_string),
+        });
+    }
+    if tenant_id.strip_prefix("workspace:") == workspace_id && workspace_id.is_some() {
+        return Ok(CredentialScope::local());
+    }
+    anyhow::bail!("hosted provider credentials require an injected tenant-isolated store")
 }
 
 struct ProviderAdapter {

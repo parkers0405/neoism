@@ -72,136 +72,6 @@ async fn safe_filesystem_tools_execute_inside_project() {
 }
 
 #[tokio::test]
-async fn notes_tool_delegates_to_the_injected_service_and_rejects_removed_operations() {
-    let root = std::env::temp_dir().join(format!(
-        "neoism-agent-notes-{}",
-        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let notes = Arc::new(FakeNotesService { root: root.join("notes") });
-    let services = crate::standard_services().with_notes(notes);
-    let state = crate::state::AppState::open_database_with_services(root.join("agent.db"), services).await.unwrap();
-    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
-        &state,
-        root.to_string_lossy().as_ref(),
-    )
-    .await.unwrap();
-    assert!(crate::agent_tool_registry::tool_contribution(&workspace.snapshot, "notes").is_some());
-    assert!(workspace.snapshot.runtime_tools.contains_key("notes"));
-    let context = ToolContext::new(&root)
-        .with_state(Some(state.clone()))
-        .with_permission_rules(permission_rules(BTreeMap::from([("*".to_string(), json!("allow"))])));
-
-    let list = execute("notes", context.clone(), json!({ "operation": "list" }))
-        .await
-        .unwrap();
-    assert_eq!(list.output, "Roadmap.md");
-
-    let search = execute(
-        "notes",
-        context.clone(),
-        json!({ "operation": "search", "query": "ship notes" }),
-    )
-    .await
-    .unwrap();
-    assert!(search.output.contains("Roadmap.md:7"));
-
-    let tasks = execute("notes", context.clone(), json!({ "operation": "tasks" }))
-        .await
-        .unwrap();
-    assert!(tasks.output.contains("Roadmap.md:7 - [ ] ship notes"));
-
-    let graph = execute("notes", context, json!({ "operation": "graph" }))
-        .await
-        .unwrap_err();
-    assert!(graph.to_string().contains("unknown notes operation graph"));
-
-    std::fs::create_dir_all(root.join(".agent")).unwrap();
-    std::fs::write(
-        root.join(".agent/agent.json"),
-        r#"{"plugins":{"dev.neoism.tools.notes":{"enabled":false}}}"#,
-    )
-    .unwrap();
-    let disabled_state = crate::state::AppState::open_database_with_services(
-        root.join("disabled-agent.db"),
-        state.services().clone(),
-    )
-    .await
-    .unwrap();
-    let disabled_workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
-        &disabled_state,
-        root.to_string_lossy().as_ref(),
-    )
-    .await.unwrap();
-    assert!(crate::agent_tool_registry::tool_contribution(&disabled_workspace.snapshot, "notes").is_none());
-    assert!(!disabled_workspace.snapshot.runtime_tools.contains_key("notes"));
-    let disabled = execute(
-        "notes",
-        ToolContext::new(&root)
-            .with_state(Some(disabled_state))
-            .with_permission_rules(permission_rules(BTreeMap::from([("*".to_string(), json!("allow"))]))),
-        json!({ "operation": "list" }),
-    )
-    .await
-    .unwrap_err();
-    assert!(disabled.to_string().contains("unknown tool notes"));
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-struct FakeNotesService {
-    root: std::path::PathBuf,
-}
-
-impl neoism_agent_service_api::NotesService for FakeNotesService {
-    fn scope_choices(&self) -> Vec<neoism_agent_service_api::ScopeChoice> {
-        vec![neoism_agent_service_api::ScopeChoice { id: "workspace".to_string(), label: "Workspace notes".to_string(), description: None }]
-    }
-
-    fn default_scope_id(&self) -> &str { "workspace" }
-    fn tool_description(&self) -> String { "Fake injected notes".to_string() }
-
-    fn list(&self, _request: &neoism_agent_service_api::NotesRequest, _limit: usize) -> Result<Vec<neoism_agent_service_api::ScopedNotes<String>>, neoism_agent_service_api::ServiceError> {
-        Ok(vec![neoism_agent_service_api::ScopedNotes { location: self.location(), items: vec!["Roadmap.md".to_string()] }])
-    }
-
-    fn search(&self, _request: &neoism_agent_service_api::NotesRequest, _query: &str, _limit: usize) -> Result<Vec<neoism_agent_service_api::ScopedNotes<neoism_agent_service_api::NoteSearchHit>>, neoism_agent_service_api::ServiceError> {
-        Ok(vec![neoism_agent_service_api::ScopedNotes { location: self.location(), items: vec![neoism_agent_service_api::NoteSearchHit { path: "Roadmap.md".to_string(), line: 7, text: "ship notes".to_string() }] }])
-    }
-
-    fn read(&self, _request: &neoism_agent_service_api::NotesRequest, path: &str) -> Result<neoism_agent_service_api::NoteDocument, neoism_agent_service_api::ServiceError> {
-        Ok(self.document(path, "contents"))
-    }
-
-    fn tasks(&self, _request: &neoism_agent_service_api::NotesRequest, _limit: usize) -> Result<Vec<neoism_agent_service_api::ScopedNotes<neoism_agent_service_api::NoteTask>>, neoism_agent_service_api::ServiceError> {
-        Ok(vec![neoism_agent_service_api::ScopedNotes { location: self.location(), items: vec![neoism_agent_service_api::NoteTask { path: "Roadmap.md".to_string(), line: 7, checked: false, text: "ship notes".to_string() }] }])
-    }
-
-    fn create(&self, _request: &neoism_agent_service_api::NotesRequest, title: &str, content: Option<&str>) -> Result<neoism_agent_service_api::NoteDocument, neoism_agent_service_api::ServiceError> {
-        Ok(self.document(&format!("{title}.md"), content.unwrap_or_default()))
-    }
-
-    fn write(&self, _request: &neoism_agent_service_api::NotesRequest, path: &str, content: &str) -> Result<neoism_agent_service_api::NoteDocument, neoism_agent_service_api::ServiceError> {
-        Ok(self.document(path, content))
-    }
-
-    fn task_toggle(&self, _request: &neoism_agent_service_api::NotesRequest, path: &str, line: usize, checked: Option<bool>) -> Result<neoism_agent_service_api::NoteTask, neoism_agent_service_api::ServiceError> {
-        Ok(neoism_agent_service_api::NoteTask { path: path.to_string(), line, checked: checked.unwrap_or(true), text: "ship notes".to_string() })
-    }
-}
-
-impl FakeNotesService {
-    fn location(&self) -> neoism_agent_service_api::NotesLocation {
-        neoism_agent_service_api::NotesLocation { scope_id: "workspace".to_string(), scope_label: "Workspace notes".to_string(), root: self.root.clone() }
-    }
-
-    fn document(&self, path: &str, content: &str) -> neoism_agent_service_api::NoteDocument {
-        neoism_agent_service_api::NoteDocument { location: self.location(), path: path.to_string(), absolute_path: self.root.join(path), content: content.to_string() }
-    }
-}
-
-#[tokio::test]
 async fn product_services_register_native_docs_and_memory_tools_only_when_injected() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-product-tools-{}",
@@ -242,8 +112,11 @@ async fn product_services_register_native_docs_and_memory_tools_only_when_inject
     let recall = execute("memory", context.clone(), json!({"operation":"recall","query":"host routing","scope":"project"})).await.unwrap();
     assert!(recall.output.contains("path: routing.md\nscope: project"));
 
-    let read = execute("memory", context, json!({"operation":"read","path":"project:routing.md"})).await.unwrap();
+    let read = execute("memory", context.clone(), json!({"operation":"read","path":"routing.md"})).await.unwrap();
     assert_eq!(read.output, "full host routing memory");
+    let write = execute("memory", context, json!({"operation":"write","name":"Company preference","description":"Use concise replies","body":"Keep replies concise."})).await.unwrap();
+    assert_eq!(write.title, "Memory written");
+    assert_eq!(write.output, "routing.md");
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -287,7 +160,10 @@ impl neoism_agent_service_api::MemoryService for FakeMemoryService {
         if request.scope_id.as_deref() != Some("project") || path != "routing.md" { return Err(neoism_agent_service_api::ServiceError::new("wrong memory read address")); }
         Ok(Self::entry(Some("full host routing memory".into())))
     }
-    fn write(&self, request: &neoism_agent_service_api::MemoryWriteRequest) -> Result<neoism_agent_service_api::MemoryEntry, neoism_agent_service_api::ServiceError> { Ok(Self::entry(request.body.clone())) }
+    fn write(&self, request: &neoism_agent_service_api::MemoryWriteRequest) -> Result<neoism_agent_service_api::MemoryEntry, neoism_agent_service_api::ServiceError> {
+        if request.request.scope_id.as_deref() != Some("project") { return Err(neoism_agent_service_api::ServiceError::new("wrong memory write scope")); }
+        Ok(Self::entry(request.body.clone()))
+    }
     fn search(&self, _request: &neoism_agent_service_api::MemoryRequest, _query: &str, _limit: usize) -> Result<Vec<neoism_agent_service_api::MemoryEntry>, neoism_agent_service_api::ServiceError> { Ok(vec![Self::entry(None)]) }
     fn recall<'a>(&'a self, request: &'a neoism_agent_service_api::MemoryRequest, query: &'a str, limit: usize) -> neoism_agent_service_api::ServiceFuture<'a, Result<Vec<neoism_agent_service_api::MemoryEntry>, neoism_agent_service_api::ServiceError>> { Box::pin(async move { self.search(request, query, limit) }) }
     fn context_fragments(&self, _working_directory: &Path) -> Vec<neoism_agent_service_api::SystemContextFragment> { Vec::new() }

@@ -39,9 +39,9 @@ Keep drawing files next to related notes or in a clear project folder so links r
 
 ## Notes MCP
 
-The built-in Notes MCP lets agents list, read, write, search, inspect tags/headings/tasks, follow backlinks, and summarize the graph. Tool actions operate on the same vault files visible in the sidebar.
+Neoism Desktop automatically provides its Agent sessions with a vault-backed Notes MCP. Its seven tools list, search, read, create, and write Markdown notes, list tasks, and toggle tasks. Tool actions use the workspace's linked project folder, falling back to the default vault for an unlinked workspace. Standalone and hosted Neoism Agent instances only receive Notes when their host supplies a Notes MCP.
 
-Notes MCP and Memory MCP are different: Notes handles user documents; Memory maintains compact agent recall topics inside `Memory/`. See [[Neoism Agent/Memory]].
+Notes and Agent memory are different: Notes handles user documents in vaults; the native `memory` tool maintains compact project recall under the declared workspace's `.neoism/memory` directory. See [[Neoism Agent/Memory]].
 
 ## Sync and privacy
 

@@ -361,6 +361,30 @@ impl Screen<'_> {
         self.pending_server_connect.take()
     }
 
+    pub fn request_ssh_workspace_attach(
+        &mut self,
+        target: String,
+        ssh_args: Vec<String>,
+    ) {
+        self.pending_ssh_workspace_replacement = self.current_workspace_id();
+        self.pending_ssh_workspace_id = None;
+        self.pending_ssh_workspace_attach = Some((target, ssh_args));
+        self.mark_dirty();
+    }
+
+    pub fn take_ssh_workspace_attach(&mut self) -> Option<(String, Vec<String>)> {
+        self.pending_ssh_workspace_attach.take()
+    }
+
+    pub fn cancel_ssh_workspace_replacement(&mut self) {
+        self.pending_ssh_workspace_replacement = None;
+        self.pending_ssh_workspace_id = None;
+    }
+
+    pub fn prepare_ssh_workspace_replacement(&mut self, workspace_id: String) {
+        self.pending_ssh_workspace_id = Some(workspace_id);
+    }
+
     pub fn request_server_manager(&mut self) {
         self.pending_server_manager_open = true;
     }

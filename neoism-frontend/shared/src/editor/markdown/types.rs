@@ -571,6 +571,7 @@ pub struct MarkdownPane {
     /// in `block_wrap_rows`. These come from Sugarloaf during rendering and are
     /// used for pointer hit-testing instead of average-cell estimates.
     pub(super) block_wrap_hit_stops: HashMap<usize, Vec<MarkdownWrapHitRow>>,
+    pub(super) paragraph_hit_maps: HashMap<usize, MarkdownParagraphHitMap>,
     pub(super) table_rects: Vec<MarkdownTableRect>,
     pub(super) table_cell_rects: Vec<MarkdownTableCellRect>,
     pub(super) table_action_rects: Vec<MarkdownTableActionRect>,
@@ -706,6 +707,12 @@ pub(super) struct MarkdownWrapRow {
 pub(super) struct MarkdownWrapHitRow {
     pub(super) start: usize,
     pub(super) stops: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct MarkdownParagraphHitMap {
+    /// One source position for every rendered caret boundary.
+    pub(super) positions: Vec<MarkdownPosition>,
 }
 
 impl MarkdownWrapKey {

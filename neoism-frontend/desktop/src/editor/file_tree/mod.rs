@@ -67,19 +67,20 @@ impl neoism_ui::services::FilesService for NativeFiles {
         &self,
         path: &std::path::Path,
     ) -> Result<Vec<neoism_ui::services::DirEntry>, neoism_ui::services::IoError> {
-        // Drive the same alphabetical-with-dirs-first walker the
-        // native chrome already uses, then strip the git+kind detail
-        // the slim panel doesn't model (yet). Hidden entries and
-        // unreadable directories degrade to empty — same as the
-        // native render path.
-        let empty_git = std::collections::HashMap::new();
-        let entries = scan::scan_dir(path, 0, &empty_git);
-        Ok(entries
-            .into_iter()
-            .map(|e| neoism_ui::services::DirEntry {
-                name: e.label,
-                is_dir: matches!(e.kind, types::NodeKind::Dir { .. }),
-                size: None,
+        // Return a raw, single-level listing. The shared panel applies the
+        // same hidden-entry policy for local, daemon, SSH, and web sources.
+        // Keeping this non-recursive prevents `.git` or cache traversal.
+        let read = std::fs::read_dir(path).map_err(map_io_err)?;
+        Ok(read
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.to_string();
+                let is_dir = entry.file_type().ok()?.is_dir();
+                Some(neoism_ui::services::DirEntry {
+                    name,
+                    is_dir,
+                    size: None,
+                })
             })
             .collect())
     }

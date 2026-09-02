@@ -73,6 +73,7 @@ const ORDER: u8 = 26;
 pub enum ContextMenuAction {
     Palette(PaletteAction),
     Modal(ModalAction),
+    ToggleFileTreeHidden,
     Agent(AgentContextAction),
     Lsp(LspContextAction),
     Workspace(WorkspaceContextAction),

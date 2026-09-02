@@ -86,11 +86,18 @@ impl NeoismAgentPane {
     }
 
     pub fn insert_paste(&mut self, text: &str) {
-        if self.is_subagent_session() && self.picker.is_none() {
-            return;
-        }
         let text = input_controller::normalize_paste(text);
         if text.is_empty() {
+            return;
+        }
+        // Keyboard text is routed to the pending question by the bridge,
+        // while clipboard text enters through this shared paste path. Give
+        // the question the same precedence so paste cannot leak into the
+        // composer hidden underneath its prompt.
+        if self.question_type_str(&text) {
+            return;
+        }
+        if self.is_subagent_session() && self.picker.is_none() {
             return;
         }
         // Pickers whose input is their own query row (model / connect / secret

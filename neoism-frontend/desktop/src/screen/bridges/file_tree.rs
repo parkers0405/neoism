@@ -54,22 +54,22 @@ fn watch_file_tree_root(
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         watcher.watch(root, notify::RecursiveMode::NonRecursive)?;
-        watch_file_tree_child_dirs(watcher, root);
+        watch_file_tree_child_dirs(watcher, root, root);
         Ok(())
     }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn watch_file_tree_child_dirs(watcher: &mut notify::RecommendedWatcher, root: &Path) {
-    let Ok(read) = fs::read_dir(root) else {
+fn watch_file_tree_child_dirs(
+    watcher: &mut notify::RecommendedWatcher,
+    workspace_root: &Path,
+    directory: &Path,
+) {
+    let Ok(read) = fs::read_dir(directory) else {
         return;
     };
 
     for dent in read.flatten() {
-        let name = dent.file_name();
-        if file_tree_fs_ignored_component(&name) {
-            continue;
-        }
         let Ok(file_type) = dent.file_type() else {
             continue;
         };
@@ -78,6 +78,9 @@ fn watch_file_tree_child_dirs(watcher: &mut notify::RecommendedWatcher, root: &P
         }
 
         let path = dent.path();
+        if !file_tree_fs_path_relevant(workspace_root, &path) {
+            continue;
+        }
         if let Err(err) = watcher.watch(&path, notify::RecursiveMode::NonRecursive) {
             tracing::warn!(
                 target: "neoism::file_tree",
@@ -86,6 +89,6 @@ fn watch_file_tree_child_dirs(watcher: &mut notify::RecommendedWatcher, root: &P
             );
             continue;
         }
-        watch_file_tree_child_dirs(watcher, &path);
+        watch_file_tree_child_dirs(watcher, workspace_root, &path);
     }
 }

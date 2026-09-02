@@ -22,6 +22,21 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
             rest = &rest[consumed..];
             continue;
         }
+        if let Some((link, consumed, outer_bold, outer_italic)) =
+            emphasized_markdown_link(rest)
+        {
+            let source_target = link.target.trim();
+            let (label_bold, label_italic) = markdown_link_label_style(link.label);
+            out.push(MarkdownInlineSegment::MarkdownLink {
+                label: markdown_link_visible_label(link.label).to_string(),
+                source_target: source_target.to_string(),
+                target: md::rendered_link_target(source_target).map(str::to_string),
+                bold: outer_bold || label_bold,
+                italic: outer_italic || label_italic,
+            });
+            rest = &rest[consumed..];
+            continue;
+        }
         if let Some(after) = rest.strip_prefix("***") {
             if let Some(end) = after.find("***") {
                 out.push(MarkdownInlineSegment::BoldItalic(after[..end].to_string()));
@@ -99,6 +114,32 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
         rest = &rest[text.len()..];
     }
     out
+}
+
+/// CommonMark permits emphasis around a complete link (`**[label](url)**`).
+/// Parse that form before the generic emphasis branches consume its interior
+/// as opaque text and leak the Markdown syntax into the rendered transcript.
+fn emphasized_markdown_link(
+    value: &str,
+) -> Option<(md::MarkdownLink<'_>, usize, bool, bool)> {
+    [
+        ("***", "***", true, true),
+        ("___", "___", true, true),
+        ("**", "**", true, false),
+        ("__", "__", true, false),
+        ("*", "*", false, true),
+        ("_", "_", false, true),
+    ]
+    .into_iter()
+    .find_map(|(open, close, bold, italic)| {
+        let inner = value.strip_prefix(open)?;
+        let link = md::parse_markdown_link(inner)?;
+        let consumed = open.len() + link.consumed + close.len();
+        inner
+            .get(link.consumed..)?
+            .starts_with(close)
+            .then_some((link, consumed, bold, italic))
+    })
 }
 
 fn next_agent_inline_marker(value: &str) -> Option<usize> {

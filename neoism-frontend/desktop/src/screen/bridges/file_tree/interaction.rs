@@ -263,6 +263,19 @@ impl Screen<'_> {
                     self.open_file_tree_actions_menu();
                     true
                 }
+                "h" if plain => {
+                    self.renderer.file_tree.clear_pending();
+                    let shown = self.renderer.file_tree.toggle_hidden();
+                    self.file_tree_notify(
+                        if shown {
+                            "Dotfiles shown"
+                        } else {
+                            "Dotfiles hidden"
+                        },
+                        neoism_ui::panels::notifications::NotificationLevel::Info,
+                    );
+                    true
+                }
                 "c" if plain => {
                     self.renderer.file_tree.clear_pending();
                     self.copy_file_tree_selection();
@@ -627,6 +640,15 @@ impl Screen<'_> {
                 ),
             ));
         }
+        items.push(ContextMenuItem::new(
+            if self.renderer.file_tree.show_hidden() {
+                "Hide Dotfiles"
+            } else {
+                "Show Dotfiles"
+            },
+            "h",
+            ContextMenuAction::ToggleFileTreeHidden,
+        ));
 
         let scale_factor = self.sugarloaf.scale_factor();
         let size = self.sugarloaf.window_size();

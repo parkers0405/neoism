@@ -32,6 +32,10 @@ impl FileTree {
         self.with_ctx(|inner, ctx| inner.refresh(ctx));
     }
 
+    pub fn toggle_hidden(&mut self) -> bool {
+        self.with_ctx(|inner, ctx| inner.toggle_hidden(ctx))
+    }
+
     /// Async-safe live re-list (root + open dirs) for the remote tree;
     /// falls back to a plain refresh on a local source.
     pub fn relist_open_dirs(&mut self) {

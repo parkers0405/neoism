@@ -43,8 +43,9 @@ fn glob_tool_sync(
     if !path.is_dir() { anyhow::bail!("glob path must be a directory: {}", path.display()); }
     let limit = usize_arg(&arguments, "limit").unwrap_or(50).max(1);
     let offset = usize_arg(&arguments, "offset").unwrap_or(0);
+    let include_hidden = arguments.get("includeHidden").and_then(Value::as_bool).unwrap_or(false);
     let result = context.services().workspace_search.find_files(&FindFilesRequest {
-        root: path.clone(), query: query.clone(), offset, limit,
+        root: path.clone(), query: query.clone(), include_hidden, offset, limit,
         control: neoism_agent_service_api::WorkspaceSearchRequestControl {
             timeout_ms, cancel: context.cancel.clone(),
         },
@@ -58,7 +59,7 @@ fn glob_tool_sync(
         title: if query.is_empty() { "Glob directory".into() } else { format!("Glob {query}") },
         output: output.join("\n"),
         metadata: Some(json!({
-            "query": query, "offset": offset, "limit": limit,
+            "query": query, "includeHidden": include_hidden, "offset": offset, "limit": limit,
             "total": result.bounds.total, "totalAtLeast": result.bounds.total_at_least,
             "count": result.items.len(), "truncated": result.bounds.truncated,
             "timedOut": result.bounds.timed_out, "timeout": timeout_ms,
@@ -88,6 +89,7 @@ fn grep_tool_sync(context: ToolContext, arguments: Value, timeout_ms: u64) -> an
     let limit = usize_arg(&arguments, "limit").unwrap_or(100).max(1);
     let context_lines = usize_arg(&arguments, "context").unwrap_or(0);
     let include = optional_string(&arguments, "include");
+    let include_hidden = arguments.get("includeHidden").and_then(Value::as_bool).unwrap_or(false);
     let excludes = merged_excludes(optional_string(&arguments, "exclude").as_deref());
     let case_sensitive = arguments.get("caseSensitive").and_then(Value::as_bool).unwrap_or(false);
     let mut mode = requested_mode(&arguments, patterns.first().map(String::as_str).unwrap_or(""));
@@ -97,7 +99,7 @@ fn grep_tool_sync(context: ToolContext, arguments: Value, timeout_ms: u64) -> an
         && patterns.iter().map(String::len).sum::<usize>() + include.as_deref().map_or(0, str::len) > 1024
     { mode = WorkspaceSearchMode::Plain; }
     let result = context.services().workspace_search.grep(&GrepWorkspaceRequest {
-        root: context.cwd.clone(), path, patterns: patterns.clone(), include: include.clone(),
+        root: context.cwd.clone(), path, patterns: patterns.clone(), include: include.clone(), include_hidden,
         excludes: excludes.clone(), context_lines, case_sensitive, mode, limit,
         control: neoism_agent_service_api::WorkspaceSearchRequestControl {
             timeout_ms, cancel: context.cancel.clone(),
@@ -107,7 +109,7 @@ fn grep_tool_sync(context: ToolContext, arguments: Value, timeout_ms: u64) -> an
         title: format!("Grep {original_pattern}"),
         output: render_grep(&result.items, result.files_with_matches, limit),
         metadata: Some(json!({
-            "patterns": patterns, "include": include, "exclude": excludes.join(" "),
+            "patterns": patterns, "include": include, "includeHidden": include_hidden, "exclude": excludes.join(" "),
             "mode": result.mode, "engine": result.engine, "matches": result.items.len(),
             "filesWithMatches": result.files_with_matches,
             "totalFilesSearched": result.total_files_searched,

@@ -202,6 +202,99 @@ impl FakeNotesService {
 }
 
 #[tokio::test]
+async fn product_services_register_native_docs_and_memory_tools_only_when_injected() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-product-tools-{}",
+        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+    ));
+    let neutral_root = root.join("neutral");
+    let product_root = root.join("product");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&neutral_root).unwrap();
+    std::fs::create_dir_all(&product_root).unwrap();
+
+    let neutral_state = crate::state::AppState::open_database(neutral_root.join("agent.db")).await.unwrap();
+    let neutral = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+        &neutral_state,
+        neutral_root.to_string_lossy().as_ref(),
+    ).await.unwrap();
+    assert!(!neutral.snapshot.runtime_tools.contains_key("docs"));
+    assert!(!neutral.snapshot.runtime_tools.contains_key("memory"));
+
+    let services = crate::standard_services()
+        .with_documentation(Arc::new(FakeDocumentationService))
+        .with_memory(Arc::new(FakeMemoryService));
+    let state = crate::state::AppState::open_database_with_services(product_root.join("agent.db"), services).await.unwrap();
+    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+        &state,
+        product_root.to_string_lossy().as_ref(),
+    ).await.unwrap();
+    assert!(workspace.snapshot.runtime_tools.contains_key("docs"));
+    assert!(workspace.snapshot.runtime_tools.contains_key("memory"));
+
+    let context = ToolContext::new(&product_root)
+        .with_state(Some(state))
+        .with_permission_rules(permission_rules(BTreeMap::from([("*".to_string(), json!("allow"))])));
+    let docs = execute("docs", context.clone(), json!({"operation":"search","query":"skills"})).await.unwrap();
+    assert!(docs.output.contains("Agent/Skills.md"));
+    let page = execute("docs", context.clone(), json!({"operation":"read","path":"Agent/Skills.md"})).await.unwrap();
+    assert!(page.output.contains("SKILL.md"));
+    let recall = execute("memory", context.clone(), json!({"operation":"recall","query":"host routing","scope":"project"})).await.unwrap();
+    assert!(recall.output.contains("path: routing.md\nscope: project"));
+
+    let read = execute("memory", context, json!({"operation":"read","path":"project:routing.md"})).await.unwrap();
+    assert_eq!(read.output, "full host routing memory");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+struct FakeDocumentationService;
+
+impl neoism_agent_service_api::DocumentationService for FakeDocumentationService {
+    fn list(&self) -> Result<Vec<neoism_agent_service_api::DocumentationPageSummary>, neoism_agent_service_api::ServiceError> {
+        Ok(vec![neoism_agent_service_api::DocumentationPageSummary { path: "Agent/Skills.md".into(), title: "Skills".into() }])
+    }
+
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<neoism_agent_service_api::DocumentationSearchHit>, neoism_agent_service_api::ServiceError> {
+        Ok(vec![neoism_agent_service_api::DocumentationSearchHit { path: "Agent/Skills.md".into(), title: "Skills".into(), snippet: "Create a configured skill".into() }])
+    }
+
+    fn read(&self, path: &str) -> Result<neoism_agent_service_api::DocumentationPage, neoism_agent_service_api::ServiceError> {
+        Ok(neoism_agent_service_api::DocumentationPage { path: path.into(), title: "Skills".into(), content: "Put instructions in SKILL.md".into() })
+    }
+}
+
+struct FakeMemoryService;
+
+impl FakeMemoryService {
+    fn entry(content: Option<String>) -> neoism_agent_service_api::MemoryEntry {
+        neoism_agent_service_api::MemoryEntry {
+            location: neoism_agent_service_api::MemoryLocation { scope_id: "project".into(), label: "Project memory".into(), storage_key: "fake-memory".into() },
+            path: "routing.md".into(), description: Some("Host routing facts".into()), kind: Some("project".into()), content,
+            snippet: Some("Joined clients execute on the host".into()), semantic_distance: None,
+        }
+    }
+}
+
+impl neoism_agent_service_api::MemoryService for FakeMemoryService {
+    fn scope_choices(&self) -> Vec<neoism_agent_service_api::ScopeChoice> {
+        vec![neoism_agent_service_api::ScopeChoice { id: "project".into(), label: "Project".into(), description: None }]
+    }
+    fn default_scope_id(&self) -> &str { "project" }
+    fn init(&self, _request: &neoism_agent_service_api::MemoryRequest) -> Result<Vec<neoism_agent_service_api::MemoryLocation>, neoism_agent_service_api::ServiceError> { Ok(vec![Self::entry(None).location]) }
+    fn list(&self, _request: &neoism_agent_service_api::MemoryRequest, _limit: usize) -> Result<Vec<neoism_agent_service_api::MemoryEntry>, neoism_agent_service_api::ServiceError> { Ok(vec![Self::entry(None)]) }
+    fn read(&self, request: &neoism_agent_service_api::MemoryRequest, path: &str) -> Result<neoism_agent_service_api::MemoryEntry, neoism_agent_service_api::ServiceError> {
+        if request.scope_id.as_deref() != Some("project") || path != "routing.md" { return Err(neoism_agent_service_api::ServiceError::new("wrong memory read address")); }
+        Ok(Self::entry(Some("full host routing memory".into())))
+    }
+    fn write(&self, request: &neoism_agent_service_api::MemoryWriteRequest) -> Result<neoism_agent_service_api::MemoryEntry, neoism_agent_service_api::ServiceError> { Ok(Self::entry(request.body.clone())) }
+    fn search(&self, _request: &neoism_agent_service_api::MemoryRequest, _query: &str, _limit: usize) -> Result<Vec<neoism_agent_service_api::MemoryEntry>, neoism_agent_service_api::ServiceError> { Ok(vec![Self::entry(None)]) }
+    fn recall<'a>(&'a self, request: &'a neoism_agent_service_api::MemoryRequest, query: &'a str, limit: usize) -> neoism_agent_service_api::ServiceFuture<'a, Result<Vec<neoism_agent_service_api::MemoryEntry>, neoism_agent_service_api::ServiceError>> { Box::pin(async move { self.search(request, query, limit) }) }
+    fn context_fragments(&self, _working_directory: &Path) -> Vec<neoism_agent_service_api::SystemContextFragment> { Vec::new() }
+    fn set_semantic_index(&self, _index: Option<Arc<dyn neoism_agent_service_api::SemanticMemoryIndex>>) {}
+}
+
+#[tokio::test]
 async fn safe_tools_reject_external_paths() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-tools-{}",

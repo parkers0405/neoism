@@ -2,15 +2,17 @@ use serde_json::{json, Value};
 
 use super::{
     apply_patch_handler, artifact_read_handler, artifact_search_handler, bash_handler,
-    edit_handler, glob_handler, grep_handler, lsp_handler, notes_handler, read_handler,
-    skill_handler, stateful_handler, webfetch_handler, write_handler,
-    BuiltinTool, ToolHandler,
+    documentation_handler, edit_handler, glob_handler, grep_handler, lsp_handler,
+    memory_handler, notes_handler, read_handler, skill_handler, stateful_handler,
+    webfetch_handler, write_handler, BuiltinTool, ToolHandler,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum ToolOwner {
     Workspace,
     Notes,
+    Documentation,
+    Memory,
     Skills,
     Lsp,
     Subagents,
@@ -145,6 +147,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                     },
                     "path": { "type": "string" },
                     "include": { "type": "string" },
+                    "includeHidden": { "type": "boolean", "description": "Include dotfiles and paths containing leading-dot components. Defaults to false; .git and bounded cache exclusions remain excluded." },
                     "exclude": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 1 },
                     "context": { "type": "integer", "minimum": 0 },
@@ -165,6 +168,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                 "properties": {
                     "pattern": { "type": "string" },
                     "path": { "type": "string" },
+                    "includeHidden": { "type": "boolean", "description": "Include dotfiles and paths containing leading-dot components. Defaults to false; .git and bounded cache exclusions remain excluded." },
                     "limit": { "type": "integer", "minimum": 1 },
                     "offset": { "type": "integer", "minimum": 0 },
                     "timeout": { "type": "integer", "minimum": 1000 }
@@ -211,6 +215,48 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                 ("title", "string"),
             ]),
             notes_handler,
+        ),
+        tool(
+            ToolOwner::Documentation, owner,
+            "docs",
+            "Search and read Neoism's bundled product documentation. This is the first-class documentation tool, not a Skill. Use search for a topic, then read the returned path.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "operation": { "type": "string", "enum": ["list", "search", "read"] },
+                    "query": { "type": "string", "description": "Natural-language documentation topic." },
+                    "path": { "type": "string", "description": "Exact page path returned by list or search." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20 }
+                },
+                "required": ["operation"]
+            }),
+            documentation_handler,
+        ),
+        tool(
+            ToolOwner::Memory, owner,
+            "memory",
+            "Use Neoism's injected persistent memory service. Operations are init, list, recall, search, read, and write. Prefer recall before repeating project discovery.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "operation": { "type": "string", "enum": ["init", "list", "recall", "search", "read", "write"] },
+                    "scope": { "type": "string", "enum": ["auto", "project", "user", "all"] },
+                    "query": { "type": "string" },
+                    "path": { "type": "string", "description": "Exact plain path returned by memory list, recall, search, or write. Pass scope separately; do not prefix the path with project: or user:." },
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "type": { "type": "string", "description": "project, feedback, bug, feature, reference, perf, preference, workflow, or personal" },
+                    "body": { "type": "string" },
+                    "content": { "type": "string" },
+                    "fileName": { "type": "string" },
+                    "created": { "type": "string" },
+                    "updated": { "type": "string" },
+                    "origin": { "type": "string" }
+                },
+                "required": ["operation"]
+            }),
+            memory_handler,
         ),
         tool(
             ToolOwner::Skills, owner,

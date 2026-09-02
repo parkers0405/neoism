@@ -83,6 +83,73 @@ impl FileTree {
         self.visible
     }
 
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// Toggle dotfile visibility using cached Git statuses. This only relists
+    /// directories; it never launches a Git status refresh.
+    pub fn toggle_hidden(&mut self, ctx: &PanelContext) -> bool {
+        self.show_hidden = !self.show_hidden;
+        self.rebuild_entries_without_git(ctx);
+        self.show_hidden
+    }
+
+    fn rebuild_entries_without_git(&mut self, ctx: &PanelContext) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let open_dirs = self.open_dirs();
+        let selected_path = self.selected().and_then(|entry| entry.path.clone());
+        match scan_dir_result(
+            &root,
+            0,
+            &self.git_statuses,
+            self.show_hidden,
+            ctx.services.files,
+        ) {
+            Ok(_) => {
+                let entries = scan_root_with_workspace(
+                    &root,
+                    &self.git_statuses,
+                    &open_dirs,
+                    false,
+                    self.show_hidden,
+                    ctx.services.files,
+                );
+                self.set_entries_preserve_scroll(entries);
+                if let Some(path) = selected_path {
+                    if let Some(index) = self
+                        .entries
+                        .iter()
+                        .position(|entry| entry.path.as_deref() == Some(path.as_path()))
+                    {
+                        self.selected = index;
+                    }
+                }
+            }
+            Err(IoError::Pending(id)) => {
+                self.track_pending_dir(id, root.clone(), 0, PendingDirKind::Root);
+                let open_requests = open_dirs
+                    .into_iter()
+                    .filter_map(|path| {
+                        self.entries
+                            .iter()
+                            .find(|entry| entry.path.as_deref() == Some(path.as_path()))
+                            .map(|entry| (path, entry.depth + 1))
+                    })
+                    .collect::<Vec<_>>();
+                for (path, depth) in open_requests {
+                    if let Err(IoError::Pending(id)) = ctx.services.files.list_dir(&path)
+                    {
+                        self.track_pending_dir(id, path, depth, PendingDirKind::Expand);
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
     pub fn set_visible(&mut self, v: bool) {
         self.visible = v;
         if !v {
@@ -260,6 +327,7 @@ impl FileTree {
             request.depth,
             &self.git_statuses,
             entries,
+            self.show_hidden,
         );
 
         match request.kind {
@@ -413,13 +481,20 @@ impl FileTree {
         // cached statuses when repopulating the same root so badges do not
         // flicker while that refresh is in flight.
         self.root = Some(root.clone());
-        match scan_dir_result(&root, 0, &self.git_statuses, ctx.services.files) {
+        match scan_dir_result(
+            &root,
+            0,
+            &self.git_statuses,
+            self.show_hidden,
+            ctx.services.files,
+        ) {
             Ok(_) => {
                 let entries = scan_root_with_workspace(
                     &root,
                     &self.git_statuses,
                     &self.open_dirs(),
                     false,
+                    self.show_hidden,
                     ctx.services.files,
                 );
                 self.set_entries(entries);
@@ -474,6 +549,7 @@ impl FileTree {
             &self.git_statuses,
             &open_dirs,
             false,
+            self.show_hidden,
             ctx.services.files,
         );
         self.set_entries_preserve_scroll(entries);
@@ -504,6 +580,7 @@ impl FileTree {
             &self.git_statuses,
             &open_dirs,
             false,
+            self.show_hidden,
             ctx.services.files,
         );
         if !same_entry_layout(&self.entries, &next_entries) {
@@ -528,6 +605,7 @@ impl FileTree {
             root: self.root.clone()?,
             open_dirs: self.open_dirs(),
             default_open_workspace: false,
+            show_hidden: self.show_hidden,
         })
     }
 
@@ -541,17 +619,21 @@ impl FileTree {
             &git_statuses,
             &request.open_dirs,
             request.default_open_workspace,
+            request.show_hidden,
             ctx.services.files,
         );
         FileTreeGitRefreshResult {
             root: request.root,
+            show_hidden: request.show_hidden,
             git_statuses,
             entries,
         }
     }
 
     pub fn apply_git_refresh_result(&mut self, result: FileTreeGitRefreshResult) -> bool {
-        if self.root.as_deref() != Some(result.root.as_path()) {
+        if self.root.as_deref() != Some(result.root.as_path())
+            || self.show_hidden != result.show_hidden
+        {
             return false;
         }
 
@@ -615,6 +697,7 @@ impl FileTree {
                         parent_depth + 1,
                         &self.git_statuses,
                         &self.open_dirs(),
+                        self.show_hidden,
                         ctx.services.files,
                     );
                     for (i, child) in children.into_iter().enumerate() {
@@ -627,6 +710,7 @@ impl FileTree {
                     &parent_path,
                     parent_depth + 1,
                     &self.git_statuses,
+                    self.show_hidden,
                     ctx.services.files,
                 ) {
                     Ok(children) => {
@@ -700,8 +784,13 @@ impl FileTree {
                 .map(|entry| entry.depth + 1)
                 .unwrap_or(0)
         };
-        let children =
-            entries_from_dir_listing(&path, depth, &self.git_statuses, listing);
+        let children = entries_from_dir_listing(
+            &path,
+            depth,
+            &self.git_statuses,
+            listing,
+            self.show_hidden,
+        );
 
         if self.root.as_deref() == Some(path.as_path()) {
             self.set_entries(children);

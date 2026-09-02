@@ -752,7 +752,7 @@ fn deleted_git_paths_stay_visible_as_ghost_entries() {
     let statuses = parse_git_status(&root, b" D old.rs\0 D gone/nested.rs\0");
 
     let files = StdFiles;
-    let entries = scan_dir(&root, 0, &statuses, &files);
+    let entries = scan_dir(&root, 0, &statuses, true, &files);
     assert!(entries.iter().any(|entry| {
         entry.label == "old.rs"
             && entry.kind == NodeKind::File
@@ -765,7 +765,7 @@ fn deleted_git_paths_stay_visible_as_ghost_entries() {
     }));
 
     let open_dirs = HashSet::from([normalize_path(&root.join("gone"))]);
-    let opened = scan_dir_with_open(&root, 0, &statuses, &open_dirs, &files);
+    let opened = scan_dir_with_open(&root, 0, &statuses, &open_dirs, true, &files);
     assert!(opened.iter().any(|entry| {
         entry.label == "gone" && entry.kind == (NodeKind::Dir { open: true })
     }));
@@ -774,6 +774,50 @@ fn deleted_git_paths_stay_visible_as_ghost_entries() {
             && entry.depth == 1
             && entry.git_status == GitStatus::Deleted
     }));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn project_dotfiles_are_toggleable_but_git_and_cache_metadata_stay_hidden() {
+    let root = std::env::temp_dir()
+        .join(format!("neoism-ui-tree-hidden-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
+    std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+    std::fs::create_dir_all(root.join(".hg/store")).unwrap();
+    std::fs::create_dir_all(root.join(".svn/pristine")).unwrap();
+    std::fs::create_dir_all(root.join(".neoism/cache")).unwrap();
+    std::fs::create_dir_all(root.join(".claude/worktrees/agent-one")).unwrap();
+    std::fs::create_dir_all(root.join("target/debug")).unwrap();
+    std::fs::create_dir_all(root.join("node_modules/package")).unwrap();
+    std::fs::write(root.join("README.md"), "visible").unwrap();
+    std::fs::write(root.join(".env.example"), "EXAMPLE=1").unwrap();
+    std::fs::write(root.join(".claude/settings.json"), "{}").unwrap();
+
+    let mut tree = FileTree::new(root.clone());
+    with_ctx(|ctx| tree.populate_from_dir(&root, ctx));
+    assert!(tree.entries().iter().any(|entry| entry.label == ".agent"));
+    assert!(tree.entries().iter().any(|entry| entry.label == ".env.example"));
+    assert!(tree.entries().iter().all(|entry| entry.label != ".git"));
+    assert!(tree.entries().iter().all(|entry| entry.label != ".hg"));
+    assert!(tree.entries().iter().all(|entry| entry.label != ".svn"));
+    assert!(tree.entries().iter().any(|entry| entry.label == "target"));
+    assert!(tree.entries().iter().any(|entry| entry.label == "node_modules"));
+
+    with_ctx(|ctx| assert!(!tree.toggle_hidden(ctx)));
+    assert!(tree.entries().iter().all(|entry| !entry.label.starts_with('.')));
+    assert!(tree.entries().iter().any(|entry| entry.label == "README.md"));
+
+    with_ctx(|ctx| assert!(tree.toggle_hidden(ctx)));
+    let neoism_index = tree.entries().iter().position(|entry| entry.label == ".neoism").unwrap();
+    with_ctx(|ctx| { tree.toggle_dir_at(neoism_index, ctx); });
+    assert!(tree.entries().iter().all(|entry| entry.label != "cache"));
+
+    let claude_index = tree.entries().iter().position(|entry| entry.label == ".claude").unwrap();
+    with_ctx(|ctx| { tree.toggle_dir_at(claude_index, ctx); });
+    assert!(tree.entries().iter().any(|entry| entry.label == "settings.json"));
+    assert!(tree.entries().iter().all(|entry| entry.label != "worktrees"));
 
     let _ = std::fs::remove_dir_all(root);
 }

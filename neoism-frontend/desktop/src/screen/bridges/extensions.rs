@@ -17,9 +17,6 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-const NEOISM_NOTES_MCP_ID: &str = "neoism-notes";
-const NEOISM_MEMORY_MCP_ID: &str = "neoism-memory";
-const NEOISM_DOCS_MCP_ID: &str = "neoism-docs";
 const NEOISM_PYTHON_KERNEL_ID: &str = "neoism-python-kernel";
 const EVCXR_JUPYTER_KERNEL_ID: &str = "evcxr-jupyter-kernel";
 const KERNEL_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -558,98 +555,6 @@ fn is_mcp_entry(manifest: &ExtensionManifest) -> bool {
         .any(|c| c.to_lowercase().contains("mcp"))
 }
 
-fn neoism_notes_mcp_manifest() -> ExtensionManifest {
-    use neoism_extensions::{InstallKind, RunSpec};
-    use std::collections::BTreeMap;
-
-    ExtensionManifest {
-        id: NEOISM_NOTES_MCP_ID.to_string(),
-        name: "Neoism Notes".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        description: "Built-in MCP-style notes access for Neoism agents, scoped to linked project notes when available.".to_string(),
-        author: "Neoism".to_string(),
-        downloads: None,
-        categories: vec!["MCP Server".to_string(), "Built-in".to_string(), "Notes".to_string()],
-        languages: Vec::new(),
-        repository_url: None,
-        homepage: None,
-        executables: vec!["neoism-agent".to_string()],
-        install: InstallKind::Cargo {
-            crate_name: "neoism-agent-server".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            features: Vec::new(),
-        },
-        run: Some(RunSpec {
-            command: vec!["neoism-agent".to_string(), "mcp".to_string(), "notes".to_string()],
-            env: BTreeMap::new(),
-        }),
-        env_keys: Vec::new(),
-    }
-}
-
-fn neoism_memory_mcp_manifest() -> ExtensionManifest {
-    use neoism_extensions::{InstallKind, RunSpec};
-    use std::collections::BTreeMap;
-
-    ExtensionManifest {
-        id: NEOISM_MEMORY_MCP_ID.to_string(),
-        name: "Neoism Memory".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        description: "Built-in MCP-style persistent memory for Neoism agents. Stores Claude-style MEMORY.md indexes and topic files in Neoism Notes vaults.".to_string(),
-        author: "Neoism".to_string(),
-        downloads: None,
-        categories: vec![
-            "MCP Server".to_string(),
-            "Built-in".to_string(),
-            "Memory".to_string(),
-            "Notes".to_string(),
-        ],
-        languages: Vec::new(),
-        repository_url: None,
-        homepage: None,
-        executables: vec!["neoism-agent".to_string()],
-        install: InstallKind::Cargo {
-            crate_name: "neoism-agent-server".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            features: Vec::new(),
-        },
-        run: Some(RunSpec {
-            command: vec!["neoism-agent".to_string(), "mcp".to_string(), "memory".to_string()],
-            env: BTreeMap::new(),
-        }),
-        env_keys: Vec::new(),
-    }
-}
-
-fn neoism_docs_mcp_manifest() -> ExtensionManifest {
-    use neoism_extensions::{InstallKind, RunSpec};
-    use std::collections::BTreeMap;
-
-    ExtensionManifest {
-        id: NEOISM_DOCS_MCP_ID.to_string(),
-        name: "Neoism Docs".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        description: "Read-only access to Neoism's bundled product documentation, even when the editable Welcome notes are deleted.".to_string(),
-        author: "Neoism".to_string(),
-        downloads: None,
-        categories: vec!["MCP Server".to_string(), "Built-in".to_string(), "Documentation".to_string()],
-        languages: Vec::new(),
-        repository_url: None,
-        homepage: None,
-        executables: vec!["neoism-agent".to_string()],
-        install: InstallKind::Cargo {
-            crate_name: "neoism-agent-server".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            features: Vec::new(),
-        },
-        run: Some(RunSpec {
-            command: vec!["neoism-agent".to_string(), "mcp".to_string(), "docs".to_string()],
-            env: BTreeMap::new(),
-        }),
-        env_keys: Vec::new(),
-    }
-}
-
 fn neoism_python_kernel_manifest() -> ExtensionManifest {
     use neoism_extensions::{InstallKind, RunSpec};
 
@@ -708,75 +613,6 @@ fn evcxr_jupyter_kernel_manifest() -> ExtensionManifest {
         }),
         env_keys: Vec::new(),
     }
-}
-
-fn is_builtin_extension_id(id: &str) -> bool {
-    matches!(
-        id,
-        NEOISM_NOTES_MCP_ID | NEOISM_MEMORY_MCP_ID | NEOISM_DOCS_MCP_ID
-    )
-}
-
-fn ensure_builtin_mcp_installed(manifests: &[ExtensionManifest]) -> InstalledIndex {
-    let mut installed = InstalledIndex::load().unwrap_or_default();
-    for manifest in manifests {
-        if installed.is_builtin_disabled(&manifest.id) {
-            continue;
-        }
-        if !installed.is_installed(&manifest.id) {
-            installed.install_record(InstalledEntry {
-                id: manifest.id.clone(),
-                version: manifest.version.clone(),
-                install_kind: "builtin".to_string(),
-                bin_path: std::env::current_exe().ok(),
-                installed_at: now_millis_i64(),
-            });
-        }
-        let bin_path = installed
-            .get(&manifest.id)
-            .and_then(|entry| entry.bin_path.clone())
-            .or_else(|| std::env::current_exe().ok());
-        if let Some(bin_path) = bin_path.as_deref() {
-            let _ = neoism_extensions::agent_config::install_mcp_entry(
-                &manifest.id,
-                manifest,
-                bin_path,
-            );
-        }
-    }
-    if let Err(error) = installed.save() {
-        tracing::warn!(
-            target: "neoism::extensions",
-            ?error,
-            "failed to persist built-in MCP install records"
-        );
-    }
-    installed
-}
-
-fn install_builtin_mcp_record(manifest: &ExtensionManifest) -> Result<(), InstallError> {
-    let mut installed = InstalledIndex::load().unwrap_or_default();
-    installed.enable_builtin(&manifest.id);
-    installed.install_record(InstalledEntry {
-        id: manifest.id.clone(),
-        version: manifest.version.clone(),
-        install_kind: "builtin".to_string(),
-        bin_path: std::env::current_exe().ok(),
-        installed_at: now_millis_i64(),
-    });
-    installed.save()?;
-    let bin_path = installed
-        .get(&manifest.id)
-        .and_then(|entry| entry.bin_path.clone())
-        .or_else(|| std::env::current_exe().ok());
-    if let Some(bin_path) = bin_path.as_deref() {
-        neoism_extensions::agent_config::install_mcp_entry(
-            &manifest.id,
-            manifest,
-            bin_path,
-        )?;
-    }
-    Ok(())
 }
 
 fn now_millis_i64() -> i64 {

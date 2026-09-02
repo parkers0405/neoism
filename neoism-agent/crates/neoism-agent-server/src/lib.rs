@@ -271,7 +271,7 @@ pub async fn listen(
         "server socket bound"
     );
     let state_started = crate::perf::now();
-    let state = AppState::open_default(services).await?;
+    let state = AppState::open_default_for_server(services).await?;
     tracing::info!(
         target: "neoism_agent::perf",
         listen_addr = %actual,

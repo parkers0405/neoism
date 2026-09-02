@@ -65,11 +65,13 @@ pub struct FileTreeGitRefreshRequest {
     pub(super) root: PathBuf,
     pub(super) open_dirs: HashSet<PathBuf>,
     pub(super) default_open_workspace: bool,
+    pub(super) show_hidden: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct FileTreeGitRefreshResult {
     pub(super) root: PathBuf,
+    pub(super) show_hidden: bool,
     pub(super) git_statuses: HashMap<PathBuf, GitStatus>,
     pub(super) entries: Vec<TreeEntry>,
 }

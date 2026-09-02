@@ -213,10 +213,15 @@ fn file_tree_fs_event_filter_accepts_worktree_changes() {
         notify::event::AccessKind::Close(notify::event::AccessMode::Write),
     ))
     .add_path(root.join("src/saved.rs"));
+    let claude_settings = notify::Event::new(notify::EventKind::Modify(
+        notify::event::ModifyKind::Data(notify::event::DataChange::Any),
+    ))
+    .add_path(root.join(".claude/settings.json"));
 
     assert!(file_tree_fs_event_relevant(&root, &modified));
     assert!(file_tree_fs_event_relevant(&root, &created));
     assert!(file_tree_fs_event_relevant(&root, &write_closed));
+    assert!(file_tree_fs_event_relevant(&root, &claude_settings));
 }
 
 #[test]

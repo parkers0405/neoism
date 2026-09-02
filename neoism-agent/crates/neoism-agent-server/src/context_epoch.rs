@@ -103,14 +103,11 @@ async fn observe(state: &AppState, info: &SessionInfo) -> ContextSnapshot {
             plugins.config(),
         )),
     );
-    let mut config = plugins.config().clone();
-    crate::config::inject_builtin_mcp(&mut config, state.services());
-    let memory_enabled = state.services().memory.as_ref().is_some_and(|memory| {
-        config
-            .mcp
-            .get(memory.id())
-            .is_some_and(crate::mcp::is_enabled)
-    });
+    let memory_enabled = state.services().memory.is_some()
+        && crate::plugins::enabled(
+            &plugins,
+            neoism_agent_builtins::plugin::memory_tools::ID,
+        );
     if memory_enabled {
         for fragment in state.services().context_fragments(std::path::Path::new(&info.directory)) {
             sources.insert(format!("service:{}", fragment.id), json!(fragment.content));

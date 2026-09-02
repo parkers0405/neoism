@@ -6,10 +6,10 @@
 //!
 //! Two extra filters apply on top of the kind check:
 //!
-//! - **Component ignore-list:** any path inside `.git`, `target`,
+//! - **Component ignore-list:** any path inside VCS metadata, `target`,
 //!   `node_modules`, `.direnv`, `.cache`, or the `.claude/` worktree
-//!   shadow tree is dropped — those are the high-noise dirs nothing in
-//!   the tree panel ever shows.
+//!   shadow tree is dropped. Some dependency/build directories may still be
+//!   browsed manually; excluding them here prevents background watcher churn.
 //! - **Leaf ignore-list:** editor swap files (`*~`, `*.swp`, `*.swo`,
 //!   `*.tmp`, `.#…`) are dropped because they fire on every keystroke
 //!   inside vim/emacs sessions.
@@ -47,9 +47,20 @@ pub fn event_relevant(root: &Path, event: WatcherEventView<'_>) -> bool {
 /// Component / leaf filter for a single absolute path.
 pub fn path_relevant(root: &Path, path: &Path) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
+    let mut previous = None;
     for component in relative.components() {
-        if matches!(component, Component::Normal(part) if ignored_component(part)) {
-            return false;
+        if let Component::Normal(part) = component {
+            if ignored_component(part)
+                || matches!(
+                    previous,
+                    Some(parent)
+                        if (parent == OsStr::new(".claude") && part == OsStr::new("worktrees"))
+                            || (parent == OsStr::new(".neoism") && part == OsStr::new("cache"))
+                )
+            {
+                return false;
+            }
+            previous = Some(part);
         }
     }
 
@@ -64,7 +75,16 @@ pub fn path_relevant(root: &Path, path: &Path) -> bool {
 pub fn ignored_component(part: &OsStr) -> bool {
     matches!(
         part.to_str(),
-        Some(".git" | ".claude" | "target" | "node_modules" | ".direnv" | ".cache")
+        Some(
+            ".git"
+                | ".hg"
+                | ".svn"
+                | "CVS"
+                | "target"
+                | "node_modules"
+                | ".direnv"
+                | ".cache"
+        )
     )
 }
 
@@ -119,7 +139,12 @@ mod tests {
     #[test]
     fn accepts_worktree_changes() {
         let root = PathBuf::from("/repo");
-        for sub in ["src/main.rs", "src/new_file.rs", "src/saved.rs"] {
+        for sub in [
+            "src/main.rs",
+            "src/new_file.rs",
+            "src/saved.rs",
+            ".claude/settings.json",
+        ] {
             let path = root.join(sub);
             let slice: &[&Path] = &[path.as_path()];
             assert!(
@@ -157,7 +182,10 @@ mod tests {
     #[test]
     fn ignored_component_predicate() {
         assert!(ignored_component(OsStr::new(".git")));
-        assert!(ignored_component(OsStr::new(".claude")));
+        assert!(ignored_component(OsStr::new(".hg")));
+        assert!(ignored_component(OsStr::new(".svn")));
+        assert!(ignored_component(OsStr::new("CVS")));
+        assert!(!ignored_component(OsStr::new(".claude")));
         assert!(ignored_component(OsStr::new("target")));
         assert!(ignored_component(OsStr::new("node_modules")));
         assert!(ignored_component(OsStr::new(".direnv")));

@@ -280,7 +280,6 @@ fn spawn_background_external_subtask_prompt(
         .await
         {
             Ok(message) => {
-                admission.complete("completed").await;
                 let result = assistant_text(&message).unwrap_or_default();
                 publish_background_subtask_finished(
                     &state,
@@ -290,9 +289,9 @@ fn spawn_background_external_subtask_prompt(
                     &result,
                 )
                 .await;
+                admission.complete("completed").await;
             }
             Err(error) => {
-                admission.complete("failed").await;
                 let message = error.to_string();
                 tracing::warn!(
                     session_id = %child_id,
@@ -307,6 +306,7 @@ fn spawn_background_external_subtask_prompt(
                     &message,
                 )
                 .await;
+                admission.complete("failed").await;
             }
         }
     });

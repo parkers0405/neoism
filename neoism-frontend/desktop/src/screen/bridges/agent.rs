@@ -666,6 +666,13 @@ impl Screen<'_> {
             let is_visible = visible_nodes.contains(key);
             agent.set_event_wake(agent_event_wake.clone());
             agent.set_local_presence_name(Some(local_presence_name.clone()));
+            // Warm the tiny first page while the visible Agent pane is coming
+            // up, rather than waiting for the user to open the recent-chat
+            // view. This is a bounded background request; no database or
+            // network work runs on the window startup thread.
+            if is_visible {
+                agent.maybe_refresh_side_panel_sessions();
+            }
             let agent_changed = if is_visible {
                 agent.drain_server_updates()
             } else {

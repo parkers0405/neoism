@@ -151,6 +151,10 @@ impl WorkspaceSearchService for FffWorkspaceSearchService {
 
 fn find_files(registry: &PickerRegistry, request: &FindFilesRequest) -> anyhow::Result<FindFilesResult> {
     if request.query.trim().is_empty() { return directory_entries(request); }
+    // The index deliberately favors the fast, ordinary-project path. An
+    // explicit hidden-file query uses the bounded streaming walker so its
+    // behavior does not depend on platform/indexer dotfile defaults.
+    if request.include_hidden { return streaming_find(request, "hidden-file discovery requested"); }
     if broad_root(&request.root) { return streaming_find(request, "indexed search is disabled for home and filesystem roots"); }
     let started = Instant::now();
     match registry.with_picker(&request.root, |picker| {
@@ -167,9 +171,12 @@ fn find_files(registry: &PickerRegistry, request: &FindFilesRequest) -> anyhow::
                 }); }
             }
         }
-        let items = results.items.iter().zip(&results.scores).map(|(item, score)| WorkspaceFileMatch {
-            path: item.relative_path(picker), score: score.total,
-            git_status: item.git_status.map(git_status_label), size: item.size, modified: item.modified,
+        let items = results.items.iter().zip(&results.scores).filter_map(|(item, score)| {
+            let path = item.relative_path(picker);
+            discoverable_path(&path, false).then(|| WorkspaceFileMatch {
+                path, score: score.total,
+                git_status: item.git_status.map(git_status_label), size: item.size, modified: item.modified,
+            })
         }).collect::<Vec<_>>();
         (items, results.total_matched)
     }) {
@@ -198,6 +205,8 @@ fn search_directories(registry: &PickerRegistry, request: &DirectorySearchReques
 }
 
 fn grep_workspace(registry: &PickerRegistry, request: &GrepWorkspaceRequest) -> anyhow::Result<GrepWorkspaceResult> {
+    if request.path.is_file() { return streaming_grep(request, "exact file requested"); }
+    if request.include_hidden && request.path.is_dir() { return streaming_grep(request, "hidden-file discovery requested"); }
     if broad_root(&request.root) { return streaming_grep(request, "indexed search is disabled for home and filesystem roots"); }
     let pattern = request.patterns.first().map(String::as_str).unwrap_or("");
     let requested = grep_mode(request.mode, pattern);
@@ -226,7 +235,9 @@ fn grep_workspace(registry: &PickerRegistry, request: &GrepWorkspaceRequest) -> 
         };
         let items = results.matches.iter().filter_map(|item| {
             let file = results.files.get(item.file_index)?;
-            Some(WorkspaceGrepMatch { path: file.relative_path(picker), line: item.line_number,
+            let path = file.relative_path(picker);
+            if !discoverable_path(&path, request.include_hidden) { return None; }
+            Some(WorkspaceGrepMatch { path, line: item.line_number,
                 text: truncate_line(&item.line_content), definition: item.is_definition, fuzzy_score: item.fuzzy_score })
         }).collect::<Vec<_>>();
         (items, results.files_with_matches, results.total_files_searched, results.next_file_offset, mode)
@@ -247,7 +258,7 @@ fn streaming_find(request: &FindFilesRequest, reason: &str) -> anyhow::Result<Fi
     let root = request.root.clone();
     let (filter_root, filter_excluded) = (root.clone(), excluded.clone());
     let mut builder = WalkBuilder::new(&root);
-    builder.hidden(true).git_ignore(true).git_exclude(true).git_global(true).ignore(true).follow_links(false)
+    builder.hidden(!request.include_hidden).git_ignore(true).git_exclude(true).git_global(true).ignore(true).follow_links(false)
         .filter_entry(move |entry| relative_path(&filter_root, entry.path()).is_none_or(|path| !filter_excluded.matches(&path)));
     let wanted = request.offset.saturating_add(request.limit).saturating_add(1);
     let mut items = Vec::new(); let mut timed_out = false;
@@ -276,7 +287,7 @@ fn streaming_grep(request: &GrepWorkspaceRequest, reason: &str) -> anyhow::Resul
     else {
         let (filter_root, filter_excluded) = (root.clone(), excluded.clone());
         let mut builder = WalkBuilder::new(&request.path);
-        builder.hidden(false).git_ignore(true).git_exclude(true).git_global(true).ignore(true).follow_links(false).max_filesize(Some(MAX_SEARCH_FILE_BYTES))
+        builder.hidden(!request.include_hidden).git_ignore(true).git_exclude(true).git_global(true).ignore(true).follow_links(false).max_filesize(Some(MAX_SEARCH_FILE_BYTES))
             .filter_entry(move |entry| relative_path(&filter_root, entry.path()).is_none_or(|path| !filter_excluded.matches(&path)));
         paths.extend(builder.build().filter_map(Result::ok).filter(|e| e.file_type().is_some_and(|t| t.is_file())).map(|e| e.into_path()));
     }
@@ -350,7 +361,9 @@ fn build_picker(root: &Path) -> anyhow::Result<SharedFilePicker> {
     Ok(shared)
 }
 fn directory_entries(request: &FindFilesRequest) -> anyhow::Result<FindFilesResult> {
-    let mut entries = std::fs::read_dir(&request.root)?.filter_map(Result::ok).map(|e| e.path()).collect::<Vec<_>>(); entries.sort();
+    let mut entries = std::fs::read_dir(&request.root)?.filter_map(Result::ok).map(|e| e.path())
+        .filter(|path| path.file_name().is_some_and(|name| discoverable_path(&name.to_string_lossy(), request.include_hidden)))
+        .collect::<Vec<_>>(); entries.sort();
     let total = entries.len(); let items = entries.into_iter().skip(request.offset).take(request.limit).map(|path| file_match(path.file_name().unwrap_or_default().to_string_lossy().into(), path.metadata().ok().as_ref())).collect::<Vec<_>>();
     Ok(FindFilesResult { bounds: bounds(Some(total), total, request.offset, items.len(), false), items, engine: Some("directory".into()), fallback_reason: None })
 }
@@ -359,6 +372,12 @@ fn file_match(path: String, metadata: Option<&Metadata>) -> WorkspaceFileMatch {
 fn grep_match(path: &str, line: u64, text: &str, fuzzy_score: Option<u16>) -> WorkspaceGrepMatch { WorkspaceGrepMatch { path: path.into(), line, text: truncate_line(text), definition: false, fuzzy_score } }
 fn truncate_line(line: &str) -> String { const MAX: usize = 4_000; if line.len() <= MAX { return line.into(); } let mut end=MAX; while !line.is_char_boundary(end) { end-=1; } format!("{}…", &line[..end]) }
 fn relative_path(root: &Path, path: &Path) -> Option<String> { let path=path.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/"); (!path.is_empty()).then_some(path) }
+fn discoverable_path(path: &str, include_hidden: bool) -> bool {
+    let components = path.split(['/', '\\']).filter(|component| !component.is_empty()).collect::<Vec<_>>();
+    if components.iter().any(|component| component.eq_ignore_ascii_case(".git")) { return false; }
+    if components.windows(2).any(|pair| pair[0].eq_ignore_ascii_case(".neoism") && pair[1].eq_ignore_ascii_case("cache")) { return false; }
+    include_hidden || !components.iter().any(|component| component.starts_with('.'))
+}
 fn broad_root(root: &Path) -> bool { let root=canonical_root(root); is_filesystem_root(&root) || dirs::home_dir().map(|p| canonical_root(&p)==root).unwrap_or(false) }
 fn canonical_root(root: &Path) -> PathBuf { dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()) }
 fn is_filesystem_root(path: &Path) -> bool { path.parent().is_none() }
@@ -383,7 +402,39 @@ mod tests {
     impl Drop for Root { fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);} }
     #[test] fn registry_is_bounded_and_lru(){let a=Root::new("a");let b=Root::new("b");let c=Root::new("c");let r=PickerRegistry::new(2);r.warm(&a.0).unwrap();r.warm(&b.0).unwrap();r.warm(&a.0).unwrap();r.warm(&c.0).unwrap();assert_eq!(r.len(),2);assert!(r.contains(&a.0));assert!(!r.contains(&b.0));assert!(r.contains(&c.0));}
     #[test] fn pin_lifetime_controls_eviction(){let a=Root::new("pin");let b=Root::new("other");let service=FffWorkspaceSearchService::with_capacity(1);service.warm(&a.0).unwrap();let pin=service.pin_root(&a.0).unwrap();service.warm(&b.0).unwrap();assert!(service.registry.contains(&a.0));drop(pin);service.warm(&b.0).unwrap();assert!(service.registry.contains(&b.0));}
-    #[test] fn streaming_is_bounded_and_ignored(){let root=Root::new("stream");std::fs::create_dir_all(root.0.join("src")).unwrap();std::fs::create_dir_all(root.0.join("target")).unwrap();std::fs::write(root.0.join("src/lib.rs"),"needle\n").unwrap();std::fs::write(root.0.join("target/generated.rs"),"needle\n").unwrap();let request=FindFilesRequest{root:root.0.clone(),query:"*.rs".into(),offset:0,limit:10,control:neoism_agent_service_api::WorkspaceSearchRequestControl{timeout_ms:5000,cancel:None}};let result=streaming_find(&request,"test").unwrap();assert!(result.items.iter().any(|i|i.path=="src/lib.rs"));assert!(!result.items.iter().any(|i|i.path.contains("target")));}
+    #[test] fn streaming_is_bounded_and_ignored(){let root=Root::new("stream");std::fs::create_dir_all(root.0.join("src")).unwrap();std::fs::create_dir_all(root.0.join("target")).unwrap();std::fs::write(root.0.join("src/lib.rs"),"needle\n").unwrap();std::fs::write(root.0.join("target/generated.rs"),"needle\n").unwrap();let request=FindFilesRequest{root:root.0.clone(),query:"*.rs".into(),include_hidden:false,offset:0,limit:10,control:neoism_agent_service_api::WorkspaceSearchRequestControl{timeout_ms:5000,cancel:None}};let result=streaming_find(&request,"test").unwrap();assert!(result.items.iter().any(|i|i.path=="src/lib.rs"));assert!(!result.items.iter().any(|i|i.path.contains("target")));}
+    #[test]
+    fn hidden_discovery_is_explicit_and_never_walks_git_metadata() {
+        let root = Root::new("hidden");
+        std::fs::create_dir_all(root.0.join(".agent")).unwrap();
+        std::fs::create_dir_all(root.0.join(".git")).unwrap();
+        std::fs::write(root.0.join("visible.txt"), "visible needle\n").unwrap();
+        std::fs::write(root.0.join(".agent/agent.txt"), "hidden needle\n").unwrap();
+        std::fs::write(root.0.join(".git/config.txt"), "git needle\n").unwrap();
+        let service = FffWorkspaceSearchService::new();
+        let request = |include_hidden| FindFilesRequest {
+            root: root.0.clone(), query: "*.txt".into(), include_hidden, offset: 0, limit: 20,
+            control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
+        };
+        let ordinary = service.find_files(&request(false)).unwrap();
+        assert!(ordinary.items.iter().all(|item| !item.path.starts_with('.')));
+        let hidden = service.find_files(&request(true)).unwrap();
+        assert!(hidden.items.iter().any(|item| item.path == ".agent/agent.txt"));
+        assert!(hidden.items.iter().all(|item| !item.path.starts_with(".git/")));
+
+        let grep = |path: PathBuf, include_hidden| GrepWorkspaceRequest {
+            root: root.0.clone(), path, patterns: vec!["needle".into()],
+            include: Some("*.txt".into()), include_hidden,
+            excludes: DEFAULT_EXCLUDES.iter().map(|item| (*item).into()).collect(),
+            context_lines: 0, case_sensitive: false, mode: WorkspaceSearchMode::Plain,
+            limit: 20, control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
+        };
+        let hidden_grep = service.grep(&grep(root.0.clone(), true)).unwrap();
+        assert!(hidden_grep.items.iter().any(|item| item.path == ".agent/agent.txt"));
+        assert!(hidden_grep.items.iter().all(|item| !item.path.starts_with(".git/")));
+        let exact = service.grep(&grep(root.0.join(".agent/agent.txt"), false)).unwrap();
+        assert_eq!(exact.items[0].path, ".agent/agent.txt");
+    }
     #[test]
     fn indexed_find_and_grep_preserve_bounds_and_identity() {
         let root = Root::new("search");
@@ -395,14 +446,14 @@ mod tests {
             cancel: None,
         };
         let found = service.find_files(&FindFilesRequest {
-            root: root.0.clone(), query: "upload".into(), offset: 0, limit: 5,
+            root: root.0.clone(), query: "upload".into(), include_hidden: false, offset: 0, limit: 5,
             control: control.clone(),
         }).unwrap();
         assert_eq!(found.engine.as_deref(), Some(ENGINE_ID));
         assert_eq!(found.items[0].path, "src/upload.rs");
         let grep = service.grep(&GrepWorkspaceRequest {
             root: root.0.clone(), path: root.0.clone(), patterns: vec!["PrepareUpload".into()],
-            include: Some("*.rs".into()), excludes: DEFAULT_EXCLUDES.iter().map(|s| (*s).into()).collect(),
+            include: Some("*.rs".into()), include_hidden: false, excludes: DEFAULT_EXCLUDES.iter().map(|s| (*s).into()).collect(),
             context_lines: 0, case_sensitive: false, mode: WorkspaceSearchMode::Plain,
             limit: 1, control,
         }).unwrap();
@@ -417,7 +468,7 @@ mod tests {
         std::fs::write(root.0.join("file.txt"), "needle\n").unwrap();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let request = FindFilesRequest {
-            root: root.0.clone(), query: "*".into(), offset: 0, limit: 10,
+            root: root.0.clone(), query: "*".into(), include_hidden: false, offset: 0, limit: 10,
             control: neoism_agent_service_api::WorkspaceSearchRequestControl {
                 timeout_ms: 5_000, cancel: Some(cancel),
             },

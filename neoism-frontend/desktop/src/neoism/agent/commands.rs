@@ -359,11 +359,15 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn apply_agent(&mut self, value: String) {
+        let previous_label = self.agent_label().to_string();
         self.agent = (!value.is_empty()).then_some(value.clone());
         match value.as_str() {
             "build" => self.mode = NeoismAgentMode::Build,
             "plan" => self.mode = NeoismAgentMode::Plan,
             _ => {}
+        }
+        if self.agent_label() != previous_label {
+            self.agent_label_changed_at = Some(Instant::now());
         }
         self.close_picker();
         if let Some(session_id) = self.session_id.clone() {

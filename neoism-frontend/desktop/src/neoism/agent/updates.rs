@@ -233,20 +233,20 @@ impl AgentEventWake {
         }
     }
 
-    fn wake(&self) {
+    pub(crate) fn wake(&self) {
         if !self.pending.swap(true, Ordering::AcqRel) {
             (self.callback)();
         }
     }
 
-    fn begin_drain(&self) {
+    pub(crate) fn begin_drain(&self) {
         // Clear before draining. An event racing the drain then schedules the
         // next frame instead of being stranded behind a late clear.
         self.pending.store(false, Ordering::Release);
     }
 
     #[cfg(test)]
-    fn for_test(callback: impl Fn() + Send + Sync + 'static) -> Self {
+    pub(crate) fn for_test(callback: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
             callback: Arc::new(callback),
             pending: Arc::new(AtomicBool::new(false)),

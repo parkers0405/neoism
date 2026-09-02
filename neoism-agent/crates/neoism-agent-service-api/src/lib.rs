@@ -64,6 +64,9 @@ impl Default for WorkspaceSearchRequestControl {
 pub struct FindFilesRequest {
     pub root: PathBuf,
     pub query: String,
+    /// Include leading-dot path components. Implementations must still apply
+    /// their bounded hard exclusions (for example `.git`).
+    pub include_hidden: bool,
     pub offset: usize,
     pub limit: usize,
     pub control: WorkspaceSearchRequestControl,
@@ -106,6 +109,9 @@ pub struct GrepWorkspaceRequest {
     pub path: PathBuf,
     pub patterns: Vec<String>,
     pub include: Option<String>,
+    /// Include leading-dot path components. Exact-file searches are always
+    /// honored; this flag controls recursive discovery.
+    pub include_hidden: bool,
     pub excludes: Vec<String>,
     pub context_lines: usize,
     pub case_sensitive: bool,
@@ -746,9 +752,9 @@ pub trait SemanticMemoryIndex: Send + Sync {
     fn search<'a>(&'a self, root_keys: &'a [String], query_vector: &'a [f32], model: &'a str, limit: usize) -> ServiceFuture<'a, Result<Vec<SemanticMemoryHit>, ServiceError>>;
 }
 
-/// Optional durable-memory capability. Its MCP bridge is registered through
-/// the ordinary built-in MCP registry; generic Agent deployments inject none.
-pub trait MemoryService: BuiltinMcpService {
+/// Optional durable-memory capability. Generic Agent deployments inject none;
+/// product hosts expose it through an ordinary optional native tool plugin.
+pub trait MemoryService: Send + Sync {
     fn scope_choices(&self) -> Vec<ScopeChoice>;
     fn default_scope_id(&self) -> &str;
     fn init(&self, request: &MemoryRequest) -> Result<Vec<MemoryLocation>, ServiceError>;

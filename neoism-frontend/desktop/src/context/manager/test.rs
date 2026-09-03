@@ -3,7 +3,9 @@ use crate::daemon_client::{
     DaemonClient, DaemonClientOptions, DaemonEndpoint, ReconnectBackoff,
 };
 use crate::event::VoidListener;
-use neoism_protocol::workspace::{PaneFocusDir, PaneLayoutOp, PaneLayoutSnapshotNode};
+use neoism_protocol::workspace::{
+    PaneFocusDir, PaneLayoutOp, PaneLayoutSnapshotNode, WorkspaceServerMessage,
+};
 use std::time::Duration;
 
 fn attach_unconnected_daemon(
@@ -408,6 +410,35 @@ fn daemon_attached_tab_reorder_does_not_swap_local_contexts_before_snapshot() {
     assert_eq!(context_manager.current().rich_text_id, 9001);
     assert_eq!(context_manager.daemon_cache().pending_request_count, 1);
     assert!(context_manager.cached_layout().is_none());
+}
+
+#[test]
+fn stale_workspace_switch_ack_does_not_change_the_selected_grid() {
+    let window_id: WindowId = WindowId::from(0);
+    let mut context_manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+    context_manager.add_context(false, 0);
+    let workspace_a = context_manager.workspace_id_for_grid(&context_manager.contexts[0], 0);
+    let workspace_b = context_manager.workspace_id_for_grid(&context_manager.contexts[1], 1);
+
+    // The UI has completed A -> B -> A, but the independently queued B
+    // acknowledgement arrives last.
+    context_manager.set_current(1);
+    context_manager.set_current(0);
+    assert!(context_manager.apply_workspace_server_message(
+        WorkspaceServerMessage::HostWorkspaceChanged {
+            host_id: "desktop-window".to_string(),
+            workspace_id: Some(workspace_a),
+        },
+    ));
+    assert!(context_manager.apply_workspace_server_message(
+        WorkspaceServerMessage::HostWorkspaceChanged {
+            host_id: "desktop-window".to_string(),
+            workspace_id: Some(workspace_b),
+        },
+    ));
+
+    assert_eq!(context_manager.current_index(), 0);
 }
 
 #[test]

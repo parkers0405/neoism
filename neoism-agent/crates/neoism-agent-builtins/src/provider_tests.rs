@@ -95,6 +95,49 @@ async fn parses_openai_streaming_chunks() {
 }
 
 #[test]
+fn parses_openai_usage_only_and_metadata_chunks() {
+    let usage = parse_stream_line(
+        br#"data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":7},"completion_tokens_details":{"reasoning_tokens":2}}}"#,
+    )
+    .unwrap();
+    assert!(usage.deltas.is_empty());
+    assert_eq!(usage.total_tokens, Some(16));
+    assert_eq!(usage.input_tokens, Some(12));
+    assert_eq!(usage.output_tokens, Some(4));
+    assert_eq!(usage.reasoning_tokens, Some(2));
+    assert_eq!(usage.cache_read_tokens, Some(7));
+
+    let metadata = parse_stream_line(
+        br#"data: {"id":"chatcmpl-1","model":"provider-model","choices":[]}"#,
+    )
+    .unwrap();
+    assert!(metadata.deltas.is_empty());
+    assert!(metadata.finish.is_none());
+}
+
+#[test]
+fn surfaces_openai_stream_provider_errors() {
+    let error = parse_stream_line(
+        br#"data: {"error":{"message":"quota exceeded","type":"rate_limit_error","code":"rate_limit"}}"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("quota exceeded"));
+    assert!(error.contains("rate_limit_error"));
+    assert!(!error.contains("missing field `choices`"));
+}
+
+#[test]
+fn rejects_openai_stream_chunks_without_choices_or_error() {
+    let error = parse_stream_line(br#"data: {"id":"chatcmpl-1","model":"provider-model"}"#)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("failed to decode OpenAI-compatible streaming chunk"));
+}
+
+#[test]
 fn parses_openai_tool_call_deltas() {
     let first = parse_stream_line(
             br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}],"usage":null}"#,

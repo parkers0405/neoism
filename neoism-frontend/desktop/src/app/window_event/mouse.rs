@@ -34,13 +34,9 @@ impl Application<'_> {
                 }
             }
         } else if button == MouseButton::Left && state == ElementState::Released {
-            let source_window = self
-                .router
-                .routes
-                .iter()
-                .find_map(|(id, route)| {
-                    (*id != window_id && route.window.screen.has_island_drag()).then_some(*id)
-                });
+            let source_window = self.router.routes.iter().find_map(|(id, route)| {
+                (*id != window_id && route.window.screen.has_island_drag()).then_some(*id)
+            });
             if let Some(source_window) = source_window {
                 if let Some(source) = self.router.routes.get_mut(&source_window) {
                     source.window.screen.mouse.left_button_state = ElementState::Released;
@@ -64,7 +60,8 @@ impl Application<'_> {
                 }
                 if source_window != window_id {
                     if let Some(source) = self.router.routes.get_mut(&source_window) {
-                        source.window.screen.mouse.left_button_state = ElementState::Released;
+                        source.window.screen.mouse.left_button_state =
+                            ElementState::Released;
                         source.window.screen.cancel_buffer_tab_drag();
                         source.window.screen.mouse.chrome_gesture_owned = false;
                         source.window.set_cursor(CursorIcon::Default);
@@ -467,9 +464,7 @@ impl Application<'_> {
                 // Activation already happened on press. Even a sub-threshold
                 // click owns its release; falling through would deliver it to
                 // the newly active pane underneath the chrome.
-                if button == MouseButton::Left
-                    && route.window.screen.has_island_drag()
-                {
+                if button == MouseButton::Left && route.window.screen.has_island_drag() {
                     route.window.screen.handle_island_drag_release();
                     route.window.screen.mouse.chrome_gesture_owned = false;
                     route.window.set_cursor(CursorIcon::Default);
@@ -491,9 +486,7 @@ impl Application<'_> {
                 }
 
                 if button == MouseButton::Left
-                    && std::mem::take(
-                        &mut route.window.screen.mouse.chrome_gesture_owned,
-                    )
+                    && std::mem::take(&mut route.window.screen.mouse.chrome_gesture_owned)
                 {
                     route.window.set_cursor(CursorIcon::Default);
                     route.request_redraw();
@@ -724,8 +717,7 @@ impl Application<'_> {
         // A release may be consumed by native capture loss or another UI
         // subsystem. Never let a workspace tab continue following motion
         // after the authoritative button state is already up.
-        if route.window.screen.mouse.left_button_state != ElementState::Pressed
-        {
+        if route.window.screen.mouse.left_button_state != ElementState::Pressed {
             if route.window.screen.cancel_island_drag()
                 | route.window.screen.cancel_buffer_tab_drag()
             {

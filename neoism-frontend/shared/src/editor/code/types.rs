@@ -566,31 +566,33 @@ pub struct CodePane {
     pub mouse_selecting: bool,
     /// Whole-buffer syntax cache, refreshed by the painter per revision.
     pub highlight: super::highlight::CodeHighlightCache,
-    /// Diagnostics by 0-based source line, fed by the host from the
-    /// LSP pipeline (`EditorServerMessage::Diagnostics`). Ranges are
-    /// byte columns; positions can go stale between publishes — the
-    /// painter clamps, anchoring lands with the LSP wiring pass.
+    /// Diagnostics by zero-based source line, fed by the host's local LSP
+    /// mailbox or remote `EditorServerMessage::Diagnostics`. Ranges are
+    /// UTF-8 byte columns; positions can go stale between publishes.
     pub diagnostics:
         std::collections::HashMap<usize, Vec<super::feed::CodeLineDiagnostic>>,
+    /// One entry per diagnostic (unlike the per-line projection above, a
+    /// multiline range appears only once). Used by status counts/popups.
+    pub diagnostic_summaries: Vec<super::feed::CodeDiagnosticSummary>,
     /// Diagnostics pinned into the CRDT doc with sticky anchors (only
-    /// while the pane is doc-bound). The host rebuilds `diagnostics`
-    /// from these on every buffer revision — char-precise tracking
-    /// through local and remote edits, superseding the line-shift
-    /// heuristic between server publishes.
+    /// while the pane is doc-bound). The host resolves these after editor/
+    /// CRDT service turns, outside paint, for char-precise edit tracking.
     pub diag_anchors: Vec<super::feed::CodeDiagAnchor>,
+    /// Buffer revision at which `diag_anchors` were last resolved into
+    /// `diagnostics` by the desktop service hook.
+    pub diagnostics_resolved_revision: Option<u64>,
     /// Buffer revision last shipped to the LSP engine (host bookkeeping
     /// for the didChange sync loop). `None` = never synced (didOpen).
     pub lsp_synced_revision: Option<u64>,
-    /// Diagnostics-store version last folded into `diagnostics`.
+    /// Web diagnostics-store version last folded into `diagnostics`.
+    /// Desktop diagnostics are event-applied and do not read this field.
     pub lsp_diag_version: u64,
     /// Occurrences of the symbol under the caret (LSP
     /// documentHighlight), 0-based line → byte spans. Fed by the host
     /// on caret idle; painted as quiet bands under the text.
     pub occurrence_spans: std::collections::HashMap<usize, Vec<(usize, usize)>>,
-    /// Per-file diagnostics PUBLISH sequence last folded into
-    /// `diag_anchors` — the sticky-anchor path only refolds from the
-    /// raw store (and re-pins anchors) when the server actually
-    /// published for THIS file.
+    /// Web per-file diagnostics publish sequence last folded into the pane.
+    /// Retained for the wasm `LspDiagnosticsStore`; desktop does not poll it.
     pub lsp_diag_publish_seq: u64,
     /// Symbol containers around the cursor, outermost first — the
     /// breadcrumb trail. Refreshed by the painter when the cursor
@@ -608,9 +610,10 @@ pub struct CodePane {
     /// the leader action (`<Space>x` closes the buffer).
     pub leader_pending: bool,
     /// Git gutter marks (added/modified lines + deleted-above rows),
-    /// recomputed by the host against the HEAD baseline when the
-    /// buffer revision moves. Painted next to the line numbers.
+    /// prepared asynchronously against the HEAD baseline and consumed by
+    /// paint. `git_scheduled_revision` coalesces one job per pane revision.
     pub git_marks: super::gitdiff::CodeGitMarks,
+    pub git_scheduled_revision: Option<u64>,
     /// Cursor position when `/` opened in-buffer search — Esc restores
     /// it (nvim incsearch semantics); Enter keeps the match position.
     pub search_origin: Option<(usize, usize)>,
@@ -666,7 +669,9 @@ impl CodePane {
             mouse_selecting: false,
             highlight: super::highlight::CodeHighlightCache::default(),
             diagnostics: std::collections::HashMap::new(),
+            diagnostic_summaries: Vec::new(),
             diag_anchors: Vec::new(),
+            diagnostics_resolved_revision: None,
             lsp_synced_revision: None,
             lsp_diag_publish_seq: 0,
             occurrence_spans: std::collections::HashMap::new(),
@@ -677,6 +682,7 @@ impl CodePane {
             caret_drawn_by_host: false,
             leader_pending: false,
             git_marks: super::gitdiff::CodeGitMarks::default(),
+            git_scheduled_revision: None,
             remote_cursors: Vec::new(),
             search_origin: None,
             search_backward: false,

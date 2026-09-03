@@ -993,13 +993,17 @@ impl Application<'_> {
             let (code_crdt_messages, code_pane_changed) =
                 route.window.screen.drain_code_crdt_messages();
             outbound_crdt.extend(code_crdt_messages);
+            let code_analysis_changed = route.window.screen.service_code_revision_changes();
             let (markdown_disk_messages, markdown_disk_changed) =
                 route.window.screen.reload_open_markdown_files_from_disk();
             outbound_crdt.extend(markdown_disk_messages);
             (
                 outbound,
                 outbound_crdt,
-                markdown_pane_changed || code_pane_changed || markdown_disk_changed,
+                markdown_pane_changed
+                    || code_pane_changed
+                    || code_analysis_changed
+                    || markdown_disk_changed,
             )
         };
         if redraw {
@@ -1871,6 +1875,8 @@ impl Application<'_> {
                 RioEvent::MouseCursorDirty => "RioEvent::MouseCursorDirty",
                 RioEvent::AcpWake => "RioEvent::AcpWake",
                 RioEvent::WorkspaceNotesWake => "RioEvent::WorkspaceNotesWake",
+                RioEvent::CodeDiagnosticsReady => "RioEvent::CodeDiagnosticsReady",
+                RioEvent::CodeGitMarksReady => "RioEvent::CodeGitMarksReady",
                 RioEvent::NotebookStatusTick => "RioEvent::NotebookStatusTick",
                 _ => "RioEvent::Other",
             },
@@ -2357,6 +2363,29 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         RefreshRedrawAction::Redraw
                     ) {
                         route.request_redraw();
+                    }
+                }
+            }
+            RioEventType::Rio(RioEvent::CodeDiagnosticsReady) => {
+                let snapshots =
+                    crate::screen::bridges::code::lsp::drain_code_diagnostic_snapshots();
+                for route in self.router.routes.values_mut() {
+                    let mut changed = false;
+                    for snapshot in &snapshots {
+                        changed |= route.window.screen.apply_code_diagnostic_snapshot(snapshot);
+                    }
+                    if changed {
+                        route.request_redraw();
+                    }
+                }
+            }
+            RioEventType::Rio(RioEvent::CodeGitMarksReady) => {
+                let results = crate::screen::bridges::code::lsp::drain_code_git_results();
+                for result in &results {
+                    if let Some(route) = self.router.routes.get_mut(&result.window_id()) {
+                        if route.window.screen.apply_code_git_result(result) {
+                            route.request_redraw();
+                        }
                     }
                 }
             }

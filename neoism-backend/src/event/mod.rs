@@ -205,6 +205,13 @@ pub enum RioEvent {
     /// Background file-tree git refresh completed; apply the cached
     /// result on the UI thread.
     ApplyFileTreeGitStatus,
+    /// The process-global native LSP worker published one or more complete
+    /// document diagnostic snapshots. The application drains the mailbox on
+    /// the UI thread and fans the snapshots to every window.
+    CodeDiagnosticsReady,
+    /// Background code-buffer git analysis completed. The application drains
+    /// revision-tagged results and installs only still-current marks.
+    CodeGitMarksReady,
     /// Delayed liveness check for a REMOTE (joined-workspace) file
     /// tree: fired a few seconds after a directory listing was
     /// dispatched over the daemon files plane. The handler re-issues
@@ -348,6 +355,8 @@ impl Debug for RioEvent {
             RioEvent::ApplyFileTreeGitStatus => {
                 write!(f, "ApplyFileTreeGitStatus")
             }
+            RioEvent::CodeDiagnosticsReady => write!(f, "CodeDiagnosticsReady"),
+            RioEvent::CodeGitMarksReady => write!(f, "CodeGitMarksReady"),
             RioEvent::RemoteFileTreeCheck => {
                 write!(f, "RemoteFileTreeCheck")
             }

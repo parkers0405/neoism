@@ -188,7 +188,7 @@ pub enum WorkspaceServerMessage {
     /// its metadata is upserted. This does not imply the host's active
     /// workspace changed; active changes are `HostWorkspaceChanged`.
     HostWorkspaceUpserted { workspace: WorkspaceSummary },
-    /// Broadcast when a host's active top-level workspace changes.
+    /// Acknowledges the sender's active top-level workspace change.
     HostWorkspaceChanged {
         host_id: String,
         workspace_id: Option<String>,

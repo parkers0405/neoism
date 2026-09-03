@@ -291,21 +291,22 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// daemon is deliberately marked local so files and terminals do not make
     /// a pointless websocket round trip back to the same machine.
     pub fn current_workspace_is_remote_joined(&self) -> bool {
-        let Some(workspace_id) = self.current_adopted_workspace_id() else {
+        self.workspace_is_remote_joined_for_index(self.current_index)
+    }
+
+    /// Grid-indexed form used by process-wide fanout paths that must classify
+    /// inactive workspaces without temporarily changing focus.
+    pub fn workspace_is_remote_joined_for_index(&self, index: usize) -> bool {
+        let Some(grid) = self.contexts.get(index) else {
             return false;
         };
-        if let Some(stable) = self.current_grid().workspace_route_id() {
-            if let Some(binding) = self.adopted_workspaces.get(&stable) {
-                return binding.is_peer;
-            }
+        if let Some(binding) = grid
+            .workspace_route_id()
+            .and_then(|stable| self.adopted_workspaces.get(&stable))
+        {
+            return binding.is_peer;
         }
-        let local = self.local_host_id();
-        self.daemon
-            .cache
-            .daemon_host_workspaces
-            .iter()
-            .find(|workspace| workspace.id == workspace_id)
-            .is_some_and(|workspace| workspace.host_id != local)
+        false
     }
 
     /// True for the private, per-target home workspace created by Quick SSH.
@@ -686,39 +687,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         } else {
             self.daemon.cache.daemon_host_workspaces.push(workspace);
         }
-    }
-
-    pub(crate) fn switch_local_context_to_daemon_workspace(
-        &mut self,
-        workspace_id: &str,
-    ) {
-        // MULTI-USER GUARD: the daemon's active-workspace pointer is
-        // per-HOST state. When several desktops share one daemon (a
-        // guest joined the host), following pointer flips for
-        // workspaces we don't own yanks each user's screen whenever
-        // the other one switches — the "glitching back and forth"
-        // tug-of-war. Follow only for workspaces this machine owns
-        // (the single-user web↔desktop pick/echo flow).
-        if !self.workspace_owned_locally(workspace_id) {
-            return;
-        }
-        // Adopted grids answer to the DAEMON's workspace id (8C), so a
-        // pick/echo naming one selects the adopted tab instead of
-        // silently no-opping.
-        let Some(index) = self.grid_index_for_workspace_id(workspace_id) else {
-            return;
-        };
-
-        // Idempotency guard: a daemon `HostWorkspaceChanged` naming the
-        // workspace we're already on must NOT re-select the tab — selecting
-        // re-publishes our snapshot, so any echo would oscillate. Only act on a
-        // genuine change. (Belt-and-suspenders with the daemon no longer
-        // echoing publishes back to their originator.)
-        if index == self.current_index {
-            return;
-        }
-
-        self.select_tab(index);
     }
 
     /// Sync this desktop window's view into the daemon-owned workspace graph.

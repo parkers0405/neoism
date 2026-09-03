@@ -675,10 +675,15 @@ pub(crate) async fn append_prompt(
     Ok(final_assistant_message)
 }
 
-fn request_may_start_execution(is_root_session: bool, system: Option<&str>) -> bool {
+fn request_may_start_execution(is_root_session: bool, _system: Option<&str>) -> bool {
+    // `system` is also the supported per-turn instruction channel used by
+    // first-party clients for explicit skill attachments. It does not make a
+    // human prompt an internal continuation. The V2 boundary separately
+    // rejects forged runtime-notification markers, while genuine runtime
+    // notifications enter through trusted server code. Execution admission
+    // therefore depends on session ownership, not whether the turn carries
+    // supplemental system instructions.
     is_root_session
-        && (system.is_none()
-            || system.is_some_and(crate::message_model::is_runtime_system_notification))
 }
 
 fn render_plugin_prompt(
@@ -1814,15 +1819,17 @@ mod tests {
     }
 
     #[test]
-    fn trusted_runtime_notification_can_admit_a_root_execution() {
+    fn root_prompt_with_system_instructions_can_admit_an_execution() {
         assert!(request_may_start_execution(
             true,
             Some("runtime notification: background subagent completion.")
         ));
         assert!(request_may_start_execution(true, None));
-        assert!(!request_may_start_execution(
+        assert!(request_may_start_execution(
             true,
-            Some("ordinary internal system prompt")
+            Some(
+                "The user selected these skills for this request. Load each selected skill with the skill tool before applying it:\n- neoism-yolo-release"
+            )
         ));
         assert!(!request_may_start_execution(
             false,

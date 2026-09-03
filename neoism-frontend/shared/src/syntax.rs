@@ -35,6 +35,7 @@ thread_local! {
 #[cfg(not(target_arch = "wasm32"))]
 const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
     "attribute",
+    "attribute.builtin",
     "boolean",
     "character",
     "character.special",
@@ -59,13 +60,16 @@ const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
     "function",
     "function.builtin",
     "function.call",
+    "function.macro",
     "function.method",
     "function.method.call",
     "keyword",
     "keyword.conditional",
     "keyword.conditional.ternary",
     "keyword.coroutine",
+    "keyword.debug",
     "keyword.directive",
+    "keyword.directive.define",
     "keyword.exception",
     "keyword.export",
     "keyword.function",
@@ -74,6 +78,7 @@ const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
     "keyword.operator",
     "keyword.repeat",
     "keyword.return",
+    "keyword.storage",
     "keyword.type",
     "include",
     "label",
@@ -82,6 +87,7 @@ const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
     "module.builtin",
     "namespace",
     "number",
+    "number.float",
     "operator",
     "property",
     "punctuation",
@@ -91,6 +97,7 @@ const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
     "punctuation.special",
     "string",
     "string.escape",
+    "string.regex",
     "string.regexp",
     "string.special",
     "symbol",
@@ -100,13 +107,75 @@ const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
     "type",
     "type.builtin",
     "type.definition",
+    "type.qualifier",
     "annotation",
     "variable",
     "variable.builtin",
     "variable.member",
+    "variable.member.key",
     "variable.parameter",
+    "variable.parameter.builtin",
     "variable.super",
 ];
+
+/// Contextual Rust captures shipped by nvim-treesitter but omitted from the
+/// grammar crate's intentionally small default query. Keep this compact: the
+/// grammar query still owns literals, keywords, calls, types, and punctuation;
+/// these patterns add the semantic distinctions that make imports, fields, and
+/// parameters read like the NVChad editor rather than a mostly-white lexer.
+#[cfg(not(target_arch = "wasm32"))]
+const RUST_NVIM_CONTEXT_QUERY: &str = r#"
+(field_identifier) @variable.member
+(shorthand_field_identifier) @variable.member
+(shorthand_field_initializer
+  (identifier) @variable.member)
+
+(mod_item
+  name: (identifier) @module)
+
+(parameter
+  (identifier) @variable.parameter)
+(parameter
+  (ref_pattern
+    [
+      (mut_pattern
+        (identifier) @variable.parameter)
+      (identifier) @variable.parameter
+    ]))
+(closure_parameters
+  (_) @variable.parameter)
+
+(scoped_identifier
+  path: (identifier) @module)
+(scoped_identifier
+  (scoped_identifier
+    name: (identifier) @module))
+(scoped_type_identifier
+  path: (identifier) @module)
+(scoped_type_identifier
+  (scoped_identifier
+    name: (identifier) @module))
+
+[
+  (crate)
+  (super)
+] @module
+
+(scoped_use_list
+  path: (identifier) @module)
+(scoped_use_list
+  path: (scoped_identifier
+    (identifier) @module))
+(use_list
+  (scoped_identifier
+    (identifier) @module
+    .
+    (_)))
+(use_list
+  (self) @module)
+(scoped_use_list
+  (self) @module)
+"#;
 
 /// One coloured span of a preview line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +187,9 @@ pub enum SynTok {
     Number,
     Comment,
     Function,
+    Property,
+    Constructor,
+    Special,
     Punct,
 }
 
@@ -780,7 +852,11 @@ fn tree_sitter_config(lang: ParserLang) -> Option<HighlightConfiguration> {
         ParserLang::Rust => HighlightConfiguration::new(
             tree_sitter_rust::LANGUAGE.into(),
             "rust",
-            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            &format!(
+                "{}\n{}",
+                tree_sitter_rust::HIGHLIGHTS_QUERY,
+                RUST_NVIM_CONTEXT_QUERY
+            ),
             tree_sitter_rust::INJECTIONS_QUERY,
             "",
         )
@@ -1183,9 +1259,13 @@ fn tree_sitter_capture_kind(capture: &str, lang: Lang) -> SynTok {
         | "comment.note"
         | "comment.todo"
         | "comment.warning" => SynTok::Comment,
-        "string" | "string.escape" | "string.regexp" | "string.special" | "symbol"
-        | "character" | "character.special" | "escape" => SynTok::String,
-        "number" | "boolean" | "constant.builtin" => SynTok::Number,
+        "string" | "string.special" | "symbol" | "character" => SynTok::String,
+        "string.escape" | "string.regex" | "string.regexp" | "escape" => {
+            SynTok::Constructor
+        }
+        "number" | "number.float" | "boolean" | "constant" | "constant.builtin" => {
+            SynTok::Number
+        }
         "keyword"
         | "keyword.conditional"
         | "keyword.conditional.ternary"
@@ -1199,27 +1279,32 @@ fn tree_sitter_capture_kind(capture: &str, lang: Lang) -> SynTok {
         | "keyword.operator"
         | "keyword.repeat"
         | "keyword.return" => SynTok::Keyword,
-        "keyword.type" | "type" | "type.builtin" | "type.definition" | "constructor"
-        | "tag" | "module" | "module.builtin" | "namespace" | "annotation" => {
-            SynTok::Type
-        }
+        "keyword.type" | "type" | "type.builtin" | "type.definition" | "type.qualifier"
+        | "tag" | "attribute" | "attribute.builtin" => SynTok::Type,
+        "constructor" => SynTok::Constructor,
+        "module" | "module.builtin" | "namespace" => SynTok::Property,
+        "annotation" => SynTok::Special,
         "function"
         | "function.builtin"
         | "function.call"
         | "function.method"
         | "function.method.call" => SynTok::Function,
+        "function.macro" | "constant.macro" | "macro" => SynTok::Property,
         "punctuation"
         | "punctuation.bracket"
         | "punctuation.delimiter"
         | "punctuation.special"
-        | "operator"
-        | "delimiter"
-        | "tag.delimiter" => SynTok::Punct,
-        "constant" | "constant.macro" | "macro" | "label" | "variable.builtin"
-        | "variable.super" => SynTok::Type,
-        "property" | "field" | "variable.member" | "tag.attribute" | "attribute" => {
-            SynTok::Function
-        }
+        | "tag.delimiter" => SynTok::Special,
+        "operator" | "delimiter" => SynTok::Punct,
+        "label" | "character.special" => SynTok::Constructor,
+        "variable.builtin" | "variable.super" => SynTok::Number,
+        "property"
+        | "field"
+        | "variable.member"
+        | "variable.member.key"
+        | "variable.parameter"
+        | "variable.parameter.builtin"
+        | "tag.attribute" => SynTok::Property,
         _ => SynTok::Plain,
     }
 }
@@ -1251,6 +1336,9 @@ pub fn syn_color(tok: SynTok, theme: &IdeTheme, dim: bool) -> [u8; 4] {
         SynTok::Number => theme.u8(theme.syn_number),
         SynTok::Comment => theme.u8(theme.syn_comment),
         SynTok::Function => theme.u8(theme.syn_func),
+        SynTok::Property => theme.u8(theme.syn_property),
+        SynTok::Constructor => theme.u8(theme.syn_constructor),
+        SynTok::Special => theme.u8(theme.syn_special),
         // Structural code characters must remain as legible as identifiers.
         // Muting punctuation made (), {}, operators and delimiters disappear
         // even though they carry the shape of the expression.
@@ -1281,7 +1369,7 @@ mod tests {
         assert!(has_token(&spans, SynTok::Function, "fetch"));
         assert!(has_token(&spans, SynTok::Type, "User"));
         assert!(has_token(&spans, SynTok::Number, "true"));
-        assert!(has_token(&spans, SynTok::Punct, "("));
+        assert!(has_token(&spans, SynTok::Special, "("));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1357,7 +1445,7 @@ mod tests {
         );
         assert_eq!(
             kind_at(flag),
-            Some(SynTok::Type),
+            Some(SynTok::Number),
             "-la should color as a bash flag"
         );
     }
@@ -1423,10 +1511,35 @@ mod tests {
         let spans = highlight_line("let path = format!(\"a\\nb\");", Lang::Rust);
 
         assert!(has_token(&spans, SynTok::Keyword, "let"));
-        assert!(has_token(&spans, SynTok::Function, "format"));
-        assert!(has_token(&spans, SynTok::String, "\\n"));
+        assert!(has_token(&spans, SynTok::Property, "format"));
+        assert!(has_token(&spans, SynTok::Constructor, "\\n"));
         assert!(spans
             .iter()
-            .any(|(kind, text)| *kind == SynTok::Punct && *text == "("));
+            .any(|(kind, text)| *kind == SynTok::Special && *text == "("));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn rust_uses_nvchad_style_contextual_captures() {
+        let source = "use crate::provider::stream_processor::{run_step, ProviderContext};\n\
+                      fn send(state: &AppState) {\n\
+                          let Prompt { message_id, parts: prompt_parts } = request;\n\
+                          state.run(prompt_parts);\n\
+                      }\n";
+        let spans = highlight_source(source, Lang::Rust).unwrap_or_default();
+        let kind_at = |needle: &str| {
+            let position = source.find(needle).unwrap();
+            spans
+                .iter()
+                .find(|(_, start, end)| *start <= position && position < *end)
+                .map(|(kind, _, _)| *kind)
+        };
+
+        assert_eq!(kind_at("provider"), Some(SynTok::Property));
+        assert_eq!(kind_at("stream_processor"), Some(SynTok::Property));
+        assert_eq!(kind_at("ProviderContext"), Some(SynTok::Constructor));
+        assert_eq!(kind_at("state"), Some(SynTok::Property));
+        assert_eq!(kind_at("message_id"), Some(SynTok::Property));
+        assert_eq!(kind_at("{"), Some(SynTok::Special));
     }
 }

@@ -2511,6 +2511,9 @@ impl ChromeBridge {
                     "Number" => SynTok::Number,
                     "Comment" => SynTok::Comment,
                     "Function" => SynTok::Function,
+                    "Property" => SynTok::Property,
+                    "Constructor" => SynTok::Constructor,
+                    "Special" => SynTok::Special,
                     "Punct" => SynTok::Punct,
                     _ => SynTok::Plain,
                 };

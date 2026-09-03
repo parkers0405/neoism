@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use neoism_agent_core::{AuthInfo, ProviderStreamEvent};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default)]
 pub(super) struct ParsedStreamLine {
@@ -35,8 +35,15 @@ pub(super) fn parse_stream_line(raw: &[u8]) -> anyhow::Result<ParsedStreamLine> 
         });
     }
 
-    let chunk: ChatCompletionChunk = serde_json::from_str(data)
+    let chunk: ChatCompletionStreamChunk = serde_json::from_str(data)
         .context("failed to decode OpenAI-compatible streaming chunk")?;
+    let chunk = match chunk {
+        ChatCompletionStreamChunk::Completion(chunk) => chunk,
+        ChatCompletionStreamChunk::Error { error } => anyhow::bail!(
+            "OpenAI-compatible provider error: {}",
+            serde_json::to_string(&error)?
+        ),
+    };
     let mut parsed = ParsedStreamLine::default();
     if let Some(usage) = chunk.usage {
         if let Some(value) = usage.total_tokens {
@@ -204,6 +211,24 @@ pub(super) fn openai_key_with_fallback(
             .ok(),
         _ => None,
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ChatCompletionStreamChunk {
+    Error { error: OpenAiStreamError },
+    Completion(ChatCompletionChunk),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OpenAiStreamError {
+    message: String,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    param: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]

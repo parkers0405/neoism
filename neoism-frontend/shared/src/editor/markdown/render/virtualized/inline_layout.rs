@@ -45,10 +45,9 @@ struct InlineWrappedLine {
     row_width: f32,
 }
 
-/// A rendered slice of one CommonMark paragraph. The source remains split into
-/// physical lines; this is only the text presented to layout. Keeping this
-/// small transform independent of Sugarloaf makes measurement and drawing use
-/// exactly the same soft/hard-break decisions.
+/// A rendered physical Markdown line whose trailing hard-break marker is
+/// hidden in Normal mode. Ordinary source newlines stay as visual row breaks;
+/// this projection exists only for the two CommonMark marker spellings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PlainParagraphSegment {
     pub(super) start: usize,
@@ -72,10 +71,11 @@ fn is_plain_paragraph_line(raw: &str) -> bool {
     ) && !looks_like_inline_table_line(raw)
 }
 
-/// Return the semantic paragraph segment beginning at `start`, but only when
-/// layout differs from the old one-physical-line path. A revealed source line
-/// is a hard boundary: it stays byte-for-byte visible and adjacent text can
-/// still reflow on either side without invalidating cursor/source mapping.
+/// Hide a trailing CommonMark hard-break marker on one physical source line.
+/// Soft breaks deliberately return `None`, leaving the normal one-source-line
+/// renderer in charge. Neoism is an editor first: collapsing adjacent source
+/// lines into spaces made Normal mode disagree with Insert mode and made
+/// Shift+Enter-created lines appear to vanish.
 pub(super) fn plain_paragraph_segment(
     lines: &[String],
     start: usize,
@@ -86,55 +86,17 @@ pub(super) fn plain_paragraph_segment(
         return None;
     }
 
-    let mut text = String::new();
-    let mut line_ix = start;
-    let mut end;
-    let mut changed = false;
-    let mut spans = Vec::new();
-    loop {
-        let raw = lines.get(line_ix)?.trim_end_matches(['\r', '\n']);
-        let source_start = if line_ix > start {
-            raw.len() - raw.trim_start_matches([' ', '\t']).len()
-        } else {
-            0
-        };
-        let raw = if source_start > 0 {
-            raw.trim_start_matches([' ', '\t'])
-        } else {
-            raw
-        };
-        let (visible, hard_break) = commonmark_line_break(raw);
-        end = line_ix + 1;
-        let continues = !hard_break
-            && revealed_line != Some(end)
-            && lines.get(end).is_some_and(|next| is_plain_paragraph_line(next));
-        let visible = if continues {
-            visible.trim_end_matches([' ', '\t'])
-        } else {
-            visible
-        };
-        let projected_start = text.len();
-        text.push_str(visible);
-        spans.push(PlainParagraphSourceSpan {
-            line: line_ix,
-            projected_start,
-            projected_end: text.len(),
-            source_start,
-        });
-        changed |= hard_break;
-        if !continues {
-            break;
-        }
-        text.push(' ');
-        changed = true;
-        line_ix = end;
-    }
-
-    changed.then_some(PlainParagraphSegment {
+    let (visible, hard_break) = commonmark_line_break(first);
+    hard_break.then(|| PlainParagraphSegment {
         start,
-        end,
-        text,
-        spans,
+        end: start + 1,
+        text: visible.to_string(),
+        spans: vec![PlainParagraphSourceSpan {
+            line: start,
+            projected_start: 0,
+            projected_end: visible.len(),
+            source_start: 0,
+        }],
     })
 }
 
@@ -1413,14 +1375,11 @@ mod inline_layout_tests {
     }
 
     #[test]
-    fn soft_breaks_form_one_reflowable_plain_paragraph() {
+    fn soft_breaks_preserve_every_physical_source_line() {
         let source = source_lines(&["one physical", "  second line", "third"]);
-        let segment = plain_paragraph_segment(&source, 0, None).unwrap();
-        assert_eq!(segment.start, 0);
-        assert_eq!(segment.end, 3);
-        assert_eq!(segment.text, "one physical second line third");
-        // Layout projection never mutates or normalizes the editor/CRDT text.
-        assert_eq!(source, source_lines(&["one physical", "  second line", "third"]));
+        assert!(plain_paragraph_segment(&source, 0, None).is_none());
+        assert!(plain_paragraph_segment(&source, 1, None).is_none());
+        assert!(plain_paragraph_segment(&source, 2, None).is_none());
     }
 
     #[test]
@@ -1431,10 +1390,10 @@ mod inline_layout_tests {
         assert_eq!((first.start, first.end), (0, 1));
         assert_eq!(first.text, "space break");
 
-        let second = plain_paragraph_segment(&source, 1, None).unwrap();
-        assert_eq!((second.start, second.end), (1, 3));
-        assert_eq!(second.text, "after slash break");
-
+        assert!(plain_paragraph_segment(&source, 1, None).is_none());
+        let second = plain_paragraph_segment(&source, 2, None).unwrap();
+        assert_eq!((second.start, second.end), (2, 3));
+        assert_eq!(second.text, "slash break");
         assert!(plain_paragraph_segment(&source, 3, None).is_none());
         assert_eq!(commonmark_line_break(r"escaped\\"), (r"escaped\\", false));
     }
@@ -1451,32 +1410,24 @@ mod inline_layout_tests {
         assert!(plain_paragraph_segment(&source, 5, None).is_none());
 
         let source = source_lines(&["a", "b", "editing", "c", "d"]);
-        assert_eq!(
-            plain_paragraph_segment(&source, 0, Some(2)).unwrap().text,
-            "a b"
-        );
-        assert_eq!(
-            plain_paragraph_segment(&source, 3, Some(2)).unwrap().text,
-            "c d"
-        );
+        for line in 0..source.len() {
+            assert!(plain_paragraph_segment(&source, line, Some(2)).is_none());
+        }
     }
 
     #[test]
-    fn joined_visible_offsets_map_back_to_later_source_lines_and_columns() {
-        let source = source_lines(&["**first**", "  second"]);
+    fn hard_break_visible_offsets_stay_on_the_physical_source_line() {
+        let source = source_lines(&["**first**  "]);
         let segment = plain_paragraph_segment(&source, 0, None).unwrap();
-        assert_eq!(segment.text, "**first** second");
+        assert_eq!(segment.text, "**first**");
 
         let positions = segment.hit_positions(0);
         assert_eq!(positions[0], MarkdownPosition { line: 0, col: 2 });
         assert_eq!(positions[5], MarkdownPosition { line: 0, col: 9 });
-        assert_eq!(positions[6], MarkdownPosition { line: 1, col: 2 });
-        assert_eq!(positions[8], MarkdownPosition { line: 1, col: 4 });
-        assert_eq!(segment.visible_offset_for_source(1, 4, 0), Some(8));
         assert_eq!(
-            segment.hit_positions(40)[8],
-            MarkdownPosition { line: 41, col: 4 }
+            segment.hit_positions(40)[5],
+            MarkdownPosition { line: 40, col: 9 }
         );
-        assert_eq!(segment.visible_offset_for_source(41, 4, 40), Some(8));
+        assert_eq!(segment.visible_offset_for_source(40, 9, 40), Some(5));
     }
 }

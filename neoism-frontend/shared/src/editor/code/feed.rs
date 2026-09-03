@@ -15,7 +15,7 @@ use super::types::*;
 /// Diagnostic severity carried on a run. Mapped from the wire's
 /// `DiagnosticSeverity` by the host — the shared feed stays
 /// protocol-independent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CodeDiagnosticSeverity {
     Hint,
     Info,
@@ -32,6 +32,17 @@ pub struct CodeLineDiagnostic {
     /// Diagnostic message for the inline virtual text; populated only
     /// on the diagnostic's FIRST line (continuation-line spans carry
     /// an empty message so multi-line diagnostics print once).
+    pub message: String,
+}
+
+/// One document-level diagnostic retained by a pane for exact status-pill
+/// counts and popup rows. Visible geometry lives in `CodeLineDiagnostic`;
+/// this compact summary avoids a process-global raw diagnostics store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeDiagnosticSummary {
+    pub line: usize,
+    pub byte: usize,
+    pub severity: CodeDiagnosticSeverity,
     pub message: String,
 }
 

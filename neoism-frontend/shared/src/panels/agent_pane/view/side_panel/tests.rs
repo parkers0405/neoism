@@ -407,7 +407,7 @@ fn first_seen_completed_subagent_is_hidden_immediately() {
 }
 
 #[test]
-fn completed_subagent_stays_visible_while_its_transcript_is_open() {
+fn viewed_historical_completion_is_not_resurrected() {
     let mut panel = NeoismAgentSidePanel::default();
     panel.set_viewed_session_id(Some("done".to_string()));
     panel.set_subagents(vec![
@@ -416,11 +416,28 @@ fn completed_subagent_stays_visible_while_its_transcript_is_open() {
             .with_runtime_status(Some("completed".to_string())),
     ]);
 
-    assert!(panel.subagents().iter().any(|entry| entry.id == "done"));
+    assert!(!panel.subagents().iter().any(|entry| entry.id == "done"));
+}
+
+#[test]
+fn live_viewed_completion_survives_reconciliation_until_user_leaves() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("main", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "working", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+    panel.set_viewed_session_id(Some("child".to_string()));
+    panel.set_branch_activity_status("child", BranchStatus::Completed);
+
+    panel.retain_authoritative_branches(&std::collections::HashSet::new());
+    assert!(panel.subagents().iter().any(|entry| entry.id == "main"));
+    assert!(panel.subagents().iter().any(|entry| entry.id == "child"));
 
     panel.set_viewed_session_id(Some("main".to_string()));
-    assert!(panel.prune_expired_completed_subagents());
+    panel.retain_authoritative_branches(&std::collections::HashSet::new());
     assert!(!panel.subagents().iter().any(|entry| entry.id == "done"));
+    assert!(!panel.subagents().iter().any(|entry| entry.id == "child"));
 }
 
 #[test]

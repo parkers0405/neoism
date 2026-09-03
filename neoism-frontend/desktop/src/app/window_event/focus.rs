@@ -33,11 +33,15 @@ impl Application<'_> {
             route.window.screen.mouse.middle_button_state = ElementState::Released;
             route.window.screen.mouse.right_button_state = ElementState::Released;
             if route.window.screen.cancel_island_drag() {
-                route.window.set_cursor(neoism_window::window::CursorIcon::Default);
+                route
+                    .window
+                    .set_cursor(neoism_window::window::CursorIcon::Default);
                 route.request_redraw();
             }
             if route.window.screen.cancel_buffer_tab_drag() {
-                route.window.set_cursor(neoism_window::window::CursorIcon::Default);
+                route
+                    .window
+                    .set_cursor(neoism_window::window::CursorIcon::Default);
                 route.request_redraw();
             }
         }

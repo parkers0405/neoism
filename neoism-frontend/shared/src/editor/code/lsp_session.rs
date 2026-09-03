@@ -404,24 +404,21 @@ pub struct LspStoredDiagnostic {
 }
 
 // ---------------------------------------------------------------------
-// Diagnostics store: per-file per-server raw sets + the re-anchor-lite
-// heuristic + the per-line byte-span fold. Port of the desktop store
-// (`diag_store` + `reanchor_diagnostics` + the remote fold in
-// `apply_remote_code_lsp_message`).
+// Web diagnostics store: per-file per-server raw sets, re-anchor-lite,
+// and per-line byte-span folding. Desktop uses an event-driven native
+// diagnostics mailbox instead; this remains the wasm transport path.
 // ---------------------------------------------------------------------
 
 #[derive(Default)]
 pub struct LspDiagnosticsStore {
     /// server-keyed raw sets per file, replaced wholesale per publish.
     files: HashMap<PathBuf, HashMap<String, Vec<LspStoredDiagnostic>>>,
-    /// Bumped on every publish AND on heuristic re-anchors — panes
-    /// refold when their seen version lags (desktop `DIAG_VERSION`).
+    /// Bumped on every publish and heuristic re-anchor; web panes refold
+    /// when their seen version lags.
     version: u64,
-    /// Bumped ONLY on a real publish for that file (desktop
-    /// `diag_publish_seq`).
+    /// Bumped only on a real publish for that file.
     publish_seq: HashMap<PathBuf, u64>,
-    /// Previous buffer lines per file for the line-shift heuristic
-    /// (desktop `reanchor_diagnostics`'s `PREV`).
+    /// Previous buffer lines per file for the web line-shift heuristic.
     prev_lines: HashMap<PathBuf, Vec<String>>,
 }
 
@@ -452,9 +449,8 @@ impl LspDiagnosticsStore {
         self.version = self.version.wrapping_add(1).max(1);
     }
 
-    /// Anchor-lite for diagnostics (Zed keeps real anchors; we shift
-    /// the stored ranges by the line-span delta of each edit). Port of
-    /// desktop `reanchor_diagnostics`, on 0-based store lines.
+    /// Web fallback anchor-lite: shift stored ranges by the line-span delta
+    /// of each edit, on zero-based store lines.
     pub fn reanchor(&mut self, file: &Path, current: &[String]) {
         let prev = self.prev_lines.insert(file.to_path_buf(), current.to_vec());
         let Some(prev) = prev else {

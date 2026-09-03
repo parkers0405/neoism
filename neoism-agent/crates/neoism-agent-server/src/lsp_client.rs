@@ -490,7 +490,7 @@ impl LspClient {
                         // normalized by the request waiter, which knows the
                         // originating document for URI-less ranges (hover,
                         // formatting edits, call hierarchy, and so on).
-                        if method.is_some() {
+                        if method.as_deref() == Some("textDocument/publishDiagnostics") {
                             let encoding = reader_position_encoding
                                 .lock()
                                 .map(|encoding| *encoding)

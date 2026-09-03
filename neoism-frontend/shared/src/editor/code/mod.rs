@@ -37,7 +37,7 @@ pub mod vim;
 
 pub use feed::{
     styled_runs_for_line, styled_runs_with_syntax, CodeDiagAnchor,
-    CodeDiagnosticSeverity, CodeLineDiagnostic, CodeStyledRun,
+    CodeDiagnosticSeverity, CodeDiagnosticSummary, CodeLineDiagnostic, CodeStyledRun,
 };
 pub use highlight::CodeHighlightCache;
 pub use types::*;

@@ -5,7 +5,7 @@
 //! Without a watch, its tree only updates when the guest re-lists —
 //! everything else in a shared workspace (shells, CRDT docs) is push
 //! driven, and the tree read as frozen next to them. This hub puts a
-//! recursive watcher on every files root a client has actually
+//! demand-driven watcher on every directory a client has actually
 //! touched and broadcasts debounced `FilesServerMessage::Changed`
 //! pushes (request_id 0) that each `/session` socket forwards to its
 //! client.
@@ -95,6 +95,25 @@ fn is_ignored_watch_path(root: &Path, path: &Path) -> bool {
                 if seg.to_str().is_some_and(|s| IGNORED_SEGMENTS.contains(&s))
         )
     })
+}
+
+/// Only mutations can change a remote client's tree or visible file state.
+/// Directory listings themselves produce read/open/close events on Linux;
+/// forwarding those makes a guest re-list the directory, which produces the
+/// same events again and turns an idle joined workspace into a refresh loop.
+fn is_relevant_watch_event_kind(kind: &notify::EventKind) -> bool {
+    use notify::event::{AccessKind, AccessMode, MetadataKind, ModifyKind};
+
+    match kind {
+        notify::EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        notify::EventKind::Access(_) => false,
+        notify::EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)) => false,
+        notify::EventKind::Any
+        | notify::EventKind::Create(_)
+        | notify::EventKind::Modify(_)
+        | notify::EventKind::Remove(_)
+        | notify::EventKind::Other => true,
+    }
 }
 
 pub struct FsWatchHub {
@@ -204,6 +223,9 @@ impl FsWatchHub {
         let watcher = notify::recommended_watcher(
             move |event: Result<notify::Event, notify::Error>| {
                 let Ok(event) = event else { return };
+                if !is_relevant_watch_event_kind(&event.kind) {
+                    return;
+                }
                 // Content-only modifications don't change the tree
                 // shape, but renames/creates/removes do; send them
                 // all and let the debounce + client re-list absorb
@@ -254,7 +276,43 @@ impl FsWatchHub {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ignored_watch_path, Path};
+    use super::{is_ignored_watch_path, is_relevant_watch_event_kind, Path};
+    use notify::event::{
+        AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+        RenameMode,
+    };
+    use notify::EventKind;
+
+    #[test]
+    fn drops_non_mutating_access_events() {
+        for kind in [
+            EventKind::Access(AccessKind::Any),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Open(AccessMode::Write)),
+            EventKind::Access(AccessKind::Other),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+        ] {
+            assert!(!is_relevant_watch_event_kind(&kind), "kept {kind:?}");
+        }
+    }
+
+    #[test]
+    fn keeps_mutating_and_rescan_events() {
+        for kind in [
+            EventKind::Any,
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            EventKind::Remove(RemoveKind::File),
+            EventKind::Other,
+        ] {
+            assert!(is_relevant_watch_event_kind(&kind), "dropped {kind:?}");
+        }
+    }
 
     #[test]
     fn drops_churny_trees_under_root() {

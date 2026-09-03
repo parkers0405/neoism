@@ -27,6 +27,9 @@ pub enum SyntaxToken {
     Number,
     Comment,
     Function,
+    Property,
+    Constructor,
+    Special,
     Punct,
 }
 

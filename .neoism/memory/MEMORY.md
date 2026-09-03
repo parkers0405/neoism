@@ -182,3 +182,7 @@
 - [Markdown model hard-wraps rendered as ugly extra lines — fixed](bug_markdown_model_hard_wrap_rendering.md) - Live Preview reflows model hard-wrapped Markdown soft breaks without changing source; source-accurate interaction maps included.
 - [Chrome overlays shifted by workspace Island — FIXED](bug_chrome_overlay_workspace_shift.md) - Chrome palette and modal overlays no longer shift down when additional workspaces make the Island visible; anchor excludes Island entirely
 - [Desktop-owned Notes MCP](feature_desktop_notes_mcp.md) - Notes removed from generic Agent and supplied automatically by Neoism Desktop over stdio MCP; memory remains native Agent-owned
+- [Workspace switch Agent tabs become terminal splash — FIXED](bug_workspace_switch_agent_tabs_terminal_splash.md) - Stale workspace switch ack caused Agent tabs to render terminal splash; fixed by treating ack as ack-only
+- [Viewed subagent disappears on completion — FIXED](bug_viewed_subagent_disappears_on_completion.md) - Live viewed subagent retained through completion until navigation; historical dead sessions remain filtered
+- [Mac→Linux joined workspace 8 FPS — FIXED](bug_macos_linux_join_8fps.md) - Linux watcher access-event feedback loop starved macOS joined guest; mutation filter restored
+- [Rust Analyzer warm-up UI slowdown — FIXED](bug_rust_analyzer_warmup_ui_slow.md) - Zed-style document-scoped diagnostics, sticky anchors, and background git analysis fix RA warm-up frame starvation

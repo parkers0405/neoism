@@ -709,8 +709,12 @@ pub struct NeoismAgentSidePanel {
     /// only when this list has at least one *non-main* entry.
     subagents: Vec<NeoismAgentSessionEntry>,
     /// Session whose transcript is currently open in the pane. Completed
-    /// children are not auto-hidden while the user is viewing them.
+    /// children are retained only when we observed them running while viewed.
     viewed_session_id: Option<String>,
+    /// Ephemeral hold for a viewed child observed live before it finished.
+    /// Never populate this from completed recovery data: doing so would
+    /// resurrect dead sessions after startup or reconnect.
+    retained_viewed_subagent_id: Option<String>,
     subagents_loaded: bool,
     /// Only one branch-tree snapshot may be in flight at a time. The
     /// generation invalidates an older worker when the viewed session or
@@ -817,6 +821,7 @@ impl Default for NeoismAgentSidePanel {
             last_sessions_refresh: None,
             subagents: Vec::new(),
             viewed_session_id: None,
+            retained_viewed_subagent_id: None,
             subagents_loaded: false,
             subagent_refresh_in_flight: false,
             subagent_refresh_generation: 0,
@@ -1231,7 +1236,38 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn set_viewed_session_id(&mut self, session_id: Option<String>) {
-        self.viewed_session_id = session_id.filter(|id| !id.is_empty());
+        let session_id = session_id.filter(|id| !id.is_empty());
+        if self.retained_viewed_subagent_id.as_deref() != session_id.as_deref() {
+            self.retained_viewed_subagent_id = None;
+        }
+        self.viewed_session_id = session_id;
+        let Some(viewed) = self.viewed_session_id.as_deref() else {
+            return;
+        };
+        let active = self
+            .branch_activities
+            .get(viewed)
+            .is_some_and(|activity| {
+                matches!(
+                    activity.status,
+                    BranchStatus::Active | BranchStatus::WaitingPermission
+                )
+            })
+            || self
+                .subagents
+                .iter()
+                .find(|entry| entry.id == viewed)
+                .and_then(|entry| entry.runtime_status.as_deref())
+                .and_then(BranchStatus::from_runtime_status)
+                .is_some_and(|status| {
+                    matches!(
+                        status,
+                        BranchStatus::Active | BranchStatus::WaitingPermission
+                    )
+                });
+        if active {
+            self.retained_viewed_subagent_id = Some(viewed.to_string());
+        }
     }
 
     /// Record the non-idle status the composer row is displaying this
@@ -1318,9 +1354,9 @@ impl NeoismAgentSidePanel {
     /// A respawned sub-agent reports `Active`/`WaitingPermission`
     /// (which clears `completed_at`) so it stays visible.
     fn subagent_hidden(&self, entry: &NeoismAgentSessionEntry) -> bool {
-        // Keep the open transcript reachable even after it finishes. Once
-        // the user leaves it, the ordinary completion expiry applies.
-        if self.viewed_session_id.as_deref() == Some(entry.id.as_str()) {
+        // Keep only a child observed live while its transcript was open.
+        // Merely viewing a historical completed child must not revive it.
+        if self.retained_viewed_subagent_id.as_deref() == Some(entry.id.as_str()) {
             return false;
         }
         // Runtime status reported straight on the entry takes
@@ -1850,7 +1886,7 @@ impl NeoismAgentSidePanel {
             .filter(|(index, entry)| {
                 *index > 0
                     && !incoming_ids.contains(&entry.id)
-                    && self
+                    && (self
                         .branch_activities
                         .get(&entry.id)
                         .is_some_and(|activity| {
@@ -1859,6 +1895,8 @@ impl NeoismAgentSidePanel {
                                 BranchStatus::Active | BranchStatus::WaitingPermission
                             )
                         })
+                        || self.retained_viewed_subagent_id.as_deref()
+                            == Some(entry.id.as_str()))
             })
             .map(|(_, entry)| entry.clone())
             .collect::<Vec<_>>();
@@ -2173,6 +2211,11 @@ impl NeoismAgentSidePanel {
         transition: BranchStatusTransition,
     ) -> bool {
         let session_id = session_id.into();
+        if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission)
+            && self.viewed_session_id.as_deref() == Some(session_id.as_str())
+        {
+            self.retained_viewed_subagent_id = Some(session_id.clone());
+        }
         if transition == BranchStatusTransition::AncillaryActivity
             && matches!(
                 status,
@@ -2274,11 +2317,15 @@ impl NeoismAgentSidePanel {
         &mut self,
         branch_ids: &std::collections::HashSet<String>,
     ) {
-        self.branch_activities
-            .retain(|session_id, _| branch_ids.contains(session_id));
+        let retained = self.retained_viewed_subagent_id.as_deref();
+        self.branch_activities.retain(|session_id, _| {
+            branch_ids.contains(session_id) || retained == Some(session_id.as_str())
+        });
         let root_id = self.subagents.first().map(|entry| entry.id.clone());
         self.subagents.retain(|entry| {
-            root_id.as_deref() == Some(entry.id.as_str()) || branch_ids.contains(&entry.id)
+            root_id.as_deref() == Some(entry.id.as_str())
+                || branch_ids.contains(&entry.id)
+                || retained == Some(entry.id.as_str())
         });
     }
 

@@ -1,5 +1,76 @@
 use super::*;
 
+/// A normal root prompt may carry first-party per-turn system instructions
+/// (for example an explicitly attached skill). Those instructions must not
+/// make execution admission treat the prompt as a child/internal continuation.
+#[tokio::test]
+async fn root_prompt_with_skill_system_starts_model_generation() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-root-skill-prompt-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/v2/sessions?directory={}", root.display()),
+                Some(json!({
+                    "model": {
+                        "providerId": "neoism",
+                        "id": "stub"
+                    }
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let response = app
+        .oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions/{}/prompt", session.id),
+            Some(json!({
+                "model": { "providerId": "neoism", "modelId": "stub" },
+                "system": "The user selected these skills for this request. Load each selected skill with the skill tool before applying it:\n- neoism-yolo-release",
+                "parts": [{ "type": "text", "text": "confirm skill prompt" }]
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let messages = state
+                .inner
+                .store
+                .list_messages(session.id.as_str())
+                .await
+                .unwrap();
+            if messages
+                .iter()
+                .any(|message| matches!(message.info, MessageInfo::Assistant(_)))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("root skill prompt should produce an assistant reply");
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn session_abort_cancels_active_run() {
     let path = std::env::temp_dir().join(format!(

@@ -138,10 +138,12 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 self.daemon.cache.daemon_workspace_tabs = tabs;
                 true
             }
-            WorkspaceServerMessage::HostWorkspaceChanged { workspace_id, .. } => {
-                if let Some(workspace_id) = workspace_id {
-                    self.switch_local_context_to_daemon_workspace(&workspace_id);
-                }
+            WorkspaceServerMessage::HostWorkspaceChanged { .. } => {
+                // This is the acknowledgement for our own prior
+                // `SwitchHostWorkspace`. Re-applying it here can reorder rapid
+                // A -> B -> A selections behind Screen's workspace-chrome
+                // transaction, leaving one grid paired with another grid's
+                // buffer tabs.
                 self.request_daemon_host_workspace_tree();
                 true
             }

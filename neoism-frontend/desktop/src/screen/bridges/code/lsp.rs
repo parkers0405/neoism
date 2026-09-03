@@ -7,9 +7,10 @@
 //!   and ships the full text to a worker thread that calls
 //!   `sync_document` (didOpen/didChange), coalescing bursts.
 //! - diagnostics: a thread blocks on the engine's `publishDiagnostics`
-//!   broadcast, folds events into a global per-file store, and wakes
-//!   the render loop; the pump converts UTF-16 ranges into per-line
-//!   byte spans on the pane (`CodePane::diagnostics`) for squiggles.
+//!   broadcast, maps each event once to zero-based UTF-8 byte ranges,
+//!   and publishes complete per-document snapshots to a newest-wins
+//!   mailbox. `Application::user_event` drains it and fans each snapshot
+//!   to every window and every matching local pane.
 //! - queries (completion/hover/definition): input paths enqueue
 //!   seq-tokened jobs on the same worker; the worker calls the blocking
 //!   facade, drops all but the newest job per kind, writes the result
@@ -17,19 +18,14 @@
 //!   drains the mailbox into the UI session state on
 //!   `Renderer::code_lsp` (stale seqs are dropped there).
 //!
-//! Coordinate contract: the engine facade speaks zero-based lines and
-//! zero-based UTF-8 BYTE columns in both directions (`crate::lsp`
-//! converts to/from each server's negotiated encoding at the wire), so
-//! the pane's `cursor_col` byte offsets pass through unchanged.
-//! EXCEPTION: diagnostic ranges are NOT converted by the engine
-//! (`lsp_parse::parse_diagnostics` stores the raw wire range), so the
-//! fold below converts assuming UTF-16 — correct for most servers;
-//! UTF-8-negotiated servers only drift on non-ASCII lines.
+//! Coordinate contract: query/action facade positions are zero-based UTF-8
+//! byte columns. Published `DiagnosticsEvent` positions are public 1-based
+//! UTF-8 byte coordinates after the client normalization/parser boundary;
+//! the diagnostics worker removes that one-based offset exactly once.
 
 use super::*;
 use neoism_agent_server::language_server as engine;
 use neoism_backend::event::{EventProxy, RioEvent, RioEventType, WindowId};
-use neoism_ui::editor::code::layout::byte_for_utf16_col;
 // Pure LSP session helpers now live in the shared crate
 // (`neoism_ui::editor::code::lsp_session`) so the web frontend runs the
 // exact same logic; desktop delegates instead of keeping copies.
@@ -42,13 +38,15 @@ use neoism_ui::editor::code::lsp_session::{
     parse_lsp_text_edits, snippet_with_first_stop, word_start_col,
     workspace_edit_file_edits,
 };
-use neoism_ui::editor::code::{CodeDiagnosticSeverity, CodeLineDiagnostic};
+use neoism_ui::editor::code::{
+    CodeDiagAnchor, CodeDiagnosticSeverity, CodeDiagnosticSummary, CodeLineDiagnostic,
+};
 use neoism_ui::editor_snapshot::{PopupMenu, PopupMenuItem};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 fn is_neoism_config_path(path: &Path) -> bool {
     path == neoism_backend::config::config_file_path()
@@ -234,31 +232,74 @@ struct CodeLspShared {
 }
 
 static CODE_LSP: OnceLock<CodeLspShared> = OnceLock::new();
-/// Bumped on every diagnostics push; panes fold the store in when their
-/// seen version lags.
-static DIAG_VERSION: AtomicU64 = AtomicU64::new(1);
 /// Monotonic token for completion/hover/definition requests. The pump
 /// only installs a result whose seq matches the newest request of that
 /// kind, so late replies to superseded requests are dropped.
 static QUERY_SEQ: AtomicU64 = AtomicU64::new(1);
 
-type DiagStore = Mutex<HashMap<PathBuf, HashMap<String, Vec<engine::LspDiagnostic>>>>;
-
-fn diag_store() -> &'static DiagStore {
-    static STORE: OnceLock<DiagStore> = OnceLock::new();
-    STORE.get_or_init(Default::default)
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DiagnosticDocumentKey {
+    root: PathBuf,
+    file: PathBuf,
 }
 
-/// Per-file publish sequence: bumped ONLY when a server actually
-/// publishes diagnostics for that file. Unlike the global
-/// `DIAG_VERSION` (which also moves on heuristic re-anchors and other
-/// files' publishes), this lets the sticky-anchor path refold from the
-/// raw store exactly when fresh positions exist — a version bump from
-/// anywhere else must never overwrite anchor-precise spans with stale
-/// store positions.
-fn diag_publish_seq() -> &'static Mutex<HashMap<PathBuf, u64>> {
-    static STORE: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
-    STORE.get_or_init(Default::default)
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DocumentDiagnostic {
+    start_line: usize,
+    start_byte: usize,
+    end_line: usize,
+    end_byte: usize,
+    severity: CodeDiagnosticSeverity,
+    message: String,
+}
+
+/// A complete aggregate across every server currently publishing for one
+/// `(workspace root, file)`. Coordinates are zero-based UTF-8 bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodeDiagnosticSnapshot {
+    key: DiagnosticDocumentKey,
+    diagnostics: Vec<DocumentDiagnostic>,
+}
+
+type DiagnosticsMailbox = Mutex<HashMap<DiagnosticDocumentKey, CodeDiagnosticSnapshot>>;
+
+fn diagnostics_mailbox() -> &'static DiagnosticsMailbox {
+    static MAILBOX: OnceLock<DiagnosticsMailbox> = OnceLock::new();
+    MAILBOX.get_or_init(Default::default)
+}
+
+static DIAGNOSTICS_WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn enqueue_diagnostic_snapshot(
+    mailbox: &DiagnosticsMailbox,
+    wake_pending: &AtomicBool,
+    snapshot: CodeDiagnosticSnapshot,
+) -> bool {
+    let mut pending = match mailbox.lock() {
+        Ok(pending) => pending,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    pending.insert(snapshot.key.clone(), snapshot);
+    !wake_pending.swap(true, Ordering::AcqRel)
+}
+
+fn drain_diagnostic_snapshots_from(
+    mailbox: &DiagnosticsMailbox,
+    wake_pending: &AtomicBool,
+) -> Vec<CodeDiagnosticSnapshot> {
+    let mut pending = match mailbox.lock() {
+        Ok(pending) => pending,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let snapshots = pending.drain().map(|(_, snapshot)| snapshot).collect();
+    // Reset while holding the mailbox lock: a producer cannot insert between
+    // the drain and reset and lose its wakeup.
+    wake_pending.store(false, Ordering::Release);
+    snapshots
+}
+
+pub(crate) fn drain_code_diagnostic_snapshots() -> Vec<CodeDiagnosticSnapshot> {
+    drain_diagnostic_snapshots_from(diagnostics_mailbox(), &DIAGNOSTICS_WAKE_PENDING)
 }
 
 /// Diagnostics are keyed by CANONICAL path: the engine's event carries
@@ -274,6 +315,20 @@ fn canonical_key(path: &Path) -> PathBuf {
     {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
+}
+
+fn map_engine_diagnostic(
+    diagnostic: engine::LspDiagnostic,
+) -> Option<DocumentDiagnostic> {
+    let range = diagnostic.range?;
+    Some(DocumentDiagnostic {
+        start_line: (range.start.line as usize).saturating_sub(1),
+        start_byte: (range.start.character as usize).saturating_sub(1),
+        end_line: (range.end.line as usize).saturating_sub(1),
+        end_byte: (range.end.character as usize).saturating_sub(1),
+        severity: map_severity(&diagnostic.severity),
+        message: diagnostic.message,
+    })
 }
 
 /// Latest result per query kind, written by the worker and drained by
@@ -475,31 +530,18 @@ fn apply_edits_on_disk(
     std::fs::write(path, out)
 }
 
-/// Git gutter baseline: the file's HEAD content as lines. `None` value
-/// = fetched and absent (untracked / not a repo); missing key = not
-/// fetched yet. Filled by a spawned `git show` thread; the UI thread
-/// only reads.
-type GitBaselineStore = Mutex<HashMap<PathBuf, Option<std::sync::Arc<Vec<String>>>>>;
+/// Git gutter baseline: the file's HEAD content as lines. The dedicated code
+/// analysis worker populates this cache; the UI thread never runs git.
+type GitBaselineStore = Mutex<HashMap<PathBuf, Option<Arc<Vec<String>>>>>;
 
 fn git_baseline_store() -> &'static GitBaselineStore {
     static STORE: OnceLock<GitBaselineStore> = OnceLock::new();
     STORE.get_or_init(Default::default)
 }
 
-fn git_baseline_inflight() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
-    static STORE: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
-    STORE.get_or_init(Default::default)
-}
-
-/// Baseline for `file`, spawning a one-shot `git show HEAD:./name`
-/// fetch when it hasn't been loaded yet (the wake repaints once it
-/// lands). Returns `None` until the fetch resolves or when the file
-/// has no baseline.
-fn git_baseline(
-    file: &Path,
-    proxy: &EventProxy,
-    window_id: WindowId,
-) -> Option<std::sync::Arc<Vec<String>>> {
+/// Baseline for `file`, loaded synchronously on the single background worker
+/// and cached thereafter. `None` means untracked/not in a repository.
+fn git_baseline(file: &Path) -> Option<Arc<Vec<String>>> {
     let key = canonical_key(file);
     {
         let store = match git_baseline_store().lock() {
@@ -510,133 +552,241 @@ fn git_baseline(
             return entry.clone();
         }
     }
-    {
-        let mut inflight = match git_baseline_inflight().lock() {
-            Ok(inflight) => inflight,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if !inflight.insert(key.clone()) {
+    let baseline = key.parent().and_then(|dir| {
+        let name = key.file_name()?;
+        let output = crate::background_process::command("git")
+            .arg("-C")
+            .arg(dir)
+            .arg("show")
+            .arg(format!("HEAD:./{}", name.to_string_lossy()))
+            .output()
+            .ok()?;
+        if !output.status.success() {
             return None;
         }
-    }
-    let fetch_file = key.clone();
-    let proxy = proxy.clone();
-    let _ = std::thread::Builder::new()
-        .name("code-git-baseline".into())
-        .spawn(move || {
-            let baseline = fetch_file.parent().and_then(|dir| {
-                let name = fetch_file.file_name()?;
-                let output = crate::background_process::command("git")
-                    .arg("-C")
-                    .arg(dir)
-                    .arg("show")
-                    .arg(format!("HEAD:./{}", name.to_string_lossy()))
-                    .output()
-                    .ok()?;
-                if !output.status.success() {
-                    return None;
-                }
-                let text = String::from_utf8_lossy(&output.stdout).replace('\r', "");
-                let mut lines: Vec<String> =
-                    text.split('\n').map(str::to_string).collect();
-                if text.ends_with('\n') {
-                    lines.pop();
-                }
-                Some(std::sync::Arc::new(lines))
-            });
-            {
-                let mut store = match git_baseline_store().lock() {
-                    Ok(store) => store,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                store.insert(fetch_file.clone(), baseline);
-            }
-            {
-                let mut inflight = match git_baseline_inflight().lock() {
-                    Ok(inflight) => inflight,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                inflight.remove(&fetch_file);
-            }
-            proxy.send_event(RioEventType::Rio(RioEvent::Render), window_id);
-        });
-    None
-}
-
-/// Anchor-lite for diagnostics (Zed keeps real anchors; we shift the
-/// stored ranges by the line-span delta of each edit): compare the
-/// buffer against its previous snapshot, and when lines were inserted
-/// or removed, move every stored diagnostic that sits BELOW the edited
-/// span. Squiggles then track edits instead of drifting until the
-/// server's next publish (which replaces the set wholesale).
-fn reanchor_diagnostics(file: &Path, current: &[String]) {
-    static PREV: OnceLock<Mutex<HashMap<PathBuf, Vec<String>>>> = OnceLock::new();
-    let key = canonical_key(file);
-    let prev = {
-        let mut map = match PREV.get_or_init(Default::default).lock() {
-            Ok(map) => map,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        map.insert(key.clone(), current.to_vec())
-    };
-    let Some(prev) = prev else {
-        return;
-    };
-    if prev.len() == current.len() {
-        // Same line count: per-line edits don't move ranges.
-        return;
-    }
-    let mut prefix = 0usize;
-    let max_prefix = prev.len().min(current.len());
-    while prefix < max_prefix && prev[prefix] == current[prefix] {
-        prefix += 1;
-    }
-    let mut suffix = 0usize;
-    let max_suffix = max_prefix - prefix;
-    while suffix < max_suffix
-        && prev[prev.len() - 1 - suffix] == current[current.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-    let old_len = prev.len() - prefix - suffix;
-    let new_len = current.len() - prefix - suffix;
-    let delta = new_len as i64 - old_len as i64;
-    if delta == 0 {
-        return;
-    }
-    // First OLD line index at/after which ranges must shift.
-    let boundary = (prefix + old_len) as i64;
-    let shift = |line: &mut u32| {
-        let shifted = (*line as i64 + delta).max(0);
-        *line = shifted as u32;
-    };
-    let mut store = match diag_store().lock() {
+        let text = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+        let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        if text.ends_with('\n') {
+            lines.pop();
+        }
+        Some(Arc::new(lines))
+    });
+    let mut store = match git_baseline_store().lock() {
         Ok(store) => store,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let Some(by_server) = store.get_mut(&key) else {
-        return;
+    store.insert(key, baseline.clone());
+    baseline
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CodeGitKey {
+    window_id: WindowId,
+    route_id: usize,
+    file: PathBuf,
+}
+
+struct CodeGitJob {
+    key: CodeGitKey,
+    revision: u64,
+    lines: Vec<String>,
+}
+
+pub(crate) struct CodeGitResult {
+    key: CodeGitKey,
+    revision: u64,
+    marks: neoism_ui::editor::code::gitdiff::CodeGitMarks,
+}
+
+impl CodeGitResult {
+    pub(crate) fn window_id(&self) -> WindowId {
+        self.key.window_id
+    }
+}
+
+type CodeGitQueue = Arc<(Mutex<HashMap<CodeGitKey, CodeGitJob>>, Condvar)>;
+type CodeGitResultMailbox = Mutex<HashMap<CodeGitKey, CodeGitResult>>;
+
+struct CodeGitWorker {
+    queue: CodeGitQueue,
+}
+
+fn code_git_results() -> &'static CodeGitResultMailbox {
+    static RESULTS: OnceLock<CodeGitResultMailbox> = OnceLock::new();
+    RESULTS.get_or_init(Default::default)
+}
+
+static CODE_GIT_WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn ensure_code_git_worker(proxy: EventProxy) -> &'static CodeGitWorker {
+    static WORKER: OnceLock<CodeGitWorker> = OnceLock::new();
+    WORKER.get_or_init(move || {
+        let queue: CodeGitQueue = Arc::new((Mutex::new(HashMap::new()), Condvar::new()));
+        let worker_queue = Arc::clone(&queue);
+        let _ = std::thread::Builder::new()
+            .name("code-git-analysis".into())
+            .spawn(move || loop {
+                let batch = {
+                    let (pending, ready) = &*worker_queue;
+                    let mut pending = match pending.lock() {
+                        Ok(pending) => pending,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    while pending.is_empty() {
+                        pending = match ready.wait(pending) {
+                            Ok(pending) => pending,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                    }
+                    std::mem::take(&mut *pending)
+                };
+                for (_, job) in batch {
+                    // The 512KB policy scan runs once per scheduled revision,
+                    // here rather than in paint or the UI scheduling hook.
+                    let small_enough = job
+                        .lines
+                        .iter()
+                        .map(|line| line.len() + 1)
+                        .sum::<usize>()
+                        <= 512 * 1024;
+                    let marks = if small_enough {
+                        git_baseline(&job.key.file)
+                            .map(|baseline| {
+                                neoism_ui::editor::code::gitdiff::compute_git_marks(
+                                    &baseline,
+                                    &job.lines,
+                                )
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Default::default()
+                    };
+                    let window_id = job.key.window_id;
+                    let result = CodeGitResult {
+                        key: job.key.clone(),
+                        revision: job.revision,
+                        marks,
+                    };
+                    let mut results = match code_git_results().lock() {
+                        Ok(results) => results,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    results.insert(job.key, result);
+                    if !CODE_GIT_WAKE_PENDING.swap(true, Ordering::AcqRel) {
+                        proxy.send_event(
+                            RioEventType::Rio(RioEvent::CodeGitMarksReady),
+                            window_id,
+                        );
+                    }
+                }
+            });
+        CodeGitWorker { queue }
+    })
+}
+
+fn enqueue_code_git_job(worker: &CodeGitWorker, job: CodeGitJob) -> bool {
+    let (pending, ready) = &*worker.queue;
+    let mut pending = match pending.lock() {
+        Ok(pending) => pending,
+        Err(poisoned) => poisoned.into_inner(),
     };
-    let mut moved = false;
-    for diags in by_server.values_mut() {
-        for diag in diags.iter_mut() {
-            let Some(range) = diag.range.as_mut() else {
+    let replaced = pending.insert(job.key.clone(), job).is_some();
+    ready.notify_one();
+    replaced
+}
+
+fn code_git_result_matches(
+    code: &neoism_ui::editor::code::CodePane,
+    result: &CodeGitResult,
+) -> bool {
+    canonical_key(&code.path) == result.key.file && code.buffer.revision == result.revision
+}
+
+pub(crate) fn drain_code_git_results() -> Vec<CodeGitResult> {
+    let mut results = match code_git_results().lock() {
+        Ok(results) => results,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let drained = results.drain().map(|(_, result)| result).collect();
+    CODE_GIT_WAKE_PENDING.store(false, Ordering::Release);
+    drained
+}
+
+fn visible_byte_span(line: &str, from: usize, to: usize) -> Option<(usize, usize)> {
+    if line.is_empty() {
+        return None;
+    }
+    let mut from = floor_char_boundary_of(line, from);
+    let mut to = floor_char_boundary_of(line, to);
+    if to <= from {
+        if from >= line.len() {
+            from = line
+                .char_indices()
+                .next_back()
+                .map(|(ix, _)| ix)
+                .unwrap_or(0);
+        }
+        to = line[from..]
+            .chars()
+            .next()
+            .map(|ch| from + ch.len_utf8())
+            .unwrap_or(line.len());
+    }
+    (from < to).then_some((from, to))
+}
+
+fn clamp_byte_position(lines: &[String], line: usize, byte: usize) -> (usize, usize) {
+    lines
+        .get(line)
+        .map(|text| (line, floor_char_boundary_of(text, byte)))
+        .unwrap_or((line, byte))
+}
+
+/// Pure projection from complete document diagnostics to visible per-line
+/// spans. Input and output columns are UTF-8 bytes; no UTF-16 conversion is
+/// valid at this layer.
+fn project_diagnostic_ranges(
+    lines: &[String],
+    diagnostics: &[DocumentDiagnostic],
+) -> HashMap<usize, Vec<CodeLineDiagnostic>> {
+    let mut per_line = HashMap::new();
+    for diagnostic in diagnostics {
+        let start = (diagnostic.start_line, diagnostic.start_byte);
+        let end = (diagnostic.end_line, diagnostic.end_byte);
+        let ((start_line, start_byte), (end_line, end_byte)) = if end < start {
+            (end, start)
+        } else {
+            (start, end)
+        };
+        for line_ix in start_line..=end_line {
+            let Some(line) = lines.get(line_ix) else {
+                break;
+            };
+            let from = if line_ix == start_line { start_byte } else { 0 };
+            let to = if line_ix == end_line {
+                end_byte
+            } else {
+                line.len()
+            };
+            let Some((start, end)) = visible_byte_span(line, from, to) else {
                 continue;
             };
-            if (range.start.line as i64) >= boundary {
-                shift(&mut range.start.line);
-                shift(&mut range.end.line);
-                moved = true;
-            } else if (range.end.line as i64) >= boundary {
-                shift(&mut range.end.line);
-                moved = true;
-            }
+            per_line
+                .entry(line_ix)
+                .or_insert_with(Vec::new)
+                .push(CodeLineDiagnostic {
+                    start,
+                    end,
+                    severity: diagnostic.severity,
+                    message: if line_ix == start_line {
+                        diagnostic.message.clone()
+                    } else {
+                        String::new()
+                    },
+                });
         }
     }
-    drop(store);
-    if moved {
-        DIAG_VERSION.fetch_add(1, Ordering::SeqCst);
-    }
+    per_line
 }
 
 /// Rebuild the pane's per-line diagnostic spans by resolving its
@@ -650,7 +800,7 @@ fn fold_anchored_diagnostics(
     code: &neoism_ui::editor::code::CodePane,
     binding: &neoism_ui::editor::code::doc_sync::CodeDocBinding,
 ) -> HashMap<usize, Vec<CodeLineDiagnostic>> {
-    let mut per_line: HashMap<usize, Vec<CodeLineDiagnostic>> = HashMap::new();
+    let mut diagnostics = Vec::with_capacity(code.diag_anchors.len());
     for anchor in &code.diag_anchors {
         let Some(start) = binding.resolve_sticky_anchor(&anchor.start) else {
             continue;
@@ -658,53 +808,16 @@ fn fold_anchored_diagnostics(
         let Some(end) = binding.resolve_sticky_anchor(&anchor.end) else {
             continue;
         };
-        // A delete spanning the range can leave the endpoints reversed;
-        // normalize rather than dropping the diagnostic.
-        let ((start_line, start_col), (end_line, end_col)) = if end < start {
-            (end, start)
-        } else {
-            (start, end)
-        };
-        for line_ix in start_line..=end_line {
-            let Some(line) = code.buffer.lines.get(line_ix) else {
-                break;
-            };
-            let mut from = if line_ix == start_line {
-                start_col.min(line.len())
-            } else {
-                0
-            };
-            let mut to = if line_ix == end_line {
-                end_col.min(line.len())
-            } else {
-                line.len()
-            };
-            // Zero-width / end-of-line ranges still get a visible
-            // one-cell underline (same policy as the store fold).
-            if to <= from {
-                if from >= line.len() && !line.is_empty() {
-                    from = line.len() - 1;
-                }
-                to = (from + 1).min(line.len());
-            }
-            if from < to {
-                per_line
-                    .entry(line_ix)
-                    .or_default()
-                    .push(CodeLineDiagnostic {
-                        start: from,
-                        end: to,
-                        severity: anchor.severity,
-                        message: if line_ix == start_line {
-                            anchor.message.clone()
-                        } else {
-                            String::new()
-                        },
-                    });
-            }
-        }
+        diagnostics.push(DocumentDiagnostic {
+            start_line: start.0,
+            start_byte: start.1,
+            end_line: end.0,
+            end_byte: end.1,
+            severity: anchor.severity,
+            message: anchor.message.clone(),
+        });
     }
-    per_line
+    project_diagnostic_ranges(&code.buffer.lines, &diagnostics)
 }
 
 // ---------------------------------------------------------------------
@@ -1576,29 +1689,33 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     event.diagnostics.len()
                                 );
                             }
-                            let file = canonical_key(Path::new(&event.file));
-                            {
-                                let mut store = match diag_store().lock() {
-                                    Ok(store) => store,
-                                    Err(poisoned) => poisoned.into_inner(),
-                                };
-                                store
-                                    .entry(file.clone())
-                                    .or_default()
-                                    .insert(event.server_id.clone(), event.diagnostics);
+                            let key = DiagnosticDocumentKey {
+                                root: canonical_key(&event.root),
+                                file: canonical_key(Path::new(&event.file)),
+                            };
+                            let snapshot = CodeDiagnosticSnapshot {
+                                key,
+                                // The engine cache has already merged every
+                                // server's replacement set for this document.
+                                diagnostics: event
+                                    .diagnostics
+                                    .into_iter()
+                                    .filter_map(map_engine_diagnostic)
+                                    .collect(),
+                            };
+                            if enqueue_diagnostic_snapshot(
+                                diagnostics_mailbox(),
+                                &DIAGNOSTICS_WAKE_PENDING,
+                                snapshot,
+                            ) {
+                                // The event is process-level despite carrying the
+                                // bootstrap window id. Its application handler fans
+                                // the mailbox to every route/window.
+                                proxy.send_event(
+                                    RioEventType::Rio(RioEvent::CodeDiagnosticsReady),
+                                    window_id,
+                                );
                             }
-                            {
-                                let mut seq = match diag_publish_seq().lock() {
-                                    Ok(seq) => seq,
-                                    Err(poisoned) => poisoned.into_inner(),
-                                };
-                                *seq.entry(file).or_insert(0) += 1;
-                            }
-                            DIAG_VERSION.fetch_add(1, Ordering::SeqCst);
-                            proxy.send_event(
-                                RioEventType::Rio(RioEvent::Render),
-                                window_id,
-                            );
                         }
                         // The bus is a process-global static that never
                         // closes; the only error is Lagged — skip ahead.
@@ -1611,6 +1728,210 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
 }
 
 impl Screen<'_> {
+    /// Apply one process-mailbox snapshot to every matching local code pane,
+    /// including inactive split panes and inactive workspace grids.
+    pub(crate) fn apply_code_diagnostic_snapshot(
+        &mut self,
+        snapshot: &CodeDiagnosticSnapshot,
+    ) -> bool {
+        let current_index = self.context_manager.current_index();
+        let matching_grids = (0..self.context_manager.len())
+            .map(|index| {
+                let Some(workspace_id) =
+                    self.context_manager.workspace_tree_id_for_index(index)
+                else {
+                    return false;
+                };
+                if self
+                    .context_manager
+                    .workspace_is_remote_joined_for_index(index)
+                {
+                    return false;
+                }
+                let root =
+                    self.workspace_roots
+                        .get(&workspace_id)
+                        .cloned()
+                        .or_else(|| {
+                            (index == current_index)
+                                .then(|| self.active_workspace_root.clone())
+                                .flatten()
+                        });
+                root.is_some_and(|root| canonical_key(&root) == snapshot.key.root)
+            })
+            .collect::<Vec<_>>();
+
+        let buffer_id =
+            crate::screen::markdown_crdt::buffer_id_for_markdown_path(&snapshot.key.file);
+        let binding = self
+            .code_crdt
+            .binding_for(&buffer_id)
+            .filter(|binding| binding.is_seeded());
+        let summaries = snapshot
+            .diagnostics
+            .iter()
+            .map(|diagnostic| CodeDiagnosticSummary {
+                line: diagnostic.start_line,
+                byte: diagnostic.start_byte,
+                severity: diagnostic.severity,
+                message: diagnostic.message.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for (index, grid) in self.context_manager.all_grids_mut().iter_mut().enumerate() {
+            if !matching_grids.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            for item in grid.contexts_mut().values_mut() {
+                let Some(code) = item.context_mut().code.as_mut() else {
+                    continue;
+                };
+                if canonical_key(&code.path) != snapshot.key.file {
+                    continue;
+                }
+
+                code.diagnostic_summaries = summaries.clone();
+                code.diag_anchors.clear();
+                if let Some(binding) = binding {
+                    code.diag_anchors = snapshot
+                        .diagnostics
+                        .iter()
+                        .filter_map(|diagnostic| {
+                            let (start_line, start_byte) = clamp_byte_position(
+                                &code.buffer.lines,
+                                diagnostic.start_line,
+                                diagnostic.start_byte,
+                            );
+                            let (end_line, end_byte) = clamp_byte_position(
+                                &code.buffer.lines,
+                                diagnostic.end_line,
+                                diagnostic.end_byte,
+                            );
+                            let start = binding.sticky_anchor_at(
+                                start_line,
+                                start_byte,
+                                true,
+                            )?;
+                            let end = binding.sticky_anchor_at(
+                                end_line,
+                                end_byte,
+                                false,
+                            )?;
+                            Some(CodeDiagAnchor {
+                                start,
+                                end,
+                                severity: diagnostic.severity,
+                                message: diagnostic.message.clone(),
+                            })
+                        })
+                        .collect();
+                    code.diagnostics = fold_anchored_diagnostics(code, binding);
+                } else {
+                    code.diagnostics = project_diagnostic_ranges(
+                        &code.buffer.lines,
+                        &snapshot.diagnostics,
+                    );
+                }
+                code.diagnostics_resolved_revision = Some(code.buffer.revision);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Non-render editor service hook. Called after local CRDT flushing and
+    /// inbound editor events: resolve sticky diagnostics against the updated
+    /// document and enqueue one background git job per changed pane revision.
+    pub(crate) fn service_code_revision_changes(&mut self) -> bool {
+        let proxy = self.context_manager.event_proxy_clone();
+        let window_id = self.context_manager.window_id();
+        let worker = ensure_code_git_worker(proxy);
+        let remote_grids = (0..self.context_manager.len())
+            .map(|index| {
+                self.context_manager
+                    .workspace_is_remote_joined_for_index(index)
+            })
+            .collect::<Vec<_>>();
+        let bindings = &self.code_crdt;
+        let mut changed = false;
+
+        for (index, grid) in self.context_manager.all_grids_mut().iter_mut().enumerate() {
+            let remote = remote_grids.get(index).copied().unwrap_or(false);
+            for item in grid.contexts_mut().values_mut() {
+                let route_id = item.context().route_id;
+                let Some(code) = item.context_mut().code.as_mut() else {
+                    continue;
+                };
+                let revision = code.buffer.revision;
+                if !code.diag_anchors.is_empty()
+                    && code.diagnostics_resolved_revision != Some(revision)
+                {
+                    let buffer_id =
+                        crate::screen::markdown_crdt::buffer_id_for_markdown_path(&code.path);
+                    if let Some(binding) = bindings
+                        .binding_for(&buffer_id)
+                        .filter(|binding| binding.is_seeded())
+                    {
+                        code.diagnostics = fold_anchored_diagnostics(code, binding);
+                        code.diagnostics_resolved_revision = Some(revision);
+                        changed = true;
+                    }
+                }
+
+                if !remote && code.git_scheduled_revision != Some(revision) {
+                    code.git_scheduled_revision = Some(revision);
+                    enqueue_code_git_job(
+                        worker,
+                        CodeGitJob {
+                            key: CodeGitKey {
+                                window_id,
+                                route_id,
+                                file: canonical_key(&code.path),
+                            },
+                            revision,
+                            lines: code.buffer.lines.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        changed
+    }
+
+    /// Install a background git result only into the exact pane route and
+    /// revision that produced it. This is the stale-result rejection gate.
+    pub(crate) fn apply_code_git_result(&mut self, result: &CodeGitResult) -> bool {
+        let remote_grids = (0..self.context_manager.len())
+            .map(|index| {
+                self.context_manager
+                    .workspace_is_remote_joined_for_index(index)
+            })
+            .collect::<Vec<_>>();
+        for (index, grid) in self.context_manager.all_grids_mut().iter_mut().enumerate() {
+            if remote_grids.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            for item in grid.contexts_mut().values_mut() {
+                let context = item.context_mut();
+                if context.route_id != result.key.route_id {
+                    continue;
+                }
+                let Some(code) = context.code.as_mut() else {
+                    return false;
+                };
+                if !code_git_result_matches(code, result) {
+                    return false;
+                }
+                if code.git_marks == result.marks {
+                    return false;
+                }
+                code.git_marks = result.marks.clone();
+                return true;
+            }
+        }
+        false
+    }
+
     fn code_lsp_shared(&self) -> &'static CodeLspShared {
         let proxy = self.context_manager.event_proxy_clone();
         let window_id = self.context_manager.window_id();
@@ -1639,9 +1960,8 @@ impl Screen<'_> {
         Some((root, file))
     }
 
-    /// Per-frame LSP pump for the focused code pane: ship buffer edits
-    /// to the engine, fold fresh diagnostics into the pane, and drain
-    /// completion/hover/definition results into the UI session state.
+    /// Per-frame LSP pump for sync/query timing only. Diagnostics and git
+    /// marks are prepared by event/service hooks and merely consumed by paint.
     pub(crate) fn pump_code_lsp(&mut self) {
         if self.context_manager.current().code.is_none() {
             // Focus left the code pane — no stale popups may linger.
@@ -1652,10 +1972,8 @@ impl Screen<'_> {
             return;
         }
         let proxy = self.context_manager.event_proxy_clone();
-        let git_proxy = self.context_manager.event_proxy_clone();
         let window_id = self.context_manager.window_id();
         let shared = ensure_workers(proxy, window_id);
-        let global_version = DIAG_VERSION.load(Ordering::SeqCst);
         let root = self.active_pane_workspace_root();
         // Remote-joined panes never drive the in-process language
         // server (host paths — a local server would start against files
@@ -1685,16 +2003,6 @@ impl Screen<'_> {
         let Some(root) = root.or_else(|| file.parent().map(Path::to_path_buf)) else {
             return;
         };
-        // The pane's live CRDT binding (None → not doc-bound; the
-        // line-shift heuristic serves those panes instead). Disjoint
-        // field of `self` from the `code` borrow above.
-        let diag_binding = self
-            .code_crdt
-            .binding_for(&crate::screen::markdown_crdt::buffer_id_for_markdown_path(
-                &file,
-            ))
-            .filter(|binding| binding.is_seeded());
-
         let remote_focus_changed = remote_endpoint.is_some_and(|endpoint| {
             let key = (endpoint, file.clone());
             let mut store = match remote_lsp_focus_store().lock() {
@@ -1748,174 +2056,6 @@ impl Screen<'_> {
                 file: file.clone(),
                 text: code.buffer.text(),
             });
-        }
-
-        // Per-revision pass: git gutter marks + diagnostic anchor-lite.
-        // Gated by its own key so it also runs on the FIRST frame of a
-        // freshly opened pane (revision 0).
-        {
-            static GIT_PASS_REV: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
-            let revision = code.buffer.revision;
-            let needs_pass = {
-                let mut map = match GIT_PASS_REV.get_or_init(Default::default).lock() {
-                    Ok(map) => map,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                map.insert(file.clone(), revision) != Some(revision)
-            };
-            // 512KB gate matches the highlight/outline cutoffs.
-            let small_enough = code
-                .buffer
-                .lines
-                .iter()
-                .map(|line| line.len() + 1)
-                .sum::<usize>()
-                <= 512 * 1024;
-            if needs_pass && small_enough {
-                // The heuristic keeps the RAW store's line numbers
-                // roughly right (status counts, problems popup and
-                // diagnostic cards read it) — the publish gate below
-                // stops its version bump from ever overwriting the
-                // anchored fold.
-                reanchor_diagnostics(&file, &code.buffer.lines);
-                if let Some(binding) = diag_binding {
-                    // Doc-bound: char-precise squiggles by re-resolving
-                    // sticky anchors against the live CRDT doc.
-                    let folded = fold_anchored_diagnostics(code, binding);
-                    code.diagnostics = folded;
-                }
-                match git_baseline(&file, &git_proxy, window_id) {
-                    Some(baseline) => {
-                        code.git_marks =
-                            neoism_ui::editor::code::gitdiff::compute_git_marks(
-                                &baseline,
-                                &code.buffer.lines,
-                            );
-                    }
-                    None => {
-                        if !code.git_marks.is_empty() {
-                            code.git_marks = Default::default();
-                        }
-                    }
-                }
-            }
-        }
-
-        let fold_from_store = !remote && code.lsp_diag_version != global_version && {
-            code.lsp_diag_version = global_version;
-            // Publish gate for the sticky-anchor path: the global
-            // version also moves on other files' publishes and on the
-            // line-shift heuristic; refolding from the store then
-            // would overwrite anchor-precise spans with stale
-            // positions. A doc-bound pane refolds (and re-pins its
-            // anchors) only when a server actually published for THIS
-            // file.
-            let publish_seq = {
-                let seq = match diag_publish_seq().lock() {
-                    Ok(seq) => seq,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                seq.get(&canonical_key(&file)).copied().unwrap_or(0)
-            };
-            let fresh_publish = publish_seq != code.lsp_diag_publish_seq;
-            code.lsp_diag_publish_seq = publish_seq;
-            diag_binding.is_none() || fresh_publish
-        };
-        if fold_from_store {
-            let store = match diag_store().lock() {
-                Ok(store) => store,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let canonical = canonical_key(&file);
-            if lsp_log() {
-                eprintln!(
-                    "neoism::lsp diag fold: pane={} canonical={} store_keys={:?}",
-                    file.display(),
-                    canonical.display(),
-                    store.keys().collect::<Vec<_>>()
-                );
-            }
-            let mut per_line: HashMap<usize, Vec<CodeLineDiagnostic>> = HashMap::new();
-            let mut anchors: Vec<neoism_ui::editor::code::CodeDiagAnchor> = Vec::new();
-            if let Some(by_server) = store.get(&canonical) {
-                for diags in by_server.values() {
-                    for diag in diags {
-                        let Some(range) = diag.range.as_ref() else {
-                            continue;
-                        };
-                        let severity = map_severity(&diag.severity);
-                        // LSP positions arrive 1-based here (the agent-server
-                        // parser adds +1 in `parse_lsp_position`); the buffer
-                        // is 0-based. Drop the +1 exactly like the occurrence
-                        // and goto paths do — forgetting it is what drew every
-                        // diagnostic one line low and one column right.
-                        let start_line = (range.start.line as usize).saturating_sub(1);
-                        let end_line =
-                            (range.end.line as usize).saturating_sub(1).max(start_line);
-                        let start_char =
-                            (range.start.character as usize).saturating_sub(1);
-                        let end_char = (range.end.character as usize).saturating_sub(1);
-                        // Pin the published range into the CRDT doc
-                        // while the pane is bound: the squiggle then
-                        // tracks edits char-precisely until the next
-                        // publish (start follows its character, end
-                        // stays put on inserts at the range edge).
-                        if let Some(binding) = diag_binding {
-                            if let (Some(start), Some(end)) = (
-                                binding
-                                    .sticky_anchor_at_utf16(start_line, start_char, true),
-                                binding.sticky_anchor_at_utf16(end_line, end_char, false),
-                            ) {
-                                anchors.push(neoism_ui::editor::code::CodeDiagAnchor {
-                                    start,
-                                    end,
-                                    severity,
-                                    message: diag.message.clone(),
-                                });
-                            }
-                        }
-                        for line_ix in start_line..=end_line {
-                            let Some(line) = code.buffer.lines.get(line_ix) else {
-                                break;
-                            };
-                            let mut from = if line_ix == start_line {
-                                byte_for_utf16_col(line, start_char)
-                            } else {
-                                0
-                            };
-                            let mut to = if line_ix == end_line {
-                                byte_for_utf16_col(line, end_char)
-                            } else {
-                                line.len()
-                            };
-                            // Zero-width / end-of-line ranges still get
-                            // a visible one-cell underline.
-                            if to <= from {
-                                if from >= line.len() && !line.is_empty() {
-                                    from = line.len() - 1;
-                                }
-                                to = (from + 1).min(line.len());
-                            }
-                            if from < to {
-                                per_line.entry(line_ix).or_default().push(
-                                    CodeLineDiagnostic {
-                                        start: from,
-                                        end: to,
-                                        severity,
-                                        message: if line_ix == start_line {
-                                            diag.message.clone()
-                                        } else {
-                                            String::new()
-                                        },
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            code.diag_anchors = anchors;
-            code.diagnostics = per_line;
         }
 
         // Caret-idle occurrence probe (documentHighlight): once the
@@ -2558,105 +2698,38 @@ impl Screen<'_> {
                     return false;
                 }
 
-                // Preserve the existing diagnostics popups/counts by feeding
-                // the same raw store used by local LSP, then build visible
-                // byte spans directly (remote panes intentionally skip the
-                // local-engine fold).
-                let engine_items = items
+                // Remote protocol columns are also UTF-8 bytes. Preserve the
+                // current-pane routing for this increment, but share the exact
+                // same projection/clamping policy as local diagnostics.
+                let diagnostics = items
                     .iter()
-                    .map(|item| engine::LspDiagnostic {
-                        path: file.to_string_lossy().into_owned(),
-                        range: Some(engine::LspRange {
-                            start: engine::LspPosition {
-                                line: item.line.saturating_add(1),
-                                character: item.col.saturating_add(1),
-                            },
-                            end: engine::LspPosition {
-                                line: item.end_line.saturating_add(1),
-                                character: item.end_col.saturating_add(1),
-                            },
-                        }),
+                    .map(|item| DocumentDiagnostic {
+                        start_line: item.line as usize,
+                        start_byte: item.col as usize,
+                        end_line: item.end_line as usize,
+                        end_byte: item.end_col as usize,
                         severity: match item.severity {
-                            DiagnosticSeverity::Error => "error",
-                            DiagnosticSeverity::Warn => "warning",
-                            DiagnosticSeverity::Info => "information",
-                            DiagnosticSeverity::Hint => "hint",
-                        }
-                        .to_string(),
-                        code: item.code.clone(),
-                        code_description: item.code_description.clone(),
-                        source: item.source.clone(),
+                            DiagnosticSeverity::Error => CodeDiagnosticSeverity::Error,
+                            DiagnosticSeverity::Warn => CodeDiagnosticSeverity::Warn,
+                            DiagnosticSeverity::Info => CodeDiagnosticSeverity::Info,
+                            DiagnosticSeverity::Hint => CodeDiagnosticSeverity::Hint,
+                        },
                         message: item.message.clone(),
-                        tags: item.tags.clone(),
-                        related_information: Vec::new(),
-                        data: None,
-                        language: None,
                     })
                     .collect::<Vec<_>>();
-                let server = items
-                    .first()
-                    .and_then(|item| item.source.clone())
-                    .unwrap_or_else(|| "remote".to_string());
-                {
-                    let mut store = match diag_store().lock() {
-                        Ok(store) => store,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    store
-                        .entry(canonical_key(&file))
-                        .or_default()
-                        .insert(server, engine_items);
-                }
-
-                let mut per_line: HashMap<usize, Vec<CodeLineDiagnostic>> =
-                    HashMap::new();
-                for item in items {
-                    let start_line = item.line as usize;
-                    let end_line = (item.end_line as usize).max(start_line);
-                    let severity = match item.severity {
-                        DiagnosticSeverity::Error => CodeDiagnosticSeverity::Error,
-                        DiagnosticSeverity::Warn => CodeDiagnosticSeverity::Warn,
-                        DiagnosticSeverity::Info => CodeDiagnosticSeverity::Info,
-                        DiagnosticSeverity::Hint => CodeDiagnosticSeverity::Hint,
-                    };
-                    for line_ix in start_line..=end_line {
-                        let Some(line) = code.buffer.lines.get(line_ix) else {
-                            break;
-                        };
-                        let mut from = if line_ix == start_line {
-                            byte_for_utf16_col(line, item.col as usize)
-                        } else {
-                            0
-                        };
-                        let mut to = if line_ix == end_line {
-                            byte_for_utf16_col(line, item.end_col as usize)
-                        } else {
-                            line.len()
-                        };
-                        if to <= from {
-                            if from >= line.len() && !line.is_empty() {
-                                from = line.len() - 1;
-                            }
-                            to = (from + 1).min(line.len());
-                        }
-                        if from < to {
-                            per_line.entry(line_ix).or_default().push(
-                                CodeLineDiagnostic {
-                                    start: from,
-                                    end: to,
-                                    severity,
-                                    message: if line_ix == start_line {
-                                        item.message.clone()
-                                    } else {
-                                        String::new()
-                                    },
-                                },
-                            );
-                        }
-                    }
-                }
                 code.diag_anchors.clear();
-                code.diagnostics = per_line;
+                code.diagnostic_summaries = diagnostics
+                    .iter()
+                    .map(|diagnostic| CodeDiagnosticSummary {
+                        line: diagnostic.start_line,
+                        byte: diagnostic.start_byte,
+                        severity: diagnostic.severity,
+                        message: diagnostic.message.clone(),
+                    })
+                    .collect();
+                code.diagnostics =
+                    project_diagnostic_ranges(&code.buffer.lines, &diagnostics);
+                code.diagnostics_resolved_revision = Some(code.buffer.revision);
                 self.mark_dirty();
                 true
             }
@@ -2731,22 +2804,18 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    /// Status-bar error/warning pills: exact per-diagnostic counts for
-    /// the file from the raw store (the pane's per-line span map would
-    /// overcount multi-line diagnostics).
+    /// Status-bar error/warning pills: exact per-diagnostic counts from the
+    /// pane's document summaries (the per-line span map would overcount
+    /// multiline diagnostics).
     pub(crate) fn code_diagnostic_counts(
         &self,
         file: &Path,
     ) -> neoism_ui::panels::status_line::DiagnosticCounts {
-        let store = match diag_store().lock() {
-            Ok(store) => store,
-            Err(poisoned) => poisoned.into_inner(),
-        };
         let mut counts = neoism_ui::panels::status_line::DiagnosticCounts::default();
-        if let Some(by_server) = store.get(&canonical_key(file)) {
-            for diags in by_server.values() {
-                for diag in diags {
-                    match map_severity(&diag.severity) {
+        if let Some(code) = self.context_manager.current().code.as_ref() {
+            if canonical_key(&code.path) == canonical_key(file) {
+                for diagnostic in &code.diagnostic_summaries {
+                    match diagnostic.severity {
                         CodeDiagnosticSeverity::Error => counts.error += 1,
                         CodeDiagnosticSeverity::Warn => counts.warn += 1,
                         CodeDiagnosticSeverity::Info => counts.info += 1,
@@ -2766,15 +2835,11 @@ impl Screen<'_> {
         pill: neoism_ui::panels::status_line::DiagnosticPill,
     ) -> Vec<neoism_ui::panels::diagnostics_popup::PopupItem> {
         use neoism_ui::panels::diagnostics_popup::{PopupItem, Severity};
-        let store = match diag_store().lock() {
-            Ok(store) => store,
-            Err(poisoned) => poisoned.into_inner(),
-        };
         let mut items = Vec::new();
-        if let Some(by_server) = store.get(&canonical_key(file)) {
-            for diags in by_server.values() {
-                for diag in diags {
-                    let severity = map_severity(&diag.severity);
+        if let Some(code) = self.context_manager.current().code.as_ref() {
+            if canonical_key(&code.path) == canonical_key(file) {
+                for diagnostic in &code.diagnostic_summaries {
+                    let severity = diagnostic.severity;
                     let wanted = match pill {
                         neoism_ui::panels::status_line::DiagnosticPill::Error => {
                             severity == CodeDiagnosticSeverity::Error
@@ -2787,18 +2852,14 @@ impl Screen<'_> {
                         continue;
                     }
                     items.push(PopupItem {
-                        lnum: diag
-                            .range
-                            .as_ref()
-                            .map(|r| r.start.line as u64 + 1)
-                            .unwrap_or(1),
+                        lnum: diagnostic.line as u64 + 1,
                         severity: match severity {
                             CodeDiagnosticSeverity::Error => Severity::Error,
                             CodeDiagnosticSeverity::Warn => Severity::Warn,
                             CodeDiagnosticSeverity::Info => Severity::Info,
                             CodeDiagnosticSeverity::Hint => Severity::Hint,
                         },
-                        message: diag.message.replace('\n', "  "),
+                        message: diagnostic.message.replace('\n', "  "),
                     });
                 }
             }
@@ -3052,9 +3113,8 @@ impl Screen<'_> {
         }
     }
 
-    /// Palette "Project Problems": every diagnostic in the store, all
-    /// files, as finder References rows (path:line + severity-tagged
-    /// message) — Enter/preview jump straight to the problem.
+    /// Palette "Project Problems": diagnostics retained by all open panes as
+    /// finder rows. Duplicate panes for one file are collapsed.
     pub(crate) fn open_project_problems(&mut self) {
         let Some(cwd) = self
             .active_pane_workspace_root()
@@ -3064,33 +3124,38 @@ impl Screen<'_> {
         };
         let mut rows: Vec<neoism_ui::panels::finder::ReferenceRow> = Vec::new();
         {
-            let store = match diag_store().lock() {
-                Ok(store) => store,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            for (path, by_server) in store.iter() {
-                let display = path
-                    .strip_prefix(&cwd)
-                    .unwrap_or(path.as_path())
-                    .to_string_lossy()
-                    .into_owned();
-                for diags in by_server.values() {
-                    for diag in diags {
-                        let Some(range) = diag.range.as_ref() else {
+            let mut seen = std::collections::HashSet::new();
+            for grid in self.context_manager.all_grids() {
+                for item in grid.contexts().values() {
+                    let Some(code) = item.context().code.as_ref() else {
+                        continue;
+                    };
+                    let path = canonical_key(&code.path);
+                    let display = path
+                        .strip_prefix(&cwd)
+                        .unwrap_or(path.as_path())
+                        .to_string_lossy()
+                        .into_owned();
+                    for diagnostic in &code.diagnostic_summaries {
+                        if !seen.insert((
+                            path.clone(),
+                            diagnostic.line,
+                            diagnostic.byte,
+                            diagnostic.severity,
+                            diagnostic.message.clone(),
+                        )) {
                             continue;
-                        };
+                        }
                         let mut message =
-                            diag.message.lines().next().unwrap_or("").to_string();
+                            diagnostic.message.lines().next().unwrap_or("").to_string();
                         if message.chars().count() > 160 {
                             message = message.chars().take(160).collect();
                         }
                         rows.push(neoism_ui::panels::finder::ReferenceRow {
                             path: display.clone(),
-                            // Store ranges are raw wire (zero-based);
-                            // rows are 1-based like references.
-                            line: range.start.line + 1,
-                            column: range.start.character,
-                            text: format!("{}: {}", diag.severity, message),
+                            line: (diagnostic.line + 1) as u32,
+                            column: diagnostic.byte as u32,
+                            text: format!("{:?}: {}", diagnostic.severity, message),
                         });
                     }
                 }
@@ -3732,5 +3797,127 @@ impl Screen<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    fn diagnostic(
+        start_line: usize,
+        start_byte: usize,
+        end_line: usize,
+        end_byte: usize,
+    ) -> DocumentDiagnostic {
+        DocumentDiagnostic {
+            start_line,
+            start_byte,
+            end_line,
+            end_byte,
+            severity: CodeDiagnosticSeverity::Error,
+            message: "first\nsecond".to_string(),
+        }
+    }
+
+    #[test]
+    fn projection_uses_utf8_bytes_and_clamps_boundaries() {
+        let projected = project_diagnostic_ranges(
+            &["aéz".to_string()],
+            &[diagnostic(0, 2, 0, 3)],
+        );
+        let span = &projected[&0][0];
+        assert_eq!((span.start, span.end), (1, 3));
+        assert!("aéz".is_char_boundary(span.start));
+        assert!("aéz".is_char_boundary(span.end));
+    }
+
+    #[test]
+    fn projection_splits_multiline_and_messages_only_the_first_line() {
+        let projected = project_diagnostic_ranges(
+            &["abc".to_string(), "déf".to_string()],
+            &[diagnostic(0, 1, 1, 3)],
+        );
+        assert_eq!((projected[&0][0].start, projected[&0][0].end), (1, 3));
+        assert_eq!((projected[&1][0].start, projected[&1][0].end), (0, 3));
+        assert_eq!(projected[&0][0].message, "first\nsecond");
+        assert!(projected[&1][0].message.is_empty());
+    }
+
+    #[test]
+    fn projection_makes_zero_width_range_visible() {
+        let projected = project_diagnostic_ranges(
+            &["aéz".to_string()],
+            &[diagnostic(0, 1, 0, 1)],
+        );
+        assert_eq!((projected[&0][0].start, projected[&0][0].end), (1, 3));
+    }
+
+    #[test]
+    fn empty_snapshot_projects_to_empty_map() {
+        assert!(project_diagnostic_ranges(&["text".to_string()], &[]).is_empty());
+    }
+
+    #[test]
+    fn mailbox_is_newest_wins_and_coalesces_wakes() {
+        let mailbox = DiagnosticsMailbox::default();
+        let wake = AtomicBool::new(false);
+        let key = DiagnosticDocumentKey {
+            root: PathBuf::from("/workspace"),
+            file: PathBuf::from("/workspace/main.rs"),
+        };
+        let snapshot = |start_byte| CodeDiagnosticSnapshot {
+            key: key.clone(),
+            diagnostics: vec![diagnostic(0, start_byte, 0, start_byte + 1)],
+        };
+
+        assert!(enqueue_diagnostic_snapshot(&mailbox, &wake, snapshot(0)));
+        assert!(!enqueue_diagnostic_snapshot(&mailbox, &wake, snapshot(1)));
+        let drained = drain_diagnostic_snapshots_from(&mailbox, &wake);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].diagnostics[0].start_byte, 1);
+        assert!(!wake.load(Ordering::Acquire));
+        assert!(enqueue_diagnostic_snapshot(&mailbox, &wake, snapshot(2)));
+    }
+
+    fn test_git_key() -> CodeGitKey {
+        CodeGitKey {
+            window_id: unsafe { WindowId::dummy() },
+            route_id: 17,
+            file: PathBuf::from("/workspace/main.rs"),
+        }
+    }
+
+    #[test]
+    fn git_queue_coalesces_to_newest_revision_per_route() {
+        let worker = CodeGitWorker {
+            queue: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
+        };
+        let job = |revision| CodeGitJob {
+            key: test_git_key(),
+            revision,
+            lines: vec![revision.to_string()],
+        };
+        assert!(!enqueue_code_git_job(&worker, job(1)));
+        assert!(enqueue_code_git_job(&worker, job(2)));
+        let pending = worker.queue.0.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.values().next().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn git_result_rejects_stale_buffer_revision() {
+        let mut pane = neoism_ui::editor::code::CodePane::new(
+            PathBuf::from("/workspace/main.rs"),
+            "fn main() {}",
+        );
+        let result = CodeGitResult {
+            key: test_git_key(),
+            revision: pane.buffer.revision,
+            marks: Default::default(),
+        };
+        assert!(code_git_result_matches(&pane, &result));
+        pane.buffer.revision = pane.buffer.revision.wrapping_add(1);
+        assert!(!code_git_result_matches(&pane, &result));
     }
 }

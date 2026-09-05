@@ -196,8 +196,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          dotnet tool install --global wix --version 4.0.6
-          wix extension add --global WixToolset.UI.wixext/4.0.6
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add --global WixToolset.UI.wixext/5.0.2
 
       - name: Sign Windows executables (Authenticode)
         if: matrix.goos == 'windows' && env.HAVE_WINDOWS_SIGNING == 'true'

@@ -128,7 +128,7 @@ export interface TerminalAdapter {
     setPaneSurfaces?(json: string): void;
     /** Feed one split pane terminal's PTY stream (creates + seeds the
      *  pane-sized grid on first feed). */
-    feedPaneTerminal?(externalId: number, bytes: Uint8Array): void;
+    feedPaneTerminal?(externalId: number, bytes: Uint8Array): unknown[];
     paneTerminalExists?(externalId: number): boolean;
     removePaneTerminal?(externalId: number): void;
     /** Retain only the pane terminals listed in `keepJson` (id array). */
@@ -186,6 +186,7 @@ export interface TerminalAdapter {
         deltaY: number,
         shift: boolean,
     ): number;
+    terminalTouchScroll?(x: number, y: number, deltaX: number, deltaY: number): number;
     /** Pointer press on the terminal grid (button 0/1/2 = L/M/R).
      *  Same TERM_INPUT_* flag contract as terminalWheel. */
     terminalPointerDown?(
@@ -197,6 +198,9 @@ export interface TerminalAdapter {
         alt: boolean,
         nowMs: number,
     ): number;
+    terminalSelectWordAt?(x: number, y: number): boolean;
+    terminalExtendWordSelectionAt?(x: number, y: number): boolean;
+    terminalEndWordSelection?(): boolean;
     terminalPointerMove?(
         x: number,
         y: number,
@@ -274,6 +278,11 @@ export interface TerminalAdapter {
     showFileTree?(): void;
     hideFileTree?(): void;
     showCommandPalette?(): void;
+    openTerminalDirectoryPalette?(routeId: number, sessionId: string | null, cwd: string, shell: string): void;
+    updateTerminalDirectoryPaletteCwd?(sessionId: string, cwd: string): void;
+    continueTerminalDirectoryPalette?(cwd: string): void;
+    setTerminalDirectoryPaletteError?(error: string): void;
+    terminalChangeDirectoryPayload?(path: string, shell: string): Uint8Array;
     setCommandPaletteWorkspaceVisibility?(visibility: string): void;
     setWorkspaceIslandTabs?(payloadJson: string): void;
     workspaceIslandClick?(x: number, y: number): boolean;
@@ -324,6 +333,9 @@ export interface TerminalAdapter {
     showFinderGitChanges?(): void;
     hideModals?(): void;
     splashClick?(x: number, y: number): boolean;
+    /** Typed row under the point, or empty for splash background/gaps. */
+    splashActionAt?(x: number, y: number): string;
+    splashActive?(): boolean;
     splashMouseMove?(x: number, y: number): void;
     splashMouseLeave?(): void;
     splashWordmarkClick?(x: number, y: number): void;
@@ -384,6 +396,8 @@ export interface TerminalAdapter {
     /** Open an arbitrary chrome-hosted modal from a JSON `ModalSpec`
      *  (see the wasm `open_modal_spec` docs for the shape). */
     openModalSpec?(specJson: string): void;
+    showConnectionGate?(body: string, meta: string): void;
+    hideConnectionGate?(): void;
     /** Drain confirmed modal outcomes as a JSON array string:
      *  `[{kind:"file_tree_new_file",dir,name}|{kind:"file_tree_new_folder",dir,name}|
      *    {kind:"file_tree_rename",path,name}|{kind:"file_tree_delete",path}|
@@ -438,6 +452,8 @@ export interface TerminalAdapter {
     enterPaletteShadersMode?(shadersJson: string): void;
     /** Swap the command palette into host-buffer browsing mode. */
     enterPaletteBuffersMode?(buffersJson: string): void;
+    /** Install daemon-hosted pack rows and enter real Mashups mode. */
+    enterPaletteMashupsMode?(entriesJson: string): boolean;
     /** Open the desktop-parity Workspaces modal: the command palette's
      *  grouped host→workspace tree. `payloadJson` is the JSON-encoded
      *  `WorkspacesModalPayload`. Returns `false` when the underlying
@@ -447,6 +463,8 @@ export interface TerminalAdapter {
     /** True while the Workspaces modal is currently open, so hosts can
      *  live-refresh the tree as daemon pushes arrive. */
     workspacesPaletteOpen?(): boolean;
+    markdownScroll?(deltaY: number, viewportH: number): boolean;
+    markdownTouchScroll?(deltaY: number, viewportH: number): boolean;
     /** The markdown pane's REAL caret (line + UTF-16 column) for the
      *  presence plane. Null when no markdown pane is active. */
     markdownCursor?(): { line: number; columnUtf16: number; insert?: boolean } | null;
@@ -461,6 +479,8 @@ export interface TerminalAdapter {
     crdtApply?(json: string): boolean;
     /** Queue a daemon-owned save of the active markdown doc. */
     markdownRequestSave?(): boolean;
+    /** Whether the active markdown pane differs from its saved baseline. */
+    markdownDirty?(): boolean;
     /** Desktop-breadth markdown key routing (shared dispatcher). */
     markdownKeyFull?(
         key: string,
@@ -479,6 +499,9 @@ export interface TerminalAdapter {
     markdownMouseRelease?(): boolean;
     /** Right-click spelling menu for the word under the pointer. */
     markdownSpellingMenuAt?(x: number, y: number): boolean;
+    markdownSelectWordAt?(x: number, y: number): boolean;
+    markdownExtendWordSelectionAt?(x: number, y: number): boolean;
+    markdownEndWordSelection?(): boolean;
     /** Clipboard text queued by the last handled markdown event. */
     markdownDrainClipboardOut?(): string | null;
     /** Queued markdown activations (`markdown`/`editor`/`external`/
@@ -501,6 +524,15 @@ export interface TerminalAdapter {
      *  editing for code, cell/vim surface for notebooks, tools for
      *  draw). True when consumed. */
     editorKey?(key: string, ctrl: boolean, shift: boolean, alt: boolean): boolean;
+    editorTouchScroll?(x: number, y: number, deltaX: number, deltaY: number): boolean;
+    setMobileDirectInsert?(enabled: boolean): void;
+    setMobileKeyboardInset?(bottom: number): void;
+    setOverlaySafeArea?(top: number, right: number, bottom: number, left: number): void;
+    overlayTextEntryAt?(x: number, y: number): boolean;
+    /** Exact painted mobile text-field family at this point, or empty. */
+    mobileTextFieldAt?(x: number, y: number): string;
+    agentSidePanelTakeoverActive?(): boolean;
+    agentSidePanelSearchFocused?(): boolean;
     /** Insert browser-pasted text into the active editor pane. */
     editorInsertPaste?(text: string): boolean;
     /** Pointer press in the editor surface (canvas CSS px). */
@@ -515,6 +547,9 @@ export interface TerminalAdapter {
     editorPointerMove?(x: number, y: number): boolean;
     /** Pointer release for the editor surface. */
     editorPointerUp?(): boolean;
+    editorSelectWordAt?(x: number, y: number): boolean;
+    editorExtendWordSelectionAt?(x: number, y: number): boolean;
+    editorEndWordSelection?(): boolean;
     /** Wheel over the editor surface (code/notebook scroll, draw
      *  pan; ctrl = zoom for draw). */
     editorScroll?(
@@ -598,6 +633,9 @@ export interface TerminalAdapter {
      *  the button is held, after `agentPointerDown` reported
      *  `selecting`). */
     agentSelectionDrag?(x: number, y: number): boolean;
+    agentSelectWordAt?(x: number, y: number): boolean;
+    agentExtendWordSelectionAt?(x: number, y: number): boolean;
+    agentEndWordSelection?(): boolean;
     /** Finish the drag and return the selected text for the clipboard,
      *  or null when it was just a click. */
     agentSelectionEnd?(): string | null;
@@ -610,6 +648,7 @@ export interface TerminalAdapter {
         y: number,
         deltaY: number,
         deltaMode: number,
+        legacyWheelDeltaY: number,
     ): boolean;
     /** Adopt daemon-computed tree-sitter spans for the code pane. */
     codeSetHighlightSpans?(
@@ -629,15 +668,33 @@ export interface TerminalAdapter {
     modalPointerDown?(x: number, y: number): number;
     /** Center-modal list scroll (DOM sign). */
     modalScroll?(x: number, y: number, deltaPixels: number): boolean;
+    modalTouchScroll?(x: number, y: number, fingerDelta: number): boolean;
+    chromeTouchScrollAt?(x: number, y: number, dx: number, dy: number): boolean;
+    /** Position-owned wheel for Tree/Notes/Git and horizontal top tabs. */
+    chromeWheelScrollAt?(
+        x: number,
+        y: number,
+        dx: number,
+        dy: number,
+        deltaMode: number,
+        shift: boolean,
+    ): boolean;
+    /** A shared overlay owns pointer/wheel input above content. */
+    pointerOverlayActive?(): boolean;
+    /** Settings/About full-window overlay uses shared Chrome events. */
+    chromePageOverlayActive?(): boolean;
     /** Seed composer ArrowUp history (oldest first). */
     terminalSeedHistory?(entriesJson: string): void;
     /** Seed a directory listing for composer Tab completion. */
     terminalSeedCompletionDir?(dir: string, entriesJson: string): void;
     /** Dirs Tab completion is waiting on (absolute paths). */
     drainCompletionDirRequests?(): unknown;
-    /** Position-aware touch drag. 0 = unhandled, 1 = overlay/diff card,
-     *  2 = timeline (fling allowed on release). */
+    /** Position-aware touch drag. 0 = unhandled/bound, 1 = picker/side panel,
+     *  2 = outer timeline (including touches over diff cards). */
     agentDragAt?(x: number, y: number, dyPixels: number): number;
+    /** Sticky-owner variant: owner 0 resolves, 1 keeps nested UI, 2 keeps the
+     * outer timeline. Used so moving content cannot retarget a touch gesture. */
+    agentDragOwnedAt?(x: number, y: number, dyPixels: number, owner: number): number;
     /** 1:1 touch drag — content tracks the finger, no inertia. */
     agentDragTimeline?(deltaPixels: number): boolean;
     /** Launch (non-zero) or stop (0) a kinetic glide; returns whether
@@ -648,6 +705,7 @@ export interface TerminalAdapter {
      *  centers the input mid-pane rather than docking it bottom. */
     agentInputRect?(): [number, number, number, number] | null;
     agentHasConversation?(): boolean;
+    agentSessionId?(): string | null;
     agentHasPendingPermission?(): boolean;
     agentIsStreaming?(): boolean;
     agentMovePermissionSelection?(delta: number): boolean;
@@ -678,6 +736,14 @@ export interface TerminalAdapter {
      *  composer chip — the web analogue of desktop's DroppedFile →
      *  attach_path. Empty mime is sniffed from the filename. */
     agentAttachFile?(filename: string, mime: string, bytes: Uint8Array): boolean;
+    openFileBrowser?(mode: string, start: string, recentsJson: string): void;
+    fileBrowserActive?(): boolean;
+    drainFileBrowserRequests?(): unknown;
+    setFileBrowserEntries?(path: string, entriesJson: string): boolean;
+    setFileBrowserLocations?(locationsJson: string): boolean;
+    setFileBrowserError?(message: string): void;
+    setFileBrowserRecents?(recentsJson: string): void;
+    drainFileBrowserSelection?(): unknown;
     /** Active `@`-mention query in the shared composer (text between
      *  `@` and the caret), or null when none is being typed. */
     agentFileMentionQuery?(): string | null;
@@ -689,6 +755,7 @@ export interface TerminalAdapter {
     agentCancel?(): void;
     /** Reset the daemon-side conversation history. */
     agentNewThread?(directory?: string | null): void;
+    agentSwitchThread?(sessionId: string): void;
     /** Trigger the Neoism Agent home wordmark click animation. */
     agentWordmarkClick?(x: number, y: number): boolean;
     /** Which surface should consume the next raw keystroke. Returns
@@ -835,7 +902,18 @@ export interface FinderOpenIntent {
  *  "kind", rename_all = "snake_case")]` derivation. */
 export type PaletteIntent =
     | { kind: "action"; action: string }
-    | { kind: "ex_command"; command: string }
+    | {
+          kind: "ex_command";
+          command: string;
+          plan?:
+              | "write"
+              | "close"
+              | "close_force"
+              | "write_close"
+              | "close_all"
+              | "close_all_force"
+              | "write_all_close";
+      }
     | {
           kind: "search";
           query: string;
@@ -843,10 +921,11 @@ export type PaletteIntent =
       }
     | { kind: "font"; family: string }
     | { kind: "theme"; name: string }
+    | { kind: "mashup"; id: string | null }
     | { kind: "shader"; title: string; filter: string | null }
     | { kind: "buffer"; target: PaletteBufferTarget }
     | { kind: "workspace"; workspace_id: string }
-    | { kind: "directory"; path: string }
+    | { kind: "change_terminal_directory"; route_id: number; session_id: string | null; cwd: string; shell_kind: string; path: string; selected: boolean }
     | { kind: "server"; action: string; id: string };
 
 export type PaletteBufferTarget =
@@ -1125,7 +1204,11 @@ interface ChromeBridgeInstance {
     feed_pty_output(bytes: Uint8Array): void;
     set_markdown_remote_cursors?(peers: unknown): void;
     markdown_scroll?(deltaY: number, viewportH: number): boolean;
+    markdown_touch_scroll?(deltaY: number, viewportH: number): boolean;
     markdown_click?(x: number, y: number): boolean;
+    markdown_select_word_at?(x: number, y: number): boolean;
+    markdown_extend_word_selection_at?(x: number, y: number): boolean;
+    markdown_end_word_selection?(): boolean;
     markdown_key?(key: string, ctrl: boolean): boolean;
     markdown_key_full?(
         key: string,
@@ -1145,11 +1228,16 @@ interface ChromeBridgeInstance {
     crdt_pump?(bufferId: string | null): string | undefined;
     crdt_apply?(json: string): boolean;
     markdown_request_save?(): boolean;
+    markdown_dirty?(): boolean;
     editor_open_file?(tabIndex: number, path: string, text: string): string;
     editor_set_config_descriptors?(json: string): boolean;
     editor_active_kind?(): string | undefined;
     editor_close_panes?(): void;
     editor_key?(key: string, ctrl: boolean, shift: boolean, alt: boolean): boolean;
+    set_mobile_direct_insert?(enabled: boolean): void;
+    set_mobile_keyboard_inset?(bottom: number): void;
+    set_overlay_safe_area?(top: number, right: number, bottom: number, left: number): void;
+    overlay_text_entry_at?(x: number, y: number): boolean;
     editor_insert_paste?(text: string): boolean;
     editor_pointer_down?(
         x: number,
@@ -1158,6 +1246,9 @@ interface ChromeBridgeInstance {
         ctrl: boolean,
         clickCount: number,
     ): boolean;
+    editor_select_word_at?(x: number, y: number): boolean;
+    editor_extend_word_selection_at?(x: number, y: number): boolean;
+    editor_end_word_selection?(): boolean;
     editor_pointer_move?(x: number, y: number): boolean;
     editor_pointer_up?(): boolean;
     editor_scroll?(
@@ -1167,6 +1258,7 @@ interface ChromeBridgeInstance {
         deltaY: number,
         ctrl: boolean,
     ): boolean;
+    editor_touch_scroll?(x: number, y: number, deltaX: number, deltaY: number): boolean;
     editor_drain_clipboard_out?(): string | undefined;
     editor_dirty?(): boolean;
     editor_cursor?(): Uint32Array | number[] | undefined;
@@ -1299,7 +1391,12 @@ interface ChromeBridgeInstance {
     /** Per-pane terminal surfaces for split panes. */
     draw_pane_grid_host_surfaces?(): void;
     set_pane_surfaces?(json: string): void;
-    feed_pane_terminal?(externalId: number, bytes: Uint8Array): void;
+    feed_pane_terminal?(externalId: number, bytes: Uint8Array): unknown;
+    open_terminal_directory_palette?(routeId: number, sessionId: string | undefined, cwd: string, shell: string): void;
+    update_terminal_directory_palette_cwd?(sessionId: string, cwd: string): void;
+    continue_terminal_directory_palette?(cwd: string): void;
+    set_terminal_directory_palette_error?(error: string): void;
+    terminal_change_directory_payload?(path: string, shell: string): Uint8Array;
     pane_terminal_exists?(externalId: number): boolean;
     remove_pane_terminal?(externalId: number): void;
     prune_pane_terminals?(keepJson: string): void;
@@ -1334,6 +1431,7 @@ interface ChromeBridgeInstance {
         deltaY: number,
         shift: boolean,
     ): number;
+    terminal_touch_scroll?(x: number, y: number, deltaX: number, deltaY: number): number;
     terminal_pointer_down?(
         x: number,
         y: number,
@@ -1343,6 +1441,9 @@ interface ChromeBridgeInstance {
         alt: boolean,
         nowMs: number,
     ): number;
+    terminal_select_word_at?(x: number, y: number): boolean;
+    terminal_extend_word_selection_at?(x: number, y: number): boolean;
+    terminal_end_word_selection?(): boolean;
     terminal_pointer_move?(
         x: number,
         y: number,
@@ -1410,6 +1511,8 @@ interface ChromeBridgeInstance {
     show_finder_git_changes?(): void;
     hide_modals(): void;
     splash_click(x: number, y: number): boolean;
+    splash_action_at(x: number, y: number): string;
+    splash_active(): boolean;
     splash_mouse_move(x: number, y: number): void;
     splash_mouse_leave(): void;
     splash_wordmark_click(x: number, y: number): void;
@@ -1424,6 +1527,8 @@ interface ChromeBridgeInstance {
     open_file_tree_delete_modal?(path: string, isDir?: boolean | null): void;
     open_lsp_rename_modal?(word: string): void;
     open_modal_spec?(specJson: string): void;
+    show_connection_gate?(body: string, meta: string): void;
+    hide_connection_gate?(): void;
     drain_modal_actions?(): unknown;
     animations_active?(): boolean;
     set_status_branch(branch: string | null): void;
@@ -1437,6 +1542,7 @@ interface ChromeBridgeInstance {
     enter_palette_fonts_mode?(fontsJson: string): void;
     enter_palette_themes_mode?(themesJson: string): void;
     enter_palette_shaders_mode?(shadersJson: string): void;
+    enter_palette_mashups_mode?(entriesJson: string): boolean;
     enter_palette_buffers_mode?(buffersJson: string): void;
     open_workspaces_palette?(payloadJson: string): void;
     workspaces_palette_open?(): boolean;
@@ -1473,8 +1579,12 @@ interface ChromeBridgeInstance {
         y: number,
         deltaY: number,
         deltaMode: number,
+        legacyWheelDeltaY: number,
     ): boolean;
     agent_selection_drag?(x: number, y: number): boolean;
+    agent_select_word_at?(x: number, y: number): boolean;
+    agent_extend_word_selection_at?(x: number, y: number): boolean;
+    agent_end_word_selection?(): boolean;
     agent_selection_end?(): string | undefined;
     agent_has_active_selection?(): boolean;
     agent_scroll_horizontal_at?(x: number, y: number, deltaPixels: number): boolean;
@@ -1482,10 +1592,23 @@ interface ChromeBridgeInstance {
     agent_end_markdown_horizontal_scrollbar_drag?(): boolean;
     modal_pointer_down?(x: number, y: number): number;
     modal_scroll?(x: number, y: number, deltaPixels: number): boolean;
+    modal_touch_scroll?(x: number, y: number, fingerDelta: number): boolean;
+    chrome_touch_scroll_at?(x: number, y: number, dx: number, dy: number): boolean;
+    chrome_wheel_scroll_at?(
+        x: number,
+        y: number,
+        dx: number,
+        dy: number,
+        deltaMode: number,
+        shift: boolean,
+    ): boolean;
+    pointer_overlay_active?(): boolean;
+    chrome_page_overlay_active?(): boolean;
     terminal_seed_history?(entriesJson: string): void;
     terminal_seed_completion_dir?(dir: string, entriesJson: string): void;
     drain_completion_dir_requests?(): unknown;
     agent_drag_at?(x: number, y: number, dyPixels: number): number;
+    agent_drag_owned_at?(x: number, y: number, dyPixels: number, owner: number): number;
     agent_drag_timeline?(deltaPixels: number): boolean;
     agent_fling_timeline?(velocityPxPerSecond: number): boolean;
     agent_input_rect_json?(): unknown;
@@ -1506,10 +1629,20 @@ interface ChromeBridgeInstance {
       bytes: Uint8Array,
     ): boolean;
     agent_attach_file?(filename: string, mime: string, bytes: Uint8Array): boolean;
+    open_file_browser?(mode: string, start: string, recentsJson: string): void;
+    file_browser_active?(): boolean;
+    drain_file_browser_requests?(): unknown;
+    set_file_browser_entries?(path: string, entriesJson: string): boolean;
+    set_file_browser_locations?(locationsJson: string): boolean;
+    set_file_browser_error?(message: string): void;
+    set_file_browser_recents?(recentsJson: string): void;
+    drain_file_browser_selection?(): unknown;
     agent_file_mention_query?(): unknown;
     agent_set_file_mention_candidates?(json: string): boolean;
     agent_cancel(): void;
     agent_new_thread(directory?: string | null): void;
+    agent_session_id?(): string | null;
+    agent_switch_thread?(sessionId: string): void;
     agent_wordmark_click?(x: number, y: number): boolean;
     active_surface(): string;
     /** Install the PTY outbox callback. Optional because the wasm
@@ -1682,6 +1815,10 @@ export interface WasmInputPolicyModule {
     } | null;
     mobile_named_key_bytes?: (key: string) => Uint8Array | undefined;
     mobile_ctrl_chord_byte?: (text: string) => number | undefined;
+    mobile_direct_insert_mode?: (
+        coarsePointer: boolean,
+        maxTouchPoints: number,
+    ) => boolean;
     PresenceStoreBridge?: new () => WasmPresenceStoreInstance;
     PresencePublisherBridge?: new (
         peerId: string,
@@ -2037,8 +2174,20 @@ class ChromeAdapter implements TerminalAdapter {
     markdownScroll(deltaY: number, viewportH: number): boolean {
         return this.inner.markdown_scroll?.(deltaY, viewportH) ?? false;
     }
+    markdownTouchScroll(deltaY: number, viewportH: number): boolean {
+        return this.inner.markdown_touch_scroll?.(deltaY, viewportH) ?? false;
+    }
     markdownClick(x: number, y: number): boolean {
         return this.inner.markdown_click?.(x, y) ?? false;
+    }
+    markdownSelectWordAt(x: number, y: number): boolean {
+        return this.inner.markdown_select_word_at?.(x, y) ?? false;
+    }
+    markdownExtendWordSelectionAt(x: number, y: number): boolean {
+        return this.inner.markdown_extend_word_selection_at?.(x, y) ?? false;
+    }
+    markdownEndWordSelection(): boolean {
+        return this.inner.markdown_end_word_selection?.() ?? false;
     }
     markdownKey(key: string, ctrl: boolean): boolean {
         return this.inner.markdown_key?.(key, ctrl) ?? false;
@@ -2117,6 +2266,9 @@ class ChromeAdapter implements TerminalAdapter {
     markdownRequestSave(): boolean {
         return this.inner.markdown_request_save?.() ?? false;
     }
+    markdownDirty(): boolean {
+        return this.inner.markdown_dirty?.() === true;
+    }
     editorOpenFile(tabIndex: number, path: string, text: string): string {
         return this.inner.editor_open_file?.(tabIndex, path, text) ?? "";
     }
@@ -2131,6 +2283,12 @@ class ChromeAdapter implements TerminalAdapter {
     }
     editorKey(key: string, ctrl: boolean, shift: boolean, alt: boolean): boolean {
         return this.inner.editor_key?.(key, ctrl, shift, alt) ?? false;
+    }
+    setMobileDirectInsert(enabled: boolean): void {
+        this.inner.set_mobile_direct_insert?.(enabled);
+    }
+    setMobileKeyboardInset(bottom: number): void {
+        this.inner.set_mobile_keyboard_inset?.(bottom);
     }
     editorInsertPaste(text: string): boolean {
         return this.inner.editor_insert_paste?.(text) ?? false;
@@ -2150,6 +2308,15 @@ class ChromeAdapter implements TerminalAdapter {
     editorPointerUp(): boolean {
         return this.inner.editor_pointer_up?.() ?? false;
     }
+    editorSelectWordAt(x: number, y: number): boolean {
+        return this.inner.editor_select_word_at?.(x, y) ?? false;
+    }
+    editorExtendWordSelectionAt(x: number, y: number): boolean {
+        return this.inner.editor_extend_word_selection_at?.(x, y) ?? false;
+    }
+    editorEndWordSelection(): boolean {
+        return this.inner.editor_end_word_selection?.() ?? false;
+    }
     editorScroll(
         x: number,
         y: number,
@@ -2158,6 +2325,9 @@ class ChromeAdapter implements TerminalAdapter {
         ctrl: boolean,
     ): boolean {
         return this.inner.editor_scroll?.(x, y, deltaX, deltaY, ctrl) ?? false;
+    }
+    editorTouchScroll(x: number, y: number, deltaX: number, deltaY: number): boolean {
+        return this.inner.editor_touch_scroll?.(x, y, deltaX, deltaY) ?? false;
     }
     editorDrainClipboardOut(): string | null {
         return this.inner.editor_drain_clipboard_out?.() ?? null;
@@ -2396,8 +2566,9 @@ class ChromeAdapter implements TerminalAdapter {
     setPaneSurfaces(json: string): void {
         this.inner.set_pane_surfaces?.(json);
     }
-    feedPaneTerminal(externalId: number, bytes: Uint8Array): void {
-        this.inner.feed_pane_terminal?.(externalId, bytes);
+    feedPaneTerminal(externalId: number, bytes: Uint8Array): unknown[] {
+        const out = this.inner.feed_pane_terminal?.(externalId, bytes);
+        return Array.isArray(out) ? out : [];
     }
     paneTerminalExists(externalId: number): boolean {
         return this.inner.pane_terminal_exists?.(externalId) === true;
@@ -2487,6 +2658,9 @@ class ChromeAdapter implements TerminalAdapter {
     ): number {
         return this.inner.terminal_wheel?.(x, y, deltaX, deltaY, shift) ?? 0;
     }
+    terminalTouchScroll(x: number, y: number, deltaX: number, deltaY: number): number {
+        return this.inner.terminal_touch_scroll?.(x, y, deltaX, deltaY) ?? 0;
+    }
     terminalPointerDown(
         x: number,
         y: number,
@@ -2500,6 +2674,15 @@ class ChromeAdapter implements TerminalAdapter {
             this.inner.terminal_pointer_down?.(x, y, button, shift, ctrl, alt, nowMs) ??
             0
         );
+    }
+    terminalSelectWordAt(x: number, y: number): boolean {
+        return this.inner.terminal_select_word_at?.(x, y) ?? false;
+    }
+    terminalExtendWordSelectionAt(x: number, y: number): boolean {
+        return this.inner.terminal_extend_word_selection_at?.(x, y) ?? false;
+    }
+    terminalEndWordSelection(): boolean {
+        return this.inner.terminal_end_word_selection?.() ?? false;
     }
     terminalPointerMove(
         x: number,
@@ -2616,6 +2799,21 @@ class ChromeAdapter implements TerminalAdapter {
     showCommandPalette() {
         this.inner.show_command_palette();
     }
+    openTerminalDirectoryPalette(routeId: number, sessionId: string | null, cwd: string, shell: string) {
+        this.inner.open_terminal_directory_palette?.(routeId, sessionId ?? undefined, cwd, shell);
+    }
+    updateTerminalDirectoryPaletteCwd(sessionId: string, cwd: string) {
+        this.inner.update_terminal_directory_palette_cwd?.(sessionId, cwd);
+    }
+    continueTerminalDirectoryPalette(cwd: string) {
+        this.inner.continue_terminal_directory_palette?.(cwd);
+    }
+    setTerminalDirectoryPaletteError(error: string) {
+        this.inner.set_terminal_directory_palette_error?.(error);
+    }
+    terminalChangeDirectoryPayload(path: string, shell: string) {
+        return this.inner.terminal_change_directory_payload?.(path, shell) ?? new Uint8Array();
+    }
     setCommandPaletteWorkspaceVisibility(visibility: string) {
         this.inner.set_command_palette_workspace_visibility?.(visibility);
     }
@@ -2727,6 +2925,12 @@ class ChromeAdapter implements TerminalAdapter {
     splashClick(x: number, y: number): boolean {
         return this.inner.splash_click(x, y);
     }
+    splashActionAt(x: number, y: number): string {
+        return this.inner.splash_action_at(x, y);
+    }
+    splashActive(): boolean {
+        return this.inner.splash_active();
+    }
     splashMouseMove(x: number, y: number): void {
         this.inner.splash_mouse_move(x, y);
     }
@@ -2800,6 +3004,12 @@ class ChromeAdapter implements TerminalAdapter {
     openModalSpec(specJson: string) {
         this.inner.open_modal_spec?.(specJson);
     }
+    showConnectionGate(body: string, meta: string) {
+        this.inner.show_connection_gate?.(body, meta);
+    }
+    hideConnectionGate() {
+        this.inner.hide_connection_gate?.();
+    }
     drainModalActions(): string | null {
         const raw = this.inner.drain_modal_actions?.();
         return typeof raw === "string" ? raw : null;
@@ -2870,6 +3080,9 @@ class ChromeAdapter implements TerminalAdapter {
     }
     enterPaletteBuffersMode(buffersJson: string): void {
         this.inner.enter_palette_buffers_mode?.(buffersJson);
+    }
+    enterPaletteMashupsMode(entriesJson: string): boolean {
+        return this.inner.enter_palette_mashups_mode?.(entriesJson) === true;
     }
     openWorkspacesPalette(payloadJson: string): boolean {
         if (!this.inner.open_workspaces_palette) return false;
@@ -2958,6 +3171,15 @@ class ChromeAdapter implements TerminalAdapter {
     agentSelectionDrag(x: number, y: number): boolean {
         return this.inner.agent_selection_drag?.(x, y) === true;
     }
+    agentSelectWordAt(x: number, y: number): boolean {
+        return this.inner.agent_select_word_at?.(x, y) === true;
+    }
+    agentExtendWordSelectionAt(x: number, y: number): boolean {
+        return this.inner.agent_extend_word_selection_at?.(x, y) === true;
+    }
+    agentEndWordSelection(): boolean {
+        return this.inner.agent_end_word_selection?.() === true;
+    }
     agentSelectionEnd(): string | null {
         const text = this.inner.agent_selection_end?.();
         return typeof text === "string" && text.length > 0 ? text : null;
@@ -2985,8 +3207,15 @@ class ChromeAdapter implements TerminalAdapter {
         y: number,
         deltaY: number,
         deltaMode: number,
+        legacyWheelDeltaY: number,
     ): boolean {
-        return this.inner.agent_scroll_wheel_at?.(x, y, deltaY, deltaMode) === true;
+        return this.inner.agent_scroll_wheel_at?.(
+            x,
+            y,
+            deltaY,
+            deltaMode,
+            legacyWheelDeltaY,
+        ) === true;
     }
     agentScrollHorizontalAt(x: number, y: number, deltaPixels: number): boolean {
         return this.inner.agent_scroll_horizontal_at?.(x, y, deltaPixels) === true;
@@ -3003,6 +3232,41 @@ class ChromeAdapter implements TerminalAdapter {
     modalScroll(x: number, y: number, deltaPixels: number): boolean {
         return this.inner.modal_scroll?.(x, y, deltaPixels) === true;
     }
+    modalTouchScroll(x: number, y: number, fingerDelta: number): boolean {
+        return this.inner.modal_touch_scroll?.(x, y, fingerDelta) === true;
+    }
+    chromeTouchScrollAt(x: number, y: number, dx: number, dy: number): boolean {
+        return this.inner.chrome_touch_scroll_at?.(x, y, dx, dy) === true;
+    }
+    chromeWheelScrollAt(
+        x: number,
+        y: number,
+        dx: number,
+        dy: number,
+        deltaMode: number,
+        shift: boolean,
+    ): boolean {
+        return this.inner.chrome_wheel_scroll_at?.(
+            x,
+            y,
+            dx,
+            dy,
+            deltaMode,
+            shift,
+        ) === true;
+    }
+    pointerOverlayActive(): boolean {
+        return this.inner.pointer_overlay_active?.() === true;
+    }
+    chromePageOverlayActive(): boolean {
+        return this.inner.chrome_page_overlay_active?.() === true;
+    }
+    overlayTextEntryAt(x: number, y: number): boolean {
+        return this.inner.overlay_text_entry_at?.(x, y) === true;
+    }
+    setOverlaySafeArea(top: number, right: number, bottom: number, left: number): void {
+        this.inner.set_overlay_safe_area?.(top, right, bottom, left);
+    }
     terminalSeedHistory(entriesJson: string): void {
         this.inner.terminal_seed_history?.(entriesJson);
     }
@@ -3014,6 +3278,10 @@ class ChromeAdapter implements TerminalAdapter {
     }
     agentDragAt(x: number, y: number, dyPixels: number): number {
         return this.inner.agent_drag_at?.(x, y, dyPixels) ?? 0;
+    }
+    agentDragOwnedAt(x: number, y: number, dyPixels: number, owner: number): number {
+        return this.inner.agent_drag_owned_at?.(x, y, dyPixels, owner) ??
+            this.agentDragAt(x, y, dyPixels);
     }
     agentDragTimeline(deltaPixels: number): boolean {
         return this.inner.agent_drag_timeline?.(deltaPixels) === true;
@@ -3030,6 +3298,10 @@ class ChromeAdapter implements TerminalAdapter {
     }
     agentHasConversation(): boolean {
         return this.inner.agent_has_conversation?.() === true;
+    }
+    agentSessionId(): string | null {
+        const value = this.inner.agent_session_id?.();
+        return typeof value === "string" && value.length > 0 ? value : null;
     }
     agentHasPendingPermission(): boolean {
         return this.inner.agent_has_pending_permission();
@@ -3073,6 +3345,20 @@ class ChromeAdapter implements TerminalAdapter {
     agentAttachFile(filename: string, mime: string, bytes: Uint8Array): boolean {
         return this.inner.agent_attach_file?.(filename, mime, bytes) === true;
     }
+    openFileBrowser(mode: string, start: string, recentsJson: string): void {
+        this.inner.open_file_browser?.(mode, start, recentsJson);
+    }
+    fileBrowserActive(): boolean { return this.inner.file_browser_active?.() === true; }
+    drainFileBrowserRequests(): unknown { return this.inner.drain_file_browser_requests?.(); }
+    setFileBrowserEntries(path: string, entriesJson: string): boolean {
+        return this.inner.set_file_browser_entries?.(path, entriesJson) === true;
+    }
+    setFileBrowserLocations(locationsJson: string): boolean {
+        return this.inner.set_file_browser_locations?.(locationsJson) === true;
+    }
+    setFileBrowserError(message: string): void { this.inner.set_file_browser_error?.(message); }
+    setFileBrowserRecents(recentsJson: string): void { this.inner.set_file_browser_recents?.(recentsJson); }
+    drainFileBrowserSelection(): unknown { return this.inner.drain_file_browser_selection?.(); }
     agentFileMentionQuery(): string | null {
         const query = this.inner.agent_file_mention_query?.();
         return typeof query === "string" ? query : null;
@@ -3085,6 +3371,9 @@ class ChromeAdapter implements TerminalAdapter {
     }
     agentNewThread(directory?: string | null): void {
         this.inner.agent_new_thread(directory ?? undefined);
+    }
+    agentSwitchThread(sessionId: string): void {
+        this.inner.agent_switch_thread?.(sessionId);
     }
     agentWordmarkClick(x: number, y: number): boolean {
         return this.inner.agent_wordmark_click?.(x, y) === true;

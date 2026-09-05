@@ -66,9 +66,9 @@ fn canonical_daemon_token_from_disk() -> Option<String> {
         #[cfg(unix)]
         {
             match std::env::var_os("XDG_RUNTIME_DIR") {
-                Some(runtime) if !runtime.is_empty() => {
-                    std::path::PathBuf::from(runtime).join("neoism").join("daemon-token")
-                }
+                Some(runtime) if !runtime.is_empty() => std::path::PathBuf::from(runtime)
+                    .join("neoism")
+                    .join("daemon-token"),
                 _ => {
                     let uid = unsafe { libc::geteuid() };
                     std::env::temp_dir()
@@ -364,7 +364,9 @@ pub(crate) fn allows_session(
         session
             .workspace_id
             .as_ref()
-            .is_some_and(|session_workspace| session_workspace.to_string() == *workspace_id)
+            .is_some_and(|session_workspace| {
+                session_workspace.to_string() == *workspace_id
+            })
     }) && allows_session_scope(claims, session_tenant(session), &session.directory)
 }
 
@@ -388,10 +390,8 @@ mod tests {
 
     #[test]
     fn signature_mismatch_falls_back_to_canonical_token_file() {
-        let runtime = std::env::temp_dir().join(format!(
-            "neoism-caller-fallback-{}",
-            std::process::id()
-        ));
+        let runtime = std::env::temp_dir()
+            .join(format!("neoism-caller-fallback-{}", std::process::id()));
         let dir = runtime.join("neoism");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("daemon-token"), "file-key\n").unwrap();
@@ -400,18 +400,20 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        let claims = neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
-            "guest".to_string(),
-            "ws-1",
-            "workspace:ws-1".to_string(),
-            vec!["/tmp".to_string()],
-            true,
-            now,
-            60,
-        )
-        .unwrap();
+        let claims =
+            neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
+                "guest".to_string(),
+                "ws-1",
+                "workspace:ws-1".to_string(),
+                vec!["/tmp".to_string()],
+                true,
+                now,
+                60,
+            )
+            .unwrap();
         let credential =
-            neoism_agent_service_api::daemon_credential::issue(&claims, b"file-key").unwrap();
+            neoism_agent_service_api::daemon_credential::issue(&claims, b"file-key")
+                .unwrap();
 
         // Env-captured key is STALE (the drift scenario); the canonical file
         // holds the signer's key.
@@ -429,9 +431,11 @@ mod tests {
         assert_eq!(claims.workspace_id.as_deref(), Some("ws-1"));
 
         // A credential signed with a key matching NEITHER still fails.
-        let bogus =
-            neoism_agent_service_api::daemon_credential::issue(&claims_for_bogus(now), b"other")
-                .unwrap();
+        let bogus = neoism_agent_service_api::daemon_credential::issue(
+            &claims_for_bogus(now),
+            b"other",
+        )
+        .unwrap();
         std::env::set_var("XDG_RUNTIME_DIR", &runtime);
         let rejected = policy.authenticate(Some(&bogus));
         std::env::remove_var("XDG_RUNTIME_DIR");

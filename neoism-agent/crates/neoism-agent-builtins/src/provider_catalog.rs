@@ -7,8 +7,9 @@ use std::time::{Duration, SystemTime};
 use anyhow::Context;
 use neoism_agent_core::{
     ModelCacheCost, ModelCost, ModelInfo, ModelLimit, ModelStatus, ProviderApiInfo,
-    ProviderCapabilities, ProviderInfo, ProviderInterleaved, ProviderModalities,
-    ProviderSource, UserModel,
+    ProviderAuthMode, ProviderCapabilities, ProviderConfig, ProviderInfo,
+    ProviderInterleaved, ProviderModalities, ProviderModelConfig, ProviderSource,
+    UserModel,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -41,18 +42,20 @@ pub struct ProviderCatalog {
     cached: Arc<RwLock<Option<Vec<ProviderInfo>>>>,
     cold_load_gate: Arc<Mutex<()>>,
     refresh_gate: Arc<Mutex<()>>,
+    configured: Arc<BTreeMap<String, ProviderConfig>>,
+    discovered: Arc<RwLock<BTreeMap<String, (std::time::Instant, Vec<String>)>>>,
+    discovery_gate: Arc<Mutex<()>>,
 }
 
 impl ProviderCatalog {
-    pub fn from_env() -> Self {
+    pub fn from_env_with_config(configured: BTreeMap<String, ProviderConfig>) -> Self {
         let source = std::env::var("NEOISM_AGENT_MODELS_URL")
             .unwrap_or_else(|_| DEFAULT_SOURCE.to_string());
-        let cache_path =
-            crate::default_cache_dir().join(if source == DEFAULT_SOURCE {
-                "models.json".to_string()
-            } else {
-                format!("models-{}.json", stable_hash(&source))
-            });
+        let cache_path = crate::default_cache_dir().join(if source == DEFAULT_SOURCE {
+            "models.json".to_string()
+        } else {
+            format!("models-{}.json", stable_hash(&source))
+        });
         Self {
             source,
             path_override: std::env::var("NEOISM_AGENT_MODELS_PATH")
@@ -63,26 +66,215 @@ impl ProviderCatalog {
             cached: Arc::new(RwLock::new(None)),
             cold_load_gate: Arc::new(Mutex::new(())),
             refresh_gate: Arc::new(Mutex::new(())),
+            configured: Arc::new(configured),
+            discovered: Arc::new(RwLock::new(BTreeMap::new())),
+            discovery_gate: Arc::new(Mutex::new(())),
         }
     }
 
     pub async fn providers(&self) -> anyhow::Result<Vec<ProviderInfo>> {
         if let Some(providers) = self.cached.read().await.as_ref().cloned() {
-            return Ok(providers);
+            return self.apply_configured(providers).await;
         }
 
         // Only the first cache miss performs disk/network work. Other callers
         // wait for that result instead of launching duplicate catalog fetches.
         let _load = self.cold_load_gate.lock().await;
         if let Some(providers) = self.cached.read().await.as_ref().cloned() {
-            return Ok(providers);
+            return self.apply_configured(providers).await;
         }
         let (providers, refresh_stale) = self.load().await?;
         *self.cached.write().await = Some(providers.clone());
         if refresh_stale {
             self.schedule_refresh();
         }
+        self.apply_configured(providers).await
+    }
+
+    async fn apply_configured(
+        &self,
+        mut providers: Vec<ProviderInfo>,
+    ) -> anyhow::Result<Vec<ProviderInfo>> {
+        for (provider_id, config) in self.configured.iter() {
+            let existing = providers
+                .iter()
+                .position(|provider| provider.id == *provider_id);
+            let is_custom = existing.is_none();
+            let auth = config.auth.unwrap_or(if is_custom {
+                ProviderAuthMode::None
+            } else {
+                ProviderAuthMode::Required
+            });
+            let base_url = config
+                .options
+                .base_url
+                .clone()
+                .or_else(|| {
+                    existing.and_then(|index| {
+                        providers[index]
+                            .models
+                            .values()
+                            .next()
+                            .map(|model| model.api.url.clone())
+                    })
+                })
+                .unwrap_or_default()
+                .trim_end_matches('/')
+                .to_string();
+            let npm = config
+                .npm
+                .clone()
+                .unwrap_or_else(|| "@ai-sdk/openai-compatible".to_string());
+            let mut provider = existing
+                .map(|index| providers.remove(index))
+                .unwrap_or_else(|| ProviderInfo {
+                    id: provider_id.clone(),
+                    name: config.name.clone().unwrap_or_else(|| provider_id.clone()),
+                    source: ProviderSource::Config,
+                    env: Vec::new(),
+                    key: None,
+                    options: BTreeMap::new(),
+                    models: BTreeMap::new(),
+                });
+            if let Some(name) = &config.name {
+                provider.name = name.clone();
+            }
+            if !config.env.is_empty() {
+                provider.env = config.env.clone();
+            }
+
+            if config.discover_models && !base_url.is_empty() {
+                for model_id in self.discover_model_ids(&base_url, auth).await {
+                    provider.models.entry(model_id.clone()).or_insert_with(|| {
+                        local_model(
+                            provider_id,
+                            &model_id,
+                            &model_id,
+                            &base_url,
+                            &npm,
+                            auth,
+                            config.compatibility.stream_usage,
+                            config.compatibility.reasoning_effort,
+                            None,
+                        )
+                    });
+                }
+            }
+            for (model_id, model_config) in &config.models {
+                let wire_id = model_config.id.as_deref().unwrap_or(model_id);
+                let model =
+                    provider.models.entry(model_id.clone()).or_insert_with(|| {
+                        local_model(
+                            provider_id,
+                            model_id,
+                            wire_id,
+                            &base_url,
+                            &npm,
+                            auth,
+                            config.compatibility.stream_usage,
+                            config.compatibility.reasoning_effort,
+                            Some(model_config),
+                        )
+                    });
+                apply_model_config(
+                    model,
+                    provider_id,
+                    model_id,
+                    &base_url,
+                    &npm,
+                    auth,
+                    config.compatibility.stream_usage,
+                    config.compatibility.reasoning_effort,
+                    model_config,
+                );
+            }
+            for model in provider.models.values_mut() {
+                if !base_url.is_empty() {
+                    model.api.url = base_url.clone();
+                }
+                if config.npm.is_some() {
+                    model.api.npm = npm.clone();
+                }
+                model.api.auth = auth;
+                model.api.stream_usage = Some(config.compatibility.stream_usage);
+                model.api.reasoning_effort = Some(config.compatibility.reasoning_effort);
+            }
+            providers.push(provider);
+        }
         Ok(providers)
+    }
+
+    async fn discover_model_ids(
+        &self,
+        base_url: &str,
+        auth: ProviderAuthMode,
+    ) -> Vec<String> {
+        const TTL: Duration = Duration::from_secs(60);
+        if let Some((loaded, models)) = self.discovered.read().await.get(base_url) {
+            if loaded.elapsed() < TTL {
+                return models.clone();
+            }
+        }
+        let _gate = self.discovery_gate.lock().await;
+        if let Some((loaded, models)) = self.discovered.read().await.get(base_url) {
+            if loaded.elapsed() < TTL {
+                return models.clone();
+            }
+        }
+        // Stored credentials are intentionally unavailable to catalog discovery.
+        // Authenticated endpoints should declare models manually.
+        if auth == ProviderAuthMode::Required {
+            return Vec::new();
+        }
+        let discovered = async {
+            let response = self
+                .client
+                .get(format!("{base_url}/models"))
+                .timeout(Duration::from_secs(3))
+                .send()
+                .await?
+                .error_for_status()?;
+            if response
+                .content_length()
+                .is_some_and(|length| length > 1_048_576)
+            {
+                anyhow::bail!("local model catalog is too large");
+            }
+            let bytes = response.bytes().await?;
+            if bytes.len() > 1_048_576 {
+                anyhow::bail!("local model catalog is too large");
+            }
+            let payload: OpenAiModelsResponse = serde_json::from_slice(&bytes)?;
+            let mut ids = payload
+                .data
+                .into_iter()
+                .map(|model| model.id)
+                .filter(|id| !id.trim().is_empty() && id.len() <= 512)
+                .take(512)
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids.dedup();
+            Ok::<_, anyhow::Error>(ids)
+        }
+        .await;
+        match discovered {
+            Ok(ids) => {
+                self.discovered.write().await.insert(
+                    base_url.to_string(),
+                    (std::time::Instant::now(), ids.clone()),
+                );
+                ids
+            }
+            Err(error) => {
+                tracing::debug!(%error, %base_url, "local model discovery failed");
+                self.discovered
+                    .read()
+                    .await
+                    .get(base_url)
+                    .map(|(_, ids)| ids.clone())
+                    .unwrap_or_default()
+            }
+        }
     }
 
     pub async fn refresh(&self, force: bool) -> anyhow::Result<()> {
@@ -231,6 +423,10 @@ fn claude_code_provider() -> ProviderInfo {
                     id: id.to_string(),
                     url: base_url.clone(),
                     npm: "@ai-sdk/anthropic".to_string(),
+                    auth: ProviderAuthMode::Required,
+                    tool_call: Some(true),
+                    stream_usage: None,
+                    reasoning_effort: None,
                 },
                 family: Some("claude".to_string()),
                 capabilities: ProviderCapabilities {
@@ -398,6 +594,10 @@ fn from_models_dev_model(
             id: model.id.clone(),
             url: api,
             npm,
+            auth: ProviderAuthMode::Required,
+            tool_call: Some(model.tool_call),
+            stream_usage: None,
+            reasoning_effort: None,
         },
         family: model.family.clone(),
         capabilities: ProviderCapabilities {
@@ -435,6 +635,114 @@ fn from_models_dev_model(
         release_date: model.release_date.clone(),
         variants: None,
     }
+}
+
+#[derive(Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiModelEntry {
+    id: String,
+}
+
+fn local_model(
+    provider_id: &str,
+    picker_id: &str,
+    wire_id: &str,
+    base_url: &str,
+    npm: &str,
+    auth: ProviderAuthMode,
+    stream_usage: bool,
+    reasoning_effort: bool,
+    config: Option<&ProviderModelConfig>,
+) -> ModelInfo {
+    let config = config.cloned().unwrap_or_default();
+    ModelInfo {
+        id: picker_id.to_string(),
+        provider_id: provider_id.to_string(),
+        name: config.name.unwrap_or_else(|| picker_id.to_string()),
+        api: ProviderApiInfo {
+            id: wire_id.to_string(),
+            url: base_url.to_string(),
+            npm: npm.to_string(),
+            auth,
+            tool_call: Some(config.tool_call.unwrap_or(false)),
+            stream_usage: Some(stream_usage),
+            reasoning_effort: Some(reasoning_effort),
+        },
+        family: config.family,
+        capabilities: ProviderCapabilities {
+            attachment: config.attachment.unwrap_or(false),
+            reasoning: config.reasoning.unwrap_or(false),
+            temperature: config.temperature.unwrap_or(false),
+            tool_call: config.tool_call.unwrap_or(false),
+            input: ProviderModalities {
+                text: true,
+                ..ProviderModalities::default()
+            },
+            output: ProviderModalities {
+                text: true,
+                ..ProviderModalities::default()
+            },
+            interleaved: ProviderInterleaved::default(),
+        },
+        cost: ModelCost::default(),
+        limit: config.limit.unwrap_or_default(),
+        status: ModelStatus::Active,
+        options: config.options,
+        headers: config.headers,
+        release_date: String::new(),
+        variants: None,
+    }
+}
+
+fn apply_model_config(
+    model: &mut ModelInfo,
+    provider_id: &str,
+    picker_id: &str,
+    base_url: &str,
+    npm: &str,
+    auth: ProviderAuthMode,
+    stream_usage: bool,
+    reasoning_effort: bool,
+    config: &ProviderModelConfig,
+) {
+    model.id = picker_id.to_string();
+    model.provider_id = provider_id.to_string();
+    model.api.id = config.id.clone().unwrap_or_else(|| picker_id.to_string());
+    if !base_url.is_empty() {
+        model.api.url = base_url.to_string();
+    }
+    model.api.npm = npm.to_string();
+    model.api.auth = auth;
+    model.api.tool_call = config.tool_call.or(model.api.tool_call);
+    model.api.stream_usage = Some(stream_usage);
+    model.api.reasoning_effort = Some(reasoning_effort);
+    if let Some(name) = &config.name {
+        model.name = name.clone();
+    }
+    if let Some(family) = &config.family {
+        model.family = Some(family.clone());
+    }
+    if let Some(value) = config.attachment {
+        model.capabilities.attachment = value;
+    }
+    if let Some(value) = config.reasoning {
+        model.capabilities.reasoning = value;
+    }
+    if let Some(value) = config.temperature {
+        model.capabilities.temperature = value;
+    }
+    if let Some(value) = config.tool_call {
+        model.capabilities.tool_call = value;
+    }
+    if let Some(limit) = &config.limit {
+        model.limit = limit.clone();
+    }
+    model.options.extend(config.options.clone());
+    model.headers.extend(config.headers.clone());
 }
 
 fn model_cost(cost: Option<&ModelsDevCost>) -> ModelCost {
@@ -838,6 +1146,48 @@ struct ModelsDevModelProvider {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn configured_local_models_are_keyless_and_override_discovery_defaults() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "qwen".to_string(),
+            ProviderModelConfig {
+                name: Some("Qwen local".to_string()),
+                tool_call: Some(true),
+                limit: Some(ModelLimit {
+                    context: 65_536,
+                    input: None,
+                    output: 8_192,
+                }),
+                ..ProviderModelConfig::default()
+            },
+        );
+        let mut configured = BTreeMap::new();
+        configured.insert(
+            "llama.cpp".to_string(),
+            ProviderConfig {
+                name: Some("llama-server (local)".to_string()),
+                auth: Some(ProviderAuthMode::None),
+                options: neoism_agent_core::ProviderConfigOptions {
+                    base_url: Some("http://127.0.0.1:8080/v1/".to_string()),
+                },
+                models,
+                ..ProviderConfig::default()
+            },
+        );
+        let catalog = ProviderCatalog::from_env_with_config(configured);
+        let providers = catalog.apply_configured(Vec::new()).await.unwrap();
+        let provider = &providers[0];
+        let model = &provider.models["qwen"];
+
+        assert_eq!(provider.name, "llama-server (local)");
+        assert_eq!(model.api.url, "http://127.0.0.1:8080/v1");
+        assert_eq!(model.api.auth, ProviderAuthMode::None);
+        assert_eq!(model.api.tool_call, Some(true));
+        assert_eq!(model.api.stream_usage, Some(false));
+        assert_eq!(model.limit.context, 65_536);
+    }
+
     use super::*;
 
     #[test]

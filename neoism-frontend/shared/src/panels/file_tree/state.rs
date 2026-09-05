@@ -46,6 +46,9 @@ pub struct FileTree {
     pub(super) scroll: CriticallyDampedSpring,
     pub(super) cursor_spring: CriticallyDampedSpring,
     pub(super) wheel_accumulator: f32,
+    /// Persistent sub-row displacement for direct touch manipulation. Unlike
+    /// `scroll.position`, this never decays after the finger lifts.
+    pub(super) touch_scroll_offset: f32,
     pub(super) last_scroll_frame: Instant,
     pub(super) last_cursor_frame: Instant,
     pub(super) last_panel_height_rows: usize,
@@ -125,6 +128,7 @@ impl FileTree {
             scroll: CriticallyDampedSpring::new(),
             cursor_spring: CriticallyDampedSpring::new(),
             wheel_accumulator: 0.0,
+            touch_scroll_offset: 0.0,
             last_scroll_frame: Instant::now(),
             last_cursor_frame: Instant::now(),
             last_panel_height_rows: 1,
@@ -162,6 +166,7 @@ impl FileTree {
             scroll: CriticallyDampedSpring::new(),
             cursor_spring: CriticallyDampedSpring::new(),
             wheel_accumulator: 0.0,
+            touch_scroll_offset: 0.0,
             last_scroll_frame: Instant::now(),
             last_cursor_frame: Instant::now(),
             last_panel_height_rows: 1,

@@ -16,8 +16,14 @@ use super::{process, ToolContext, ToolExecutionResult};
 const DEFAULT_SEARCH_TIMEOUT_MS: u64 = 45_000;
 const MAX_SEARCH_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_EXCLUDES: &[&str] = &[
-    ".git", ".claude/worktrees", ".codex", ".neoism/cache", "target",
-    "node_modules", "dist", ".tmp",
+    ".git",
+    ".claude/worktrees",
+    ".codex",
+    ".neoism/cache",
+    "target",
+    "node_modules",
+    "dist",
+    ".tmp",
 ];
 
 pub(super) async fn glob_tool(
@@ -28,7 +34,8 @@ pub(super) async fn glob_tool(
     let cancel = context.cancel.clone();
     run_search_blocking("glob", timeout_ms, cancel, move || {
         glob_tool_sync(context, arguments, timeout_ms)
-    }).await
+    })
+    .await
 }
 
 fn glob_tool_sync(
@@ -40,23 +47,51 @@ fn glob_tool_sync(
     let raw_path = optional_string(&arguments, "path").unwrap_or_else(|| ".".into());
     let path = existing_project_path(&context, &raw_path)?;
     context.ensure_allowed("glob", &display_path(&context.cwd, &path))?;
-    if !path.is_dir() { anyhow::bail!("glob path must be a directory: {}", path.display()); }
+    if !path.is_dir() {
+        anyhow::bail!("glob path must be a directory: {}", path.display());
+    }
     let limit = usize_arg(&arguments, "limit").unwrap_or(50).max(1);
     let offset = usize_arg(&arguments, "offset").unwrap_or(0);
-    let include_hidden = arguments.get("includeHidden").and_then(Value::as_bool).unwrap_or(false);
-    let result = context.services().workspace_search.find_files(&FindFilesRequest {
-        root: path.clone(), query: query.clone(), include_hidden, offset, limit,
-        control: neoism_agent_service_api::WorkspaceSearchRequestControl {
-            timeout_ms, cancel: context.cancel.clone(),
-        },
-    }).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let mut output = result.items.iter().map(|item| {
-        let status = item.git_status.as_ref().map(|status| format!(" [{status}]")).unwrap_or_default();
-        format!("{}{status}", item.path)
-    }).collect::<Vec<_>>();
-    if output.is_empty() { output.push("No files found".into()); }
+    let include_hidden = arguments
+        .get("includeHidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let result = context
+        .services()
+        .workspace_search
+        .find_files(&FindFilesRequest {
+            root: path.clone(),
+            query: query.clone(),
+            include_hidden,
+            offset,
+            limit,
+            control: neoism_agent_service_api::WorkspaceSearchRequestControl {
+                timeout_ms,
+                cancel: context.cancel.clone(),
+            },
+        })
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let mut output = result
+        .items
+        .iter()
+        .map(|item| {
+            let status = item
+                .git_status
+                .as_ref()
+                .map(|status| format!(" [{status}]"))
+                .unwrap_or_default();
+            format!("{}{status}", item.path)
+        })
+        .collect::<Vec<_>>();
+    if output.is_empty() {
+        output.push("No files found".into());
+    }
     Ok(ToolExecutionResult {
-        title: if query.is_empty() { "Glob directory".into() } else { format!("Glob {query}") },
+        title: if query.is_empty() {
+            "Glob directory".into()
+        } else {
+            format!("Glob {query}")
+        },
         output: output.join("\n"),
         metadata: Some(json!({
             "query": query, "includeHidden": include_hidden, "offset": offset, "limit": limit,
@@ -77,10 +112,15 @@ pub(super) async fn grep_tool(
     let cancel = context.cancel.clone();
     run_search_blocking("grep", timeout_ms, cancel, move || {
         grep_tool_sync(context, arguments, timeout_ms)
-    }).await
+    })
+    .await
 }
 
-fn grep_tool_sync(context: ToolContext, arguments: Value, timeout_ms: u64) -> anyhow::Result<ToolExecutionResult> {
+fn grep_tool_sync(
+    context: ToolContext,
+    arguments: Value,
+    timeout_ms: u64,
+) -> anyhow::Result<ToolExecutionResult> {
     let patterns = patterns_arg(&arguments)?;
     let original_pattern = patterns.join(", ");
     let raw_path = optional_string(&arguments, "path").unwrap_or_else(|| ".".into());
@@ -89,22 +129,48 @@ fn grep_tool_sync(context: ToolContext, arguments: Value, timeout_ms: u64) -> an
     let limit = usize_arg(&arguments, "limit").unwrap_or(100).max(1);
     let context_lines = usize_arg(&arguments, "context").unwrap_or(0);
     let include = optional_string(&arguments, "include");
-    let include_hidden = arguments.get("includeHidden").and_then(Value::as_bool).unwrap_or(false);
+    let include_hidden = arguments
+        .get("includeHidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let excludes = merged_excludes(optional_string(&arguments, "exclude").as_deref());
-    let case_sensitive = arguments.get("caseSensitive").and_then(Value::as_bool).unwrap_or(false);
-    let mut mode = requested_mode(&arguments, patterns.first().map(String::as_str).unwrap_or(""));
+    let case_sensitive = arguments
+        .get("caseSensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut mode = requested_mode(
+        &arguments,
+        patterns.first().map(String::as_str).unwrap_or(""),
+    );
     // Keep oversized fuzzy needles away from implementations whose scorer uses
     // bounded integer arithmetic.
     if mode == WorkspaceSearchMode::Fuzzy
-        && patterns.iter().map(String::len).sum::<usize>() + include.as_deref().map_or(0, str::len) > 1024
-    { mode = WorkspaceSearchMode::Plain; }
-    let result = context.services().workspace_search.grep(&GrepWorkspaceRequest {
-        root: context.cwd.clone(), path, patterns: patterns.clone(), include: include.clone(), include_hidden,
-        excludes: excludes.clone(), context_lines, case_sensitive, mode, limit,
-        control: neoism_agent_service_api::WorkspaceSearchRequestControl {
-            timeout_ms, cancel: context.cancel.clone(),
-        },
-    }).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        && patterns.iter().map(String::len).sum::<usize>()
+            + include.as_deref().map_or(0, str::len)
+            > 1024
+    {
+        mode = WorkspaceSearchMode::Plain;
+    }
+    let result = context
+        .services()
+        .workspace_search
+        .grep(&GrepWorkspaceRequest {
+            root: context.cwd.clone(),
+            path,
+            patterns: patterns.clone(),
+            include: include.clone(),
+            include_hidden,
+            excludes: excludes.clone(),
+            context_lines,
+            case_sensitive,
+            mode,
+            limit,
+            control: neoism_agent_service_api::WorkspaceSearchRequestControl {
+                timeout_ms,
+                cancel: context.cancel.clone(),
+            },
+        })
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(ToolExecutionResult {
         title: format!("Grep {original_pattern}"),
         output: render_grep(&result.items, result.files_with_matches, limit),
@@ -122,11 +188,18 @@ fn grep_tool_sync(context: ToolContext, arguments: Value, timeout_ms: u64) -> an
 }
 
 async fn run_search_blocking<F>(
-    tool: &'static str, timeout_ms: u64,
-    cancel: Option<Arc<std::sync::atomic::AtomicBool>>, operation: F,
+    tool: &'static str,
+    timeout_ms: u64,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    operation: F,
 ) -> anyhow::Result<ToolExecutionResult>
-where F: FnOnce() -> anyhow::Result<ToolExecutionResult> + Send + 'static {
-    if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+where
+    F: FnOnce() -> anyhow::Result<ToolExecutionResult> + Send + 'static,
+{
+    if cancel
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    {
         anyhow::bail!("{tool} aborted before start");
     }
     let started = Instant::now();
@@ -140,15 +213,26 @@ where F: FnOnce() -> anyhow::Result<ToolExecutionResult> + Send + 'static {
     };
     if perf_logging_enabled() {
         match &result {
-            Ok(output) => tracing::info!(tool, elapsed_ms = started.elapsed().as_millis() as u64, output_bytes = output.output.len(), "workspace search finish"),
-            Err(error) => tracing::warn!(tool, elapsed_ms = started.elapsed().as_millis() as u64, error = %error, "workspace search failed"),
+            Ok(output) => tracing::info!(
+                tool,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                output_bytes = output.output.len(),
+                "workspace search finish"
+            ),
+            Err(error) => {
+                tracing::warn!(tool, elapsed_ms = started.elapsed().as_millis() as u64, error = %error, "workspace search failed")
+            }
         }
     }
     result
 }
 
 fn requested_mode(arguments: &Value, pattern: &str) -> WorkspaceSearchMode {
-    match optional_string(arguments, "mode").unwrap_or_default().to_ascii_lowercase().as_str() {
+    match optional_string(arguments, "mode")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "regex" => WorkspaceSearchMode::Regex,
         "fuzzy" => WorkspaceSearchMode::Fuzzy,
         "plain" | "literal" | "text" => WorkspaceSearchMode::Plain,
@@ -160,57 +244,122 @@ fn requested_mode(arguments: &Value, pattern: &str) -> WorkspaceSearchMode {
 fn has_regex_metacharacters(pattern: &str) -> bool {
     let mut escaped = false;
     for ch in pattern.chars() {
-        if escaped { escaped = false; continue; }
-        if ch == '\\' { escaped = true; continue; }
-        if matches!(ch, '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|') { return true; }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if matches!(
+            ch,
+            '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|'
+        ) {
+            return true;
+        }
     }
     false
 }
 
 fn patterns_arg(arguments: &Value) -> anyhow::Result<Vec<String>> {
-    let Some(raw) = arguments.get("pattern") else { anyhow::bail!("tool argument pattern is required"); };
+    let Some(raw) = arguments.get("pattern") else {
+        anyhow::bail!("tool argument pattern is required");
+    };
     let patterns = if let Some(array) = raw.as_array() {
-        array.iter().filter_map(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+        array
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
     } else if let Some(value) = raw.as_str() {
         // Preserve a single regex or literal pattern; comma/newline lists are
         // accepted for compatibility with multi-pattern callers.
-        if value.contains('\n') { value.lines().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect() }
-        else { vec![value.to_string()] }
-    } else { Vec::new() };
-    if patterns.is_empty() { anyhow::bail!("tool argument pattern must contain at least one pattern"); }
+        if value.contains('\n') {
+            value
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        } else {
+            vec![value.to_string()]
+        }
+    } else {
+        Vec::new()
+    };
+    if patterns.is_empty() {
+        anyhow::bail!("tool argument pattern must contain at least one pattern");
+    }
     Ok(patterns)
 }
 
 fn merged_excludes(extra: Option<&str>) -> Vec<String> {
-    DEFAULT_EXCLUDES.iter().copied().chain(extra.into_iter().flat_map(|value| value.split([',', ' '])))
-        .map(str::trim).filter(|item| !item.is_empty()).map(|item| item.trim_start_matches('!').to_string()).collect()
+    DEFAULT_EXCLUDES
+        .iter()
+        .copied()
+        .chain(extra.into_iter().flat_map(|value| value.split([',', ' '])))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| item.trim_start_matches('!').to_string())
+        .collect()
 }
 
 fn search_timeout_ms(arguments: &Value) -> u64 {
-    usize_arg(arguments, "timeout").map(|v| v as u64).unwrap_or(DEFAULT_SEARCH_TIMEOUT_MS).clamp(1_000, MAX_SEARCH_TIMEOUT_MS)
+    usize_arg(arguments, "timeout")
+        .map(|v| v as u64)
+        .unwrap_or(DEFAULT_SEARCH_TIMEOUT_MS)
+        .clamp(1_000, MAX_SEARCH_TIMEOUT_MS)
 }
 
 fn perf_logging_enabled() -> bool {
-    std::env::var_os("NEOISM_AGENT_PERF_LOG").as_deref().is_some_and(|v| matches!(v.to_string_lossy().as_ref(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    std::env::var_os("NEOISM_AGENT_PERF_LOG")
+        .as_deref()
+        .is_some_and(|v| {
+            matches!(
+                v.to_string_lossy().as_ref(),
+                "1" | "true" | "TRUE" | "yes" | "YES"
+            )
+        })
 }
 
-fn file_items_json(items: &[WorkspaceFileMatch]) -> Value { Value::Array(items.iter().map(|item| json!({
+fn file_items_json(items: &[WorkspaceFileMatch]) -> Value {
+    Value::Array(items.iter().map(|item| json!({
     "path": item.path, "score": item.score, "gitStatus": item.git_status, "size": item.size, "modified": item.modified,
-})).collect()) }
+})).collect())
+}
 
-fn grep_items_json(items: &[WorkspaceGrepMatch]) -> Value { Value::Array(items.iter().map(|item| json!({
+fn grep_items_json(items: &[WorkspaceGrepMatch]) -> Value {
+    Value::Array(items.iter().map(|item| json!({
     "path": item.path, "line": item.line, "text": item.text, "definition": item.definition, "fuzzyScore": item.fuzzy_score,
-})).collect()) }
+})).collect())
+}
 
 fn render_grep(items: &[WorkspaceGrepMatch], files: usize, limit: usize) -> String {
-    if items.is_empty() { return "No files found".into(); }
-    let mut output = vec![format!("Grep: Found {} matches in {files} files", items.len())];
+    if items.is_empty() {
+        return "No files found".into();
+    }
+    let mut output = vec![format!(
+        "Grep: Found {} matches in {files} files",
+        items.len()
+    )];
     let mut current = "";
     for item in items {
-        if current != item.path { if !current.is_empty() { output.push(String::new()); } current = &item.path; output.push(format!("{}:", item.path)); }
+        if current != item.path {
+            if !current.is_empty() {
+                output.push(String::new());
+            }
+            current = &item.path;
+            output.push(format!("{}:", item.path));
+        }
         let marker = if item.definition { " [def]" } else { "" };
         output.push(format!("  Line {}{marker}: {}", item.line, item.text));
     }
-    if items.len() >= limit { output.push(String::new()); output.push(format!("(Results may be truncated: showing first {limit} matches. Narrow the query or use nextFileOffset metadata.)")); }
+    if items.len() >= limit {
+        output.push(String::new());
+        output.push(format!("(Results may be truncated: showing first {limit} matches. Narrow the query or use nextFileOffset metadata.)"));
+    }
     output.join("\n")
 }

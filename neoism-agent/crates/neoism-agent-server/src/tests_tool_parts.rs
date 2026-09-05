@@ -157,7 +157,9 @@ async fn streamed_tool_call_executes_builtin_and_completes_part() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("input.txt"), "tool output").unwrap();
-    let state = AppState::open_database(root.join("agent.sqlite3")).await.unwrap();
+    let state = AppState::open_database(root.join("agent.sqlite3"))
+        .await
+        .unwrap();
     let session_id = Id::ascending(IdKind::Session);
     let message_id = Id::ascending(IdKind::Message);
     let part_id = Id::ascending(IdKind::Part);
@@ -215,7 +217,9 @@ async fn streamed_tool_call_respects_wildcard_deny_permission() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("input.txt"), "secret").unwrap();
-    let state = AppState::open_database(root.join("agent.sqlite3")).await.unwrap();
+    let state = AppState::open_database(root.join("agent.sqlite3"))
+        .await
+        .unwrap();
 
     let error = execute_tool_call(
         &state,

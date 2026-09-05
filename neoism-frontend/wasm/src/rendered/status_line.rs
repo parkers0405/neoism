@@ -77,16 +77,37 @@ impl ChromeBridge {
         info.mode = Mode::Markdown;
         self.chrome.status_line.set_info(info);
     }
-    /// Wheel for the live markdown pane. `delta_y` is the browser's
-    /// wheel deltaY in CSS px (positive = scroll down); negated here
-    /// to the pane's content-delta convention. True when consumed.
-    pub fn markdown_scroll(&mut self, delta_y: f32, viewport_h: f32) -> bool {
+    /// Wheel for the live markdown pane. The host viewport argument remains
+    /// for wire compatibility, but Chrome's focused content geometry is the
+    /// sole authority for scroll bounds.
+    pub fn markdown_scroll(&mut self, delta_y: f32, _host_viewport_h: f32) -> bool {
+        if !self.chrome.content_surface_available() {
+            return false;
+        }
+        let viewport_h = self.chrome.focused_content_rect().h.max(1.0);
         match self.chrome.markdown_pane_mut() {
             Some(pane) => {
                 pane.scroll_pixels(-delta_y, viewport_h.max(1.0));
                 pane.tick_scroll();
                 self.last_markdown_viewport_h = viewport_h.max(1.0);
                 true
+            }
+            None => false,
+        }
+    }
+
+    /// Direct touch counterpart: no internal momentum injection or easing;
+    /// mobile release momentum reuses this exact frame API from the host.
+    pub fn markdown_touch_scroll(&mut self, delta_y: f32, _host_viewport_h: f32) -> bool {
+        if !self.chrome.content_surface_available() {
+            return false;
+        }
+        let viewport_h = self.chrome.focused_content_rect().h.max(1.0);
+        match self.chrome.markdown_pane_mut() {
+            Some(pane) => {
+                let moved = pane.scroll_touch_pixels(delta_y, viewport_h.max(1.0));
+                self.last_markdown_viewport_h = viewport_h.max(1.0);
+                moved
             }
             None => false,
         }
@@ -324,6 +345,15 @@ impl ChromeBridge {
         true
     }
 
+    /// Whether the active markdown pane differs from its saved baseline.
+    /// The JS host reads this before mutating its BufferTabs list so `:q`
+    /// refuses dirty documents while `:q!` can explicitly discard them.
+    pub fn markdown_dirty(&mut self) -> bool {
+        self.chrome
+            .markdown_pane_mut()
+            .is_some_and(|pane| pane.is_dirty())
+    }
+
     /// Mouse press in the markdown pane (CSS px, canvas coords).
     /// Roster dots and task checkboxes win over caret placement,
     /// mirroring the desktop press order. True when handled.
@@ -343,6 +373,9 @@ impl ChromeBridge {
     /// chip → copy chip → table actions → task checkboxes → drag
     /// handle / caret placement. True when consumed.
     pub fn markdown_click(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
         // An open markdown menu (block / link completion / spelling)
         // owns the pointer first: a row pick applies its action, a
         // click inside the card is swallowed, a click outside closes
@@ -364,6 +397,12 @@ impl ChromeBridge {
         }
         if self.chrome.markdown_pane_mut().is_none() {
             return false;
+        }
+        if self.mobile_direct_insert {
+            if let Some(pane) = self.chrome.markdown_pane_mut() {
+                pane.vim_enabled = false;
+                pane.enter_insert();
+            }
         }
         if self
             .chrome
@@ -425,9 +464,37 @@ impl ChromeBridge {
     /// the desktop's `handle_markdown_drag_move`. True while a drag
     /// consumed the move.
     pub fn markdown_drag_move(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
         self.chrome
             .markdown_pane_mut()
             .is_some_and(|pane| pane.update_drag(x, y))
+    }
+
+    /// Mobile hard hold on rendered or source Markdown text.
+    pub fn markdown_select_word_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
+        self.chrome
+            .markdown_pane_mut()
+            .is_some_and(|pane| pane.select_word_at(x, y))
+    }
+
+    pub fn markdown_extend_word_selection_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
+        self.chrome
+            .markdown_pane_mut()
+            .is_some_and(|pane| pane.extend_touch_word_selection_at(x, y))
+    }
+
+    pub fn markdown_end_word_selection(&mut self) -> bool {
+        self.chrome
+            .markdown_pane_mut()
+            .is_some_and(|pane| pane.end_touch_word_selection())
     }
 
     /// Pointer release for the markdown pane: ends drags (block
@@ -593,6 +660,17 @@ impl ChromeBridge {
         }
         if self.chrome.markdown_pane_mut().is_none() {
             return false;
+        }
+        if self.mobile_direct_insert {
+            let viewport = self.last_markdown_viewport_h.max(1.0);
+            let Some(pane) = self.chrome.markdown_pane_mut() else {
+                return false;
+            };
+            pane.vim_enabled = false;
+            pane.enter_insert();
+            return super::editor_panes::route_markdown_pane_key(
+                pane, key, ctrl, viewport,
+            );
         }
         // A live `/`-search session (palette in Search mode over this
         // pane) owns the keyboard: query editing, match navigation,
@@ -839,7 +917,7 @@ impl ChromeBridge {
         }
         if fx.open_palette {
             self.chrome.finder.set_enabled(false);
-            self.chrome.command_palette.set_enabled(true);
+            self.chrome.command_palette.enter_ex_mode();
             self.relayout_chrome();
         }
         if fx.open_block_menu {
@@ -971,7 +1049,7 @@ impl ChromeBridge {
         }
     }
 
-    fn apply_web_markdown_menu_action(
+    pub(crate) fn apply_web_markdown_menu_action(
         &mut self,
         action: neoism_ui::panels::context_menu::ContextMenuAction,
     ) {

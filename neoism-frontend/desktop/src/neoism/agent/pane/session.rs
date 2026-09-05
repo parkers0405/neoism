@@ -156,23 +156,6 @@ impl NeoismAgentPane {
         self.pending_timeline_prepend_height_px = Some(self.timeline_content_height_px);
     }
 
-    /// Publish a human-readable title for this pane's agent session at
-    /// the daemon level (right-click → Rename on an agent tab). No-ops
-    /// when the pane has no live session yet. Queues an
-    /// [`OutboundAgentCommand::SetTitle`] so the desktop runtime PATCHes
-    /// `/session/{id}` (and the web bridge ships `SetTitle` over the
-    /// daemon WS) on the next drain.
-    pub fn publish_session_title(&mut self, title: impl Into<String>) -> bool {
-        let Some(session_id) = self.session_id.clone() else {
-            return false;
-        };
-        self.push_outbound(OutboundAgentCommand::SetTitle {
-            session_id,
-            title: title.into(),
-        });
-        true
-    }
-
     /// Kick off (debounced) a background refresh of the previous-session
     /// list shown in the side panel's home mode. Mirrors the file_tree
     /// git-status worker pattern: never blocks the frame; the worker
@@ -201,11 +184,12 @@ impl NeoismAgentPane {
                     directory.as_deref(),
                     cursor.as_deref(),
                 );
-                let _ = tx.send(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
-                    generation,
-                    requested_cursor: cursor,
-                    result: entries,
-                });
+                let _ =
+                    tx.send(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
+                        generation,
+                        requested_cursor: cursor,
+                        result: entries,
+                    });
             })
             .is_err()
         {
@@ -582,6 +566,12 @@ impl NeoismAgentPane {
             && self.streaming_started_at.is_some()
     }
 
+    pub fn interruptible_run_active(&self) -> bool {
+        self.is_streaming()
+            || self.viewed_subagent_outstanding()
+            || self.active_subagent_count() > 0
+    }
+
     pub fn has_status_activity(&self) -> bool {
         self.is_streaming()
             || self.viewed_subagent_outstanding()
@@ -597,9 +587,14 @@ impl NeoismAgentPane {
     fn viewed_subagent_outstanding(&self) -> bool {
         self.is_subagent_session()
             && self.session_id.as_deref().is_some_and(|session_id| {
-                self.side_panel.branch_activity(session_id).is_some_and(|activity| {
-                    matches!(activity.status, BranchStatus::Active | BranchStatus::WaitingPermission)
-                })
+                self.side_panel
+                    .branch_activity(session_id)
+                    .is_some_and(|activity| {
+                        matches!(
+                            activity.status,
+                            BranchStatus::Active | BranchStatus::WaitingPermission
+                        )
+                    })
             })
     }
 
@@ -729,7 +724,10 @@ impl NeoismAgentPane {
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
         if let Some(activity) = &self.execution_activity {
-            let viewed = self.session_id.as_deref().unwrap_or(&activity.root_session_id);
+            let viewed = self
+                .session_id
+                .as_deref()
+                .unwrap_or(&activity.root_session_id);
             let elapsed = self
                 .execution_timer_anchor
                 .as_ref()
@@ -752,15 +750,28 @@ impl NeoismAgentPane {
         mut incoming: neoism_ui::panels::agent_pane::state::ExecutionActivityState,
     ) -> bool {
         let now = Instant::now();
-        let viewed = self.session_id.as_deref().unwrap_or(&incoming.root_session_id);
-        let current_floor = self.execution_timer_anchor.as_ref().and_then(|anchor| {
-            anchor.matches(&incoming.execution_id, viewed).then(|| anchor.elapsed_ms_at(now))
-        }).unwrap_or(0);
+        let viewed = self
+            .session_id
+            .as_deref()
+            .unwrap_or(&incoming.root_session_id);
+        let current_floor = self
+            .execution_timer_anchor
+            .as_ref()
+            .and_then(|anchor| {
+                anchor
+                    .matches(&incoming.execution_id, viewed)
+                    .then(|| anchor.elapsed_ms_at(now))
+            })
+            .unwrap_or(0);
         if let Some(current) = self.execution_activity.as_ref() {
-            if current.execution_id == incoming.execution_id && current.revision > incoming.revision {
+            if current.execution_id == incoming.execution_id
+                && current.revision > incoming.revision
+            {
                 return false;
             }
-            if current.execution_id != incoming.execution_id && incoming.execution_id <= current.execution_id {
+            if current.execution_id != incoming.execution_id
+                && incoming.execution_id <= current.execution_id
+            {
                 return false;
             }
             if current.execution_id == incoming.execution_id {
@@ -783,7 +794,11 @@ impl NeoismAgentPane {
                 ),
             );
         }
-        if self.execution_activity.as_ref().is_some_and(|activity| activity.finished) {
+        if self
+            .execution_activity
+            .as_ref()
+            .is_some_and(|activity| activity.finished)
+        {
             self.side_panel.clear_status_display_hold();
         }
         if replaced {
@@ -800,7 +815,11 @@ impl NeoismAgentPane {
         true
     }
 
-    pub(crate) fn execution_activity_matches(&self, execution_id: &str, revision: u64) -> bool {
+    pub(crate) fn execution_activity_matches(
+        &self,
+        execution_id: &str,
+        revision: u64,
+    ) -> bool {
         self.execution_activity.as_ref().is_some_and(|current| {
             current.execution_id == execution_id && current.revision == revision
         })
@@ -843,7 +862,7 @@ impl NeoismAgentPane {
         branches: impl IntoIterator<Item = (String, String, Option<u64>)>,
     ) -> bool {
         if self.runtime_snapshot_root.as_deref() == Some(root_session_id.as_str())
-            && revision <= self.runtime_snapshot_revision
+            && revision < self.runtime_snapshot_revision
         {
             return false;
         }
@@ -924,12 +943,14 @@ impl NeoismAgentPane {
             ) {
                 self.active_subagent_ids.insert(session_id.clone());
                 if let Some(started_at) = started_at {
-                    self.active_subagent_started_at.insert(session_id, started_at);
+                    self.active_subagent_started_at
+                        .insert(session_id, started_at);
                 }
             } else {
                 self.active_subagent_ids.remove(&session_id);
                 self.active_subagent_started_at.remove(&session_id);
-                viewed_terminal |= self.reconcile_viewed_subagent_runtime(&session_id, status);
+                viewed_terminal |=
+                    self.reconcile_viewed_subagent_runtime(&session_id, status);
             }
         }
         if viewed_terminal {
@@ -1030,13 +1051,13 @@ impl NeoismAgentPane {
         if self.is_subagent_session() {
             return 0;
         }
-        let mut active_ids = self
-            .side_panel
-            .active_child_ids(self.session_id.as_deref());
+        let mut active_ids = self.side_panel.active_child_ids(self.session_id.as_deref());
         active_ids.extend(
             self.active_subagent_ids
                 .iter()
-                .filter(|session_id| Some(session_id.as_str()) != self.session_id.as_deref())
+                .filter(|session_id| {
+                    Some(session_id.as_str()) != self.session_id.as_deref()
+                })
                 .cloned(),
         );
         active_ids.len()
@@ -1175,6 +1196,29 @@ impl NeoismAgentPane {
         if inserted {
             self.side_panel.mark_subagent_tree_dirty();
         }
+    }
+
+    pub(crate) fn note_subagent_metadata(
+        &mut self,
+        session_id: &str,
+        title: Option<String>,
+        agent: Option<String>,
+    ) -> bool {
+        let Some((existing_title, existing_agent)) = self
+            .side_panel
+            .subagents()
+            .iter()
+            .find(|entry| entry.id == session_id)
+            .map(|entry| (entry.title.clone(), entry.time_label.clone()))
+        else {
+            return false;
+        };
+        self.side_panel.upsert_subagent(
+            session_id.to_string(),
+            title.unwrap_or(existing_title),
+            agent.unwrap_or(existing_agent),
+        );
+        true
     }
 
     pub(crate) fn set_task_message_status(&mut self, task_id: &str, status: &str) {

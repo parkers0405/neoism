@@ -101,6 +101,9 @@ pub struct InlinePickerRenderState {
     pub selected_cursor_rect: Option<[f32; 4]>,
     /// Device-pixel height of the footer band (0 when absent).
     pub footer_h: f32,
+    /// Source-row range actually painted into the card.
+    pub first_row: usize,
+    pub visible_rows: usize,
 }
 
 /// Trim `text` with an ellipsis so its measured width is ≤ `max_w`.
@@ -720,6 +723,8 @@ pub fn render_limited(
         rect: [x, y, width, height],
         selected_cursor_rect,
         footer_h,
+        first_row: first,
+        visible_rows,
     })
 }
 

@@ -232,8 +232,11 @@ fn apply_v4a_patch_metadata(
         mutation.diagnostic_paths.clone(),
     );
     let lsp_runtime = context.lsp_runtime()?;
-    let lsp_touch =
-        diagnostics::touch_paths(&lsp_runtime, &context.cwd, mutation.diagnostic_paths.clone());
+    let lsp_touch = diagnostics::touch_paths(
+        &lsp_runtime,
+        &context.cwd,
+        mutation.diagnostic_paths.clone(),
+    );
     let mut metadata = json!({ "paths": mutation.touched });
     metadata["lspTouch"] = lsp_touch;
     let mut snapshots = Vec::new();

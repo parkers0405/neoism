@@ -108,6 +108,8 @@ pub struct Finder {
     pub(super) preview_start_line: u32,
     pub(super) selected_cursor_rect: Option<[f32; 4]>,
     pub(super) wheel_accumulator: f32,
+    /// Persistent direct-touch sub-row offset (never spring-decayed).
+    pub(super) touch_scroll_offset: f32,
     pub(super) open_pop_started: Instant,
     pub(super) pop_on_open: bool,
     pub(super) top_anchor: f32,
@@ -150,6 +152,7 @@ impl Default for Finder {
             preview_start_line: 1,
             selected_cursor_rect: None,
             wheel_accumulator: 0.0,
+            touch_scroll_offset: 0.0,
             open_pop_started: Instant::now(),
             pop_on_open: false,
             top_anchor: super::FINDER_MARGIN_TOP,
@@ -194,6 +197,7 @@ impl Finder {
         self.preview_start_line = 1;
         self.selected_cursor_rect = None;
         self.wheel_accumulator = 0.0;
+        self.touch_scroll_offset = 0.0;
     }
 
     pub(super) fn invalidate_preview_cache(&mut self) {

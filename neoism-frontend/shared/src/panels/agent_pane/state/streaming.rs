@@ -58,6 +58,11 @@ impl NeoismAgentPane {
         self.maybe_request_side_panel_session_page();
     }
 
+    pub fn scroll_side_panel_touch_pixels(&mut self, delta_pixels: f32, rows: usize) {
+        self.side_panel.scroll_touch_pixels(delta_pixels, rows);
+        self.maybe_request_side_panel_session_page();
+    }
+
     pub fn maybe_request_side_panel_session_page(&mut self) {
         if let Some(cursor) = self.side_panel.begin_session_page_near_end() {
             self.push_outbound(OutboundAgentCommand::RefreshSessions {
@@ -116,9 +121,53 @@ impl NeoismAgentPane {
         true
     }
 
+    /// Activate the selected session/subagent through the normal authoritative
+    /// switch path, then optionally dismiss the side panel as part of the same
+    /// navigation outcome. Narrow mobile takeover passes `true`; desktop and
+    /// wide layouts pass `false` and retain their established docked panel.
+    ///
+    /// Dismissal happens immediately after the switch is queued (or when the
+    /// selected recent row is already current), so an async switch failure can
+    /// never trap the user behind the takeover or reopen it later.
+    pub fn activate_side_panel_row(
+        &mut self,
+        showing_sessions: bool,
+        dismiss_after_navigation: bool,
+    ) -> bool {
+        let mut navigated = if showing_sessions {
+            self.activate_side_panel_selection()
+        } else {
+            self.activate_side_panel_subagent()
+        };
+        if !navigated
+            && showing_sessions
+            && self.side_panel.show_home_override()
+            && self.selected_side_panel_session_is_current()
+        {
+            navigated = true;
+        }
+        if navigated {
+            self.side_panel.set_show_home_override(false);
+            self.side_panel.set_focused(false);
+            if dismiss_after_navigation {
+                self.side_panel.set_user_hidden(true);
+            }
+        }
+        navigated
+    }
+
     pub fn is_streaming(&self) -> bool {
         self.streaming_state != NeoismAgentStreamingState::Idle
             && self.streaming_started_at.is_some()
+    }
+
+    /// Whether the composer control should interrupt rather than send. This
+    /// deliberately excludes detached background jobs and the visual status
+    /// grace hold: only the viewed run or its relevant live branch is stopped.
+    pub fn interruptible_run_active(&self) -> bool {
+        self.is_streaming()
+            || self.viewed_subagent_outstanding()
+            || self.active_subagent_count() > 0
     }
 
     pub fn has_status_activity(&self) -> bool {
@@ -133,12 +182,19 @@ impl NeoismAgentPane {
             || self.side_panel.held_status_display().is_some()
     }
 
-    pub(in crate::panels::agent_pane::state) fn viewed_subagent_outstanding(&self) -> bool {
+    pub(in crate::panels::agent_pane::state) fn viewed_subagent_outstanding(
+        &self,
+    ) -> bool {
         self.is_subagent_session()
             && self.session_id.as_deref().is_some_and(|session_id| {
-                self.side_panel.branch_activity(session_id).is_some_and(|activity| {
-                    matches!(activity.status, BranchStatus::Active | BranchStatus::WaitingPermission)
-                })
+                self.side_panel
+                    .branch_activity(session_id)
+                    .is_some_and(|activity| {
+                        matches!(
+                            activity.status,
+                            BranchStatus::Active | BranchStatus::WaitingPermission
+                        )
+                    })
             })
     }
 
@@ -223,7 +279,10 @@ impl NeoismAgentPane {
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
         if let Some(activity) = &self.execution_activity {
-            let viewed = self.session_id.as_deref().unwrap_or(&activity.root_session_id);
+            let viewed = self
+                .session_id
+                .as_deref()
+                .unwrap_or(&activity.root_session_id);
             let elapsed = self
                 .execution_timer_anchor
                 .as_ref()
@@ -241,9 +300,15 @@ impl NeoismAgentPane {
             .or_else(|| self.side_panel.held_status_elapsed_seconds())
     }
 
-    pub fn apply_execution_activity(&mut self, mut incoming: ExecutionActivityState) -> bool {
+    pub fn apply_execution_activity(
+        &mut self,
+        mut incoming: ExecutionActivityState,
+    ) -> bool {
         let now = Instant::now();
-        let viewed = self.session_id.as_deref().unwrap_or(&incoming.root_session_id);
+        let viewed = self
+            .session_id
+            .as_deref()
+            .unwrap_or(&incoming.root_session_id);
         let current_floor = self
             .execution_timer_anchor
             .as_ref()
@@ -282,7 +347,11 @@ impl NeoismAgentPane {
                 current_floor,
             ));
         }
-        if self.execution_activity.as_ref().is_some_and(|activity| activity.finished) {
+        if self
+            .execution_activity
+            .as_ref()
+            .is_some_and(|activity| activity.finished)
+        {
             self.side_panel.clear_status_display_hold();
         }
         if replaced {
@@ -315,6 +384,7 @@ impl NeoismAgentPane {
     where
         I: IntoIterator<Item = (String, String, Option<u64>)>,
     {
+        let branches = branches.into_iter().collect::<Vec<_>>();
         // Execution and branches are one server snapshot. Reject both when
         // its execution revision is stale so branches cannot travel alone.
         let (execution_current, execution_changed) = execution
@@ -331,8 +401,163 @@ impl NeoismAgentPane {
         if !execution_current {
             return false;
         }
-        self.apply_branch_lifecycle_snapshot(root_session_id, family_revision, branches)
-            || execution_changed
+        let branches_changed = self.apply_branch_lifecycle_snapshot(
+            root_session_id.clone(),
+            family_revision,
+            branches.iter().cloned(),
+        );
+        self.reconcile_authoritative_family_transients(
+            &root_session_id,
+            branches
+                .iter()
+                .map(|(session_id, _, _)| session_id.as_str()),
+        );
+        branches_changed || execution_changed
+    }
+
+    /// Reconcile display-only activity against an authoritative family
+    /// snapshot. `WaitingSubagents` is an aggregate hint, not an independent
+    /// run: once the durable branch set has no outstanding children it must be
+    /// removed even if `execution.finished` is delayed or omitted. Other root
+    /// streaming verbs are cleared only by a finished execution, so a parent
+    /// continuation cannot disappear early.
+    pub(in crate::panels::agent_pane::state) fn reconcile_authoritative_family_transients<
+        'a,
+    >(
+        &mut self,
+        root_session_id: &str,
+        branch_ids: impl IntoIterator<Item = &'a str>,
+    ) {
+        let terminal = self.execution_activity.as_ref().is_some_and(|activity| {
+            activity.root_session_id == root_session_id && activity.finished
+        });
+        if !self.active_subagent_ids.is_empty() {
+            return;
+        }
+
+        let mut family_ids = branch_ids
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        family_ids.insert(root_session_id.to_string());
+        if self.session_id.as_deref().is_some_and(|session_id| {
+            family_ids.contains(session_id)
+                || self.parent_session_id.as_deref() == Some(root_session_id)
+        }) {
+            if terminal
+                || self.streaming_state == NeoismAgentStreamingState::WaitingSubagents
+            {
+                self.note_streaming(NeoismAgentStreamingState::Idle, None);
+            }
+            self.subagent_waiting_started_at = None;
+            if terminal {
+                self.abort_requested_at = None;
+            }
+        }
+        for (session_id, cached) in &mut self.session_cache {
+            if family_ids.contains(session_id)
+                || cached.state.parent_id.as_deref() == Some(root_session_id)
+            {
+                if terminal
+                    || cached.runtime.streaming_state
+                        == NeoismAgentStreamingState::WaitingSubagents
+                {
+                    cached
+                        .runtime
+                        .note_streaming(NeoismAgentStreamingState::Idle, None);
+                }
+                cached.runtime.subagent_waiting_started_at = None;
+            }
+        }
+        if terminal
+            || self.side_panel.held_status_display()
+                == Some(NeoismAgentStreamingState::WaitingSubagents)
+        {
+            self.side_panel.clear_status_display_hold();
+        }
+    }
+
+    /// The server may publish a transient `waiting_subagents` session status.
+    /// Keep it as a hint only: the durable branch roster remains the sole
+    /// authority for whether the aggregate footer is visible.
+    pub fn note_waiting_subagents_hint(&mut self) {
+        if self.streaming_state == NeoismAgentStreamingState::WaitingSubagents {
+            self.note_streaming(NeoismAgentStreamingState::Idle, None);
+        }
+        self.sync_subagent_waiting_clock();
+        if self.active_subagent_count() == 0
+            && self.side_panel.held_status_display()
+                == Some(NeoismAgentStreamingState::WaitingSubagents)
+        {
+            self.side_panel.clear_status_display_hold();
+        }
+    }
+
+    pub fn cache_note_waiting_subagents_hint(&mut self, session_id: &str) {
+        if let Some(cached) = self.session_cache.get_mut(session_id) {
+            if cached.runtime.streaming_state
+                == NeoismAgentStreamingState::WaitingSubagents
+            {
+                cached
+                    .runtime
+                    .note_streaming(NeoismAgentStreamingState::Idle, None);
+            }
+            cached.runtime.subagent_waiting_started_at = None;
+        }
+    }
+
+    /// Admit and apply an authoritative family snapshot. A cold child view
+    /// has no roster yet, so the snapshot itself is allowed to establish the
+    /// family when its envelope targets the viewed session or one of its
+    /// branches is the viewed session. Snapshots for unrelated roots remain
+    /// rejected.
+    pub fn apply_authoritative_family_runtime_snapshot<I>(
+        &mut self,
+        envelope_session_id: &str,
+        execution: Option<ExecutionActivityState>,
+        root_session_id: String,
+        family_revision: u64,
+        branches: I,
+    ) -> bool
+    where
+        I: IntoIterator<Item = (String, String, String, Option<u64>)>,
+    {
+        let branches = branches.into_iter().collect::<Vec<_>>();
+        let viewed = self.session_id.as_deref();
+        let viewed_branch = viewed.and_then(|viewed| {
+            branches
+                .iter()
+                .find(|(session_id, _, _, _)| session_id == viewed)
+        });
+        let establishes_viewed_family = viewed.is_some_and(|viewed| {
+            envelope_session_id == viewed
+                || root_session_id == viewed
+                || viewed_branch.is_some()
+        });
+        if !self.session_family_contains(&root_session_id) && !establishes_viewed_family {
+            return false;
+        }
+
+        self.side_panel.ensure_subagent_main_entry(&root_session_id);
+        if viewed == Some(root_session_id.as_str()) {
+            self.parent_session_id = None;
+        } else if let Some((_, parent_session_id, _, _)) = viewed_branch {
+            self.parent_session_id = Some(parent_session_id.clone());
+        } else if viewed.is_some() && envelope_session_id == viewed.unwrap_or_default() {
+            self.parent_session_id = Some(root_session_id.clone());
+        }
+
+        self.apply_runtime_lifecycle_snapshot(
+            execution,
+            root_session_id,
+            family_revision,
+            branches
+                .into_iter()
+                .map(|(session_id, _, status, started_at)| {
+                    (session_id, status, started_at)
+                }),
+        );
+        true
     }
 
     pub fn apply_branch_lifecycle_snapshot(
@@ -342,7 +567,7 @@ impl NeoismAgentPane {
         branches: impl IntoIterator<Item = (String, String, Option<u64>)>,
     ) -> bool {
         if self.runtime_snapshot_root.as_deref() == Some(root_session_id.as_str())
-            && revision <= self.runtime_snapshot_revision
+            && revision < self.runtime_snapshot_revision
         {
             return false;
         }
@@ -425,7 +650,8 @@ impl NeoismAgentPane {
             ) {
                 self.active_subagent_ids.insert(session_id.clone());
                 if let Some(started_at) = started_at {
-                    self.active_subagent_started_at.insert(session_id, started_at);
+                    self.active_subagent_started_at
+                        .insert(session_id, started_at);
                 }
             } else {
                 self.active_subagent_ids.remove(&session_id);
@@ -524,13 +750,13 @@ impl NeoismAgentPane {
         if self.is_subagent_session() {
             return 0;
         }
-        let mut active_ids = self
-            .side_panel
-            .active_child_ids(self.session_id.as_deref());
+        let mut active_ids = self.side_panel.active_child_ids(self.session_id.as_deref());
         active_ids.extend(
             self.active_subagent_ids
                 .iter()
-                .filter(|session_id| Some(session_id.as_str()) != self.session_id.as_deref())
+                .filter(|session_id| {
+                    Some(session_id.as_str()) != self.session_id.as_deref()
+                })
                 .cloned(),
         );
         active_ids.len()

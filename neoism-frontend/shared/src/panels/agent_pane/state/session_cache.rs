@@ -121,8 +121,8 @@ impl CachedAgentRuntime {
         );
         self.queued_prompt_count = decision.count;
         self.queued_prompt_preview = decision.preview;
-        if decision.should_enter_thinking {
-            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+        if decision.should_enter_generating {
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
         if let Some(started_at) = decision.started_at {
             let started = instant_from_epoch_millis(started_at);
@@ -728,6 +728,29 @@ impl NeoismAgentPane {
         self.session_cache
             .get(session_id)
             .is_some_and(|cached| cached.hydrated)
+    }
+
+    /// Apply a complete provider snapshot to a parked session without
+    /// disturbing the conversation currently on screen.
+    pub fn cache_apply_authoritative_provider_state(
+        &mut self,
+        session_id: &str,
+        model: Option<String>,
+        connection_id: Option<String>,
+        agent: Option<String>,
+        thinking: Option<String>,
+        context_limit: Option<u64>,
+    ) {
+        let cached = self.cached_session_entry(session_id);
+        cached.state.model = model;
+        cached.state.connection_id = connection_id.filter(|value| !value.is_empty());
+        cached.state.agent = agent;
+        cached.state.thinking = thinking.filter(|value| !value.is_empty());
+        if context_limit.is_some() {
+            cached.model_context_limit = context_limit;
+        }
+        cached.last_access = Instant::now();
+        self.trim_session_cache();
     }
 
     /// Streamed whole-part upsert for a non-active session. Desktop:

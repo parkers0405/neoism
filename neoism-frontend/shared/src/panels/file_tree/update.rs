@@ -156,6 +156,7 @@ impl FileTree {
             self.scroll.reset();
             self.cursor_spring.reset();
             self.wheel_accumulator = 0.0;
+            self.touch_scroll_offset = 0.0;
             self.selected_cursor_rect = None;
         }
     }
@@ -191,6 +192,7 @@ impl FileTree {
         self.scroll.reset();
         self.cursor_spring.reset();
         self.wheel_accumulator = 0.0;
+        self.touch_scroll_offset = 0.0;
         self.clamp_scroll(self.last_panel_height_rows);
     }
 
@@ -1069,6 +1071,7 @@ impl FileTree {
     /// the wheel handler in `screen`; if the viewport actually moves,
     /// the selection is kept inside the scrolloff band.
     pub fn scroll_by(&mut self, delta: i32, panel_height_rows: usize) {
+        self.touch_scroll_offset = 0.0;
         let old = self.scroll_top;
         let max_top = self.max_scroll_top(panel_height_rows);
         if delta < 0 {
@@ -1085,6 +1088,7 @@ impl FileTree {
     }
 
     pub fn scroll_pixels(&mut self, delta_pixels: f32, panel_height_rows: usize) {
+        self.touch_scroll_offset = 0.0;
         let row_h = self.row_height();
         if row_h <= 0.0 || delta_pixels == 0.0 {
             return;
@@ -1105,6 +1109,27 @@ impl FileTree {
         {
             self.wheel_accumulator = 0.0;
         }
+    }
+
+    /// Direct vertical finger tracking with a persistent sub-row residual.
+    /// `finger_delta` uses screen coordinates (positive = finger down).
+    pub fn scroll_touch_pixels(
+        &mut self,
+        finger_delta: f32,
+        panel_height_rows: usize,
+    ) -> bool {
+        let row_h = self.row_height();
+        if row_h <= 0.0 || finger_delta == 0.0 {
+            return false;
+        }
+        self.scroll.reset();
+        let max_px = self.max_scroll_top(panel_height_rows) as f32 * row_h;
+        let before = self.scroll_top as f32 * row_h - self.touch_scroll_offset;
+        let next = (before - finger_delta).clamp(0.0, max_px);
+        self.scroll_top = (next / row_h).floor() as usize;
+        self.touch_scroll_offset = self.scroll_top as f32 * row_h - next;
+        self.wheel_accumulator = 0.0;
+        (next - before).abs() > f32::EPSILON
     }
 
     fn set_scroll_top(&mut self, new_top: usize) {
@@ -1135,7 +1160,7 @@ impl FileTree {
     pub(super) fn tick_scroll(&mut self) -> f32 {
         if self.scroll.position == 0.0 {
             self.last_scroll_frame = Instant::now();
-            return 0.0;
+            return self.touch_scroll_offset;
         }
         let now = Instant::now();
         let dt = now
@@ -1144,7 +1169,7 @@ impl FileTree {
             .min(0.05);
         self.last_scroll_frame = now;
         self.scroll.update(dt, SCROLL_ANIMATION_LENGTH);
-        self.scroll.position
+        self.scroll.position + self.touch_scroll_offset
     }
 
     pub(super) fn tick_cursor(&mut self) -> f32 {
@@ -1426,7 +1451,8 @@ impl FileTree {
             return None;
         }
         let row_h = self.row_height();
-        let local_y = mouse_y - content_y - self.scroll.position;
+        let local_y =
+            mouse_y - content_y - self.scroll.position - self.touch_scroll_offset;
         let row = (local_y / row_h).floor() as isize + self.scroll_top as isize;
         if row < 0 {
             return None;

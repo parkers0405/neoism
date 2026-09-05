@@ -405,6 +405,7 @@ const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = 8;
 
 #[derive(Debug)]
 pub struct Crosswords {
+    synthetic_echo_filter: crate::handler::SyntheticEchoFilter,
     active_charset: CharsetIndex,
     mode: Mode,
     pub vi_mode_cursor: ViModeCursor,
@@ -560,6 +561,7 @@ impl Crosswords {
             keyboard_mode_idx: 0,
             inactive_keyboard_mode_stack: Default::default(),
             inactive_keyboard_mode_idx: 0,
+            synthetic_echo_filter: Default::default(),
             effects: Vec::new(),
         }
     }
@@ -574,6 +576,10 @@ impl Crosswords {
     /// Drain accumulated terminal effects.
     pub fn drain_effects(&mut self) -> std::vec::Drain<'_, crate::TerminalEffect> {
         self.effects.drain(..)
+    }
+
+    pub fn expect_synthetic_command_echo(&mut self, input: &[u8]) {
+        self.synthetic_echo_filter.expect_command(input);
     }
 
     pub fn mark_fully_damaged(&mut self) {
@@ -2251,6 +2257,9 @@ impl Crosswords {
 }
 
 impl Handler for Crosswords {
+    fn synthetic_echo_filter(&mut self) -> Option<&mut crate::handler::SyntheticEchoFilter> {
+        Some(&mut self.synthetic_echo_filter)
+    }
     #[inline]
     fn set_mode(&mut self, mode: AnsiMode) {
         let mode = match mode {
@@ -2961,6 +2970,10 @@ impl Handler for Crosswords {
 
     fn open_editor_tab(&mut self, path: Option<std::path::PathBuf>) {
         self.push_effect(crate::TerminalEffect::OpenEditorTab { path });
+    }
+
+    fn change_terminal_directory(&mut self, path: std::path::PathBuf) {
+        self.push_effect(crate::TerminalEffect::ChangeTerminalDirectory { path });
     }
 
     #[inline]

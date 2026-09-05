@@ -441,6 +441,7 @@ pub struct UniversalModal {
     busy: bool,
     progress: Option<u8>,
     blocking: bool,
+    dismissible: bool,
     opened_at: Instant,
     top_anchor: f32,
     /// Confirmed modal outcomes awaiting a host that cannot execute
@@ -449,6 +450,9 @@ pub struct UniversalModal {
     /// bridge; survives `close()` so a "confirm then close" flow
     /// hands the action over even though the modal is already gone.
     pending_host_actions: Vec<ModalHostAction>,
+    viewport_height: f32,
+    input_hit_rects: Vec<[f32; 4]>,
+    close_rect: Option<[f32; 4]>,
 }
 
 /// A modal outcome the CHROME could validate but not execute — the
@@ -511,9 +515,13 @@ impl Default for UniversalModal {
             busy: false,
             progress: None,
             blocking: true,
+            dismissible: true,
             opened_at: Instant::now(),
             top_anchor: MODAL_MARGIN_TOP,
             pending_host_actions: Vec::new(),
+            viewport_height: 720.0,
+            input_hit_rects: Vec::new(),
+            close_rect: None,
         }
     }
 }
@@ -554,6 +562,9 @@ impl UniversalModal {
         self.busy = false;
         self.progress = None;
         self.blocking = true;
+        self.dismissible = true;
+        self.input_hit_rects.clear();
+        self.close_rect = None;
     }
 
     pub fn open(&mut self, spec: ModalSpec) {
@@ -594,6 +605,7 @@ impl UniversalModal {
         self.busy = spec.busy;
         self.progress = None;
         self.blocking = spec.blocking;
+        self.dismissible = true;
         self.opened_at = Instant::now();
         self.selected_index = 0;
         self.scroll_offset = 0;
@@ -671,6 +683,17 @@ impl UniversalModal {
         self.active && self.blocking
     }
 
+    pub fn set_dismissible(&mut self, dismissible: bool) {
+        self.dismissible = dismissible;
+        if !dismissible {
+            self.close_rect = None;
+        }
+    }
+
+    pub fn is_dismissible(&self) -> bool {
+        self.dismissible
+    }
+
     pub fn owns_editor_focus(&self) -> bool {
         self.is_blocking() || self.has_input()
     }
@@ -690,6 +713,19 @@ impl UniversalModal {
 
     pub fn has_input(&self) -> bool {
         self.active && (self.input.is_some() || self.form.is_some())
+    }
+
+    pub fn text_entry_at(&self, x: f32, y: f32) -> bool {
+        self.active
+            && self.input_hit_rects.iter().any(|[rx, ry, rw, rh]| {
+                x >= *rx && x <= *rx + *rw && y >= *ry && y <= *ry + *rh
+            })
+    }
+
+    pub fn close_button_hit(&self, x: f32, y: f32) -> bool {
+        self.close_rect.is_some_and(|[rx, ry, rw, rh]| {
+            x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+        })
     }
 
     pub fn has_markdown_input(&self) -> bool {
@@ -1091,8 +1127,9 @@ impl UniversalModal {
     pub fn move_selection_down(&mut self) {
         if self.selected_index + 1 < self.buttons.len() {
             self.selected_index += 1;
-            if self.selected_index >= self.scroll_offset + MAX_VISIBLE_ACTIONS {
-                self.scroll_offset = self.selected_index - MAX_VISIBLE_ACTIONS + 1;
+            let visible = self.visible_action_count().max(1);
+            if self.selected_index >= self.scroll_offset + visible {
+                self.scroll_offset = self.selected_index - visible + 1;
             }
         }
     }
@@ -1152,14 +1189,29 @@ impl UniversalModal {
             self.selected_index = index;
             if self.selected_index < self.scroll_offset {
                 self.scroll_offset = self.selected_index;
-            } else if self.selected_index >= self.scroll_offset + MAX_VISIBLE_ACTIONS {
-                self.scroll_offset = self.selected_index - MAX_VISIBLE_ACTIONS + 1;
+            } else if self.selected_index
+                >= self.scroll_offset + self.visible_action_count().max(1)
+            {
+                self.scroll_offset =
+                    self.selected_index - self.visible_action_count().max(1) + 1;
             }
         }
     }
 
     fn visible_action_count(&self) -> usize {
-        self.buttons.len().min(MAX_VISIBLE_ACTIONS)
+        self.buttons.len().min(self.action_row_budget())
+    }
+
+    fn body_row_budget(&self) -> usize {
+        ((self.viewport_height * 0.32 / (BODY_LINE_HEIGHT * self.scale).max(1.0)).floor()
+            as usize)
+            .clamp(1, MAX_BODY_LINES)
+    }
+
+    fn action_row_budget(&self) -> usize {
+        ((self.viewport_height * 0.30 / (ACTION_ROW_HEIGHT * self.scale).max(1.0)).floor()
+            as usize)
+            .clamp(1, MAX_VISIBLE_ACTIONS)
     }
 
     fn body_lines(&self) -> Vec<BodyLine> {
@@ -1266,12 +1318,12 @@ impl UniversalModal {
         let mut rows = 0usize;
         let mut visible = Vec::new();
         for line in self.body_lines().into_iter().skip(self.body_scroll_offset) {
-            if rows > 0 && rows + line.row_span > MAX_BODY_LINES {
+            if rows > 0 && rows + line.row_span > self.body_row_budget() {
                 break;
             }
             rows += line.row_span;
             visible.push(line);
-            if rows >= MAX_BODY_LINES {
+            if rows >= self.body_row_budget() {
                 break;
             }
         }
@@ -1283,12 +1335,15 @@ impl UniversalModal {
             .iter()
             .map(|line| line.row_span)
             .sum::<usize>()
-            .min(MAX_BODY_LINES)
+            .min(self.body_row_budget())
             .max(1)
     }
 
     fn clamp_body_scroll(&mut self) {
-        let max_offset = self.body_lines().len().saturating_sub(MAX_BODY_LINES);
+        let max_offset = self
+            .body_lines()
+            .len()
+            .saturating_sub(self.body_row_budget());
         self.body_scroll_offset = self.body_scroll_offset.min(max_offset);
     }
 
@@ -1296,7 +1351,10 @@ impl UniversalModal {
         if rows == 0 {
             return;
         }
-        let max_offset = self.body_lines().len().saturating_sub(MAX_BODY_LINES);
+        let max_offset = self
+            .body_lines()
+            .len()
+            .saturating_sub(self.body_row_budget());
         self.body_scroll_offset = if rows < 0 {
             self.body_scroll_offset
                 .saturating_sub(rows.unsigned_abs() as usize)
@@ -1309,18 +1367,19 @@ impl UniversalModal {
 
     pub fn scroll_body_page(&mut self, down: bool) {
         let rows = if down {
-            MAX_BODY_LINES as i32
+            self.body_row_budget() as i32
         } else {
-            -(MAX_BODY_LINES as i32)
+            -(self.body_row_budget() as i32)
         };
         self.scroll_body_rows(rows);
     }
 
     fn scroll_actions_rows(&mut self, rows: i32) {
-        if rows == 0 || self.buttons.len() <= MAX_VISIBLE_ACTIONS {
+        let visible = self.visible_action_count().max(1);
+        if rows == 0 || self.buttons.len() <= visible {
             return;
         }
-        let max_offset = self.buttons.len().saturating_sub(MAX_VISIBLE_ACTIONS);
+        let max_offset = self.buttons.len().saturating_sub(visible);
         self.scroll_offset = if rows < 0 {
             self.scroll_offset
                 .saturating_sub(rows.unsigned_abs() as usize)
@@ -1331,8 +1390,8 @@ impl UniversalModal {
         };
         if self.selected_index < self.scroll_offset {
             self.selected_index = self.scroll_offset;
-        } else if self.selected_index >= self.scroll_offset + MAX_VISIBLE_ACTIONS {
-            self.selected_index = self.scroll_offset + MAX_VISIBLE_ACTIONS - 1;
+        } else if self.selected_index >= self.scroll_offset + visible {
+            self.selected_index = self.scroll_offset + visible - 1;
         }
     }
 
@@ -1374,7 +1433,10 @@ impl UniversalModal {
     }
 
     fn body_scroll_normalized(&self) -> f32 {
-        let max_offset = self.body_lines().len().saturating_sub(MAX_BODY_LINES);
+        let max_offset = self
+            .body_lines()
+            .len()
+            .saturating_sub(self.body_row_budget());
         if max_offset == 0 {
             0.0
         } else {
@@ -1384,7 +1446,9 @@ impl UniversalModal {
 
     fn modal_rect(&self, window_width: f32, scale_factor: f32) -> (f32, f32, f32, f32) {
         let s = self.scale;
-        let width = MODAL_WIDTH * s;
+        let viewport_w = (window_width / scale_factor).max(1.0);
+        let margin = (12.0 * s).min(viewport_w * 0.05);
+        let width = (MODAL_WIDTH * s).min((viewport_w - margin * 2.0).max(1.0));
         let body_lines = self.visible_body_line_count() as f32;
         let meta_h = if self.meta.is_empty() { 0.0 } else { 20.0 * s };
         let busy_h = if self.busy {
@@ -1427,8 +1491,12 @@ impl UniversalModal {
             + 4.0 * s
             + actions_h
             + MODAL_PADDING * s;
-        let x = (window_width / scale_factor - width) / 2.0;
-        let y = self.top_anchor;
+        let max_h = (self.viewport_height - margin * 2.0).max(1.0);
+        let height = height.min(max_h);
+        let x = (viewport_w - width) / 2.0;
+        let y = self
+            .top_anchor
+            .min((self.viewport_height - height - margin).max(margin));
         (x, y, width, height)
     }
 
@@ -1563,9 +1631,10 @@ impl UniversalModal {
         if !self.active {
             return;
         }
-        self.clamp_body_scroll();
-
         let (window_width, window_height, scale_factor) = dimensions;
+        self.viewport_height = (window_height / scale_factor).max(1.0);
+        self.clamp_body_scroll();
+        self.input_hit_rects.clear();
         let s = self.scale;
         let pad = MODAL_PADDING * s;
         let radius = MODAL_CORNER_RADIUS * s;
@@ -1623,6 +1692,27 @@ impl UniversalModal {
         sugarloaf
             .text_mut()
             .draw(text_x, text_y, title.as_str(), &title_opts);
+        let close_size = 36.0 * s;
+        let close = [
+            x + w - close_size - 6.0 * s,
+            y + 6.0 * s,
+            close_size,
+            close_size,
+        ];
+        self.close_rect = self.dismissible.then_some(close);
+        let close_opts = DrawOpts {
+            font_size: 18.0 * s,
+            color: theme.u8(theme.dim),
+            ..DrawOpts::default()
+        };
+        if self.dismissible {
+            sugarloaf.text_mut().draw(
+                close[0] + 11.0 * s,
+                close[1] + 8.0 * s,
+                "×",
+                &close_opts,
+            );
+        }
 
         // Segmented mode slider, centered in the title row (the server
         // modal's Join ↔ Create switch). Draws inside the row the title
@@ -1705,9 +1795,10 @@ impl UniversalModal {
         }
 
         let total_body_lines = self.body_lines().len();
-        if total_body_lines > MAX_BODY_LINES {
+        let body_budget = self.body_row_budget();
+        if total_body_lines > body_budget {
             if let Some((thumb_y, thumb_h)) = scrollbar::compute_thumb(
-                MAX_BODY_LINES,
+                body_budget,
                 total_body_lines,
                 body_view_y,
                 body_view_h,
@@ -1802,6 +1893,8 @@ impl UniversalModal {
                 5.0 * s,
                 ORDER,
             );
+            self.input_hit_rects
+                .push([text_x, input_y, w - pad * 2.0, input_h]);
             sugarloaf.rounded_rect(
                 None,
                 text_x,
@@ -1953,6 +2046,8 @@ impl UniversalModal {
                     5.0 * s,
                     ORDER,
                 );
+                self.input_hit_rects
+                    .push([text_x, text_y, w - pad * 2.0, input_h]);
                 let value = if field.value.is_empty() {
                     field.placeholder.clone()
                 } else if field.secret {
@@ -2050,7 +2145,7 @@ impl UniversalModal {
             .buttons
             .iter()
             .skip(self.scroll_offset)
-            .take(MAX_VISIBLE_ACTIONS)
+            .take(self.visible_action_count())
             .enumerate()
         {
             let actual_idx = self.scroll_offset + display_idx;

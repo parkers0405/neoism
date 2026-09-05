@@ -370,16 +370,26 @@ pub(crate) fn apply_code_action_at(
         // No edit inline → codeAction/resolve fills it in
         // (rust-analyzer style).
         if action.get("edit").is_none() {
-            if let Some(resolved) =
-                engine::resolve_code_action(runtime, root, &file, &server_id, action.clone())
-            {
+            if let Some(resolved) = engine::resolve_code_action(
+                runtime,
+                root,
+                &file,
+                &server_id,
+                action.clone(),
+            ) {
                 action = resolved;
             }
         }
         let edit = action.get("edit").filter(|edit| !edit.is_null()).cloned();
         let ran_command = match action.get("command") {
             Some(command) if !command.is_null() => {
-                let _ = engine::execute_command(runtime, root, &file, &server_id, command.clone());
+                let _ = engine::execute_command(
+                    runtime,
+                    root,
+                    &file,
+                    &server_id,
+                    command.clone(),
+                );
                 true
             }
             _ => false,

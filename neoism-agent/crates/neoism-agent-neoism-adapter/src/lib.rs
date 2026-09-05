@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use neoism_agent_service_api::{
     AgentServices, ConfigSourceService, DocumentationService, ExecutableError,
-    ExecutableRequest, ExecutableResult, ExecutableService, ExecutableSource, MemoryService,
-    StandardExecutableService,
+    ExecutableRequest, ExecutableResult, ExecutableService, ExecutableSource,
+    MemoryService, StandardExecutableService,
 };
 
-mod docs;
 mod config;
+mod docs;
 mod lsp;
 mod memory;
 
@@ -26,10 +26,11 @@ pub fn neoism_services() -> AgentServices {
         Arc::new(NeoismExecutableService::new()),
         Arc::new(neoism_agent_workspace_search_fff::FffWorkspaceSearchService::new()),
     )
-        .with_language_capabilities(Arc::new(lsp::NeoismLanguageCapabilityService::new()))
-        .with_config(Arc::new(config::NeoismConfigSourceService::new()) as Arc<dyn ConfigSourceService>)
-        .with_documentation(documentation.clone() as Arc<dyn DocumentationService>)
-        .with_memory(memory.clone() as Arc<dyn MemoryService>)
+    .with_language_capabilities(Arc::new(lsp::NeoismLanguageCapabilityService::new()))
+    .with_config(Arc::new(config::NeoismConfigSourceService::new())
+        as Arc<dyn ConfigSourceService>)
+    .with_documentation(documentation.clone() as Arc<dyn DocumentationService>)
+    .with_memory(memory.clone() as Arc<dyn MemoryService>)
 }
 
 pub fn language_capability_snapshot(
@@ -48,7 +49,8 @@ impl NeoismExecutableService {
         // TODO: neoism-extensions currently reconciles legacy installs while
         // building this map. Keep that product side effect isolated here until
         // it exposes a side-effect-free installed-binary snapshot API.
-        let managed = neoism_extensions::managed_bin::managed_bin_map().unwrap_or_default();
+        let managed =
+            neoism_extensions::managed_bin::managed_bin_map().unwrap_or_default();
         Self {
             managed,
             standard: StandardExecutableService,
@@ -67,7 +69,9 @@ impl NeoismExecutableService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neoism_agent_service_api::{ExecutablePurpose, ExecutableRequest, ExecutableSource};
+    use neoism_agent_service_api::{
+        ExecutablePurpose, ExecutableRequest, ExecutableSource,
+    };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -76,7 +80,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "neoism-agent-adapter-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
         let executable = root.join("pyright-langserver");
@@ -116,7 +123,10 @@ impl Default for NeoismExecutableService {
 }
 
 impl ExecutableService for NeoismExecutableService {
-    fn resolve(&self, request: &ExecutableRequest) -> Result<ExecutableResult, ExecutableError> {
+    fn resolve(
+        &self,
+        request: &ExecutableRequest,
+    ) -> Result<ExecutableResult, ExecutableError> {
         let program_key = Path::new(&request.program)
             .file_name()
             .and_then(|name| name.to_str());
@@ -124,7 +134,11 @@ impl ExecutableService for NeoismExecutableService {
             .preferred_ids
             .iter()
             .filter_map(|id| self.managed.get(id))
-            .chain(program_key.into_iter().filter_map(|name| self.managed.get(name)))
+            .chain(
+                program_key
+                    .into_iter()
+                    .filter_map(|name| self.managed.get(name)),
+            )
             .next();
         if let Some(path) = managed {
             let managed_request = ExecutableRequest::new(path, request.purpose.clone());

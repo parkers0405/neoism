@@ -152,7 +152,8 @@ fn compacted_summary_is_added_to_provider_context() {
     let summary = build_session_summary(&messages);
     messages.extend(test_compaction_pair(&session_id, None, &summary));
 
-    let provider_messages = provider_messages_for_session(&info, &messages, "stub", None, true);
+    let provider_messages =
+        provider_messages_for_session(&info, &messages, "stub", None, true);
 
     assert!(matches!(provider_messages[0].role, ProviderRole::System));
     assert!(provider_messages[0]
@@ -322,7 +323,8 @@ fn compacted_summary_trims_messages_already_covered_by_summary() {
     ));
     messages.push(tail_message);
 
-    let provider_messages = provider_messages_for_session(&info, &messages, "stub", None, true);
+    let provider_messages =
+        provider_messages_for_session(&info, &messages, "stub", None, true);
 
     assert!(provider_messages.iter().any(|message| message
         .content
@@ -352,9 +354,9 @@ fn test_compaction_pair(
                 agent: "neoism".to_string(),
                 model: UserModel {
                     provider_id: "neoism".to_string(),
-                model_id: "stub".to_string(),
-                connection_id: None,
-                variant: None,
+                    model_id: "stub".to_string(),
+                    connection_id: None,
+                    variant: None,
                 },
                 system: None,
                 tools: None,
@@ -460,9 +462,9 @@ async fn store_persists_sessions_and_messages() {
                     agent: "build".to_string(),
                     model: UserModel {
                         provider_id: "neoism".to_string(),
-                    model_id: "stub".to_string(),
-                    connection_id: None,
-                    variant: None,
+                        model_id: "stub".to_string(),
+                        connection_id: None,
+                        variant: None,
                     },
                     system: None,
                     tools: None,
@@ -610,7 +612,10 @@ async fn transcript_search_route_serves_keyword_hits_without_embeddings() {
         !excerpt.contains(">>") && !excerpt.contains("<<"),
         "tool-facing match markers are stripped for the UI: {excerpt}"
     );
-    assert_eq!(hits[0]["distance"], 0.0, "exact matches outrank semantic ones");
+    assert_eq!(
+        hits[0]["distance"], 0.0,
+        "exact matches outrank semantic ones"
+    );
 
     std::env::remove_var("NEOISM_AGENT_DISABLE_EMBEDDINGS");
     state.shutdown().await.unwrap();
@@ -802,15 +807,34 @@ async fn cancelled_subtask_completion_keeps_admission_armed_for_retry() {
     child.parent_id = Some(parent_id.clone());
     state.inner.store.insert_session(&parent).await.unwrap();
     state.inner.store.insert_session(&child).await.unwrap();
-    let execution = state.inner.store
-        .admit_execution_activity(parent_id.as_str(), "execution-guard", "message-guard", "")
-        .await.unwrap().unwrap();
-    parent.extra.insert(crate::execution_activity::EXECUTION_ID_KEY.into(), json!(execution.execution_id));
-    parent.extra.insert(crate::execution_activity::EXECUTION_ROOT_KEY.into(), json!(parent_id.to_string()));
+    let execution = state
+        .inner
+        .store
+        .admit_execution_activity(
+            parent_id.as_str(),
+            "execution-guard",
+            "message-guard",
+            "",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    parent.extra.insert(
+        crate::execution_activity::EXECUTION_ID_KEY.into(),
+        json!(execution.execution_id),
+    );
+    parent.extra.insert(
+        crate::execution_activity::EXECUTION_ROOT_KEY.into(),
+        json!(parent_id.to_string()),
+    );
     state.inner.store.update_session(&parent).await.unwrap();
     let guard = crate::execution_activity::SubtaskAdmissionGuard::admit(
-        &state, &parent, child_id.as_str(),
-    ).await.unwrap();
+        &state,
+        &parent,
+        child_id.as_str(),
+    )
+    .await
+    .unwrap();
     let child_two_id = neoism_agent_core::new_session_id();
     let mut child_two = store_test_session(&child_two_id, now_millis());
     child_two.parent_id = Some(parent_id.clone());
@@ -826,46 +850,77 @@ async fn cancelled_subtask_completion_keeps_admission_armed_for_retry() {
     drop(writer);
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if state.inner.store
+            if state
+                .inner
+                .store
                 .execution_subtask_status("execution-guard", child_id.as_str())
-                .await.unwrap().as_deref() == Some("completed")
+                .await
+                .unwrap()
+                .as_deref()
+                == Some("completed")
             {
                 break;
             }
             tokio::task::yield_now().await;
         }
-    }).await.unwrap();
-    assert!(crate::execution_activity::SubtaskAdmissionGuard::admit(
-        &state, &parent, child_id.as_str(),
-    ).await.is_err(), "terminal duplicate must not resurrect");
+    })
+    .await
+    .unwrap();
+    assert!(
+        crate::execution_activity::SubtaskAdmissionGuard::admit(
+            &state,
+            &parent,
+            child_id.as_str(),
+        )
+        .await
+        .is_err(),
+        "terminal duplicate must not resurrect"
+    );
     crate::session_actions::publish_background_subtask_finished(
         &state,
         child_two_id.as_str(),
         &Id::ascending(IdKind::Message),
         "completed",
         "done",
-    ).await;
+    )
+    .await;
     assert_eq!(
-        state.inner.store
+        state
+            .inner
+            .store
             .execution_subtask_status("execution-guard", child_two_id.as_str())
-            .await.unwrap().as_deref(),
+            .await
+            .unwrap()
+            .as_deref(),
         Some("completed"),
         "execution terminalization must not depend on notification tracking",
     );
     let child_three_id = neoism_agent_core::new_session_id();
     let mut child_three = store_test_session(&child_three_id, now_millis());
     child_three.parent_id = Some(parent_id.clone());
-    state.inner.store.insert_session(&child_three).await.unwrap();
-    assert!(crate::execution_activity::SubtaskAdmissionGuard::admit(
-        &state,
-        &parent,
-        child_three_id.as_str(),
-    )
-    .await
-    .is_err(), "finished execution must reject and prevent child launch");
-    assert!(state.inner.store
+    state
+        .inner
+        .store
+        .insert_session(&child_three)
+        .await
+        .unwrap();
+    assert!(
+        crate::execution_activity::SubtaskAdmissionGuard::admit(
+            &state,
+            &parent,
+            child_three_id.as_str(),
+        )
+        .await
+        .is_err(),
+        "finished execution must reject and prevent child launch"
+    );
+    assert!(state
+        .inner
+        .store
         .execution_subtask_status("execution-guard", child_three_id.as_str())
-        .await.unwrap().is_none());
+        .await
+        .unwrap()
+        .is_none());
     state.shutdown().await.unwrap();
     cleanup_sqlite_files(&path);
 }
@@ -885,16 +940,43 @@ async fn deleting_child_cleans_runtime_without_deleting_root_execution() {
     child.parent_id = Some(root_id.clone());
     store.insert_session(&root).await.unwrap();
     store.insert_session(&child).await.unwrap();
-    store.admit_execution_activity(root_id.as_str(), "execution-delete-child", "message", "")
-        .await.unwrap().unwrap();
-    store.register_execution_subtask(
-        "execution-delete-child", root_id.as_str(), root_id.as_str(), child_id.as_str(), "owner", 10,
-    ).await.unwrap();
-    store.insert_execution_segment(
-        root_id.as_str(), "execution-delete-child", "child-segment", "owner", child_id.as_str(), 10,
-    ).await.unwrap();
+    store
+        .admit_execution_activity(
+            root_id.as_str(),
+            "execution-delete-child",
+            "message",
+            "",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .register_execution_subtask(
+            "execution-delete-child",
+            root_id.as_str(),
+            root_id.as_str(),
+            child_id.as_str(),
+            "owner",
+            10,
+        )
+        .await
+        .unwrap();
+    store
+        .insert_execution_segment(
+            root_id.as_str(),
+            "execution-delete-child",
+            "child-segment",
+            "owner",
+            child_id.as_str(),
+            10,
+        )
+        .await
+        .unwrap();
     assert!(store.delete_session(child_id.as_str()).await.unwrap());
-    let runtime = store.get_session_runtime_snapshot(root_id.as_str()).await.unwrap();
+    let runtime = store
+        .get_session_runtime_snapshot(root_id.as_str())
+        .await
+        .unwrap();
     assert!(runtime.execution.is_some());
     assert!(runtime.branches.is_empty());
     assert!(runtime.execution.unwrap().active_segments.is_empty());
@@ -1051,7 +1133,11 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
         .chain(second.items)
         .map(|session| session.id.to_string())
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(listed.len(), 3, "equal timestamps must not duplicate or omit rows");
+    assert_eq!(
+        listed.len(),
+        3,
+        "equal timestamps must not duplicate or omit rows"
+    );
 
     let mut moved = store.get_session(ids[0].as_str()).await.unwrap().unwrap();
     moved.directory = "/moved".to_string();
@@ -1223,9 +1309,9 @@ async fn list_messages_page_pages_by_cursor_in_sql() {
                         agent: "build".to_string(),
                         model: UserModel {
                             provider_id: "neoism".to_string(),
-                    model_id: "stub".to_string(),
-                    connection_id: None,
-                    variant: None,
+                            model_id: "stub".to_string(),
+                            connection_id: None,
+                            variant: None,
                         },
                         system: None,
                         tools: None,
@@ -1364,9 +1450,9 @@ async fn compact_session_publishes_streaming_compaction_events() {
                     agent: "build".to_string(),
                     model: UserModel {
                         provider_id: "neoism".to_string(),
-                    model_id: "stub".to_string(),
-                    connection_id: None,
-                    variant: None,
+                        model_id: "stub".to_string(),
+                        connection_id: None,
+                        variant: None,
                     },
                     system: None,
                     tools: None,
@@ -1602,26 +1688,55 @@ async fn foreign_session_verdicts_are_cached_per_connection() {
         json!({ "sessionID": foreign_id, "messageID": "m", "partID": "p", "field": "text", "delta": "x" }),
     );
     // First foreign event pays the store walk and records the verdict...
-    assert!(!crate::v2_routes::admit_live_event(
-        &state, &event, Some(root_id.as_str()), &mut family, &mut foreign
-    ).await);
-    assert!(foreign.contains(foreign_id.as_str()), "negative verdict cached");
+    assert!(
+        !crate::v2_routes::admit_live_event(
+            &state,
+            &event,
+            Some(root_id.as_str()),
+            &mut family,
+            &mut foreign
+        )
+        .await
+    );
+    assert!(
+        foreign.contains(foreign_id.as_str()),
+        "negative verdict cached"
+    );
     // ...later ones skip the store entirely (delete the session row: a
     // cached verdict needs no lookup, an uncached one would now admit the
     // event through the missing-parent fallback path differently).
-    state.inner.store.delete_session(root_id.as_str()).await.ok();
-    assert!(!crate::v2_routes::admit_live_event(
-        &state, &event, Some(root_id.as_str()), &mut family, &mut foreign
-    ).await);
+    state
+        .inner
+        .store
+        .delete_session(root_id.as_str())
+        .await
+        .ok();
+    assert!(
+        !crate::v2_routes::admit_live_event(
+            &state,
+            &event,
+            Some(root_id.as_str()),
+            &mut family,
+            &mut foreign
+        )
+        .await
+    );
 
     // Family members always admit without store traffic.
     let own = EventPayload::new(
         event_type::MESSAGE_PART_DELTA,
         json!({ "sessionID": root_id, "messageID": "m", "partID": "p", "field": "text", "delta": "y" }),
     );
-    assert!(crate::v2_routes::admit_live_event(
-        &state, &own, Some(root_id.as_str()), &mut family, &mut foreign
-    ).await);
+    assert!(
+        crate::v2_routes::admit_live_event(
+            &state,
+            &own,
+            Some(root_id.as_str()),
+            &mut family,
+            &mut foreign
+        )
+        .await
+    );
 
     state.shutdown().await.unwrap();
     cleanup_sqlite_files(&path);
@@ -1962,30 +2077,53 @@ async fn v2_root_stream_delivers_child_deletion_without_unrelated_leak() {
     state.inner.store.insert_session(&root).await.unwrap();
     state.inner.store.insert_session(&child).await.unwrap();
     state.inner.store.insert_session(&unrelated).await.unwrap();
-    state.inner.store
+    state
+        .inner
+        .store
         .admit_execution_activity(root_id.as_str(), "execution-delete-sse", "message", "")
-        .await.unwrap().unwrap();
-    state.inner.store.register_execution_subtask(
-        "execution-delete-sse", root_id.as_str(), root_id.as_str(), child_id.as_str(), &state.inner.execution_owner_id, 10,
-    ).await.unwrap();
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .inner
+        .store
+        .register_execution_subtask(
+            "execution-delete-sse",
+            root_id.as_str(),
+            root_id.as_str(),
+            child_id.as_str(),
+            &state.inner.execution_owner_id,
+            10,
+        )
+        .await
+        .unwrap();
 
-    let response = app(state.clone()).oneshot(
-        Request::builder()
-            .method(Method::GET)
-            .uri(format!("/v2/events?sessionId={}&tail=true&limit=10", root_id))
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v2/events?sessionId={}&tail=true&limit=10",
+                    root_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let mut body = response.into_body().into_data_stream();
 
     for deleted in [&unrelated_id, &child_id] {
-        let response = app(state.clone()).oneshot(
-            Request::builder()
-                .method(Method::DELETE)
-                .uri(format!("/v2/sessions/{deleted}"))
-                .body(Body::empty())
-                .unwrap(),
-        ).await.unwrap();
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/v2/sessions/{deleted}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -2003,10 +2141,16 @@ async fn v2_root_stream_delivers_child_deletion_without_unrelated_leak() {
     assert!(text.contains(child_id.as_str()), "{text}");
     assert!(!text.contains(unrelated_id.as_str()), "{text}");
 
-    let runtime = state.inner.store
+    let runtime = state
+        .inner
+        .store
         .get_session_runtime_snapshot(root_id.as_str())
-        .await.unwrap();
-    assert!(runtime.branches.is_empty(), "reconnect hydration must omit deleted child");
+        .await
+        .unwrap();
+    assert!(
+        runtime.branches.is_empty(),
+        "reconnect hydration must omit deleted child"
+    );
     cleanup_sqlite_files(&path);
 }
 
@@ -2324,11 +2468,7 @@ async fn public_api_is_v2_only() {
     assert_eq!(manifest["id"], "dev.neoism.mcp");
     let mcp_root: Value = response_json(
         app.clone()
-            .oneshot(request(
-                Method::GET,
-                "/v2/plugins/dev.neoism.mcp",
-                None,
-            ))
+            .oneshot(request(Method::GET, "/v2/plugins/dev.neoism.mcp", None))
             .await
             .unwrap(),
     )
@@ -2362,11 +2502,7 @@ async fn public_api_is_v2_only() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
     let response = app
-        .oneshot(request(
-            Method::GET,
-            "/v2/sessions/ses_missing",
-            None,
-        ))
+        .oneshot(request(Method::GET, "/v2/sessions/ses_missing", None))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -2375,7 +2511,12 @@ async fn public_api_is_v2_only() {
         .unwrap();
     let error: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
-        error.as_object().unwrap().keys().cloned().collect::<BTreeSet<_>>(),
+        error
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
         BTreeSet::from([
             "code".to_string(),
             "details".to_string(),
@@ -2445,7 +2586,11 @@ async fn provider_auth_routes_persist_api_credentials() {
 
     let stored: bool = response_json(
         app.clone()
-            .oneshot(request(Method::GET, "/v2/providers/test-provider/auth", None))
+            .oneshot(request(
+                Method::GET,
+                "/v2/providers/test-provider/auth",
+                None,
+            ))
             .await
             .unwrap(),
     )
@@ -2461,10 +2606,34 @@ async fn provider_auth_routes_persist_api_credentials() {
     assert!(created.get("credential").is_none());
     assert!(!created.to_string().contains("second-secret"));
     let connection_id = created["connectionId"].as_str().unwrap();
-    let listed: Vec<Value> = response_json(app.clone().oneshot(request(Method::GET, "/v2/providers/test-provider/connections", None)).await.unwrap()).await;
+    let listed: Vec<Value> = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::GET,
+                "/v2/providers/test-provider/connections",
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
     assert_eq!(listed.len(), 2);
-    assert!(listed.iter().all(|summary| summary.get("key").is_none() && summary.get("credential").is_none()));
-    let selected: Value = response_json(app.clone().oneshot(request(Method::POST, &format!("/v2/providers/test-provider/connections/{connection_id}/default"), None)).await.unwrap()).await;
+    assert!(listed.iter().all(
+        |summary| summary.get("key").is_none() && summary.get("credential").is_none()
+    ));
+    let selected: Value = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!(
+                    "/v2/providers/test-provider/connections/{connection_id}/default"
+                ),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
     assert_eq!(selected["isDefault"], true);
 
     let providers: ProviderListResult = response_json(
@@ -2481,7 +2650,11 @@ async fn provider_auth_routes_persist_api_credentials() {
 
     let removed: bool = response_json(
         app.clone()
-            .oneshot(request(Method::DELETE, "/v2/providers/test-provider/auth", None))
+            .oneshot(request(
+                Method::DELETE,
+                "/v2/providers/test-provider/auth",
+                None,
+            ))
             .await
             .unwrap(),
     )
@@ -2490,7 +2663,11 @@ async fn provider_auth_routes_persist_api_credentials() {
 
     let stored: bool = response_json(
         app.clone()
-            .oneshot(request(Method::GET, "/v2/providers/test-provider/auth", None))
+            .oneshot(request(
+                Method::GET,
+                "/v2/providers/test-provider/auth",
+                None,
+            ))
             .await
             .unwrap(),
     )
@@ -2688,7 +2865,9 @@ async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
         tool::ToolContext::new(&root)
             .with_state(Some(state.clone()))
             .with_permission_rules(vec![neoism_agent_core::PermissionRule {
-                permission: "read".into(), pattern: "*".into(), action: neoism_agent_core::PermissionAction::Allow,
+                permission: "read".into(),
+                pattern: "*".into(),
+                action: neoism_agent_core::PermissionAction::Allow,
             }]),
         arguments,
     )
@@ -3034,19 +3213,39 @@ async fn runtime_source_plugins_are_workspace_disableable() {
     .await;
     let snapshot = state.plugin_snapshot(&directory).await;
     let disabled_ids = [
-        "dev.neoism.skills", "dev.neoism.commands", "dev.neoism.websearch",
-        "dev.neoism.agents", "dev.neoism.mcp", "dev.neoism.lsp",
+        "dev.neoism.skills",
+        "dev.neoism.commands",
+        "dev.neoism.websearch",
+        "dev.neoism.agents",
+        "dev.neoism.mcp",
+        "dev.neoism.lsp",
         "dev.neoism.workflows",
-        "dev.neoism.tools.workspace", "dev.neoism.semantic", "dev.neoism.goals",
-        "dev.neoism.subagents", "dev.neoism.vcs", "dev.neoism.pty",
-        "dev.neoism.artifacts", "dev.neoism.interactions",
+        "dev.neoism.tools.workspace",
+        "dev.neoism.semantic",
+        "dev.neoism.goals",
+        "dev.neoism.subagents",
+        "dev.neoism.vcs",
+        "dev.neoism.pty",
+        "dev.neoism.artifacts",
+        "dev.neoism.interactions",
     ];
-    assert!(snapshot.manifests.iter().all(|manifest| !disabled_ids.contains(&manifest.id.as_str())));
-    assert!(snapshot.capabilities.iter().all(|capability| capability.plugin_id.as_deref().is_none_or(|id| !disabled_ids.contains(&id))));
-    assert!(snapshot.contributions.values().all(|contribution| !disabled_ids.contains(&contribution.plugin_id.as_str())));
+    assert!(snapshot
+        .manifests
+        .iter()
+        .all(|manifest| !disabled_ids.contains(&manifest.id.as_str())));
+    assert!(snapshot.capabilities.iter().all(|capability| capability
+        .plugin_id
+        .as_deref()
+        .is_none_or(|id| !disabled_ids.contains(&id))));
+    assert!(snapshot
+        .contributions
+        .values()
+        .all(|contribution| !disabled_ids.contains(&contribution.plugin_id.as_str())));
     assert!(snapshot.runtime_tools.is_empty());
 
-    let response = app.clone().oneshot(request(
+    let response = app
+        .clone()
+        .oneshot(request(
             Method::GET,
             &format!("/v2/skills?directory={directory}"),
             None,
@@ -3055,19 +3254,22 @@ async fn runtime_source_plugins_are_workspace_disableable() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let tools: Vec<neoism_agent_core::ToolListItem> = response_json(
-        app.clone().oneshot(request(
-            Method::GET,
-            &format!("/v2/tools?directory={directory}"),
-            None,
-        ))
-        .await
-        .unwrap(),
+        app.clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/v2/tools?directory={directory}"),
+                None,
+            ))
+            .await
+            .unwrap(),
     )
     .await;
     assert!(!tools.iter().any(|tool| tool.id == "websearch"));
     assert!(!tools.iter().any(|tool| tool.id == "lsp"));
     assert!(!tools.iter().any(|tool| tool.id == "notes"));
-    assert!(!capabilities.iter().any(|capability| capability.id == "neoism.tools.notes"));
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability.id == "neoism.tools.notes"));
     assert!(!tools.iter().any(|tool| tool.id == "skill"));
     assert!(!tools.iter().any(|tool| tool.id == "read"));
     assert!(!tools.iter().any(|tool| tool.id == "complete_goal"));
@@ -3090,14 +3292,20 @@ async fn runtime_source_plugins_are_workspace_disableable() {
             "dev.neoism.subagents",
             "/v2/plugins/dev.neoism.subagents/sessions/session-test/tasks",
         ),
-        ("dev.neoism.semantic", "/v2/plugins/dev.neoism.semantic/search"),
+        (
+            "dev.neoism.semantic",
+            "/v2/plugins/dev.neoism.semantic/search",
+        ),
         ("dev.neoism.workflows", "/v2/plugins/dev.neoism.workflows"),
         ("dev.neoism.lsp", "/v2/plugins/dev.neoism.lsp"),
         ("dev.neoism.mcp", "/v2/plugins/dev.neoism.mcp"),
         ("dev.neoism.vcs", "/v2/plugins/dev.neoism.vcs"),
         ("dev.neoism.pty", "/v2/plugins/dev.neoism.pty/shells"),
     ] {
-        assert!(!snapshot.manifests.iter().any(|manifest| manifest.id == plugin_id));
+        assert!(!snapshot
+            .manifests
+            .iter()
+            .any(|manifest| manifest.id == plugin_id));
         let response = app
             .clone()
             .oneshot(request(
@@ -3109,7 +3317,8 @@ async fn runtime_source_plugins_are_workspace_disableable() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
-    let response = app.oneshot(request(
+    let response = app
+        .oneshot(request(
             Method::GET,
             &format!("/v2/commands?directory={directory}"),
             None,
@@ -3168,10 +3377,19 @@ async fn disabled_execution_contributions_have_no_side_effects() {
     }];
 
     for (name, input) in [
-        ("bash", json!({ "command": format!("touch {}", marker.display()) })),
-        ("background_task", json!({ "command": format!("touch {}", marker.display()), "description": "disabled" })),
+        (
+            "bash",
+            json!({ "command": format!("touch {}", marker.display()) }),
+        ),
+        (
+            "background_task",
+            json!({ "command": format!("touch {}", marker.display()), "description": "disabled" }),
+        ),
         ("session_search", json!({ "query": "anything" })),
-        ("task", json!({ "description": "disabled", "prompt": "disabled", "subagent_type": "general" })),
+        (
+            "task",
+            json!({ "description": "disabled", "prompt": "disabled", "subagent_type": "general" }),
+        ),
         ("execute", json!({ "action": "search" })),
         ("custom_spawn", json!({})),
     ] {
@@ -3189,11 +3407,27 @@ async fn disabled_execution_contributions_have_no_side_effects() {
         assert!(result.is_err(), "disabled {name} unexpectedly executed");
     }
 
-    let workspace = state.workspace_runtime(root.to_string_lossy().as_ref()).await.unwrap();
-    assert!(!workspace.mcp_is_allocated(), "disabled MCP allocated a runtime");
-    assert!(workspace.background_if_allocated().is_none(), "disabled background tool allocated state");
-    assert!(!marker.exists(), "a disabled shell, MCP, background, or custom tool spawned");
-    assert_eq!(state.inner.store.list_sessions().await.unwrap().len(), 1, "disabled task created a child session");
+    let workspace = state
+        .workspace_runtime(root.to_string_lossy().as_ref())
+        .await
+        .unwrap();
+    assert!(
+        !workspace.mcp_is_allocated(),
+        "disabled MCP allocated a runtime"
+    );
+    assert!(
+        workspace.background_if_allocated().is_none(),
+        "disabled background tool allocated state"
+    );
+    assert!(
+        !marker.exists(),
+        "a disabled shell, MCP, background, or custom tool spawned"
+    );
+    assert_eq!(
+        state.inner.store.list_sessions().await.unwrap().len(),
+        1,
+        "disabled task created a child session"
+    );
 
     let subtask = PromptRequest {
         message_id: None,
@@ -3211,7 +3445,9 @@ async fn disabled_execution_contributions_have_no_side_effects() {
             command: None,
         }],
     };
-    assert!(append_prompt(&state, session_id.as_str(), subtask, true).await.is_err());
+    assert!(append_prompt(&state, session_id.as_str(), subtask, true)
+        .await
+        .is_err());
     assert_eq!(state.inner.store.list_sessions().await.unwrap().len(), 1);
 
     state.inner.store.close().await;
@@ -3260,7 +3496,10 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     cleanup_sqlite_files(&db_path);
 
     let state = AppState::open_database(db_path.clone()).await.unwrap();
-    let runtime = state.workspace_runtime(root.to_string_lossy().as_ref()).await.unwrap();
+    let runtime = state
+        .workspace_runtime(root.to_string_lossy().as_ref())
+        .await
+        .unwrap();
     let app = app(state.clone());
     let hook_ctx = plugin::ChatHookContext {
         session_id: "ses_test".to_string(),
@@ -3289,15 +3528,32 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     assert!(tools.iter().any(|tool| tool.id == "custom_echo"));
 
     let mut custom_env = std::collections::BTreeMap::new();
-    plugin::shell_env(&runtime.snapshot(), &plugin::ShellEnvContext {
-        cwd: root.to_string_lossy().into_owned(), session_id: None, call_id: None,
-    }, &mut custom_env).unwrap();
+    plugin::shell_env(
+        &runtime.snapshot(),
+        &plugin::ShellEnvContext {
+            cwd: root.to_string_lossy().into_owned(),
+            session_id: None,
+            call_id: None,
+        },
+        &mut custom_env,
+    )
+    .unwrap();
     let result = custom_tool::execute(
-        state.services(), root.to_string_lossy().as_ref(), "custom_echo",
-        json!({ "text": "hello" }), &[neoism_agent_core::PermissionRule {
-            permission: "bash".into(), pattern: "*".into(), action: neoism_agent_core::PermissionAction::Allow,
-        }], custom_env, None,
-    ).await.unwrap().unwrap();
+        state.services(),
+        root.to_string_lossy().as_ref(),
+        "custom_echo",
+        json!({ "text": "hello" }),
+        &[neoism_agent_core::PermissionRule {
+            permission: "bash".into(),
+            pattern: "*".into(),
+            action: neoism_agent_core::PermissionAction::Allow,
+        }],
+        custom_env,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(result.output, "loaded:hello");
     assert_eq!(result.metadata.unwrap()["customTool"], true);
 
@@ -3327,8 +3583,13 @@ fn generic_config_reads_only_canonical_agent_json() {
     .unwrap();
 
     let user_root = root.join("user");
-    let services = neoism_agent_service_api::AgentServices::new(std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
-        .with_config(std::sync::Arc::new(neoism_agent_service_api::StandardConfigSourceService::new(&user_root)));
+    let services = neoism_agent_service_api::AgentServices::new(
+        std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
+        crate::standard_workspace_search(),
+    )
+    .with_config(std::sync::Arc::new(
+        neoism_agent_service_api::StandardConfigSourceService::new(&user_root),
+    ));
     std::fs::write(
         root.join(".agent/agent.json"),
         r#"{"mcp":{"gamma":{"type":"local","command":["gamma-agent"]}}}"#,
@@ -3465,8 +3726,13 @@ Audit the current worktree for correctness.
     )
     .unwrap();
 
-    let services = neoism_agent_service_api::AgentServices::new(std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
-        .with_config(std::sync::Arc::new(neoism_agent_service_api::StandardConfigSourceService::new(root.join("user"))));
+    let services = neoism_agent_service_api::AgentServices::new(
+        std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
+        crate::standard_workspace_search(),
+    )
+    .with_config(std::sync::Arc::new(
+        neoism_agent_service_api::StandardConfigSourceService::new(root.join("user")),
+    ));
     let loaded = config::load(&services, root.to_str().unwrap()).unwrap();
     assert_eq!(loaded.info.default_agent.as_deref(), Some("plan"));
     assert!(loaded.info.agent.contains_key("reviewer"));
@@ -4097,7 +4363,8 @@ async fn v2_artifacts_round_trip_binary_content() {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let artifact: neoism_agent_core::ArtifactInfo = serde_json::from_slice(&bytes).unwrap();
+    let artifact: neoism_agent_core::ArtifactInfo =
+        serde_json::from_slice(&bytes).unwrap();
     assert_eq!(artifact.filename, "note.txt");
     assert_eq!(artifact.size, payload.len() as u64);
     assert_eq!(artifact.sha256.len(), 64);
@@ -4122,7 +4389,10 @@ async fn v2_artifacts_round_trip_binary_content() {
     };
     state.inner.store.append_audit(&audit).await.unwrap();
     let entries = state.inner.store.list_audit("local", 10).await.unwrap();
-    assert_eq!(entries.first().map(|entry| entry.id.as_str()), Some(audit.id.as_str()));
+    assert_eq!(
+        entries.first().map(|entry| entry.id.as_str()),
+        Some(audit.id.as_str())
+    );
 
     let response = router
         .clone()
@@ -4219,7 +4489,8 @@ async fn pending_interactions_restore_after_restart() {
         .resolve_interaction(&permission.id, "once", json!({ "reply": "once" }))
         .await
         .unwrap());
-    crate::interaction::cancel_session_interactions(&restored, &permission.session_id).await;
+    crate::interaction::cancel_session_interactions(&restored, &permission.session_id)
+        .await;
     assert!(restored.inner.permissions.read().await.is_empty());
     assert!(restored.inner.questions.read().await.is_empty());
     assert!(!restored
@@ -4316,70 +4587,169 @@ struct RecordingWorkspaceSearch {
 struct RecordingRootPin(PathBuf);
 
 impl neoism_agent_service_api::WorkspaceSearchRootPin for RecordingRootPin {
-    fn root(&self) -> &std::path::Path { &self.0 }
+    fn root(&self) -> &std::path::Path {
+        &self.0
+    }
 }
 
 impl neoism_agent_service_api::WorkspaceSearchService for RecordingWorkspaceSearch {
-    fn warm(&self, _root: &std::path::Path) -> Result<(), neoism_agent_service_api::ServiceError> {
+    fn warm(
+        &self,
+        _root: &std::path::Path,
+    ) -> Result<(), neoism_agent_service_api::ServiceError> {
         self.warms.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn pin_root(&self, root: &std::path::Path) -> Result<Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>, neoism_agent_service_api::ServiceError> {
+    fn pin_root(
+        &self,
+        root: &std::path::Path,
+    ) -> Result<
+        Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>,
+        neoism_agent_service_api::ServiceError,
+    > {
         Ok(Arc::new(RecordingRootPin(root.to_path_buf())))
     }
 
-    fn find_files(&self, _request: &neoism_agent_service_api::FindFilesRequest) -> Result<neoism_agent_service_api::FindFilesResult, neoism_agent_service_api::ServiceError> {
+    fn find_files(
+        &self,
+        _request: &neoism_agent_service_api::FindFilesRequest,
+    ) -> Result<
+        neoism_agent_service_api::FindFilesResult,
+        neoism_agent_service_api::ServiceError,
+    > {
         Ok(neoism_agent_service_api::FindFilesResult {
             items: vec![neoism_agent_service_api::WorkspaceFileMatch {
-                path: format!("{}.rs", self.label), score: 0, git_status: None, size: 0, modified: 0,
+                path: format!("{}.rs", self.label),
+                score: 0,
+                git_status: None,
+                size: 0,
+                modified: 0,
             }],
-            bounds: Default::default(), engine: Some("fake".to_string()), fallback_reason: None,
+            bounds: Default::default(),
+            engine: Some("fake".to_string()),
+            fallback_reason: None,
         })
     }
 
-    fn grep(&self, _request: &neoism_agent_service_api::GrepWorkspaceRequest) -> Result<neoism_agent_service_api::GrepWorkspaceResult, neoism_agent_service_api::ServiceError> {
+    fn grep(
+        &self,
+        _request: &neoism_agent_service_api::GrepWorkspaceRequest,
+    ) -> Result<
+        neoism_agent_service_api::GrepWorkspaceResult,
+        neoism_agent_service_api::ServiceError,
+    > {
         Ok(neoism_agent_service_api::GrepWorkspaceResult {
-            items: Vec::new(), files_with_matches: 0, total_files_searched: 0,
-            bounds: Default::default(), mode: "plain".to_string(), engine: Some("fake".to_string()), fallback_reason: None,
+            items: Vec::new(),
+            files_with_matches: 0,
+            total_files_searched: 0,
+            bounds: Default::default(),
+            mode: "plain".to_string(),
+            engine: Some("fake".to_string()),
+            fallback_reason: None,
         })
     }
 
-    fn search_directories(&self, _request: &neoism_agent_service_api::DirectorySearchRequest) -> Result<neoism_agent_service_api::DirectorySearchResult, neoism_agent_service_api::ServiceError> {
+    fn search_directories(
+        &self,
+        _request: &neoism_agent_service_api::DirectorySearchRequest,
+    ) -> Result<
+        neoism_agent_service_api::DirectorySearchResult,
+        neoism_agent_service_api::ServiceError,
+    > {
         Ok(neoism_agent_service_api::DirectorySearchResult {
-            paths: vec![self.label.clone()], bounds: Default::default(), engine: Some("fake".to_string()),
+            paths: vec![self.label.clone()],
+            bounds: Default::default(),
+            engine: Some("fake".to_string()),
         })
     }
 }
 
 #[tokio::test]
 async fn app_states_keep_workspace_search_services_isolated() {
-    let root = std::env::temp_dir().join(format!("neoism-search-isolation-{}", Id::ascending(IdKind::Event)));
+    let root = std::env::temp_dir().join(format!(
+        "neoism-search-isolation-{}",
+        Id::ascending(IdKind::Event)
+    ));
     std::fs::create_dir_all(&root).unwrap();
-    let first_search = Arc::new(RecordingWorkspaceSearch { label: "first".into(), ..Default::default() });
-    let second_search = Arc::new(RecordingWorkspaceSearch { label: "second".into(), ..Default::default() });
-    let first_services = neoism_agent_service_api::AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), first_search.clone());
-    let second_services = neoism_agent_service_api::AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), second_search.clone());
-    let first = AppState::open_database_with_services(root.join("first.db"), first_services).await.unwrap();
-    let second = AppState::open_database_with_services(root.join("second.db"), second_services).await.unwrap();
+    let first_search = Arc::new(RecordingWorkspaceSearch {
+        label: "first".into(),
+        ..Default::default()
+    });
+    let second_search = Arc::new(RecordingWorkspaceSearch {
+        label: "second".into(),
+        ..Default::default()
+    });
+    let first_services = neoism_agent_service_api::AgentServices::new(
+        Arc::new(neoism_agent_service_api::StandardExecutableService),
+        first_search.clone(),
+    );
+    let second_services = neoism_agent_service_api::AgentServices::new(
+        Arc::new(neoism_agent_service_api::StandardExecutableService),
+        second_search.clone(),
+    );
+    let first =
+        AppState::open_database_with_services(root.join("first.db"), first_services)
+            .await
+            .unwrap();
+    let second =
+        AppState::open_database_with_services(root.join("second.db"), second_services)
+            .await
+            .unwrap();
     first.services().workspace_search.warm(&root).unwrap();
     let search_request = neoism_agent_service_api::FindFilesRequest {
-        root: root.clone(), query: "rs".into(), include_hidden: false, offset: 0, limit: 10, control: Default::default(),
+        root: root.clone(),
+        query: "rs".into(),
+        include_hidden: false,
+        offset: 0,
+        limit: 10,
+        control: Default::default(),
     };
-    assert_eq!(first.services().workspace_search.find_files(&search_request).unwrap().items[0].path, "first.rs");
-    assert_eq!(second.services().workspace_search.find_files(&search_request).unwrap().items[0].path, "second.rs");
+    assert_eq!(
+        first
+            .services()
+            .workspace_search
+            .find_files(&search_request)
+            .unwrap()
+            .items[0]
+            .path,
+        "first.rs"
+    );
+    assert_eq!(
+        second
+            .services()
+            .workspace_search
+            .find_files(&search_request)
+            .unwrap()
+            .items[0]
+            .path,
+        "second.rs"
+    );
     for (state, expected) in [(first.clone(), "first"), (second.clone(), "second")] {
         let router = app(state);
-        let session: SessionInfo = response_json(router.clone().oneshot(request(
-            Method::POST,
-            &format!("/v2/sessions?directory={}", root.to_string_lossy()),
-            Some(json!({})),
-        )).await.unwrap()).await;
-        let options: Value = response_json(router.oneshot(request(
-            Method::GET,
-            &format!("/v2/sessions/{}/directory-options?query=x", session.id),
-            None,
-        )).await.unwrap()).await;
+        let session: SessionInfo = response_json(
+            router
+                .clone()
+                .oneshot(request(
+                    Method::POST,
+                    &format!("/v2/sessions?directory={}", root.to_string_lossy()),
+                    Some(json!({})),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let options: Value = response_json(
+            router
+                .oneshot(request(
+                    Method::GET,
+                    &format!("/v2/sessions/{}/directory-options?query=x", session.id),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert!(options.as_array().unwrap().iter().any(|option| {
             option.as_str().is_some_and(|path| path.ends_with(expected))
         }));
@@ -4393,13 +4763,25 @@ async fn app_states_keep_workspace_search_services_isolated() {
 
 #[tokio::test]
 async fn disabled_workspace_tools_do_not_warm_search() {
-    let root = std::env::temp_dir().join(format!("neoism-search-disabled-{}", Id::ascending(IdKind::Event)));
+    let root = std::env::temp_dir().join(format!(
+        "neoism-search-disabled-{}",
+        Id::ascending(IdKind::Event)
+    ));
     std::fs::create_dir_all(root.join(".agent")).unwrap();
-    std::fs::write(root.join(".agent/agent.json"), r#"{"plugins":{"dev.neoism.tools.workspace":{"enabled":false}}}"#).unwrap();
+    std::fs::write(
+        root.join(".agent/agent.json"),
+        r#"{"plugins":{"dev.neoism.tools.workspace":{"enabled":false}}}"#,
+    )
+    .unwrap();
     let search = Arc::new(RecordingWorkspaceSearch::default());
-    let services = neoism_agent_service_api::AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), search.clone());
+    let services = neoism_agent_service_api::AgentServices::new(
+        Arc::new(neoism_agent_service_api::StandardExecutableService),
+        search.clone(),
+    );
     let db = root.join("agent.db");
-    let state = AppState::open_database_with_services(&db, services).await.unwrap();
+    let state = AppState::open_database_with_services(&db, services)
+        .await
+        .unwrap();
     let snapshot = state.plugin_snapshot(root.to_str().unwrap()).await;
     let tools = provider_tools_for_agent(
         &state,
@@ -4410,18 +4792,30 @@ async fn disabled_workspace_tools_do_not_warm_search() {
     )
     .await
     .unwrap();
-    assert!(!tools.iter().any(|tool| matches!(tool.id.as_str(), "grep" | "glob" | "read")));
+    assert!(!tools
+        .iter()
+        .any(|tool| matches!(tool.id.as_str(), "grep" | "glob" | "read")));
     let router = app(state);
-    let session: SessionInfo = response_json(router.clone().oneshot(request(
-        Method::POST,
-        &format!("/v2/sessions?directory={}", root.to_string_lossy()),
-        Some(json!({})),
-    )).await.unwrap()).await;
-    let response = router.oneshot(request(
-        Method::GET,
-        &format!("/v2/sessions/{}/directory-options", session.id),
-        None,
-    )).await.unwrap();
+    let session: SessionInfo = response_json(
+        router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
+                Some(json!({})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let response = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/v2/sessions/{}/directory-options", session.id),
+            None,
+        ))
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(search.warms.load(Ordering::SeqCst), 0);
     cleanup_sqlite_files(&db);

@@ -8,10 +8,11 @@ test("query daemon wins and auto-connects", () => {
     protocol: "http:",
     host: "127.0.0.1:5173",
     port: "5173",
-    search: "?daemon=ws://127.0.0.1:43111/session&token=secret",
+    search: "?daemon=ws://127.0.0.1:43111/session&token=secret&workspace=ws-1",
   });
   assert.equal(target.url, "ws://127.0.0.1:43111/session");
   assert.equal(target.token, "secret");
+  assert.equal(target.workspaceId, "ws-1");
   assert.equal(target.autoConnect, true);
   assert.equal(target.fromQuery, true);
 });

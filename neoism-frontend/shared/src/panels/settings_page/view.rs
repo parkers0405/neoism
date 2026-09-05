@@ -24,6 +24,43 @@ const OPEN_FILE_GLYPH: &str = "\u{f15c}"; // file-lines — "open the raw settin
 const CHEVRON_GLYPH: &str = "\u{f078}";
 const CLOSE_GLYPH: &str = "\u{f00d}";
 const CHECK_GLYPH: &str = "\u{f00c}";
+const BACK_GLYPH: &str = "\u{f053}";
+const FORWARD_GLYPH: &str = "\u{f054}";
+
+const COMPACT_BREAKPOINT: f32 = 720.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SettingsGeometry {
+    compact: bool,
+    panel: [f32; 4],
+    header_h: f32,
+    sidebar_w: f32,
+}
+
+fn settings_geometry(
+    win_w: f32,
+    win_h: f32,
+    scale: f32,
+    safe: [f32; 4],
+) -> SettingsGeometry {
+    let s = scale.clamp(0.75, 2.0);
+    let [top, right, bottom, left] = safe;
+    let available_w = (win_w - left - right).max(1.0);
+    let available_h = (win_h - top - bottom).max(1.0);
+    let compact = available_w < COMPACT_BREAKPOINT * s || available_h < 430.0 * s;
+    let margin = if compact { 0.0 } else { 40.0 * s };
+    SettingsGeometry {
+        compact,
+        panel: [
+            left + margin,
+            top + margin,
+            (available_w - margin * 2.0).max(1.0),
+            (available_h - margin * 2.0).max(1.0),
+        ],
+        header_h: if compact { 102.0 * s } else { 54.0 * s },
+        sidebar_w: if compact { 0.0 } else { 200.0 * s },
+    }
+}
 
 /// A rounded rect clipped (by intersection) to `clip`, so a partly
 /// scrolled-off control is cut at the viewport edge instead of drawing
@@ -40,6 +77,168 @@ fn clip_rrect(
         let radius = radius.min(r[2] * 0.5).min(r[3] * 0.5).max(0.0);
         sugarloaf.rounded_rect(None, r[0], r[1], r[2], r[3], color, DEPTH, radius, order);
     }
+}
+
+/// Compact settings is a navigation root, not a squeezed desktop rail. It
+/// intentionally registers only category rows (plus the close affordance), so
+/// stale detail controls cannot remain clickable after a push/pop or resize.
+fn render_compact_root(
+    pane: &mut NeoismSettingsPane,
+    sugarloaf: &mut Sugarloaf,
+    theme: &IdeTheme,
+    s: f32,
+    mouse: Option<(f32, f32)>,
+    base: DrawOpts,
+) {
+    let [px, py, pw, ph] = pane.panel_rect;
+    pane.back_rect = [0.0; 4];
+    pane.search_rect = [0.0; 4];
+    pane.edit_json_rect = [0.0; 4];
+    pane.dropdown_search_rect = [0.0; 4];
+    pane.control_rects.clear();
+    pane.dropdown_rects.clear();
+    pane.keybind_rects.clear();
+    pane.keybind_reset_rects.clear();
+    pane.category_rects.clear();
+
+    let header_h = 64.0 * s;
+    let pad = 16.0 * s;
+    let title_opts = DrawOpts {
+        font_size: 22.0 * s,
+        bold: true,
+        ..base
+    };
+    draw_text_with_occlusion(
+        sugarloaf,
+        px + pad,
+        py + 21.0 * s,
+        "Settings",
+        &title_opts,
+        &[],
+    );
+
+    let close_sz = 44.0 * s;
+    pane.close_rect = [px + pw - pad - close_sz, py + 10.0 * s, close_sz, close_sz];
+    let close_hovered = mouse.is_some_and(|(x, y)| point_in(pane.close_rect, x, y));
+    let close_opts = DrawOpts {
+        font_size: 16.0 * s,
+        color: theme.u8(if close_hovered { theme.fg } else { theme.dim }),
+        ..base
+    };
+    draw_text_with_occlusion(
+        sugarloaf,
+        pane.close_rect[0] + 15.0 * s,
+        pane.close_rect[1] + 14.0 * s,
+        CLOSE_GLYPH,
+        &close_opts,
+        &[],
+    );
+
+    let row_h = 54.0 * s;
+    let list_x = px + pad;
+    let list_w = (pw - pad * 2.0).max(1.0);
+    let list_top = py + header_h + 8.0 * s;
+    let clip = [px, list_top, pw, (py + ph - list_top).max(0.0)];
+    let scroll = pane.scroll_offset();
+    sugarloaf.rounded_rect(
+        None,
+        list_x,
+        list_top,
+        list_w,
+        (row_h * Category::ALL.len() as f32).min(clip[3]),
+        theme.f32(theme.surface),
+        DEPTH,
+        12.0 * s,
+        ORDER_ROW,
+    );
+
+    for (index, category) in Category::ALL.into_iter().enumerate() {
+        let y = list_top + index as f32 * row_h - scroll;
+        let rect = [list_x, y, list_w, row_h];
+        let Some(hit_rect) = intersect_rect(rect, clip) else {
+            continue;
+        };
+        let hovered = mouse.is_some_and(|(x, y)| point_in(hit_rect, x, y));
+        if hovered {
+            clip_rrect(
+                sugarloaf,
+                rect,
+                clip,
+                theme.f32(theme.hover),
+                8.0 * s,
+                ORDER_CTRL,
+            );
+        }
+        let icon_bg = [list_x + 12.0 * s, y + 11.0 * s, 32.0 * s, 32.0 * s];
+        clip_rrect(
+            sugarloaf,
+            icon_bg,
+            clip,
+            theme.f32_alpha(theme.accent, 0.18),
+            8.0 * s,
+            ORDER_CTRL,
+        );
+        let icon_opts = DrawOpts {
+            font_size: 14.0 * s,
+            color: theme.u8(theme.accent),
+            clip_rect: Some(clip),
+            ..base
+        };
+        draw_text_with_occlusion(
+            sugarloaf,
+            icon_bg[0] + 9.0 * s,
+            y + 20.0 * s,
+            category.icon(),
+            &icon_opts,
+            &[],
+        );
+        let label_opts = DrawOpts {
+            font_size: 16.0 * s,
+            clip_rect: Some(clip),
+            ..base
+        };
+        draw_text_with_occlusion(
+            sugarloaf,
+            list_x + 56.0 * s,
+            y + 19.0 * s,
+            category.label(),
+            &label_opts,
+            &[],
+        );
+        let chevron_opts = DrawOpts {
+            font_size: 11.0 * s,
+            color: theme.u8(theme.dim),
+            clip_rect: Some(clip),
+            ..base
+        };
+        draw_text_with_occlusion(
+            sugarloaf,
+            list_x + list_w - 24.0 * s,
+            y + 21.0 * s,
+            FORWARD_GLYPH,
+            &chevron_opts,
+            &[],
+        );
+        if index + 1 < Category::ALL.len() {
+            if let Some(separator) = intersect_rect(
+                [list_x + 56.0 * s, y + row_h - 1.0, list_w - 56.0 * s, 1.0],
+                clip,
+            ) {
+                sugarloaf.rect(
+                    None,
+                    separator[0],
+                    separator[1],
+                    separator[2],
+                    separator[3],
+                    theme.f32_alpha(theme.border, 0.55),
+                    DEPTH,
+                    ORDER_ROW,
+                );
+            }
+        }
+        pane.category_rects.push((hit_rect, category));
+    }
+    pane.set_content_metrics(row_h * Category::ALL.len() as f32, clip[3]);
 }
 
 pub(crate) fn render(
@@ -68,11 +267,10 @@ pub(crate) fn render(
         ORDER_SCRIM,
     );
 
-    let margin = 40.0 * s;
-    let px = margin;
-    let py = margin;
-    let pw = (win_w - margin * 2.0).max(480.0);
-    let ph = (win_h - margin * 2.0).max(320.0);
+    let geometry = settings_geometry(win_w, win_h, s, pane.safe_area_insets());
+    let compact = geometry.compact;
+    pane.set_compact_layout(compact);
+    let [px, py, pw, ph] = geometry.panel;
     pane.panel_rect = [px, py, pw, ph];
     sugarloaf.rounded_rect(
         None,
@@ -82,7 +280,7 @@ pub(crate) fn render(
         ph,
         theme.f32(theme.panel_bg()),
         DEPTH,
-        12.0 * s,
+        if compact { 0.0 } else { 12.0 * s },
         ORDER_PANEL,
     );
 
@@ -96,10 +294,15 @@ pub(crate) fn render(
         clip_rect: Some(pane.panel_rect),
     };
 
-    let pad = 20.0 * s;
-    let header_h = 54.0 * s;
+    let pad = if compact { 16.0 * s } else { 20.0 * s };
+    let header_h = geometry.header_h;
     let content_top = py + header_h;
-    let sidebar_w = 200.0 * s;
+    let sidebar_w = geometry.sidebar_w;
+
+    if pane.compact_root() {
+        render_compact_root(pane, sugarloaf, theme, s, mouse, base);
+        return;
+    }
 
     // ── Header ──
     let title_opts = DrawOpts {
@@ -107,21 +310,87 @@ pub(crate) fn render(
         bold: true,
         ..base
     };
-    draw_text_with_occlusion(sugarloaf, px + pad, py + pad, "Settings", &title_opts, occ);
+    let title = if compact {
+        pane.current_category().label()
+    } else {
+        "Settings"
+    };
+    let title_w = sugarloaf.text_mut().measure(title, &title_opts);
+    draw_text_with_occlusion(
+        sugarloaf,
+        if compact {
+            px + (pw - title_w) * 0.5
+        } else {
+            px + pad
+        },
+        py + if compact { 18.0 * s } else { pad },
+        title,
+        &title_opts,
+        occ,
+    );
+
+    if compact {
+        pane.back_rect = [px, py, (112.0 * s).min(pw * 0.42), 54.0 * s];
+        let back_opts = DrawOpts {
+            font_size: 13.5 * s,
+            color: theme.u8(theme.accent),
+            ..base
+        };
+        draw_text_with_occlusion(
+            sugarloaf,
+            px + 16.0 * s,
+            py + 20.0 * s,
+            BACK_GLYPH,
+            &back_opts,
+            occ,
+        );
+        draw_text_with_occlusion(
+            sugarloaf,
+            px + 34.0 * s,
+            py + 19.0 * s,
+            "Settings",
+            &back_opts,
+            occ,
+        );
+    } else {
+        pane.back_rect = [0.0; 4];
+    }
 
     let ctrl_h = 30.0 * s;
-    let ctrl_y = py + (header_h - ctrl_h) * 0.5;
+    let ctrl_y = if compact {
+        py + 60.0 * s
+    } else {
+        py + (header_h - ctrl_h) * 0.5
+    };
     let close_sz = 26.0 * s;
     let close_x = px + pw - pad - close_sz;
-    pane.close_rect = [
-        close_x,
-        py + (header_h - close_sz) * 0.5,
-        close_sz,
-        close_sz,
-    ];
+    pane.close_rect = if compact {
+        [0.0; 4]
+    } else {
+        [
+            close_x,
+            py + (header_h - close_sz) * 0.5,
+            close_sz,
+            close_sz,
+        ]
+    };
 
     let json_sz = ctrl_h;
-    let json_x = close_x - 12.0 * s - json_sz;
+    let search_w = if compact {
+        (pw - pad * 2.0 - json_sz - 8.0 * s).max(80.0 * s)
+    } else {
+        260.0 * s
+    };
+    let search_x = if compact {
+        px + pad
+    } else {
+        close_x - 12.0 * s - json_sz - 12.0 * s - search_w
+    };
+    let json_x = if compact {
+        search_x + search_w + 8.0 * s
+    } else {
+        close_x - 12.0 * s - json_sz
+    };
     pane.edit_json_rect = [json_x, ctrl_y, json_sz, json_sz];
     let json_hovered =
         mouse.is_some_and(|(mx, my)| point_in(pane.edit_json_rect, mx, my));
@@ -154,8 +423,6 @@ pub(crate) fn render(
         occ,
     );
 
-    let search_w = 260.0 * s;
-    let search_x = json_x - 12.0 * s - search_w;
     pane.search_rect = [search_x, ctrl_y, search_w, ctrl_h];
     let sb_focused = pane.is_search_focused();
     let sb_hovered = mouse.is_some_and(|(mx, my)| point_in(pane.search_rect, mx, my));
@@ -226,20 +493,23 @@ pub(crate) fn render(
         }
     }
 
-    let close_hovered = mouse.is_some_and(|(mx, my)| point_in(pane.close_rect, mx, my));
-    let close_opts = DrawOpts {
-        font_size: 15.0 * s,
-        color: theme.u8(if close_hovered { theme.fg } else { theme.dim }),
-        ..base
-    };
-    draw_text_with_occlusion(
-        sugarloaf,
-        close_x + close_sz * 0.5 - 5.0 * s,
-        pane.close_rect[1] + (close_sz - 15.0 * s) * 0.5,
-        CLOSE_GLYPH,
-        &close_opts,
-        occ,
-    );
+    if !compact {
+        let close_hovered =
+            mouse.is_some_and(|(mx, my)| point_in(pane.close_rect, mx, my));
+        let close_opts = DrawOpts {
+            font_size: 15.0 * s,
+            color: theme.u8(if close_hovered { theme.fg } else { theme.dim }),
+            ..base
+        };
+        draw_text_with_occlusion(
+            sugarloaf,
+            close_x + close_sz * 0.5 - 5.0 * s,
+            pane.close_rect[1] + (close_sz - 15.0 * s) * 0.5,
+            CLOSE_GLYPH,
+            &close_opts,
+            occ,
+        );
+    }
 
     sugarloaf.rect(
         None,
@@ -257,85 +527,89 @@ pub(crate) fn render(
     let cat_row_h = 34.0 * s;
     let mut cy = content_top + pad;
     let searching = !pane.search_is_empty();
-    for cat in Category::ALL {
-        let rect = [px + 10.0 * s, cy, sidebar_w - 20.0 * s, cat_row_h];
-        let selected = !searching && cat == pane.current_category();
-        let hovered = mouse.is_some_and(|(mx, my)| point_in(rect, mx, my));
-        if selected {
-            sugarloaf.rounded_rect(
-                None,
-                rect[0],
-                rect[1],
-                rect[2],
-                rect[3],
-                theme.f32_alpha(theme.accent, 0.18),
-                DEPTH,
-                6.0 * s,
-                ORDER_ROW,
+    if !compact {
+        for cat in Category::ALL {
+            let rect = [px + 10.0 * s, cy, sidebar_w - 20.0 * s, cat_row_h];
+            let selected = !searching && cat == pane.current_category();
+            let hovered = mouse.is_some_and(|(mx, my)| point_in(rect, mx, my));
+            if selected {
+                sugarloaf.rounded_rect(
+                    None,
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    theme.f32_alpha(theme.accent, 0.18),
+                    DEPTH,
+                    6.0 * s,
+                    ORDER_ROW,
+                );
+            } else if hovered {
+                sugarloaf.rounded_rect(
+                    None,
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    theme.f32(theme.hover),
+                    DEPTH,
+                    6.0 * s,
+                    ORDER_ROW,
+                );
+            }
+            let icon_opts = DrawOpts {
+                font_size: 13.0 * s,
+                color: theme.u8(if selected { theme.accent } else { theme.dim }),
+                ..base
+            };
+            draw_text_with_occlusion(
+                sugarloaf,
+                rect[0] + 12.0 * s,
+                rect[1] + (cat_row_h - 13.0 * s) * 0.5,
+                cat.icon(),
+                &icon_opts,
+                occ,
             );
-        } else if hovered {
-            sugarloaf.rounded_rect(
-                None,
-                rect[0],
-                rect[1],
-                rect[2],
-                rect[3],
-                theme.f32(theme.hover),
-                DEPTH,
-                6.0 * s,
-                ORDER_ROW,
+            let label_opts = DrawOpts {
+                font_size: 13.5 * s,
+                color: theme.u8(if selected { theme.fg } else { theme.dim }),
+                bold: selected,
+                ..base
+            };
+            draw_text_with_occlusion(
+                sugarloaf,
+                rect[0] + 36.0 * s,
+                rect[1] + (cat_row_h - 13.0 * s) * 0.5,
+                cat.label(),
+                &label_opts,
+                occ,
             );
+            pane.category_rects.push((rect, cat));
+            cy += cat_row_h + 2.0 * s;
         }
-        let icon_opts = DrawOpts {
-            font_size: 13.0 * s,
-            color: theme.u8(if selected { theme.accent } else { theme.dim }),
-            ..base
-        };
-        draw_text_with_occlusion(
-            sugarloaf,
-            rect[0] + 12.0 * s,
-            rect[1] + (cat_row_h - 13.0 * s) * 0.5,
-            cat.icon(),
-            &icon_opts,
-            occ,
-        );
-        let label_opts = DrawOpts {
-            font_size: 13.5 * s,
-            color: theme.u8(if selected { theme.fg } else { theme.dim }),
-            bold: selected,
-            ..base
-        };
-        draw_text_with_occlusion(
-            sugarloaf,
-            rect[0] + 36.0 * s,
-            rect[1] + (cat_row_h - 13.0 * s) * 0.5,
-            cat.label(),
-            &label_opts,
-            occ,
-        );
-        pane.category_rects.push((rect, cat));
-        cy += cat_row_h + 2.0 * s;
     }
 
     let div_x = px + sidebar_w;
-    sugarloaf.rect(
-        None,
-        div_x,
-        content_top,
-        1.0 * s,
-        ph - header_h,
-        theme.f32(theme.border),
-        DEPTH,
-        ORDER_PANEL,
-    );
+    if !compact {
+        sugarloaf.rect(
+            None,
+            div_x,
+            content_top,
+            1.0 * s,
+            ph - header_h,
+            theme.f32(theme.border),
+            DEPTH,
+            ORDER_PANEL,
+        );
+    }
 
     // ── Setting rows (scrollable, partial-clipped to the viewport) ──
     pane.control_rects.clear();
     pane.dropdown_rects.clear();
     pane.keybind_rects.clear();
     pane.keybind_reset_rects.clear();
-    let cx = div_x + pad;
-    let cw = (px + pw - pad - cx).max(120.0);
+    let cx = if compact { px + pad } else { div_x + pad };
+    let cw = (px + pw - pad - cx).max(1.0);
     // Content viewport — text AND rects are clipped to this so a partly
     // scrolled row is cut at the edge (matching the rest of the app),
     // never drawn over the header or bottom margin.
@@ -349,7 +623,11 @@ pub(crate) fn render(
     ];
     let viewport_h = (clip_bottom - (content_top + pad * 0.5)).max(0.0);
     let setting_row_h = 66.0 * s;
-    let pill_w = 180.0 * s;
+    let pill_w = if compact {
+        (cw * 0.46).clamp(92.0 * s, 150.0 * s)
+    } else {
+        180.0 * s
+    };
     let pill_h = 28.0 * s;
     let visible = pane.visible_settings();
     let scroll = pane.scroll_offset();
@@ -1069,5 +1347,28 @@ pub(crate) fn render(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    #[test]
+    fn iphone_geometry_is_full_width_and_uses_pushed_navigation() {
+        let geometry = settings_geometry(390.0, 844.0, 1.0, [0.0; 4]);
+        assert!(geometry.compact);
+        assert_eq!(geometry.panel, [0.0, 0.0, 390.0, 844.0]);
+        assert_eq!(geometry.sidebar_w, 0.0);
+        assert_eq!(geometry.header_h, 102.0);
+    }
+
+    #[test]
+    fn desktop_geometry_preserves_the_rail_card() {
+        let geometry = settings_geometry(1440.0, 900.0, 1.0, [0.0; 4]);
+        assert!(!geometry.compact);
+        assert_eq!(geometry.panel, [40.0, 40.0, 1360.0, 820.0]);
+        assert_eq!(geometry.sidebar_w, 200.0);
+        assert_eq!(geometry.header_h, 54.0);
     }
 }

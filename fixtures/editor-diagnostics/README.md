@@ -20,10 +20,7 @@ and scroll-away/scroll-back behavior.
   Docker's language server.
 - `nix/flake.nix`: a 217-line flake with undefined names near the top,
   middle, and bottom. It must route only to nil, never rust-analyzer.
-- `typescript/scroll_errors.ts` and `javascript_scroll_errors.js`: standalone 200-plus-line
-  TypeScript/JavaScript files with strict project settings and intentional type
-  errors near the top, middle, and bottom. Both must attach to the shared
-  TypeScript adapter and publish diagnostics while typing, without waiting for save.
+- `typescript/scroll_errors.ts` and `javascript_scroll_errors.js`: standalone 200-plus-line TypeScript/JavaScript files with strict project settings and intentional type errors near the top, middle, and bottom. Both must attach to theshared TypeScript adapter and publish diagnostics while typing, without waiting for save.
 
 Expected errors are 4 for Rust and at least 3 each for GDScript, Nix, Docker,
 TypeScript, and JavaScript. In every file, scroll each error off screen and back repeatedly; its

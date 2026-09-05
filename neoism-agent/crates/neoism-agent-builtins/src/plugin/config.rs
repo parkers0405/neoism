@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use neoism_agent_core::AgentConfigDocument;
 use neoism_agent_plugin_api::{
-    ConfigDocument, ConfigService, ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture,
-    PluginHostError, PluginManifest, PluginRuntimeError, RouteContribution,
-    PluginScope, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
-    ServiceRequest,
+    ConfigDocument, ConfigService, ContributionMetadata, PluginContributions,
+    PluginDefinition, PluginFuture, PluginHostError, PluginManifest, PluginRuntimeError,
+    PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
+    RouteRequest, RouteResponse, RouteScope, ServiceRequest,
 };
 use neoism_agent_service_api::{AgentServices, ConfigSnapshot, ConfigSnapshotRequest};
 use serde_json::{Map, Value};
@@ -57,25 +57,58 @@ impl PluginDefinition for ConfigPlugin {
         }
     }
 
-    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![ConfigRead, ConfigWrite, WorkspaceRead, WorkspaceWrite] }
-    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> {
+        use neoism_agent_plugin_api::HostCapability::*;
+        vec![ConfigRead, ConfigWrite, WorkspaceRead, WorkspaceWrite]
+    }
+    fn contributions(
+        &self,
+        registrar: &mut PluginContributions,
+    ) -> Result<(), PluginHostError> {
         registrar.config_service_runtime(
             "workspace-config",
             Arc::new(WorkspaceConfig(self.services.clone())),
         );
         for (id, method, path, action) in [
-            ("v2.config.defaults", RouteMethod::Get, "/v2/config/defaults", ConfigAdminAction::Defaults),
-            ("v2.config.get", RouteMethod::Get, "/v2/config", ConfigAdminAction::Get),
-            ("v2.config.update", RouteMethod::Patch, "/v2/config", ConfigAdminAction::Update),
-            ("v2.config.validate", RouteMethod::Get, "/v2/config/validate", ConfigAdminAction::Validate),
+            (
+                "v2.config.defaults",
+                RouteMethod::Get,
+                "/v2/config/defaults",
+                ConfigAdminAction::Defaults,
+            ),
+            (
+                "v2.config.get",
+                RouteMethod::Get,
+                "/v2/config",
+                ConfigAdminAction::Get,
+            ),
+            (
+                "v2.config.update",
+                RouteMethod::Patch,
+                "/v2/config",
+                ConfigAdminAction::Update,
+            ),
+            (
+                "v2.config.validate",
+                RouteMethod::Get,
+                "/v2/config/validate",
+                ConfigAdminAction::Validate,
+            ),
         ] {
             registrar.runtime_route(RouteContribution {
                 descriptor: RouteDescriptor {
-                    id: id.into(), method, path: path.into(), scope: RouteScope::Workspace,
-                    request_schema: None, response_schema: None,
+                    id: id.into(),
+                    method,
+                    path: path.into(),
+                    scope: RouteScope::Workspace,
+                    request_schema: None,
+                    response_schema: None,
                 },
                 metadata: ContributionMetadata::new(id, ID, PluginScope::Workspace),
-                handler: Arc::new(ConfigAdminRoute { admin: self.admin.clone(), action }),
+                handler: Arc::new(ConfigAdminRoute {
+                    admin: self.admin.clone(),
+                    action,
+                }),
             });
         }
         Ok(())
@@ -116,14 +149,19 @@ impl ConfigService for WorkspaceConfig {
     }
 }
 
-pub fn load(services: &AgentServices, directory: &str) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
+pub fn load(
+    services: &AgentServices,
+    directory: &str,
+) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
     let snapshot = services
         .config
         .snapshot(&ConfigSnapshotRequest::new(directory))?;
     load_snapshot(&snapshot)
 }
 
-pub fn load_snapshot(snapshot: &ConfigSnapshot) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
+pub fn load_snapshot(
+    snapshot: &ConfigSnapshot,
+) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
     let mut value = serde_json::json!({});
     for layer in &snapshot.layers {
         merge(&mut value, layer.document.clone());
@@ -133,7 +171,11 @@ pub fn load_snapshot(snapshot: &ConfigSnapshot) -> anyhow::Result<(AgentConfigDo
     }
     let mut document = serde_json::from_value(value)?;
     normalize(&mut document);
-    let roots = snapshot.discovery_roots.iter().map(|root| root.path.clone()).collect();
+    let roots = snapshot
+        .discovery_roots
+        .iter()
+        .map(|root| root.path.clone())
+        .collect();
     Ok((document, roots))
 }
 
@@ -158,11 +200,21 @@ fn merge_markdown_entries(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
             let root = dir.join(root_name);
             for file in markdown_files(&root)? {
                 let (mut data, content) = parse_markdown(&file)?;
-                let name = data.get("name").and_then(Value::as_str).map(ToOwned::to_owned)
+                let name = data
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
                     .unwrap_or_else(|| entry_name(&root, &file));
-                if field == "command" { data.insert("name".into(), Value::String(name.clone())); }
-                data.insert(content_field.into(), Value::String(content.trim().to_string()));
-                if let Some(mode) = mode { data.insert("mode".into(), Value::String(mode.into())); }
+                if field == "command" {
+                    data.insert("name".into(), Value::String(name.clone()));
+                }
+                data.insert(
+                    content_field.into(),
+                    Value::String(content.trim().to_string()),
+                );
+                if let Some(mode) = mode {
+                    data.insert("mode".into(), Value::String(mode.into()));
+                }
                 set_named_entry(raw, field, &name, Value::Object(data));
             }
         }
@@ -171,15 +223,31 @@ fn merge_markdown_entries(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
 }
 
 fn entry_name(root: &Path, file: &Path) -> String {
-    file.strip_prefix(root).unwrap_or(file).with_extension("").components()
-        .map(|component| component.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+    file.strip_prefix(root)
+        .unwrap_or(file)
+        .with_extension("")
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn set_named_entry(raw: &mut Value, field: &str, name: &str, value: Value) {
-    if !raw.is_object() { *raw = Value::Object(Map::new()); }
-    let entry = raw.as_object_mut().expect("config root object").entry(field).or_insert_with(|| Value::Object(Map::new()));
-    if !entry.is_object() { *entry = Value::Object(Map::new()); }
-    entry.as_object_mut().expect("config field object").insert(name.into(), value);
+    if !raw.is_object() {
+        *raw = Value::Object(Map::new());
+    }
+    let entry = raw
+        .as_object_mut()
+        .expect("config root object")
+        .entry(field)
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !entry.is_object() {
+        *entry = Value::Object(Map::new());
+    }
+    entry
+        .as_object_mut()
+        .expect("config field object")
+        .insert(name.into(), value);
 }
 
 fn normalize(info: &mut AgentConfigDocument) {
@@ -190,25 +258,46 @@ fn normalize(info: &mut AgentConfigDocument) {
     let permissions = permissions_from_tools(&info.tools);
     merge_permissions(&mut info.permission, permissions);
     for (name, command) in &mut info.command {
-        if command.name.is_empty() { command.name = name.clone(); }
+        if command.name.is_empty() {
+            command.name = name.clone();
+        }
     }
-    for (id, plugin) in &mut info.plugins { plugin.id = Some(id.clone()); }
+    for (id, plugin) in &mut info.plugins {
+        plugin.id = Some(id.clone());
+    }
     for agent in info.agent.values_mut() {
-        if agent.steps.is_none() { agent.steps = agent.max_steps; }
+        if agent.steps.is_none() {
+            agent.steps = agent.max_steps;
+        }
         let permissions = permissions_from_tools(&agent.tools);
         merge_permissions(&mut agent.permission, permissions);
     }
 }
 
 fn permissions_from_tools(tools: &BTreeMap<String, bool>) -> BTreeMap<String, Value> {
-    tools.iter().map(|(tool, enabled)| {
-        let key = if matches!(tool.as_str(), "write" | "edit") { "edit" } else { tool };
-        (key.to_string(), Value::String(if *enabled { "allow" } else { "deny" }.into()))
-    }).collect()
+    tools
+        .iter()
+        .map(|(tool, enabled)| {
+            let key = if matches!(tool.as_str(), "write" | "edit") {
+                "edit"
+            } else {
+                tool
+            };
+            (
+                key.to_string(),
+                Value::String(if *enabled { "allow" } else { "deny" }.into()),
+            )
+        })
+        .collect()
 }
 
-fn merge_permissions(target: &mut BTreeMap<String, Value>, source: BTreeMap<String, Value>) {
-    for (key, value) in source { target.entry(key).or_insert(value); }
+fn merge_permissions(
+    target: &mut BTreeMap<String, Value>,
+    source: BTreeMap<String, Value>,
+) {
+    for (key, value) in source {
+        target.entry(key).or_insert(value);
+    }
 }
 
 pub(super) fn markdown_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -231,7 +320,9 @@ pub(super) fn markdown_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-pub(super) fn parse_markdown(path: &Path) -> anyhow::Result<(serde_json::Map<String, Value>, String)> {
+pub(super) fn parse_markdown(
+    path: &Path,
+) -> anyhow::Result<(serde_json::Map<String, Value>, String)> {
     let text = std::fs::read_to_string(path)?;
     if !text.starts_with("---") {
         return Ok((serde_json::Map::new(), text));
@@ -255,7 +346,10 @@ fn merge(target: &mut Value, source: Value) {
         (Value::Object(target), Value::Object(source)) => {
             for (key, value) in source {
                 if key == "instructions" {
-                    merge_unique_array(target.entry(key).or_insert(Value::Array(Vec::new())), value);
+                    merge_unique_array(
+                        target.entry(key).or_insert(Value::Array(Vec::new())),
+                        value,
+                    );
                     continue;
                 }
                 merge(target.entry(key).or_insert(Value::Null), value);
@@ -266,11 +360,26 @@ fn merge(target: &mut Value, source: Value) {
 }
 
 fn merge_unique_array(target: &mut Value, source: Value) {
-    let Value::Array(source) = source else { *target = source; return; };
-    let Value::Array(target) = target else { *target = Value::Array(source); return; };
-    let mut seen = target.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect::<BTreeSet<_>>();
+    let Value::Array(source) = source else {
+        *target = source;
+        return;
+    };
+    let Value::Array(target) = target else {
+        *target = Value::Array(source);
+        return;
+    };
+    let mut seen = target
+        .iter()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
     for item in source {
-        if item.as_str().is_some_and(|text| !seen.insert(text.to_string())) { continue; }
+        if item
+            .as_str()
+            .is_some_and(|text| !seen.insert(text.to_string()))
+        {
+            continue;
+        }
         target.push(item);
     }
 }

@@ -271,9 +271,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             // The fresh websocket's eager backlog arrived before this grid's
             // route map was rebound and was intentionally ignored. Ask for a
             // one-shot retained replay now that output has a destination.
-            link.send_pty(neoism_protocol::pty::ClientMessage::AttachPty {
-                session_id,
-            });
+            link.send_pty(neoism_protocol::pty::ClientMessage::AttachPty { session_id });
         }
     }
 
@@ -533,17 +531,21 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let joined = self.current_workspace_is_remote_joined();
         let collaborative = self.current_workspace_is_collaborative();
         let endpoint = binding.map(|binding| binding.endpoint.clone());
-        let resolved = collaborative.then_some(binding).flatten().and_then(|binding| {
-            let server = crate::neoism::agent::agent_reverse_proxy_for_daemon_workspace(
-                &binding.endpoint,
-                &binding.workspace_id,
-            )?;
-            crate::neoism::agent::register_agent_server_credential(
-                &server,
-                binding.credential.as_deref(),
-            );
-            Some(server)
-        });
+        let resolved = collaborative
+            .then_some(binding)
+            .flatten()
+            .and_then(|binding| {
+                let server =
+                    crate::neoism::agent::agent_reverse_proxy_for_daemon_workspace(
+                        &binding.endpoint,
+                        &binding.workspace_id,
+                    )?;
+                crate::neoism::agent::register_agent_server_credential(
+                    &server,
+                    binding.credential.as_deref(),
+                );
+                Some(server)
+            });
         tracing::info!(
             target: "neoism::agent_server",
             joined,

@@ -11,12 +11,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde_json::{json, Value};
 use neoism_agent_service_api::{
     LanguageCapabilitySnapshot, LanguageRootPolicy, LanguageRouteCapability,
     LanguageServerCapability, LanguageServerOperations, LanguageServerTransport,
     StaticLanguageCapabilityService,
 };
+use serde_json::{json, Value};
 
 fn fake_language(
     id: &str,
@@ -34,16 +34,26 @@ fn fake_language(
         },
         routes: routes
             .iter()
-            .map(|(route_id, language_id, extensions, patterns)| LanguageRouteCapability {
-                id: (*route_id).to_string(),
-                document_language_id: (*language_id).to_string(),
-                extensions: extensions.iter().map(|value| (*value).to_string()).collect(),
-                filename_patterns: patterns.iter().map(|value| (*value).to_string()).collect(),
+            .map(|(route_id, language_id, extensions, patterns)| {
+                LanguageRouteCapability {
+                    id: (*route_id).to_string(),
+                    document_language_id: (*language_id).to_string(),
+                    extensions: extensions
+                        .iter()
+                        .map(|value| (*value).to_string())
+                        .collect(),
+                    filename_patterns: patterns
+                        .iter()
+                        .map(|value| (*value).to_string())
+                        .collect(),
+                }
             })
             .collect(),
         markers: markers.iter().map(|marker| (*marker).to_string()).collect(),
         root_policy: if id == "rust" {
-            LanguageRootPolicy::CargoMetadata { manifest: "Cargo.toml".to_string() }
+            LanguageRootPolicy::CargoMetadata {
+                manifest: "Cargo.toml".to_string(),
+            }
         } else {
             LanguageRootPolicy::NearestMarker
         },
@@ -66,7 +76,13 @@ fn fake_language(
 
 fn test_runtime() -> LspRuntime {
     let languages = vec![
-        fake_language("rust", "Rust", &["rust-analyzer"], &[("rust", "rust", &["rs"], &[])], &["Cargo.toml"]),
+        fake_language(
+            "rust",
+            "Rust",
+            &["rust-analyzer"],
+            &[("rust", "rust", &["rs"], &[])],
+            &["Cargo.toml"],
+        ),
         fake_language(
             "typescript",
             "TypeScript",
@@ -77,18 +93,49 @@ fn test_runtime() -> LspRuntime {
             ],
             &["package.json"],
         ),
-        fake_language("python", "Python", &["pyright-langserver", "--stdio"], &[("python", "python", &["py"], &[])], &[]),
-        fake_language("go", "Go", &["gopls"], &[("go", "go", &["go"], &[])], &["go.mod"]),
-        fake_language("json", "JSON", &["json-lsp", "--stdio"], &[("json", "json", &["json"], &[])], &[]),
-        fake_language("nix", "Nix", &["nil"], &[("nix", "nix", &["nix"], &[])], &["flake.nix"]),
-        fake_language("docker", "Docker", &["docker-language-server", "start", "--stdio"], &[("dockerfile", "dockerfile", &[], &["Dockerfile"])], &[]),
+        fake_language(
+            "python",
+            "Python",
+            &["pyright-langserver", "--stdio"],
+            &[("python", "python", &["py"], &[])],
+            &[],
+        ),
+        fake_language(
+            "go",
+            "Go",
+            &["gopls"],
+            &[("go", "go", &["go"], &[])],
+            &["go.mod"],
+        ),
+        fake_language(
+            "json",
+            "JSON",
+            &["json-lsp", "--stdio"],
+            &[("json", "json", &["json"], &[])],
+            &[],
+        ),
+        fake_language(
+            "nix",
+            "Nix",
+            &["nil"],
+            &[("nix", "nix", &["nix"], &[])],
+            &["flake.nix"],
+        ),
+        fake_language(
+            "docker",
+            "Docker",
+            &["docker-language-server", "start", "--stdio"],
+            &[("dockerfile", "dockerfile", &[], &["Dockerfile"])],
+            &[],
+        ),
     ];
-    let services = crate::standard_services().with_language_capabilities(std::sync::Arc::new(
-        StaticLanguageCapabilityService::new(LanguageCapabilitySnapshot {
-            generation: 1,
-            languages: std::sync::Arc::from(languages),
-        }),
-    ));
+    let services =
+        crate::standard_services().with_language_capabilities(std::sync::Arc::new(
+            StaticLanguageCapabilityService::new(LanguageCapabilitySnapshot {
+                generation: 1,
+                languages: std::sync::Arc::from(languages),
+            }),
+        ));
     LspRuntime::new(services)
 }
 
@@ -105,7 +152,10 @@ impl TempWorkspace {
             .as_nanos();
         let path = env::temp_dir().join(format!("neoism-lsp-{name}-{nonce}"));
         fs::create_dir_all(path.join(".agent")).expect("create temp workspace");
-        Self { path, runtime: test_runtime() }
+        Self {
+            path,
+            runtime: test_runtime(),
+        }
     }
 
     fn touch(&self, relative: &str) {
@@ -196,7 +246,13 @@ fn unknown_file_extension_does_not_inherit_workspace_lsps() {
     );
     assert!(status_for_file(&workspace.runtime, &workspace.path, &file).is_empty());
     assert_eq!(
-        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Diagnostics).len(),
+        file_query_specs(
+            &workspace.runtime,
+            &workspace.path,
+            &file,
+            LspOperation::Diagnostics
+        )
+        .len(),
         0,
         "workspace LSPs must never receive an unknown document language"
     );
@@ -217,7 +273,13 @@ fn extensionless_file_does_not_inherit_workspace_lsps() {
     );
     assert!(status_for_file(&workspace.runtime, &workspace.path, &file).is_empty());
     assert_eq!(
-        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Diagnostics).len(),
+        file_query_specs(
+            &workspace.runtime,
+            &workspace.path,
+            &file,
+            LspOperation::Diagnostics
+        )
+        .len(),
         0,
         "an unrelated extensionless file must not inherit workspace LSPs"
     );
@@ -302,7 +364,10 @@ fn installed_nil_publishes_nix_fixture_diagnostics() {
     let text = fs::read_to_string(&file).expect("read Nix fixture");
 
     shutdown_all(&runtime);
-    assert_eq!(sync_document(&runtime, &root, &file, Some(&text)), vec!["nix"]);
+    assert_eq!(
+        sync_document(&runtime, &root, &file, Some(&text)),
+        vec!["nix"]
+    );
     let deadline = Instant::now() + Duration::from_secs(30);
     let diagnostics = loop {
         let diagnostics = cached_diagnostics(&runtime, &root, &file);
@@ -351,7 +416,10 @@ fn managed_docker_language_server_publishes_dockerfile_diagnostics() {
     let text = fs::read_to_string(&file).expect("read Docker fixture");
 
     shutdown_all(&runtime);
-    assert_eq!(sync_document(&runtime, &root, &file, Some(&text)), vec!["docker"]);
+    assert_eq!(
+        sync_document(&runtime, &root, &file, Some(&text)),
+        vec!["docker"]
+    );
     // Exercise the same write/touch path the daemon uses. The client sends
     // didSave only when the server advertises it, and otherwise relies on the
     // push-diagnostics lifecycle established by didOpen/didChange.
@@ -409,7 +477,10 @@ fn installed_typescript_server_publishes_ts_and_js_fixture_diagnostics() {
         let file = root.join(name);
         let text = fs::read_to_string(&file).expect("read TypeScript fixture");
         shutdown_all(&runtime);
-        assert_eq!(sync_document(&runtime, &root, &file, Some(&text)), vec!["typescript"]);
+        assert_eq!(
+            sync_document(&runtime, &root, &file, Some(&text)),
+            vec!["typescript"]
+        );
         let deadline = Instant::now() + Duration::from_secs(30);
         let diagnostics = loop {
             let diagnostics = cached_diagnostics(&runtime, &root, &file);
@@ -468,7 +539,10 @@ fn installed_typescript_server_publishes_ts_and_js_fixture_diagnostics() {
 #[test]
 fn language_id_for_path_uses_the_injected_runtime() {
     let runtime = test_runtime();
-    assert_eq!(language_id_for_path(&runtime, "fixture.rs"), Some("rust".to_string()));
+    assert_eq!(
+        language_id_for_path(&runtime, "fixture.rs"),
+        Some("rust".to_string())
+    );
     assert_eq!(language_id_for_path(&runtime, "fixture.unknown"), None);
 }
 
@@ -584,16 +658,25 @@ fn configured_stdio_adapter_adds_a_genuinely_new_language_route() {
         language_id_for_path_in(&workspace.runtime, &workspace.path, &file).as_deref(),
         Some("quux")
     );
-    let adapters = file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Hover);
+    let adapters = file_query_specs(
+        &workspace.runtime,
+        &workspace.path,
+        &file,
+        LspOperation::Hover,
+    );
     assert_eq!(adapters.len(), 1);
     assert_eq!(adapters[0].id, "quux-lsp");
     assert_eq!(
         adapters[0].document_language_id_for_path(&file),
         Some("quux-script")
     );
-    assert!(
-        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Completion).is_empty()
-    );
+    assert!(file_query_specs(
+        &workspace.runtime,
+        &workspace.path,
+        &file,
+        LspOperation::Completion
+    )
+    .is_empty());
 
     let metadata = language_server_adapters_for(&workspace.runtime, &workspace.path)
         .into_iter()
@@ -652,7 +735,13 @@ fn document_lifecycle_is_not_gated_by_diagnostics_capability() {
 
     let file = workspace.path.join("src/example.liveonly");
     assert!(
-        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Diagnostics).is_empty(),
+        file_query_specs(
+            &workspace.runtime,
+            &workspace.path,
+            &file,
+            LspOperation::Diagnostics
+        )
+        .is_empty(),
         "fixture intentionally disables diagnostics"
     );
     let lifecycle = file_lifecycle_specs(&workspace.runtime, &workspace.path, &file);
@@ -682,10 +771,17 @@ fn invalid_custom_route_is_actionable_and_never_falls_back_to_plaintext() {
     .expect("write invalid adapter config");
 
     let file = workspace.path.join("broken.quux");
-    assert_eq!(language_id_for_path_in(&workspace.runtime, &workspace.path, &file), None);
-    assert!(
-        file_query_specs(&workspace.runtime, &workspace.path, &file, LspOperation::Diagnostics).is_empty()
+    assert_eq!(
+        language_id_for_path_in(&workspace.runtime, &workspace.path, &file),
+        None
     );
+    assert!(file_query_specs(
+        &workspace.runtime,
+        &workspace.path,
+        &file,
+        LspOperation::Diagnostics
+    )
+    .is_empty());
     let status = status_for_file(&workspace.runtime, &workspace.path, &file)
         .into_iter()
         .find(|status| status.id == "broken-quux")
@@ -714,7 +810,9 @@ fn builtin_override_keeps_the_builtin_route_table() {
     )
     .expect("write override");
 
-    let adapter = workspace.runtime.adapters_for_root(&workspace.path)
+    let adapter = workspace
+        .runtime
+        .adapters_for_root(&workspace.path)
         .into_iter()
         .find(|adapter| adapter.id == "rust")
         .expect("overridden Rust adapter");
@@ -729,16 +827,33 @@ fn builtin_override_keeps_the_builtin_route_table() {
 #[test]
 fn explicit_lsp_false_disables_builtins_and_cache_refreshes() {
     let workspace = TempWorkspace::new("lsp-disable-cache");
-    fs::write(workspace.path.join(".agent/agent.json"), r#"{ "lsp": false }"#)
-        .expect("disable LSP");
-    assert!(workspace.runtime.adapters_for_root(&workspace.path).is_empty());
+    fs::write(
+        workspace.path.join(".agent/agent.json"),
+        r#"{ "lsp": false }"#,
+    )
+    .expect("disable LSP");
+    assert!(workspace
+        .runtime
+        .adapters_for_root(&workspace.path)
+        .is_empty());
 
-    fs::write(workspace.path.join(".agent/agent.json"), r#"{ "lsp": true }"#)
-        .expect("enable LSP");
-    assert!(workspace.runtime.adapters_for_root(&workspace.path)
-        .iter()
-        .any(|adapter| adapter.id == "rust"), "snapshot identity invalidates stale adapter config immediately");
-    lsp_adapters::invalidate_adapter_cache(&workspace.runtime.service.adapter_cache, &workspace.path);
+    fs::write(
+        workspace.path.join(".agent/agent.json"),
+        r#"{ "lsp": true }"#,
+    )
+    .expect("enable LSP");
+    assert!(
+        workspace
+            .runtime
+            .adapters_for_root(&workspace.path)
+            .iter()
+            .any(|adapter| adapter.id == "rust"),
+        "snapshot identity invalidates stale adapter config immediately"
+    );
+    lsp_adapters::invalidate_adapter_cache(
+        &workspace.runtime.service.adapter_cache,
+        &workspace.path,
+    );
 }
 
 #[test]
@@ -779,7 +894,8 @@ fn resolves_command_source_for_runtime_launches() {
     assert_eq!(explicit_command, vec!["/bin/sh".to_string()]);
     assert_eq!(explicit_source, LspCommandSource::Config);
 
-    let (path_command, path_source) = runtime.resolve_lsp_command("sh", vec!["sh".to_string()]);
+    let (path_command, path_source) =
+        runtime.resolve_lsp_command("sh", vec!["sh".to_string()]);
     assert!(Path::new(&path_command[0]).is_file());
     assert_eq!(path_source, LspCommandSource::Path);
 }
@@ -808,7 +924,10 @@ fn lsp_resolution_uses_the_injected_executable_service() {
         }
     }
 
-    let services = AgentServices::new(Arc::new(FakeExecutableService), crate::standard_workspace_search());
+    let services = AgentServices::new(
+        Arc::new(FakeExecutableService),
+        crate::standard_workspace_search(),
+    );
     let (command, source) = resolve_lsp_command_with(
         &services,
         "python",

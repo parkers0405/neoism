@@ -30,9 +30,7 @@ use provider_auth_openai::{
     poll_openai_headless,
 };
 
-pub fn methods(
-    providers: &[ProviderInfo],
-) -> BTreeMap<String, Vec<ProviderAuthMethod>> {
+pub fn methods(providers: &[ProviderInfo]) -> BTreeMap<String, Vec<ProviderAuthMethod>> {
     providers
         .iter()
         .map(|provider| (provider.id.clone(), provider_methods(provider)))
@@ -62,13 +60,15 @@ pub async fn authorize(
     match method.kind {
         ProviderAuthMethodKind::Api => {
             if let Some(key) = inputs.get("key").filter(|key| !key.trim().is_empty()) {
-                auth_store.set(
-                    provider_id,
-                    AuthInfo::Api {
-                        key: key.clone(),
-                        metadata: provider_metadata(inputs),
-                    },
-                ).await?;
+                auth_store
+                    .set(
+                        provider_id,
+                        AuthInfo::Api {
+                            key: key.clone(),
+                            metadata: provider_metadata(inputs),
+                        },
+                    )
+                    .await?;
             }
             Ok(None)
         }
@@ -130,9 +130,9 @@ pub async fn callback(
                 anyhow::bail!("API key is required for provider {provider_id}")
             };
             Ok(AuthInfo::Api {
-                    key: key.to_string(),
-                    metadata: None,
-                })
+                key: key.to_string(),
+                metadata: None,
+            })
         }
         ProviderAuthMethodKind::OAuth => {
             if provider_id == "openai" && method.label.contains("browser") {
@@ -149,12 +149,12 @@ pub async fn callback(
             }
             if let Some(code) = code.filter(|code| !code.trim().is_empty()) {
                 return Ok(AuthInfo::OAuth {
-                        refresh: code.to_string(),
-                        access: code.to_string(),
-                        expires: 0,
-                        account_id: None,
-                        enterprise_url: None,
-                    });
+                    refresh: code.to_string(),
+                    access: code.to_string(),
+                    expires: 0,
+                    account_id: None,
+                    enterprise_url: None,
+                });
             }
             anyhow::bail!("OAuth token is required for provider {provider_id}")
         }

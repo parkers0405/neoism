@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -75,7 +75,8 @@ pub(crate) async fn family_has_running_jobs(
         };
         if background.jobs.read().await.values().any(|job| {
             job.status == BackgroundJobStatus::Running
-                && (job.session_id == root_session_id || descendants.contains(&job.session_id))
+                && (job.session_id == root_session_id
+                    || descendants.contains(&job.session_id))
         }) {
             return true;
         }
@@ -308,7 +309,9 @@ pub(crate) async fn start_background_task_tool(
     }
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-    background.cancellations.write()
+    background
+        .cancellations
+        .write()
         .await
         .insert(job_id.clone(), cancel_tx);
     background.active_jobs.fetch_add(1, Ordering::AcqRel);
@@ -394,7 +397,9 @@ pub(crate) async fn stop_background_task(
 ) -> Result<Json<BackgroundJobStopResponse>, ApiError> {
     let Some((background, job)) = find_job(&state, &job_id).await else {
         if state.inner.store.get_session(&session_id).await?.is_none() {
-            return Err(ApiError::not_found(format!("session {session_id} not found")));
+            return Err(ApiError::not_found(format!(
+                "session {session_id} not found"
+            )));
         }
         let now = now_millis();
         let interrupted = BackgroundJob {
@@ -413,8 +418,9 @@ pub(crate) async fn stop_background_task(
             timeout_ms: 0,
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
             output_truncated: false,
-            output: "Background task was interrupted when its owning Neoism server stopped."
-                .to_string(),
+            output:
+                "Background task was interrupted when its owning Neoism server stopped."
+                    .to_string(),
             error: Some("background task owner is no longer available".to_string()),
             command_patterns: Vec::new(),
             always_patterns: Vec::new(),
@@ -437,7 +443,9 @@ pub(crate) async fn stop_background_task(
             job.status.as_str()
         )));
     }
-    let cancel = background.cancellations.write()
+    let cancel = background
+        .cancellations
+        .write()
         .await
         .remove(&job_id)
         .ok_or_else(|| {
@@ -461,9 +469,7 @@ async fn run_background_job(
     generation: crate::workspace_runtime::PluginGenerationLease,
 ) {
     let finish = wait_for_background_job(&mut child, &job, cancel_rx).await;
-    background.cancellations.write()
-        .await
-        .remove(&job.id);
+    background.cancellations.write().await.remove(&job.id);
     job.status = finish.status;
     job.finished_at = Some(now_millis());
     job.exit_code = finish.exit_code;
@@ -567,7 +573,11 @@ async fn wait_for_background_job(
     }
 }
 
-async fn finish_background_job(state: &AppState, background: &BackgroundWorkspaceRuntime, job: BackgroundJob) {
+async fn finish_background_job(
+    state: &AppState,
+    background: &BackgroundWorkspaceRuntime,
+    job: BackgroundJob,
+) {
     let session_id = job.session_id.clone();
     {
         let mut jobs = background.jobs.write().await;
@@ -587,7 +597,9 @@ async fn publish_background_jobs_updated(
     session_id: &str,
 ) {
     let root_id = match state.inner.store.get_session(session_id).await {
-        Ok(Some(session)) => crate::execution_activity::root_session_id(state, &session).await,
+        Ok(Some(session)) => {
+            crate::execution_activity::root_session_id(state, &session).await
+        }
         _ => session_id.to_string(),
     };
     let family = crate::v2_routes::session_family_ids(state, &root_id).await;
@@ -599,7 +611,8 @@ async fn publish_background_jobs_updated(
             .await
             .values()
             .filter(|job| {
-                job.status == BackgroundJobStatus::Running && family.contains(&job.session_id)
+                job.status == BackgroundJobStatus::Running
+                    && family.contains(&job.session_id)
             })
             .map(|job| {
                 json!({
@@ -641,8 +654,7 @@ async fn publish_background_job_completion(state: &AppState, job: &BackgroundJob
             "result": job.output.clone(),
         }),
     ));
-    if let Err(error) =
-        enqueue_parent_background_task_completion_prompt(state, job).await
+    if let Err(error) = enqueue_parent_background_task_completion_prompt(state, job).await
     {
         tracing::warn!(
             session_id = %job.session_id,
@@ -657,9 +669,14 @@ async fn publish_background_job_completion(state: &AppState, job: &BackgroundJob
 async fn find_job(
     state: &AppState,
     job_id: &str,
-) -> Option<(crate::workspace_runtime::LeasedResource<BackgroundWorkspaceRuntime>, BackgroundJob)> {
+) -> Option<(
+    crate::workspace_runtime::LeasedResource<BackgroundWorkspaceRuntime>,
+    BackgroundJob,
+)> {
     for runtime in state.inner.workspace_runtimes.runtimes().await {
-        let Some(background) = runtime.background_if_allocated() else { continue; };
+        let Some(background) = runtime.background_if_allocated() else {
+            continue;
+        };
         let job = background.jobs.read().await.get(job_id).cloned();
         if let Some(job) = job {
             return Some((background, job));
@@ -1100,11 +1117,10 @@ mod tests {
     #[tokio::test]
     async fn shutdown_waits_for_background_jobs_to_settle_before_clearing() {
         let runtime = Arc::new(BackgroundWorkspaceRuntime::default());
-        runtime
-            .jobs
-            .write()
-            .await
-            .insert("job_test".to_string(), test_job(BackgroundJobStatus::Running, ""));
+        runtime.jobs.write().await.insert(
+            "job_test".to_string(),
+            test_job(BackgroundJobStatus::Running, ""),
+        );
         runtime.active_jobs.store(1, Ordering::Release);
         let worker_runtime = runtime.clone();
         tokio::spawn(async move {

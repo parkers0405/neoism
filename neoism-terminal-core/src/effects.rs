@@ -149,6 +149,9 @@ pub enum TerminalEffect {
     /// Ask the host to open a Neoism editor tab.
     OpenEditorTab { path: Option<PathBuf> },
 
+    /// Change the cwd of the terminal that emitted a private OSC 777 command.
+    ChangeTerminalDirectory { path: PathBuf },
+
     /// Query the current value of palette colour `index` and write
     /// the response back to the PTY.
     ///
@@ -240,6 +243,10 @@ impl std::fmt::Debug for TerminalEffect {
             TerminalEffect::OpenEditorTab { path } => {
                 f.debug_struct("OpenEditorTab").field("path", path).finish()
             }
+            TerminalEffect::ChangeTerminalDirectory { path } => f
+                .debug_struct("ChangeTerminalDirectory")
+                .field("path", path)
+                .finish(),
             TerminalEffect::ColorRequest {
                 prefix,
                 index,

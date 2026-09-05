@@ -43,7 +43,10 @@ pub(in crate::neoism::agent) struct ProviderConnection {
 }
 
 #[derive(Clone, Copy)]
-enum LabelAction { Add, Rename }
+enum LabelAction {
+    Add,
+    Rename,
+}
 
 /// Sentinel option value for the "Disconnect …" row in the auth-method stage.
 pub(in crate::neoism::agent) const DISCONNECT_VALUE: &str = "__disconnect__";
@@ -93,16 +96,36 @@ impl ConnectFlow {
 }
 
 impl NeoismAgentPane {
-    pub(in crate::neoism::agent) fn reconcile_model_account(&mut self, model: String) -> bool {
-        if model.trim().is_empty() { self.apply_model_with_connection(model, None); return true; }
-        let provider_id = model.split_once('/').map(|(provider, _)| provider).unwrap_or("openai").to_string();
+    pub(in crate::neoism::agent) fn reconcile_model_account(
+        &mut self,
+        model: String,
+    ) -> bool {
+        if model.trim().is_empty() {
+            self.apply_model_with_connection(model, None);
+            return true;
+        }
+        let provider_id = model
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .unwrap_or("openai")
+            .to_string();
         let connections = match fetch_provider_connections(&self.server, &provider_id) {
             Ok(connections) => connections,
-            Err(error) => { self.system_message("Accounts", error); return true; }
+            Err(error) => {
+                self.system_message("Accounts", error);
+                return true;
+            }
         };
-        let selected_for_provider = self.model.split_once('/').map(|(provider, _)| provider) == Some(provider_id.as_str());
-        if let Some(selected) = self.connection_id.clone().filter(|_| selected_for_provider) {
-            if connections.iter().any(|connection| connection.id == selected) {
+        let selected_for_provider =
+            self.model.split_once('/').map(|(provider, _)| provider)
+                == Some(provider_id.as_str());
+        if let Some(selected) =
+            self.connection_id.clone().filter(|_| selected_for_provider)
+        {
+            if connections
+                .iter()
+                .any(|connection| connection.id == selected)
+            {
                 self.apply_model_with_connection(model, Some(selected));
             } else {
                 self.system_message("Account", "The selected provider connection no longer exists. Choose an account explicitly.");
@@ -110,15 +133,32 @@ impl NeoismAgentPane {
             return true;
         }
         if connections.len() <= 1 {
-            self.apply_model_with_connection(model, connections.first().map(|connection| connection.id.clone()));
+            self.apply_model_with_connection(
+                model,
+                connections.first().map(|connection| connection.id.clone()),
+            );
             return true;
         }
-        let mut flow = match fetch_connect_flow(&self.server) { Ok(flow) => flow, Err(error) => { self.system_message("Accounts", error); return true; } };
-        flow.provider = flow.providers.iter().find(|provider| provider.id == provider_id).cloned();
+        let mut flow = match fetch_connect_flow(&self.server) {
+            Ok(flow) => flow,
+            Err(error) => {
+                self.system_message("Accounts", error);
+                return true;
+            }
+        };
+        flow.provider = flow
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .cloned();
         flow.connections = connections.clone();
         self.connect = Some(flow);
         self.pending_account_model = Some(model);
-        self.open_account_picker(NeoismAgentPickerKind::ModelAccount, &provider_id, &connections);
+        self.open_account_picker(
+            NeoismAgentPickerKind::ModelAccount,
+            &provider_id,
+            &connections,
+        );
         true
     }
 
@@ -164,15 +204,29 @@ impl NeoismAgentPane {
     /// Stage 1 → 2: the user picked a provider; show account management.
     pub(in crate::neoism::agent) fn enter_connect_auth(&mut self, provider_id: &str) {
         if let Some(flow) = self.connect.as_mut() {
-            flow.provider = flow.providers.iter().find(|provider| provider.id == provider_id).cloned();
+            flow.provider = flow
+                .providers
+                .iter()
+                .find(|provider| provider.id == provider_id)
+                .cloned();
             flow.connection = None;
         }
         let connections = match fetch_provider_connections(&self.server, provider_id) {
             Ok(connections) => connections,
-            Err(error) => { self.system_message("Accounts", error); return; }
+            Err(error) => {
+                self.system_message("Accounts", error);
+                return;
+            }
         };
-        if let Some(flow) = self.connect.as_mut() { flow.connections = connections.clone(); flow.connection = None; }
-        self.open_account_picker(NeoismAgentPickerKind::ConnectAccount, provider_id, &connections);
+        if let Some(flow) = self.connect.as_mut() {
+            flow.connections = connections.clone();
+            flow.connection = None;
+        }
+        self.open_account_picker(
+            NeoismAgentPickerKind::ConnectAccount,
+            provider_id,
+            &connections,
+        );
     }
 
     pub(in crate::neoism::agent) fn open_connect_auth_methods(&mut self) {
@@ -180,7 +234,9 @@ impl NeoismAgentPane {
             let Some(flow) = self.connect.as_ref() else {
                 return;
             };
-            let Some(provider) = flow.provider.clone() else { return; };
+            let Some(provider) = flow.provider.clone() else {
+                return;
+            };
             let methods = flow
                 .methods_by_provider
                 .get(&provider.id)
@@ -197,7 +253,10 @@ impl NeoismAgentPane {
         }
         let title = format!("{} — select auth method", provider.name);
         let connected = provider.connected
-            && !self.connect.as_ref().is_some_and(|flow| matches!(flow.label_action, Some(LabelAction::Add)));
+            && !self
+                .connect
+                .as_ref()
+                .is_some_and(|flow| matches!(flow.label_action, Some(LabelAction::Add)));
         let provider_name = provider.name.clone();
         if let Some(flow) = self.connect.as_mut() {
             flow.provider = Some(provider);
@@ -229,14 +288,28 @@ impl NeoismAgentPane {
         ));
     }
 
-    pub(in crate::neoism::agent) fn open_account_picker(&mut self, kind: NeoismAgentPickerKind, provider_id: &str, connections: &[ProviderConnection]) {
+    pub(in crate::neoism::agent) fn open_account_picker(
+        &mut self,
+        kind: NeoismAgentPickerKind,
+        provider_id: &str,
+        connections: &[ProviderConnection],
+    ) {
         let mut options = Vec::new();
         if kind == NeoismAgentPickerKind::ConnectAccount {
-            options.push(NeoismAgentPickerOption::new("Add account", "", "add", ADD_ACCOUNT_VALUE));
-            if !connections.is_empty() { options.push(NeoismAgentPickerOption::header("Connected accounts")); }
+            options.push(NeoismAgentPickerOption::new(
+                "Add account",
+                "",
+                "add",
+                ADD_ACCOUNT_VALUE,
+            ));
+            if !connections.is_empty() {
+                options.push(NeoismAgentPickerOption::header("Connected accounts"));
+            }
         }
         options.extend(connections.iter().map(account_option));
-        let provider_name = self.connect.as_ref()
+        let provider_name = self
+            .connect
+            .as_ref()
             .and_then(|flow| flow.provider.as_ref())
             .filter(|provider| provider.id == provider_id)
             .map(|provider| provider.name.as_str())
@@ -246,63 +319,221 @@ impl NeoismAgentPane {
 
     pub(in crate::neoism::agent) fn choose_connect_account(&mut self, value: &str) {
         if value == ADD_ACCOUNT_VALUE {
-            if let Some(flow) = self.connect.as_mut() { flow.label_action = Some(LabelAction::Add); flow.connection = None; }
+            if let Some(flow) = self.connect.as_mut() {
+                flow.label_action = Some(LabelAction::Add);
+                flow.connection = None;
+            }
             self.open_account_label("Label new account", "Account label");
             return;
         }
-        let Some(connection) = self.connect.as_ref().and_then(|flow| flow.connections.iter().find(|connection| connection.id == value).cloned()) else { self.system_message("Account", "The selected provider connection no longer exists."); return; };
-        if let Some(flow) = self.connect.as_mut() { flow.connection = Some(connection.clone()); }
+        let Some(connection) = self.connect.as_ref().and_then(|flow| {
+            flow.connections
+                .iter()
+                .find(|connection| connection.id == value)
+                .cloned()
+        }) else {
+            self.system_message(
+                "Account",
+                "The selected provider connection no longer exists.",
+            );
+            return;
+        };
+        if let Some(flow) = self.connect.as_mut() {
+            flow.connection = Some(connection.clone());
+        }
         let mut options = vec![
-            NeoismAgentPickerOption::new("Select account", &connection.label, "use", "select"),
-            NeoismAgentPickerOption::new("Rename", &connection.label, "edit label", "rename"),
+            NeoismAgentPickerOption::new(
+                "Select account",
+                &connection.label,
+                "use",
+                "select",
+            ),
+            NeoismAgentPickerOption::new(
+                "Rename",
+                &connection.label,
+                "edit label",
+                "rename",
+            ),
         ];
-        if !connection.is_default { options.push(NeoismAgentPickerOption::new("Make default", &connection.label, "default", "default")); }
-        options.push(NeoismAgentPickerOption::new("Disconnect", &connection.label, "remove", "disconnect"));
-        self.picker = Some(NeoismAgentPicker::new(NeoismAgentPickerKind::ConnectAccountActions, "Account actions", options, 0));
+        if !connection.is_default {
+            options.push(NeoismAgentPickerOption::new(
+                "Make default",
+                &connection.label,
+                "default",
+                "default",
+            ));
+        }
+        options.push(NeoismAgentPickerOption::new(
+            "Disconnect",
+            &connection.label,
+            "remove",
+            "disconnect",
+        ));
+        self.picker = Some(NeoismAgentPicker::new(
+            NeoismAgentPickerKind::ConnectAccountActions,
+            "Account actions",
+            options,
+            0,
+        ));
     }
 
     pub(in crate::neoism::agent) fn choose_model_account(&mut self, id: String) {
-        let Some(model) = self.pending_account_model.take() else { return; };
-        if !self.connect.as_ref().is_some_and(|flow| flow.connections.iter().any(|connection| connection.id == id)) { self.system_message("Account", "The selected provider connection no longer exists."); return; }
+        let Some(model) = self.pending_account_model.take() else {
+            return;
+        };
+        if !self.connect.as_ref().is_some_and(|flow| {
+            flow.connections
+                .iter()
+                .any(|connection| connection.id == id)
+        }) {
+            self.system_message(
+                "Account",
+                "The selected provider connection no longer exists.",
+            );
+            return;
+        }
         self.apply_model_with_connection(model, Some(id));
     }
 
     pub(in crate::neoism::agent) fn run_account_action(&mut self, action: &str) {
-        let Some((provider, connection)) = self.connect.as_ref().and_then(|flow| flow.provider.clone().zip(flow.connection.clone())) else { return; };
+        let Some((provider, connection)) = self
+            .connect
+            .as_ref()
+            .and_then(|flow| flow.provider.clone().zip(flow.connection.clone()))
+        else {
+            return;
+        };
         match action {
             "select" => {
-                if self.model.split_once('/').map(|(current, _)| current) == Some(provider.id.as_str()) { self.apply_model_with_connection(self.model.clone(), Some(connection.id)); }
-                else { self.connection_id = Some(connection.id); self.close_connect(); }
+                if self.model.split_once('/').map(|(current, _)| current)
+                    == Some(provider.id.as_str())
+                {
+                    self.apply_model_with_connection(
+                        self.model.clone(),
+                        Some(connection.id),
+                    );
+                } else {
+                    self.connection_id = Some(connection.id);
+                    self.close_connect();
+                }
                 self.system_message("Account", format!("Using {}.", connection.label));
             }
-            "rename" => { if let Some(flow) = self.connect.as_mut() { flow.label_action = Some(LabelAction::Rename); } self.open_account_label("Rename account", &connection.label); }
-            "default" => { let path = format!("/v2/providers/{}/connections/{}/default", provider.id, connection.id); match api_request_json(&self.server, "POST", &path, None) { Ok(_) => self.open_connect_picker(), Err(error) => self.system_message("Account", error) } }
-            "disconnect" => self.picker = Some(NeoismAgentPicker::new(NeoismAgentPickerKind::ConnectConfirm, "Disconnect account?", vec![NeoismAgentPickerOption::new("Disconnect", &connection.label, "cannot be undone", CONFIRM_DISCONNECT_VALUE), NeoismAgentPickerOption::new("Cancel", "", "keep account", "cancel")], 1)),
+            "rename" => {
+                if let Some(flow) = self.connect.as_mut() {
+                    flow.label_action = Some(LabelAction::Rename);
+                }
+                self.open_account_label("Rename account", &connection.label);
+            }
+            "default" => {
+                let path = format!(
+                    "/v2/providers/{}/connections/{}/default",
+                    provider.id, connection.id
+                );
+                match api_request_json(&self.server, "POST", &path, None) {
+                    Ok(_) => self.open_connect_picker(),
+                    Err(error) => self.system_message("Account", error),
+                }
+            }
+            "disconnect" => {
+                self.picker = Some(NeoismAgentPicker::new(
+                    NeoismAgentPickerKind::ConnectConfirm,
+                    "Disconnect account?",
+                    vec![
+                        NeoismAgentPickerOption::new(
+                            "Disconnect",
+                            &connection.label,
+                            "cannot be undone",
+                            CONFIRM_DISCONNECT_VALUE,
+                        ),
+                        NeoismAgentPickerOption::new(
+                            "Cancel",
+                            "",
+                            "keep account",
+                            "cancel",
+                        ),
+                    ],
+                    1,
+                ))
+            }
             _ => {}
         }
     }
 
-    fn open_account_label(&mut self, title: &str, placeholder: &str) { let mut picker = NeoismAgentPicker::new(NeoismAgentPickerKind::ConnectLabel, title, Vec::new(), 0); picker.search_placeholder = Some(placeholder.to_string()); self.picker = Some(picker); }
+    fn open_account_label(&mut self, title: &str, placeholder: &str) {
+        let mut picker = NeoismAgentPicker::new(
+            NeoismAgentPickerKind::ConnectLabel,
+            title,
+            Vec::new(),
+            0,
+        );
+        picker.search_placeholder = Some(placeholder.to_string());
+        self.picker = Some(picker);
+    }
 
     pub(in crate::neoism::agent) fn submit_account_label(&mut self, label: String) {
         let label = label.trim().to_string();
-        if label.is_empty() { self.open_account_label("Account label", "Account label"); return; }
+        if label.is_empty() {
+            self.open_account_label("Account label", "Account label");
+            return;
+        }
         match self.connect.as_ref().and_then(|flow| flow.label_action) {
-            Some(LabelAction::Add) => { if let Some(flow) = self.connect.as_mut() { flow.label = Some(label); } self.open_connect_auth_methods(); }
+            Some(LabelAction::Add) => {
+                if let Some(flow) = self.connect.as_mut() {
+                    flow.label = Some(label);
+                }
+                self.open_connect_auth_methods();
+            }
             Some(LabelAction::Rename) => {
-                let Some((provider, connection)) = self.connect.as_ref().and_then(|flow| flow.provider.clone().zip(flow.connection.clone())) else { return; };
-                let path = format!("/v2/providers/{}/connections/{}", provider.id, connection.id);
-                match api_request_json(&self.server, "PATCH", &path, Some(&json!({"label": label}))) { Ok(_) => self.open_connect_picker(), Err(error) => self.system_message("Account", error) }
+                let Some((provider, connection)) = self
+                    .connect
+                    .as_ref()
+                    .and_then(|flow| flow.provider.clone().zip(flow.connection.clone()))
+                else {
+                    return;
+                };
+                let path = format!(
+                    "/v2/providers/{}/connections/{}",
+                    provider.id, connection.id
+                );
+                match api_request_json(
+                    &self.server,
+                    "PATCH",
+                    &path,
+                    Some(&json!({"label": label})),
+                ) {
+                    Ok(_) => self.open_connect_picker(),
+                    Err(error) => self.system_message("Account", error),
+                }
             }
             None => {}
         }
     }
 
     pub(in crate::neoism::agent) fn confirm_account_disconnect(&mut self, confirm: bool) {
-        if !confirm { self.close_connect(); return; }
-        let Some((provider, connection)) = self.connect.as_ref().and_then(|flow| flow.provider.clone().zip(flow.connection.clone())) else { return; };
-        let path = format!("/v2/providers/{}/connections/{}", provider.id, connection.id);
-        match api_request_json(&self.server, "DELETE", &path, None) { Ok(_) => { if self.connection_id.as_deref() == Some(connection.id.as_str()) { self.system_message("Account", "The selected provider connection was deleted. Choose another account before sending."); } self.open_connect_picker(); }, Err(error) => self.system_message("Disconnect", error) }
+        if !confirm {
+            self.close_connect();
+            return;
+        }
+        let Some((provider, connection)) = self
+            .connect
+            .as_ref()
+            .and_then(|flow| flow.provider.clone().zip(flow.connection.clone()))
+        else {
+            return;
+        };
+        let path = format!(
+            "/v2/providers/{}/connections/{}",
+            provider.id, connection.id
+        );
+        match api_request_json(&self.server, "DELETE", &path, None) {
+            Ok(_) => {
+                if self.connection_id.as_deref() == Some(connection.id.as_str()) {
+                    self.system_message("Account", "The selected provider connection was deleted. Choose another account before sending.");
+                }
+                self.open_connect_picker();
+            }
+            Err(error) => self.system_message("Disconnect", error),
+        }
     }
 
     /// Stage 2 → 3: the user picked an auth method. API-key methods jump
@@ -337,13 +568,16 @@ impl NeoismAgentPane {
         if provider.id == "claude-code" && method.label.contains("Meridian") {
             let body = json!({ "type": "api", "key": "meridian" });
             let label = self.connect.as_ref().and_then(|flow| flow.label.clone());
-            let (method, path, body) = if let Some(label) = label { ("POST", format!("/v2/providers/{}/connections", provider.id), json!({"label": label, "credential": body, "setDefault": false})) } else { ("PUT", format!("/v2/providers/{}/auth", provider.id), body) };
-            match api_request_json(
-                &self.server,
-                method,
-                &path,
-                Some(&body),
-            ) {
+            let (method, path, body) = if let Some(label) = label {
+                (
+                    "POST",
+                    format!("/v2/providers/{}/connections", provider.id),
+                    json!({"label": label, "credential": body, "setDefault": false}),
+                )
+            } else {
+                ("PUT", format!("/v2/providers/{}/auth", provider.id), body)
+            };
+            match api_request_json(&self.server, method, &path, Some(&body)) {
                 Ok(_) => {
                     self.close_connect();
                     self.system_message(
@@ -428,7 +662,12 @@ impl NeoismAgentPane {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        if let Some(flow) = self.connect.as_mut() { flow.attempt_id = value.get("attemptId").and_then(Value::as_str).map(str::to_string); }
+        if let Some(flow) = self.connect.as_mut() {
+            flow.attempt_id = value
+                .get("attemptId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
         let authorization_link = (url.starts_with("http://")
             || url.starts_with("https://"))
         .then(|| format!("[{url}]({url})"));
@@ -457,7 +696,13 @@ impl NeoismAgentPane {
                 message.push_str(link);
             }
             self.system_message(&provider.name, message);
-            self.spawn_connect_oauth_wait(provider, method.index, self.connect.as_ref().and_then(|flow| flow.attempt_id.clone()));
+            self.spawn_connect_oauth_wait(
+                provider,
+                method.index,
+                self.connect
+                    .as_ref()
+                    .and_then(|flow| flow.attempt_id.clone()),
+            );
             // Return to the composer; the outcome arrives as a background update.
             self.close_connect();
         } else {
@@ -483,7 +728,12 @@ impl NeoismAgentPane {
     /// server-side until the browser redirect is captured and the token
     /// exchanged, so the wait must not freeze the pane; the result comes back as
     /// a background update.
-    fn spawn_connect_oauth_wait(&self, provider: &ConnectProvider, method_index: usize, attempt_id: Option<String>) {
+    fn spawn_connect_oauth_wait(
+        &self,
+        provider: &ConnectProvider,
+        method_index: usize,
+        attempt_id: Option<String>,
+    ) {
         let server = self.server.clone();
         let provider_id = provider.id.clone();
         let provider_name = provider.name.clone();
@@ -502,7 +752,12 @@ impl NeoismAgentPane {
                     ) {
                         Ok(value) => NeoismAgentBackgroundUpdate::ConnectOauthFinished {
                             provider_name,
-                            connection_id: value.and_then(|value| value.get("connectionId").and_then(Value::as_str).map(str::to_string)),
+                            connection_id: value.and_then(|value| {
+                                value
+                                    .get("connectionId")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                            }),
                         },
                         Err(error) => NeoismAgentBackgroundUpdate::ConnectOauthFailed {
                             provider_name,
@@ -556,27 +811,49 @@ impl NeoismAgentPane {
         let result = if method.is_api {
             let credential = json!({ "type": "api", "key": secret });
             let label = self.connect.as_ref().and_then(|flow| flow.label.clone());
-            let (verb, path, body) = if let Some(label) = label { ("POST", format!("/v2/providers/{}/connections", provider.id), json!({"label": label, "credential": credential, "setDefault": false})) } else { ("PUT", format!("/v2/providers/{}/auth", provider.id), credential) };
-            api_request_json(
-                &self.server,
-                verb,
-                &path,
-                Some(&body),
-            )
-            .map(|value| value.and_then(|value| value.get("connectionId").and_then(Value::as_str).map(str::to_string)))
+            let (verb, path, body) = if let Some(label) = label {
+                (
+                    "POST",
+                    format!("/v2/providers/{}/connections", provider.id),
+                    json!({"label": label, "credential": credential, "setDefault": false}),
+                )
+            } else {
+                (
+                    "PUT",
+                    format!("/v2/providers/{}/auth", provider.id),
+                    credential,
+                )
+            };
+            api_request_json(&self.server, verb, &path, Some(&body)).map(|value| {
+                value.and_then(|value| {
+                    value
+                        .get("connectionId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+            })
         } else {
             let body = json!({ "method": method.index, "code": secret, "attemptId": self.connect.as_ref().and_then(|flow| flow.attempt_id.clone()) });
             api_request_json(
                 &self.server,
                 "POST",
-                    &format!("/v2/providers/{}/oauth/callback", provider.id),
+                &format!("/v2/providers/{}/oauth/callback", provider.id),
                 Some(&body),
             )
-            .map(|value| value.and_then(|value| value.get("connectionId").and_then(Value::as_str).map(str::to_string)))
+            .map(|value| {
+                value.and_then(|value| {
+                    value
+                        .get("connectionId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+            })
         };
         match result {
             Ok(connection_id) => {
-                if connection_id.is_some() { self.connection_id = connection_id; }
+                if connection_id.is_some() {
+                    self.connection_id = connection_id;
+                }
                 self.close_connect();
                 self.system_message(
                     "Connected",
@@ -604,8 +881,8 @@ impl NeoismAgentPane {
 fn fetch_connect_flow(server: &str) -> Result<ConnectFlow, String> {
     let providers_value =
         api_request_json(server, "GET", "/v2/providers", None)?.unwrap_or(Value::Null);
-    let auth_value =
-        api_request_json(server, "GET", "/v2/providers/auth-methods", None)?.unwrap_or(Value::Null);
+    let auth_value = api_request_json(server, "GET", "/v2/providers/auth-methods", None)?
+        .unwrap_or(Value::Null);
 
     let connected: HashSet<String> = providers_value
         .get("connected")
@@ -683,18 +960,46 @@ fn fetch_connect_flow(server: &str) -> Result<ConnectFlow, String> {
     })
 }
 
-pub(super) fn fetch_provider_connections(server: &str, provider_id: &str) -> Result<Vec<ProviderConnection>, String> {
-    let value = api_request_json(server, "GET", &format!("/v2/providers/{provider_id}/connections"), None)?.unwrap_or(Value::Array(Vec::new()));
-    Ok(value.as_array().into_iter().flatten().filter_map(|connection| Some(ProviderConnection {
-        id: connection.get("connectionId")?.as_str()?.to_string(),
-        label: connection.get("label")?.as_str()?.to_string(),
-        auth_type: connection.get("authType")?.as_str()?.to_string(),
-        is_default: connection.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
-    })).collect())
+pub(super) fn fetch_provider_connections(
+    server: &str,
+    provider_id: &str,
+) -> Result<Vec<ProviderConnection>, String> {
+    let value = api_request_json(
+        server,
+        "GET",
+        &format!("/v2/providers/{provider_id}/connections"),
+        None,
+    )?
+    .unwrap_or(Value::Array(Vec::new()));
+    Ok(value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|connection| {
+            Some(ProviderConnection {
+                id: connection.get("connectionId")?.as_str()?.to_string(),
+                label: connection.get("label")?.as_str()?.to_string(),
+                auth_type: connection.get("authType")?.as_str()?.to_string(),
+                is_default: connection
+                    .get("isDefault")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect())
 }
 
 fn account_option(connection: &ProviderConnection) -> NeoismAgentPickerOption {
-    NeoismAgentPickerOption::new(&connection.label, &connection.auth_type, if connection.is_default { "default" } else { "account" }, &connection.id)
+    NeoismAgentPickerOption::new(
+        &connection.label,
+        &connection.auth_type,
+        if connection.is_default {
+            "default"
+        } else {
+            "account"
+        },
+        &connection.id,
+    )
 }
 
 /// Build the stage-1 picker rows: a "Popular" header + the well-known providers

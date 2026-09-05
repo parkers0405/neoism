@@ -1423,6 +1423,19 @@ impl Renderer {
             sugarloaf.set_late_overlay_mode(false);
         }
 
+        if self.file_browser.is_active() {
+            let active_theme = neoism_ui::chrome::active_ide_theme();
+            self.file_browser.set_font_scale(self.chrome_scale());
+            sugarloaf.set_late_overlay_mode(true);
+            self.file_browser.render(
+                sugarloaf,
+                [0.0, 0.0, window_size.width as f32 / scale_factor,
+                 window_size.height as f32 / scale_factor],
+                &active_theme,
+            );
+            sugarloaf.set_late_overlay_mode(false);
+        }
+
         // Right-side git diff panel — flush against the window's right
         // edge, spanning the middle band like the file tree: below the
         // full-width top chrome and above the full-width status bar.
@@ -1632,7 +1645,8 @@ impl neoism_ui::panels::buffer_tabs::AgentIconProvider<crate::neoism::icon::Agen
 #[cfg(test)]
 mod tests {
     use super::{
-        modal_uses_late_overlay, settings_uses_late_overlay, terminal_splash_wants_visible,
+        modal_uses_late_overlay, settings_uses_late_overlay,
+        terminal_splash_wants_visible,
     };
 
     #[test]

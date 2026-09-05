@@ -217,6 +217,7 @@ impl CodeBuffer {
             goal_visual_col: None,
             revision: 0,
             follow_cursor: false,
+            pending_cursor_row_delta: None,
             indent,
             line_ending,
             trailing_newline,

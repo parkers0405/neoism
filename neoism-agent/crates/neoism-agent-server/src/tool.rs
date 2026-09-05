@@ -5,9 +5,9 @@ use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 
-use neoism_agent_core::{PermissionAction, PermissionRule};
 #[cfg(test)]
 use neoism_agent_core::ToolListItem;
+use neoism_agent_core::{PermissionAction, PermissionRule};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -25,8 +25,6 @@ mod diagnostics;
 mod documentation;
 #[path = "tool_support/edit_match.rs"]
 mod edit_match;
-#[path = "tool_support/workspace_search.rs"]
-pub(crate) mod workspace_search;
 #[path = "tool_support/file.rs"]
 mod file;
 #[path = "tool_support/format.rs"]
@@ -51,6 +49,8 @@ pub(crate) mod shell_scan;
 pub(crate) mod truncate;
 #[path = "tool_support/web.rs"]
 mod web;
+#[path = "tool_support/workspace_search.rs"]
+pub(crate) mod workspace_search;
 
 use web::webfetch_tool;
 
@@ -139,13 +139,15 @@ impl ToolContext {
 
     pub(crate) async fn with_generation(mut self, generation: Option<u64>) -> Self {
         if let (Some(state), Some(generation)) = (self.state.as_ref(), generation) {
-            self.plugin_snapshot = crate::workspace_runtime::active_generation(&self.cwd.to_string_lossy())
-                .filter(|active| active.generation == generation);
+            self.plugin_snapshot =
+                crate::workspace_runtime::active_generation(&self.cwd.to_string_lossy())
+                    .filter(|active| active.generation == generation);
             if self.plugin_snapshot.is_none() {
                 self.plugin_snapshot = state
                     .inner
                     .workspace_runtimes
-                    .loaded(&self.cwd.to_string_lossy()).await
+                    .loaded(&self.cwd.to_string_lossy())
+                    .await
                     .and_then(|runtime| runtime.lease_generation(generation));
             }
         }
@@ -182,7 +184,10 @@ impl ToolContext {
     }
 
     pub(crate) fn services(&self) -> neoism_agent_service_api::AgentServices {
-        self.state.as_ref().map(|state| state.services().clone()).unwrap_or_else(crate::standard_services)
+        self.state
+            .as_ref()
+            .map(|state| state.services().clone())
+            .unwrap_or_else(crate::standard_services)
     }
 
     pub(crate) fn session_id(&self) -> Option<&str> {
@@ -318,11 +323,20 @@ impl neoism_agent_plugin_api::RuntimeTool for BuiltinTool {
     fn execute<'a>(
         &'a self,
         invocation: neoism_agent_plugin_api::PluginToolInvocation,
-    ) -> neoism_agent_plugin_api::PluginFuture<'a, neoism_agent_plugin_api::PluginToolResult> {
+    ) -> neoism_agent_plugin_api::PluginFuture<
+        'a,
+        neoism_agent_plugin_api::PluginToolResult,
+    > {
         Box::pin(async move {
             let context = ToolContext::new(&invocation.directory)
-                .with_state(self.state.as_ref().and_then(Weak::upgrade).map(|inner| AppState { inner }))
-                .with_generation(invocation.generation).await
+                .with_state(
+                    self.state
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .map(|inner| AppState { inner }),
+                )
+                .with_generation(invocation.generation)
+                .await
                 .with_session_id(invocation.session_id)
                 .with_permission_rules(invocation.permission_rules)
                 .with_env(invocation.env)
@@ -335,7 +349,9 @@ impl neoism_agent_plugin_api::RuntimeTool for BuiltinTool {
                     output: result.output,
                     metadata: result.metadata,
                 })
-                .map_err(|error| neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string()))
+                .map_err(|error| {
+                    neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string())
+                })
         })
     }
 }
@@ -522,22 +538,68 @@ fn register_owned_tools(
     }
 }
 
-pub(crate) fn register_workspace_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) {
+pub(crate) fn register_workspace_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginContributions,
+    state: &AppState,
+) {
     register_owned_tools(registrar, state, registry::ToolOwner::Workspace);
 }
 
 #[cfg(test)]
 pub(crate) fn workspace_tool_items() -> Vec<ToolListItem> {
-    registry::definitions(registry::ToolOwner::Workspace).into_iter().map(|tool| tool.item()).collect()
+    registry::definitions(registry::ToolOwner::Workspace)
+        .into_iter()
+        .map(|tool| tool.item())
+        .collect()
 }
-pub(crate) fn register_documentation_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Documentation); }
-pub(crate) fn register_memory_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Memory); }
-pub(crate) fn register_skill_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Skills); }
-pub(crate) fn register_lsp_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Lsp); }
-pub(crate) fn register_subagent_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Subagents); }
-pub(crate) fn register_goal_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Goals); }
-pub(crate) fn register_artifact_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Artifacts); }
-pub(crate) fn register_interaction_tools(registrar: &mut neoism_agent_plugin_api::PluginContributions, state: &AppState) { register_owned_tools(registrar, state, registry::ToolOwner::Interactions); }
+pub(crate) fn register_documentation_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginContributions,
+    state: &AppState,
+) {
+    register_owned_tools(registrar, state, registry::ToolOwner::Documentation);
+}
+pub(crate) fn register_memory_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginContributions,
+    state: &AppState,
+) {
+    register_owned_tools(registrar, state, registry::ToolOwner::Memory);
+}
+pub(crate) fn register_skill_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginContributions,
+    state: &AppState,
+) {
+    register_owned_tools(registrar, state, registry::ToolOwner::Skills);
+}
+pub(crate) fn register_lsp_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginContributions,
+    state: &AppState,
+) {
+    register_owned_tools(registrar, state, registry::ToolOwner::Lsp);
+}
+pub(crate) fn register_subagent_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginContributions,
+    state: &AppState,
+) {
+    register_owned_tools(registrar, state, registry::ToolOwner::Subagents);
+}
+pub(crate) fn register_goal_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginContributions,
+    state: &AppState,
+) {
+    register_owned_tools(registrar, state, registry::ToolOwner::Goals);
+}
+pub(crate) fn register_artifact_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginContributions,
+    state: &AppState,
+) {
+    register_owned_tools(registrar, state, registry::ToolOwner::Artifacts);
+}
+pub(crate) fn register_interaction_tools(
+    registrar: &mut neoism_agent_plugin_api::PluginContributions,
+    state: &AppState,
+) {
+    register_owned_tools(registrar, state, registry::ToolOwner::Interactions);
+}
 
 pub(crate) fn warm_search(
     services: &neoism_agent_service_api::AgentServices,
@@ -554,8 +616,14 @@ pub(crate) async fn execute(
     mut context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let state = context.state.as_ref().ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
-    let runtime = state.workspace_runtime(&context.cwd.to_string_lossy()).await.map_err(anyhow::Error::msg)?;
+    let state = context
+        .state
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
+    let runtime = state
+        .workspace_runtime(&context.cwd.to_string_lossy())
+        .await
+        .map_err(anyhow::Error::msg)?;
     let snapshot = runtime.snapshot();
     context.plugin_snapshot = Some(snapshot.clone());
     let _contribution = snapshot

@@ -117,7 +117,10 @@ pub(crate) fn serve_plugin_spec(
         sandbox: sandbox_policy(options.get("sandbox").and_then(Value::as_bool)),
         // Serve plugins default to networked: SDK callbacks to the server run
         // over loopback, which a network namespace would sever.
-        network: options.get("network").and_then(Value::as_bool).unwrap_or(true),
+        network: options
+            .get("network")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         working_directory: PathBuf::from(directory),
     })
 }
@@ -129,7 +132,13 @@ fn plugin_cache_dir() -> PathBuf {
 fn npm_cache_slot(spec: &str) -> PathBuf {
     let sanitized = spec
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     plugin_cache_dir().join(sanitized)
 }
@@ -219,7 +228,8 @@ fn start_background_npm_install(
     package_spec: &str,
     executables: &Arc<dyn neoism_agent_service_api::ExecutableService>,
 ) {
-    static IN_FLIGHT: OnceLock<Mutex<std::collections::BTreeSet<String>>> = OnceLock::new();
+    static IN_FLIGHT: OnceLock<Mutex<std::collections::BTreeSet<String>>> =
+        OnceLock::new();
     let in_flight = IN_FLIGHT.get_or_init(Default::default);
     {
         let mut guard = in_flight.lock().expect("npm install set poisoned");
@@ -438,18 +448,16 @@ impl ProcessHost {
         *self.stdin.lock().expect("stdin slot poisoned") = Some(stdin);
         *self.child.lock().expect("child slot poisoned") = Some(child);
 
-        let handshake: PluginHandshake = serde_json::from_value(
-            self.call(
-                "initialize",
-                json!({
-                    "protocol": SERVE_PLUGIN_PROTOCOL,
-                    "pluginId": self.spec.id,
-                    "directory": self.spec.working_directory,
-                    "config": self.spec.config,
-                }),
-                INITIALIZE_TIMEOUT,
-            )?,
-        )
+        let handshake: PluginHandshake = serde_json::from_value(self.call(
+            "initialize",
+            json!({
+                "protocol": SERVE_PLUGIN_PROTOCOL,
+                "pluginId": self.spec.id,
+                "directory": self.spec.working_directory,
+                "config": self.spec.config,
+            }),
+            INITIALIZE_TIMEOUT,
+        )?)
         .map_err(|error| format!("plugin initialize reply is invalid: {error}"))?;
         if handshake.protocol != SERVE_PLUGIN_PROTOCOL {
             return Err(format!(
@@ -460,7 +468,12 @@ impl ProcessHost {
         Ok(handshake)
     }
 
-    fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+    fn call(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = std::sync::mpsc::channel();
         self.pending
@@ -518,7 +531,8 @@ impl ProcessHost {
     fn shutdown_sync(&self) {
         self.notify("shutdown", json!({}));
         drop(self.stdin.lock().expect("stdin slot poisoned").take());
-        let Some(mut child) = self.child.lock().expect("child slot poisoned").take() else {
+        let Some(mut child) = self.child.lock().expect("child slot poisoned").take()
+        else {
             return;
         };
         let deadline = Instant::now() + SHUTDOWN_GRACE;
@@ -660,7 +674,8 @@ impl ServePluginFactory {
 
 impl PluginFactory for ServePluginFactory {
     fn descriptor(&self) -> PluginDescriptor {
-        let mut capabilities = vec![HostCapability::ProcessSpawn, HostCapability::WorkspaceRead];
+        let mut capabilities =
+            vec![HostCapability::ProcessSpawn, HostCapability::WorkspaceRead];
         if self.spec.network {
             capabilities.push(HostCapability::Network);
         }
@@ -683,7 +698,10 @@ impl PluginFactory for ServePluginFactory {
         }
     }
 
-    fn create<'a>(&'a self, _context: PluginContext) -> PluginFuture<'a, Box<dyn PluginInstance>> {
+    fn create<'a>(
+        &'a self,
+        _context: PluginContext,
+    ) -> PluginFuture<'a, Box<dyn PluginInstance>> {
         Box::pin(async move {
             Ok(Box::new(ServePluginInstance {
                 host: Arc::new(ProcessHost::new(
@@ -867,10 +885,7 @@ rl.on("line", (line) => {
             fixture.to_string_lossy().into_owned(),
         ]);
         let factory = ServePluginFactory::new(spec, standard_executables());
-        let instance = factory
-            .create(test_context())
-            .await
-            .unwrap();
+        let instance = factory.create(test_context()).await.unwrap();
         instance.start().await.unwrap();
         assert_eq!(instance.readiness(), PluginReadiness::ready());
 
@@ -915,10 +930,7 @@ rl.on("line", (line) => {
     async fn missing_binary_degrades_instead_of_failing_install() {
         let spec = spec_with_command(vec!["neoism-definitely-not-a-binary".to_string()]);
         let factory = ServePluginFactory::new(spec, standard_executables());
-        let instance = factory
-            .create(test_context())
-            .await
-            .unwrap();
+        let instance = factory.create(test_context()).await.unwrap();
         instance.start().await.unwrap();
         let readiness = instance.readiness();
         assert_eq!(readiness.state, ReadinessState::Degraded);

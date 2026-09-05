@@ -151,7 +151,7 @@ impl ChromeBridge {
             // running re-dismiss the splash `clear` brings back.
             self.chrome.dismiss_terminal_splash();
         }
-        let visible = self.chrome.is_terminal_tab_active()
+        let visible = self.chrome.is_terminal_tab_selected()
             && !self.chrome.is_neoism_agent_tab_active()
             && self.terminal_blocks.composer_footer_active(
                 state,
@@ -289,14 +289,14 @@ impl ChromeBridge {
         }
 
         let viewport_rows = raw_rows.len();
-        if self.chrome.command_composer.is_visible() {
+        if chrome_owns_prompt {
             if let Some(idx) = raw_sources.iter().position(|abs| *abs == cursor_abs) {
                 raw_rows.remove(idx);
                 raw_sources.remove(idx);
             }
         }
 
-        let composer_rows = if self.chrome.command_composer.is_visible() {
+        let composer_rows = if chrome_owns_prompt {
             self.chrome
                 .command_composer
                 .terminal_reserved_rows_for_input(

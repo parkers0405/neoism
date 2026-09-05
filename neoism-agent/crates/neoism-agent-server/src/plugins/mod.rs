@@ -1,11 +1,11 @@
-use neoism_agent_core::{CapabilityInfo, PluginManifestInfo};
-use neoism_agent_plugin_api::{
-    CapabilityGrants, HostCapability, InstalledPlugins, PluginFactory, PluginFactoryRegistration,
-    PluginHost, PluginHostError, PluginContext, RegistrySnapshot, RoutePrefixPolicy, RuntimeScope,
-    WorkspaceIdentity,
-};
 use crate::plugin_adapters;
 use crate::workspace_runtime::{managed_plugin_factory, WorkspaceLifecycle};
+use neoism_agent_core::{CapabilityInfo, PluginManifestInfo};
+use neoism_agent_plugin_api::{
+    CapabilityGrants, HostCapability, InstalledPlugins, PluginContext, PluginFactory,
+    PluginFactoryRegistration, PluginHost, PluginHostError, RegistrySnapshot,
+    RoutePrefixPolicy, RuntimeScope, WorkspaceIdentity,
+};
 
 pub(crate) mod subagents;
 
@@ -21,8 +21,12 @@ pub(crate) async fn build_host(
 ) -> Result<PluginHostBuild, PluginHostError> {
     let services = state.services();
     let host = PluginHost::default();
-    let (config, discovery_roots) = neoism_agent_builtins::plugin::config::load(services, directory)
-        .map_err(|error| PluginHostError::Registration(format!("invalid configuration: {error}")))?;
+    let (config, discovery_roots) = neoism_agent_builtins::plugin::config::load(
+        services, directory,
+    )
+    .map_err(|error| {
+        PluginHostError::Registration(format!("invalid configuration: {error}"))
+    })?;
     build_host_with_config(state, directory, config, discovery_roots, host).await
 }
 
@@ -36,28 +40,46 @@ pub(crate) async fn build_default_host(
         neoism_agent_core::AgentConfigDocument::default(),
         Vec::new(),
         PluginHost::default(),
-    ).await
+    )
+    .await
 }
 
 fn first_party_legacy_prefix(plugin_id: &str) -> Option<&'static str> {
     [
         (neoism_agent_builtins::plugin::config::ID, "/v2/config"),
-        (neoism_agent_builtins::plugin::artifacts::ID, "/v2/artifacts"),
-        (neoism_agent_builtins::plugin::interactions::ID, "/v2/interactions"),
-        (neoism_agent_builtins::plugin::providers::ID, "/v2/providers"),
-        (neoism_agent_builtins::plugin::workflows::ID, "/v2/workflows"),
+        (
+            neoism_agent_builtins::plugin::artifacts::ID,
+            "/v2/artifacts",
+        ),
+        (
+            neoism_agent_builtins::plugin::interactions::ID,
+            "/v2/interactions",
+        ),
+        (
+            neoism_agent_builtins::plugin::providers::ID,
+            "/v2/providers",
+        ),
+        (
+            neoism_agent_builtins::plugin::workflows::ID,
+            "/v2/workflows",
+        ),
         (neoism_agent_builtins::plugin::subagents::ID, "/v2/session"),
         (neoism_agent_builtins::plugin::lsp::ID, "/v2/lsp"),
         (neoism_agent_builtins::plugin::mcp::ID, "/v2/mcp"),
         (neoism_agent_builtins::plugin::pty::ID, "/v2/pty"),
-        (neoism_agent_builtins::plugin::workspace_tools::ID, "/v2/tools"),
+        (
+            neoism_agent_builtins::plugin::workspace_tools::ID,
+            "/v2/tools",
+        ),
         (neoism_agent_builtins::plugin::skills::ID, "/v2/skills"),
         (neoism_agent_builtins::plugin::agents::ID, "/v2/agents"),
         (neoism_agent_builtins::plugin::commands::ID, "/v2/commands"),
         (neoism_agent_builtins::plugin::websearch::ID, "/v2/tools"),
         (neoism_agent_builtins::plugin::vcs::ID, "/v2/vcs"),
         (neoism_agent_builtins::plugin::goals::ID, "/v2/goals"),
-    ].into_iter().find_map(|(id, prefix)| (id == plugin_id).then_some(prefix))
+    ]
+    .into_iter()
+    .find_map(|(id, prefix)| (id == plugin_id).then_some(prefix))
 }
 
 async fn build_host_with_config(
@@ -68,24 +90,19 @@ async fn build_host_with_config(
     host: PluginHost,
 ) -> Result<PluginHostBuild, PluginHostError> {
     let services = state.services();
-    let mut plugins = vec![
-        Box::new(neoism_agent_builtins::plugin::ConfigPlugin::new(
-            services.clone(),
-            std::sync::Arc::new(plugin_adapters::ConfigAdmin(state.clone())),
-        )) as Box<dyn PluginFactory>,
-    ];
-    if enabled_in(
-        &config,
-        neoism_agent_builtins::plugin::system_prompt::ID,
-    ) {
-        plugins.push(Box::new(
-            neoism_agent_builtins::plugin::SystemPromptPlugin,
-        ));
+    let mut plugins = vec![Box::new(neoism_agent_builtins::plugin::ConfigPlugin::new(
+        services.clone(),
+        std::sync::Arc::new(plugin_adapters::ConfigAdmin(state.clone())),
+    )) as Box<dyn PluginFactory>];
+    if enabled_in(&config, neoism_agent_builtins::plugin::system_prompt::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::SystemPromptPlugin));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::artifacts::ID) {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::ArtifactsPlugin::new(
-            std::sync::Arc::new(plugin_adapters::Artifacts(state.clone())),
-        )));
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::ArtifactsPlugin::new(std::sync::Arc::new(
+                plugin_adapters::Artifacts(state.clone()),
+            )),
+        ));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::interactions::ID) {
         plugins.push(Box::new(
@@ -95,27 +112,39 @@ async fn build_host_with_config(
         ));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::providers::ID) {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::ProvidersPlugin::new(
-            vec![(
+        let provider_service: std::sync::Arc<
+            dyn neoism_agent_plugin_api::ProviderService,
+        > = std::sync::Arc::new(neoism_agent_builtins::ProviderPlatform::with_config(
+            services.provider_credentials.clone(),
+            config.clone(),
+        ));
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::ProvidersPlugin::new(vec![(
                 "runtime".into(),
-                state.inner.provider_service.clone(),
-            )],
-        )));
+                provider_service,
+            )]),
+        ));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::semantic::ID) {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::SemanticPlugin::new(
-            std::sync::Arc::new(plugin_adapters::Semantic(state.clone())),
-        )));
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::SemanticPlugin::new(std::sync::Arc::new(
+                plugin_adapters::Semantic(state.clone()),
+            )),
+        ));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::workflows::ID) {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::WorkflowsPlugin::new(
-            std::sync::Arc::new(plugin_adapters::Workflows(state.clone())),
-        )));
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::WorkflowsPlugin::new(std::sync::Arc::new(
+                plugin_adapters::Workflows(state.clone()),
+            )),
+        ));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::subagents::ID) {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::SubagentsPlugin::new(
-            std::sync::Arc::new(plugin_adapters::Subagents(state.clone())),
-        )));
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::SubagentsPlugin::new(std::sync::Arc::new(
+                plugin_adapters::Subagents(state.clone()),
+            )),
+        ));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::lsp::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::LspPlugin::new(
@@ -133,12 +162,17 @@ async fn build_host_with_config(
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::workspace_tools::ID) {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::WorkspaceToolsPlugin::new(
-            std::sync::Arc::new(plugin_adapters::WorkspaceTools(state.clone())),
-        )));
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::WorkspaceToolsPlugin::new(
+                std::sync::Arc::new(plugin_adapters::WorkspaceTools(state.clone())),
+            ),
+        ));
     }
     if services.documentation.is_some()
-        && enabled_in(&config, neoism_agent_builtins::plugin::documentation_tools::ID)
+        && enabled_in(
+            &config,
+            neoism_agent_builtins::plugin::documentation_tools::ID,
+        )
     {
         plugins.push(Box::new(
             neoism_agent_builtins::plugin::DocumentationToolsPlugin::new(
@@ -150,9 +184,9 @@ async fn build_host_with_config(
         && enabled_in(&config, neoism_agent_builtins::plugin::memory_tools::ID)
     {
         plugins.push(Box::new(
-            neoism_agent_builtins::plugin::MemoryToolsPlugin::new(
-                std::sync::Arc::new(plugin_adapters::MemoryTools(state.clone())),
-            ),
+            neoism_agent_builtins::plugin::MemoryToolsPlugin::new(std::sync::Arc::new(
+                plugin_adapters::MemoryTools(state.clone()),
+            )),
         ));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::skills::ID) {
@@ -168,9 +202,9 @@ async fn build_host_with_config(
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::commands::ID) {
-        plugins.push(Box::new(neoism_agent_builtins::plugin::CommandsPlugin::new(
-            &config,
-        )));
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::CommandsPlugin::new(&config),
+        ));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::websearch::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::WebsearchPlugin));
@@ -190,29 +224,38 @@ async fn build_host_with_config(
     {
         let custom_tools = crate::custom_tool::load(services, directory);
         if !custom_tools.is_empty() {
-            plugins.push(Box::new(neoism_agent_builtins::plugin::CustomToolsPlugin::new(
-                std::sync::Arc::new(plugin_adapters::CustomTools(custom_tools)),
-            )));
+            plugins.push(Box::new(
+                neoism_agent_builtins::plugin::CustomToolsPlugin::new(
+                    std::sync::Arc::new(plugin_adapters::CustomTools(custom_tools)),
+                ),
+            ));
         }
     }
-    let configured_plugins = crate::plugin::configured_agent_plugins(
-        services,
-        &config,
-        directory,
-    );
+    let configured_plugins =
+        crate::plugin::configured_agent_plugins(services, &config, directory);
     let lifecycle = std::sync::Arc::new(WorkspaceLifecycle::default());
     let root = std::path::PathBuf::from(directory);
     let mut registrations = plugins
         .into_iter()
         .map(|factory| {
             let policy = first_party_legacy_prefix(&factory.descriptor().manifest.id)
-                .map_or_else(RoutePrefixPolicy::default, |prefix| RoutePrefixPolicy::default().allow_legacy(prefix));
-            PluginFactoryRegistration::new(managed_plugin_factory(factory, lifecycle.clone(), root.clone()))
-                .with_route_prefix_policy(policy)
+                .map_or_else(RoutePrefixPolicy::default, |prefix| {
+                    RoutePrefixPolicy::default().allow_legacy(prefix)
+                });
+            PluginFactoryRegistration::new(managed_plugin_factory(
+                factory,
+                lifecycle.clone(),
+                root.clone(),
+            ))
+            .with_route_prefix_policy(policy)
         })
         .collect::<Vec<_>>();
     registrations.extend(configured_plugins.into_iter().map(|factory| {
-        PluginFactoryRegistration::new(managed_plugin_factory(factory, lifecycle.clone(), root.clone()))
+        PluginFactoryRegistration::new(managed_plugin_factory(
+            factory,
+            lifecycle.clone(),
+            root.clone(),
+        ))
     }));
     let context = PluginContext::new(
         RuntimeScope::Workspace(WorkspaceIdentity {
@@ -221,16 +264,25 @@ async fn build_host_with_config(
         }),
         production_workspace_grants(),
     );
-    let disabled = config.plugins.iter()
+    let disabled = config
+        .plugins
+        .iter()
         .filter(|(_, plugin)| !plugin.enabled)
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
-    let installed = match host.install_registered(registrations, &disabled, context).await {
+    let installed = match host
+        .install_registered(registrations, &disabled, context)
+        .await
+    {
         Ok(installed) => installed,
         Err(failure) => {
             let (error, quarantine) = failure.into_parts();
             if let Some(quarantine) = quarantine {
-                state.inner.workspace_runtimes.retain_plugin_quarantine(quarantine).await;
+                state
+                    .inner
+                    .workspace_runtimes
+                    .retain_plugin_quarantine(quarantine)
+                    .await;
             }
             return Err(error);
         }
@@ -255,7 +307,9 @@ fn production_workspace_grants() -> CapabilityGrants {
         HostCapability::Network,
         HostCapability::ProcessSpawn,
         HostCapability::SecretRead,
-    ].into_iter().fold(CapabilityGrants::default(), CapabilityGrants::allow)
+    ]
+    .into_iter()
+    .fold(CapabilityGrants::default(), CapabilityGrants::allow)
 }
 
 pub(crate) fn agent_catalog(
@@ -286,11 +340,13 @@ fn enabled_in(config: &neoism_agent_core::AgentConfigDocument, plugin_id: &str) 
         .is_none_or(|plugin| plugin.enabled)
 }
 
-
 pub(crate) fn manifests(snapshot: &RegistrySnapshot) -> Vec<PluginManifestInfo> {
     let mut manifests = snapshot.manifests.clone();
     for hook in &snapshot.runtime_hooks {
-        if let Some(manifest) = manifests.iter_mut().find(|manifest| manifest.id == hook.plugin_id) {
+        if let Some(manifest) = manifests
+            .iter_mut()
+            .find(|manifest| manifest.id == hook.plugin_id)
+        {
             let lifecycle = hook.lifecycle();
             manifest.active = lifecycle.active;
             manifest.reason = lifecycle.reason;

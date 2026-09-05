@@ -1963,6 +1963,37 @@ fn load_from_font_source(path: &PathBuf) -> Option<SharedData> {
     Some(entry.clone())
 }
 
+#[cfg(test)]
+mod bundled_icon_tests {
+    use super::*;
+
+    /// Shared chrome uses these glyphs for the folder button, rounded toolbar
+    /// buttons, menu rows, and file types. The browser has no system cascade,
+    /// so replacing the bundled face must fail before producing web tofu.
+    #[test]
+    fn nerd_face_covers_representative_shared_web_icons() {
+        let data = constants::FONT_SYMBOLS_NERD_FONT_MONO;
+        let font = swash::FontRef::from_index(data, 0).expect("bundled Nerd Font parses");
+        let cmap = font.charmap();
+        for ch in ['\u{eb56}', '\u{f07b}', '\u{f0c9}', '\u{f002}', '\u{f15c}'] {
+            assert_ne!(
+                cmap.map(ch),
+                0,
+                "bundled web icon face must contain U+{:04X}",
+                ch as u32
+            );
+        }
+
+        let mut library = FontLibraryData::default();
+        library.insert(FontData::from_static_slice(data).expect("register Nerd Font"));
+        assert_eq!(
+            library.font_id_for_family("Symbols Nerd Font Mono"),
+            Some(0),
+            "shared icon draws must resolve the family used by the WASM slot"
+        );
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod postscript_resolver_tests {
     use super::*;

@@ -13,6 +13,16 @@ fn roundtrip_server(msg: &WorkspaceServerMessage) {
 }
 
 #[test]
+fn application_liveness_roundtrips() {
+    roundtrip_client(&WorkspaceClientMessage::Ping {
+        nonce: "generation:7".into(),
+    });
+    roundtrip_server(&WorkspaceServerMessage::Pong {
+        nonce: "generation:7".into(),
+    });
+}
+
+#[test]
 fn client_open_project_root_roundtrip() {
     roundtrip_client(&WorkspaceClientMessage::OpenProjectRoot {
         path: PathBuf::from("/tmp/proj"),
@@ -773,17 +783,20 @@ fn server_hello_ack_roundtrip() {
         accepted: true,
         reason: None,
         peer_identity: Some("you@tailnet".into()),
+        connected_host_id: Some("laptop-a".into()),
     });
     roundtrip_server(&WorkspaceServerMessage::HelloAck {
         accepted: false,
         reason: Some("invalid pairing token".into()),
         peer_identity: None,
+        connected_host_id: None,
     });
     // Bare-minimum positive ack — both optional fields elided.
     roundtrip_server(&WorkspaceServerMessage::HelloAck {
         accepted: true,
         reason: None,
         peer_identity: None,
+        connected_host_id: None,
     });
 }
 
@@ -822,10 +835,12 @@ fn hello_ack_missing_fields_deserialize_from_old_daemons() {
             accepted,
             reason,
             peer_identity,
+            connected_host_id,
         } => {
             assert!(accepted);
             assert!(reason.is_none());
             assert!(peer_identity.is_none());
+            assert!(connected_host_id.is_none());
         }
         other => panic!("expected HelloAck, got {other:?}"),
     }

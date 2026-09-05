@@ -11,8 +11,7 @@ first-letters via:
 ::illuminate[X]{style=NAME size=N}
 ```
 
-`X` is the letter, `size=N` is how many lines tall the drop-cap is, and `NAME` is one of:
-`fraktur`, `maguntia`, `manuscript`, `cinzel`, `cinzelblack`, `pirata`, `medieval`.
+`X` is the letter, `size=N` is how many lines tall the drop-cap is, and `NAME` is one of: `fraktur`, `maguntia`, `manuscript`, `cinzel`, `cinzelblack`, `pirata`, `medieval`.
 
 ### Fraktur — heavy blackletter (UnifrakturCook)
 ::illuminate[F]{style=fraktur size=3} raktur — the quick brown fox jumps over the lazy dog.

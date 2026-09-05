@@ -7,7 +7,12 @@ pub(crate) async fn find_command(
     directory: &str,
     name: &str,
 ) -> anyhow::Result<Option<CommandInfo>> {
-    for source in state.plugin_snapshot(directory).await.command_sources.values() {
+    for source in state
+        .plugin_snapshot(directory)
+        .await
+        .command_sources
+        .values()
+    {
         if let Some(command) = source
             .list(directory)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?

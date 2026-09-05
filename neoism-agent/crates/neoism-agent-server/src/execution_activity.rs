@@ -79,7 +79,8 @@ impl SubtaskAdmissionGuard {
         child_session_id: &str,
         allow_resume: bool,
     ) -> anyhow::Result<Self> {
-        let armed = register_subtask_inner(state, parent, child_session_id, allow_resume).await?;
+        let armed =
+            register_subtask_inner(state, parent, child_session_id, allow_resume).await?;
         Ok(Self {
             state: state.clone(),
             child_session_id: child_session_id.to_string(),
@@ -93,7 +94,10 @@ impl SubtaskAdmissionGuard {
         let state = self.state.clone();
         let child = self.child_session_id.clone();
         let status = self.cleanup_status.clone();
-        if try_finish_subtask_for_child(&state, &child, &status).await.is_ok() {
+        if try_finish_subtask_for_child(&state, &child, &status)
+            .await
+            .is_ok()
+        {
             self.armed = false;
         }
     }
@@ -119,7 +123,10 @@ impl Drop for SubtaskAdmissionGuard {
 impl ProviderSegmentGuard {
     pub(crate) async fn finish(mut self) {
         if let Some(segment) = self.segment.clone() {
-            if try_finish_provider_segment(&self.state, &segment).await.is_ok() {
+            if try_finish_provider_segment(&self.state, &segment)
+                .await
+                .is_ok()
+            {
                 self.segment = None;
             }
         }
@@ -133,11 +140,12 @@ impl Drop for ProviderSegmentGuard {
         };
         let state = self.state.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move { let _ = try_finish_provider_segment(&state, &segment).await; });
+            runtime.spawn(async move {
+                let _ = try_finish_provider_segment(&state, &segment).await;
+            });
         }
     }
 }
-
 
 pub(crate) async fn root_session_id(state: &AppState, session: &SessionInfo) -> String {
     if let Some(root) = session
@@ -171,8 +179,7 @@ pub(crate) async fn ensure_for_prompt(
     // the quiescence guards or the reconcile can never settle from inside a
     // worker — every new run then inherits the previous execution's timer.
     if allow_new {
-        finish_if_quiescent_impl(state, info.id.as_str(), Some(info.id.as_str()))
-            .await;
+        finish_if_quiescent_impl(state, info.id.as_str(), Some(info.id.as_str())).await;
     }
     let root = root_session_id(state, info).await;
     let lock = keyed_lock(state, &root).await;
@@ -185,15 +192,12 @@ pub(crate) async fn ensure_for_prompt(
     let snapshot = match existing {
         Some(snapshot)
             if !snapshot.finished
-                && inherited.is_none_or(|execution| execution == snapshot.execution_id) =>
+                && inherited
+                    .is_none_or(|execution| execution == snapshot.execution_id) =>
         {
             snapshot
         }
-        Some(snapshot)
-            if allow_new && snapshot.root_message_id == message_id =>
-        {
-            snapshot
-        }
+        Some(snapshot) if allow_new && snapshot.root_message_id == message_id => snapshot,
         _ if allow_new => state
             .inner
             .store
@@ -245,8 +249,10 @@ pub(crate) async fn begin_manual_action(
             .await?
             .ok_or_else(|| anyhow::anyhow!("no active parent execution"))?
     };
-    info.extra.insert(EXECUTION_ID_KEY.to_string(), json!(snapshot.execution_id));
-    info.extra.insert(EXECUTION_ROOT_KEY.to_string(), json!(root));
+    info.extra
+        .insert(EXECUTION_ID_KEY.to_string(), json!(snapshot.execution_id));
+    info.extra
+        .insert(EXECUTION_ROOT_KEY.to_string(), json!(root));
     state.inner.store.update_session(&info).await?;
     Ok(())
 }
@@ -297,7 +303,10 @@ pub(crate) async fn begin_provider_segment(
     })
 }
 
-async fn try_finish_provider_segment(state: &AppState, segment: &ProviderSegment) -> anyhow::Result<()> {
+async fn try_finish_provider_segment(
+    state: &AppState,
+    segment: &ProviderSegment,
+) -> anyhow::Result<()> {
     let root = segment.root_session_id.clone();
     let lock = keyed_lock(state, &root).await;
     let _guard = lock.lock().await;
@@ -310,8 +319,7 @@ async fn try_finish_provider_segment(state: &AppState, segment: &ProviderSegment
             &segment.segment_id,
             crate::now_millis(),
         )
-        .await
-        ?;
+        .await?;
     if finished {
         publish_snapshot(state, &root).await;
     }
@@ -353,7 +361,8 @@ async fn register_subtask_inner(
     let root = root_session_id(state, parent).await;
     let lock = keyed_lock(state, &root).await;
     let _guard = lock.lock().await;
-    let Ok(Some(mut child)) = state.inner.store.get_session(child_session_id).await else {
+    let Ok(Some(mut child)) = state.inner.store.get_session(child_session_id).await
+    else {
         anyhow::bail!("child session {child_session_id} not found");
     };
     child.extra.insert(
@@ -499,7 +508,8 @@ async fn finish_if_quiescent_impl(
     let Ok(Some(_)) = state.inner.store.get_session(&root_id).await else {
         return;
     };
-    let Ok(Some(execution)) = state.inner.store.get_execution_activity(&root_id).await else {
+    let Ok(Some(execution)) = state.inner.store.get_execution_activity(&root_id).await
+    else {
         return;
     };
     if execution.finished {
@@ -533,7 +543,8 @@ async fn finish_if_quiescent_impl(
         .iter()
         .filter(|branch| branch.status == "outstanding")
     {
-        let Ok(Some(child)) = state.inner.store.get_session(&branch.session_id).await else {
+        let Ok(Some(child)) = state.inner.store.get_session(&branch.session_id).await
+        else {
             continue;
         };
         let Some(status) = crate::session_actions::recorded_subtask_terminal_status(
@@ -590,11 +601,7 @@ async fn finish_if_quiescent_impl(
         if admitting_session == Some(session.as_str()) {
             continue;
         }
-        if state
-            .inner
-            .session_coordinator
-            .worker_active(session)
-            .await
+        if state.inner.session_coordinator.worker_active(session).await
             || crate::session_queue::queued_prompt_count(state, session).await > 0
         {
             return;
@@ -616,7 +623,12 @@ async fn finish_if_quiescent_impl(
     // serialize on this root's keyed lock (held here), so reconciling now
     // cannot race a genuinely starting run.
     let family_ids = family.iter().cloned().collect::<Vec<_>>();
-    match state.inner.store.interrupt_abandoned_runs(&family_ids).await {
+    match state
+        .inner
+        .store
+        .interrupt_abandoned_runs(&family_ids)
+        .await
+    {
         Ok(0) => {}
         Ok(reconciled) => {
             tracing::warn!(
@@ -834,7 +846,12 @@ mod tests {
         state
             .inner
             .store
-            .admit_execution_activity(root_id.as_str(), "execution-orphan", "message-root", "")
+            .admit_execution_activity(
+                root_id.as_str(),
+                "execution-orphan",
+                "message-root",
+                "",
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1183,19 +1200,22 @@ mod tests {
             .await
             .unwrap()
             .family_revision;
-        assert_eq!(reopened
-            .inner
-            .store
-            .register_execution_subtask(
-                "execution-a",
-                "root",
-                "root",
-                "child",
-                &reopened.inner.execution_owner_id,
-                9_000,
-            )
-            .await
-            .unwrap(), crate::state::ExecutionSubtaskRegistration::AlreadyPresent);
+        assert_eq!(
+            reopened
+                .inner
+                .store
+                .register_execution_subtask(
+                    "execution-a",
+                    "root",
+                    "root",
+                    "child",
+                    &reopened.inner.execution_owner_id,
+                    9_000,
+                )
+                .await
+                .unwrap(),
+            crate::state::ExecutionSubtaskRegistration::AlreadyPresent
+        );
         assert_eq!(
             reopened
                 .inner
@@ -1232,26 +1252,34 @@ mod tests {
                 .and_then(|execution| execution.active_segments.get("child")),
             Some(&1_500)
         );
-        reopened.inner.store.replace_execution_activity(&ExecutionActivitySnapshot {
-            execution_id: "execution-b".into(),
-            root_session_id: "root".into(),
-            root_message_id: "message-b".into(),
-            revision: runtime.execution.as_ref().unwrap().revision + 1,
-            ..Default::default()
-        }).await.unwrap();
-        assert_eq!(reopened
+        reopened
             .inner
             .store
-            .register_execution_subtask(
-                "execution-b",
-                "root",
-                "root",
-                "child",
-                &reopened.inner.execution_owner_id,
-                3_000,
-            )
+            .replace_execution_activity(&ExecutionActivitySnapshot {
+                execution_id: "execution-b".into(),
+                root_session_id: "root".into(),
+                root_message_id: "message-b".into(),
+                revision: runtime.execution.as_ref().unwrap().revision + 1,
+                ..Default::default()
+            })
             .await
-            .unwrap(), crate::state::ExecutionSubtaskRegistration::Inserted);
+            .unwrap();
+        assert_eq!(
+            reopened
+                .inner
+                .store
+                .register_execution_subtask(
+                    "execution-b",
+                    "root",
+                    "root",
+                    "child",
+                    &reopened.inner.execution_owner_id,
+                    3_000,
+                )
+                .await
+                .unwrap(),
+            crate::state::ExecutionSubtaskRegistration::Inserted
+        );
         assert_eq!(
             reopened
                 .inner
@@ -1410,14 +1438,17 @@ mod tests {
             .await
             .unwrap();
         let writer = state.inner.store.lock_writer_for_test().await;
-        let finish = tokio::spawn(ProviderSegmentGuard {
-            state: state.clone(),
-            segment: Some(ProviderSegment {
-                root_session_id: "root-guard".into(),
-                execution_id: "execution-guard".into(),
-                segment_id: "segment-guard".into(),
-            }),
-        }.finish());
+        let finish = tokio::spawn(
+            ProviderSegmentGuard {
+                state: state.clone(),
+                segment: Some(ProviderSegment {
+                    root_session_id: "root-guard".into(),
+                    execution_id: "execution-guard".into(),
+                    segment_id: "segment-guard".into(),
+                }),
+            }
+            .finish(),
+        );
         tokio::task::yield_now().await;
         finish.abort();
         let _ = finish.await;
@@ -1488,7 +1519,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.finished, finished);
-        assert_eq!(snapshot.active_segments.contains_key("segment-race"), inserted);
+        assert_eq!(
+            snapshot.active_segments.contains_key("segment-race"),
+            inserted
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -1656,33 +1690,88 @@ mod tests {
             "neoism-execution-cross-state-{}.sqlite3",
             Id::ascending(IdKind::Event)
         ));
-        let first = crate::state::AppState::open_database(path.clone()).await.unwrap();
-        let second = crate::state::AppState::open_database(path.clone()).await.unwrap();
-        let admitted = first.inner.store
+        let first = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        let second = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        let admitted = first
+            .inner
+            .store
             .admit_execution_activity("root", "execution-a", "message-a", "")
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(admitted.execution_id, "execution-a");
-        first.inner.store.insert_execution_segment(
-            "root", "execution-a", "segment", &first.inner.execution_owner_id, "root", 10,
-        ).await.unwrap();
-        assert!(second.inner.store
+        first
+            .inner
+            .store
+            .insert_execution_segment(
+                "root",
+                "execution-a",
+                "segment",
+                &first.inner.execution_owner_id,
+                "root",
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(second
+            .inner
+            .store
             .admit_execution_activity("root", "execution-b", "message-b", "")
-            .await.unwrap().is_none());
-        assert_eq!(second.inner.store.get_execution_activity("root").await.unwrap().unwrap().execution_id, "execution-a");
-        first.inner.store.finish_execution_segment(
-            "root", "execution-a", "segment", 20,
-        ).await.unwrap();
-        first.inner.store.mark_execution_finished("root", "execution-a").await.unwrap();
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            second
+                .inner
+                .store
+                .get_execution_activity("root")
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_id,
+            "execution-a"
+        );
+        first
+            .inner
+            .store
+            .finish_execution_segment("root", "execution-a", "segment", 20)
+            .await
+            .unwrap();
+        first
+            .inner
+            .store
+            .mark_execution_finished("root", "execution-a")
+            .await
+            .unwrap();
         let left = first.inner.store.admit_execution_activity(
-            "root", "execution-b", "message-b", "",
+            "root",
+            "execution-b",
+            "message-b",
+            "",
         );
         let right = second.inner.store.admit_execution_activity(
-            "root", "execution-c", "message-c", "",
+            "root",
+            "execution-c",
+            "message-c",
+            "",
         );
         let (left, right) = tokio::join!(left, right);
         assert_ne!(left.unwrap().is_some(), right.unwrap().is_some());
-        let winner = first.inner.store.get_execution_activity("root").await.unwrap().unwrap();
-        assert!(matches!(winner.execution_id.as_str(), "execution-b" | "execution-c"));
+        let winner = first
+            .inner
+            .store
+            .get_execution_activity("root")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            winner.execution_id.as_str(),
+            "execution-b" | "execution-c"
+        ));
         assert_eq!(winner.revision, 5);
         first.shutdown().await.unwrap();
         second.shutdown().await.unwrap();
@@ -1696,7 +1785,9 @@ mod tests {
             Id::ascending(IdKind::Event)
         ));
         for _ in 0..3 {
-            let state = crate::state::AppState::open_database(path.clone()).await.unwrap();
+            let state = crate::state::AppState::open_database(path.clone())
+                .await
+                .unwrap();
             state.shutdown().await.unwrap();
             assert!(!state.execution_lease_running());
         }
@@ -1709,19 +1800,45 @@ mod tests {
             "neoism-execution-manual-{}.sqlite3",
             Id::ascending(IdKind::Event)
         ));
-        let manual = crate::state::AppState::open_database(path.clone()).await.unwrap();
-        let competing = crate::state::AppState::open_database(path.clone()).await.unwrap();
-        manual.inner.store.start_run("manual-run", "root").await.unwrap();
-        assert!(competing.inner.store
+        let manual = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        let competing = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        manual
+            .inner
+            .store
+            .start_run("manual-run", "root")
+            .await
+            .unwrap();
+        assert!(competing
+            .inner
+            .store
             .admit_execution_activity("root", "prompt-execution", "prompt-message", "")
-            .await.unwrap().is_none());
-        let admitted = manual.inner.store
-            .admit_execution_activity("root", "manual-execution", "manual-action", "manual-run")
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .is_none());
+        let admitted = manual
+            .inner
+            .store
+            .admit_execution_activity(
+                "root",
+                "manual-execution",
+                "manual-action",
+                "manual-run",
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(admitted.execution_id, "manual-execution");
-        assert!(competing.inner.store
+        assert!(competing
+            .inner
+            .store
             .admit_execution_activity("root", "prompt-execution", "prompt-message", "")
-            .await.unwrap().is_none());
+            .await
+            .unwrap()
+            .is_none());
         manual.shutdown().await.unwrap();
         competing.shutdown().await.unwrap();
         let _ = std::fs::remove_file(path);
@@ -1733,22 +1850,55 @@ mod tests {
             "neoism-subtask-stale-registration-{}.sqlite3",
             Id::ascending(IdKind::Event)
         ));
-        let owner = crate::state::AppState::open_database(path.clone()).await.unwrap();
-        let stale = crate::state::AppState::open_database(path.clone()).await.unwrap();
-        owner.inner.store
+        let owner = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        let stale = crate::state::AppState::open_database(path.clone())
+            .await
+            .unwrap();
+        owner
+            .inner
+            .store
             .admit_execution_activity("root", "execution-a", "message-a", "")
-            .await.unwrap().unwrap();
-        assert!(owner.inner.store.mark_execution_finished("root", "execution-a").await.unwrap());
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(owner
+            .inner
+            .store
+            .mark_execution_finished("root", "execution-a")
+            .await
+            .unwrap());
         assert_eq!(
-            stale.inner.store.register_execution_subtask(
-                "execution-a", "root", "root", "late-child", &stale.inner.execution_owner_id, 10,
-            ).await.unwrap(),
+            stale
+                .inner
+                .store
+                .register_execution_subtask(
+                    "execution-a",
+                    "root",
+                    "root",
+                    "late-child",
+                    &stale.inner.execution_owner_id,
+                    10,
+                )
+                .await
+                .unwrap(),
             crate::state::ExecutionSubtaskRegistration::Rejected,
         );
-        assert!(stale.inner.store.list_execution_subtasks("execution-a").await.unwrap().is_empty());
-        let next = owner.inner.store
+        assert!(stale
+            .inner
+            .store
+            .list_execution_subtasks("execution-a")
+            .await
+            .unwrap()
+            .is_empty());
+        let next = owner
+            .inner
+            .store
             .admit_execution_activity("root", "execution-b", "message-b", "")
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(next.execution_id, "execution-b");
         owner.shutdown().await.unwrap();
         stale.shutdown().await.unwrap();

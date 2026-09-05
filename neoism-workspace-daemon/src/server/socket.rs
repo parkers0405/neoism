@@ -283,7 +283,8 @@ pub(crate) async fn handle_socket(
     // engine pushes here the instant a language server publishes; we forward
     // to the editor from the select loop below. `active_editor_file` gates it
     // so a workspace-wide push for a non-focused buffer isn't shown.
-    let mut lsp_diagnostics_rx = crate::language_server::subscribe_diagnostics(&lsp_runtime);
+    let mut lsp_diagnostics_rx =
+        crate::language_server::subscribe_diagnostics(&lsp_runtime);
     let mut active_editor_file: Option<String> = None;
     // Latest `Editor` envelope request id. Unsolicited engine pushes are
     // tagged with it so the client's reply-correlation routing still works.
@@ -371,17 +372,10 @@ pub(crate) async fn handle_socket(
             out = output_rx.recv() => {
                 match out {
                     Ok(out) => {
-                        // A workspace's directory follows its terminal's live
-                        // cwd. When the daemon reports a session moved (a
-                        // `cd`), re-point its workspace's root_dir and
-                        // broadcast so every client re-roots. The change-guard
-                        // inside `track_pty_cwd` + the registry mutex dedupe
-                        // this across the per-connection pumps, so only one
-                        // broadcast fires per real move.
+                        // PTY cwd is per-session metadata. Never broadcast a
+                        // workspace tree/root change for an ordinary shell cd.
                         if let ServerMessage::SessionCwd { session_id, cwd } = &out {
-                            if workspace_manager.track_pty_cwd(session_id, cwd.clone()) {
-                                workspace_manager.broadcast_tree_changed(None);
-                            }
+                            workspace_manager.track_pty_cwd(session_id, cwd.clone());
                         }
                         if let Err(err) = send_json(&mut sink, &out).await {
                             tracing::warn!(error = %err, "websocket send error draining output");
@@ -778,6 +772,10 @@ pub(crate) async fn handle_socket(
                         | FilesClientMessage::Rename { .. }
                         | FilesClientMessage::Delete { .. } => Permission::WriteFiles,
                         FilesClientMessage::ListDir { .. }
+                        | FilesClientMessage::ListBrowserLocations
+                        | FilesClientMessage::BrowserListDir { .. }
+                        | FilesClientMessage::BrowserStat { .. }
+                        | FilesClientMessage::BrowserReadFile { .. }
                         | FilesClientMessage::Stat { .. }
                         | FilesClientMessage::ReadFile { .. }
                         | FilesClientMessage::WalkTree { .. }
@@ -948,77 +946,83 @@ pub(crate) async fn handle_socket(
                     // where that is possible without a live buffer; grid and
                     // input messages get the standard error reply until the
                     // native editor's daemon path lands and rewires them.
-                    let reply = match message {
-                        EditorClientMessage::OpenBuffer {
-                            path,
-                            text,
-                            surface_id,
-                            ..
-                        } => {
-                            let file = if path.is_absolute() {
-                                path
-                            } else {
-                                root.join(path)
-                            };
-                            let file = match crate::path::canonicalize(&file) {
-                                Ok(file) if file.starts_with(&root) => file,
-                                Ok(file) => {
-                                    let resp = EditorServerMessage::Error {
-                                        surface_id,
-                                        message: format!(
+                    let reply =
+                        match message {
+                            EditorClientMessage::OpenBuffer {
+                                path,
+                                text,
+                                surface_id,
+                                ..
+                            } => {
+                                let file = if path.is_absolute() {
+                                    path
+                                } else {
+                                    root.join(path)
+                                };
+                                let file = match crate::path::canonicalize(&file) {
+                                    Ok(file) if file.starts_with(&root) => file,
+                                    Ok(file) => {
+                                        let resp = EditorServerMessage::Error {
+                                            surface_id,
+                                            message: format!(
                                             "editor path is outside workspace root: {}",
                                             file.display()
                                         ),
-                                    };
-                                    let _ = send_json(
-                                        &mut sink,
-                                        &ServiceServerMessage::EditorReply {
-                                            request_id,
-                                            message: resp,
-                                        },
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                                Err(error) => {
-                                    let resp = EditorServerMessage::Error {
-                                        surface_id,
-                                        message: format!(
+                                        };
+                                        let _ = send_json(
+                                            &mut sink,
+                                            &ServiceServerMessage::EditorReply {
+                                                request_id,
+                                                message: resp,
+                                            },
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        let resp = EditorServerMessage::Error {
+                                            surface_id,
+                                            message: format!(
                                             "editor path cannot be resolved: {}: {error}",
                                             file.display()
                                         ),
-                                    };
-                                    let _ = send_json(
-                                        &mut sink,
-                                        &ServiceServerMessage::EditorReply {
-                                            request_id,
-                                            message: resp,
-                                        },
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                            };
-                            let text = match text {
-                                Some(text) => text,
-                                None => {
-                                    std::fs::read_to_string(&file).unwrap_or_default()
-                                }
-                            };
-                            active_editor_file =
-                                Some(file.to_string_lossy().into_owned());
-                            // Non-blocking half inline (cache + FIFO queue,
-                            // socket order = sync order); the flush barrier
-                            // + status walk build the LspSnapshot on a
-                            // blocking task so a cold server spawn can't
-                            // stall PTY forwarding behind a keystroke sync.
-                            crate::language_server::queue_buffer_sync(&lsp_runtime, &root, &file, text);
-                            {
-                                let root = root.clone();
-                                let tx = editor_query_tx.clone();
-                                let lsp_runtime = lsp_runtime.clone();
-                                tokio::task::spawn_blocking(move || {
-                                    if let Some(message) =
+                                        };
+                                        let _ = send_json(
+                                            &mut sink,
+                                            &ServiceServerMessage::EditorReply {
+                                                request_id,
+                                                message: resp,
+                                            },
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                };
+                                let text = match text {
+                                    Some(text) => text,
+                                    None => {
+                                        std::fs::read_to_string(&file).unwrap_or_default()
+                                    }
+                                };
+                                active_editor_file =
+                                    Some(file.to_string_lossy().into_owned());
+                                // Non-blocking half inline (cache + FIFO queue,
+                                // socket order = sync order); the flush barrier
+                                // + status walk build the LspSnapshot on a
+                                // blocking task so a cold server spawn can't
+                                // stall PTY forwarding behind a keystroke sync.
+                                crate::language_server::queue_buffer_sync(
+                                    &lsp_runtime,
+                                    &root,
+                                    &file,
+                                    text,
+                                );
+                                {
+                                    let root = root.clone();
+                                    let tx = editor_query_tx.clone();
+                                    let lsp_runtime = lsp_runtime.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        if let Some(message) =
                                         crate::language_server::buffer_snapshot_message(
                                             &lsp_runtime, &root, &file, surface_id,
                                         )
@@ -1029,242 +1033,246 @@ pub(crate) async fn handle_socket(
                                                 message,
                                             });
                                     }
-                                });
-                            }
-                            continue;
-                        }
-                        EditorClientMessage::LspAction {
-                            action,
-                            text,
-                            surface_id,
-                        } => match crate::language_server::run_action(
-                            &lsp_runtime,
-                            &root,
-                            action,
-                            text.as_deref(),
-                        ) {
-                            Ok(mut message) => {
-                                if let EditorServerMessage::LspActionResult {
-                                    surface_id: target,
-                                    ..
-                                } = &mut message
-                                {
-                                    *target = surface_id;
+                                    });
                                 }
-                                message
+                                continue;
                             }
-                            Err(message) => EditorServerMessage::Error {
+                            EditorClientMessage::LspAction {
+                                action,
+                                text,
                                 surface_id,
-                                message,
-                            },
-                        },
-                        EditorClientMessage::ApplyLspCodeAction {
-                            action,
-                            surface_id,
-                        } => match crate::language_server::run_code_action(&root, action)
-                        {
-                            Ok(mut message) => {
-                                if let EditorServerMessage::LspActionResult {
-                                    surface_id: target,
-                                    ..
-                                } = &mut message
-                                {
-                                    *target = surface_id;
-                                }
-                                message
-                            }
-                            Err(message) => EditorServerMessage::Error {
-                                surface_id,
-                                message,
-                            },
-                        },
-                        EditorClientMessage::ApplyLspCompletion {
-                            item,
-                            replace_prefix,
-                            surface_id,
-                        } => match crate::language_server::run_completion(
-                            &root,
-                            item,
-                            &replace_prefix,
-                        ) {
-                            // Success needs no reply (the edit stream is the
-                            // acknowledgement); only failures are reported.
-                            Ok(()) => continue,
-                            Err(message) => EditorServerMessage::Error {
-                                surface_id,
-                                message,
-                            },
-                        },
-                        EditorClientMessage::LspComplete {
-                            seq,
-                            trigger_character,
-                            surface_id,
-                        } => {
-                            let mut reply = crate::language_server::completion(
+                            } => match crate::language_server::run_action(
+                                &lsp_runtime,
                                 &root,
+                                action,
+                                text.as_deref(),
+                            ) {
+                                Ok(mut message) => {
+                                    if let EditorServerMessage::LspActionResult {
+                                        surface_id: target,
+                                        ..
+                                    } = &mut message
+                                    {
+                                        *target = surface_id;
+                                    }
+                                    message
+                                }
+                                Err(message) => EditorServerMessage::Error {
+                                    surface_id,
+                                    message,
+                                },
+                            },
+                            EditorClientMessage::ApplyLspCodeAction {
+                                action,
+                                surface_id,
+                            } => match crate::language_server::run_code_action(
+                                &root, action,
+                            ) {
+                                Ok(mut message) => {
+                                    if let EditorServerMessage::LspActionResult {
+                                        surface_id: target,
+                                        ..
+                                    } = &mut message
+                                    {
+                                        *target = surface_id;
+                                    }
+                                    message
+                                }
+                                Err(message) => EditorServerMessage::Error {
+                                    surface_id,
+                                    message,
+                                },
+                            },
+                            EditorClientMessage::ApplyLspCompletion {
+                                item,
+                                replace_prefix,
+                                surface_id,
+                            } => match crate::language_server::run_completion(
+                                &root,
+                                item,
+                                &replace_prefix,
+                            ) {
+                                // Success needs no reply (the edit stream is the
+                                // acknowledgement); only failures are reported.
+                                Ok(()) => continue,
+                                Err(message) => EditorServerMessage::Error {
+                                    surface_id,
+                                    message,
+                                },
+                            },
+                            EditorClientMessage::LspComplete {
                                 seq,
-                                trigger_character.as_deref(),
-                            );
-                            if let EditorServerMessage::LspCompletions {
-                                surface_id: target,
-                                ..
-                            } = &mut reply
-                            {
-                                *target = surface_id;
-                            }
-                            reply
-                        }
-                        EditorClientMessage::LspHoverAt {
-                            seq,
-                            grid,
-                            row,
-                            col,
-                            surface_id,
-                        } => {
-                            let mut reply = crate::language_server::hover_at(
-                                &root, seq, grid, row, col,
-                            );
-                            if let EditorServerMessage::LspHoverResult {
-                                surface_id: target,
-                                ..
-                            } = &mut reply
-                            {
-                                *target = surface_id;
-                            }
-                            reply
-                        }
-                        // Native-editor position-explicit queries: served
-                        // from the workspace-owned language servers on a
-                        // blocking task (cold servers can stall seconds);
-                        // the reply rides the push lane, tagged with this
-                        // envelope's request id.
-                        EditorClientMessage::LspQueryAt {
-                            seq,
-                            action,
-                            path,
-                            line,
-                            character,
-                            text,
-                            open_paths,
-                            surface_id,
-                        } => {
-                            let root = root.clone();
-                            let tx = editor_query_tx.clone();
-                            let lsp_runtime = lsp_runtime.clone();
-                            tokio::task::spawn_blocking(move || {
-                                let message = crate::language_server::query_at(
-                                    &lsp_runtime,
+                                trigger_character,
+                                surface_id,
+                            } => {
+                                let mut reply = crate::language_server::completion(
                                     &root,
                                     seq,
-                                    action,
-                                    &path,
-                                    line,
-                                    character,
-                                    text.as_deref(),
-                                    &open_paths,
-                                    surface_id,
+                                    trigger_character.as_deref(),
                                 );
-                                let _ = tx.send(ServiceServerMessage::EditorReply {
-                                    request_id,
-                                    message,
-                                });
-                            });
-                            continue;
-                        }
-                        EditorClientMessage::ApplyLspCodeActionAt {
-                            seq,
-                            action,
-                            open_paths,
-                            surface_id,
-                        } => {
-                            let root = root.clone();
-                            let tx = editor_query_tx.clone();
-                            let lsp_runtime = lsp_runtime.clone();
-                            tokio::task::spawn_blocking(move || {
-                                let message =
-                                    crate::language_server::apply_code_action_at(
+                                if let EditorServerMessage::LspCompletions {
+                                    surface_id: target,
+                                    ..
+                                } = &mut reply
+                                {
+                                    *target = surface_id;
+                                }
+                                reply
+                            }
+                            EditorClientMessage::LspHoverAt {
+                                seq,
+                                grid,
+                                row,
+                                col,
+                                surface_id,
+                            } => {
+                                let mut reply = crate::language_server::hover_at(
+                                    &root, seq, grid, row, col,
+                                );
+                                if let EditorServerMessage::LspHoverResult {
+                                    surface_id: target,
+                                    ..
+                                } = &mut reply
+                                {
+                                    *target = surface_id;
+                                }
+                                reply
+                            }
+                            // Native-editor position-explicit queries: served
+                            // from the workspace-owned language servers on a
+                            // blocking task (cold servers can stall seconds);
+                            // the reply rides the push lane, tagged with this
+                            // envelope's request id.
+                            EditorClientMessage::LspQueryAt {
+                                seq,
+                                action,
+                                path,
+                                line,
+                                character,
+                                text,
+                                open_paths,
+                                surface_id,
+                            } => {
+                                let root = root.clone();
+                                let tx = editor_query_tx.clone();
+                                let lsp_runtime = lsp_runtime.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    let message = crate::language_server::query_at(
                                         &lsp_runtime,
                                         &root,
                                         seq,
                                         action,
+                                        &path,
+                                        line,
+                                        character,
+                                        text.as_deref(),
                                         &open_paths,
                                         surface_id,
                                     );
-                                let _ = tx.send(ServiceServerMessage::EditorReply {
-                                    request_id,
-                                    message,
-                                });
-                            });
-                            continue;
-                        }
-                        // Native-editor save notification: queue `didSave`
-                        // behind every pending `didChange` for this document
-                        // (the live-sync FIFO owns ordering) so save-
-                        // triggered slow-lane diagnostics (rust-analyzer's
-                        // check lane) fire for web/native saves exactly like
-                        // daemon-side saves. Fire-and-forget: no reply, and
-                        // out-of-workspace paths are silently dropped. Runs
-                        // on a blocking task — a cold language-server spawn
-                        // must never stall the socket loop.
-                        EditorClientMessage::DidSave { path, .. } => {
-                            let file = if path.is_absolute() {
-                                path
-                            } else {
-                                root.join(path)
-                            };
-                            if let Ok(file) = crate::path::canonicalize(&file) {
-                                if file.starts_with(&root) {
-                                    let root = root.clone();
-                                    let lsp_runtime = lsp_runtime.clone();
-                                    tokio::task::spawn_blocking(move || {
-                                        crate::language_server::save_document(
-                                            &lsp_runtime, &root, &file,
-                                        );
+                                    let _ = tx.send(ServiceServerMessage::EditorReply {
+                                        request_id,
+                                        message,
                                     });
-                                }
+                                });
+                                continue;
                             }
-                            continue;
-                        }
-                        // Tree-sitter highlighting on behalf of a client
-                        // that has no parser. Every `tree-sitter*` crate is
-                        // `cfg(not(target_arch = "wasm32"))`, so a browser
-                        // build cannot parse at all and degrades to a
-                        // per-line lexer; the daemon is native and already
-                        // links `neoism-ui`, so it runs the real parse here.
-                        // Off the socket loop: a large file is CPU work.
-                        EditorClientMessage::HighlightBuffer {
-                            path,
-                            text,
-                            revision,
-                        } => {
-                            let spans = tokio::task::spawn_blocking(move || {
-                                highlight_spans_for(&path, &text)
-                                    .map(|spans| (path, spans))
-                            })
-                            .await
-                            .ok()
-                            .flatten();
-                            match spans {
-                                Some((path, spans)) => {
-                                    EditorServerMessage::HighlightSpans {
-                                        path,
-                                        revision,
-                                        spans,
+                            EditorClientMessage::ApplyLspCodeActionAt {
+                                seq,
+                                action,
+                                open_paths,
+                                surface_id,
+                            } => {
+                                let root = root.clone();
+                                let tx = editor_query_tx.clone();
+                                let lsp_runtime = lsp_runtime.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    let message =
+                                        crate::language_server::apply_code_action_at(
+                                            &lsp_runtime,
+                                            &root,
+                                            seq,
+                                            action,
+                                            &open_paths,
+                                            surface_id,
+                                        );
+                                    let _ = tx.send(ServiceServerMessage::EditorReply {
+                                        request_id,
+                                        message,
+                                    });
+                                });
+                                continue;
+                            }
+                            // Native-editor save notification: queue `didSave`
+                            // behind every pending `didChange` for this document
+                            // (the live-sync FIFO owns ordering) so save-
+                            // triggered slow-lane diagnostics (rust-analyzer's
+                            // check lane) fire for web/native saves exactly like
+                            // daemon-side saves. Fire-and-forget: no reply, and
+                            // out-of-workspace paths are silently dropped. Runs
+                            // on a blocking task — a cold language-server spawn
+                            // must never stall the socket loop.
+                            EditorClientMessage::DidSave { path, .. } => {
+                                let file = if path.is_absolute() {
+                                    path
+                                } else {
+                                    root.join(path)
+                                };
+                                if let Ok(file) = crate::path::canonicalize(&file) {
+                                    if file.starts_with(&root) {
+                                        let root = root.clone();
+                                        let lsp_runtime = lsp_runtime.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            crate::language_server::save_document(
+                                                &lsp_runtime,
+                                                &root,
+                                                &file,
+                                            );
+                                        });
                                     }
                                 }
-                                None => continue,
+                                continue;
                             }
-                        }
-                        // SendKeys / Command / MouseInput / Resize drove the
-                        // embedded nvim grid. The native editor only reuses
-                        // OpenBuffer for host-owned LSP synchronization.
-                        other => EditorServerMessage::Error {
-                            surface_id: other.surface_id().map(str::to_owned),
-                            message: "editor backend unavailable: embedded nvim was \
-                                      removed; the native editor daemon path is pending"
-                                .to_string(),
-                        },
-                    };
+                            // Tree-sitter highlighting on behalf of a client
+                            // that has no parser. Every `tree-sitter*` crate is
+                            // `cfg(not(target_arch = "wasm32"))`, so a browser
+                            // build cannot parse at all and degrades to a
+                            // per-line lexer; the daemon is native and already
+                            // links `neoism-ui`, so it runs the real parse here.
+                            // Off the socket loop: a large file is CPU work.
+                            EditorClientMessage::HighlightBuffer {
+                                path,
+                                text,
+                                revision,
+                            } => {
+                                let spans = tokio::task::spawn_blocking(move || {
+                                    highlight_spans_for(&path, &text)
+                                        .map(|spans| (path, spans))
+                                })
+                                .await
+                                .ok()
+                                .flatten();
+                                match spans {
+                                    Some((path, spans)) => {
+                                        EditorServerMessage::HighlightSpans {
+                                            path,
+                                            revision,
+                                            spans,
+                                        }
+                                    }
+                                    None => continue,
+                                }
+                            }
+                            // SendKeys / Command / MouseInput / Resize drove the
+                            // embedded nvim grid. The native editor only reuses
+                            // OpenBuffer for host-owned LSP synchronization.
+                            other => {
+                                tracing::debug!(
+                                    surface_id = other.surface_id(),
+                                    "ignoring obsolete embedded-editor request"
+                                );
+                                continue;
+                            }
+                        };
                     let resp = ServiceServerMessage::EditorReply {
                         request_id,
                         message: reply,
@@ -1527,6 +1535,10 @@ pub(crate) async fn handle_socket(
                 | FilesClientMessage::Rename { .. }
                 | FilesClientMessage::Delete { .. } => Permission::WriteFiles,
                 FilesClientMessage::ListDir { .. }
+                | FilesClientMessage::ListBrowserLocations
+                | FilesClientMessage::BrowserListDir { .. }
+                | FilesClientMessage::BrowserStat { .. }
+                | FilesClientMessage::BrowserReadFile { .. }
                 | FilesClientMessage::Stat { .. }
                 | FilesClientMessage::ReadFile { .. }
                 | FilesClientMessage::WalkTree { .. }

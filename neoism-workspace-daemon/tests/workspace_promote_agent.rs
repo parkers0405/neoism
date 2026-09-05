@@ -285,11 +285,8 @@ async fn receive_agent_forwards_each_bundle() {
     let daemon = build_daemon();
     let target = TempDir::new().expect("target workspace tempdir");
     let target_root = target.path().to_string_lossy().into_owned();
-    let workspace_id = register_host_workspace(
-        &daemon.workspaces,
-        "target-host",
-        target.path(),
-    );
+    let workspace_id =
+        register_host_workspace(&daemon.workspaces, "target-host", target.path());
 
     let (status, json) = post_json(
         daemon.router.clone(),

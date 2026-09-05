@@ -4,9 +4,11 @@
  * exported from `wasm/src/rendered/input_policy.rs`.
  *
  * This file is a thin adapter, not a mirror: the tap / drag-select /
- * scroll / pinch / two-finger-pan / long-press state machine runs in
+ * scroll / pinch / two-finger-pan / long-press-selection state machine runs in
  * Rust (the exact code the desktop fork runs), and this class only
- * translates DOM touch samples in and `{ kind: ... }` actions out.
+ * translates DOM touch samples in and `{ kind: ... }` actions out. A
+ * divergent two-finger gesture is always swallowed; touch never owns font
+ * scale. Same-direction two-finger motion can still become scroll.
  * There is deliberately NO TypeScript fallback state machine — before
  * the wasm bundle loads nothing is rendered so touches are meaningless,
  * and a served bundle predating the exports gets a one-shot console
@@ -29,7 +31,7 @@ export const MAX_TAP_DISTANCE = 5;
 
 /** Editor-area motion budget before a tap becomes scroll (mirror of
  *  `EDITOR_SCROLL_TAP_DISTANCE`). */
-export const EDITOR_SCROLL_TAP_DISTANCE = 16;
+export const EDITOR_SCROLL_TAP_DISTANCE = 4;
 
 /** Wall-clock millis a finger must hold before a long-press fires
  *  (mirror of `LONG_PRESS_MS`). */
@@ -45,6 +47,22 @@ export const PINCH_COMMIT_THRESHOLD = 18;
 
 /** Coarse classification of the zone a touch started in. */
 export type TouchZone = "terminal-body" | "chrome-panel" | "editor-area";
+
+export type LongPressTextSurface = "terminal" | "markdown" | "editor" | "agent" | "none";
+
+/** Pure host-routing decision kept next to the shared gesture adapter so tests
+ * pin every selectable canvas surface without constructing a WebGL panel. */
+export function longPressTextSurface(
+  activeSurface: string,
+  markdownActive: boolean,
+  editorKind: string | null,
+): LongPressTextSurface {
+  if (markdownActive) return "markdown";
+  if (editorKind === "code" || editorKind === "notebook") return "editor";
+  if (activeSurface === "agent") return "agent";
+  if (activeSurface === "terminal") return "terminal";
+  return "none";
+}
 
 /** POD touch sample fed into the policy. */
 export interface TouchSample {
@@ -76,17 +94,35 @@ export type TouchAction =
   | { kind: "end-select" }
   | { kind: "end-scroll" }
   | { kind: "promote-tap-to-scroll" }
-  | { kind: "open-context-menu"; x: number; y: number }
+  | { kind: "select-word"; x: number; y: number }
+  | { kind: "extend-word-selection"; x: number; y: number }
+  | { kind: "end-word-selection" }
   | { kind: "two-finger-scroll"; dx: number; dy: number }
   | { kind: "suppress-native-gesture" };
 
 const NONE: TouchAction = { kind: "none" };
+
+/** Defensive host contract for stale wasm bundles that could still emit the
+ * retired touch font-zoom action. Keyboard/configured zoom does not use this
+ * path and remains unchanged. */
+export function fontScaleAfterTouchAction(
+  currentScale: number,
+  _action: TouchAction,
+): number {
+  return currentScale;
+}
 
 /** Narrow a wasm-returned action object onto the `TouchAction` union.
  *  The Rust serializer is the only producer, so a `kind` string is the
  *  whole contract; anything malformed degrades to `none`. */
 function asTouchAction(raw: unknown): TouchAction {
   if (raw && typeof raw === "object" && typeof (raw as { kind?: unknown }).kind === "string") {
+    // Older generated wasm bundles classified terminal/editor pinch as font
+    // zoom. Normalize that retired action at the adapter boundary so a stale
+    // cache cannot resize any web surface while the new bundle is loading.
+    if ((raw as { kind: string }).kind === "change-font-size") {
+      return { kind: "suppress-native-gesture" };
+    }
     return raw as TouchAction;
   }
   return NONE;

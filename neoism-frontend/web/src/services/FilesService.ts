@@ -13,11 +13,16 @@ import type {
   FilesClientMessage,
   FilesServerMessage,
   TreeEntry,
+  FileLocationDescriptor,
 } from "../workspace/types";
 
 export type { DirEntry, TreeEntry };
 
 export interface FilesService {
+  browserLocations(): Promise<FileLocationDescriptor[]>;
+  browserListDir(path: string): Promise<DirEntry[]>;
+  browserStat(path: string): Promise<DirEntry>;
+  browserReadFile(path: string): Promise<Uint8Array>;
   listDir(path: string): Promise<DirEntry[]>;
   stat(path: string): Promise<DirEntry>;
   readFile(path: string): Promise<Uint8Array>;
@@ -50,6 +55,26 @@ function expectVariant<K extends string>(
 
 export class DaemonFilesService implements FilesService {
   constructor(private readonly client: ProtocolClient) {}
+
+  async browserLocations(): Promise<FileLocationDescriptor[]> {
+    const reply = await this.client.requestFiles("ListBrowserLocations");
+    return expectVariant(reply, "BrowserLocations").BrowserLocations.locations;
+  }
+
+  async browserListDir(path: string): Promise<DirEntry[]> {
+    const reply = await this.client.requestFiles({ BrowserListDir: { path } });
+    return expectVariant(reply, "DirListing").DirListing.entries;
+  }
+
+  async browserStat(path: string): Promise<DirEntry> {
+    const reply = await this.client.requestFiles({ BrowserStat: { path } });
+    return expectVariant(reply, "Stat").Stat.entry;
+  }
+
+  async browserReadFile(path: string): Promise<Uint8Array> {
+    const reply = await this.client.requestFiles({ BrowserReadFile: { path } });
+    return Uint8Array.from(expectVariant(reply, "FileContent").FileContent.bytes);
+  }
 
   async listDir(path: string): Promise<DirEntry[]> {
     const msg: FilesClientMessage = { ListDir: { path } };

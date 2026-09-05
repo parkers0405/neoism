@@ -25,7 +25,9 @@ impl ExternalRunGuard {
 
 impl Drop for ExternalRunGuard {
     fn drop(&mut self) {
-        let Some(run_id) = self.run_id.take() else { return; };
+        let Some(run_id) = self.run_id.take() else {
+            return;
+        };
         let state = self.state.clone();
         let session_id = self.session_id.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -348,90 +350,98 @@ async fn run_external_subtask_prompt_with_cancel(
         run_id: Some(run.id.clone()),
     };
     let result = async {
-    let cancellation = cancel.unwrap_or_else(|| run.cancel.clone());
-    let model = external_model(runtime);
-    let user_message =
-        append_external_user_message(state, &child, generation, prompt, runtime, &model)
-            .await?;
-    let user_id = match &user_message.info {
-        MessageInfo::User(user) => user.id.clone(),
-        MessageInfo::Assistant(_) => Id::ascending(IdKind::Message),
-    };
-    let step = start_assistant_step(
-        state,
-        &child.id,
-        child.id.as_str(),
-        &user_id,
-        &child.directory,
-        now_millis(),
-        runtime.agent_name().to_string(),
-        runtime.agent_name().to_string(),
-        model.model_id.clone(),
-        model.provider_id.clone(),
-    )
-    .await?;
+        let cancellation = cancel.unwrap_or_else(|| run.cancel.clone());
+        let model = external_model(runtime);
+        let user_message = append_external_user_message(
+            state, &child, generation, prompt, runtime, &model,
+        )
+        .await?;
+        let user_id = match &user_message.info {
+            MessageInfo::User(user) => user.id.clone(),
+            MessageInfo::Assistant(_) => Id::ascending(IdKind::Message),
+        };
+        let step = start_assistant_step(
+            state,
+            &child.id,
+            child.id.as_str(),
+            &user_id,
+            &child.directory,
+            now_millis(),
+            runtime.agent_name().to_string(),
+            runtime.agent_name().to_string(),
+            model.model_id.clone(),
+            model.provider_id.clone(),
+        )
+        .await?;
 
-    let activity_segment =
-        crate::execution_activity::begin_provider_segment(state, child.id.as_str()).await;
-    let acp_result =
-        run_acp_prompt(state, &child, prompt, runtime, &step, &model, cancellation).await;
-    crate::execution_activity::end_provider_segment(activity_segment).await;
-    match acp_result {
-        Ok(result) => {
-            let message = finish_provider_stream_success(
-                state,
-                &child.id,
-                child.id.as_str(),
-                &step.assistant_id,
-                &step.text_part_id,
-                &step.live_message,
-                &model,
-                result.provider_response,
-                Default::default(),
-            )
-            .await?;
-            if let Err(error) = update_external_session_status(
-                state,
-                child.id.as_str(),
-                runtime,
-                "completed",
-            )
-            .await
-            {
-                tracing::warn!(
-                    session_id = %child.id,
-                    error = %error,
-                    "failed to persist external subtask completion status"
-                );
+        let activity_segment =
+            crate::execution_activity::begin_provider_segment(state, child.id.as_str())
+                .await;
+        let acp_result =
+            run_acp_prompt(state, &child, prompt, runtime, &step, &model, cancellation)
+                .await;
+        crate::execution_activity::end_provider_segment(activity_segment).await;
+        match acp_result {
+            Ok(result) => {
+                let message = finish_provider_stream_success(
+                    state,
+                    &child.id,
+                    child.id.as_str(),
+                    &step.assistant_id,
+                    &step.text_part_id,
+                    &step.live_message,
+                    &model,
+                    result.provider_response,
+                    Default::default(),
+                )
+                .await?;
+                if let Err(error) = update_external_session_status(
+                    state,
+                    child.id.as_str(),
+                    runtime,
+                    "completed",
+                )
+                .await
+                {
+                    tracing::warn!(
+                        session_id = %child.id,
+                        error = %error,
+                        "failed to persist external subtask completion status"
+                    );
+                }
+                Ok(message)
             }
-            Ok(message)
-        }
-        Err(error) => {
-            let message = error.to_string();
-            finish_provider_stream_with_error(
-                state,
-                &child.id,
-                child.id.as_str(),
-                &run.id,
-                step.text_part_id.as_str(),
-                &step.live_message,
-                message.clone(),
-            )
-            .await?;
-            if let Err(error) =
-                update_external_session_status(state, child.id.as_str(), runtime, "error")
-                    .await
-            {
-                tracing::warn!(
-                    session_id = %child.id,
-                    error = %error,
-                    "failed to persist external subtask error status"
-                );
+            Err(error) => {
+                let message = error.to_string();
+                finish_provider_stream_with_error(
+                    state,
+                    &child.id,
+                    child.id.as_str(),
+                    &run.id,
+                    step.text_part_id.as_str(),
+                    &step.live_message,
+                    message.clone(),
+                )
+                .await?;
+                if let Err(error) = update_external_session_status(
+                    state,
+                    child.id.as_str(),
+                    runtime,
+                    "error",
+                )
+                .await
+                {
+                    tracing::warn!(
+                        session_id = %child.id,
+                        error = %error,
+                        "failed to persist external subtask error status"
+                    );
+                }
+                Err(ApiError::internal(message))
             }
-            Err(ApiError::internal(message))
         }
     }
-    }.await;
+    .await;
     run_guard.finish().await;
     result
 }
@@ -510,7 +520,8 @@ mod tests {
         state
             .inner
             .session_coordinator
-            .install_run(&session_id.clone(), run.clone()).await;
+            .install_run(&session_id.clone(), run.clone())
+            .await;
         state
             .inner
             .store
@@ -533,7 +544,13 @@ mod tests {
         drop(writer);
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while state.inner.session_coordinator.active_run(&session_id).await.is_some() {
+            while state
+                .inner
+                .session_coordinator
+                .active_run(&session_id)
+                .await
+                .is_some()
+            {
                 tokio::task::yield_now().await;
             }
         })

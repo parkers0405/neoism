@@ -110,7 +110,10 @@ pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> boo
     aborted
 }
 
-pub(crate) async fn clear_subtask_completion_for_teardown(state: &AppState, session_id: &str) {
+pub(crate) async fn clear_subtask_completion_for_teardown(
+    state: &AppState,
+    session_id: &str,
+) {
     if let Ok(Some(mut child)) = state.inner.store.get_session(session_id).await {
         if child.extra.remove(SUBTASK_NOTIFY_ON_IDLE_KEY).is_some() {
             if let Err(error) = state.inner.store.update_session(&child).await {
@@ -120,7 +123,11 @@ pub(crate) async fn clear_subtask_completion_for_teardown(state: &AppState, sess
     }
 }
 
-async fn abort_session_run_impl(state: &AppState, session_id: &str, reconcile_completion: bool) -> bool {
+async fn abort_session_run_impl(
+    state: &AppState,
+    session_id: &str,
+    reconcile_completion: bool,
+) -> bool {
     let cancelled = state.inner.session_coordinator.abort_run(session_id).await;
     if let Some(cancelled) = cancelled.as_ref() {
         cancelled.cancel.store(true, Ordering::SeqCst);
@@ -241,7 +248,13 @@ pub(crate) async fn create_subtask_session(
             crate::caller::TENANT_EXTRA_KEY,
         ]
         .into_iter()
-        .filter_map(|key| parent.extra.get(key).cloned().map(|value| (key.to_string(), value)))
+        .filter_map(|key| {
+            parent
+                .extra
+                .get(key)
+                .cloned()
+                .map(|value| (key.to_string(), value))
+        })
         .collect(),
     };
     state.inner.store.insert_session(&child).await?;
@@ -431,7 +444,8 @@ pub(crate) async fn publish_background_subtask_finished(
             payload["agent"] = json!(agent);
             payload["sourceAgent"] = json!(agent);
         }
-        if let Some((root_session_id, execution_id, family_revision)) = lifecycle.as_ref() {
+        if let Some((root_session_id, execution_id, family_revision)) = lifecycle.as_ref()
+        {
             payload["rootSessionID"] = json!(root_session_id);
             payload["executionID"] = json!(execution_id);
             payload["familyRevision"] = json!(family_revision);
@@ -707,10 +721,9 @@ fn successful_parent_reply_ids(messages: &[MessageWithParts]) -> BTreeSet<String
     for message in messages {
         match &message.info {
             MessageInfo::User(info)
-                if info
-                    .system
-                    .as_deref()
-                    .is_some_and(crate::message_model::is_runtime_system_notification) =>
+                if info.system.as_deref().is_some_and(
+                    crate::message_model::is_runtime_system_notification,
+                ) =>
             {
                 awaiting_runtime_notifications.insert(info.id.to_string());
             }
@@ -745,8 +758,15 @@ pub(crate) async fn mark_subtask_notify_on_idle(
     if child.parent_id.is_none() {
         return Ok(());
     }
-    if let Some(runtime) = state.inner.workspace_runtimes.loaded(&child.directory).await {
-        if let Ok(subagents) = runtime.subagents() { subagents.track(child_id.to_string()).await; }
+    if let Some(runtime) = state
+        .inner
+        .workspace_runtimes
+        .loaded(&child.directory)
+        .await
+    {
+        if let Ok(subagents) = runtime.subagents() {
+            subagents.track(child_id.to_string()).await;
+        }
     }
     child.extra.insert(
         SUBTASK_NOTIFY_ON_IDLE_KEY.to_string(),
@@ -946,7 +966,8 @@ async fn migrate_subtask_persistence_v1(state: &AppState) -> Result<(), ApiError
             .as_array()
             .is_some_and(|records| !records.is_empty());
         if !has_records {
-            if let Some(mut completion) = child.extra.remove(SUBTASK_COMPLETION_EXTRA_KEY) {
+            if let Some(mut completion) = child.extra.remove(SUBTASK_COMPLETION_EXTRA_KEY)
+            {
                 if completion.get("pending").and_then(Value::as_bool) == Some(true) {
                     if let Some(map) = completion.as_object_mut() {
                         map.entry("id".to_string()).or_insert_with(|| {
@@ -972,7 +993,8 @@ async fn migrate_subtask_persistence_v1(state: &AppState) -> Result<(), ApiError
         // original user turn. Version 3 derives delivery from transcript order
         // and normalizes both cases without replaying historical completions.
         if let Some(parent_id) = child.parent_id.as_ref() {
-            let parent_messages = state.inner.store.list_messages(parent_id.as_str()).await?;
+            let parent_messages =
+                state.inner.store.list_messages(parent_id.as_str()).await?;
             let successful_replies = successful_parent_reply_ids(&parent_messages);
             if let Some(records) = child
                 .extra
@@ -998,7 +1020,12 @@ async fn migrate_subtask_persistence_v1(state: &AppState) -> Result<(), ApiError
             }
         }
 
-        if child.extra.get(SUBTASK_NOTIFY_ON_IDLE_KEY).and_then(Value::as_bool) == Some(true) {
+        if child
+            .extra
+            .get(SUBTASK_NOTIFY_ON_IDLE_KEY)
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
             let generation = latest_child_user_message_id(state, child.id.as_str())
                 .await
                 .unwrap_or_else(|| Id::ascending(IdKind::Message));
@@ -1042,11 +1069,18 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
             clear_subtask_completion_for_teardown(state, child.id.as_str()).await;
             continue;
         };
-        if !runtime.snapshot().manifests.iter().any(|plugin| plugin.id == neoism_agent_builtins::plugin::subagents::ID) {
+        if !runtime
+            .snapshot()
+            .manifests
+            .iter()
+            .any(|plugin| plugin.id == neoism_agent_builtins::plugin::subagents::ID)
+        {
             clear_subtask_completion_for_teardown(state, child.id.as_str()).await;
             continue;
         }
-        if let Ok(subagents) = runtime.subagents() { subagents.track(child.id.to_string()).await; }
+        if let Ok(subagents) = runtime.subagents() {
+            subagents.track(child.id.to_string()).await;
+        }
         publish_deferred_subtask_completion_if_idle(state, child.id.as_str()).await;
     }
 
@@ -1433,11 +1467,13 @@ mod tests {
     async fn insert_session(state: &AppState, session: &SessionInfo) {
         state.inner.store.insert_session(session).await.unwrap();
         if session.parent_id.is_some() {
-            let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
-                state,
-                &session.directory,
-            )
-            .await.unwrap();
+            let workspace =
+                crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+                    state,
+                    &session.directory,
+                )
+                .await
+                .unwrap();
             workspace
                 .runtime
                 .subagents()
@@ -1476,7 +1512,8 @@ mod tests {
         state
             .inner
             .session_coordinator
-            .install_run(&parent.id.to_string(), run).await;
+            .install_run(&parent.id.to_string(), run)
+            .await;
     }
 
     fn completion_pending(child: &SessionInfo, index: usize) -> Option<bool> {
@@ -1600,7 +1637,12 @@ mod tests {
             SUBTASK_NOTIFY_ON_IDLE_KEY.to_string(),
             json!({ "generation": generation.to_string() }),
         );
-        state.inner.store.update_session(&stored_child).await.unwrap();
+        state
+            .inner
+            .store
+            .update_session(&stored_child)
+            .await
+            .unwrap();
 
         assert!(state
             .inner
@@ -1623,7 +1665,11 @@ mod tests {
             .list_queued_prompt_entries(parent.id.as_str())
             .await
             .unwrap();
-        assert_eq!(queued.len(), 1, "parent completion must not depend on the runtime tracker");
+        assert_eq!(
+            queued.len(),
+            1,
+            "parent completion must not depend on the runtime tracker"
+        );
         assert_eq!(queued[0].1, "continue");
         let stored_child = state
             .inner
@@ -1653,14 +1699,18 @@ mod tests {
         insert_session(&state, &completed_child).await;
         insert_session(&state, &active_sibling).await;
         hold_parent_run(&state, &parent).await;
-        state.inner.session_coordinator.install_run(&
-            active_sibling.id.to_string(),
-            crate::state::SessionRun {
-                id: "sibling-active-run".to_string(),
-                started_at: 1,
-                cancel: Arc::new(AtomicBool::new(false)),
-            },
-        ).await;
+        state
+            .inner
+            .session_coordinator
+            .install_run(
+                &active_sibling.id.to_string(),
+                crate::state::SessionRun {
+                    id: "sibling-active-run".to_string(),
+                    started_at: 1,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                },
+            )
+            .await;
 
         let generation = owe_completion(&state, completed_child.id.as_str()).await;
         publish_background_subtask_finished(
@@ -1966,7 +2016,12 @@ mod tests {
         wrapper.await.unwrap();
         // Keep the run id live in the test assertion: abort must have removed
         // exactly the run that was racing the wrapper.
-        assert!(!state.inner.session_coordinator.active_run(child.id.as_str()).await.is_some());
+        assert!(!state
+            .inner
+            .session_coordinator
+            .active_run(child.id.as_str())
+            .await
+            .is_some());
         assert!(!run.id.is_empty());
         assert_eq!(
             state
@@ -2650,10 +2705,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(completion_pending(&stored_child, 0), Some(false));
-        stored_child.extra.insert(
-            SUBTASK_PERSISTENCE_VERSION_KEY.to_string(),
-            json!(1),
-        );
+        stored_child
+            .extra
+            .insert(SUBTASK_PERSISTENCE_VERSION_KEY.to_string(), json!(1));
         state
             .inner
             .store
@@ -2779,10 +2833,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        stored_child.extra.insert(
-            SUBTASK_PERSISTENCE_VERSION_KEY.to_string(),
-            json!(2),
-        );
+        stored_child
+            .extra
+            .insert(SUBTASK_PERSISTENCE_VERSION_KEY.to_string(), json!(2));
         let records = stored_child
             .extra
             .get_mut(SUBTASK_COMPLETIONS_EXTRA_KEY)

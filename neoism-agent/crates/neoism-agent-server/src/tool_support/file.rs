@@ -350,8 +350,12 @@ fn write_tool_metadata(
     path: std::path::PathBuf,
     mutation: WriteMutation,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let formatted =
-        format::format_paths(&context.services(), &context.cwd, context.formatter(), [path.clone()]);
+    let formatted = format::format_paths(
+        &context.services(),
+        &context.cwd,
+        context.formatter(),
+        [path.clone()],
+    );
     let lsp_runtime = context.lsp_runtime()?;
     let lsp_touch = diagnostics::touch_paths(&lsp_runtime, &context.cwd, [path.clone()]);
 
@@ -367,8 +371,12 @@ fn write_tool_metadata(
         crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot]);
     }
     format::attach_formatted(&mut metadata, &formatted);
-    let report =
-        diagnostics::attach_lsp_diagnostics(&lsp_runtime, &context.cwd, [path.clone()], &mut metadata);
+    let report = diagnostics::attach_lsp_diagnostics(
+        &lsp_runtime,
+        &context.cwd,
+        [path.clone()],
+        &mut metadata,
+    );
 
     let mut output = format!(
         "Wrote {} bytes to {} (previously {} bytes)",
@@ -472,8 +480,12 @@ fn edit_tool_metadata(
     path: std::path::PathBuf,
     mutation: EditMutation,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let formatted =
-        format::format_paths(&context.services(), &context.cwd, context.formatter(), [path.clone()]);
+    let formatted = format::format_paths(
+        &context.services(),
+        &context.cwd,
+        context.formatter(),
+        [path.clone()],
+    );
     let lsp_runtime = context.lsp_runtime()?;
     let lsp_touch = diagnostics::touch_paths(&lsp_runtime, &context.cwd, [path.clone()]);
 
@@ -489,8 +501,12 @@ fn edit_tool_metadata(
         crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot]);
     }
     format::attach_formatted(&mut metadata, &formatted);
-    let report =
-        diagnostics::attach_lsp_diagnostics(&lsp_runtime, &context.cwd, [path.clone()], &mut metadata);
+    let report = diagnostics::attach_lsp_diagnostics(
+        &lsp_runtime,
+        &context.cwd,
+        [path.clone()],
+        &mut metadata,
+    );
 
     let mut output = format!(
         "Replaced {} occurrence(s) in {}",

@@ -69,10 +69,18 @@ impl McpRuntimeManager {
         let prefix = format!("{}\0", canonical_directory(directory));
         let removed = {
             let mut clients = self.clients.write().expect("mcp runtime lock poisoned");
-            let keys = clients.keys().filter(|key| key.starts_with(&prefix)).cloned().collect::<Vec<_>>();
-            keys.into_iter().filter_map(|key| clients.remove(&key)).collect::<Vec<_>>()
+            let keys = clients
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| clients.remove(&key))
+                .collect::<Vec<_>>()
         };
-        for runtime in removed { shutdown_runtime(&runtime).await; }
+        for runtime in removed {
+            shutdown_runtime(&runtime).await;
+        }
     }
 
     pub(super) async fn connect_local(
@@ -507,7 +515,9 @@ fn runtime_key(directory: &str, name: &str) -> String {
 }
 
 fn canonical_directory(directory: &str) -> String {
-    crate::workspace_runtime::canonical_location(directory).to_string_lossy().into_owned()
+    crate::workspace_runtime::canonical_location(directory)
+        .to_string_lossy()
+        .into_owned()
 }
 
 type McpSnapshot = (Vec<McpToolInfo>, Vec<McpResource>, Vec<McpPromptInfo>);

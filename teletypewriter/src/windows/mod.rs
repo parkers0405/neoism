@@ -51,6 +51,17 @@ pub fn create_pty(
     columns: u16,
     rows: u16,
 ) -> Result<Pty, std::io::Error> {
+    create_pty_env(shell, args, working_directory, columns, rows, &[])
+}
+
+pub fn create_pty_env(
+    shell: &str,
+    args: Vec<String>,
+    working_directory: &Option<String>,
+    columns: u16,
+    rows: u16,
+    env: &[(String, String)],
+) -> Result<Pty, std::io::Error> {
     // The shell is passed through verbatim (it may already be a full
     // command line from user config); each argument is quoted per the
     // CommandLineToArgvW rules so paths with spaces survive.
@@ -59,7 +70,7 @@ pub fn create_pty(
         exec.push(' ');
         exec.push_str(&quote_cmdline_arg(arg));
     }
-    conpty::new(&exec, working_directory, columns, rows)
+    conpty::new(&exec, working_directory, columns, rows, env)
 }
 
 /// Quote a single command-line argument per the MSVCRT/CommandLineToArgvW
@@ -102,6 +113,17 @@ pub fn create_pty_with_spawn(
     rows: u16,
 ) -> Result<Pty, std::io::Error> {
     create_pty(shell, args, working_directory, columns, rows)
+}
+
+pub fn create_pty_with_spawn_env(
+    shell: &str,
+    args: Vec<String>,
+    working_directory: &Option<String>,
+    columns: u16,
+    rows: u16,
+    env: &[(String, String)],
+) -> Result<Pty, std::io::Error> {
+    create_pty_env(shell, args, working_directory, columns, rows, env)
 }
 
 impl Pty {

@@ -891,11 +891,15 @@ pub(crate) async fn ship_agent_sessions(
         workspace_root: source_root.to_string_lossy().to_string(),
     };
     let source_credential = match super::mint_agent_credential(
-        subject.to_string(), workspace_id, source_root,
+        subject.to_string(),
+        workspace_id,
+        source_root,
     ) {
         Ok(credential) => credential,
         Err(_) => {
-            summary.errors.push("agent export authentication unavailable".to_string());
+            summary
+                .errors
+                .push("agent export authentication unavailable".to_string());
             return summary;
         }
     };
@@ -1008,15 +1012,24 @@ pub(crate) async fn workspace_receive_agent(
         Err(err) => return (err.status, err.message).into_response(),
     };
 
-    let Some(target_root) = super::agent_workspace_root(&state.workspaces, &req.workspace_id) else {
+    let Some(target_root) =
+        super::agent_workspace_root(&state.workspaces, &req.workspace_id)
+    else {
         return (StatusCode::NOT_FOUND, "unknown target workspace").into_response();
     };
-    let supplied_root = crate::path::canonicalize(std::path::Path::new(&req.target_workspace_root));
+    let supplied_root =
+        crate::path::canonicalize(std::path::Path::new(&req.target_workspace_root));
     if supplied_root.as_ref().ok() != Some(&target_root) {
-        return (StatusCode::BAD_REQUEST, "target workspace root does not match workspace identity").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "target workspace root does not match workspace identity",
+        )
+            .into_response();
     }
     let agent_credential = match super::mint_agent_credential(
-        principal.subject.clone(), &req.workspace_id, &target_root,
+        principal.subject.clone(),
+        &req.workspace_id,
+        &target_root,
     ) {
         Ok(credential) => credential,
         Err(response) => return response,

@@ -256,6 +256,18 @@ pub(super) fn neoism_block_shell_for_spawn(
 __neoism_bashrc="{bash_rc_path}"
 __neoism_zdotdir="{zsh_dir}"
 __neoism_fish_init="{fish_rc_path}"
+neoism() {{
+  if [ "${{1:-}}" = cd ]; then
+    shift
+    if [ "$#" -gt 1 ]; then printf 'usage: neoism cd [directory]\n' >&2; return 2; fi
+    if [ "$#" -eq 0 ]; then builtin cd
+    elif [ "$1" = - ]; then builtin cd -
+    else builtin cd -- "$1"; fi || return
+    printf '\033]7;file://%s%s\007' "${{HOSTNAME:-localhost}}" "$PWD"
+  else
+    command neoism "$@"
+  fi
+}}
 bash() {{
   if [ "$#" -eq 0 ]; then
     command bash --rcfile "$__neoism_bashrc" -i
@@ -300,6 +312,24 @@ function bash
     command bash --rcfile "{bash_rc_path}" -i
   else
     command bash $argv
+  end
+end
+function neoism
+  if test (count $argv) -gt 0; and test "$argv[1]" = cd
+    if test (count $argv) -gt 2
+      echo 'usage: neoism cd [directory]' >&2
+      return 2
+    end
+    if test (count $argv) -eq 1
+      builtin cd
+    else if test "$argv[2]" = -
+      builtin cd -
+    else
+      builtin cd -- "$argv[2]"
+    end; or return
+    printf '\e]7;file://%s%s\a' (hostname) "$PWD"
+  else
+    command neoism $argv
   end
 end
 function zsh
@@ -450,6 +480,35 @@ bind \cp 'commandline ""'
     }
 }
 
+#[cfg(all(test, not(target_os = "windows")))]
+mod shell_integration_tests {
+    use super::*;
+
+    #[test]
+    fn generated_bash_zsh_and_fish_wrap_neoism_cd() {
+        for (route, program) in ["bash", "zsh", "fish"].into_iter().enumerate() {
+            let shell = Shell { program: program.into(), args: Vec::new() };
+            let wrapped = neoism_block_shell_for_spawn(&shell, 99 + route).unwrap();
+            let rc_path = match program {
+                "bash" => std::path::PathBuf::from(&wrapped.args[1]),
+                "zsh" => std::path::PathBuf::from(
+                    wrapped.args[0].strip_prefix("ZDOTDIR=").unwrap(),
+                ).join(".zshrc"),
+                "fish" => std::path::PathBuf::from(
+                    wrapped.args[1].strip_prefix("source ").unwrap(),
+                ),
+                _ => unreachable!(),
+            };
+            let rc = std::fs::read_to_string(rc_path).unwrap();
+            assert!(rc.contains(if program == "fish" { "function neoism" } else { "neoism()" }));
+            assert!(rc.contains("builtin cd"));
+            assert!(rc.contains("command neoism"));
+            assert!(rc.contains("033]7;file://") || rc.contains("\\e]7;file://"));
+            assert!(rc.contains("= -"));
+        }
+    }
+}
+
 /// Windows twin of the unix rc wrappers above: an inline PowerShell command
 /// that frames every prompt with the same
 /// OSC 133 marks (`D;<exit>` closing the previous command, `A` before
@@ -478,6 +537,21 @@ pub(super) fn neoism_block_shell_for_spawn(
 # marks so the block UI can segment command output, and OSC 7 reports
 # the cwd for tab-cwd / workspace re-rooting.
 $Global:__NeoismOriginalPrompt = $function:prompt
+$Global:__NeoismExecutable = (Get-Command neoism -CommandType Application -ErrorAction Ignore).Source
+function Global:neoism {
+    if (($args.Count -gt 0) -and ($args[0] -eq 'cd')) {
+        if ($args.Count -gt 2) { Write-Error 'usage: neoism cd [directory]'; return }
+        try {
+            if ($args.Count -eq 1) { Set-Location $HOME -ErrorAction Stop }
+            elseif ($args[1] -eq '-') { Set-Location -Path '-' -ErrorAction Stop }
+            else { Set-Location -LiteralPath $args[1] -ErrorAction Stop }
+        } catch { Write-Error $_; return }
+        $__neoism_cwd = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath.Replace('\', '/').Replace(' ', '%20')
+        [Console]::Write("$([char]27)]7;file:///$__neoism_cwd$([char]7)")
+    } elseif ($Global:__NeoismExecutable) {
+        & $Global:__NeoismExecutable @args
+    }
+}
 
 function Global:prompt {
     # $? / $LASTEXITCODE describe the command that just finished; read

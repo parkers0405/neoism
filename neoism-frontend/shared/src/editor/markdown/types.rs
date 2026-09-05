@@ -542,6 +542,7 @@ pub struct MarkdownPane {
     pub cursor_col: usize,
     pub(super) visual_anchor: Option<MarkdownPosition>,
     pub(super) mouse_select_anchor: Option<MarkdownPosition>,
+    pub(super) touch_word_edges: Option<(MarkdownPosition, MarkdownPosition)>,
     pub cursor_rect: Option<[f32; 4]>,
     pub(super) follow_cursor: bool,
     /// Sticky "goal" visual column for vertical (up/down) navigation, à la

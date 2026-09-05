@@ -20,12 +20,15 @@ async fn generated_context(root: &Path) -> ToolContext {
         ".tool-test-{}.sqlite3",
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
     ));
-    let state = crate::state::AppState::open_database(database).await.unwrap();
+    let state = crate::state::AppState::open_database(database)
+        .await
+        .unwrap();
     let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
         &state,
         root.to_string_lossy().as_ref(),
     )
-    .await.unwrap();
+    .await
+    .unwrap();
     assert_eq!(workspace.directory, root.to_string_lossy());
     ToolContext::new(root).with_state(Some(state))
 }
@@ -33,7 +36,10 @@ async fn generated_context(root: &Path) -> ToolContext {
 async fn allow_context(root: &Path) -> ToolContext {
     generated_context(root)
         .await
-        .with_permission_rules(permission_rules(BTreeMap::from([("*".to_string(), json!("allow"))])))
+        .with_permission_rules(permission_rules(BTreeMap::from([(
+            "*".to_string(),
+            json!("allow"),
+        )])))
 }
 
 #[tokio::test]
@@ -83,36 +89,75 @@ async fn product_services_register_native_docs_and_memory_tools_only_when_inject
     std::fs::create_dir_all(&neutral_root).unwrap();
     std::fs::create_dir_all(&product_root).unwrap();
 
-    let neutral_state = crate::state::AppState::open_database(neutral_root.join("agent.db")).await.unwrap();
+    let neutral_state =
+        crate::state::AppState::open_database(neutral_root.join("agent.db"))
+            .await
+            .unwrap();
     let neutral = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
         &neutral_state,
         neutral_root.to_string_lossy().as_ref(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert!(!neutral.snapshot.runtime_tools.contains_key("docs"));
     assert!(!neutral.snapshot.runtime_tools.contains_key("memory"));
 
     let services = crate::standard_services()
         .with_documentation(Arc::new(FakeDocumentationService))
         .with_memory(Arc::new(FakeMemoryService));
-    let state = crate::state::AppState::open_database_with_services(product_root.join("agent.db"), services).await.unwrap();
+    let state = crate::state::AppState::open_database_with_services(
+        product_root.join("agent.db"),
+        services,
+    )
+    .await
+    .unwrap();
     let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
         &state,
         product_root.to_string_lossy().as_ref(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert!(workspace.snapshot.runtime_tools.contains_key("docs"));
     assert!(workspace.snapshot.runtime_tools.contains_key("memory"));
 
     let context = ToolContext::new(&product_root)
         .with_state(Some(state))
-        .with_permission_rules(permission_rules(BTreeMap::from([("*".to_string(), json!("allow"))])));
-    let docs = execute("docs", context.clone(), json!({"operation":"search","query":"skills"})).await.unwrap();
+        .with_permission_rules(permission_rules(BTreeMap::from([(
+            "*".to_string(),
+            json!("allow"),
+        )])));
+    let docs = execute(
+        "docs",
+        context.clone(),
+        json!({"operation":"search","query":"skills"}),
+    )
+    .await
+    .unwrap();
     assert!(docs.output.contains("Agent/Skills.md"));
-    let page = execute("docs", context.clone(), json!({"operation":"read","path":"Agent/Skills.md"})).await.unwrap();
+    let page = execute(
+        "docs",
+        context.clone(),
+        json!({"operation":"read","path":"Agent/Skills.md"}),
+    )
+    .await
+    .unwrap();
     assert!(page.output.contains("SKILL.md"));
-    let recall = execute("memory", context.clone(), json!({"operation":"recall","query":"host routing","scope":"project"})).await.unwrap();
+    let recall = execute(
+        "memory",
+        context.clone(),
+        json!({"operation":"recall","query":"host routing","scope":"project"}),
+    )
+    .await
+    .unwrap();
     assert!(recall.output.contains("path: routing.md\nscope: project"));
 
-    let read = execute("memory", context.clone(), json!({"operation":"read","path":"routing.md"})).await.unwrap();
+    let read = execute(
+        "memory",
+        context.clone(),
+        json!({"operation":"read","path":"routing.md"}),
+    )
+    .await
+    .unwrap();
     assert_eq!(read.output, "full host routing memory");
     let write = execute("memory", context, json!({"operation":"write","name":"Company preference","description":"Use concise replies","body":"Keep replies concise."})).await.unwrap();
     assert_eq!(write.title, "Memory written");
@@ -124,16 +169,45 @@ async fn product_services_register_native_docs_and_memory_tools_only_when_inject
 struct FakeDocumentationService;
 
 impl neoism_agent_service_api::DocumentationService for FakeDocumentationService {
-    fn list(&self) -> Result<Vec<neoism_agent_service_api::DocumentationPageSummary>, neoism_agent_service_api::ServiceError> {
-        Ok(vec![neoism_agent_service_api::DocumentationPageSummary { path: "Agent/Skills.md".into(), title: "Skills".into() }])
+    fn list(
+        &self,
+    ) -> Result<
+        Vec<neoism_agent_service_api::DocumentationPageSummary>,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Ok(vec![neoism_agent_service_api::DocumentationPageSummary {
+            path: "Agent/Skills.md".into(),
+            title: "Skills".into(),
+        }])
     }
 
-    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<neoism_agent_service_api::DocumentationSearchHit>, neoism_agent_service_api::ServiceError> {
-        Ok(vec![neoism_agent_service_api::DocumentationSearchHit { path: "Agent/Skills.md".into(), title: "Skills".into(), snippet: "Create a configured skill".into() }])
+    fn search(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<
+        Vec<neoism_agent_service_api::DocumentationSearchHit>,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Ok(vec![neoism_agent_service_api::DocumentationSearchHit {
+            path: "Agent/Skills.md".into(),
+            title: "Skills".into(),
+            snippet: "Create a configured skill".into(),
+        }])
     }
 
-    fn read(&self, path: &str) -> Result<neoism_agent_service_api::DocumentationPage, neoism_agent_service_api::ServiceError> {
-        Ok(neoism_agent_service_api::DocumentationPage { path: path.into(), title: "Skills".into(), content: "Put instructions in SKILL.md".into() })
+    fn read(
+        &self,
+        path: &str,
+    ) -> Result<
+        neoism_agent_service_api::DocumentationPage,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Ok(neoism_agent_service_api::DocumentationPage {
+            path: path.into(),
+            title: "Skills".into(),
+            content: "Put instructions in SKILL.md".into(),
+        })
     }
 }
 
@@ -142,32 +216,116 @@ struct FakeMemoryService;
 impl FakeMemoryService {
     fn entry(content: Option<String>) -> neoism_agent_service_api::MemoryEntry {
         neoism_agent_service_api::MemoryEntry {
-            location: neoism_agent_service_api::MemoryLocation { scope_id: "project".into(), label: "Project memory".into(), storage_key: "fake-memory".into() },
-            path: "routing.md".into(), description: Some("Host routing facts".into()), kind: Some("project".into()), content,
-            snippet: Some("Joined clients execute on the host".into()), semantic_distance: None,
+            location: neoism_agent_service_api::MemoryLocation {
+                scope_id: "project".into(),
+                label: "Project memory".into(),
+                storage_key: "fake-memory".into(),
+            },
+            path: "routing.md".into(),
+            description: Some("Host routing facts".into()),
+            kind: Some("project".into()),
+            content,
+            snippet: Some("Joined clients execute on the host".into()),
+            semantic_distance: None,
         }
     }
 }
 
 impl neoism_agent_service_api::MemoryService for FakeMemoryService {
     fn scope_choices(&self) -> Vec<neoism_agent_service_api::ScopeChoice> {
-        vec![neoism_agent_service_api::ScopeChoice { id: "project".into(), label: "Project".into(), description: None }]
+        vec![neoism_agent_service_api::ScopeChoice {
+            id: "project".into(),
+            label: "Project".into(),
+            description: None,
+        }]
     }
-    fn default_scope_id(&self) -> &str { "project" }
-    fn init(&self, _request: &neoism_agent_service_api::MemoryRequest) -> Result<Vec<neoism_agent_service_api::MemoryLocation>, neoism_agent_service_api::ServiceError> { Ok(vec![Self::entry(None).location]) }
-    fn list(&self, _request: &neoism_agent_service_api::MemoryRequest, _limit: usize) -> Result<Vec<neoism_agent_service_api::MemoryEntry>, neoism_agent_service_api::ServiceError> { Ok(vec![Self::entry(None)]) }
-    fn read(&self, request: &neoism_agent_service_api::MemoryRequest, path: &str) -> Result<neoism_agent_service_api::MemoryEntry, neoism_agent_service_api::ServiceError> {
-        if request.scope_id.as_deref() != Some("project") || path != "routing.md" { return Err(neoism_agent_service_api::ServiceError::new("wrong memory read address")); }
+    fn default_scope_id(&self) -> &str {
+        "project"
+    }
+    fn init(
+        &self,
+        _request: &neoism_agent_service_api::MemoryRequest,
+    ) -> Result<
+        Vec<neoism_agent_service_api::MemoryLocation>,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Ok(vec![Self::entry(None).location])
+    }
+    fn list(
+        &self,
+        _request: &neoism_agent_service_api::MemoryRequest,
+        _limit: usize,
+    ) -> Result<
+        Vec<neoism_agent_service_api::MemoryEntry>,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Ok(vec![Self::entry(None)])
+    }
+    fn read(
+        &self,
+        request: &neoism_agent_service_api::MemoryRequest,
+        path: &str,
+    ) -> Result<
+        neoism_agent_service_api::MemoryEntry,
+        neoism_agent_service_api::ServiceError,
+    > {
+        if request.scope_id.as_deref() != Some("project") || path != "routing.md" {
+            return Err(neoism_agent_service_api::ServiceError::new(
+                "wrong memory read address",
+            ));
+        }
         Ok(Self::entry(Some("full host routing memory".into())))
     }
-    fn write(&self, request: &neoism_agent_service_api::MemoryWriteRequest) -> Result<neoism_agent_service_api::MemoryEntry, neoism_agent_service_api::ServiceError> {
-        if request.request.scope_id.as_deref() != Some("project") { return Err(neoism_agent_service_api::ServiceError::new("wrong memory write scope")); }
+    fn write(
+        &self,
+        request: &neoism_agent_service_api::MemoryWriteRequest,
+    ) -> Result<
+        neoism_agent_service_api::MemoryEntry,
+        neoism_agent_service_api::ServiceError,
+    > {
+        if request.request.scope_id.as_deref() != Some("project") {
+            return Err(neoism_agent_service_api::ServiceError::new(
+                "wrong memory write scope",
+            ));
+        }
         Ok(Self::entry(request.body.clone()))
     }
-    fn search(&self, _request: &neoism_agent_service_api::MemoryRequest, _query: &str, _limit: usize) -> Result<Vec<neoism_agent_service_api::MemoryEntry>, neoism_agent_service_api::ServiceError> { Ok(vec![Self::entry(None)]) }
-    fn recall<'a>(&'a self, request: &'a neoism_agent_service_api::MemoryRequest, query: &'a str, limit: usize) -> neoism_agent_service_api::ServiceFuture<'a, Result<Vec<neoism_agent_service_api::MemoryEntry>, neoism_agent_service_api::ServiceError>> { Box::pin(async move { self.search(request, query, limit) }) }
-    fn context_fragments(&self, _working_directory: &Path) -> Vec<neoism_agent_service_api::SystemContextFragment> { Vec::new() }
-    fn set_semantic_index(&self, _index: Option<Arc<dyn neoism_agent_service_api::SemanticMemoryIndex>>) {}
+    fn search(
+        &self,
+        _request: &neoism_agent_service_api::MemoryRequest,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<
+        Vec<neoism_agent_service_api::MemoryEntry>,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Ok(vec![Self::entry(None)])
+    }
+    fn recall<'a>(
+        &'a self,
+        request: &'a neoism_agent_service_api::MemoryRequest,
+        query: &'a str,
+        limit: usize,
+    ) -> neoism_agent_service_api::ServiceFuture<
+        'a,
+        Result<
+            Vec<neoism_agent_service_api::MemoryEntry>,
+            neoism_agent_service_api::ServiceError,
+        >,
+    > {
+        Box::pin(async move { self.search(request, query, limit) })
+    }
+    fn context_fragments(
+        &self,
+        _working_directory: &Path,
+    ) -> Vec<neoism_agent_service_api::SystemContextFragment> {
+        Vec::new()
+    }
+    fn set_semantic_index(
+        &self,
+        _index: Option<Arc<dyn neoism_agent_service_api::SemanticMemoryIndex>>,
+    ) {
+    }
 }
 
 #[tokio::test]
@@ -186,8 +344,12 @@ async fn safe_tools_reject_external_paths() {
 
     let error = execute(
         "read",
-        generated_context(&root).await
-            .with_permission_rules(permission_rules(BTreeMap::from([("read".to_string(), json!("allow"))]))),
+        generated_context(&root)
+            .await
+            .with_permission_rules(permission_rules(BTreeMap::from([(
+                "read".to_string(),
+                json!("allow"),
+            )]))),
         json!({ "filePath": external.to_string_lossy() }),
     )
     .await
@@ -220,13 +382,15 @@ async fn external_directory_permission_allows_whitelisted_paths() {
 
     let result = execute(
         "read",
-        generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-            ("read".to_string(), json!("allow")),
-            (
-                "external_directory".to_string(),
-                Value::Object(external_rules),
-            ),
-        ]))),
+        generated_context(&root)
+            .await
+            .with_permission_rules(permission_rules(BTreeMap::from([
+                ("read".to_string(), json!("allow")),
+                (
+                    "external_directory".to_string(),
+                    Value::Object(external_rules),
+                ),
+            ]))),
         json!({ "filePath": external.to_string_lossy() }),
     )
     .await
@@ -413,8 +577,12 @@ async fn bash_tool_runs_in_project_and_obeys_permission() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("subdir")).unwrap();
-    let context = generated_context(&root).await
-        .with_permission_rules(permission_rules(BTreeMap::from([("bash".to_string(), json!("allow"))])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([(
+            "bash".to_string(),
+            json!("allow"),
+        )])));
 
     let result = execute(
         "bash",
@@ -434,8 +602,12 @@ async fn bash_tool_runs_in_project_and_obeys_permission() {
 
     let denied = execute(
         "bash",
-        generated_context(&root).await
-            .with_permission_rules(permission_rules(BTreeMap::from([("bash".to_string(), json!("deny"))]))),
+        generated_context(&root)
+            .await
+            .with_permission_rules(permission_rules(BTreeMap::from([(
+                "bash".to_string(),
+                json!("deny"),
+            )]))),
         json!({ "command": "printf blocked", "description": "Print blocked marker" }),
     )
     .await
@@ -454,8 +626,12 @@ async fn bash_tool_stops_when_cancelled() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let cancel = Arc::new(AtomicBool::new(false));
-    let context = generated_context(&root).await
-        .with_permission_rules(permission_rules(BTreeMap::from([("bash".to_string(), json!("allow"))])))
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([(
+            "bash".to_string(),
+            json!("allow"),
+        )])))
         .with_cancel(Some(cancel.clone()));
 
     let task = tokio::spawn(async move {
@@ -497,10 +673,12 @@ async fn safe_tools_apply_permission_rules() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("file.txt"), "content").unwrap();
-    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-        ("read".to_string(), json!("deny")),
-    ])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("read".to_string(), json!("deny")),
+        ])));
 
     let error = execute("read", context, json!({ "filePath": "file.txt" }))
         .await
@@ -518,10 +696,12 @@ async fn write_and_edit_tools_modify_project_files() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-        ("edit".to_string(), json!("allow")),
-    ])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("edit".to_string(), json!("allow")),
+        ])));
 
     let written = execute(
         "write",
@@ -846,10 +1026,12 @@ async fn file_tools_accept_canonical_arguments() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-        ("edit".to_string(), json!("allow")),
-    ])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("edit".to_string(), json!("allow")),
+        ])));
 
     execute(
         "write",
@@ -905,10 +1087,12 @@ async fn edit_tool_rejects_patch_text_payloads() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("TASK.md"), "before\n").unwrap();
-    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-        ("edit".to_string(), json!("allow")),
-    ])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("edit".to_string(), json!("allow")),
+        ])));
 
     let error = execute(
         "edit",
@@ -1012,10 +1196,16 @@ async fn advertised_tools_use_opencode_patch_contract() {
             !ids.contains(&removed),
             "removed duplicate tool {removed} was advertised"
         );
-        assert!(crate::agent_tool_registry::tool_contribution(&snapshot, removed).is_none());
+        assert!(
+            crate::agent_tool_registry::tool_contribution(&snapshot, removed).is_none()
+        );
         assert!(!snapshot.runtime_tools.contains_key(removed));
-        let error = execute(removed, context.clone(), json!({})).await.unwrap_err();
-        assert!(error.to_string().contains(&format!("unknown tool {removed}")));
+        let error = execute(removed, context.clone(), json!({}))
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(&format!("unknown tool {removed}")));
     }
     let read = tools.iter().find(|tool| tool.id == "read").unwrap();
     assert_eq!(read.parameters["required"], json!(["filePath"]));
@@ -1036,10 +1226,12 @@ async fn write_tool_obeys_edit_permission() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-        ("edit".to_string(), json!("deny")),
-    ])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("edit".to_string(), json!("deny")),
+        ])));
 
     let error = execute(
         "write",
@@ -1070,10 +1262,12 @@ async fn skill_tool_loads_project_skill_content() {
     .unwrap();
     std::fs::write(skill_dir.join("checklist.md"), "Look for regressions.\n").unwrap();
 
-    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-        ("skill".to_string(), json!("allow")),
-    ])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("skill".to_string(), json!("allow")),
+        ])));
     let result = execute("skill", context, json!({ "name": "review" }))
         .await
         .unwrap();
@@ -1099,10 +1293,12 @@ async fn skill_tool_obeys_skill_permission() {
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(skill_dir.join("SKILL.md"), "Review carefully.\n").unwrap();
 
-    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-        ("skill".to_string(), json!("deny")),
-    ])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("skill".to_string(), json!("deny")),
+        ])));
     let error = execute("skill", context, json!({ "name": "review" }))
         .await
         .unwrap_err();
@@ -1126,10 +1322,12 @@ async fn lsp_tool_reports_workspace_status() {
     .unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
 
-    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-        ("lsp".to_string(), json!("allow")),
-    ])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("lsp".to_string(), json!("allow")),
+        ])));
     let result = execute("lsp", context, json!({ "operation": "status" }))
         .await
         .unwrap();
@@ -1148,10 +1346,12 @@ async fn lsp_tool_obeys_lsp_permission() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let context = generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-        ("lsp".to_string(), json!("deny")),
-    ])));
+    let context = generated_context(&root)
+        .await
+        .with_permission_rules(permission_rules(BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("lsp".to_string(), json!("deny")),
+        ])));
 
     let error = execute("lsp", context, json!({ "operation": "status" }))
         .await
@@ -1180,8 +1380,12 @@ async fn lsp_tool_checks_external_directory_permission_for_file_operations() {
 
     let error = execute(
         "lsp",
-        generated_context(&root).await
-            .with_permission_rules(permission_rules(BTreeMap::from([("lsp".to_string(), json!("allow"))]))),
+        generated_context(&root)
+            .await
+            .with_permission_rules(permission_rules(BTreeMap::from([(
+                "lsp".to_string(),
+                json!("allow"),
+            )]))),
         json!({ "operation": "documentSymbol", "filePath": external.to_string_lossy() }),
     )
     .await
@@ -1193,13 +1397,15 @@ async fn lsp_tool_checks_external_directory_permission_for_file_operations() {
     external_rules.insert(pattern, json!("allow"));
     let result = execute(
         "lsp",
-        generated_context(&root).await.with_permission_rules(permission_rules(BTreeMap::from([
-            ("lsp".to_string(), json!("allow")),
-            (
-                "external_directory".to_string(),
-                serde_json::Value::Object(external_rules),
-            ),
-        ]))),
+        generated_context(&root)
+            .await
+            .with_permission_rules(permission_rules(BTreeMap::from([
+                ("lsp".to_string(), json!("allow")),
+                (
+                    "external_directory".to_string(),
+                    serde_json::Value::Object(external_rules),
+                ),
+            ]))),
         json!({ "operation": "documentSymbol", "filePath": external.to_string_lossy() }),
     )
     .await

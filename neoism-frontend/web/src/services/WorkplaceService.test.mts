@@ -173,6 +173,42 @@ test("requestPaneSnapshot returns false when no client is active", () => {
   assert.equal(service.requestPaneSnapshot(), false);
 });
 
+test("accepted HelloAck caches the connected daemon stable host id", () => {
+  const { service, built } = buildService();
+  service.addWorkplace({
+    id: "manual:alias",
+    label: "Laptop",
+    url: "wss://laptop.tailnet.ts.net/session",
+    transport: "manual",
+  });
+  service.connect("manual:alias", HANDLERS);
+
+  assert.equal(service.getConnectedHostId(), null);
+  built[0].handlers.onHelloAck?.(true, null, null, "machine-a");
+  assert.equal(service.getConnectedHostId(), "machine-a");
+
+  service.disconnect();
+  assert.equal(service.getConnectedHostId(), null);
+});
+
+test("a stale HelloAck cannot replace the active workplace host id", () => {
+  const { service, built } = buildService();
+  for (const [id, label] of [["a", "A"], ["b", "B"]] as const) {
+    service.addWorkplace({
+      id,
+      label,
+      url: `ws://${id}/session`,
+      transport: "manual",
+    });
+  }
+  service.connect("a", HANDLERS);
+  service.switchTo("b", HANDLERS);
+  built[1].handlers.onHelloAck?.(true, null, null, "machine-b");
+  built[0].handlers.onHelloAck?.(true, null, null, "machine-a");
+  assert.equal(service.getConnectedHostId(), "machine-b");
+  assert.equal(service.getActiveId(), "b");
+});
+
 test("reload restores lastActiveId from storage but does NOT auto-reconnect", () => {
   const { service: first, storage } = buildService();
   first.addWorkplace(
@@ -405,7 +441,7 @@ test("discover -> promote -> connect opens a ProtocolClient at the peer's ws URL
   assert.equal(persisted!.transport, "tailscale");
 });
 
-test("hello-ack rejection tears down the freshly-promoted connection", async () => {
+test("hello-ack rejection preserves the stopped facade for immediate switch UI", async () => {
   const { service, built } = buildService();
   const events: Array<{ kind: string; accepted?: boolean }> = [];
   service.subscribe((event) =>
@@ -425,14 +461,16 @@ test("hello-ack rejection tears down the freshly-promoted connection", async () 
   assert.equal(service.getActiveId(), "tailscale:laptop-b@100.64.0.2");
 
   // Daemon rejects the Hello handshake (e.g. wrong pairing token). The
-  // service fans a `hello-ack` event then disconnects the doomed socket.
-  built[0].handlers.onHelloAck?.(false, "invalid pairing token", null);
+  // service fans a `hello-ack` event. ProtocolClient itself closes the doomed
+  // socket and stops retry; the service preserves its stable facade so the
+  // connection gate can still identify/switch the selected workplace.
+  built[0].handlers.onHelloAck?.(false, "invalid pairing token", null, null);
 
   const ack = events.find((e) => e.kind === "hello-ack");
   assert.ok(ack, "a hello-ack event fired");
   assert.equal(ack!.accepted, false);
-  assert.equal(built[0].disconnects, 1, "rejected socket was torn down");
-  assert.equal(service.getActiveId(), null, "no active connection remains");
+  assert.equal(built[0].disconnects, 0, "service does not overwrite auth-rejected with closed");
+  assert.equal(service.getActiveId(), "tailscale:laptop-b@100.64.0.2");
 });
 
 // ---------------------------------------------------------------------

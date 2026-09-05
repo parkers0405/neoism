@@ -4,14 +4,19 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{lsp, resolve_directory, InstanceQuery};
 use crate::error::ApiError;
+use crate::{lsp, resolve_directory, InstanceQuery};
 
 async fn runtime_lsp(
     state: &crate::state::AppState,
     directory: &str,
 ) -> Result<crate::workspace_runtime::LeasedResource<crate::lsp::LspRuntime>, ApiError> {
-    state.workspace_runtime(directory).await.map_err(ApiError::gone)?.lsp().map_err(|error| ApiError::gone(error.to_string()))
+    state
+        .workspace_runtime(directory)
+        .await
+        .map_err(ApiError::gone)?
+        .lsp()
+        .map_err(|error| ApiError::gone(error.to_string()))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -49,7 +54,10 @@ pub(crate) async fn lsp_status(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspStatus>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::status(&*runtime_lsp(&state, &directory).await?, directory)))
+    Ok(Json(lsp::status(
+        &*runtime_lsp(&state, &directory).await?,
+        directory,
+    )))
 }
 
 pub(crate) async fn lsp_hover(
@@ -58,7 +66,8 @@ pub(crate) async fn lsp_hover(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspHover>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::hover(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::hover(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -72,7 +81,8 @@ pub(crate) async fn lsp_signature_help(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspSignatureHelp>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::signature_help(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::signature_help(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -86,7 +96,8 @@ pub(crate) async fn lsp_inlay_hints(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspInlayHint>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::inlay_hints(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::inlay_hints(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.start_line,
@@ -100,7 +111,8 @@ pub(crate) async fn lsp_document_highlights(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspDocumentHighlight>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::document_highlights(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::document_highlights(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -114,7 +126,8 @@ pub(crate) async fn lsp_definition(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspLocation>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::definitions(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::definitions(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -128,7 +141,8 @@ pub(crate) async fn lsp_references(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspLocation>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::references(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::references(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -142,7 +156,8 @@ pub(crate) async fn lsp_implementation(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspLocation>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::implementations(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::implementations(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -156,7 +171,8 @@ pub(crate) async fn lsp_prepare_call_hierarchy(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspCallHierarchyItem>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::prepare_call_hierarchy(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::prepare_call_hierarchy(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -170,7 +186,8 @@ pub(crate) async fn lsp_incoming_calls(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspCallHierarchyCall>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::incoming_calls(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::incoming_calls(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -184,7 +201,8 @@ pub(crate) async fn lsp_outgoing_calls(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspCallHierarchyCall>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::outgoing_calls(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::outgoing_calls(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -198,7 +216,11 @@ pub(crate) async fn lsp_diagnostics(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspDiagnostic>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::diagnostics(&*runtime_lsp(&state, &directory).await?, directory, query.file)))
+    Ok(Json(lsp::diagnostics(
+        &*runtime_lsp(&state, &directory).await?,
+        directory,
+        query.file,
+    )))
 }
 
 pub(crate) async fn lsp_document_symbols(
@@ -207,7 +229,11 @@ pub(crate) async fn lsp_document_symbols(
     headers: HeaderMap,
 ) -> Result<Json<Vec<lsp::LspDocumentSymbol>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::document_symbols(&*runtime_lsp(&state, &directory).await?, directory, query.file)))
+    Ok(Json(lsp::document_symbols(
+        &*runtime_lsp(&state, &directory).await?,
+        directory,
+        query.file,
+    )))
 }
 
 pub(crate) async fn lsp_formatting(
@@ -216,7 +242,11 @@ pub(crate) async fn lsp_formatting(
     headers: HeaderMap,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::formatting(&*runtime_lsp(&state, &directory).await?, directory, query.file)))
+    Ok(Json(lsp::formatting(
+        &*runtime_lsp(&state, &directory).await?,
+        directory,
+        query.file,
+    )))
 }
 
 pub(crate) async fn lsp_code_actions(
@@ -225,7 +255,8 @@ pub(crate) async fn lsp_code_actions(
     headers: HeaderMap,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(lsp::code_actions(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::code_actions(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         query.file,
         query.line,
@@ -239,7 +270,8 @@ pub(crate) async fn lsp_touch(
     Json(request): Json<LspTouchRequest>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let directory = resolve_directory(request.directory, &headers);
-    Ok(Json(lsp::touch_document(&*runtime_lsp(&state, &directory).await?,
+    Ok(Json(lsp::touch_document(
+        &*runtime_lsp(&state, &directory).await?,
         directory,
         request.file,
         request.text.as_deref(),

@@ -105,7 +105,14 @@ impl Screen<'_> {
             .and_then(|agent| agent.cursor_rect())
             .is_some();
         let agent_surface_active = self.context_manager.current().neoism_agent.is_some();
-        let cursorless_surface_active = self.context_manager.current().neoworld.is_some()
+        // An editor whose document caret is scrolled offscreen still owns
+        // cursor focus. Without this ownership the policy falls through to
+        // the parked terminal cursor at the top-left corner.
+        let cursorless_surface_active = self.context_manager.current().code.is_some()
+            || self.context_manager.current().markdown.is_some()
+            || self.context_manager.current().notebook.is_some()
+            || self.context_manager.current().epub.is_some()
+            || self.context_manager.current().neoworld.is_some()
             || self.context_manager.current().neoism_extensions.is_some()
             || self.context_manager.current().neoism_tags.is_some()
             || self.context_manager.current().draw.is_some();

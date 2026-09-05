@@ -381,7 +381,11 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn timeline_view_anchor(&self) -> Option<(TimelineViewAnchorKey, f32)> {
         None
     }
-    fn timeline_view_anchor_matches(&self, _source_index: usize, _source_len: usize) -> bool {
+    fn timeline_view_anchor_matches(
+        &self,
+        _source_index: usize,
+        _source_len: usize,
+    ) -> bool {
         false
     }
     fn restore_timeline_view_anchor(&mut self, _content_y: f32, _screen_offset: f32) {}

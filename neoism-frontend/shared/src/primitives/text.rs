@@ -5,6 +5,32 @@ use sugarloaf::Sugarloaf;
 
 use super::geom::rects_intersect;
 
+const NERD_ICON_FONT_FAMILY: &str = "Symbols Nerd Font Mono";
+
+/// Select the app-bundled Nerd Font face for private-use UI icons.
+/// Browser builds have no system font cascade, and inherited explicit font
+/// slots bypass fallback resolution, so icon draws must choose this shared
+/// face rather than relying on the surrounding text font.
+fn icon_draw_opts(sugarloaf: &mut Sugarloaf, icon: &str, opts: &DrawOpts) -> DrawOpts {
+    let uses_nerd_pua = icon.chars().any(|ch| {
+        matches!(ch as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+    });
+    if !uses_nerd_pua {
+        return *opts;
+    }
+
+    let mut icon_opts = *opts;
+    icon_opts.font_id =
+        sugarloaf
+            .font_id_for_family(NERD_ICON_FONT_FAMILY)
+            .or_else(|| {
+                sugarloaf.ensure_static_font(
+                    sugarloaf::font::constants::FONT_SYMBOLS_NERD_FONT_MONO,
+                )
+            });
+    icon_opts
+}
+
 /// Draw a hard two-step text extrusion followed by the original foreground.
 /// The caller's clip rectangle and alpha are preserved for every layer.
 pub fn draw_text_extruded(
@@ -196,9 +222,16 @@ pub fn draw_icon_centered_with_occlusion(
     occlusion_rects: &[[f32; 4]],
     center_x: bool,
 ) -> f32 {
+    let icon_opts = icon_draw_opts(sugarloaf, icon, opts);
     let first_instance = sugarloaf.text_mut().instances().len();
-    let width =
-        draw_text_with_occlusion(sugarloaf, x, rect[1], icon, opts, occlusion_rects);
+    let width = draw_text_with_occlusion(
+        sugarloaf,
+        x,
+        rect[1],
+        icon,
+        &icon_opts,
+        occlusion_rects,
+    );
     sugarloaf
         .text_mut()
         .center_instances_in_rect(first_instance, rect, center_x, true);
@@ -216,8 +249,11 @@ pub fn draw_overlay_icon_centered(
     opts: &DrawOpts,
     center_x: bool,
 ) -> f32 {
+    let icon_opts = icon_draw_opts(sugarloaf, icon, opts);
     let first_instance = sugarloaf.overlay_text_mut().instances().len();
-    let width = sugarloaf.overlay_text_mut().draw(x, rect[1], icon, opts);
+    let width = sugarloaf
+        .overlay_text_mut()
+        .draw(x, rect[1], icon, &icon_opts);
     sugarloaf.overlay_text_mut().center_instances_in_rect(
         first_instance,
         rect,

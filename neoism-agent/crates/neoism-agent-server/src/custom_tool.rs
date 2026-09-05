@@ -69,7 +69,10 @@ impl CustomTool {
     }
 }
 
-pub(crate) fn list(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<ToolListItem> {
+pub(crate) fn list(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &str,
+) -> Vec<ToolListItem> {
     load(services, directory)
         .into_iter()
         .map(|tool| tool.item())
@@ -85,7 +88,10 @@ pub(crate) async fn execute(
     env: BTreeMap<String, String>,
     cancel: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<Option<ToolExecutionResult>> {
-    let Some(tool) = load(services, directory).into_iter().find(|tool| tool.id == tool_id) else {
+    let Some(tool) = load(services, directory)
+        .into_iter()
+        .find(|tool| tool.id == tool_id)
+    else {
         return Ok(None);
     };
     let command = tool.definition.command.parts();
@@ -177,7 +183,10 @@ fn custom_tool_command(
     Ok(process)
 }
 
-pub(crate) fn load(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<CustomTool> {
+pub(crate) fn load(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &str,
+) -> Vec<CustomTool> {
     let mut tools = Vec::new();
     for root in crate::config::roots(services, directory) {
         for folder in ["tools", "tool"] {
@@ -279,8 +288,10 @@ mod tests {
     fn custom_tool_honors_injected_path_and_reports_missing_executable() {
         let injected = PathBuf::from("/injected/custom-tool");
         let mut services = crate::standard_services();
-        services.executables = Arc::new(FakeExecutableService::with("custom-tool", &injected));
-        let command = custom_tool_command(&services, Path::new("."), "custom-tool", &[]).unwrap();
+        services.executables =
+            Arc::new(FakeExecutableService::with("custom-tool", &injected));
+        let command =
+            custom_tool_command(&services, Path::new("."), "custom-tool", &[]).unwrap();
         assert_eq!(command.as_std().get_program(), injected.as_os_str());
 
         services.executables = Arc::new(FakeExecutableService::default());

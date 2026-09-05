@@ -38,6 +38,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             layout: ChromeLayout {
                 top_bar: None,
                 file_tree: None,
+                notes_sidebar: None,
                 buffer_tabs: Rect::new(0.0, 0.0, 0.0, 0.0),
                 breadcrumbs: None,
                 status_line: Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -57,6 +58,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             cell_h: 16.0,
             chrome_scale: 1.0,
             top_workspace_strip_h: 0.0,
+            bottom_content_inset: 0.0,
+            mobile_web_agent_panel_enabled: false,
+            mobile_agent_narrow: false,
+            desktop_agent_panel_open_before_narrow: None,
             animation_phase: 0.0,
             active_tab_index: 0,
             tab_content: None,
@@ -107,6 +112,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             extensions_page: crate::panels::extensions_page::NeoismExtensionsPane::new(),
             neoworld_pane: None,
             modal: crate::widgets::modal::UniversalModal::new(),
+            connection_gate_active: false,
+            file_browser: crate::panels::file_browser::FileBrowserModal::new(),
             pending_settings_actions: Vec::new(),
             pending_extensions_actions: Vec::new(),
             pending_neoworld_snapshots: Vec::new(),
@@ -150,6 +157,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             TopBarAction::OpenAgent => {
                 self.pending_top_bar_action = Some(TopBarAction::OpenAgent);
             }
+            TopBarAction::ToggleAgentSidePanel => {
+                if self.mobile_agent_narrow && self.is_neoism_agent_tab_active() {
+                    if let Some(pane) = self.agent_pane.as_mut() {
+                        pane.toggle_side_panel();
+                    }
+                    self.relayout();
+                }
+            }
             TopBarAction::OpenThemes => {
                 // Open the SAME theme picker the user gets from Cmd+P →
                 // Themes, hosted entirely in shared chrome so it works on
@@ -192,6 +207,20 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.toggle_notes_sidebar();
                     self.pending_notes_refresh = true;
                 }
+            }
+            TopBarAction::OpenSearch => {
+                // Desktop's top-bar search opens the Files finder. Consume
+                // this in shared chrome rather than round-tripping through
+                // the WASM host, so the first press opens/focuses immediately
+                // and the second press strictly closes it.
+                if self.finder.is_visible() {
+                    self.finder.set_enabled(false);
+                } else {
+                    self.command_palette.set_enabled(false);
+                    self.finder
+                        .open_files(self.workspace_root_path.clone().unwrap_or_default());
+                }
+                self.relayout();
             }
             other => {
                 // No shared-hosted surface yet — store for the bridge to
@@ -288,6 +317,22 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// the main terminal rect whenever a Neoism Agent buffer tab is active.
     pub fn install_agent_pane(&mut self, pane: NeoismAgentPane) {
         self.agent_pane = Some(pane);
+    }
+
+    /// Enable web/mobile responsive Agent chrome. Desktop intentionally never
+    /// calls this, even if its window happens to be phone-width.
+    pub fn set_mobile_web_agent_panel_enabled(&mut self, enabled: bool) {
+        self.mobile_web_agent_panel_enabled = enabled;
+        if !enabled {
+            if let Some(was_open) = self.desktop_agent_panel_open_before_narrow.take() {
+                if let Some(pane) = self.agent_pane.as_mut() {
+                    pane.side_panel_mut().set_user_hidden(!was_open);
+                }
+            }
+            self.mobile_agent_narrow = false;
+            self.top_bar.set_mobile_agent_panel_button_visible(false);
+        }
+        self.relayout();
     }
 
     pub fn agent_pane(&self) -> Option<&NeoismAgentPane> {
@@ -566,6 +611,63 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         if self.chrome_overlay_active() {
             return false;
         }
+        self.is_terminal_tab_selected()
+    }
+
+    /// Terminal target identity without transient overlay suppression. Hosts
+    /// use this to maintain the composer's configured shell-state request
+    /// while a Settings/modal layer temporarily owns the keyboard.
+    pub fn is_terminal_tab_selected(&self) -> bool {
         self.buffer_tabs.target_at(self.active_tab_index).is_none()
+    }
+}
+
+#[cfg(test)]
+mod top_bar_toggle_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn file_tree_action_opens_focused_then_closes() {
+        let mut chrome = Chrome::<()>::new();
+        chrome.install_file_tree(FileTree::new(PathBuf::from("/workspace")));
+
+        chrome.apply_top_bar_action(TopBarAction::TogglePanel);
+        let tree = chrome.file_tree.as_ref().unwrap();
+        assert!(tree.is_visible());
+        assert!(tree.is_focused());
+
+        chrome.apply_top_bar_action(TopBarAction::TogglePanel);
+        assert!(!chrome.file_tree.as_ref().unwrap().is_visible());
+    }
+
+    #[test]
+    fn notes_action_opens_focused_then_closes() {
+        let mut chrome = Chrome::<()>::new();
+        chrome.apply_top_bar_action(TopBarAction::OpenNotes);
+        assert!(chrome.notes_sidebar.is_visible());
+        assert!(chrome.notes_sidebar.is_focused());
+
+        chrome.apply_top_bar_action(TopBarAction::OpenNotes);
+        assert!(!chrome.notes_sidebar.is_visible());
+        assert!(!chrome.notes_sidebar.is_focused());
+    }
+
+    #[test]
+    fn search_action_opens_files_finder_then_closes_without_host_intent() {
+        let mut chrome = Chrome::<()>::new();
+        chrome.set_workspace_root_path(Some(PathBuf::from("/workspace")));
+
+        chrome.apply_top_bar_action(TopBarAction::OpenSearch);
+        assert!(chrome.finder.is_visible());
+        assert_eq!(
+            chrome.finder.mode(),
+            crate::panels::finder::FinderMode::Files
+        );
+        assert_eq!(chrome.drain_top_bar_action(), None);
+
+        chrome.apply_top_bar_action(TopBarAction::OpenSearch);
+        assert!(!chrome.finder.is_visible());
+        assert_eq!(chrome.drain_top_bar_action(), None);
     }
 }

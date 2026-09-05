@@ -164,9 +164,18 @@ pub fn router(state: AppState) -> Router {
         // both ways so SSE flows live.
         .route("/agent", any(agent_proxy_root))
         .route("/agent/", any(agent_proxy_root))
-        .route("/agent/workspaces/:workspace_id", any(agent_workspace_proxy_root))
-        .route("/agent/workspaces/:workspace_id/", any(agent_workspace_proxy_root))
-        .route("/agent/workspaces/:workspace_id/*path", any(agent_workspace_proxy))
+        .route(
+            "/agent/workspaces/:workspace_id",
+            any(agent_workspace_proxy_root),
+        )
+        .route(
+            "/agent/workspaces/:workspace_id/",
+            any(agent_workspace_proxy_root),
+        )
+        .route(
+            "/agent/workspaces/:workspace_id/*path",
+            any(agent_workspace_proxy),
+        )
         .route("/agent/*path", any(agent_proxy))
         .fallback(web_fallback)
         .with_state(state)
@@ -201,7 +210,16 @@ async fn agent_workspace_proxy_root(
     query: axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
-    agent_proxy_inner(&state, Some(workspace_id), String::new(), method, headers, query, body).await
+    agent_proxy_inner(
+        &state,
+        Some(workspace_id),
+        String::new(),
+        method,
+        headers,
+        query,
+        body,
+    )
+    .await
 }
 
 async fn agent_workspace_proxy(
@@ -212,7 +230,16 @@ async fn agent_workspace_proxy(
     query: axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
-    agent_proxy_inner(&state, Some(workspace_id), path, method, headers, query, body).await
+    agent_proxy_inner(
+        &state,
+        Some(workspace_id),
+        path,
+        method,
+        headers,
+        query,
+        body,
+    )
+    .await
 }
 
 async fn agent_proxy_inner(
@@ -229,18 +256,24 @@ async fn agent_proxy_inner(
         // the process-global workspace root: that root can change underneath
         // a long-lived joined client.
         if agent_proxy_principal(&state.auth, &headers).is_err() {
-            return (StatusCode::UNAUTHORIZED, "invalid daemon authentication").into_response();
+            return (StatusCode::UNAUTHORIZED, "invalid daemon authentication")
+                .into_response();
         }
-        return (StatusCode::BAD_REQUEST, "workspace-scoped Agent endpoint required").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "workspace-scoped Agent endpoint required",
+        )
+            .into_response();
     };
     let root = match agent_workspace_root(&state.workspaces, &workspace_id) {
         Some(root) => root,
         None => return (StatusCode::NOT_FOUND, "unknown workspace").into_response(),
     };
-    let credential = match agent_proxy_credential(&state.auth, &headers, &workspace_id, &root) {
-        Ok(identity) => identity,
-        Err(response) => return response,
-    };
+    let credential =
+        match agent_proxy_credential(&state.auth, &headers, &workspace_id, &root) {
+            Ok(identity) => identity,
+            Err(response) => return response,
+        };
     crate::agent::ensure_agent_server_started(state.workspaces.clone());
     let base = agent_handler::configured_agent_server();
     let mut target = if path.is_empty() {
@@ -261,10 +294,7 @@ async fn agent_proxy_inner(
     // The inbound bearer and all caller-controlled scope headers terminate at
     // the daemon. Agent receives only the daemon-minted, short-lived identity.
     request = request.bearer_auth(credential);
-    request = request.header(
-        "x-neoism-directory",
-        root.to_string_lossy().as_ref(),
-    );
+    request = request.header("x-neoism-directory", root.to_string_lossy().as_ref());
     // Forward canonical representation negotiation and SSE resume state only;
     // hop-by-hop, Authorization, and caller scope headers stay behind.
     for name in [
@@ -322,7 +352,10 @@ fn agent_proxy_credential(
     mint_agent_credential(subject, workspace_id, root)
 }
 
-fn agent_proxy_principal(auth: &AuthService, headers: &HeaderMap) -> Result<String, Response> {
+fn agent_proxy_principal(
+    auth: &AuthService,
+    headers: &HeaderMap,
+) -> Result<String, Response> {
     let bearer = cloud_auth::extract_bearer(headers);
     let supplied = bearer.as_deref().ok_or_else(|| {
         (StatusCode::UNAUTHORIZED, "missing daemon authentication").into_response()
@@ -330,21 +363,29 @@ fn agent_proxy_principal(auth: &AuthService, headers: &HeaderMap) -> Result<Stri
 
     if cloud_auth::legacy_daemon_token_matches(supplied) {
         Ok("local-operator".to_string())
-        } else {
-            let device = auth.authenticate_bearer(supplied).map_err(|_| {
-                (StatusCode::UNAUTHORIZED, "invalid daemon authentication")
-                    .into_response()
-            })?;
-            Ok(format!("device:{}", device.device_id))
-        }
+    } else {
+        let device = auth.authenticate_bearer(supplied).map_err(|_| {
+            (StatusCode::UNAUTHORIZED, "invalid daemon authentication").into_response()
+        })?;
+        Ok(format!("device:{}", device.device_id))
+    }
 }
 
-fn agent_workspace_root(workspaces: &WorkspaceManager, workspace_id: &str) -> Option<std::path::PathBuf> {
+fn agent_workspace_root(
+    workspaces: &WorkspaceManager,
+    workspace_id: &str,
+) -> Option<std::path::PathBuf> {
     let root = workspaces
         .get_host_workspace(workspace_id)
         .and_then(|workspace| workspace.root_dir)
-        .or_else(|| workspaces.project_root_summary(workspace_id).map(|workspace| workspace.path))?;
-    crate::path::canonicalize(&root).ok().filter(|root| root.is_dir())
+        .or_else(|| {
+            workspaces
+                .project_root_summary(workspace_id)
+                .map(|workspace| workspace.path)
+        })?;
+    crate::path::canonicalize(&root)
+        .ok()
+        .filter(|root| root.is_dir())
 }
 
 fn mint_agent_credential(
@@ -352,7 +393,6 @@ fn mint_agent_credential(
     workspace_id: &str,
     root: &std::path::Path,
 ) -> Result<String, Response> {
-
     // The env var is captured once at daemon startup, but the canonical
     // token file is the live trust root shared with the (possibly separate)
     // agent-server process — and it rotates when the runtime dir is
@@ -547,7 +587,9 @@ mod agent_proxy_auth_tests {
         let auth = AuthService::bootstrap(temp.path()).unwrap();
 
         let root = temp.path();
-        let denied = agent_proxy_credential(&auth, &HeaderMap::new(), "workspace-a", root).unwrap_err();
+        let denied =
+            agent_proxy_credential(&auth, &HeaderMap::new(), "workspace-a", root)
+                .unwrap_err();
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
 
         let mut local_headers = HeaderMap::new();
@@ -555,7 +597,8 @@ mod agent_proxy_auth_tests {
             header::AUTHORIZATION,
             "Bearer daemon-test-key".parse().unwrap(),
         );
-        let local = agent_proxy_credential(&auth, &local_headers, "workspace-a", root).unwrap();
+        let local =
+            agent_proxy_credential(&auth, &local_headers, "workspace-a", root).unwrap();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let local = neoism_agent_service_api::daemon_credential::verify(
             &local,
@@ -574,28 +617,30 @@ mod agent_proxy_auth_tests {
             header::AUTHORIZATION,
             format!("Bearer {}", issued.raw_token).parse().unwrap(),
         );
-        let paired = agent_proxy_credential(&auth, &paired_headers, "workspace-a", root).unwrap();
+        let paired =
+            agent_proxy_credential(&auth, &paired_headers, "workspace-a", root).unwrap();
         let paired = neoism_agent_service_api::daemon_credential::verify(
             &paired,
             b"daemon-test-key",
             now,
         )
         .unwrap();
-        assert_eq!(
-            paired.tenant_id,
-            "workspace:workspace-a"
-        );
+        assert_eq!(paired.tenant_id, "workspace:workspace-a");
         assert_ne!(paired.subject, local.subject);
         assert!(paired.hosted);
         assert_eq!(paired.directory_prefixes.len(), 1);
 
-        let second = auth.registry.issue("second guest", BTreeSet::new()).unwrap();
+        let second = auth
+            .registry
+            .issue("second guest", BTreeSet::new())
+            .unwrap();
         let mut second_headers = HeaderMap::new();
         second_headers.insert(
             header::AUTHORIZATION,
             format!("Bearer {}", second.raw_token).parse().unwrap(),
         );
-        let second = agent_proxy_credential(&auth, &second_headers, "workspace-a", root).unwrap();
+        let second =
+            agent_proxy_credential(&auth, &second_headers, "workspace-a", root).unwrap();
         let second = neoism_agent_service_api::daemon_credential::verify(
             &second,
             b"daemon-test-key",
@@ -605,7 +650,8 @@ mod agent_proxy_auth_tests {
         assert_eq!(second.tenant_id, paired.tenant_id);
         assert_ne!(second.subject, paired.subject);
 
-        let other = agent_proxy_credential(&auth, &local_headers, "workspace-b", root).unwrap();
+        let other =
+            agent_proxy_credential(&auth, &local_headers, "workspace-b", root).unwrap();
         let other = neoism_agent_service_api::daemon_credential::verify(
             &other,
             b"daemon-test-key",

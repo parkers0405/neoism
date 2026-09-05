@@ -26,10 +26,18 @@ async fn calculate_usage_cost(
     // via Meridian, …) are flat-rate, not pay-per-token — a per-token dollar
     // figure would be misleading, so report zero cost. Token usage / context %
     // is tracked and shown regardless.
-    if matches!(state.inner.provider_service.auth(&model.provider_id).await, Ok(Some(AuthInfo::OAuth { .. }))) {
+    if matches!(
+        state.inner.provider_service.auth(&model.provider_id).await,
+        Ok(Some(AuthInfo::OAuth { .. }))
+    ) {
         return Some(0.0);
     }
-    let metadata = state.inner.provider_service.model_metadata(model).await.ok()?;
+    let metadata = state
+        .inner
+        .provider_service
+        .model_metadata(model)
+        .await
+        .ok()?;
     let cost = metadata.cost.as_ref()?;
     Some(calculate_usage_cost_with_model_cost(cost, tokens))
 }

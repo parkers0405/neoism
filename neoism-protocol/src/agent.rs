@@ -78,6 +78,9 @@ pub enum AgentClientMessage {
         /// Opaque provider connection selected for this model.
         #[serde(default)]
         connection_id: Option<String>,
+        /// Reasoning effort variant selected with the model.
+        #[serde(default)]
+        thinking: Option<String>,
     },
     /// Resume / focus an existing session by id. The daemon swaps the
     /// active session for this client and starts streaming its event
@@ -397,7 +400,10 @@ pub enum AgentClientMessage {
         connection_id: String,
         label: String,
     },
-    ConnectSetDefault { provider_id: String, connection_id: String },
+    ConnectSetDefault {
+        provider_id: String,
+        connection_id: String,
+    },
     /// Begin an OAuth method — request the authorization URL via
     /// `POST /provider/{provider_id}/oauth/authorize` with
     /// `{ "method": <index>, "inputs": {} }`. Reply is
@@ -716,6 +722,12 @@ pub enum AgentServerMessage {
     /// `SetModel` / `SetAgent` / `SetThinkingMode`.
     ProviderState {
         session_id: String,
+        /// `true` when this is a complete snapshot read from the persisted
+        /// session. Clients may then clear fields (notably connection and
+        /// thinking) that are absent from the snapshot. Mutation acks that
+        /// only contain changed fields leave this `false`.
+        #[serde(default)]
+        authoritative: bool,
         #[serde(default)]
         provider_id: Option<String>,
         #[serde(default)]
@@ -804,6 +816,17 @@ pub enum AgentServerMessage {
         execution_id: Option<String>,
         #[serde(default)]
         family_revision: Option<u64>,
+    },
+    /// Child-session metadata with no lifecycle authority. This may rename an
+    /// already-known roster row, but must never create or reactivate one.
+    SubagentMetadata {
+        session_id: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        parent_session_id: Option<String>,
     },
     /// Context-window compaction lifecycle. `phase` tells the
     /// chrome whether this is a `Started` / `Delta` / `Ended` event.
@@ -1223,6 +1246,22 @@ mod runtime_snapshot_tests {
     }
 
     #[test]
+    fn subagent_metadata_round_trips_without_a_lifecycle_status() {
+        let message = AgentServerMessage::SubagentMetadata {
+            session_id: "child".into(),
+            title: Some("Renamed child".into()),
+            agent: Some("build".into()),
+            parent_session_id: Some("root".into()),
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(!json.contains("status"));
+        assert_eq!(
+            serde_json::from_str::<AgentServerMessage>(&json).unwrap(),
+            message
+        );
+    }
+
+    #[test]
     fn provider_oauth_attempt_id_round_trips_opaquely() {
         let message = AgentClientMessage::ConnectOauthCallback {
             provider_id: "openai".into(),
@@ -1233,6 +1272,9 @@ mod runtime_snapshot_tests {
         let encoded = serde_json::to_string(&message).unwrap();
         assert!(encoded.contains("attempt_opaque"));
         assert!(!encoded.contains("Personal"));
-        assert_eq!(serde_json::from_str::<AgentClientMessage>(&encoded).unwrap(), message);
+        assert_eq!(
+            serde_json::from_str::<AgentClientMessage>(&encoded).unwrap(),
+            message
+        );
     }
 }

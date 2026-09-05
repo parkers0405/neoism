@@ -126,12 +126,37 @@ impl CapabilityGrants {
     }
 
     fn restricted_to(&self, required: &[HostCapability]) -> Self {
-        let capabilities = required.iter().copied().filter(|capability| self.capabilities.contains(capability)).collect();
+        let capabilities = required
+            .iter()
+            .copied()
+            .filter(|capability| self.capabilities.contains(capability))
+            .collect();
         Self {
             capabilities,
-            config: required.iter().any(|capability| matches!(capability, HostCapability::ConfigRead | HostCapability::ConfigWrite)).then(|| self.config.clone()).flatten(),
-            workspace: required.iter().any(|capability| matches!(capability, HostCapability::WorkspaceRead | HostCapability::WorkspaceWrite)).then(|| self.workspace.clone()).flatten(),
-            events: required.contains(&HostCapability::EventPublish).then(|| self.events.clone()).flatten(),
+            config: required
+                .iter()
+                .any(|capability| {
+                    matches!(
+                        capability,
+                        HostCapability::ConfigRead | HostCapability::ConfigWrite
+                    )
+                })
+                .then(|| self.config.clone())
+                .flatten(),
+            workspace: required
+                .iter()
+                .any(|capability| {
+                    matches!(
+                        capability,
+                        HostCapability::WorkspaceRead | HostCapability::WorkspaceWrite
+                    )
+                })
+                .then(|| self.workspace.clone())
+                .flatten(),
+            events: required
+                .contains(&HostCapability::EventPublish)
+                .then(|| self.events.clone())
+                .flatten(),
             metadata: self.metadata.clone(),
         }
     }
@@ -190,7 +215,10 @@ impl PluginContext {
     }
 
     pub fn restricted_to(&self, required: &[HostCapability]) -> Self {
-        Self { scope: self.scope.clone(), grants: self.grants.restricted_to(required) }
+        Self {
+            scope: self.scope.clone(),
+            grants: self.grants.restricted_to(required),
+        }
     }
 }
 
@@ -276,7 +304,10 @@ mod tests {
     fn read_only_grants_cannot_reach_mutating_host_operations() {
         let access = Arc::new(Config(AtomicUsize::new(0)));
         let context = PluginContext::new(
-            RuntimeScope::Workspace(WorkspaceIdentity { id: "test".into(), root: ".".into() }),
+            RuntimeScope::Workspace(WorkspaceIdentity {
+                id: "test".into(),
+                root: ".".into(),
+            }),
             CapabilityGrants::default().config(access.clone(), false),
         );
 

@@ -43,6 +43,20 @@ use crate::widgets::modal::{
 use sugarloaf::Sugarloaf;
 
 impl<A: Send + Copy + 'static> Chrome<A> {
+    pub fn open_file_browser(
+        &mut self,
+        mode: crate::panels::file_browser::FileBrowserMode,
+        start: &str,
+        recents: Vec<String>,
+    ) {
+        self.hide_focus_modals();
+        self.file_browser.open(mode, start, recents);
+    }
+
+    pub fn file_browser_overlay_active(&self) -> bool {
+        self.file_browser.is_active()
+    }
+
     // ── Queries ────────────────────────────────────────────────────
 
     /// Which chrome helper page the ACTIVE buffer tab points at, if
@@ -66,7 +80,33 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// True when the chrome-page layer wants raw keyboard input routed
     /// into `Chrome::handle_event` (web `keyboard_capture_active`).
     pub fn chrome_page_wants_keyboard(&self) -> bool {
-        self.chrome_overlay_active() || self.active_chrome_page().is_some()
+        self.chrome_overlay_active()
+            || self.file_browser.is_active()
+            || self.active_chrome_page().is_some()
+    }
+
+    /// A generic overlay/modal owns keyboard input independently of the
+    /// active content surface.  Keep this predicate centralized: terminal
+    /// composer layout, paint, prompt-row removal and cursor ownership must
+    /// all make the same decision.
+    pub fn generic_keyboard_overlay_active(&self) -> bool {
+        self.command_palette.is_enabled()
+            || self.finder.is_enabled()
+            || self.git_diff.is_visible()
+            || self.context_menu.is_visible()
+            || self.share_sheet.is_visible()
+            || self.chrome_page_wants_keyboard()
+    }
+
+    /// Effective terminal composer ownership. `CommandComposer::is_visible`
+    /// is the configured/shell-state request; overlays temporarily suppress
+    /// it without destroying that request, so closing an overlay restores the
+    /// composer on the next layout automatically.
+    pub fn terminal_composer_eligible(&self) -> bool {
+        self.is_terminal_tab_active()
+            && !self.is_neoism_agent_tab_active()
+            && self.command_composer.is_visible()
+            && !self.generic_keyboard_overlay_active()
     }
 
     /// Animation pump: the NeoWorld sim runs continuously while its
@@ -144,9 +184,51 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// wasm bridge feeds from JSON specs; the typed openers below
     /// carry desktop's exact file-tree/LSP specs.
     pub fn open_chrome_modal(&mut self, spec: ModalSpec) {
+        self.connection_gate_active = false;
         self.hide_focus_modals();
         self.modal.open(spec);
         self.relayout();
+    }
+
+    /// Show/update the web connection-loss gate without destroying the
+    /// workspace canvas. It owns input and cannot be escaped or light-dismissed;
+    /// only the host may close it after authenticated hydration succeeds.
+    pub fn show_connection_gate(&mut self, body: String, meta: String) {
+        self.hide_focus_modals();
+        self.modal.open(ModalSpec {
+            title: "Connection lost".to_string(),
+            body,
+            meta,
+            input: None,
+            buttons: vec![
+                ModalButton::new(
+                    "Retry now",
+                    "Enter",
+                    ModalAction::RunEditorCommand { command: "connection.retry".into() },
+                ),
+                ModalButton::new(
+                    "Switch workplace",
+                    "↓",
+                    ModalAction::RunEditorCommand { command: "connection.switch".into() },
+                ),
+            ],
+            busy: false,
+            blocking: true,
+        });
+        self.modal.set_dismissible(false);
+        self.connection_gate_active = true;
+        self.relayout();
+    }
+
+    pub fn hide_connection_gate(&mut self) {
+        if !self.connection_gate_active { return; }
+        self.connection_gate_active = false;
+        self.modal.close();
+        self.relayout();
+    }
+
+    pub fn connection_gate_active(&self) -> bool {
+        self.connection_gate_active
     }
 
     /// Open a chrome-hosted FORM modal (labelled fields + submit),
@@ -304,6 +386,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     pub(crate) fn execute_chrome_modal_action(&mut self, action: ModalAction) {
         match action {
             ModalAction::Close => {
+                if self.connection_gate_active { return; }
                 self.modal.close();
                 self.relayout();
             }
@@ -395,9 +478,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             }
             ModalAction::RunEditorCommand { command } => {
                 self.modal.queue_host_action(ModalHostAction::Generic {
-                    id: command,
+                    id: command.clone(),
                     value: String::new(),
                 });
+                if command.starts_with("connection.") {
+                    return;
+                }
                 self.modal.close();
                 self.relayout();
             }
@@ -738,6 +824,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             && !mods.contains(Modifiers::META);
         match &key.logical {
             LogicalKey::Named(NamedKey::Escape) => {
+                if !self.modal.is_dismissible() {
+                    return;
+                }
                 if let Some(action) = self.modal.escape_action() {
                     self.execute_chrome_modal_action(action);
                 } else {
@@ -838,6 +927,15 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// modal's Join ↔ Create slider, which is not chrome-hosted yet).
     fn handle_chrome_modal_click(&mut self, x: f32, y: f32) {
         let blocking = self.modal.is_blocking();
+        if self.modal.close_button_hit(x, y) {
+            if let Some(action) = self.modal.escape_action() {
+                self.execute_chrome_modal_action(action);
+            } else {
+                self.modal.close();
+                self.relayout();
+            }
+            return;
+        }
         if self.modal.click_markdown_input(x, y) {
             return;
         }
@@ -860,6 +958,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             }
             Ok(None) => {}
             Err(()) => {
+                if !self.modal.is_dismissible() {
+                    return;
+                }
                 if !blocking {
                     let _ = self.modal.close_if_non_blocking();
                     self.relayout();
@@ -916,6 +1017,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 true
             }
             UiEvent::Text(text) => {
+                if self.settings_page.capturing().is_some() {
+                    if let Some(ch) = text.chars().find(|ch| !ch.is_control()) {
+                        self.capture_settings_keybind(&KeyDescriptor {
+                            physical: crate::event::PhysicalKey(0),
+                            logical: LogicalKey::Character(ch.to_string().into()),
+                            state: KeyState::Pressed,
+                            modifiers: Modifiers::empty(),
+                            repeat: false,
+                        });
+                    }
+                    return true;
+                }
                 for ch in text.chars().filter(|ch| !ch.is_control()) {
                     self.settings_page.input_char(ch);
                 }
@@ -1138,4 +1251,30 @@ fn validate_child_name(input: &str) -> Result<String, String> {
         return Err("Enter a name first.".to_string());
     }
     Ok(trimmed.to_string())
+}
+
+#[cfg(test)]
+mod connection_gate_tests {
+    use super::*;
+
+    #[test]
+    fn connection_gate_is_host_dismissed_and_retry_keeps_canvas_gate_open() {
+        let mut chrome = Chrome::<()>::new();
+        chrome.show_connection_gate(
+            "The workspace is preserved while Neoism reconnects.".into(),
+            "Attempt 3 · Retrying in 2s".into(),
+        );
+        assert!(chrome.connection_gate_active());
+        assert!(chrome.modal.is_active());
+        assert!(!chrome.modal.is_dismissible());
+
+        chrome.execute_chrome_modal_action(ModalAction::RunEditorCommand {
+            command: "connection.retry".into(),
+        });
+        assert!(chrome.modal.is_active(), "retry must not dismiss the gate");
+
+        chrome.hide_connection_gate();
+        assert!(!chrome.connection_gate_active());
+        assert!(!chrome.modal.is_active());
+    }
 }

@@ -401,6 +401,17 @@ pub fn create_pty_with_spawn(
     columns: u16,
     rows: u16,
 ) -> Result<Pty, Error> {
+    create_pty_with_spawn_env(shell, args, working_directory, columns, rows, &[])
+}
+
+pub fn create_pty_with_spawn_env(
+    shell: &str,
+    args: Vec<String>,
+    working_directory: &Option<String>,
+    columns: u16,
+    rows: u16,
+    env: &[(String, String)],
+) -> Result<Pty, Error> {
     #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     let mut is_controling_terminal = true;
 
@@ -508,6 +519,7 @@ pub fn create_pty_with_spawn(
                 "--env=COLORTERM=truecolor".to_string(),
                 "--env=TERM=rio".to_string(),
             ];
+            with_args.extend(env.iter().map(|(key, value)| format!("--env={key}={value}")));
 
             if let Some(directory) = working_directory {
                 with_args.push(format!(
@@ -542,6 +554,7 @@ pub fn create_pty_with_spawn(
 
     builder.env("USER", user.user);
     builder.env("HOME", user.home);
+    builder.envs(env.iter().map(|(key, value)| (key, value)));
 
     unsafe {
         builder.pre_exec(move || {

@@ -80,6 +80,8 @@ pub struct NotesSidebar {
     scroll: CriticallyDampedSpring,
     cursor_spring: CriticallyDampedSpring,
     wheel_accumulator: f32,
+    /// Persistent sub-row direct-touch displacement; never animated on lift.
+    touch_scroll_offset: f32,
     last_scroll_frame: Instant,
     last_cursor_frame: Instant,
     last_panel_height_rows: usize,
@@ -228,6 +230,7 @@ impl Default for NotesSidebar {
             scroll: CriticallyDampedSpring::new(),
             cursor_spring: CriticallyDampedSpring::new(),
             wheel_accumulator: 0.0,
+            touch_scroll_offset: 0.0,
             last_scroll_frame: Instant::now(),
             last_cursor_frame: Instant::now(),
             last_panel_height_rows: 1,
@@ -261,6 +264,7 @@ impl NotesSidebar {
             self.scroll.reset();
             self.cursor_spring.reset();
             self.wheel_accumulator = 0.0;
+            self.touch_scroll_offset = 0.0;
         }
     }
 
@@ -881,6 +885,7 @@ impl NotesSidebar {
     /// the panel height, and feed the lag spring so the motion eases.
     /// Mirrors `file_tree::scroll_by`.
     pub fn scroll_by(&mut self, delta: i32, panel_height_rows: usize) {
+        self.touch_scroll_offset = 0.0;
         let old = self.scroll_top;
         let max_top = self.max_scroll_top_for(panel_height_rows);
         if delta < 0 {
@@ -901,6 +906,7 @@ impl NotesSidebar {
     /// event. Overscroll at the edges is discarded. Lifted from
     /// `file_tree::scroll_pixels`.
     pub fn scroll_pixels(&mut self, delta_pixels: f32, panel_height_rows: usize) {
+        self.touch_scroll_offset = 0.0;
         let row_h = self.row_height();
         if row_h <= 0.0 || delta_pixels == 0.0 {
             return;
@@ -921,6 +927,26 @@ impl NotesSidebar {
         {
             self.wheel_accumulator = 0.0;
         }
+    }
+
+    /// Direct vertical finger tracking with no spring or post-lift motion.
+    pub fn scroll_touch_pixels(
+        &mut self,
+        finger_delta: f32,
+        panel_height_rows: usize,
+    ) -> bool {
+        let row_h = self.row_height();
+        if row_h <= 0.0 || finger_delta == 0.0 {
+            return false;
+        }
+        self.scroll.reset();
+        let max_px = self.max_scroll_top_for(panel_height_rows) as f32 * row_h;
+        let before = self.scroll_top as f32 * row_h - self.touch_scroll_offset;
+        let next = (before - finger_delta).clamp(0.0, max_px);
+        self.scroll_top = (next / row_h).floor() as usize;
+        self.touch_scroll_offset = self.scroll_top as f32 * row_h - next;
+        self.wheel_accumulator = 0.0;
+        (next - before).abs() > f32::EPSILON
     }
 
     fn push_scroll_lag(&mut self, old_top: usize, new_top: usize) {
@@ -946,7 +972,7 @@ impl NotesSidebar {
     fn tick_scroll(&mut self) -> f32 {
         if self.scroll.position == 0.0 {
             self.last_scroll_frame = Instant::now();
-            return 0.0;
+            return self.touch_scroll_offset;
         }
         let now = Instant::now();
         let dt = now
@@ -955,7 +981,7 @@ impl NotesSidebar {
             .min(0.05);
         self.last_scroll_frame = now;
         self.scroll.update(dt, SCROLL_ANIMATION_LENGTH);
-        self.scroll.position
+        self.scroll.position + self.touch_scroll_offset
     }
 
     /// Step the cursor lag spring forward and return its offset.
@@ -2643,6 +2669,14 @@ mod tests {
         s.scroll_pixels(row_h / 2.0, 5);
         s.scroll_pixels(-row_h / 2.0, 5);
         assert_eq!(s.scroll_top, 0);
+    }
+
+    #[test]
+    fn touch_scroll_preserves_exact_subrow_position_without_animation() {
+        let mut s = sidebar_with_notes(40);
+        assert!(s.scroll_touch_pixels(-9.0, 5));
+        assert_eq!(s.tick_scroll(), -9.0);
+        assert_eq!(s.scroll.position, 0.0);
     }
 
     #[test]

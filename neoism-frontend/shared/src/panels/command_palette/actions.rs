@@ -6,6 +6,7 @@
 //! Palette actions and surface-aware visibility filtering.
 
 use crate::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+use crate::TerminalShellKind;
 
 /// Actions that can be triggered from the command palette.
 ///
@@ -188,6 +189,65 @@ pub struct PaletteDirectoryEntry {
     pub absolute_path: String,
     pub display: Option<String>,
     pub detail: Option<String>,
+}
+
+/// Terminal captured when `Change Directory` opens. Keeping this in shared
+/// palette state makes Enter/click deterministic even if another pane takes
+/// focus before the user commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalDirectoryTarget {
+    pub route_id: usize,
+    pub session_id: Option<String>,
+    pub cwd: String,
+    pub shell_kind: TerminalShellKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeTerminalDirectoryIntent {
+    pub target: TerminalDirectoryTarget,
+    pub destination: String,
+}
+
+/// Parse the operand portion of a manually typed `cd` command. This is a
+/// deliberately small shell-word parser: quoting groups spaces, backslash
+/// escapes the next character, and command/control syntax is never evaluated.
+pub fn parse_cd_operand(input: &str) -> Result<String, String> {
+    if input.chars().any(char::is_control) {
+        return Err("Directory contains a control character".into());
+    }
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut started = false;
+    for ch in input.trim().chars() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            started = true;
+            continue;
+        }
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some('"') if ch == '\\' => escaped = true,
+            Some(_) => word.push(ch),
+            None if ch == '\\' => { escaped = true; started = true; }
+            None if ch == '\'' || ch == '"' => { quote = Some(ch); started = true; }
+            None if ch.is_whitespace() => {
+                if started { words.push(std::mem::take(&mut word)); started = false; }
+            }
+            None => { word.push(ch); started = true; }
+        }
+    }
+    if escaped || quote.is_some() {
+        return Err("Unterminated quote or escape in directory".into());
+    }
+    if started { words.push(word); }
+    match words.len() {
+        0 => Ok(String::new()),
+        1 => Ok(words.remove(0)),
+        _ => Err("Usage: cd [directory] (quote paths containing spaces)".into()),
+    }
 }
 
 impl PaletteDirectoryEntry {
@@ -461,7 +521,7 @@ where
 }
 
 /// One installed Mash Up Pack, as the host lists it for the picker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PaletteMashupEntry {
     /// Stable id (directory name under `packs/`); `None` deactivates packs.
     pub id: Option<String>,
@@ -665,11 +725,10 @@ pub(crate) fn command_visible_for_surface(
                 PaletteSurface::Markdown | PaletteSurface::Epub | PaletteSurface::Notebook
             )
         }
-        // Line/symbol jumps only make sense when the focused pane
-        // hosts a code buffer.
-        PaletteAction::GoToLine | PaletteAction::GoToSymbol => {
-            surface == PaletteSurface::Editor
+        PaletteAction::GoToLine => {
+            matches!(surface, PaletteSurface::Editor | PaletteSurface::Markdown)
         }
+        PaletteAction::GoToSymbol => surface == PaletteSurface::Editor,
         PaletteAction::LspHover
         | PaletteAction::LspCodeAction
         | PaletteAction::LspFormat

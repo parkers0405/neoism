@@ -277,6 +277,14 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// Web uses this for the shared workspace Island so the top bar stays
     /// above both workspaces and buffer tabs while all lower chrome shifts down.
     top_workspace_strip_h: f32,
+    /// Host obstruction below editable chrome. Status remains pinned to the
+    /// physical viewport bottom (mobile keyboard exclusion).
+    bottom_content_inset: f32,
+    /// Host capability: only the shared web frontend enables the narrow Agent
+    /// side-panel takeover/button. A narrow desktop window keeps desktop UI.
+    mobile_web_agent_panel_enabled: bool,
+    mobile_agent_narrow: bool,
+    desktop_agent_panel_open_before_narrow: Option<bool>,
     /// Host-fed animation phase in seconds modulo the same 10k-second
     /// window desktop uses. Web supplies this from `performance.now()`
     /// because `SystemTime::now()` panics on wasm.
@@ -459,6 +467,12 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// Chrome-owned universal modal (About dialog today). Late-overlay
     /// painted, input-owning while active.
     pub modal: crate::widgets::modal::UniversalModal,
+    /// A non-dismissible connection-loss gate hosted by `modal`.
+    /// Kept separately so notifications can be repainted above its late pass.
+    connection_gate_active: bool,
+    /// Workspace-scoped, reusable file chooser. Unlike the generic modal it
+    /// dims but does not suppress the canvas beneath it.
+    pub file_browser: crate::panels::file_browser::FileBrowserModal,
     /// Settings actions queued for the host to persist/route —
     /// drained via [`Chrome::drain_settings_actions`].
     pending_settings_actions: Vec<crate::panels::settings_page::SettingsAction>,

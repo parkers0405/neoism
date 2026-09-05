@@ -20,9 +20,8 @@ pub(super) fn existing_project_path(
     } else {
         base.join(raw)
     };
-    let path = crate::windows_process::canonicalize_path(&candidate).with_context(|| {
-        format!("failed to resolve path {}", candidate.display())
-    })?;
+    let path = crate::windows_process::canonicalize_path(&candidate)
+        .with_context(|| format!("failed to resolve path {}", candidate.display()))?;
     if !path.starts_with(&base) {
         context.ensure_explicit_allowed(
             "external_directory",

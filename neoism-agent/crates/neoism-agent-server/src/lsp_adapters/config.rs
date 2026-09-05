@@ -243,11 +243,8 @@ fn configured_transport(
 ) -> Result<Option<ResolvedLspTransport>, String> {
     let transport_object = object.get("transport").and_then(Value::as_object);
     let transport_kind = object.get("transport").and_then(Value::as_str).or_else(|| {
-        transport_object.and_then(|transport| {
-            transport
-                .get("kind")
-                .and_then(Value::as_str)
-        })
+        transport_object
+            .and_then(|transport| transport.get("kind").and_then(Value::as_str))
     });
     let field = |name: &str| {
         transport_object

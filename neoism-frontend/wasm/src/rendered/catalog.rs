@@ -171,7 +171,6 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::MessageStart {
             role, message_id, ..
         } => {
-            pane.note_streaming(NeoismAgentStreamingState::Generating, None);
             let kind = match role {
                 Role::User => NeoismAgentMessageKind::User,
                 Role::System => NeoismAgentMessageKind::System,
@@ -193,7 +192,7 @@ pub(crate) fn apply_agent_event_to_pane(
                 author: None,
                 images: Vec::new(),
             };
-            pane.upsert_part_message(row);
+            pane.ingest_live_part_message(row);
         }
         AgentServerMessage::ContentDelta {
             message_id,
@@ -206,7 +205,7 @@ pub(crate) fn apply_agent_event_to_pane(
                 ContentKind::Reasoning => Some("reasoning".to_string()),
                 ContentKind::Tool { name } => Some(name),
             };
-            pane.apply_part_delta(None, Some(message_id), delta_kind, &text);
+            pane.ingest_live_part_delta(None, Some(message_id), delta_kind, &text);
         }
         AgentServerMessage::MessageEnd { .. } => {
             // SessionIdle is the authoritative idle signal; this
@@ -296,7 +295,7 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::HistoryChunk {
             session_id,
             messages,
-            ..
+            next_cursor,
         } => {
             pane.set_session_id(Some(session_id));
             let mapped: Vec<NeoismAgentMessage> =
@@ -310,7 +309,7 @@ pub(crate) fn apply_agent_event_to_pane(
             // are the web's recovery source. Live events keep overriding
             // these seeds (`preserve_specific_subagent_metadata`).
             let seeds = subagent_seeds_from_history(&mapped);
-            pane.apply_history(mapped);
+            pane.apply_history_page(mapped, next_cursor);
             for (task_id, status, title) in seeds {
                 pane.note_subagent_event(task_id, status, title, None, None, None);
             }
@@ -321,7 +320,7 @@ pub(crate) fn apply_agent_event_to_pane(
             // the daemon proxies through without a typed match.
         }
         AgentServerMessage::MessageUpdated { message, .. } => {
-            pane.upsert_part_message(map_history(message));
+            pane.ingest_live_part_message(map_history(message));
         }
         AgentServerMessage::PartRemoved { part_id, .. } => {
             pane.remove_part_message(&part_id);
@@ -329,21 +328,10 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::SessionIdle { .. } => {
             pane.note_session_idle();
         }
-        AgentServerMessage::RuntimeSnapshot { snapshot, .. } => {
-            if !pane.session_family_contains(&snapshot.root_session_id) {
-                return;
-            }
-            if let (Some(epoch), Some(revision), Some(tasks)) = (
-                snapshot.background_jobs_epoch.as_deref(),
-                snapshot.background_jobs_revision,
-                snapshot.running_background_tasks.as_ref(),
-            ) {
-                let tasks = tasks
-                    .iter()
-                    .map(|task| (task.job_id.clone(), task.started_at))
-                    .collect::<Vec<_>>();
-                pane.apply_running_background_tasks(epoch, revision, &tasks);
-            }
+        AgentServerMessage::RuntimeSnapshot {
+            session_id,
+            snapshot,
+        } => {
             let execution = snapshot.execution.map(|activity| {
                 let activity = neoism_ui::panels::agent_pane::state::ExecutionActivityState {
                         execution_id: activity.execution_id,
@@ -361,17 +349,42 @@ pub(crate) fn apply_agent_event_to_pane(
                     };
                 activity
             });
-            if snapshot.branches_authoritative {
-                pane.apply_runtime_lifecycle_snapshot(
+            let accepted = if snapshot.branches_authoritative {
+                pane.apply_authoritative_family_runtime_snapshot(
+                    &session_id,
                     execution,
                     snapshot.root_session_id.clone(),
                     snapshot.family_revision,
                     snapshot.branches.into_iter().map(|branch| {
-                        (branch.session_id, branch.status, branch.started_at)
+                        (
+                            branch.session_id,
+                            branch.parent_session_id,
+                            branch.status,
+                            branch.started_at,
+                        )
                     }),
-                );
-            } else if let Some(execution) = execution {
-                pane.apply_execution_activity(execution);
+                )
+            } else if pane.session_family_contains(&snapshot.root_session_id) {
+                if let Some(execution) = execution {
+                    pane.apply_execution_activity(execution);
+                }
+                true
+            } else {
+                false
+            };
+            if !accepted {
+                return;
+            }
+            if let (Some(epoch), Some(revision), Some(tasks)) = (
+                snapshot.background_jobs_epoch.as_deref(),
+                snapshot.background_jobs_revision,
+                snapshot.running_background_tasks.as_ref(),
+            ) {
+                let tasks = tasks
+                    .iter()
+                    .map(|task| (task.job_id.clone(), task.started_at))
+                    .collect::<Vec<_>>();
+                pane.apply_running_background_tasks(epoch, revision, &tasks);
             }
         }
         AgentServerMessage::BackgroundTasksUpdated {
@@ -387,7 +400,11 @@ pub(crate) fn apply_agent_event_to_pane(
             pane.apply_running_background_tasks(&epoch, revision, &tasks);
         }
         AgentServerMessage::StreamingState { state, label, .. } => {
-            pane.note_streaming(map_streaming(state), label);
+            if state == neoism_protocol::agent::StreamingState::WaitingSubagents {
+                pane.note_waiting_subagents_hint();
+            } else {
+                pane.note_streaming(map_streaming(state), label);
+            }
         }
         AgentServerMessage::Notice {
             title, body, level, ..
@@ -453,17 +470,33 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::ToolUseResult {
             tool_use_id,
             session_id: _,
+            tool,
             status,
             output,
             error,
-            ..
         } => {
+            let task_terminal = (tool == "task")
+                .then(|| output.as_deref())
+                .flatten()
+                .and_then(|output| {
+                    let task_id = neoism_ui::panels::agent_pane::stream_events::task_id_from_output(output)?;
+                    let status = neoism_ui::panels::agent_pane::stream_events::task_status_from_output(output)?;
+                    let status = match neoism_ui::panels::agent_pane::stream_events::normalize_subagent_status(status) {
+                        "completed" => Some(BranchStatus::Completed),
+                        "error" => Some(BranchStatus::Stopped),
+                        _ => None,
+                    }?;
+                    Some((task_id, status))
+                });
             pane.finalize_tool_card(
                 &tool_use_id,
                 tool_status_label(status),
                 output,
                 error,
             );
+            if let Some((task_id, status)) = task_terminal {
+                pane.note_subagent_event(task_id, status, None, None, None, None);
+            }
         }
 
         // -- Structured questions (the `question` tool) ----------
@@ -530,6 +563,7 @@ pub(crate) fn apply_agent_event_to_pane(
 
         // -- Provider / model / agent state ----------------------
         AgentServerMessage::ProviderState {
+            authoritative,
             provider_id,
             model,
             connection_id,
@@ -538,8 +572,24 @@ pub(crate) fn apply_agent_event_to_pane(
             context_limit,
             ..
         } => {
-            pane.set_connection_id(connection_id);
-            pane.apply_provider_state(provider_id, model, agent, thinking, context_limit);
+            if authoritative {
+                pane.apply_authoritative_provider_state(
+                    model,
+                    connection_id,
+                    agent,
+                    thinking,
+                    context_limit,
+                );
+            } else {
+                pane.set_connection_id(connection_id);
+                pane.apply_provider_state(
+                    provider_id,
+                    model,
+                    agent,
+                    thinking,
+                    context_limit,
+                );
+            }
         }
         AgentServerMessage::ProviderCatalog { providers } => {
             pane.set_model_context_limits(model_context_limits_from_catalog(&providers));
@@ -552,7 +602,7 @@ pub(crate) fn apply_agent_event_to_pane(
             input_help_visible,
             sidebar_visible,
         } => {
-            pane.apply_provider_state(None, model, agent, thinking, None);
+            pane.apply_config_defaults_if_unset(model, agent, thinking);
             if let Some(visible) = input_help_visible {
                 pane.set_input_help_visible(visible);
             }
@@ -615,12 +665,11 @@ pub(crate) fn apply_agent_event_to_pane(
                 neoism_protocol::agent::SubagentStatus::Completed
                     | neoism_protocol::agent::SubagentStatus::Failed
             ) && !pane.note_subagent_terminal_revision(
-                    &session_id,
-                    root_session_id.as_deref(),
-                    execution_id.as_deref(),
-                    family_revision,
-                )
-            {
+                &session_id,
+                root_session_id.as_deref(),
+                execution_id.as_deref(),
+                family_revision,
+            ) {
                 return;
             }
             pane.note_subagent_event(
@@ -631,6 +680,14 @@ pub(crate) fn apply_agent_event_to_pane(
                 current_tool,
                 started_at,
             );
+        }
+        AgentServerMessage::SubagentMetadata {
+            session_id,
+            title,
+            agent,
+            ..
+        } => {
+            pane.note_subagent_metadata(&session_id, title, agent);
         }
         AgentServerMessage::Compaction {
             phase,
@@ -645,7 +702,10 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::ConnectProviderCatalog { providers, auth } => {
             pane.apply_connect_catalog(providers, auth);
         }
-        AgentServerMessage::ConnectConnections { provider, connections } => {
+        AgentServerMessage::ConnectConnections {
+            provider,
+            connections,
+        } => {
             pane.apply_provider_connections(provider, connections);
         }
         AgentServerMessage::ConnectOauthUrl {
@@ -656,7 +716,10 @@ pub(crate) fn apply_agent_event_to_pane(
         } => {
             pane.apply_connect_oauth_url(url, auto, instructions, attempt_id);
         }
-        AgentServerMessage::ConnectFinished { provider, connection_id } => {
+        AgentServerMessage::ConnectFinished {
+            provider,
+            connection_id,
+        } => {
             pane.note_connect_finished_with_connection(provider, connection_id);
         }
         AgentServerMessage::ConnectFailed { provider, error } => {
@@ -871,23 +934,9 @@ pub(crate) fn apply_agent_event_to_cache(
             true
         }
         AgentServerMessage::RuntimeSnapshot {
-            session_id: _,
+            session_id,
             snapshot,
         } => {
-            if !pane.session_family_contains(&snapshot.root_session_id) {
-                return true;
-            }
-            if let (Some(epoch), Some(revision), Some(tasks)) = (
-                snapshot.background_jobs_epoch.as_deref(),
-                snapshot.background_jobs_revision,
-                snapshot.running_background_tasks.as_ref(),
-            ) {
-                let tasks = tasks
-                    .iter()
-                    .map(|task| (task.job_id.clone(), task.started_at))
-                    .collect::<Vec<_>>();
-                pane.apply_running_background_tasks(epoch, revision, &tasks);
-            }
             let execution = snapshot.execution.map(|activity| {
                 let activity = neoism_ui::panels::agent_pane::state::ExecutionActivityState {
                         execution_id: activity.execution_id,
@@ -905,17 +954,42 @@ pub(crate) fn apply_agent_event_to_cache(
                     };
                 activity
             });
-            if snapshot.branches_authoritative {
-                pane.apply_runtime_lifecycle_snapshot(
+            let accepted = if snapshot.branches_authoritative {
+                pane.apply_authoritative_family_runtime_snapshot(
+                    &session_id,
                     execution,
                     snapshot.root_session_id.clone(),
                     snapshot.family_revision,
                     snapshot.branches.into_iter().map(|branch| {
-                        (branch.session_id, branch.status, branch.started_at)
+                        (
+                            branch.session_id,
+                            branch.parent_session_id,
+                            branch.status,
+                            branch.started_at,
+                        )
                     }),
-                );
-            } else if let Some(execution) = execution {
-                pane.apply_execution_activity(execution);
+                )
+            } else if pane.session_family_contains(&snapshot.root_session_id) {
+                if let Some(execution) = execution {
+                    pane.apply_execution_activity(execution);
+                }
+                true
+            } else {
+                false
+            };
+            if !accepted {
+                return true;
+            }
+            if let (Some(epoch), Some(revision), Some(tasks)) = (
+                snapshot.background_jobs_epoch.as_deref(),
+                snapshot.background_jobs_revision,
+                snapshot.running_background_tasks.as_ref(),
+            ) {
+                let tasks = tasks
+                    .iter()
+                    .map(|task| (task.job_id.clone(), task.started_at))
+                    .collect::<Vec<_>>();
+                pane.apply_running_background_tasks(epoch, revision, &tasks);
             }
             true
         }
@@ -937,8 +1011,13 @@ pub(crate) fn apply_agent_event_to_cache(
             state,
             label,
         } => {
-            pane.cache_note_streaming(&session_id, map_streaming(state), label);
-            pane.note_family_session_streaming(&session_id, true);
+            if state == neoism_protocol::agent::StreamingState::WaitingSubagents {
+                pane.cache_note_waiting_subagents_hint(&session_id);
+            } else {
+                let active = state != neoism_protocol::agent::StreamingState::Idle;
+                pane.cache_note_streaming(&session_id, map_streaming(state), label);
+                pane.note_family_session_streaming(&session_id, active);
+            }
             true
         }
         AgentServerMessage::QueueUpdate {
@@ -952,6 +1031,26 @@ pub(crate) fn apply_agent_event_to_cache(
         }
         AgentServerMessage::UsageUpdate { session_id, usage } => {
             pane.cache_apply_usage(&session_id, map_usage(usage));
+            true
+        }
+        AgentServerMessage::ProviderState {
+            session_id,
+            authoritative: true,
+            model,
+            connection_id,
+            agent,
+            thinking,
+            context_limit,
+            ..
+        } => {
+            pane.cache_apply_authoritative_provider_state(
+                &session_id,
+                model,
+                connection_id,
+                agent,
+                thinking,
+                context_limit,
+            );
             true
         }
         AgentServerMessage::Notice {
@@ -1037,6 +1136,21 @@ pub(crate) fn apply_agent_event_to_cache(
                 false
             }
         }
+        AgentServerMessage::SubagentMetadata {
+            session_id,
+            title,
+            agent,
+            parent_session_id,
+        } => {
+            let in_family = pane.session_family_contains(&session_id)
+                || parent_session_id
+                    .as_deref()
+                    .is_some_and(|parent| pane.session_family_contains(parent));
+            if in_family {
+                pane.note_subagent_metadata(&session_id, title, agent);
+            }
+            in_family
+        }
         // Everything else (tool gating, questions, edits, catalogs,
         // thread lifecycle) stays gated out exactly as before — those
         // either target the live view or are handled by the pre-gate
@@ -1097,6 +1211,7 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::EditRejected { session_id, .. }
         | AgentServerMessage::TodoUpdate { session_id, .. }
         | AgentServerMessage::SubagentUpdate { session_id, .. }
+        | AgentServerMessage::SubagentMetadata { session_id, .. }
         | AgentServerMessage::Compaction { session_id, .. }
         | AgentServerMessage::ProviderState { session_id, .. }
         | AgentServerMessage::QueueUpdate { session_id, .. }
@@ -1344,4 +1459,174 @@ pub(crate) fn subagent_seeds_from_history(
         }
     }
     seeds
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    use neoism_protocol::agent::{
+        AgentServerMessage, HistoryMessage, HistoryMessageKind, Role, ToolStatus,
+    };
+    use neoism_ui::panels::agent_pane::state::side_panel::BranchStatus;
+    use neoism_ui::panels::agent_pane::state::{
+        NeoismAgentPane, NeoismAgentStreamingState,
+    };
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    fn part(
+        id: &str,
+        kind: HistoryMessageKind,
+        title: &str,
+        tool: &str,
+    ) -> HistoryMessage {
+        HistoryMessage {
+            id: id.to_string(),
+            role: Role::Assistant,
+            kind,
+            author: None,
+            title: title.to_string(),
+            text: "chunk".to_string(),
+            status: "running".to_string(),
+            tool: tool.to_string(),
+            lang: String::new(),
+            line_offset: None,
+            detail: String::new(),
+            todos: Vec::new(),
+            usage: None,
+            created_at: 0,
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn ordered_daemon_messages_match_desktop_activity_semantics() {
+        let mut pane = NeoismAgentPane::default();
+        pane.set_session_id(Some("root".to_string()));
+        apply_agent_event_to_pane(
+            &mut pane,
+            AgentServerMessage::QueueUpdate {
+                session_id: "root".to_string(),
+                count: 1,
+                preview: Some("queued".to_string()),
+                started_at: Some(1),
+            },
+        );
+        assert_eq!(
+            pane.streaming_state(),
+            NeoismAgentStreamingState::Generating
+        );
+
+        for (index, (kind, expected, title, tool)) in [
+            (
+                HistoryMessageKind::Assistant,
+                NeoismAgentStreamingState::Generating,
+                "",
+                "",
+            ),
+            (
+                HistoryMessageKind::Reasoning,
+                NeoismAgentStreamingState::Thinking,
+                "",
+                "",
+            ),
+            (
+                HistoryMessageKind::Tool,
+                NeoismAgentStreamingState::Working,
+                "Search",
+                "grep",
+            ),
+            (
+                HistoryMessageKind::Assistant,
+                NeoismAgentStreamingState::Generating,
+                "",
+                "",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            apply_agent_event_to_pane(
+                &mut pane,
+                AgentServerMessage::MessageUpdated {
+                    session_id: "root".to_string(),
+                    message: part(&format!("part-{index}"), kind, title, tool),
+                },
+            );
+            assert_eq!(pane.streaming_state(), expected);
+            apply_agent_event_to_pane(
+                &mut pane,
+                AgentServerMessage::QueueUpdate {
+                    session_id: "root".to_string(),
+                    count: 1,
+                    preview: Some("queued".to_string()),
+                    started_at: Some(1),
+                },
+            );
+            assert_eq!(pane.streaming_state(), expected);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn terminal_task_result_clears_last_child_without_execution_event() {
+        let mut pane = NeoismAgentPane::default();
+        pane.set_session_id(Some("root".to_string()));
+        pane.note_subagent_event(
+            "child".to_string(),
+            BranchStatus::Active,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(pane.streaming_label(), "Sub-agents working");
+
+        apply_agent_event_to_pane(
+            &mut pane,
+            AgentServerMessage::ToolUseResult {
+                session_id: "root".to_string(),
+                tool_use_id: "task-tool".to_string(),
+                tool: "task".to_string(),
+                status: ToolStatus::Completed,
+                output: Some("task_id: child\nstatus: completed\ndone".to_string()),
+                error: None,
+            },
+        );
+
+        assert_eq!(pane.streaming_label(), "");
+        assert!(!pane.has_status_activity());
+    }
+
+    #[wasm_bindgen_test]
+    fn late_child_metadata_does_not_recreate_finished_sidebar_activity() {
+        let mut pane = NeoismAgentPane::default();
+        pane.set_session_id(Some("root".to_string()));
+        pane.note_subagent_event(
+            "child".to_string(),
+            BranchStatus::Active,
+            Some("Original".to_string()),
+            Some("explore".to_string()),
+            None,
+            None,
+        );
+        pane.note_subagent_event(
+            "child".to_string(),
+            BranchStatus::Completed,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        apply_agent_event_to_pane(
+            &mut pane,
+            AgentServerMessage::SubagentMetadata {
+                session_id: "child".to_string(),
+                title: Some("Late rename".to_string()),
+                agent: Some("build".to_string()),
+                parent_session_id: Some("root".to_string()),
+            },
+        );
+
+        assert_eq!(pane.streaming_label(), "");
+        assert!(!pane.has_status_activity());
+    }
 }

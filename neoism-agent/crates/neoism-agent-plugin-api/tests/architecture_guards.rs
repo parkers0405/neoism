@@ -108,14 +108,18 @@ fn production_source_inventory_is_live_and_unique() {
 #[test]
 fn trusted_native_install_has_no_server_timeout_or_detached_task_wrapper() {
     let server = fs::read_to_string(
-        workspace_root().join("neoism-agent/crates/neoism-agent-server/src/plugins/mod.rs"),
-    ).expect("read server plugin host assembly");
+        workspace_root()
+            .join("neoism-agent/crates/neoism-agent-server/src/plugins/mod.rs"),
+    )
+    .expect("read server plugin host assembly");
     for forbidden in ["install_with_timeout", "catch_unwind", "tokio::spawn"] {
         assert!(!server.contains(forbidden), "trusted native install reacquired forbidden cancellation/detachment path `{forbidden}`");
     }
     let contract = fs::read_to_string(
-        workspace_root().join("neoism-agent/crates/neoism-agent-plugin-api/src/plugin.rs"),
-    ).expect("read native plugin contract");
+        workspace_root()
+            .join("neoism-agent/crates/neoism-agent-plugin-api/src/plugin.rs"),
+    )
+    .expect("read native plugin contract");
     assert!(contract.contains("Trusted in-process native extension point"));
     assert!(contract.contains("forced cancellation"));
 }
@@ -123,15 +127,33 @@ fn trusted_native_install_has_no_server_timeout_or_detached_task_wrapper() {
 #[test]
 fn server_resource_accessors_are_generation_leased() {
     let runtime = fs::read_to_string(
-        workspace_root().join("neoism-agent/crates/neoism-agent-server/src/workspace_runtime.rs"),
-    ).expect("read workspace runtime");
-    assert!(!runtime.contains("pub(crate) fn plugin_generation("), "unleased generation Arc accessor returned");
-    let runtime_accessors = &runtime[runtime.find("impl WorkspaceRuntime {").expect("workspace runtime implementation")..];
-    for accessor in ["mcp_if_allocated", "lsp_if_allocated", "pty_if_allocated", "background_if_allocated", "subagents_if_allocated"] {
+        workspace_root()
+            .join("neoism-agent/crates/neoism-agent-server/src/workspace_runtime.rs"),
+    )
+    .expect("read workspace runtime");
+    assert!(
+        !runtime.contains("pub(crate) fn plugin_generation("),
+        "unleased generation Arc accessor returned"
+    );
+    let runtime_accessors = &runtime[runtime
+        .find("impl WorkspaceRuntime {")
+        .expect("workspace runtime implementation")..];
+    for accessor in [
+        "mcp_if_allocated",
+        "lsp_if_allocated",
+        "pty_if_allocated",
+        "background_if_allocated",
+        "subagents_if_allocated",
+    ] {
         let signature = format!("fn {accessor}");
-        let start = runtime_accessors.find(&signature).unwrap_or_else(|| panic!("missing accessor `{accessor}`"));
+        let start = runtime_accessors
+            .find(&signature)
+            .unwrap_or_else(|| panic!("missing accessor `{accessor}`"));
         let body = &runtime_accessors[start..runtime_accessors.len().min(start + 500)];
-        assert!(body.contains("LeasedResource"), "accessor `{accessor}` does not retain a generation lease");
+        assert!(
+            body.contains("LeasedResource"),
+            "accessor `{accessor}` does not retain a generation lease"
+        );
     }
 }
 
@@ -142,9 +164,15 @@ fn plugin_api_stays_transport_storage_and_product_independent() {
     )
     .expect("read plugin-api manifest");
     let dependencies = manifest_dependencies(&manifest);
-    let allowed = ["futures-core", "neoism-agent-core", "serde", "serde_json", "thiserror"]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let allowed = [
+        "futures-core",
+        "neoism-agent-core",
+        "serde",
+        "serde_json",
+        "thiserror",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
     let forbidden = dependencies
         .difference(&allowed)
         .copied()
@@ -317,7 +345,10 @@ fn user_visible_kernel_tools_are_forbidden() {
         fs::read_to_string(workspace_root().join(format!("{SERVER}tool_registry.rs")))
             .expect("read tool registry");
     let ids = ids_after_marker(&source, "ToolOwner::Kernel, owner,");
-    assert!(ids.is_empty(), "user-visible kernel tools are forbidden: {ids:?}");
+    assert!(
+        ids.is_empty(),
+        "user-visible kernel tools are forbidden: {ids:?}"
+    );
 }
 
 #[test]
@@ -332,11 +363,7 @@ fn hardcoded_plugin_route_switches_are_allowlisted_and_decreasing() {
             actual.insert(path, switches.len());
         }
     }
-    assert_ratchet(
-        "hardcoded plugin route switches",
-        &actual,
-        &[],
-    );
+    assert_ratchet("hardcoded plugin route switches", &actual, &[]);
 }
 
 fn package_name(manifest: &str) -> Option<&str> {
@@ -383,9 +410,7 @@ fn manifest_dependencies(manifest: &str) -> BTreeSet<&str> {
 
 fn inline_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
     line.match_indices(field).find_map(|(index, _)| {
-        let value = line[index + field.len()..]
-            .trim_start()
-            .strip_prefix('=')?;
+        let value = line[index + field.len()..].trim_start().strip_prefix('=')?;
         value.split_once('"')?.1.split_once('"').map(|item| item.0)
     })
 }

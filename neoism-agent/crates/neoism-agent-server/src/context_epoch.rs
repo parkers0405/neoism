@@ -109,7 +109,10 @@ async fn observe(state: &AppState, info: &SessionInfo) -> ContextSnapshot {
             neoism_agent_builtins::plugin::memory_tools::ID,
         );
     if memory_enabled {
-        for fragment in state.services().context_fragments(std::path::Path::new(&info.directory)) {
+        for fragment in state
+            .services()
+            .context_fragments(std::path::Path::new(&info.directory))
+        {
             sources.insert(format!("service:{}", fragment.id), json!(fragment.content));
         }
     }

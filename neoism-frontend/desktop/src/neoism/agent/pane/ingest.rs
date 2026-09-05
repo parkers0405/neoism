@@ -252,8 +252,8 @@ impl NeoismAgentPane {
                         self.queued_prompt_preview = decision.preview;
                         changed = true;
                     }
-                    if decision.should_enter_thinking {
-                        self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+                    if decision.should_enter_generating {
+                        self.note_streaming(NeoismAgentStreamingState::Generating, None);
                         changed = true;
                     }
                     if let Some(started_at) = decision.started_at {
@@ -375,15 +375,7 @@ impl NeoismAgentPane {
                     // Metadata is not a lifecycle edge. Update a row that is
                     // already tracked, but never recreate a pruned completed
                     // child or alter the aggregate working state.
-                    let tracked = self
-                        .side_panel
-                        .subagents()
-                        .iter()
-                        .any(|entry| entry.id == session_id);
-                    if tracked {
-                        self.upsert_live_subagent_entry(&session_id, title, agent);
-                        changed = true;
-                    }
+                    changed |= self.note_subagent_metadata(&session_id, title, agent);
                 }
                 AgentSessionUpdate::SubagentActivity {
                     session_id,
@@ -468,7 +460,8 @@ impl NeoismAgentPane {
                         .into_iter()
                         .map(|(job_id, _, started_at)| (job_id, started_at))
                         .collect::<Vec<_>>();
-                    changed |= self.apply_running_background_tasks(&epoch, revision, &tasks);
+                    changed |=
+                        self.apply_running_background_tasks(&epoch, revision, &tasks);
                 }
                 AgentSessionUpdate::SubagentCompleted {
                     task_id,
@@ -546,6 +539,7 @@ impl NeoismAgentPane {
                 AgentSessionUpdate::SessionMetadataUpdated {
                     agent,
                     model,
+                    connection_id,
                     thinking,
                 } => {
                     if !stream_is_active {
@@ -559,6 +553,9 @@ impl NeoismAgentPane {
                         if let Some(model) = model {
                             cached.state.model = Some(model);
                         }
+                        if let Some(connection_id) = connection_id {
+                            cached.state.connection_id = connection_id;
+                        }
                         if let Some(thinking) = thinking {
                             cached.state.thinking = thinking;
                         }
@@ -571,13 +568,17 @@ impl NeoismAgentPane {
                         self.model = model;
                         self.execute_refresh_model_context_limit_command();
                     }
+                    if let Some(connection_id) = connection_id {
+                        self.connection_id = connection_id;
+                    }
                     if let Some(thinking) = thinking {
                         self.thinking = thinking;
                     }
                     changed = true;
                 }
                 AgentSessionUpdate::ExecutionUpdated(snapshot) => {
-                    if let Some(activity) = super::super::api::execution_activity_from_json(&snapshot)
+                    if let Some(activity) =
+                        super::super::api::execution_activity_from_json(&snapshot)
                     {
                         if !stream_is_active
                             && !self.session_family_contains(&activity.root_session_id)
@@ -609,7 +610,8 @@ impl NeoismAgentPane {
                     if self.picker.as_ref().is_some_and(|picker| {
                         matches!(
                             picker.kind,
-                            NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
+                            NeoismAgentPickerKind::Mcp
+                                | NeoismAgentPickerKind::McpActions
                         )
                     }) {
                         self.show_mcp();
@@ -1521,8 +1523,9 @@ impl NeoismAgentPane {
                         ),
                         Err(error) => {
                             tracing::warn!(%error, "failed to refresh agent sessions");
-                            self.side_panel
-                                .settle_session_page_error("couldn't load sessions; retrying");
+                            self.side_panel.settle_session_page_error(
+                                "couldn't load sessions; retrying",
+                            );
                         }
                     }
                     changed = true;
@@ -1733,8 +1736,8 @@ impl NeoismAgentPane {
                             runtime.background_jobs_revision,
                             runtime.running_background_tasks.as_deref(),
                         ) {
-                            changed |=
-                                self.apply_running_background_tasks(epoch, revision, tasks);
+                            changed |= self
+                                .apply_running_background_tasks(epoch, revision, tasks);
                         }
                         changed |= self.apply_runtime_lifecycle_snapshot(
                             runtime.execution,
@@ -1831,7 +1834,9 @@ impl NeoismAgentPane {
                     provider_name,
                     connection_id,
                 }) => {
-                    if connection_id.is_some() { self.connection_id = connection_id; }
+                    if connection_id.is_some() {
+                        self.connection_id = connection_id;
+                    }
                     self.system_message(
                         "Connected",
                         format!(
@@ -2960,13 +2965,16 @@ fn normalize_grouped_assistant_reasoning_order(
         .iter()
         .filter(|message| {
             message.kind == NeoismAgentMessageKind::Reasoning
-                && parent_ids.get(&message.id).is_some_and(|id| id == parent_id)
+                && parent_ids
+                    .get(&message.id)
+                    .is_some_and(|id| id == parent_id)
         })
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
     let mut changed = false;
     for reasoning_id in reasoning_ids {
-        while move_grouped_assistant_after_reasoning(messages, parent_ids, &reasoning_id) {
+        while move_grouped_assistant_after_reasoning(messages, parent_ids, &reasoning_id)
+        {
             changed = true;
         }
     }

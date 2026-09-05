@@ -1,6 +1,43 @@
 use super::*;
 
 impl NeoismAgentPane {
+    /// Atomically ingest one live part and derive activity from that same
+    /// classified part. Hosts should use this instead of pairing an upsert
+    /// with an independently-maintained status mapping.
+    pub fn ingest_live_part_message(&mut self, message: NeoismAgentMessage) {
+        let kind = message.kind;
+        let title = message.title.clone();
+        self.upsert_part_message(message);
+        self.note_streaming_from_part(kind, &title);
+    }
+
+    /// Delta twin of [`Self::ingest_live_part_message`]. The wire delta kind
+    /// is the desktop classifier vocabulary: text, reasoning/thinking, or a
+    /// concrete tool name.
+    pub fn ingest_live_part_delta(
+        &mut self,
+        message_id: Option<String>,
+        part_id: Option<String>,
+        kind: Option<String>,
+        delta: &str,
+    ) {
+        self.apply_part_delta(message_id, part_id, kind.clone(), delta);
+        match kind.as_deref() {
+            Some("reasoning" | "thinking") => {
+                self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+            }
+            Some("text") | None => {
+                self.note_streaming(NeoismAgentStreamingState::Generating, None);
+            }
+            Some(tool) => {
+                self.note_streaming(
+                    NeoismAgentStreamingState::Working,
+                    (!tool.is_empty()).then(|| tool.to_string()),
+                );
+            }
+        }
+    }
+
     /// The compact composer form for a prompt the server echoes back
     /// expanded. Canonicalizing every inbound user text through this
     /// keeps ONE transcript bubble instead of a token + expanded

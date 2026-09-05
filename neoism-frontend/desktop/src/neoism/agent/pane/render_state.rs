@@ -268,7 +268,7 @@ impl NeoismAgentPane {
             Some("build") => "Build",
             Some("plan") => "Plan",
             Some(agent) => agent,
-            None => "server default",
+            None => "Build",
         }
     }
 
@@ -332,9 +332,11 @@ impl NeoismAgentPane {
                     }
                     match fetch_config_defaults(&server, directory.as_deref()) {
                         Ok(defaults) => {
-                            let _ = tx.send(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(
-                                defaults,
-                            ));
+                            let _ = tx.send(
+                                NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(
+                                    defaults,
+                                ),
+                            );
                             return;
                         }
                         Err(error) => last_error = Some(error),
@@ -682,6 +684,19 @@ impl NeoismAgentPane {
 
     pub fn usage_chip_contains(&self, x: f32, y: f32) -> bool {
         self.usage_chip_rect
+            .is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
+    }
+
+    pub fn clear_composer_control_rect(&mut self) {
+        self.composer_control_rect = None;
+    }
+
+    pub fn register_composer_control_rect(&mut self, rect: [f32; 4]) {
+        self.composer_control_rect = Some(rect);
+    }
+
+    pub fn composer_control_contains(&self, x: f32, y: f32) -> bool {
+        self.composer_control_rect
             .is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
     }
 

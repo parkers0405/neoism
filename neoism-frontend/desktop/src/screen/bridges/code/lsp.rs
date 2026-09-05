@@ -643,18 +643,14 @@ fn ensure_code_git_worker(proxy: EventProxy) -> &'static CodeGitWorker {
                 for (_, job) in batch {
                     // The 512KB policy scan runs once per scheduled revision,
                     // here rather than in paint or the UI scheduling hook.
-                    let small_enough = job
-                        .lines
-                        .iter()
-                        .map(|line| line.len() + 1)
-                        .sum::<usize>()
-                        <= 512 * 1024;
+                    let small_enough =
+                        job.lines.iter().map(|line| line.len() + 1).sum::<usize>()
+                            <= 512 * 1024;
                     let marks = if small_enough {
                         git_baseline(&job.key.file)
                             .map(|baseline| {
                                 neoism_ui::editor::code::gitdiff::compute_git_marks(
-                                    &baseline,
-                                    &job.lines,
+                                    &baseline, &job.lines,
                                 )
                             })
                             .unwrap_or_default()
@@ -699,7 +695,8 @@ fn code_git_result_matches(
     code: &neoism_ui::editor::code::CodePane,
     result: &CodeGitResult,
 ) -> bool {
-    canonical_key(&code.path) == result.key.file && code.buffer.revision == result.revision
+    canonical_key(&code.path) == result.key.file
+        && code.buffer.revision == result.revision
 }
 
 pub(crate) fn drain_code_git_results() -> Vec<CodeGitResult> {
@@ -1807,16 +1804,10 @@ impl Screen<'_> {
                                 diagnostic.end_line,
                                 diagnostic.end_byte,
                             );
-                            let start = binding.sticky_anchor_at(
-                                start_line,
-                                start_byte,
-                                true,
-                            )?;
-                            let end = binding.sticky_anchor_at(
-                                end_line,
-                                end_byte,
-                                false,
-                            )?;
+                            let start =
+                                binding.sticky_anchor_at(start_line, start_byte, true)?;
+                            let end =
+                                binding.sticky_anchor_at(end_line, end_byte, false)?;
                             Some(CodeDiagAnchor {
                                 start,
                                 end,
@@ -1867,7 +1858,9 @@ impl Screen<'_> {
                     && code.diagnostics_resolved_revision != Some(revision)
                 {
                     let buffer_id =
-                        crate::screen::markdown_crdt::buffer_id_for_markdown_path(&code.path);
+                        crate::screen::markdown_crdt::buffer_id_for_markdown_path(
+                            &code.path,
+                        );
                     if let Some(binding) = bindings
                         .binding_for(&buffer_id)
                         .filter(|binding| binding.is_seeded())
@@ -3822,10 +3815,8 @@ mod diagnostics_tests {
 
     #[test]
     fn projection_uses_utf8_bytes_and_clamps_boundaries() {
-        let projected = project_diagnostic_ranges(
-            &["aéz".to_string()],
-            &[diagnostic(0, 2, 0, 3)],
-        );
+        let projected =
+            project_diagnostic_ranges(&["aéz".to_string()], &[diagnostic(0, 2, 0, 3)]);
         let span = &projected[&0][0];
         assert_eq!((span.start, span.end), (1, 3));
         assert!("aéz".is_char_boundary(span.start));
@@ -3846,10 +3837,8 @@ mod diagnostics_tests {
 
     #[test]
     fn projection_makes_zero_width_range_visible() {
-        let projected = project_diagnostic_ranges(
-            &["aéz".to_string()],
-            &[diagnostic(0, 1, 0, 1)],
-        );
+        let projected =
+            project_diagnostic_ranges(&["aéz".to_string()], &[diagnostic(0, 1, 0, 1)]);
         assert_eq!((projected[&0][0].start, projected[&0][0].end), (1, 3));
     }
 

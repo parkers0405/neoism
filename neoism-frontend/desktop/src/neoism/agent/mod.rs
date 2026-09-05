@@ -1,10 +1,10 @@
 mod api;
 mod commands;
-pub(crate) mod transport;
 mod pane;
 pub(crate) mod picker;
 pub(crate) mod prompt_history;
 pub(crate) mod side_panel;
+pub(crate) mod transport;
 mod updates;
 
 pub(crate) mod perf {
@@ -34,10 +34,10 @@ pub(crate) use api::{
     register_agent_server_credential,
 };
 pub(crate) use pane::TimelineMeasureKey;
-pub(crate) use updates::AgentEventWake;
 pub use pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentNoticeLevel,
     NeoismAgentOutputKind, NeoismAgentPane, NeoismAgentPendingPermission,
     NeoismAgentPermissionChoice, NeoismAgentStreamingState, NeoismAgentTodo,
     NeoismAgentUiEvent, NeoismWordmarkState,
 };
+pub(crate) use updates::AgentEventWake;

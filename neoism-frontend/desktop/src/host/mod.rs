@@ -233,6 +233,7 @@ pub struct Renderer {
     pub minimap: minimap::Minimap,
     pub yank_flash: yank_flash::YankFlash,
     pub modal: modal::UniversalModal,
+    pub file_browser: neoism_ui::panels::file_browser::FileBrowserModal,
     pub settings: neoism_ui::panels::NeoismSettingsPane,
     pub git_diff_panel: git_diff_panel::GitDiffPanel,
     pub notifications: notifications::Notifications,
@@ -445,6 +446,7 @@ impl Renderer {
             minimap: minimap::Minimap::new(),
             yank_flash: yank_flash::YankFlash::new(),
             modal: modal::UniversalModal::new(),
+            file_browser: neoism_ui::panels::file_browser::FileBrowserModal::new(),
             settings: neoism_ui::panels::NeoismSettingsPane::new(),
             git_diff_panel: {
                 let mut p = git_diff_panel::GitDiffPanel::new();

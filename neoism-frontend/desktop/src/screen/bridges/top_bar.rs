@@ -25,6 +25,8 @@ impl Screen<'_> {
                 self.toggle_file_tree();
                 true
             }
+            // Mobile shared-web only; desktop never exposes this button.
+            Some(TopBarAction::ToggleAgentSidePanel) => false,
             Some(TopBarAction::OpenAgent) => {
                 self.open_neoism_agent_tab();
                 self.mark_dirty();

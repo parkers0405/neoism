@@ -10,6 +10,4 @@ mod types;
 pub(super) use registry::adapter_by_id;
 pub(super) use registry::LANGUAGE_SPECS;
 use types::{CatalogPackageSpec, LanguageRoute};
-pub(super) use types::{
-    LanguageSpec, LspTransportSpec, WorkspaceRootStrategySpec,
-};
+pub(super) use types::{LanguageSpec, LspTransportSpec, WorkspaceRootStrategySpec};

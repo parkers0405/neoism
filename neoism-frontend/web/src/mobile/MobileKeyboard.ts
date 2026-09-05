@@ -1,4 +1,9 @@
 import { wasmInputPolicy } from "../terminal/createTerminal";
+import {
+  keyboardViewportObservation,
+  nextTouchKeyboardFocusPhase,
+  type TouchKeyboardFocusPhase,
+} from "./mobileEditingPolicy";
 
 export type MobileKeyboardContext =
   | "code"
@@ -72,6 +77,7 @@ export class MobileKeyboard {
   private toolbarVisible = false;
   private readonly beforeInputHandler: (event: InputEvent) => void;
   private readonly keydownHandler: (event: KeyboardEvent) => void;
+  private readonly compositionEndHandler: (event: CompositionEvent) => void;
   private readonly focusHandler: () => void;
   private readonly viewportHandler: () => void;
   private readonly windowResizeHandler: () => void;
@@ -87,6 +93,10 @@ export class MobileKeyboard {
    *  Used to suppress nuisance toolbar pop-ins on hover/click sequences
    *  that aren't actually focused. */
   private captureFocused = false;
+  /** Agent-composer touchstart focus whose gesture has not resolved as tap vs
+   * pan. Editors and overlay fields defer focus entirely until touchend. */
+  private touchFocusPhase: TouchKeyboardFocusPhase = "idle";
+  private suppressOpeningInsetsUntilClosed = false;
 
   constructor(private readonly options: MobileKeyboardOptions) {
     this.capture = document.createElement("div");
@@ -98,12 +108,14 @@ export class MobileKeyboard {
 
     this.beforeInputHandler = (event) => this.handleBeforeInput(event);
     this.keydownHandler = (event) => this.handleKeyDown(event);
+    this.compositionEndHandler = (event) => this.handleCompositionEnd(event);
     this.focusHandler = () => {
       this.captureFocused = true;
-      this.scrollAnchorIntoView();
+      if (this.touchFocusPhase !== "provisional") this.scrollAnchorIntoView();
     };
     this.capture.addEventListener("beforeinput", this.beforeInputHandler);
     this.capture.addEventListener("keydown", this.keydownHandler);
+    this.capture.addEventListener("compositionend", this.compositionEndHandler);
     this.capture.addEventListener("focus", this.focusHandler);
     this.capture.addEventListener("blur", () => {
       this.captureFocused = false;
@@ -138,10 +150,47 @@ export class MobileKeyboard {
   }
 
   focus(): void {
+    this.touchFocusPhase = "idle";
+    this.suppressOpeningInsetsUntilClosed = false;
     this.capture.focus({ preventScroll: true });
   }
 
+  beginProvisionalFocus(): void {
+    this.touchFocusPhase = nextTouchKeyboardFocusPhase(
+      this.touchFocusPhase,
+      "touchstart-provisional",
+    );
+    this.suppressOpeningInsetsUntilClosed = false;
+    this.capture.focus({ preventScroll: true });
+  }
+
+  commitProvisionalFocus(): void {
+    if (this.touchFocusPhase !== "provisional") return;
+    this.touchFocusPhase = nextTouchKeyboardFocusPhase(
+      this.touchFocusPhase,
+      "touchend-tap",
+    );
+    this.suppressOpeningInsetsUntilClosed = false;
+    this.scrollAnchorIntoView();
+    this.recomputeInsets();
+  }
+
+  cancelProvisionalFocus(): void {
+    if (this.touchFocusPhase !== "provisional") return;
+    this.touchFocusPhase = nextTouchKeyboardFocusPhase(
+      this.touchFocusPhase,
+      "touchcancel",
+    );
+    this.suppressOpeningInsetsUntilClosed = true;
+    this.blur();
+  }
+
+  isFocused(): boolean {
+    return this.captureFocused || document.activeElement === this.capture;
+  }
+
   blur(): void {
+    this.touchFocusPhase = nextTouchKeyboardFocusPhase(this.touchFocusPhase, "blur");
     this.captureFocused = false;
     this.capture.blur();
   }
@@ -149,6 +198,7 @@ export class MobileKeyboard {
   dispose(): void {
     this.capture.removeEventListener("beforeinput", this.beforeInputHandler);
     this.capture.removeEventListener("keydown", this.keydownHandler);
+    this.capture.removeEventListener("compositionend", this.compositionEndHandler);
     this.capture.removeEventListener("focus", this.focusHandler);
     const viewport = window.visualViewport;
     if (viewport) {
@@ -275,6 +325,7 @@ export class MobileKeyboard {
 
   private handleBeforeInput(event: InputEvent): void {
     event.preventDefault();
+    if (event.isComposing || event.inputType === "insertCompositionText") return;
     if (event.inputType === "insertText" && event.data) {
       this.emitTextRespectingModifiers(event.data);
     } else if (
@@ -296,12 +347,20 @@ export class MobileKeyboard {
 
   private handleKeyDown(event: KeyboardEvent): void {
     // Some mobile keyboards bypass beforeinput for navigation keys.
-    if (event.key === "Enter" || event.key === "Backspace") {
+    if (
+      event.key === "Enter" || event.key === "Backspace" ||
+      event.key === "Delete" || event.key === "Tab" || event.key.startsWith("Arrow")
+    ) {
       event.preventDefault();
       const bytes = this.namedKeyBytes(event.key);
       if (bytes) this.options.onBytes(bytes);
       this.clearTransientModifiers();
     }
+  }
+
+  private handleCompositionEnd(event: CompositionEvent): void {
+    if (event.data) this.options.onBytes(new TextEncoder().encode(event.data));
+    this.capture.textContent = "";
   }
 
   private emitTextRespectingModifiers(data: string): void {
@@ -365,10 +424,19 @@ export class MobileKeyboard {
       // below is the identical pre-wasm / stale-bundle fallback. The
       // decision re-runs on every viewport/resize event so the inset
       // survives resizes either way.
+      // Pinch zoom changes visualViewport.width/height/scale without changing
+      // layout CSS geometry or DPR. Normalize only the keyboard observation;
+      // never feed visualViewport.scale into chrome or canvas render scale.
+      const observation = keyboardViewportObservation(window.innerHeight, {
+        width: viewport.width,
+        height: viewport.height,
+        offsetTop: viewport.offsetTop,
+        scale: viewport.scale,
+      });
       const decided = wasmInputPolicy()?.mobile_keyboard_inset?.(
         window.innerHeight,
-        viewport.height,
-        viewport.offsetTop,
+        observation.visualHeight,
+        observation.offsetTop,
       );
       if (decided) {
         bottom = decided.bottom;
@@ -376,10 +444,24 @@ export class MobileKeyboard {
       } else {
         bottom = Math.max(
           0,
-          Math.round(window.innerHeight - (viewport.height + viewport.offsetTop)),
+          Math.round(
+            window.innerHeight -
+              (observation.visualHeight + observation.offsetTop),
+          ),
         );
         open = bottom > 4;
       }
+    }
+    this.touchFocusPhase = nextTouchKeyboardFocusPhase(
+      this.touchFocusPhase,
+      "viewport-resize",
+    );
+    if (this.touchFocusPhase === "provisional") {
+      return;
+    }
+    if (this.suppressOpeningInsetsUntilClosed) {
+      if (open) return;
+      this.suppressOpeningInsetsUntilClosed = false;
     }
     const previous = this.currentInsets;
     if (previous.bottom === bottom && previous.keyboardOpen === open) {

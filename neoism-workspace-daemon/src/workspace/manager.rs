@@ -1174,10 +1174,40 @@ impl WorkspaceManager {
 
     pub(crate) fn remove_session(&self, id: &str) -> bool {
         let mut inner = self.inner.lock();
-        let removed = inner.sessions.remove(id).is_some();
+        let session = inner.sessions.remove(id);
+        let removed = session.is_some();
         // Drop any live-PTY link for a closed tab so a future tab id
         // can never resolve to a stale shell.
         inner.session_pty_links.remove(id);
+        let removed_tab_ids: std::collections::HashSet<String> = inner
+            .workspace_tabs
+            .values()
+            .filter(|tab| tab.session_id.as_deref() == Some(id))
+            .map(|tab| tab.id.clone())
+            .collect();
+        inner.workspace_tabs.retain(|_, tab| tab.session_id.as_deref() != Some(id));
+        for workspace in inner.host_workspaces.values_mut() {
+            if workspace.main_session_id.as_deref() == Some(id) {
+                workspace.main_session_id = None;
+            }
+            if workspace
+                .active_tab_id
+                .as_ref()
+                .is_some_and(|tab_id| removed_tab_ids.contains(tab_id))
+            {
+                workspace.active_tab_id = None;
+            }
+        }
+        let affected_workspaces: std::collections::HashSet<String> = inner
+            .editor_surfaces
+            .values()
+            .filter(|surface| surface.session_id == id)
+            .map(|surface| surface.workspace_id.clone())
+            .collect();
+        inner.editor_surfaces.retain(|_, surface| surface.session_id != id);
+        for workspace_id in affected_workspaces {
+            rebuild_layout_after_surface_remove(&mut inner, &workspace_id);
+        }
         drop(inner);
         if removed {
             self.mark_dirty();
@@ -1278,13 +1308,9 @@ impl WorkspaceManager {
         }
     }
 
-    /// A workspace's directory follows its terminal's live cwd. When the
-    /// daemon's `/proc` poll reports a PTY moved (a `cd`), resolve the
-    /// workspace tab that owns that PTY, record the cwd there, and re-point
-    /// the host-workspace `root_dir` to match. Returns `true` when the
-    /// workspace root actually changed so the caller broadcasts a tree change
-    /// and every client re-roots its Explorer. Ignores non-absolute cwds (a
-    /// freshly spawned shell reports "." before its first prompt).
+    /// Record a live PTY cwd on its owning session. A workspace root is a
+    /// declared directory and never follows either the first/main or a later
+    /// terminal. Returns whether session metadata changed.
     pub fn track_pty_cwd(&self, pty_session_id: &str, cwd: String) -> bool {
         if cwd.is_empty() || !std::path::Path::new(&cwd).is_absolute() {
             return false;
@@ -1303,24 +1329,14 @@ impl WorkspaceManager {
         let Some(session) = inner.sessions.get_mut(&session_id) else {
             return false;
         };
-        session.cwd = cwd.clone();
+        if session.cwd == cwd {
+            return false;
+        }
+        session.cwd = cwd;
         session.last_active = now_secs();
-        let ws_id = session.workspace_id.clone();
-        let new_root = PathBuf::from(&cwd);
-        let changed = match inner.host_workspaces.get_mut(&ws_id) {
-            Some(ws)
-                if ws.main_session_id.as_deref() == Some(session_id.as_str())
-                    && ws.root_dir.as_deref() != Some(new_root.as_path()) =>
-            {
-                ws.root_dir = Some(new_root);
-                ws.last_active = now_secs();
-                true
-            }
-            _ => false,
-        };
         drop(inner);
         self.mark_dirty();
-        changed
+        true
     }
 
     pub(crate) fn rename_session(&self, id: &str, label: String) -> bool {

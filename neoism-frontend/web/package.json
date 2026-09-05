@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "sync:app-icon": "node scripts/sync-app-icon.mjs",
+    "predev": "npm run sync:app-icon",
+    "predev:fast": "npm run sync:app-icon",
+    "prebuild": "npm run sync:app-icon",
+    "prebuild:fast": "npm run sync:app-icon",
     "build:wasm": "bash scripts/build-wasm.sh",
     "dev": "npm run build:wasm && vite",
     "dev:fast": "vite",

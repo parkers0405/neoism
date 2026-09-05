@@ -74,6 +74,12 @@ pub fn dispatch_terminal_effects<U: EventListener>(
                 event_proxy
                     .send_event(RioEvent::OpenEditorTab { route_id, path }, window_id);
             }
+            TerminalEffect::ChangeTerminalDirectory { path } => {
+                event_proxy.send_event(
+                    RioEvent::ChangeTerminalDirectory { route_id, path },
+                    window_id,
+                );
+            }
             TerminalEffect::ColorRequest {
                 prefix,
                 index,

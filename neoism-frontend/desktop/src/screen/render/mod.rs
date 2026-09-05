@@ -261,6 +261,13 @@ impl Screen<'_> {
         let window_id = self.context_manager.window_id();
         crate::app::freeze_watchdog::mark_render_stage(window_id, "screen.render.enter");
 
+        let active_context = self.context_manager.current();
+        if !active_context.has_non_terminal_surface()
+            && (active_context.shell_pid != 0 || active_context.remote_pty.is_some())
+        {
+            self.last_active_terminal_route = Some(active_context.route_id);
+        }
+
         // First-run only: auto-open the notes sidebar with `Welcome/`
         // expanded (no note opened, focus left on the splash/terminal).
         // Runs on the first render tick — panes + workspace are wired by

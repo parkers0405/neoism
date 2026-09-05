@@ -29,7 +29,6 @@ pub struct DaemonCredentialClaims {
     pub expires_at: i64,
 }
 
-
 impl DaemonCredentialClaims {
     pub fn new(
         subject: impl Into<String>,

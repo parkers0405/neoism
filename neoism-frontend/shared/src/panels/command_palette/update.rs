@@ -45,10 +45,12 @@ impl CommandPalette {
             .or_else(|| self.first_selectable_index(index));
         if let Some(i) = snapped {
             self.selected_index = i;
+            self.cd_completion_selected = true;
         }
     }
 
     pub fn move_selection_up(&mut self) {
+        self.cd_completion_selected = true;
         let rows = self.filtered_rows();
         if rows.is_empty() {
             return;
@@ -66,6 +68,7 @@ impl CommandPalette {
     }
 
     pub fn move_selection_down(&mut self) {
+        self.cd_completion_selected = true;
         let rows = self.filtered_rows();
         let count = rows.len();
         let mut idx = self.selected_index;
@@ -76,6 +79,20 @@ impl CommandPalette {
                 return;
             }
         }
+    }
+
+    pub fn cycle_cd_selection(&mut self, reverse: bool) -> bool {
+        if !self.is_cd_query() { return false; }
+        let count = self.filtered_rows().len();
+        if count == 0 { return false; }
+        self.cd_completion_selected = true;
+        let next = if reverse {
+            self.selected_index.checked_sub(1).unwrap_or(count - 1)
+        } else {
+            (self.selected_index + 1) % count
+        };
+        self.move_selection_to(next, count);
+        true
     }
 
     /// First selectable row at or after `from`, falling back to the
@@ -112,6 +129,7 @@ impl CommandPalette {
     }
 
     pub(super) fn set_scroll_offset(&mut self, new_offset: usize, count: usize) {
+        self.touch_scroll_offset = 0.0;
         let max_offset = count.saturating_sub(MAX_VISIBLE_RESULTS);
         let new_offset = new_offset.min(max_offset);
         let old_offset = self.scroll_offset;
@@ -159,6 +177,26 @@ impl CommandPalette {
 
         let visible = MAX_VISIBLE_RESULTS.min(count).max(1);
         self.clamp_selected_to_viewport(count, visible);
+    }
+
+    /// Pixel-exact touch list scroll. Positive means finger/content down.
+    pub fn scroll_touch_pixels(&mut self, finger_delta: f32) -> bool {
+        let count = self.filtered_rows().len();
+        if count <= MAX_VISIBLE_RESULTS || finger_delta == 0.0 {
+            return count > MAX_VISIBLE_RESULTS;
+        }
+        let row_h = self.row_height().max(1.0);
+        let max_px = count.saturating_sub(MAX_VISIBLE_RESULTS) as f32 * row_h;
+        let before = self.scroll_offset as f32 * row_h - self.touch_scroll_offset;
+        let next = (before - finger_delta).clamp(0.0, max_px);
+        self.scroll_offset = (next / row_h).floor() as usize;
+        self.touch_scroll_offset = self.scroll_offset as f32 * row_h - next;
+        self.list_scroll_spring.reset();
+        self.wheel_accumulator = 0.0;
+        self.last_scroll_time = Some(Instant::now());
+        let visible = MAX_VISIBLE_RESULTS.min(count).max(1);
+        self.clamp_selected_to_viewport(count, visible);
+        true
     }
 
     pub(super) fn clamp_selected_to_viewport(
@@ -251,7 +289,7 @@ impl CommandPalette {
     pub fn get_selected_cd_directory(
         &self,
     ) -> Option<super::actions::PaletteDirectoryEntry> {
-        if !self.is_cd_query() {
+        if !self.is_cd_query() || !self.cd_completion_selected {
             return None;
         }
         self.filtered_rows()
@@ -846,10 +884,19 @@ impl CommandPalette {
     /// shrinks to actual content instead of always reserving space for
     /// `MAX_VISIBLE_RESULTS` rows.
     pub(super) fn visible_row_count(&self) -> usize {
+        let fixed = (file_tree::FRAME_STROKE * self.scale).max(2.0) * 2.0
+            + PALETTE_PADDING * self.scale * 2.0
+            + self.input_band_height
+            + SEPARATOR_HEIGHT
+            + RESULTS_MARGIN_TOP * self.scale
+            + RESULTS_PADDING_BOTTOM * self.scale;
+        let available = (self.viewport_height - self.top_anchor - 8.0 * self.scale - fixed)
+            .max(0.0);
+        let viewport_rows = (available / (RESULT_ITEM_HEIGHT * self.scale).max(1.0)) as usize;
         self.filtered_rows()
             .len()
             .saturating_sub(self.scroll_offset)
-            .min(MAX_VISIBLE_RESULTS)
+            .min(MAX_VISIBLE_RESULTS.min(viewport_rows))
     }
 
     /// Returns the palette geometry (x, y, width, height) for hit-testing.
@@ -874,7 +921,7 @@ impl CommandPalette {
             };
         let width = (preferred_width * s).min((logical_w - 16.0 * s).max(160.0));
         let pad = PALETTE_PADDING * s;
-        let input_h = INPUT_HEIGHT * s;
+        let input_h = self.input_band_height.max(INPUT_HEIGHT * s);
         let row_h = RESULT_ITEM_HEIGHT * s;
         let margin_top = RESULTS_MARGIN_TOP * s;
         let frame_stroke = (file_tree::FRAME_STROKE * s).max(2.0);
@@ -899,6 +946,31 @@ impl CommandPalette {
             let (x, y, w, h) = self.palette_rect(window_width, scale_factor);
             [x, y, w, h]
         })
+    }
+
+    /// Exact query-field hit test. Keeping this beside `palette_rect` prevents
+    /// mobile hosts from mistaking result rows/preview chrome for text input.
+    pub fn text_entry_at(
+        &self,
+        x: f32,
+        y: f32,
+        window_width: f32,
+        scale_factor: f32,
+    ) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let (px, py, pw, _) = self.palette_rect(window_width, scale_factor);
+        let s = self.scale;
+        let stroke = (file_tree::FRAME_STROKE * s).max(2.0);
+        let pad = PALETTE_PADDING * s;
+        let rect = [
+            px + stroke + pad,
+            py + stroke + pad,
+            (pw - stroke * 2.0 - pad * 2.0).max(0.0),
+            self.input_band_height.max(INPUT_HEIGHT * s),
+        ];
+        x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3]
     }
 
     /// Current painted bounds, including the short scale/slide animation used
@@ -945,7 +1017,7 @@ impl CommandPalette {
         let results_y = py
             + (file_tree::FRAME_STROKE * s).max(2.0)
             + PALETTE_PADDING * s
-            + INPUT_HEIGHT * s
+            + self.input_band_height.max(INPUT_HEIGHT * s)
             + SEPARATOR_HEIGHT
             + RESULTS_MARGIN_TOP * s;
         if mouse_y < results_y {
@@ -958,7 +1030,10 @@ impl CommandPalette {
             return Ok(None); // Preview pane is informative, not a result row.
         }
 
-        let relative_y = mouse_y - results_y - self.list_scroll_spring.position;
+        let relative_y = mouse_y
+            - results_y
+            - self.list_scroll_spring.position
+            - self.touch_scroll_offset;
         let row = (relative_y / (RESULT_ITEM_HEIGHT * s)) as usize;
         let filtered_count = self.filtered_rows().len();
         let actual_index = self.scroll_offset + row;
@@ -988,7 +1063,7 @@ impl CommandPalette {
         let results_y = py
             + (file_tree::FRAME_STROKE * s).max(2.0)
             + PALETTE_PADDING * s
-            + INPUT_HEIGHT * s
+            + self.input_band_height.max(INPUT_HEIGHT * s)
             + SEPARATOR_HEIGHT
             + RESULTS_MARGIN_TOP * s;
         let row = index.saturating_sub(self.scroll_offset);

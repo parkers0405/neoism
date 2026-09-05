@@ -58,6 +58,8 @@ pub struct NeoismAgentPendingQuestion {
     /// options and doubles as the custom answer.
     pub typed: String,
     pub responding: bool,
+    /// First visible filtered row in the bounded question card.
+    pub scroll_offset: usize,
 }
 
 impl NeoismAgentPendingQuestion {
@@ -106,16 +108,24 @@ impl NeoismAgentPendingQuestion {
         }
         let current = self.selected.min(count - 1) as isize;
         self.selected = (current + delta).rem_euclid(count as isize) as usize;
+        const VISIBLE: usize = 7;
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + VISIBLE {
+            self.scroll_offset = self.selected + 1 - VISIBLE;
+        }
     }
 
     pub fn type_str(&mut self, text: &str) {
         self.typed.push_str(text);
         self.selected = 0;
+        self.scroll_offset = 0;
     }
 
     pub fn backspace(&mut self) {
         self.typed.pop();
         self.selected = 0;
+        self.scroll_offset = 0;
     }
 
     /// Commit the selected row (or the bare typed text for option-less
@@ -137,6 +147,7 @@ impl NeoismAgentPendingQuestion {
         self.current += 1;
         self.typed.clear();
         self.selected = 0;
+        self.scroll_offset = 0;
         if self.current < self.questions.len() {
             QuestionCommit::Advanced
         } else {
@@ -224,6 +235,7 @@ pub fn question_request_from_event(properties: &Value) -> NeoismAgentPendingQues
         selected: 0,
         typed: String::new(),
         responding: false,
+        scroll_offset: 0,
     }
 }
 
@@ -251,6 +263,7 @@ mod tests {
             selected: 0,
             typed: String::new(),
             responding: false,
+            scroll_offset: 0,
         }
     }
 

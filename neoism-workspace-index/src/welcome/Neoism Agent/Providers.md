@@ -70,9 +70,44 @@ Advanced overrides:
 
 ## Compatible endpoints
 
-Neoism derives provider API endpoints and adapter kinds from Models.dev. It also supports deployment-level base URL overrides; OpenAI supports `NEOISM_AGENT_OPENAI_BASE_URL`, and catalog adapters expose normalized provider-specific override variables.
+Neoism can connect directly to local OpenAI-compatible servers such as llama.cpp, Ollama, and LM Studio. The runtime loads the GGUF model; Neoism connects to its HTTP API.
 
-Neoism's public config does **not** define an arbitrary `providers` package-overlay object. Do not use examples with `package`, `headers`, `body`, or nested custom model maps; those are not Neoism's configuration contract.
+```jsonc
+{
+  "agent": {
+    "model": "llama.cpp/qwen3-coder",
+    "provider": {
+      "llama.cpp": {
+        "name": "llama-server (local)",
+        "npm": "@ai-sdk/openai-compatible",
+        "auth": "none",
+        "options": {
+          "baseURL": "http://127.0.0.1:8080/v1"
+        },
+        "discoverModels": true,
+        "models": {
+          "qwen3-coder": {
+            "name": "Qwen3 Coder",
+            "toolCall": true,
+            "limit": {
+              "context": 65536,
+              "output": 8192
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+`discoverModels` calls `GET /models` and adds the returned model IDs to the picker. Explicit `models` entries override discovered metadata and are recommended for coding models because discovery cannot reliably infer tool calling, reasoning, attachment, or context-window support.
+
+Use `auth: "none"` for a keyless local server, `auth: "optional"` for a server that accepts a key when configured, or `auth: "required"` for an authenticated endpoint. Put credential environment variable names in `env`; never put the key itself in config.
+
+The `baseURL` is the API root, usually ending in `/v1`. Do not include `/models` or `/chat/completions`; Neoism appends those paths.
+
+Neoism also supports deployment-level base URL overrides. OpenAI supports `NEOISM_AGENT_OPENAI_BASE_URL`, and catalog adapters expose normalized provider-specific override variables.
 
 ## Security
 

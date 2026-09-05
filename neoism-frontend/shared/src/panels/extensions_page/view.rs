@@ -1459,7 +1459,14 @@ fn paint_install_button(
                 ..DrawOpts::default()
             };
             let lw = sugarloaf.text_mut().measure(label, &opts);
-            draw_text_with_occlusion(sugarloaf, bx + (bw - lw) * 0.5, by + 5.0 * s, label, &opts, occlusion_rects);
+            draw_text_with_occlusion(
+                sugarloaf,
+                bx + (bw - lw) * 0.5,
+                by + 5.0 * s,
+                label,
+                &opts,
+                occlusion_rects,
+            );
             let _ = message;
         }
         ExtensionStatus::Uninstalling => {

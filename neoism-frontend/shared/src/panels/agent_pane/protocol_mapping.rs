@@ -154,11 +154,13 @@ pub fn map_outbound_command(
         Cmd::RefreshModelContextLimit | Cmd::RefreshModels => {
             Mapping::Messages(vec![Msg::ListProviders])
         }
-        Cmd::RefreshSessions { directory, cursor } => Mapping::Messages(vec![Msg::ListThreads {
-            directory: directory.or_else(|| context.default_directory.clone()),
-            limit: Some(50),
-            cursor,
-        }]),
+        Cmd::RefreshSessions { directory, cursor } => {
+            Mapping::Messages(vec![Msg::ListThreads {
+                directory: directory.or_else(|| context.default_directory.clone()),
+                limit: Some(50),
+                cursor,
+            }])
+        }
         Cmd::LoadOlderTimeline {
             session_id,
             before,
@@ -206,13 +208,21 @@ pub fn map_outbound_command(
             Mapping::Messages(vec![Msg::SetAgent { session_id, agent }])
         }
         Cmd::ApplyModel { session_id, model } => {
-            let connection_id = model.get("connectionId").and_then(Value::as_str).map(str::to_string);
+            let connection_id = model
+                .get("connectionId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let thinking = model
+                .get("variant")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
             let model = model_value_to_wire_model(&model);
             Mapping::Messages(vec![Msg::SetModel {
                 session_id,
                 model,
                 connection_id,
-                thinking: context.default_thinking.clone(),
+                thinking,
             }])
         }
         Cmd::ApplyThinking {
@@ -325,14 +335,40 @@ pub fn map_outbound_command(
         Cmd::RefreshProviderConnections { provider_id } => {
             Mapping::Messages(vec![Msg::ConnectListConnections { provider_id }])
         }
-        Cmd::ConnectStoreApiKey { provider_id, key, label, connection_id } => {
-            Mapping::Messages(vec![Msg::ConnectStoreApiKey { provider_id, key, label, connection_id }])
-        }
-        Cmd::ConnectDisconnect { provider_id, connection_id } => {
-            Mapping::Messages(vec![Msg::ConnectDisconnect { provider_id, connection_id }])
-        }
-        Cmd::ConnectRename { provider_id, connection_id, label } => Mapping::Messages(vec![Msg::ConnectRename { provider_id, connection_id, label }]),
-        Cmd::ConnectSetDefault { provider_id, connection_id } => Mapping::Messages(vec![Msg::ConnectSetDefault { provider_id, connection_id }]),
+        Cmd::ConnectStoreApiKey {
+            provider_id,
+            key,
+            label,
+            connection_id,
+        } => Mapping::Messages(vec![Msg::ConnectStoreApiKey {
+            provider_id,
+            key,
+            label,
+            connection_id,
+        }]),
+        Cmd::ConnectDisconnect {
+            provider_id,
+            connection_id,
+        } => Mapping::Messages(vec![Msg::ConnectDisconnect {
+            provider_id,
+            connection_id,
+        }]),
+        Cmd::ConnectRename {
+            provider_id,
+            connection_id,
+            label,
+        } => Mapping::Messages(vec![Msg::ConnectRename {
+            provider_id,
+            connection_id,
+            label,
+        }]),
+        Cmd::ConnectSetDefault {
+            provider_id,
+            connection_id,
+        } => Mapping::Messages(vec![Msg::ConnectSetDefault {
+            provider_id,
+            connection_id,
+        }]),
         Cmd::ConnectOauthAuthorize {
             provider_id,
             method_index,

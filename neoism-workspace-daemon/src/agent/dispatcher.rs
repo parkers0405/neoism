@@ -27,9 +27,19 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             agent,
             model,
             connection_id,
+            thinking,
         } => {
             tokio::spawn(async move {
-                handle_create_thread(inner, title, directory, agent, model, connection_id).await;
+                handle_create_thread(
+                    inner,
+                    title,
+                    directory,
+                    agent,
+                    model,
+                    connection_id,
+                    thinking,
+                )
+                .await;
             });
         }
         AgentClientMessage::SwitchThread { session_id } => {
@@ -42,7 +52,11 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_delete_thread(inner, session_id).await;
             });
         }
-        AgentClientMessage::ListThreads { directory, limit, cursor } => {
+        AgentClientMessage::ListThreads {
+            directory,
+            limit,
+            cursor,
+        } => {
             tokio::spawn(async move {
                 handle_list_threads(inner, directory, limit, cursor).await;
             });
@@ -108,8 +122,8 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             cancel_inflight(&inner, &session_id);
             let inner = inner.clone();
             tokio::spawn(async move {
-                let _ =
-                    post_no_body(&inner, &format!("/v2/sessions/{session_id}/abort")).await;
+                let _ = post_no_body(&inner, &format!("/v2/sessions/{session_id}/abort"))
+                    .await;
             });
         }
         AgentClientMessage::ClearQueue { session_id } => {
@@ -396,20 +410,52 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             });
         }
         AgentClientMessage::ConnectListConnections { provider_id } => {
-            tokio::spawn(async move { handle_connect_list_connections(inner, provider_id).await; });
-        }
-        AgentClientMessage::ConnectStoreApiKey { provider_id, key, label, connection_id } => {
             tokio::spawn(async move {
-                handle_connect_store_api_key(inner, provider_id, key, label, connection_id).await;
+                handle_connect_list_connections(inner, provider_id).await;
             });
         }
-        AgentClientMessage::ConnectDisconnect { provider_id, connection_id } => {
+        AgentClientMessage::ConnectStoreApiKey {
+            provider_id,
+            key,
+            label,
+            connection_id,
+        } => {
+            tokio::spawn(async move {
+                handle_connect_store_api_key(
+                    inner,
+                    provider_id,
+                    key,
+                    label,
+                    connection_id,
+                )
+                .await;
+            });
+        }
+        AgentClientMessage::ConnectDisconnect {
+            provider_id,
+            connection_id,
+        } => {
             tokio::spawn(async move {
                 handle_connect_disconnect(inner, provider_id, connection_id).await;
             });
         }
-        AgentClientMessage::ConnectRename { provider_id, connection_id, label } => { tokio::spawn(async move { handle_connect_rename(inner, provider_id, connection_id, label).await; }); }
-        AgentClientMessage::ConnectSetDefault { provider_id, connection_id } => { tokio::spawn(async move { handle_connect_set_default(inner, provider_id, connection_id).await; }); }
+        AgentClientMessage::ConnectRename {
+            provider_id,
+            connection_id,
+            label,
+        } => {
+            tokio::spawn(async move {
+                handle_connect_rename(inner, provider_id, connection_id, label).await;
+            });
+        }
+        AgentClientMessage::ConnectSetDefault {
+            provider_id,
+            connection_id,
+        } => {
+            tokio::spawn(async move {
+                handle_connect_set_default(inner, provider_id, connection_id).await;
+            });
+        }
         AgentClientMessage::ConnectOauthAuthorize {
             provider_id,
             method_index,
@@ -417,7 +463,14 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             connection_id,
         } => {
             tokio::spawn(async move {
-                handle_connect_oauth_authorize(inner, provider_id, method_index, label, connection_id).await;
+                handle_connect_oauth_authorize(
+                    inner,
+                    provider_id,
+                    method_index,
+                    label,
+                    connection_id,
+                )
+                .await;
             });
         }
         AgentClientMessage::ConnectOauthCallback {
@@ -427,8 +480,14 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             attempt_id,
         } => {
             tokio::spawn(async move {
-                handle_connect_oauth_callback(inner, provider_id, method_index, code, attempt_id)
-                    .await;
+                handle_connect_oauth_callback(
+                    inner,
+                    provider_id,
+                    method_index,
+                    code,
+                    attempt_id,
+                )
+                .await;
             });
         }
 

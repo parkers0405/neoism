@@ -1,13 +1,14 @@
-use std::collections::BTreeSet;
 use anyhow::Context;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use neoism_agent_core::{AgentConfigDocument, FormatterConfig, McpConfig};
+use neoism_agent_service_api::{
+    AgentServices, ConfigSnapshot, ConfigSnapshotRequest, ConfigUpdate,
+    ConfigUpdateRequest,
+};
 use serde::Serialize;
 use serde_json::Value;
-use neoism_agent_service_api::{
-    AgentServices, ConfigSnapshot, ConfigSnapshotRequest, ConfigUpdate, ConfigUpdateRequest,
-};
 
 #[derive(Clone, Debug)]
 pub(crate) struct LoadedConfig {
@@ -36,11 +37,20 @@ pub(crate) enum ConfigDiagnosticLevel {
     Warning,
 }
 
-pub(crate) fn snapshot(services: &AgentServices, directory: &str) -> anyhow::Result<ConfigSnapshot> {
-    services.config.snapshot(&ConfigSnapshotRequest::new(directory)).map_err(Into::into)
+pub(crate) fn snapshot(
+    services: &AgentServices,
+    directory: &str,
+) -> anyhow::Result<ConfigSnapshot> {
+    services
+        .config
+        .snapshot(&ConfigSnapshotRequest::new(directory))
+        .map_err(Into::into)
 }
 
-pub(crate) fn load(services: &AgentServices, directory: &str) -> anyhow::Result<LoadedConfig> {
+pub(crate) fn load(
+    services: &AgentServices,
+    directory: &str,
+) -> anyhow::Result<LoadedConfig> {
     load_snapshot(&snapshot(services, directory)?)
 }
 
@@ -67,17 +77,28 @@ pub(crate) async fn set_mcp_enabled_with_default(
     default: Option<McpConfig>,
 ) -> anyhow::Result<()> {
     let snapshot = snapshot(services, directory)?;
-    let source = snapshot.layers
+    let source = snapshot
+        .layers
         .iter()
         .rev()
         .find(|layer| {
-            layer.document.get("mcp").and_then(|mcp| mcp.get(name)).is_some()
+            layer
+                .document
+                .get("mcp")
+                .and_then(|mcp| mcp.get(name))
+                .is_some()
         })
         .map(|layer| {
-            if layer.writable { Ok(layer.source_id.clone()) } else {
-                Err(anyhow::anyhow!("MCP server {name} is defined by read-only config source `{}`", layer.source_id))
+            if layer.writable {
+                Ok(layer.source_id.clone())
+            } else {
+                Err(anyhow::anyhow!(
+                    "MCP server {name} is defined by read-only config source `{}`",
+                    layer.source_id
+                ))
             }
-        }).transpose()?;
+        })
+        .transpose()?;
     let loaded = load_snapshot(&snapshot)?;
     let effective = loaded
         .info
@@ -88,14 +109,23 @@ pub(crate) async fn set_mcp_enabled_with_default(
         .with_context(|| format!("MCP server {name} is not configured"))?;
     let source_id = source.unwrap_or_else(|| snapshot.writable_target.source_id.clone());
     let mut entry = serde_json::to_value(effective)?;
-    let object = entry.as_object_mut()
+    let object = entry
+        .as_object_mut()
         .with_context(|| format!("MCP server {name} config is not an object"))?;
     object.insert("enabled".to_string(), Value::Bool(enabled));
-    services.config.update(&ConfigUpdateRequest {
-        workspace: PathBuf::from(directory),
-        source_id,
-        update: ConfigUpdate::SetValue { path: vec!["mcp".into(), name.into()], value: entry },
-    }).await.map(|_| ()).map_err(Into::into)
+    services
+        .config
+        .update(&ConfigUpdateRequest {
+            workspace: PathBuf::from(directory),
+            source_id,
+            update: ConfigUpdate::SetValue {
+                path: vec!["mcp".into(), name.into()],
+                value: entry,
+            },
+        })
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -114,9 +144,21 @@ mod mcp_write_tests {
             r#"{"mcp":{"neoism-toggle-test":{"type":"remote","url":"https://example.com/mcp","enabled":true}},"theme":"keep"}"#,
         )
         .unwrap();
-        let services = AgentServices::new(std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
-            .with_config(std::sync::Arc::new(neoism_agent_service_api::StandardConfigSourceService::new(root.join("user"))));
-        set_mcp_enabled(&services, project.to_str().unwrap(), "neoism-toggle-test", false).await.unwrap();
+        let services = AgentServices::new(
+            std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
+            crate::standard_workspace_search(),
+        )
+        .with_config(std::sync::Arc::new(
+            neoism_agent_service_api::StandardConfigSourceService::new(root.join("user")),
+        ));
+        set_mcp_enabled(
+            &services,
+            project.to_str().unwrap(),
+            "neoism-toggle-test",
+            false,
+        )
+        .await
+        .unwrap();
         let value: Value =
             serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
         assert_eq!(value["mcp"]["neoism-toggle-test"]["enabled"], false);
@@ -128,65 +170,129 @@ mod mcp_write_tests {
 #[cfg(test)]
 mod service_boundary_tests {
     use super::*;
-    use serde_json::json;
     use neoism_agent_service_api::{
         ConfigDiscoveryRoot, ConfigLayer, ConfigSourceService, ConfigWritableTarget,
         ServiceError, ServiceFuture,
     };
+    use serde_json::json;
     use std::sync::Arc;
 
     struct FakeConfig(Value);
 
     impl ConfigSourceService for FakeConfig {
-        fn snapshot(&self, request: &ConfigSnapshotRequest) -> Result<ConfigSnapshot, ServiceError> {
+        fn snapshot(
+            &self,
+            request: &ConfigSnapshotRequest,
+        ) -> Result<ConfigSnapshot, ServiceError> {
             Ok(ConfigSnapshot {
                 identity: self.0.to_string(),
                 workspace: request.workspace.clone(),
-                layers: vec![ConfigLayer { source_id: "fake".into(), document: self.0.clone(), writable: false }],
+                layers: vec![ConfigLayer {
+                    source_id: "fake".into(),
+                    document: self.0.clone(),
+                    writable: false,
+                }],
                 discovery_roots: Vec::<ConfigDiscoveryRoot>::new(),
-                writable_target: ConfigWritableTarget { source_id: "fake".into(), label: "fake".into() },
+                writable_target: ConfigWritableTarget {
+                    source_id: "fake".into(),
+                    label: "fake".into(),
+                },
             })
         }
 
-        fn update<'a>(&'a self, _request: &'a ConfigUpdateRequest) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+        fn update<'a>(
+            &'a self,
+            _request: &'a ConfigUpdateRequest,
+        ) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
             Box::pin(async { Err(ServiceError::new("read only")) })
         }
     }
 
     fn fake_services(model: &str) -> AgentServices {
-        AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
-            .with_config(Arc::new(FakeConfig(json!({ "model": model }))))
+        AgentServices::new(
+            Arc::new(neoism_agent_service_api::StandardExecutableService),
+            crate::standard_workspace_search(),
+        )
+        .with_config(Arc::new(FakeConfig(json!({ "model": model }))))
     }
 
     #[tokio::test]
     async fn app_states_keep_injected_config_sources_isolated() {
-        let root = std::env::temp_dir().join(format!("agent-config-isolation-{}", neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)));
+        let root = std::env::temp_dir().join(format!(
+            "agent-config-isolation-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
         std::fs::create_dir_all(&root).unwrap();
-        let first = crate::state::AppState::open_database_with_services(root.join("first.db"), fake_services("one/model")).await.unwrap();
-        let second = crate::state::AppState::open_database_with_services(root.join("second.db"), fake_services("two/model")).await.unwrap();
-        assert_eq!(load(first.services(), root.to_str().unwrap()).unwrap().info.model.as_deref(), Some("one/model"));
-        assert_eq!(load(second.services(), root.to_str().unwrap()).unwrap().info.model.as_deref(), Some("two/model"));
-        assert_eq!(load(first.services(), root.to_str().unwrap()).unwrap().info.model.as_deref(), Some("one/model"));
+        let first = crate::state::AppState::open_database_with_services(
+            root.join("first.db"),
+            fake_services("one/model"),
+        )
+        .await
+        .unwrap();
+        let second = crate::state::AppState::open_database_with_services(
+            root.join("second.db"),
+            fake_services("two/model"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load(first.services(), root.to_str().unwrap())
+                .unwrap()
+                .info
+                .model
+                .as_deref(),
+            Some("one/model")
+        );
+        assert_eq!(
+            load(second.services(), root.to_str().unwrap())
+                .unwrap()
+                .info
+                .model
+                .as_deref(),
+            Some("two/model")
+        );
+        assert_eq!(
+            load(first.services(), root.to_str().unwrap())
+                .unwrap()
+                .info
+                .model
+                .as_deref(),
+            Some("one/model")
+        );
         drop((first, second));
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn generic_server_never_interprets_product_gui_groups() {
-        let services = AgentServices::new(Arc::new(neoism_agent_service_api::StandardExecutableService), crate::standard_workspace_search())
-            .with_config(Arc::new(FakeConfig(json!({
-                "agent": { "desktop-agent": { "model": "hidden/model" } },
-                "terminal": { "shell": "fish" }
-            }))));
+        let services = AgentServices::new(
+            Arc::new(neoism_agent_service_api::StandardExecutableService),
+            crate::standard_workspace_search(),
+        )
+        .with_config(Arc::new(FakeConfig(json!({
+            "agent": { "desktop-agent": { "model": "hidden/model" } },
+            "terminal": { "shell": "fish" }
+        }))));
         let loaded = load(&services, "/workspace").unwrap();
         assert!(loaded.info.model.is_none());
         assert!(loaded.info.shell.is_none());
-        assert!(serde_json::to_value(loaded.info).unwrap().get("terminal").is_none());
+        assert!(serde_json::to_value(loaded.info)
+            .unwrap()
+            .get("terminal")
+            .is_none());
     }
 }
 
 pub(crate) fn roots(services: &AgentServices, directory: &str) -> Vec<PathBuf> {
-    snapshot(services, directory).map(|snapshot| snapshot.discovery_roots.into_iter().map(|root| root.path).collect()).unwrap_or_default()
+    snapshot(services, directory)
+        .map(|snapshot| {
+            snapshot
+                .discovery_roots
+                .into_iter()
+                .map(|root| root.path)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn formatter_value(info: &AgentConfigDocument) -> Option<Value> {
@@ -245,6 +351,68 @@ pub(crate) fn validate_loaded(info: &AgentConfigDocument) -> ConfigValidation {
     }
     validate_model_ref("model", info.model.as_deref(), &mut diagnostics);
     validate_model_ref("smallModel", info.small_model.as_deref(), &mut diagnostics);
+
+    for (provider_id, provider) in &info.provider {
+        let path = format!("provider.{provider_id}");
+        if provider_id.trim().is_empty() {
+            diagnostics.push(error("provider", "provider IDs must not be empty"));
+        }
+        if provider
+            .npm
+            .as_deref()
+            .is_some_and(|npm| npm != "@ai-sdk/openai-compatible")
+        {
+            diagnostics.push(error(
+                format!("{path}.npm"),
+                "custom providers currently support only @ai-sdk/openai-compatible",
+            ));
+        }
+        match provider.options.base_url.as_deref() {
+            Some(raw) => match url::Url::parse(raw) {
+                Ok(url)
+                    if matches!(url.scheme(), "http" | "https")
+                        && url.query().is_none()
+                        && url.fragment().is_none()
+                        && !matches!(
+                            url.path().trim_end_matches('/'),
+                            path if path.ends_with("/models")
+                                || path.ends_with("/chat/completions")
+                        ) => {}
+                _ => diagnostics.push(error(
+                    format!("{path}.options.baseURL"),
+                    "baseURL must be an http(s) API root without a query, fragment, /models, or /chat/completions suffix",
+                )),
+            },
+            None if provider.discover_models || !provider.models.is_empty() => diagnostics.push(error(
+                format!("{path}.options.baseURL"),
+                "custom providers with models or discovery require options.baseURL",
+            )),
+            None => {}
+        }
+        for (model_id, model) in &provider.models {
+            if model_id.trim().is_empty() {
+                diagnostics.push(error(
+                    format!("{path}.models"),
+                    "model IDs must not be empty",
+                ));
+            }
+            if let Some(limit) = &model.limit {
+                if limit.context == 0 || limit.output == 0 {
+                    diagnostics.push(error(
+                        format!("{path}.models.{model_id}.limit"),
+                        "context and output limits must be greater than zero",
+                    ));
+                } else if limit.output > limit.context
+                    || limit.input.is_some_and(|input| input > limit.context)
+                {
+                    diagnostics.push(error(
+                        format!("{path}.models.{model_id}.limit"),
+                        "input and output limits cannot exceed the context limit",
+                    ));
+                }
+            }
+        }
+    }
 
     for (name, agent) in &info.agent {
         if name.trim().is_empty() {

@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path as FsPath, PathBuf};
 
 use axum::extract::{Path, Query, State};
-use axum::Extension;
 use axum::http::HeaderMap;
+use axum::Extension;
 use axum::Json;
 use neoism_agent_builtins::plugin::vcs;
 use neoism_agent_core::{
@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::{
-    message_id_of, model_ref_from_config_with_variant,
-    now_millis, project, resolve_directory, slug, InstanceQuery,
+    message_id_of, model_ref_from_config_with_variant, now_millis, project,
+    resolve_directory, slug, InstanceQuery,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -88,7 +88,9 @@ pub(crate) async fn session_create(
                 .list_sessions()
                 .await?
                 .iter()
-                .filter(|session| crate::caller::session_tenant(session) == claims.tenant_id)
+                .filter(|session| {
+                    crate::caller::session_tenant(session) == claims.tenant_id
+                })
                 .count();
             if count >= limit {
                 return Err(ApiError::too_many_requests("Session quota exceeded"));
@@ -100,7 +102,9 @@ pub(crate) async fn session_create(
         );
         bind_authenticated_workspace(&mut request, &claims)?;
     }
-    Ok(Json(create_session_in_directory(&state, &directory, request, extra).await?))
+    Ok(Json(
+        create_session_in_directory(&state, &directory, request, extra).await?,
+    ))
 }
 
 fn bind_authenticated_workspace(
@@ -161,7 +165,9 @@ pub(crate) async fn create_session_in_directory(
             .and_then(Value::as_str)
         {
             if tenant != parent_tenant {
-                return Err(ApiError::forbidden("Parent session belongs to another tenant"));
+                return Err(ApiError::forbidden(
+                    "Parent session belongs to another tenant",
+                ));
             }
         } else if parent_tenant != "local" {
             extra.insert(
@@ -188,10 +194,7 @@ pub(crate) async fn create_session_in_directory(
         ),
         model: request.model.or_else(|| {
             loaded_config.model.as_deref().and_then(|model| {
-                model_ref_from_config_with_variant(
-                    model,
-                    loaded_config.variant.clone(),
-                )
+                model_ref_from_config_with_variant(model, loaded_config.variant.clone())
             })
         }),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -232,7 +235,9 @@ pub(crate) async fn session_delete(
 ) -> Result<Json<bool>, ApiError> {
     let deleted_session = state.inner.store.get_session(&session_id).await?;
     let execution_root = match deleted_session.as_ref() {
-        Some(session) => Some(crate::execution_activity::root_session_id(&state, session).await),
+        Some(session) => {
+            Some(crate::execution_activity::root_session_id(&state, session).await)
+        }
         None => None,
     };
     crate::interaction::cancel_session_interactions(&state, &session_id).await;
@@ -275,7 +280,13 @@ pub(crate) async fn session_update(
         info.model = Some(model);
     }
     if let Some(directory) = update.directory {
-        if state.inner.session_coordinator.active_run(&session_id).await.is_some() {
+        if state
+            .inner
+            .session_coordinator
+            .active_run(&session_id)
+            .await
+            .is_some()
+        {
             return Err(ApiError::conflict(
                 "cannot change directory while the session is running",
             ));
@@ -320,8 +331,13 @@ pub(crate) async fn session_directory_options(
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let plugins = state.plugin_snapshot(&info.directory).await;
-    if !crate::plugins::enabled(&plugins, neoism_agent_builtins::plugin::workspace_tools::ID) {
-        return Err(ApiError::not_found("workspace filesystem tools are disabled"));
+    if !crate::plugins::enabled(
+        &plugins,
+        neoism_agent_builtins::plugin::workspace_tools::ID,
+    ) {
+        return Err(ApiError::not_found(
+            "workspace filesystem tools are disabled",
+        ));
     }
     let current = PathBuf::from(info.directory);
     let search_root = directory_search_root(&current);
@@ -329,7 +345,13 @@ pub(crate) async fn session_directory_options(
     let limit = query.limit.unwrap_or(256).clamp(1, 1_000);
     let search = state.services().workspace_search.clone();
     let options = tokio::task::spawn_blocking(move || {
-        workspace_directory_options(search.as_ref(), &search_root, &current, &needle, limit)
+        workspace_directory_options(
+            search.as_ref(),
+            &search_root,
+            &current,
+            &needle,
+            limit,
+        )
     })
     .await
     .map_err(|error| ApiError::internal(format!("directory search failed: {error}")))??;
@@ -433,13 +455,15 @@ fn workspace_directory_options(
     if remaining == 0 {
         return Ok(options);
     }
-    let result = search.search_directories(&neoism_agent_service_api::DirectorySearchRequest {
-        root: root.to_path_buf(),
-        query: query.to_string(),
-        offset: 0,
-        limit: remaining,
-        control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
-    }).map_err(|error| ApiError::internal(error.to_string()))?;
+    let result = search
+        .search_directories(&neoism_agent_service_api::DirectorySearchRequest {
+            root: root.to_path_buf(),
+            query: query.to_string(),
+            offset: 0,
+            limit: remaining,
+            control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
+        })
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     for relative in result.paths {
         let relative = relative.trim_end_matches(['/', '\\']);
         if !relative.is_empty() {
@@ -591,7 +615,6 @@ pub(crate) async fn session_status(
     }
     Json(out)
 }
-
 
 pub(crate) async fn session_diff(
     State(state): State<AppState>,

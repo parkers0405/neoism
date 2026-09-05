@@ -130,9 +130,10 @@ fn surfaces_openai_stream_provider_errors() {
 
 #[test]
 fn rejects_openai_stream_chunks_without_choices_or_error() {
-    let error = parse_stream_line(br#"data: {"id":"chatcmpl-1","model":"provider-model"}"#)
-        .unwrap_err()
-        .to_string();
+    let error =
+        parse_stream_line(br#"data: {"id":"chatcmpl-1","model":"provider-model"}"#)
+            .unwrap_err()
+            .to_string();
 
     assert!(error.contains("failed to decode OpenAI-compatible streaming chunk"));
 }

@@ -10,12 +10,14 @@
 //! "enter mode" / "set query" entry points.
 
 use web_time::Instant;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::animation::CriticallyDampedSpring;
 
 use super::actions::{
     PaletteBufferEntry, PaletteDirectoryEntry, PaletteHostCapabilities, PaletteHostEntry,
     PaletteServerEntry, PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry,
+    TerminalDirectoryTarget,
 };
 use super::modes::PaletteMode;
 use super::MAX_RECENT_SEARCHES;
@@ -85,6 +87,16 @@ pub struct CommandPalette {
     /// Host-owned directory snapshot for the current Commands-mode `cd`
     /// query. The shared palette never touches the filesystem itself.
     pub(super) cd_directory_results: Vec<PaletteDirectoryEntry>,
+    terminal_directory_recents: Vec<String>,
+    terminal_directory_target: Option<TerminalDirectoryTarget>,
+    pub(super) cd_error: Option<String>,
+    /// UTF-8 byte insertion point in `query`.
+    pub(super) query_cursor: usize,
+    /// Measured input band height from the latest render. Geometry/hit tests
+    /// use this instead of assuming one line.
+    pub(super) input_band_height: f32,
+    pub(super) viewport_height: f32,
+    pub(super) cd_completion_selected: bool,
     /// Direction of the current Search-mode session: `false` for `/`
     /// (forward), `true` for `?` (backward). The commit dispatcher reads
     /// this to pick the search direction (and `v:searchforward` so
@@ -103,6 +115,9 @@ pub struct CommandPalette {
     pub(super) last_cursor_frame: Instant,
     pub(super) selected_cursor_rect: Option<[f32; 4]>,
     pub(super) wheel_accumulator: f32,
+    /// Persistent sub-row offset for direct touch; unlike the wheel spring it
+    /// does not decay after lift.
+    pub(super) touch_scroll_offset: f32,
     pub(super) open_pop_started: Instant,
     pub(super) pop_on_open: bool,
     pub(super) top_anchor: f32,
@@ -164,6 +179,13 @@ impl Default for CommandPalette {
             recent_searches: Vec::new(),
             buffer_matches: Vec::new(),
             cd_directory_results: Vec::new(),
+            terminal_directory_recents: Vec::new(),
+            terminal_directory_target: None,
+            cd_error: None,
+            query_cursor: 0,
+            input_band_height: super::INPUT_HEIGHT,
+            viewport_height: 900.0,
+            cd_completion_selected: false,
             search_backward: false,
             scale: 1.0,
             list_scroll_spring: CriticallyDampedSpring::new(),
@@ -172,6 +194,7 @@ impl Default for CommandPalette {
             last_cursor_frame: Instant::now(),
             selected_cursor_rect: None,
             wheel_accumulator: 0.0,
+            touch_scroll_offset: 0.0,
             open_pop_started: Instant::now(),
             pop_on_open: false,
             top_anchor: super::PALETTE_MARGIN_TOP,
@@ -202,6 +225,7 @@ impl CommandPalette {
     /// stray test or future caller can't spike the multiplier.
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(0.5, 3.0);
+        self.input_band_height = super::INPUT_HEIGHT * self.scale;
         self.reset_motion();
     }
 
@@ -227,6 +251,10 @@ impl CommandPalette {
         if enabled {
             self.query.clear();
             self.cd_directory_results.clear();
+            self.terminal_directory_target = None;
+            self.cd_error = None;
+            self.query_cursor = 0;
+            self.input_band_height = super::INPUT_HEIGHT * self.scale;
             self.selected_index = 0;
             self.scroll_offset = 0;
             self.caret_blink_start = Instant::now();
@@ -246,6 +274,126 @@ impl CommandPalette {
             // Closing the palette drops any in-flight drag.
             self.workspace_drag = None;
         }
+    }
+
+    /// Open Commands mode with an exact initial query. Unlike `set_enabled`,
+    /// this does not briefly expose an empty command list to the host.
+    pub fn open_commands_with_query(&mut self, query: impl Into<String>) {
+        self.set_enabled(true);
+        self.set_query(query.into());
+    }
+
+    pub fn open_commands_for_terminal(
+        &mut self,
+        query: impl Into<String>,
+        target: TerminalDirectoryTarget,
+    ) {
+        self.open_commands_with_query(query);
+        self.terminal_directory_target = Some(target);
+    }
+
+    pub fn change_terminal_directory_intent(
+        &self,
+        destination: impl Into<String>,
+    ) -> Option<super::actions::ChangeTerminalDirectoryIntent> {
+        Some(super::actions::ChangeTerminalDirectoryIntent {
+            target: self.terminal_directory_target.clone()?,
+            destination: destination.into(),
+        })
+    }
+
+    pub fn typed_change_terminal_directory_intent(
+        &mut self,
+    ) -> Option<super::actions::ChangeTerminalDirectoryIntent> {
+        let suffix = self.cd_query_suffix()?.to_owned();
+        match super::actions::parse_cd_operand(&suffix) {
+            Ok(destination) => {
+                self.cd_error = None;
+                self.change_terminal_directory_intent(destination)
+            }
+            Err(error) => { self.cd_error = Some(error); None }
+        }
+    }
+
+    pub fn cd_error(&self) -> Option<&str> { self.cd_error.as_deref() }
+    pub fn set_cd_error(&mut self, error: impl Into<String>) {
+        self.cd_error = Some(error.into());
+    }
+
+    /// Keep captured terminal mode alive after a successful dispatch and use
+    /// the optimistic canonical destination as the base for the next command.
+    pub fn continue_terminal_directory(&mut self, cwd: impl Into<String>) {
+        let cwd = cwd.into();
+        if let Some(target) = self.terminal_directory_target.as_mut() {
+            target.cwd = cwd.clone();
+        }
+        self.record_terminal_directory(cwd);
+        self.mode = PaletteMode::Commands;
+        self.cd_error = None;
+        self.set_query("cd ".into());
+    }
+
+    /// Keep the captured target after a shell-resolved transition (`cd` or
+    /// `cd -`). Its resulting cwd is unknown until the terminal reports OSC 7.
+    pub fn continue_terminal_directory_pending(&mut self) {
+        self.mode = PaletteMode::Commands;
+        self.cd_error = None;
+        self.set_query("cd ".into());
+    }
+
+    pub fn record_terminal_directory(&mut self, cwd: impl Into<String>) {
+        let cwd = cwd.into();
+        if cwd.is_empty() { return; }
+        self.terminal_directory_recents.retain(|entry| entry != &cwd);
+        self.terminal_directory_recents.insert(0, cwd);
+        self.terminal_directory_recents.truncate(8);
+    }
+
+    pub fn compose_terminal_directory_choices(
+        &mut self,
+        home: Option<String>,
+        workspace_root: Option<String>,
+        completions: Vec<PaletteDirectoryEntry>,
+    ) {
+        let Some(target) = self.terminal_directory_target.as_ref() else { return; };
+        let cwd = target.cwd.clone();
+        let parent = std::path::Path::new(&cwd).parent()
+            .map(|path| path.to_string_lossy().into_owned());
+        let mut rows = Vec::new();
+        let mut push = |path: String, label: &str, detail: &str| {
+            if path.is_empty() || rows.iter().any(|row: &PaletteDirectoryEntry| row.absolute_path == path) { return; }
+            rows.push(PaletteDirectoryEntry {
+                absolute_path: path,
+                display: Some(label.to_owned()),
+                detail: Some(detail.to_owned()),
+            });
+        };
+        push(cwd, "Current directory", "Terminal cwd");
+        if let Some(parent) = parent { push(parent, "Parent directory", ".."); }
+        push(home.unwrap_or_else(|| "~".into()), "Home", "~");
+        if let Some(root) = workspace_root { push(root, "Workspace root", "Declared root"); }
+        for recent in self.terminal_directory_recents.clone() {
+            push(recent.clone(), "Recent", &recent);
+        }
+        for completion in completions {
+            if rows.iter().any(|row| row.absolute_path == completion.absolute_path) { continue; }
+            rows.push(completion);
+        }
+        self.set_cd_directory_results(rows);
+    }
+
+    /// Apply a later authoritative daemon/PTY cwd report only to the captured
+    /// session; focus changes cannot retarget the sheet.
+    pub fn update_captured_terminal_cwd(&mut self, session_id: &str, cwd: &str) -> bool {
+        let Some(target) = self.terminal_directory_target.as_mut() else { return false; };
+        if target.session_id.as_deref() != Some(session_id) { return false; }
+        target.cwd = cwd.to_owned();
+        self.record_terminal_directory(cwd);
+        true
+    }
+
+    pub fn terminal_directory_target(&self) -> Option<&TerminalDirectoryTarget> {
+        self.terminal_directory_target.as_ref()
     }
 
     pub(super) fn start_open_pop(&mut self) {
@@ -536,6 +684,9 @@ impl CommandPalette {
     pub fn set_query(&mut self, query: String) {
         let old_cd_suffix = self.cd_query_suffix().map(str::to_owned);
         self.query = query;
+        self.query_cursor = self.query.len();
+        self.cd_error = None;
+        self.cd_completion_selected = false;
         if self.cd_query_suffix() != old_cd_suffix.as_deref() {
             // Never show results belonging to a previous suffix while the
             // host obtains the next filesystem snapshot.
@@ -557,6 +708,54 @@ impl CommandPalette {
         // fade state so the next scroll starts with a clean timer.
         self.last_scroll_time = None;
         self.reset_motion();
+    }
+
+
+    pub fn query_cursor(&self) -> usize { self.query_cursor }
+
+    pub fn set_query_cursor(&mut self, byte: usize) {
+        let requested = byte.min(self.query.len());
+        let byte = if requested == self.query.len() {
+            requested
+        } else {
+            self.query.grapheme_indices(true)
+                .map(|(index, _)| index)
+                .take_while(|index| *index <= requested)
+                .last()
+                .unwrap_or(0)
+        };
+        self.query_cursor = byte;
+        self.caret_blink_start = Instant::now();
+    }
+
+    pub fn move_query_cursor_left(&mut self) {
+        let prev = self.query[..self.query_cursor].grapheme_indices(true).next_back().map(|(i, _)| i).unwrap_or(0);
+        self.set_query_cursor(prev);
+    }
+
+    pub fn move_query_cursor_right(&mut self) {
+        let next = self.query[self.query_cursor..].grapheme_indices(true).nth(1).map(|(i, _)| self.query_cursor + i).unwrap_or(self.query.len());
+        self.set_query_cursor(next);
+    }
+
+    pub fn insert_query_text(&mut self, text: &str) {
+        if text.is_empty() || text.chars().any(char::is_control) { return; }
+        let at = self.query_cursor;
+        let mut next = self.query.clone();
+        next.insert_str(at, text);
+        self.set_query(next);
+        self.query_cursor = at + text.len();
+    }
+
+    pub fn backspace_query(&mut self) -> bool {
+        if self.query_cursor == 0 { return false; }
+        let at = self.query_cursor;
+        let prev = self.query[..at].grapheme_indices(true).next_back().map(|(i, _)| i).unwrap_or(0);
+        let mut next = self.query.clone();
+        next.replace_range(prev..at, "");
+        self.set_query(next);
+        self.query_cursor = prev;
+        true
     }
 
     /// Whether Commands mode currently contains exactly `cd` or starts with
@@ -583,6 +782,7 @@ impl CommandPalette {
     /// preserved because filtering and ranking belong to the filesystem host.
     pub fn set_cd_directory_results(&mut self, results: Vec<PaletteDirectoryEntry>) {
         self.cd_directory_results = results;
+        self.cd_completion_selected = false;
         self.selected_index = self
             .selected_index
             .min(self.cd_directory_results.len().saturating_sub(1));
@@ -601,6 +801,7 @@ impl CommandPalette {
         self.last_cursor_frame = Instant::now();
         self.selected_cursor_rect = None;
         self.wheel_accumulator = 0.0;
+        self.touch_scroll_offset = 0.0;
         // A mode switch / requery / reopen invalidates any armed drag —
         // the dragged row may no longer exist in the new list.
         self.workspace_drag = None;

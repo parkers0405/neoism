@@ -16,6 +16,13 @@ use crate::panels::terminal_splash::adapt_layout;
 use crate::panels::{Panel, PanelContext};
 use crate::services::Services;
 
+/// The shared `Chrome::draw` path is the web/WASM status-line host. Keep both
+/// the strip and its interactive contents in window coordinates: side panels
+/// are confined to the middle band and must not reflow this bottom band.
+fn status_line_render_geometry(layout: &crate::layout::ChromeLayout) -> (Rect, Rect) {
+    (layout.status_line, layout.status_line)
+}
+
 impl<A: Send + Copy + 'static> Chrome<A> {
     /// Paint every visible panel through `sugarloaf` in z-order.
     /// Background panels paint first; modal overlays paint last so
@@ -63,7 +70,24 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         .fold(0.0_f32, f32::max);
         let command_palette_occlusion =
             self.command_palette.active_visual_rect(window_width, 1.0);
-        let command_palette_occlusions = command_palette_occlusion.as_slice();
+        let mut active_text_occlusions: Vec<[f32; 4]> =
+            command_palette_occlusion.into_iter().collect();
+        if let Some(rect) = self.file_browser.occlusion_rect_for([
+            0.0,
+            0.0,
+            window_width,
+            layout.status_line.y + layout.status_line.h,
+        ]) {
+            active_text_occlusions.push(rect);
+        }
+        if self.share_sheet.is_visible() {
+            active_text_occlusions.push([
+                0.0,
+                0.0,
+                window_width,
+                layout.status_line.y + layout.status_line.h,
+            ]);
+        }
         if input_modal_active {
             self.buffer_tabs.clear_hover_immediate();
             self.buffer_tabs.set_focused(false);
@@ -76,14 +100,20 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // (it doesn't go through `Chrome`, so this clear is web-only).
         sugarloaf
             .clear_image_overlays_for(crate::panels::agent_pane::icon::ICON_PANEL_ID);
-        self.buffer_tabs.draw(
-            sugarloaf,
-            &PanelLayout {
-                bounds: layout.buffer_tabs,
-                scale: 1.0,
-            },
-            &ctx,
-        );
+        // Splash images are retained by Sugarloaf, unlike frame-local quads
+        // and text. Clear the previous frame before any eligibility branch so
+        // a full-page Tree/Notes takeover cannot leave the old wordmark alive.
+        SplashOverlay::clear_image_overlays(sugarloaf);
+        if layout.buffer_tabs.w > 0.0 && layout.buffer_tabs.h > 0.0 {
+            self.buffer_tabs.draw(
+                sugarloaf,
+                &PanelLayout {
+                    bounds: layout.buffer_tabs,
+                    scale: 1.0,
+                },
+                &ctx,
+            );
+        }
 
         // Window-top chrome strip is rendered at the very end of this
         // function (search "TOP BAR LAST PASS") so its dropdown's
@@ -103,13 +133,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // status bar came out a different color than the desktop one.
         // The content-bounds variant also starts the pills at the editor
         // column instead of x=0, which is the other half of the mismatch.
+        let (status_background, status_content) = status_line_render_geometry(&layout);
         self.status_line.render_with_ide_theme_in_content_bounds(
             sugarloaf,
-            layout.status_line.x,
-            layout.status_line.y,
-            layout.status_line.w,
-            layout.terminal.x,
-            layout.terminal.w,
+            status_background.x,
+            status_background.y,
+            status_background.w,
+            status_content.x,
+            status_content.w,
             &self.ide_theme,
         );
 
@@ -138,7 +169,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // the focused pane's rect; unfocused panes render through
         // `draw_unfocused_pane_surfaces` below.
         let content_rect = self.focused_content_rect();
-        if terminal_rect.w > 0.0 && terminal_rect.h > 0.0 {
+        let content_available = content_rect.w > 0.0 && content_rect.h > 0.0;
+        if !content_available {
+            agent_pane_view::clear_overlays(sugarloaf);
+            self.splash_overlay.reset();
+        }
+        if content_available {
             if self.is_terminal_tab_active() {
                 // The splash wordmark is a whole-content flourish — it
                 // stands down while the grid is split so it can't paint
@@ -173,7 +209,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         &ide_theme,
                         1.0,
                         true,
-                        command_palette_occlusions,
+                        &active_text_occlusions,
                     );
                 } else {
                     SplashOverlay::clear_image_overlays(sugarloaf);
@@ -183,22 +219,29 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             } else if self.is_neoism_agent_tab_active() {
                 SplashOverlay::clear_image_overlays(sugarloaf);
                 self.splash_overlay.reset();
+                let narrow_takeover = self.agent_side_panel_takeover_active();
                 if let Some(pane) = self.agent_pane.as_mut() {
-                    agent_pane_view::render(
+                    if narrow_takeover {
+                        // The composer is not rendered during takeover, so its
+                        // previous frame's caret must not remain globally live.
+                        pane.set_cursor_rect(None);
+                    }
+                    agent_pane_view::render_responsive(
                         sugarloaf,
                         pane,
                         [
-                            terminal_rect.x,
-                            terminal_rect.y,
-                            terminal_rect.w,
-                            terminal_rect.h,
+                            content_rect.x,
+                            content_rect.y,
+                            content_rect.w,
+                            content_rect.h,
                         ],
                         &self.ide_theme,
                         true,
                         time.as_secs_f32(),
                         Some(self.last_pointer_pos),
                         self.chrome_scale,
-                        command_palette_occlusions,
+                        &active_text_occlusions,
+                        narrow_takeover,
                     );
                 }
             } else {
@@ -242,7 +285,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     // above, the same way desktop's context-grid pages
                     // take over the pane body.
                     let _ = effective_offset; // pages own their scroll
-                    self.draw_chrome_page_body(sugarloaf, page, terminal_rect);
+                    self.draw_chrome_page_body(sugarloaf, page, content_rect);
                 } else if self.tab_lang == crate::syntax::Lang::Markdown {
                     if let Some(pane) = self.markdown_pane.as_mut() {
                         // The REAL renderer — same virtualized path as the
@@ -414,18 +457,24 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         //     into their pane rects; panes the host painted (secondary
         //     terminal grids) are skipped; anything else gets an honest
         //     labeled placeholder.
-        self.draw_unfocused_pane_surfaces(sugarloaf);
+        if content_available {
+            self.draw_unfocused_pane_surfaces(sugarloaf);
+        }
 
         // 3a'. Per-pane tab strips + breadcrumbs on stacked panes
         //      (desktop `pane_tabs` / `pane_breadcrumbs` parity).
-        self.draw_pane_tab_strips(sugarloaf);
+        if content_available {
+            self.draw_pane_tab_strips(sugarloaf);
+        }
 
         // 3b. Pane-grid chrome: divider bands between split panes, the
         //     focused-pane outline, and the live drag-to-split drop
         //     preview. Painted over the pane surfaces but under the
         //     composer / modals — the Rust twin of the deleted DOM
         //     `.terminal-pane-layout-cell` overlay.
-        self.draw_pane_grid_overlay(sugarloaf);
+        if content_available {
+            self.draw_pane_grid_overlay(sugarloaf);
+        }
 
         // 4. Sticky composer above the status line (still under modals).
         if let Some(rect) = layout.command_composer {
@@ -433,8 +482,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             let neutral = crate::panels::command_composer::InputClassification::neutral(
                 theme.u8(theme.fg),
             );
-            let trail_cursor_will_paint =
-                self.is_terminal_tab_active() && self.command_composer.is_visible();
+            let trail_cursor_will_paint = self.terminal_composer_eligible();
             let _ = self.command_composer.render(
                 sugarloaf,
                 rect.x,
@@ -466,7 +514,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         //     Data-driven panels (toasts without queue, popup without
         //     snapshot, minimap without a fed snapshot) early-return
         //     without painting.
-        if let Some(rect) = layout.breadcrumbs {
+        if let Some(rect) = layout
+            .breadcrumbs
+            .filter(|rect| rect.w > 0.0 && rect.h > 0.0)
+        {
             self.breadcrumbs.render_with_options(
                 sugarloaf,
                 rect.x,
@@ -476,9 +527,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 !input_modal_active,
             );
         }
-        self.notifications.draw(
-            sugarloaf,
-            &PanelLayout {
+        if !self.connection_gate_active() {
+            self.notifications.draw(
+                sugarloaf,
+                &PanelLayout {
                 // Full-width band: buffer_tabs spans the whole viewport,
                 // so toasts anchor at the real WINDOW right edge instead
                 // of the terminal pane's (which reserves right-side
@@ -490,17 +542,20 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     h: layout.terminal.h,
                 },
                 scale: 1.0,
-            },
-            &ctx,
-        );
-        self.search_overlay.draw(
-            sugarloaf,
-            &PanelLayout {
-                bounds: layout.terminal,
-                scale: 1.0,
-            },
-            &ctx,
-        );
+                },
+                &ctx,
+            );
+        }
+        if content_available {
+            self.search_overlay.draw(
+                sugarloaf,
+                &PanelLayout {
+                    bounds: layout.terminal,
+                    scale: 1.0,
+                },
+                &ctx,
+            );
+        }
         // Minimap rail — desktop parity with the per-route loop in
         // `desktop/src/screen/render/cell_emit.rs`: `begin_frame()`
         // resets the hit rects, then each visible pane paints the
@@ -510,7 +565,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // falls back to the terminal rect + route 0, which is the route
         // the web host feeds for the active editor surface.
         self.minimap.begin_frame();
-        if self.minimap.is_enabled() {
+        if content_available && self.minimap.is_enabled() {
             let ide_theme = self.ide_theme;
             let minimap_cell_h = self.cell_h.max(1.0);
             let pane_routes: Vec<(u64, crate::layout::Rect)> = self
@@ -549,32 +604,36 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 }
             }
         }
-        self.yank_flash.draw(
-            sugarloaf,
-            &PanelLayout {
-                bounds: layout.terminal,
-                scale: 1.0,
-            },
-            &ctx,
-            self.cell_w,
-            self.cell_h,
-        );
+        if content_available {
+            self.yank_flash.draw(
+                sugarloaf,
+                &PanelLayout {
+                    bounds: layout.terminal,
+                    scale: 1.0,
+                },
+                &ctx,
+                self.cell_w,
+                self.cell_h,
+            );
+        }
         // Code-pane LSP session hosting: pump the shared session layer
         // (buffer sync, mouse-rest hover, diagnostics refold, popup
         // dismissal) and feed its completion / code-action menu into
         // the stored-popup slot the shim below paints from.
-        self.pump_code_lsp_layer(input_modal_active);
-        self.completion_menu.draw(
-            sugarloaf,
-            &PanelLayout {
-                bounds: layout.terminal,
-                scale: 1.0,
-            },
-            &ctx,
-            self.cell_w,
-            self.cell_h,
-        );
-        if self.context_menu.is_visible() {
+        if content_available {
+            self.pump_code_lsp_layer(input_modal_active);
+            self.completion_menu.draw(
+                sugarloaf,
+                &PanelLayout {
+                    bounds: layout.terminal,
+                    scale: 1.0,
+                },
+                &ctx,
+                self.cell_w,
+                self.cell_h,
+            );
+        }
+        if content_available && self.context_menu.is_visible() {
             let window_w = [
                 layout.buffer_tabs.x + layout.buffer_tabs.w,
                 layout.status_line.x + layout.status_line.w,
@@ -644,12 +703,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
         let tab_cursor_rect = self.buffer_tabs.focused_cursor_rect();
         let agent_tab_active = self.is_neoism_agent_tab_active();
-        let agent_side_panel_focused = agent_tab_active
+        let agent_side_panel_takeover = self.agent_side_panel_takeover_active();
+        let agent_side_panel_focused = content_available
+            && agent_tab_active
             && self
                 .agent_pane
                 .as_ref()
                 .is_some_and(|pane| pane.side_panel().is_focused());
-        let agent_input_cursor_available = agent_tab_active
+        let agent_input_cursor_available = content_available
+            && agent_tab_active
+            && !agent_side_panel_takeover
             && self
                 .agent_pane
                 .as_ref()
@@ -659,11 +722,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // trail-cursor owner. Only counts while a non-terminal,
         // non-agent tab is active — the same gate the render branch
         // above uses.
-        let editor_pane_kind = if !self.is_terminal_tab_active() && !agent_tab_active {
-            self.active_editor_pane_kind()
-        } else {
-            None
-        };
+        let editor_pane_kind =
+            if content_available && !self.is_terminal_tab_active() && !agent_tab_active {
+                self.active_editor_pane_kind()
+            } else {
+                None
+            };
         let code_cursor_available = editor_pane_kind
             == Some(crate::chrome::EditorPaneKind::Code)
             && self
@@ -686,10 +750,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .and_then(|pane| pane.cursor_rect)
                 .is_some())
             || notebook_cursor_available;
-        let markdown_active = !self.is_terminal_tab_active()
+        let markdown_active = content_available
+            && !self.is_terminal_tab_active()
             && self.tab_lang == crate::syntax::Lang::Markdown;
-        let terminal_block_input_active = self.is_terminal_tab_active()
-            && self.command_composer.is_visible()
+        let terminal_block_input_active = content_available
+            && self.terminal_composer_eligible()
             && self.command_composer.last_frame().caret_rect.is_some();
 
         match trail_cursor_overlay_target(TrailCursorOverlayState {
@@ -714,23 +779,26 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             git_diff_panel_focused: self.git_diff.is_visible()
                 || self.git_diff_panel.is_focused(),
             search_active: self.search_overlay.is_active(),
-            modal_owns_editor_focus: false,
-            agent_surface_active: agent_tab_active,
+            // Settings/file modals and every other generic keyboard owner
+            // suppress the unrelated content caret just like palette/finder.
+            modal_owns_editor_focus: self.generic_keyboard_overlay_active(),
+            agent_surface_active: content_available && agent_tab_active,
             agent_input_cursor_available,
             markdown_cursor_available,
             code_cursor_available,
-            // The draw pane is a cursorless surface — without this the
-            // trail falls through to the parked terminal origin. The
-            // chrome helper pages (Extensions / NeoWorld) are equally
-            // cursorless.
-            cursorless_surface_active: editor_pane_kind
-                == Some(crate::chrome::EditorPaneKind::Draw)
+            // Every hosted editor owns cursor focus even when its document
+            // caret is scrolled fully offscreen. Otherwise Ctrl+D/U can fall
+            // through to the parked terminal cursor at the top-left corner.
+            cursorless_surface_active: editor_pane_kind.is_some()
+                || markdown_active
                 || self.active_chrome_page().is_some(),
             terminal_block_input_active,
             // Hosted editor panes draw content carets (or none) — the
             // terminal-grid fallback must not park a cursor over them
             // while the pane's first `cursor_rect` is still pending.
-            trail_cursor_enabled: !markdown_active && editor_pane_kind.is_none(),
+            trail_cursor_enabled: content_available
+                && !markdown_active
+                && editor_pane_kind.is_none(),
         }) {
             Some(target)
                 if trail_cursor_overlay_draw_kind(target)
@@ -875,27 +943,22 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // the content column, so the band starts at `buffer_tabs.y`.
         let band_top = layout.buffer_tabs.y;
         let band_bottom = layout.status_line.y;
-        let band_h = (band_bottom - band_top).max(0.0);
 
         // Notes sidebar — left column right of the file tree, scoped to
         // the middle band.
-        if self.notes_sidebar.is_visible() {
-            if let Some(viewport) = self.last_viewport {
-                let ide_theme = self.ide_theme;
-                let x_left = layout.file_tree.map(|ft| ft.x + ft.w).unwrap_or(viewport.x);
-                let width = self.notes_sidebar.width().min(viewport.w * 0.8);
-                self.notes_sidebar.render(
-                    sugarloaf,
-                    x_left,
-                    band_top,
-                    width,
-                    band_h,
-                    &ide_theme,
-                    &[],
-                    None,
-                    0.0,
-                );
-            }
+        if let Some(rect) = layout.notes_sidebar {
+            let ide_theme = self.ide_theme;
+            self.notes_sidebar.render(
+                sugarloaf,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                &ide_theme,
+                &[],
+                None,
+                0.0,
+            );
         }
 
         // Rich git side panel — right column scoped to the middle band,
@@ -966,6 +1029,41 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // overlay pass, so no earlier text can bleed through (the
         // same layering desktop gives its settings overlay + modal).
         self.draw_chrome_overlays(sugarloaf);
+        // Connection notifications must remain readable above the blocking
+        // late-overlay gate (ordinary modals intentionally cover toasts).
+        if self.connection_gate_active() {
+            sugarloaf.set_late_overlay_mode(true);
+            self.notifications.draw(
+                sugarloaf,
+                &PanelLayout {
+                    bounds: crate::layout::Rect {
+                        x: layout.buffer_tabs.x,
+                        y: layout.terminal.y,
+                        w: layout.buffer_tabs.w,
+                        h: layout.terminal.h,
+                    },
+                    scale: 1.0,
+                },
+                &ctx,
+            );
+            sugarloaf.set_late_overlay_mode(false);
+        }
+
+        // Reusable file browser: a late material pass prevents text/image
+        // bleed, while its translucent backdrop leaves the themed workspace
+        // visibly present beneath the modal.
+        if self.file_browser.is_active() {
+            if let Some(viewport) = self.last_viewport {
+                sugarloaf.set_late_overlay_mode(true);
+                self.file_browser.set_font_scale(self.chrome_scale);
+                self.file_browser.render(
+                    sugarloaf,
+                    [viewport.x, viewport.y, viewport.w, viewport.h],
+                    &self.ide_theme,
+                );
+                sugarloaf.set_late_overlay_mode(false);
+            }
+        }
 
         // "Share with phone" QR — genuinely last, above even the chrome
         // overlays, because it is a modal the user is pointing a camera at.
@@ -1282,6 +1380,36 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             sugarloaf.rect(None, hl.x, hl.y, bw, hl.h, edge, 0.0, 2);
             sugarloaf.rect(None, hl.x + hl.w - bw, hl.y, bw, hl.h, edge, 0.0, 2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::panels::FileTree;
+    use std::path::PathBuf;
+
+    #[test]
+    fn web_status_line_stays_full_width_when_file_tree_is_open() {
+        let viewport = Rect::new(0.0, 0.0, 1024.0, 768.0);
+        let mut chrome = Chrome::<()>::new();
+        let mut tree = FileTree::new(PathBuf::from("/workspace"));
+        tree.set_visible(true);
+        chrome.install_file_tree(tree);
+        chrome.set_layout(viewport);
+
+        let layout = chrome.layout();
+        assert!(
+            layout.file_tree.is_some(),
+            "test must exercise an open tree"
+        );
+        assert!(layout.terminal.x > viewport.x, "tree must reflow content");
+
+        let (background, content) = status_line_render_geometry(layout);
+        assert_eq!(background.x, viewport.x);
+        assert_eq!(background.w, viewport.w);
+        assert_eq!(content.x, viewport.x);
+        assert_eq!(content.w, viewport.w);
     }
 }
 

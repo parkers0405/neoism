@@ -383,11 +383,15 @@ fn empty_hover_uses_one_exact_position_request() {
         "empty-hover",
         "ptest",
     );
-    let spec = workspace.runtime.adapters_for_root(&workspace.path)
+    let spec = workspace
+        .runtime
+        .adapters_for_root(&workspace.path)
         .into_iter()
         .find(|adapter| adapter.id == "protocol-test")
         .expect("configured exact-position adapter");
-    workspace.runtime.service
+    workspace
+        .runtime
+        .service
         .sync(&workspace.path, &file, Some("fn main() {}\n"), &spec)
         .expect("initialize exact-position fake LSP");
 
@@ -428,7 +432,8 @@ fn concurrent_cold_opens_initialize_one_shared_client() {
         let barrier = Arc::clone(&barrier);
         workers.push(thread::spawn(move || {
             barrier.wait();
-            runtime.service
+            runtime
+                .service
                 .sync(&root, &file, Some("clean\n"), &spec)
                 .expect("concurrent cold-open sync");
         }));
@@ -437,7 +442,9 @@ fn concurrent_cold_opens_initialize_one_shared_client() {
     for worker in workers {
         worker.join().expect("cold-open worker");
     }
-    workspace.runtime.service
+    workspace
+        .runtime
+        .service
         .hover(&workspace.path, &first, 0, 0, &spec)
         .expect("protocol barrier after concurrent opens");
 
@@ -497,10 +504,14 @@ fn changed_adapter_configuration_replaces_the_old_transport() {
 
     write_lsp_config(&workspace.path, &fake_server, &log, "serve");
     let first = configured_test_spec(&workspace.runtime, &workspace.path);
-    workspace.runtime.service
+    workspace
+        .runtime
+        .service
         .sync(&workspace.path, &file, Some("broken_v1"), &first)
         .expect("start first configured transport");
-    workspace.runtime.service
+    workspace
+        .runtime
+        .service
         .hover(&workspace.path, &file, 0, 0, &first)
         .expect("first transport barrier");
 
@@ -510,14 +521,20 @@ fn changed_adapter_configuration_replaces_the_old_transport() {
         &workspace.path,
     );
     let replacement = configured_test_spec(&workspace.runtime, &workspace.path);
-    workspace.runtime.service
+    workspace
+        .runtime
+        .service
         .sync(&workspace.path, &file, Some("broken_v2"), &replacement)
         .expect("start replacement configured transport");
-    workspace.runtime.service
+    workspace
+        .runtime
+        .service
         .hover(&workspace.path, &file, 0, 0, &replacement)
         .expect("replacement transport barrier");
 
-    let live_for_adapter = workspace.runtime.service
+    let live_for_adapter = workspace
+        .runtime
+        .service
         .clients
         .lock()
         .expect("client map")
@@ -614,8 +631,12 @@ fn nested_project_client_keeps_outer_workspace_cache_and_event_ownership() {
         .is_empty());
 }
 
-fn configured_test_spec(runtime: &super::super::LspRuntime, root: &Path) -> LanguageAdapter {
-    runtime.adapters_for_root(root)
+fn configured_test_spec(
+    runtime: &super::super::LspRuntime,
+    root: &Path,
+) -> LanguageAdapter {
+    runtime
+        .adapters_for_root(root)
         .into_iter()
         .find(|adapter| adapter.id == "protocol-test")
         .expect("configured protocol-test adapter")

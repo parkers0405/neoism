@@ -19,11 +19,186 @@ use super::{
 };
 use crate::panels::file_tree::FRAME_STROKE;
 use crate::primitives::ide_theme::IdeTheme;
+use crate::primitives::text::draw_icon_centered_with_occlusion;
 use crate::render_policy::opencode_scanner_frame;
 
 /// Logical height of the dropdown-chip row (agent ˅ / model ˅ /
 /// thinking ˅) rendered below the input box, inside the outer shell.
 pub(super) const CHIPS_BAND_H: f32 = 26.0;
+const STATUS_CHIP_DESKTOP_FONT: f32 = 12.5;
+const STATUS_CHIP_COMPACT_FONT: f32 = 10.75;
+const STATUS_CHIP_HIT_H: f32 = 23.5;
+const INPUT_COMMAND_HINT: (&str, &str) = ("/", "commands");
+const INPUT_TAB_HINT: (&str, &str) = ("tab", "agents");
+const NARROW_CONTROL_HIT_SIDE: f32 = 44.0;
+const COMPOSER_CONTROL_RADIUS: f32 = 8.0;
+const COMPOSER_STOP_SIDE_RATIO: f32 = 0.28;
+const COMPOSER_SEND_FONT_RATIO: f32 = 0.62;
+const COMPOSER_ATTACH_FONT_RATIO: f32 = 0.72;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ComposerActionDrawPolicy {
+    paint_background: bool,
+}
+
+const ATTACHMENT_ACTION_DRAW_POLICY: ComposerActionDrawPolicy =
+    ComposerActionDrawPolicy {
+        // The attachment affordance is deliberately only a glyph. Its visual
+        // target below exists for centering, clipping, and hit geometry; it is not
+        // a surface that may be filled or outlined.
+        paint_background: false,
+    };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposerControlAction {
+    Disabled,
+    Send,
+    Interrupt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ComposerVisualPolicy {
+    narrow: bool,
+    visual_side: f32,
+    hit_side: f32,
+    action: ComposerControlAction,
+    show_activity: bool,
+    show_interrupt_hint: bool,
+    show_tab_hint: bool,
+    show_command_hint: bool,
+}
+
+/// One renderer-owned responsive policy serves desktop, web, and mobile.
+/// Widths are converted back to logical/CSS pixels before the breakpoint is
+/// applied. Responsive hit geometry must not alter the painted control.
+fn composer_visual_policy(
+    available_w: f32,
+    scale: f32,
+    show_status: bool,
+    has_draft: bool,
+    display_status_active: bool,
+    interruptible_run_active: bool,
+) -> ComposerVisualPolicy {
+    let narrow = super::layout::is_narrow_composer_width(available_w, scale);
+    let action = if interruptible_run_active {
+        ComposerControlAction::Interrupt
+    } else if has_draft {
+        ComposerControlAction::Send
+    } else {
+        ComposerControlAction::Disabled
+    };
+    // These are the original painted dimensions. Mobile accessibility is
+    // provided by `hit_side`, never by enlarging this visual square.
+    let visual_side = if show_status { 30.0 } else { 26.0 } * scale;
+    ComposerVisualPolicy {
+        narrow,
+        visual_side,
+        hit_side: if narrow {
+            (NARROW_CONTROL_HIT_SIDE * scale).max(visual_side)
+        } else {
+            visual_side
+        },
+        action,
+        show_activity: display_status_active,
+        show_interrupt_hint: display_status_active && !narrow,
+        show_tab_hint: !narrow,
+        show_command_hint: true,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ComposerControlGeometry {
+    visual_rect: [f32; 4],
+    hit_rect: [f32; 4],
+}
+
+/// Keep the invisible mobile target concentric with the original visual
+/// square. It is interaction-only and therefore cannot reserve composer
+/// height or shift adjacent chips/text.
+fn composer_control_geometry(
+    box_x: f32,
+    box_w: f32,
+    box_bottom: f32,
+    inset: f32,
+    policy: ComposerVisualPolicy,
+) -> ComposerControlGeometry {
+    let visual_side = policy.visual_side.min((box_w - inset * 2.0).max(0.0));
+    let visual_x = box_x + box_w - inset - visual_side;
+    let visual_y = box_bottom - inset - visual_side;
+    let hit_pad = (policy.hit_side - visual_side).max(0.0) * 0.5;
+    let hit_x = (visual_x - hit_pad).max(box_x);
+    let hit_y = visual_y - hit_pad;
+    let hit_right = (visual_x + visual_side + hit_pad).min(box_x + box_w);
+    ComposerControlGeometry {
+        visual_rect: [visual_x, visual_y, visual_side, visual_side],
+        hit_rect: [hit_x, hit_y, (hit_right - hit_x).max(0.0), policy.hit_side],
+    }
+}
+
+fn attachment_control_geometry(
+    box_x: f32,
+    box_w: f32,
+    inset: f32,
+    send_visual_rect: [f32; 4],
+    scale: f32,
+) -> ComposerControlGeometry {
+    let visual_side = send_visual_rect[2];
+    let visual_x = box_x + inset;
+    let visual_y = send_visual_rect[1];
+    // Keep the touch target accessible at every width, not only after the
+    // narrow breakpoint. It remains invisible and does not reserve layout.
+    let hit_side = (NARROW_CONTROL_HIT_SIDE * scale).max(visual_side);
+    let hit_pad = (hit_side - visual_side) * 0.5;
+    let hit_x = (visual_x - hit_pad).max(box_x);
+    let hit_right = (visual_x + visual_side + hit_pad).min(box_x + box_w);
+    ComposerControlGeometry {
+        visual_rect: [visual_x, visual_y, visual_side, visual_side],
+        hit_rect: [
+            hit_x,
+            visual_y - hit_pad,
+            (hit_right - hit_x).max(0.0),
+            hit_side,
+        ],
+    }
+}
+
+fn rect_center(rect: [f32; 4]) -> [f32; 2] {
+    [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5]
+}
+
+fn centered_square(rect: [f32; 4], side: f32) -> [f32; 4] {
+    let center = rect_center(rect);
+    [center[0] - side * 0.5, center[1] - side * 0.5, side, side]
+}
+
+fn point_in_rect(rect: [f32; 4], point: (f32, f32)) -> bool {
+    point.0 >= rect[0]
+        && point.0 <= rect[0] + rect[2]
+        && point.1 >= rect[1]
+        && point.1 <= rect[1] + rect[3]
+}
+
+/// Narrow chips show only the terminal non-empty model-id segment. The pane's
+/// full model value remains untouched for picker actions and host state.
+fn model_chip_label(model: &str, narrow: bool) -> &str {
+    if !narrow {
+        return model;
+    }
+    model
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("")
+}
+
+/// Scale chip labels down with the shared compositor's available width. This
+/// covers mobile/web and narrow desktop panes without platform-specific CSS.
+fn status_chip_font_size(max_w: f32, scale: f32) -> f32 {
+    let logical_w = max_w / scale.max(0.001);
+    let blend = ((logical_w - 420.0) / (760.0 - 420.0)).clamp(0.0, 1.0);
+    (STATUS_CHIP_COMPACT_FONT
+        + (STATUS_CHIP_DESKTOP_FONT - STATUS_CHIP_COMPACT_FONT) * blend)
+        * scale
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentPermissionChoice {
@@ -230,6 +405,9 @@ pub trait AgentUserInputPane {
     fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>);
     fn clear_usage_chip_rect(&mut self);
     fn register_usage_chip_rect(&mut self, rect: [f32; 4]);
+    fn clear_composer_control_rect(&mut self);
+    fn register_composer_control_rect(&mut self, rect: [f32; 4]);
+    fn interruptible_run_active(&self) -> bool;
     fn clear_status_chip_rects(&mut self);
     fn register_status_chip_rect(&mut self, index: usize, rect: [f32; 4]);
     fn usage_summary_label(&self) -> Option<String>;
@@ -342,6 +520,18 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn register_usage_chip_rect(&mut self, rect: [f32; 4]) {
                 <$pane>::register_usage_chip_rect(self, rect);
+            }
+
+            fn clear_composer_control_rect(&mut self) {
+                <$pane>::clear_composer_control_rect(self);
+            }
+
+            fn register_composer_control_rect(&mut self, rect: [f32; 4]) {
+                <$pane>::register_composer_control_rect(self, rect);
+            }
+
+            fn interruptible_run_active(&self) -> bool {
+                <$pane>::interruptible_run_active(self)
             }
 
             fn clear_status_chip_rects(&mut self) {
@@ -561,6 +751,18 @@ impl AgentUserInputPane for NeoismAgentPane {
 
     fn register_usage_chip_rect(&mut self, rect: [f32; 4]) {
         NeoismAgentPane::register_usage_chip_rect(self, rect);
+    }
+
+    fn clear_composer_control_rect(&mut self) {
+        NeoismAgentPane::clear_composer_control_rect(self);
+    }
+
+    fn register_composer_control_rect(&mut self, rect: [f32; 4]) {
+        NeoismAgentPane::register_composer_control_rect(self, rect);
+    }
+
+    fn interruptible_run_active(&self) -> bool {
+        NeoismAgentPane::interruptible_run_active(self)
     }
 
     fn clear_status_chip_rects(&mut self) {
@@ -971,8 +1173,10 @@ pub fn render_input(
     sugarloaf: &mut Sugarloaf,
     pane: &mut impl AgentUserInputPane,
     rect: [f32; 4],
+    responsive_width: f32,
     theme: &IdeTheme,
     active: bool,
+    mouse: Option<(f32, f32)>,
     s: f32,
     show_status: bool,
     now_seconds: f32,
@@ -982,6 +1186,7 @@ pub fn render_input(
     let [x, y, w, h] = rect;
     pane.set_cursor_rect(None);
     pane.clear_usage_chip_rect();
+    pane.clear_composer_control_rect();
     pane.clear_status_chip_rects();
     // Floating-island composer: the input box's own border IS the
     // island's top and sides — the shell only shows as a "skirt"
@@ -1071,22 +1276,20 @@ pub fn render_input(
         );
     }
 
-    let usage_label = pane.usage_summary_label();
-    let usage_opts = DrawOpts {
-        font_size: 11.5 * s,
-        color: theme.u8(theme.readable_accent(theme.cyan)),
-        bold: true,
-        ..DrawOpts::default()
-    };
-    let usage_chip_w = usage_label
-        .as_ref()
-        .map(|label| sugarloaf.text_mut().measure(label, &usage_opts) + 22.0 * s)
-        .unwrap_or(0.0);
-    // Square send button — bottom-right corner inside the box.
-    let send_side = if show_status { 30.0 } else { 26.0 } * s;
+    let composer_policy = composer_visual_policy(
+        responsive_width,
+        s,
+        show_status,
+        !pane.input().trim().is_empty(),
+        !matches!(pane.streaming_state(), AgentStreamingStatus::Idle),
+        pane.interruptible_run_active(),
+    );
+    // The painted square retains its original size. Narrow panes register a
+    // separate 44 logical-pixel touch target without affecting layout.
     let send_inset = 9.0 * s;
-    let send_x = box_x + box_w - send_inset - send_side;
-    let send_y = box_bottom - send_inset - send_side;
+    let control_geometry =
+        composer_control_geometry(box_x, box_w, box_bottom, send_inset, composer_policy);
+    let [send_x, send_y, send_side, _] = control_geometry.visual_rect;
     // Dropdown chip row in the shell band below the box. Each chip
     // registers a hit rect: clicking one opens its "/" picker.
     render_status_chips(
@@ -1095,6 +1298,7 @@ pub fn render_input(
         x + 14.0 * s,
         box_bottom + ((y + h - box_bottom) - 13.5 * s) * 0.5,
         (w - 28.0 * s).max(0.0),
+        composer_policy.narrow,
         theme,
         s,
         occlusion_rects,
@@ -1210,46 +1414,56 @@ pub fn render_input(
         }
     }
 
-    // Usage chip sits at the FAR LEFT of the send-button line.
-    if let Some(label) = usage_label.as_deref() {
-        if usage_chip_w > 0.0 {
-            let usage_h = 22.0 * s;
-            let usage_x = box_x + 16.0 * s;
-            let usage_y = send_y + (send_side - usage_h) * 0.5;
-            if usage_x + usage_chip_w <= send_x - 8.0 * s {
-                sugarloaf.rounded_rect(
-                    None,
-                    usage_x,
-                    usage_y,
-                    usage_chip_w,
-                    usage_h,
-                    theme.f32(theme.surface),
-                    DEPTH,
-                    usage_h * 0.4,
-                    ORDER_TEXT,
-                );
-                draw_text_clipped(
-                    sugarloaf,
-                    usage_x + 11.0 * s,
-                    usage_y + 5.0 * s,
-                    label,
-                    &usage_opts,
-                    occlusion_rects,
-                );
-                pane.register_usage_chip_rect([usage_x, usage_y, usage_chip_w, usage_h]);
-            }
-        }
-    }
+    // Attachment is a bare `+`, with no painted surface. `usage_chip_rect` is
+    // retained as the authoritative ABI-level file-browser action slot while
+    // old percentage-meter consumers migrate. Its independent invisible hit
+    // target is at least 44 logical pixels without changing composer layout.
+    let attachment_geometry = attachment_control_geometry(
+        box_x,
+        box_w,
+        send_inset,
+        control_geometry.visual_rect,
+        s,
+    );
+    debug_assert!(!ATTACHMENT_ACTION_DRAW_POLICY.paint_background);
+    let attachment_hovered =
+        mouse.is_some_and(|point| point_in_rect(attachment_geometry.hit_rect, point));
+    let mut attach_color = theme.u8(theme.fg);
+    let attach_alpha = if attachment_hovered {
+        1.0
+    } else if active {
+        0.88
+    } else {
+        0.68
+    };
+    attach_color[3] = (attach_color[3] as f32 * attach_alpha).round() as u8;
+    let attach_opts = DrawOpts {
+        font_size: send_side * COMPOSER_ATTACH_FONT_RATIO,
+        color: attach_color,
+        bold: true,
+        clip_rect: Some(attachment_geometry.visual_rect),
+        ..DrawOpts::default()
+    };
+    draw_icon_centered_with_occlusion(
+        sugarloaf,
+        attachment_geometry.visual_rect[0],
+        attachment_geometry.visual_rect,
+        "+",
+        &attach_opts,
+        occlusion_rects,
+        true,
+    );
+    pane.register_usage_chip_rect(attachment_geometry.hit_rect);
     // Square send button: filled rounded square, bottom-right. While the
     // model responds it becomes a quiet static stop-square; avoid layering
     // another activity animation here because the status row already owns
     // the live response treatment. Enter still submits — the button mirrors
     // state.
-    let busy = !matches!(pane.streaming_state(), AgentStreamingStatus::Idle);
-    let button_alpha = if busy || !pane.input().trim().is_empty() {
-        1.0
-    } else {
+    let busy = composer_policy.action == ComposerControlAction::Interrupt;
+    let button_alpha = if composer_policy.action == ComposerControlAction::Disabled {
         0.55
+    } else {
+        1.0
     };
     sugarloaf.rounded_rect(
         None,
@@ -1259,20 +1473,21 @@ pub fn render_input(
         send_side,
         theme.f32_alpha(theme.fg, button_alpha),
         DEPTH,
-        8.0 * s,
+        COMPOSER_CONTROL_RADIUS * s,
         ORDER_TEXT,
     );
+    pane.register_composer_control_rect(control_geometry.hit_rect);
     if busy {
         // Running state: a static dark stop-square.
-        let center_x = send_x + send_side * 0.5;
-        let center_y = send_y + send_side * 0.5;
-        let square = send_side * 0.28;
+        let square = send_side * COMPOSER_STOP_SIDE_RATIO;
+        let [stop_x, stop_y, stop_w, stop_h] =
+            centered_square(control_geometry.visual_rect, square);
         sugarloaf.rounded_rect(
             None,
-            center_x - square * 0.5,
-            center_y - square * 0.5,
-            square,
-            square,
+            stop_x,
+            stop_y,
+            stop_w,
+            stop_h,
             theme.f32(theme.bg),
             DEPTH,
             (1.5 * s).min(square * 0.3),
@@ -1282,19 +1497,20 @@ pub fn render_input(
         // Idle: send arrow.
         let arrow = "\u{2191}";
         let arrow_opts = DrawOpts {
-            font_size: send_side * 0.62,
+            font_size: send_side * COMPOSER_SEND_FONT_RATIO,
             color: theme.u8(theme.bg),
             bold: true,
+            clip_rect: Some(control_geometry.visual_rect),
             ..DrawOpts::default()
         };
-        let arrow_w = sugarloaf.text_mut().measure(arrow, &arrow_opts);
-        draw_text_clipped(
+        draw_icon_centered_with_occlusion(
             sugarloaf,
-            send_x + (send_side - arrow_w) * 0.5,
-            send_y + (send_side - arrow_opts.font_size) * 0.5,
+            send_x,
+            control_geometry.visual_rect,
             arrow,
             &arrow_opts,
             occlusion_rects,
+            true,
         );
     }
 
@@ -1302,6 +1518,7 @@ pub fn render_input(
         render_input_help_strip(
             sugarloaf,
             pane,
+            composer_policy,
             [
                 x + 8.0 * s,
                 y + h + 1.0 * s,
@@ -1318,10 +1535,11 @@ pub fn render_input(
 
 /// Small keyboard legend below the composer. The left side only
 /// advertises interruption while a run is actually active; the right
-/// side mirrors the two composer shortcuts that are always available.
+/// side advertises the slash-command shortcut that is always available.
 fn render_input_help_strip(
     sugarloaf: &mut Sugarloaf,
     pane: &impl AgentUserInputPane,
+    policy: ComposerVisualPolicy,
     rect: [f32; 4],
     theme: &IdeTheme,
     s: f32,
@@ -1350,7 +1568,7 @@ fn render_input_help_strip(
     let baseline_y = y + (h - key_opts.font_size) * 0.5;
 
     let mut activity_guard = x;
-    if !matches!(pane.streaming_state(), AgentStreamingStatus::Idle) {
+    if policy.show_activity {
         let activity_w = draw_opencode_activity_scanner(
             sugarloaf,
             x,
@@ -1362,50 +1580,56 @@ fn render_input_help_strip(
             clip,
             occlusion_rects,
         );
-        let esc_x = x + activity_w + 10.0 * s;
-        draw_text_clipped(
-            sugarloaf,
-            esc_x,
-            baseline_y,
-            "esc",
-            &key_opts,
-            occlusion_rects,
-        );
-        let esc_w = sugarloaf.text_mut().measure("esc", &key_opts);
-        draw_text_clipped(
-            sugarloaf,
-            esc_x + esc_w + 7.0 * s,
-            baseline_y,
-            "interrupt",
-            &label_opts,
-            occlusion_rects,
-        );
-        activity_guard = esc_x
-            + esc_w
-            + 7.0 * s
-            + sugarloaf.text_mut().measure("interrupt", &label_opts)
-            + 12.0 * s;
+        activity_guard = x + activity_w + 10.0 * s;
+        if policy.show_interrupt_hint {
+            let esc_x = activity_guard;
+            draw_text_clipped(
+                sugarloaf,
+                esc_x,
+                baseline_y,
+                "esc",
+                &key_opts,
+                occlusion_rects,
+            );
+            let esc_w = sugarloaf.text_mut().measure("esc", &key_opts);
+            draw_text_clipped(
+                sugarloaf,
+                esc_x + esc_w + 7.0 * s,
+                baseline_y,
+                "interrupt",
+                &label_opts,
+                occlusion_rects,
+            );
+            activity_guard = esc_x
+                + esc_w
+                + 7.0 * s
+                + sugarloaf.text_mut().measure("interrupt", &label_opts)
+                + 12.0 * s;
+        }
     }
 
-    let command_label = "commands";
-    let slash = "/";
-    let tab = "tab";
-    let agents = "agents";
+    if !policy.show_command_hint {
+        return;
+    }
+    let (slash, command_label) = INPUT_COMMAND_HINT;
+    let (tab, agents) = INPUT_TAB_HINT;
     let command_label_w = sugarloaf.text_mut().measure(command_label, &label_opts);
     let slash_w = sugarloaf.text_mut().measure(slash, &key_opts);
     let agents_w = sugarloaf.text_mut().measure(agents, &label_opts);
     let tab_w = sugarloaf.text_mut().measure(tab, &key_opts);
-    let group_gap = 26.0 * s;
     let inner_gap = 7.0 * s;
-    let right_w =
-        tab_w + inner_gap + agents_w + group_gap + slash_w + inner_gap + command_label_w;
+    let group_gap = 26.0 * s;
+    let tab_group_w = tab_w + inner_gap + agents_w;
+    let command_group_w = slash_w + inner_gap + command_label_w;
+    let right_w = if policy.show_tab_hint {
+        tab_group_w + group_gap + command_group_w
+    } else {
+        command_group_w
+    };
     let right_x = x + (w - right_w).max(0.0);
 
-    // On narrow panes prefer the actionable slash-command hint. The
-    // Tab group is omitted instead of being allowed to overlap the live
-    // interruption group on the left.
-    let slash_x = right_x + tab_w + inner_gap + agents_w + group_gap;
-    if right_x >= activity_guard {
+    let groups_fit = right_x >= activity_guard;
+    if policy.show_tab_hint && groups_fit {
         draw_text_clipped(
             sugarloaf,
             right_x,
@@ -1423,8 +1647,10 @@ fn render_input_help_strip(
             occlusion_rects,
         );
     }
-    let slash_x = if right_x >= activity_guard {
-        slash_x
+    let slash_x = if policy.show_tab_hint && groups_fit {
+        right_x + tab_group_w + group_gap
+    } else if groups_fit {
+        right_x
     } else {
         x + (w - slash_w - inner_gap - command_label_w).max(0.0)
     };
@@ -1910,6 +2136,7 @@ pub fn render_status_chips(
     mut x: f32,
     y: f32,
     max_w: f32,
+    narrow: bool,
     theme: &IdeTheme,
     s: f32,
     occlusion_rects: &[[f32; 4]],
@@ -1923,10 +2150,13 @@ pub fn render_status_chips(
     let agent_color = agent_chip_accent(theme, &agent_label);
     let chips: [(String, u32); 3] = [
         (agent_label, agent_color),
-        (pane.model().to_string(), theme.blue),
+        (
+            model_chip_label(pane.model(), narrow).to_string(),
+            theme.blue,
+        ),
         (pane.thinking_label().to_string(), theme.magenta),
     ];
-    let font_size = 13.5 * s;
+    let font_size = status_chip_font_size(max_w, s);
     let caret = "\u{f078}";
     let caret_opts = DrawOpts {
         font_size: font_size * 0.66,
@@ -1954,12 +2184,7 @@ pub fn render_status_chips(
         if index == 0 {
             if let Some(elapsed_ms) = agent_transition {
                 super::side_panel::draw::render_scramble_text(
-                    sugarloaf,
-                    x,
-                    y,
-                    &label,
-                    &opts,
-                    elapsed_ms,
+                    sugarloaf, x, y, &label, &opts, elapsed_ms,
                 );
             } else {
                 draw_text_clipped(sugarloaf, x, y, &label, &opts, occlusion_rects);
@@ -1981,10 +2206,225 @@ pub fn render_status_chips(
                 x - 4.0 * s,
                 y - 5.0 * s,
                 chip_w - 8.0 * s,
-                font_size + 10.0 * s,
+                STATUS_CHIP_HIT_H * s,
             ],
         );
         x += chip_w;
+    }
+}
+
+#[cfg(test)]
+mod composer_visual_policy_tests {
+    use super::*;
+
+    #[test]
+    fn help_strip_defines_tab_and_slash_commands() {
+        assert_eq!(INPUT_COMMAND_HINT, ("/", "commands"));
+        assert_eq!(INPUT_TAB_HINT, ("tab", "agents"));
+    }
+
+    #[test]
+    fn narrow_streaming_hides_only_escape_hint_and_keeps_adjacent_help() {
+        let policy = composer_visual_policy(390.0, 1.0, false, false, true, true);
+        assert!(policy.narrow);
+        assert!(policy.show_activity);
+        assert!(!policy.show_interrupt_hint);
+        assert!(!policy.show_tab_hint);
+        assert!(policy.show_command_hint);
+        assert_eq!(policy.action, ComposerControlAction::Interrupt);
+        assert_eq!(policy.visual_side, 26.0);
+        assert_eq!(policy.hit_side, 44.0);
+    }
+
+    #[test]
+    fn wide_streaming_retains_escape_hint_and_desktop_size() {
+        let policy = composer_visual_policy(900.0, 1.0, false, true, true, true);
+        assert!(!policy.narrow);
+        assert!(policy.show_activity);
+        assert!(policy.show_interrupt_hint);
+        assert!(policy.show_tab_hint);
+        assert!(policy.show_command_hint);
+        assert_eq!(policy.action, ComposerControlAction::Interrupt);
+        assert_eq!(policy.visual_side, 26.0);
+        assert_eq!(policy.hit_side, 26.0);
+    }
+
+    #[test]
+    fn hint_breakpoint_compacts_only_phone_widths() {
+        let cramped = composer_visual_policy(519.0, 1.0, false, false, true, true);
+        let wide = composer_visual_policy(520.0, 1.0, false, false, true, true);
+        let scaled_cramped =
+            composer_visual_policy(1038.0, 2.0, false, false, true, true);
+        let scaled_wide = composer_visual_policy(1040.0, 2.0, false, false, true, true);
+
+        for policy in [cramped, scaled_cramped] {
+            assert!(policy.narrow);
+            assert!(!policy.show_tab_hint);
+            assert!(!policy.show_interrupt_hint);
+            assert!(policy.show_activity);
+            assert!(policy.show_command_hint);
+        }
+        for policy in [wide, scaled_wide] {
+            assert!(!policy.narrow);
+            assert!(policy.show_tab_hint);
+            assert!(policy.show_interrupt_hint);
+        }
+    }
+
+    #[test]
+    fn idle_control_is_send_with_draft_and_disabled_without_one() {
+        let send = composer_visual_policy(390.0, 1.0, false, true, false, false);
+        let disabled = composer_visual_policy(390.0, 1.0, false, false, false, false);
+        assert_eq!(send.action, ComposerControlAction::Send);
+        assert_eq!(disabled.action, ComposerControlAction::Disabled);
+        assert_eq!(send.visual_side, disabled.visual_side);
+        assert_eq!(send.hit_side, disabled.hit_side);
+    }
+
+    #[test]
+    fn narrow_non_interruptible_status_keeps_scanner_and_command_help() {
+        let policy = composer_visual_policy(390.0, 1.0, false, false, true, false);
+        assert!(policy.show_activity);
+        assert!(!policy.show_interrupt_hint);
+        assert!(policy.show_command_hint);
+        assert_eq!(policy.action, ComposerControlAction::Disabled);
+    }
+
+    #[test]
+    fn status_chip_type_scales_down_without_shrinking_hit_height() {
+        let compact = status_chip_font_size(360.0, 1.0);
+        let desktop = status_chip_font_size(900.0, 1.0);
+        assert_eq!(compact, STATUS_CHIP_COMPACT_FONT);
+        assert_eq!(desktop, STATUS_CHIP_DESKTOP_FONT);
+        assert!(STATUS_CHIP_HIT_H > desktop);
+    }
+
+    #[test]
+    fn status_chip_type_respects_renderer_scale() {
+        assert_eq!(
+            status_chip_font_size(720.0, 2.0),
+            STATUS_CHIP_COMPACT_FONT * 2.0
+        );
+    }
+
+    #[test]
+    fn narrow_model_chip_uses_last_non_empty_segment_without_changing_wide_label() {
+        let full = "openrouter/openai/gpt-5.6";
+        assert_eq!(model_chip_label(full, true), "gpt-5.6");
+        assert_eq!(model_chip_label(full, false), full);
+        assert_eq!(model_chip_label("provider//family/model/", true), "model");
+        assert_eq!(model_chip_label("/model/", true), "model");
+        assert_eq!(model_chip_label("", true), "");
+        assert_eq!(model_chip_label("///", true), "");
+    }
+
+    #[test]
+    fn narrow_control_separates_original_visual_square_from_touch_hit_rect() {
+        let idle = composer_visual_policy(390.0, 1.0, false, true, false, false);
+        let streaming = composer_visual_policy(390.0, 1.0, false, true, true, true);
+        let idle_geometry = composer_control_geometry(10.0, 300.0, 120.0, 9.0, idle);
+        let streaming_geometry =
+            composer_control_geometry(10.0, 300.0, 120.0, 9.0, streaming);
+
+        assert_eq!(idle.action, ComposerControlAction::Send);
+        assert_eq!(streaming.action, ComposerControlAction::Interrupt);
+        assert_eq!(idle_geometry.visual_rect, [275.0, 85.0, 26.0, 26.0]);
+        assert_eq!(idle_geometry.hit_rect, [266.0, 76.0, 44.0, 44.0]);
+        assert_eq!(streaming_geometry, idle_geometry);
+    }
+
+    #[test]
+    fn visual_control_metrics_match_original_chat_and_home_buttons() {
+        let chat = composer_visual_policy(390.0, 1.0, false, true, false, false);
+        let home = composer_visual_policy(390.0, 1.0, true, true, false, false);
+        assert_eq!(chat.visual_side, 26.0);
+        assert_eq!(home.visual_side, 30.0);
+        assert_eq!(COMPOSER_CONTROL_RADIUS, 8.0);
+        assert_eq!(COMPOSER_STOP_SIDE_RATIO, 0.28);
+        assert_eq!(COMPOSER_SEND_FONT_RATIO, 0.62);
+        assert_eq!(COMPOSER_ATTACH_FONT_RATIO, 0.72);
+    }
+
+    #[test]
+    fn action_glyph_centers_match_chat_home_and_narrow_action_centers() {
+        // `draw_icon_centered_with_occlusion` centers real raster ink in these
+        // target rects on both the desktop and wasm text backends. Sweep the
+        // renderer geometry that feeds it rather than encoding font offsets.
+        for (width, scale, show_status) in [
+            (900.0, 1.0, false),
+            (900.0, 1.0, true),
+            (390.0, 1.0, false),
+            (780.0, 2.0, false),
+            (780.0, 2.0, true),
+        ] {
+            let policy =
+                composer_visual_policy(width, scale, show_status, true, false, false);
+            let send = composer_control_geometry(20.0, width, 180.0, 9.0 * scale, policy);
+            let attach = attachment_control_geometry(
+                20.0,
+                width,
+                9.0 * scale,
+                send.visual_rect,
+                scale,
+            );
+            let action_center = rect_center(send.visual_rect);
+            assert_eq!(rect_center(send.visual_rect), action_center);
+            assert_eq!(
+                rect_center(centered_square(
+                    send.visual_rect,
+                    send.visual_rect[2] * COMPOSER_STOP_SIDE_RATIO,
+                )),
+                action_center
+            );
+            assert_eq!(
+                rect_center(attach.visual_rect),
+                [
+                    attach.visual_rect[0] + attach.visual_rect[2] * 0.5,
+                    action_center[1],
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_is_glyph_only_with_independent_44px_hit_target() {
+        assert!(!ATTACHMENT_ACTION_DRAW_POLICY.paint_background);
+        for (width, scale, show_status) in [
+            (900.0, 1.0, false),
+            (900.0, 1.0, true),
+            (390.0, 1.0, false),
+            (780.0, 2.0, false),
+        ] {
+            let policy =
+                composer_visual_policy(width, scale, show_status, true, false, false);
+            let send = composer_control_geometry(10.0, width, 160.0, 9.0 * scale, policy);
+            let attach = attachment_control_geometry(
+                10.0,
+                width,
+                9.0 * scale,
+                send.visual_rect,
+                scale,
+            );
+            assert!(attach.hit_rect[2] / scale >= 44.0);
+            assert!(attach.hit_rect[3] / scale >= 44.0);
+            assert!(attach.hit_rect[2] > attach.visual_rect[2]);
+            assert!(attach.hit_rect[3] > attach.visual_rect[3]);
+            assert_eq!(
+                rect_center(attach.hit_rect),
+                rect_center(attach.visual_rect)
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_control_paint_and_hit_width_stay_inside_composer() {
+        let policy = composer_visual_policy(32.0, 1.0, false, true, false, false);
+        let geometry = composer_control_geometry(100.0, 32.0, 120.0, 9.0, policy);
+        for rect in [geometry.visual_rect, geometry.hit_rect] {
+            assert!(rect[0] >= 100.0);
+            assert!(rect[2] >= 0.0);
+            assert!(rect[0] + rect[2] <= 132.0);
+        }
     }
 }
 

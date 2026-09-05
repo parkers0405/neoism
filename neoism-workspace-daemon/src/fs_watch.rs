@@ -107,7 +107,9 @@ fn is_relevant_watch_event_kind(kind: &notify::EventKind) -> bool {
     match kind {
         notify::EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
         notify::EventKind::Access(_) => false,
-        notify::EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)) => false,
+        notify::EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)) => {
+            false
+        }
         notify::EventKind::Any
         | notify::EventKind::Create(_)
         | notify::EventKind::Modify(_)
@@ -278,8 +280,8 @@ impl FsWatchHub {
 mod tests {
     use super::{is_ignored_watch_path, is_relevant_watch_event_kind, Path};
     use notify::event::{
-        AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
-        RenameMode,
+        AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind,
+        RemoveKind, RenameMode,
     };
     use notify::EventKind;
 

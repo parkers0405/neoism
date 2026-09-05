@@ -13,7 +13,9 @@ use axum::Json;
 use crate::error::ApiError;
 use crate::state::{AppState, SemanticSearchHit};
 use neoism_agent_core::AuthInfo;
-use neoism_agent_service_api::{SemanticMemoryHit, SemanticMemoryIndex, ServiceError, ServiceFuture};
+use neoism_agent_service_api::{
+    SemanticMemoryHit, SemanticMemoryIndex, ServiceError, ServiceFuture,
+};
 
 const DEFAULT_MODEL: &str = "openai/text-embedding-3-small";
 /// Keep embedding inputs comfortably under model token limits.
@@ -53,10 +55,12 @@ impl EmbeddingsClient {
     /// API key is available for the configured provider.
     pub(crate) fn configured_provider_id() -> Option<String> {
         let spec = std::env::var("NEOISM_AGENT_EMBEDDINGS_MODEL")
-            .ok().filter(|spec| !spec.trim().is_empty())
+            .ok()
+            .filter(|spec| !spec.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        spec.split_once('/').and_then(|(provider, model)|
-            (!provider.is_empty() && !model.is_empty()).then(|| provider.to_string()))
+        spec.split_once('/').and_then(|(provider, model)| {
+            (!provider.is_empty() && !model.is_empty()).then(|| provider.to_string())
+        })
     }
 
     pub(crate) fn from_env(auth: Option<AuthInfo>) -> Option<Self> {
@@ -205,7 +209,10 @@ pub(crate) struct AgentSemanticMemoryIndex {
 }
 
 impl AgentSemanticMemoryIndex {
-    pub(crate) fn new(store: crate::state::SessionStore, client: Option<EmbeddingsClient>) -> Self {
+    pub(crate) fn new(
+        store: crate::state::SessionStore,
+        client: Option<EmbeddingsClient>,
+    ) -> Self {
         Self { store, client }
     }
 }
@@ -219,29 +226,86 @@ impl SemanticMemoryIndex for AgentSemanticMemoryIndex {
         self.client.as_ref().map(|client| client.model_spec.clone())
     }
 
-    fn embed<'a>(&'a self, inputs: &'a [String]) -> ServiceFuture<'a, Result<Vec<Vec<f32>>, ServiceError>> {
+    fn embed<'a>(
+        &'a self,
+        inputs: &'a [String],
+    ) -> ServiceFuture<'a, Result<Vec<Vec<f32>>, ServiceError>> {
         Box::pin(async move {
-            let client = self.client.as_ref().ok_or_else(|| ServiceError::new("semantic memory is unavailable"))?;
+            let client = self
+                .client
+                .as_ref()
+                .ok_or_else(|| ServiceError::new("semantic memory is unavailable"))?;
             client.embed(inputs).await.map_err(service_error)
         })
     }
 
-    fn hashes<'a>(&'a self, root_key: &'a str, model: &'a str) -> ServiceFuture<'a, Result<Vec<(String, String)>, ServiceError>> {
-        Box::pin(async move { self.store.memory_embedding_hashes(root_key, model).await.map_err(service_error) })
+    fn hashes<'a>(
+        &'a self,
+        root_key: &'a str,
+        model: &'a str,
+    ) -> ServiceFuture<'a, Result<Vec<(String, String)>, ServiceError>> {
+        Box::pin(async move {
+            self.store
+                .memory_embedding_hashes(root_key, model)
+                .await
+                .map_err(service_error)
+        })
     }
 
-    fn upsert<'a>(&'a self, key: &'a str, root_key: &'a str, content_hash: &'a str, model: &'a str, updated: i64, vector: &'a [f32]) -> ServiceFuture<'a, Result<(), ServiceError>> {
-        Box::pin(async move { self.store.upsert_memory_embedding(key, root_key, content_hash, model, updated, &vector_json(vector)).await.map_err(service_error) })
+    fn upsert<'a>(
+        &'a self,
+        key: &'a str,
+        root_key: &'a str,
+        content_hash: &'a str,
+        model: &'a str,
+        updated: i64,
+        vector: &'a [f32],
+    ) -> ServiceFuture<'a, Result<(), ServiceError>> {
+        Box::pin(async move {
+            self.store
+                .upsert_memory_embedding(
+                    key,
+                    root_key,
+                    content_hash,
+                    model,
+                    updated,
+                    &vector_json(vector),
+                )
+                .await
+                .map_err(service_error)
+        })
     }
 
     fn delete<'a>(&'a self, key: &'a str) -> ServiceFuture<'a, Result<(), ServiceError>> {
-        Box::pin(async move { self.store.delete_memory_embedding(key).await.map_err(service_error) })
+        Box::pin(async move {
+            self.store
+                .delete_memory_embedding(key)
+                .await
+                .map_err(service_error)
+        })
     }
 
-    fn search<'a>(&'a self, root_keys: &'a [String], query_vector: &'a [f32], model: &'a str, limit: usize) -> ServiceFuture<'a, Result<Vec<SemanticMemoryHit>, ServiceError>> {
+    fn search<'a>(
+        &'a self,
+        root_keys: &'a [String],
+        query_vector: &'a [f32],
+        model: &'a str,
+        limit: usize,
+    ) -> ServiceFuture<'a, Result<Vec<SemanticMemoryHit>, ServiceError>> {
         Box::pin(async move {
-            self.store.memory_semantic_search(root_keys, &vector_json(query_vector), model, limit).await
-                .map(|hits| hits.into_iter().map(|(key, distance)| SemanticMemoryHit { key, distance }).collect())
+            self.store
+                .memory_semantic_search(
+                    root_keys,
+                    &vector_json(query_vector),
+                    model,
+                    limit,
+                )
+                .await
+                .map(|hits| {
+                    hits.into_iter()
+                        .map(|(key, distance)| SemanticMemoryHit { key, distance })
+                        .collect()
+                })
                 .map_err(service_error)
         })
     }
@@ -318,8 +382,16 @@ pub(crate) async fn semantic_search_route(
     let mut hits = keyword_hits(store, needle, query.session_id.as_deref(), limit).await;
 
     let auth = if let Some(provider_id) = EmbeddingsClient::configured_provider_id() {
-        state.inner.provider_service.auth(&provider_id).await.ok().flatten()
-    } else { None };
+        state
+            .inner
+            .provider_service
+            .auth(&provider_id)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
     if let Some(client) = EmbeddingsClient::from_env(auth) {
         if store.semantic_search_supported() {
             let vectors = client.embed(&[needle.to_string()]).await?;
@@ -404,10 +476,7 @@ async fn search_hits(
             message_id: hit.message_id,
             role: hit.role,
             created: hit.created,
-            excerpt: hit
-                .excerpt
-                .replacen(">>", "", 1)
-                .replacen("<<", "", 1),
+            excerpt: hit.excerpt.replacen(">>", "", 1).replacen("<<", "", 1),
             distance: 0.0,
         })
         .collect()
@@ -415,11 +484,13 @@ async fn search_hits(
 
 /// Start the background embedding indexer if the store supports vector
 /// search and an embeddings provider is configured. Safe to call always.
-pub(crate) fn spawn_indexer(state: AppState, root: std::path::PathBuf, client: Option<EmbeddingsClient>) -> Option<SemanticIndexerHandle> {
+pub(crate) fn spawn_indexer(
+    state: AppState,
+    root: std::path::PathBuf,
+    client: Option<EmbeddingsClient>,
+) -> Option<SemanticIndexerHandle> {
     if !state.inner.store.semantic_search_supported() {
-        tracing::info!(
-            "semantic search unavailable: store has no vector support"
-        );
+        tracing::info!("semantic search unavailable: store has no vector support");
         return None;
     }
     let Some(client) = client else {
@@ -430,7 +501,9 @@ pub(crate) fn spawn_indexer(state: AppState, root: std::path::PathBuf, client: O
         tracing::info!(model = client.model_spec, "semantic search indexer started");
         loop {
             match index_batch(&state, &root, &client).await {
-                Ok(0) => tokio::select! { _ = &mut cancelled => break, _ = tokio::time::sleep(IDLE_POLL) => {} },
+                Ok(0) => {
+                    tokio::select! { _ = &mut cancelled => break, _ = tokio::time::sleep(IDLE_POLL) => {} }
+                }
                 Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(%error, "semantic indexing batch failed; backing off");
@@ -449,8 +522,15 @@ async fn index_batch(
     root: &std::path::Path,
     client: &EmbeddingsClient,
 ) -> anyhow::Result<usize> {
-    let session_ids = state.inner.store.list_sessions().await?.into_iter()
-        .filter(|session| crate::workspace_runtime::canonical_location(&session.directory) == root)
+    let session_ids = state
+        .inner
+        .store
+        .list_sessions()
+        .await?
+        .into_iter()
+        .filter(|session| {
+            crate::workspace_runtime::canonical_location(&session.directory) == root
+        })
         .map(|session| session.id.to_string())
         .collect::<Vec<_>>();
     let pending = state

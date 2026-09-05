@@ -45,6 +45,59 @@ export type ProtocolStatus =
   | "closed"
   | "errored";
 
+export type ConnectionPhase =
+  | "idle"
+  | "connecting"
+  | "authenticating"
+  | "hydrating"
+  | "connected"
+  | "waiting"
+  | "offline"
+  | "auth-rejected"
+  | "host-ended"
+  | "closed";
+
+export type DisconnectIntent = "manual" | "switch" | "rehome" | "dispose" | "host-ended";
+
+export interface ConnectionState {
+  phase: ConnectionPhase;
+  generation: number;
+  attempt: number;
+  reason: string | null;
+  retryAt: number | null;
+  retryInMs: number | null;
+  gateVisible: boolean;
+  intentional: boolean;
+}
+
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+export interface ProtocolClientRuntime {
+  createSocket(url: string): WebSocket;
+  setTimeout(callback: () => void, delayMs: number): TimerHandle;
+  clearTimeout(handle: TimerHandle): void;
+  now(): number;
+  random(): number;
+  isOnline(): boolean;
+  isVisible(): boolean;
+  onOnline(callback: () => void): () => void;
+  onVisibility(callback: () => void): () => void;
+  onPageShow(callback: (persisted: boolean) => void): () => void;
+  onPageHide(callback: () => void): () => void;
+  onFreeze(callback: () => void): () => void;
+  onResume(callback: () => void): () => void;
+}
+
+export interface ReconnectOptions {
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  handshakeTimeoutMs?: number;
+  hydrationTimeoutMs?: number;
+  modalGraceMs?: number;
+  heartbeatIntervalMs?: number;
+  livenessTimeoutMs?: number;
+}
+
 export interface ProtocolClientOptions {
   url: string;
   authToken?: string;
@@ -67,10 +120,17 @@ export interface ProtocolClientOptions {
    * to `neoism-web`.
    */
   clientName?: string;
+  /** Test/runtime injection. Production callers should omit this. */
+  runtime?: ProtocolClientRuntime;
+  reconnect?: ReconnectOptions;
 }
 
 export interface ProtocolClientHandlers {
   onStatus?: (status: ProtocolStatus, detail?: string) => void;
+  onConnectionState?: (state: ConnectionState) => void;
+  onDisconnect?: (error: Error, intentional: boolean) => void;
+  /** A previously-connected generation answered its resume liveness probe. */
+  onAuthenticatedResume?: (generation: number) => void;
   onPtyCreated?: (sessionId: string, workspaceRoot: string | null) => void;
   onPtyOutput?: (sessionId: string, bytes: Uint8Array) => void;
   onPtyClosed?: (sessionId: string, exitCode: number | null) => void;
@@ -140,11 +200,13 @@ export interface ProtocolClientHandlers {
    * tear down per-connection state. `accepted=true` may include a
    * `peerIdentity` resolved server-side via `tailscale whois`,
    * useful for rendering "connected to laptop-A (you@tailnet)".
+   * `connectedHostId` is the accepting daemon's durable machine id.
    */
   onHelloAck?: (
     accepted: boolean,
     reason: string | null,
     peerIdentity: string | null,
+    connectedHostId?: string | null,
   ) => void;
 }
 
@@ -178,11 +240,51 @@ export class ProtocolClient {
    */
   private nextRequestId = 0x4000_0000;
   private readonly pending = new Map<number, PendingRequest>();
+  private connectedHostId: string | null = null;
+  private readonly runtime: ProtocolClientRuntime;
+  private readonly reconnect: Required<ReconnectOptions>;
+  private generation = 0;
+  private desired = false;
+  private authenticated = false;
+  private failureHandledGeneration = -1;
+  private attempt = 0;
+  private outageStartedAt: number | null = null;
+  private retryAt: number | null = null;
+  private retryTimer: TimerHandle | null = null;
+  private progressTimer: TimerHandle | null = null;
+  private deadlineTimer: TimerHandle | null = null;
+  private heartbeatTimer: TimerHandle | null = null;
+  private livenessTimer: TimerHandle | null = null;
+  private pendingProbe: { generation: number; nonce: string; resume: boolean } | null = null;
+  private nextProbeNonce = 1;
+  private suspensionSuspected = false;
+  private signalUnsubscribers: Array<() => void> = [];
+  private connectionState: ConnectionState = {
+    phase: "idle",
+    generation: 0,
+    attempt: 0,
+    reason: null,
+    retryAt: null,
+    retryInMs: null,
+    gateVisible: false,
+    intentional: false,
+  };
 
   constructor(
     private readonly options: ProtocolClientOptions,
     private readonly handlers: ProtocolClientHandlers = {},
-  ) {}
+  ) {
+    this.runtime = options.runtime ?? browserRuntime();
+    this.reconnect = {
+      baseDelayMs: options.reconnect?.baseDelayMs ?? 250,
+      maxDelayMs: options.reconnect?.maxDelayMs ?? 15_000,
+      handshakeTimeoutMs: options.reconnect?.handshakeTimeoutMs ?? 8_000,
+      hydrationTimeoutMs: options.reconnect?.hydrationTimeoutMs ?? 15_000,
+      modalGraceMs: options.reconnect?.modalGraceMs ?? 2_500,
+      heartbeatIntervalMs: options.reconnect?.heartbeatIntervalMs ?? 15_000,
+      livenessTimeoutMs: options.reconnect?.livenessTimeoutMs ?? 3_000,
+    };
+  }
 
   /**
    * Allocate the next request id. Files and git share a single id
@@ -199,25 +301,145 @@ export class ProtocolClient {
     return this.status;
   }
 
+  /** The authoritative endpoint used by this live client. Share links use
+   * this instead of guessing the daemon port from desktop defaults. */
+  endpointUrl(): string {
+    return this.options.url;
+  }
+
+  /** Stable identity learned from the accepted HelloAck. Older daemons
+   * omit it, in which case callers must use the conservative legacy policy. */
+  getConnectedHostId(): string | null {
+    return this.connectedHostId;
+  }
+
+  getConnectionState(): ConnectionState {
+    return { ...this.connectionState };
+  }
+
+  getGeneration(): number {
+    return this.generation;
+  }
+
   connect(): void {
-    if (this.socket) {
+    this.desired = true;
+    this.installSignals();
+    if (this.socket || this.retryTimer) return;
+    this.startAttempt();
+  }
+
+  /** Complete the application hydration barrier for the current socket. */
+  markHydrated(generation = this.generation): boolean {
+    if (
+      generation !== this.generation ||
+      !this.socket ||
+      !this.authenticated ||
+      !this.desired
+    ) {
+      return false;
+    }
+    this.clearDeadline();
+    this.attempt = 0;
+    this.outageStartedAt = null;
+    this.retryAt = null;
+    this.clearProgressTimer();
+    this.emitConnectionState("connected", null, false);
+    this.setStatus("open");
+    this.armHeartbeat();
+    return true;
+  }
+
+  /** Bypass the current backoff after an explicit button/network wake. */
+  retryNow(): void {
+    if (this.connectionState.phase === "auth-rejected") {
+      // Authentication failures stop *automatic* retry. A deliberate button
+      // press may try again (for example after the token was refreshed by the
+      // workplace picker) without replacing this stable facade.
+      this.desired = true;
+      this.installSignals();
+    }
+    if (!this.desired) return;
+    this.clearRetryTimer();
+    this.clearProgressTimer();
+    if (this.socket) return;
+    this.startAttempt();
+  }
+
+  /** Validate/recover the transport after a browser lifecycle suspension.
+   * This is public for App-level pageshow integrations and deterministic tests;
+   * normal production callers use the installed lifecycle listeners. */
+  validateAfterResume(): void {
+    if (!this.desired) return;
+    if (!this.runtime.isOnline()) {
+      this.recycleForResume("Browser is offline", false);
       return;
     }
+    if (!this.runtime.isVisible()) {
+      return;
+    }
+    const phase = this.connectionState.phase;
+    if (
+      phase === "auth-rejected" ||
+      phase === "host-ended" ||
+      phase === "closed"
+    ) {
+      return;
+    }
+    if (
+      phase === "connected" &&
+      this.authenticated &&
+      this.socket?.readyState === 1
+    ) {
+      this.probeLiveness(true);
+      this.suspensionSuspected = false;
+      return;
+    }
+    if (this.socket && !this.suspensionSuspected) {
+      // A duplicate visible/pageshow signal during an ordinary in-flight dial
+      // must not create a second socket.
+      return;
+    }
+    this.recycleForResume("Resuming after browser suspension", true);
+  }
+
+  private startAttempt(): void {
+    if (!this.desired || this.socket) return;
+    if (!this.runtime.isOnline()) {
+      this.emitConnectionState("offline", "Browser is offline", false);
+      this.armProgressTimer();
+      return;
+    }
+    if (!this.runtime.isVisible()) {
+      this.retryAt = null;
+      this.emitConnectionState("waiting", "Page is hidden", false);
+      return;
+    }
+    const generation = ++this.generation;
+    this.failureHandledGeneration = -1;
+    this.connectedHostId = null;
+    this.authenticated = false;
+    this.suspensionSuspected = false;
+    this.retryAt = null;
+    this.emitConnectionState("connecting", null, false);
     this.setStatus("connecting");
 
     let socket: WebSocket;
     try {
-      socket = new WebSocket(websocketUrl(this.options.url, this.options.authToken));
+      socket = this.runtime.createSocket(
+        websocketUrl(this.options.url, this.options.authToken),
+      );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      this.setStatus("errored", detail);
+      this.failAttempt(generation, detail);
       return;
     }
     socket.binaryType = "arraybuffer";
     this.socket = socket;
 
+    this.armDeadline(generation, this.reconnect.handshakeTimeoutMs, "Handshake timed out");
     socket.addEventListener("open", () => {
-      this.setStatus("open");
+      if (!this.isCurrentSocket(socket, generation)) return;
+      this.emitConnectionState("authenticating", null, false);
       // Ship the `Hello` envelope as the very first frame. The daemon
       // resolves it through `handshake::evaluate_hello` and replies
       // with `HelloAck { accepted, reason }`. We send `Hello` even on
@@ -226,13 +448,24 @@ export class ProtocolClient {
       // `clientName`.
       this.sendHello();
     });
-    socket.addEventListener("close", (event) =>
-      this.setStatus("closed", `code=${event.code} reason=${event.reason}`),
-    );
-    socket.addEventListener("error", () => this.setStatus("errored"));
-    socket.addEventListener("message", (event) =>
-      this.handleRawMessage(event.data),
-    );
+    socket.addEventListener("close", (event) => {
+      if (!this.isCurrentSocket(socket, generation)) return;
+      this.socket = null;
+      const detail = closeDetail(event.code, event.reason);
+      this.failAttempt(generation, detail);
+    });
+    socket.addEventListener("error", () => {
+      if (!this.isCurrentSocket(socket, generation)) return;
+      // Browsers are allowed to emit `error` without a later `close`.
+      // Clear the live reference first so a new generation can dial.
+      this.socket = null;
+      try { socket.close(); } catch { /* already unusable */ }
+      this.failAttempt(generation, "WebSocket transport error");
+    });
+    socket.addEventListener("message", (event) => {
+      if (!this.isCurrentSocket(socket, generation)) return;
+      this.handleRawMessage(event.data, generation);
+    });
   }
 
   /**
@@ -254,30 +487,45 @@ export class ProtocolClient {
     if (this.options.pairingToken && this.options.pairingToken.length > 0) {
       helloPayload.token = this.options.pairingToken;
     }
-    this.sendWorkspace({ Hello: helloPayload });
+    const socket = this.socket;
+    if (!socket || socket.readyState !== 1) return;
+    socket.send(JSON.stringify(ClientMessage.workspace({ message: { Hello: helloPayload } })));
   }
 
-  disconnect(): void {
-    if (!this.socket) {
+  disconnect(intent: DisconnectIntent = "manual"): void {
+    this.desired = false;
+    this.generation += 1;
+    this.clearAllTimers();
+    this.removeSignals();
+    this.connectedHostId = null;
+    this.authenticated = false;
+    this.rejectPending(new Error(`connection closed (${intent})`), true);
+    const socket = this.socket;
+    this.socket = null;
+    if (!socket) {
+      this.emitConnectionState(intent === "host-ended" ? "host-ended" : "closed", intent, true);
+      this.setStatus("closed", intent);
       return;
     }
     try {
-      this.socket.close();
+      socket.close(1000, intent);
     } catch {
       // ignore
     }
-    this.socket = null;
+    this.emitConnectionState(intent === "host-ended" ? "host-ended" : "closed", intent, true);
+    this.setStatus("closed", intent);
   }
 
-  send(message: ClientMessage): void {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+  send(message: ClientMessage): boolean {
+    if (!this.authenticated || !this.socket || this.socket.readyState !== 1) {
       this.handlers.onProtocolError?.(
-        "socket not open; dropping message",
+        "connection unavailable; message not sent",
         message,
       );
-      return;
+      return false;
     }
     this.socket.send(JSON.stringify(message));
+    return true;
   }
 
   /**
@@ -287,25 +535,30 @@ export class ProtocolClient {
    * across both directions of the wire). Drops with a warning if the
    * socket isn't open — matches the behaviour of `send`.
    */
-  sendRaw(payload: string): void {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+  sendRaw(payload: string): boolean {
+    if (!this.authenticated || !this.socket || this.socket.readyState !== 1) {
       this.handlers.onProtocolError?.(
-        "socket not open; dropping raw payload",
+        "connection unavailable; raw payload not sent",
         payload,
       );
-      return;
+      return false;
     }
     this.socket.send(payload);
+    return true;
   }
 
   // Convenience wrappers --------------------------------------------
 
-  createPty(args: CreatePtyArgs): void {
-    this.send(ClientMessage.createPty(args));
+  createPty(args: CreatePtyArgs): boolean {
+    return this.send(ClientMessage.createPty(args));
   }
 
-  sendInput(sessionId: string, bytes: Uint8Array): void {
-    this.send(
+  attachPty(sessionId: string): boolean {
+    return this.send({ AttachPty: { session_id: sessionId } });
+  }
+
+  sendInput(sessionId: string, bytes: Uint8Array): boolean {
+    return this.send(
       ClientMessage.ptyInput({
         session_id: sessionId,
         bytes: Array.from(bytes),
@@ -313,14 +566,14 @@ export class ProtocolClient {
     );
   }
 
-  resize(sessionId: string, cols: number, rows: number): void {
-    this.send(
+  resize(sessionId: string, cols: number, rows: number): boolean {
+    return this.send(
       ClientMessage.resize({ session_id: sessionId, cols, rows }),
     );
   }
 
-  closePty(sessionId: string): void {
-    this.send(ClientMessage.closePty({ session_id: sessionId }));
+  closePty(sessionId: string): boolean {
+    return this.send(ClientMessage.closePty({ session_id: sessionId }));
   }
 
   /**
@@ -334,7 +587,7 @@ export class ProtocolClient {
   ): Promise<FilesServerMessage> {
     const request_id = this.allocateRequestId();
     return new Promise<FilesServerMessage>((resolve, reject) => {
-      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      if (!this.authenticated || !this.socket || this.socket.readyState !== 1) {
         reject(new Error("socket not open"));
         return;
       }
@@ -342,7 +595,10 @@ export class ProtocolClient {
         resolve: (payload) => resolve(payload as FilesServerMessage),
         reject,
       });
-      this.send(ClientMessage.files({ request_id, workspace_root, message }));
+      if (!this.send(ClientMessage.files({ request_id, workspace_root, message }))) {
+        this.pending.delete(request_id);
+        reject(new Error("connection unavailable"));
+      }
     });
   }
 
@@ -366,7 +622,7 @@ export class ProtocolClient {
   requestGit(message: GitClientMessage): Promise<GitServerMessage> {
     const request_id = this.allocateRequestId();
     return new Promise<GitServerMessage>((resolve, reject) => {
-      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      if (!this.authenticated || !this.socket || this.socket.readyState !== 1) {
         reject(new Error("socket not open"));
         return;
       }
@@ -374,7 +630,10 @@ export class ProtocolClient {
         resolve: (payload) => resolve(payload as GitServerMessage),
         reject,
       });
-      this.send(ClientMessage.git({ request_id, message }));
+      if (!this.send(ClientMessage.git({ request_id, message }))) {
+        this.pending.delete(request_id);
+        reject(new Error("connection unavailable"));
+      }
     });
   }
 
@@ -394,7 +653,7 @@ export class ProtocolClient {
   requestConfig(message: ConfigClientMessage): Promise<ConfigServerMessage> {
     const request_id = this.allocateRequestId();
     return new Promise<ConfigServerMessage>((resolve, reject) => {
-      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      if (!this.authenticated || !this.socket || this.socket.readyState !== 1) {
         reject(new Error("socket not open"));
         return;
       }
@@ -402,7 +661,10 @@ export class ProtocolClient {
         resolve: (payload) => resolve(payload as ConfigServerMessage),
         reject,
       });
-      this.send(ClientMessage.config({ request_id, message }));
+      if (!this.send(ClientMessage.config({ request_id, message }))) {
+        this.pending.delete(request_id);
+        reject(new Error("connection unavailable"));
+      }
     });
   }
 
@@ -569,7 +831,7 @@ export class ProtocolClient {
     this.handlers.onStatus?.(next, detail);
   }
 
-  private handleRawMessage(raw: unknown): void {
+  private handleRawMessage(raw: unknown, generation = this.generation): void {
     if (typeof raw !== "string") {
       this.handlers.onProtocolError?.(
         "expected text frame, received non-string",
@@ -591,6 +853,35 @@ export class ProtocolClient {
     if (!msg) {
       this.handlers.onProtocolError?.("unrecognised server frame", parsed);
       return;
+    }
+    // Nothing except HelloAck is dispatched before authentication. This
+    // prevents a compromised/misconfigured endpoint from injecting data
+    // while the pairing decision is still pending.
+    const helloAck = helloAckFrom(msg);
+    if (!this.authenticated && !helloAck) {
+      this.handlers.onProtocolError?.("received data before HelloAck", parsed);
+      return;
+    }
+    const pong = pongFrom(msg);
+    if (this.authenticated && pong) this.noteLiveness(generation, pong.nonce);
+    if (helloAck) {
+      if (helloAck.accepted) {
+        this.authenticated = true;
+        this.clearDeadline();
+        this.clearHeartbeat();
+        this.emitConnectionState("hydrating", null, false);
+        this.armDeadline(generation, this.reconnect.hydrationTimeoutMs, "Hydration timed out");
+      } else {
+        const reason = sanitizeReason(helloAck.reason ?? "Authentication rejected");
+        this.desired = false;
+        this.clearAllTimers();
+        this.rejectPending(new Error(reason), false);
+        const socket = this.socket;
+        this.socket = null;
+        this.emitConnectionState("auth-rejected", reason, false, true);
+        this.setStatus("errored", reason);
+        try { socket?.close(1008, "authentication rejected"); } catch { /* ignore */ }
+      }
     }
     this.dispatchServerMessage(msg);
   }
@@ -696,15 +987,27 @@ export class ProtocolClient {
             accepted: boolean;
             reason?: string | null;
             peer_identity?: string | null;
+            connected_host_id?: string | null;
           };
         }
       ).HelloAck;
       if (helloAck) {
+        this.connectedHostId = helloAck.accepted
+          ? (helloAck.connected_host_id ?? null)
+          : null;
         this.handlers.onHelloAck?.(
           Boolean(helloAck.accepted),
           helloAck.reason ?? null,
           helloAck.peer_identity ?? null,
+          this.connectedHostId,
         );
+      }
+      if ("HostEnded" in inner) {
+        const reason = sanitizeReason(inner.HostEnded.reason || "The host ended the session");
+        this.handlers.onWorkspaceReply?.(inner);
+        this.disconnect("host-ended");
+        this.emitConnectionState("host-ended", reason, true);
+        return;
       }
       this.handlers.onWorkspaceReply?.(inner);
       return;
@@ -742,6 +1045,363 @@ export class ProtocolClient {
     }
     this.handlers.onServiceReply?.(requestId, payload);
   }
+
+  private isCurrentSocket(socket: WebSocket, generation: number): boolean {
+    return this.socket === socket && this.generation === generation;
+  }
+
+  private failAttempt(generation: number, rawReason: string): void {
+    if (generation !== this.generation || this.failureHandledGeneration === generation) return;
+    this.failureHandledGeneration = generation;
+    this.clearDeadline();
+    this.socket = null;
+    this.authenticated = false;
+    this.clearHeartbeat();
+    this.clearLivenessTimer();
+    this.pendingProbe = null;
+    const reason = sanitizeReason(rawReason);
+    this.rejectPending(new Error(reason), !this.desired);
+    if (!this.desired) return;
+    this.attempt += 1;
+    this.outageStartedAt ??= this.runtime.now();
+    this.setStatus("errored", reason);
+    if (!this.runtime.isOnline()) {
+      this.retryAt = null;
+      this.emitConnectionState("offline", reason, false);
+      this.armProgressTimer();
+      return;
+    }
+    if (!this.runtime.isVisible()) {
+      this.retryAt = null;
+      this.emitConnectionState("waiting", reason, false);
+      return;
+    }
+    const cap = Math.min(
+      this.reconnect.maxDelayMs,
+      this.reconnect.baseDelayMs * 2 ** Math.max(0, this.attempt - 1),
+    );
+    const delay = Math.max(0, Math.floor(this.runtime.random() * cap));
+    this.retryAt = this.runtime.now() + delay;
+    this.emitConnectionState("waiting", reason, false);
+    this.clearRetryTimer();
+    this.retryTimer = this.runtime.setTimeout(() => {
+      this.retryTimer = null;
+      this.startAttempt();
+    }, delay);
+    this.armProgressTimer();
+  }
+
+  private rejectPending(error: Error, intentional: boolean): void {
+    for (const slot of this.pending.values()) slot.reject(error);
+    this.pending.clear();
+    this.handlers.onDisconnect?.(error, intentional);
+  }
+
+  private armDeadline(generation: number, delayMs: number, reason: string): void {
+    this.clearDeadline();
+    this.deadlineTimer = this.runtime.setTimeout(() => {
+      this.deadlineTimer = null;
+      if (generation !== this.generation) return;
+      const socket = this.socket;
+      this.socket = null;
+      try { socket?.close(); } catch { /* ignore */ }
+      this.failAttempt(generation, reason);
+    }, delayMs);
+  }
+
+  private clearDeadline(): void {
+    if (this.deadlineTimer !== null) this.runtime.clearTimeout(this.deadlineTimer);
+    this.deadlineTimer = null;
+  }
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer !== null) this.runtime.clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+  }
+
+  private clearProgressTimer(): void {
+    if (this.progressTimer !== null) this.runtime.clearTimeout(this.progressTimer);
+    this.progressTimer = null;
+  }
+
+  private clearAllTimers(): void {
+    this.clearDeadline();
+    this.clearRetryTimer();
+    this.clearProgressTimer();
+    this.clearHeartbeat();
+    this.clearLivenessTimer();
+  }
+
+  private armProgressTimer(): void {
+    this.clearProgressTimer();
+    if (!this.desired) return;
+    const graceRemaining = this.outageStartedAt === null
+      ? 1_000
+      : Math.max(1, this.reconnect.modalGraceMs - (this.runtime.now() - this.outageStartedAt));
+    const delay = Math.min(1_000, graceRemaining);
+    this.progressTimer = this.runtime.setTimeout(() => {
+      this.progressTimer = null;
+      this.emitConnectionState(this.connectionState.phase, this.connectionState.reason, false);
+      if (
+        this.connectionState.phase === "waiting" ||
+        this.connectionState.phase === "offline" ||
+        this.connectionState.phase === "connecting" ||
+        this.connectionState.phase === "authenticating" ||
+        this.connectionState.phase === "hydrating"
+      ) {
+        this.armProgressTimer();
+      }
+    }, delay);
+  }
+
+  private emitConnectionState(
+    phase: ConnectionPhase,
+    reason: string | null,
+    intentional: boolean,
+    forceGate = false,
+  ): void {
+    const now = this.runtime.now();
+    const gateVisible = forceGate || (
+      this.outageStartedAt !== null &&
+      now - this.outageStartedAt >= this.reconnect.modalGraceMs &&
+      phase !== "connected"
+    );
+    this.connectionState = {
+      phase,
+      generation: this.generation,
+      attempt: this.attempt,
+      reason: reason ? sanitizeReason(reason) : null,
+      retryAt: this.retryAt,
+      retryInMs: this.retryAt === null ? null : Math.max(0, this.retryAt - now),
+      gateVisible,
+      intentional,
+    };
+    this.handlers.onConnectionState?.({ ...this.connectionState });
+  }
+
+  private installSignals(): void {
+    if (this.signalUnsubscribers.length > 0) return;
+    this.signalUnsubscribers = [
+      this.runtime.onOnline(() => {
+        if (this.desired) this.retryNow();
+      }),
+      this.runtime.onVisibility(() => {
+        if (!this.runtime.isVisible()) {
+          this.noteSuspended();
+        } else if (this.desired) {
+          this.validateAfterResume();
+        }
+      }),
+      this.runtime.onPageShow((persisted) => {
+        if (!this.desired) return;
+        if (persisted) this.suspensionSuspected = true;
+        this.validateAfterResume();
+      }),
+      this.runtime.onPageHide(() => this.noteSuspended()),
+      this.runtime.onFreeze(() => this.noteSuspended()),
+      this.runtime.onResume(() => {
+        if (this.desired) this.validateAfterResume();
+      }),
+    ];
+  }
+
+  private removeSignals(): void {
+    for (const unsubscribe of this.signalUnsubscribers) unsubscribe();
+    this.signalUnsubscribers = [];
+  }
+
+  private noteSuspended(): void {
+    this.suspensionSuspected = true;
+    // A backoff scheduled before pagehide may wake hours late with stale
+    // assumptions. Keep the healthy socket, but pause retry-only timers until
+    // a visible/pageshow signal can perform one immediate validated attempt.
+    this.clearRetryTimer();
+    this.clearHeartbeat();
+    this.clearLivenessTimer();
+    this.pendingProbe = null;
+  }
+
+  private probeLiveness(resume: boolean): void {
+    const socket = this.socket;
+    if (!socket || !this.authenticated || socket.readyState !== 1) {
+      this.recycleForResume("Connection unavailable after resume", true);
+      return;
+    }
+    if (this.pendingProbe?.generation === this.generation) {
+      // Visibility + pageshow + resume commonly arrive as one burst.
+      if (resume) this.pendingProbe.resume = true;
+      return;
+    }
+    const generation = this.generation;
+    const nonce = `${generation}:${this.nextProbeNonce++}:${Math.trunc(this.runtime.now())}`;
+    this.pendingProbe = { generation, nonce, resume };
+    if (!this.sendWorkspaceMessage({ Ping: { nonce } })) {
+      this.pendingProbe = null;
+      this.recycleForResume("Liveness probe could not be sent", true);
+      return;
+    }
+    this.clearLivenessTimer();
+    this.livenessTimer = this.runtime.setTimeout(() => {
+      this.livenessTimer = null;
+      if (
+        this.pendingProbe?.generation !== generation ||
+        this.pendingProbe.nonce !== nonce
+      ) return;
+      this.pendingProbe = null;
+      this.recycleForResume("Connection did not respond after resume", true);
+    }, this.reconnect.livenessTimeoutMs);
+  }
+
+  private noteLiveness(generation: number, nonce: string): void {
+    if (generation !== this.generation) return;
+    const probe = this.pendingProbe;
+    if (
+      !probe ||
+      probe.generation !== generation ||
+      probe.nonce !== nonce
+    ) return;
+    this.pendingProbe = null;
+    this.clearLivenessTimer();
+    this.armHeartbeat();
+    if (probe.resume && this.connectionState.phase === "connected") {
+      this.handlers.onAuthenticatedResume?.(generation);
+    }
+  }
+
+  private armHeartbeat(): void {
+    this.clearHeartbeat();
+    if (
+      !this.desired ||
+      !this.runtime.isVisible() ||
+      this.connectionState.phase !== "connected"
+    ) return;
+    this.heartbeatTimer = this.runtime.setTimeout(() => {
+      this.heartbeatTimer = null;
+      if (this.connectionState.phase === "connected") this.probeLiveness(false);
+    }, this.reconnect.heartbeatIntervalMs);
+  }
+
+  private clearHeartbeat(): void {
+    if (this.heartbeatTimer !== null) this.runtime.clearTimeout(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
+  private clearLivenessTimer(): void {
+    if (this.livenessTimer !== null) this.runtime.clearTimeout(this.livenessTimer);
+    this.livenessTimer = null;
+  }
+
+  private recycleForResume(reason: string, reconnectImmediately: boolean): void {
+    if (!this.desired) return;
+    const socket = this.socket;
+    this.generation += 1; // invalidate every callback/timer from the old socket
+    this.socket = null;
+    this.authenticated = false;
+    this.connectedHostId = null;
+    this.failureHandledGeneration = -1;
+    this.clearAllTimers();
+    this.pendingProbe = null;
+    if (reconnectImmediately && !this.connectionState.gateVisible) {
+      // Time spent suspended must not make a quick successful return flash the
+      // modal. Start the visible grace window when recovery actually begins.
+      this.outageStartedAt = this.runtime.now();
+    } else {
+      this.outageStartedAt ??= this.runtime.now();
+    }
+    this.retryAt = null;
+    this.rejectPending(new Error(reason), false);
+    try { socket?.close(); } catch { /* stale Safari socket */ }
+    this.suspensionSuspected = false;
+    if (!this.runtime.isOnline()) {
+      this.emitConnectionState("offline", reason, false);
+      this.armProgressTimer();
+      return;
+    }
+    if (reconnectImmediately) {
+      this.startAttempt();
+    } else {
+      this.emitConnectionState("offline", reason, false);
+    }
+  }
+
+  private sendWorkspaceMessage(message: WorkspaceClientMessage): boolean {
+    return this.send(ClientMessage.workspace({ message }));
+  }
+}
+
+function helloAckFrom(msg: ServerMessage): {
+  accepted: boolean;
+  reason?: string | null;
+} | null {
+  if (!isWorkspaceReply(msg)) return null;
+  const inner = msg.WorkspaceReply.message as { HelloAck?: { accepted: boolean; reason?: string | null } };
+  return inner.HelloAck ?? null;
+}
+
+function pongFrom(msg: ServerMessage): { nonce: string } | null {
+  if (!isWorkspaceReply(msg)) return null;
+  const inner = msg.WorkspaceReply.message as { Pong?: { nonce?: unknown } };
+  return typeof inner.Pong?.nonce === "string"
+    ? { nonce: inner.Pong.nonce }
+    : null;
+}
+
+function sanitizeReason(reason: string): string {
+  return reason
+    .replace(/([?&](?:token|auth|key|secret)=)[^\s&]+/gi, "$1[redacted]")
+    .replace(/(\b(?:token|secret|authorization|credential)\b\s*[:=]\s*)\S+/gi, "$1[redacted]")
+    .replace(/(wss?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240) || "Connection lost";
+}
+
+function closeDetail(code: number, reason: string): string {
+  const clean = sanitizeReason(reason || "Connection closed");
+  return code === 1000 ? clean : `${clean} (code ${code})`;
+}
+
+function browserRuntime(): ProtocolClientRuntime {
+  return {
+    createSocket: (url) => new WebSocket(url),
+    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimeout: (handle) => clearTimeout(handle),
+    now: () => Date.now(),
+    random: () => Math.random(),
+    isOnline: () => typeof navigator === "undefined" || navigator.onLine !== false,
+    isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
+    onOnline: (callback) => {
+      if (typeof window === "undefined") return () => undefined;
+      window.addEventListener("online", callback);
+      return () => window.removeEventListener("online", callback);
+    },
+    onVisibility: (callback) => {
+      if (typeof document === "undefined") return () => undefined;
+      document.addEventListener("visibilitychange", callback);
+      return () => document.removeEventListener("visibilitychange", callback);
+    },
+    onPageShow: (callback) => {
+      if (typeof window === "undefined") return () => undefined;
+      const listener = (event: PageTransitionEvent) => callback(event.persisted);
+      window.addEventListener("pageshow", listener);
+      return () => window.removeEventListener("pageshow", listener);
+    },
+    onPageHide: (callback) => {
+      if (typeof window === "undefined") return () => undefined;
+      window.addEventListener("pagehide", callback);
+      return () => window.removeEventListener("pagehide", callback);
+    },
+    onFreeze: (callback) => {
+      if (typeof document === "undefined") return () => undefined;
+      document.addEventListener("freeze", callback);
+      return () => document.removeEventListener("freeze", callback);
+    },
+    onResume: (callback) => {
+      if (typeof document === "undefined") return () => undefined;
+      document.addEventListener("resume", callback);
+      return () => document.removeEventListener("resume", callback);
+    },
+  };
 }
 
 function websocketUrl(url: string, authToken?: string): string {

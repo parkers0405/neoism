@@ -147,6 +147,7 @@ mod tests {
             cursor_col: 5,
             visual_anchor: None,
             mouse_select_anchor: None,
+            touch_word_edges: None,
             cursor_rect: None,
             follow_cursor: false,
             goal_visual_col: None,

@@ -1044,7 +1044,10 @@ mod tests {
                     connection_id: None,
                     variant: None,
                 },
-                system: Some("Agent runtime notification: background subagent completion.".to_string()),
+                system: Some(
+                    "Agent runtime notification: background subagent completion."
+                        .to_string(),
+                ),
                 tools: None,
                 author: None,
             }),

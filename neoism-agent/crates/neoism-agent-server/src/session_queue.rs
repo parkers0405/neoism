@@ -157,7 +157,12 @@ async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueI
         .into_iter()
         .filter_map(|(request, delivery)| (delivery != "continue").then_some(request))
         .collect::<Vec<_>>();
-    let running = state.inner.session_coordinator.active_run(session_id).await.is_some();
+    let running = state
+        .inner
+        .session_coordinator
+        .active_run(session_id)
+        .await
+        .is_some();
     let worker = state
         .inner
         .session_coordinator
@@ -346,7 +351,12 @@ pub(crate) async fn publish_prompt_queue_status(
     let visible_queue_len = queued_prompt_count(state, session_id).await;
     let status = if active_worker
         || total_queue_len > 0
-        || state.inner.session_coordinator.active_run(session_id).await.is_some()
+        || state
+            .inner
+            .session_coordinator
+            .active_run(session_id)
+            .await
+            .is_some()
     {
         busy_status(
             visible_queue_len,

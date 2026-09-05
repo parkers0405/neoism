@@ -69,6 +69,38 @@ impl TerminalShellKind {
         });
         bytes
     }
+
+    /// Build a shell-safe command that changes only the target terminal's
+    /// process directory. The path is always passed as one literal argument;
+    /// controls are rejected rather than normalized so no second command can
+    /// be smuggled through the palette/OSC path.
+    pub fn change_directory_payload(self, path: &str) -> Result<Vec<u8>, &'static str> {
+        if path.is_empty()
+            || path
+                .chars()
+                .any(|ch| ch == '\0' || ch == '\r' || ch == '\n' || ch.is_control())
+        {
+            return Err("directory contains a control character");
+        }
+        let command = match self {
+            TerminalShellKind::PowerShell => {
+                format!("Set-Location -LiteralPath '{}'", path.replace('\'', "''"))
+            }
+            TerminalShellKind::Cmd => {
+                if path.contains('"') {
+                    return Err("directory contains an unsupported quote");
+                }
+                format!("cd /d \"{path}\"")
+            }
+            TerminalShellKind::Bash
+            | TerminalShellKind::Zsh
+            | TerminalShellKind::Fish
+            | TerminalShellKind::Unknown => {
+                format!("cd -- '{}'", path.replace('\'', "'\\''"))
+            }
+        };
+        Ok(self.command_payload(&command, false))
+    }
 }
 
 /// Live animation parameters the composer needs each frame. Computed

@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod agent_tool_registry;
-mod artifact_routes;
 mod app_router;
-pub mod auth_cli;
+mod artifact_routes;
 mod audit_routes;
+pub mod auth_cli;
 mod background_job;
 mod caller;
 mod command_routes;
@@ -20,9 +20,9 @@ mod config;
 mod custom_tool;
 #[cfg(test)]
 mod edit_smoke_tests;
-mod execution_activity;
 mod error;
 mod executable;
+mod execution_activity;
 mod external_acp;
 mod external_agent;
 mod global_routes;
@@ -31,12 +31,12 @@ mod interaction;
 pub mod language_server;
 mod lsp;
 mod lsp_routes;
+mod management;
 mod mcp;
 mod mcp_auth;
 mod mcp_routes;
 mod message_model;
 mod message_part_mutation;
-mod management;
 mod model_selection;
 mod openapi;
 pub use openapi::canonical_openapi;
@@ -45,8 +45,8 @@ mod permission;
 mod permission_runtime;
 mod platform_shell;
 mod plugin;
-mod plugin_host_process;
 mod plugin_adapters;
+mod plugin_host_process;
 mod plugins;
 mod project;
 mod project_routes;
@@ -54,15 +54,17 @@ mod provider_stream_message;
 mod provider_stream_processor;
 
 mod provider {
-    pub(crate) use neoism_agent_builtins::provider::{estimate_tokens, ProviderEventStream, ProviderStream};
+    pub(crate) use neoism_agent_builtins::provider::{
+        estimate_tokens, ProviderEventStream, ProviderStream,
+    };
 }
 mod provider_error {
     pub(crate) use neoism_agent_builtins::provider_error::ProviderError;
 }
+mod context_epoch;
 mod pty;
 mod pty_routes;
 mod route_query;
-mod context_epoch;
 mod semantic;
 mod server_util;
 mod session_actions;
@@ -96,22 +98,21 @@ mod workflow;
 mod workspace_runtime;
 
 pub(crate) use agent_tool_registry::{
-    available_tools_for_directory, execute_mcp_gateway,
-    provider_tools_for_agent,
+    available_tools_for_directory, execute_mcp_gateway, provider_tools_for_agent,
 };
 use anyhow::Context;
 pub use app_router::app;
-pub use management::ManagementPolicy;
 #[cfg(test)]
 use command_routes::{command_arguments, expand_command_template};
+pub use management::ManagementPolicy;
 #[cfg(test)]
 use message_part_mutation::{
     append_text_delta, append_tool_input_delta, finish_text_part,
     mark_interrupted_tool_parts, set_tool_completed, set_tool_running,
 };
 pub(crate) use model_selection::{
-    model_ref_from_config, model_ref_from_config_with_variant,
-    model_ref_from_user_model, user_model_from_model_ref,
+    model_ref_from_config, model_ref_from_config_with_variant, model_ref_from_user_model,
+    user_model_from_model_ref,
 };
 #[cfg(test)]
 use neoism_agent_core::event_type;
@@ -125,8 +126,8 @@ use neoism_agent_core::{
 #[cfg(test)]
 use neoism_agent_core::{
     CompactionPart, CreatedTime, EventPayload, Id, IdKind, MessageInfo, MessageWithParts,
-    Page, Part, PermissionRule, PromptPart, PromptRequest, ProviderRole,
-    SessionInfo, TextPart, UserMessage, UserModel,
+    Page, Part, PermissionRule, PromptPart, PromptRequest, ProviderRole, SessionInfo,
+    TextPart, UserMessage, UserModel,
 };
 pub(crate) use permission_runtime::{
     ask_permission_for_tool, parse_permission_required_error, permission_grants,
@@ -137,10 +138,7 @@ pub use route_query::{InstanceQuery, VcsDiffQuery};
 use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
-pub(crate) use server_util::{
-    default_state_dir, now_millis,
-    resolve_directory, slug,
-};
+pub(crate) use server_util::{default_state_dir, now_millis, resolve_directory, slug};
 #[cfg(test)]
 use session_context::build_session_summary;
 #[cfg(test)]
@@ -178,7 +176,9 @@ use tool_selection::normalize_provider_tool_name;
 use tool_selection::{tool_allowed_for_model, use_apply_patch_for_model};
 
 pub fn services_with_workspace_search(
-    workspace_search: std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchService>,
+    workspace_search: std::sync::Arc<
+        dyn neoism_agent_service_api::WorkspaceSearchService,
+    >,
 ) -> neoism_agent_service_api::AgentServices {
     neoism_agent_service_api::AgentServices::new(
         std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
@@ -200,18 +200,55 @@ pub fn standard_services() -> neoism_agent_service_api::AgentServices {
 struct UnavailableWorkspaceSearch;
 
 impl neoism_agent_service_api::WorkspaceSearchService for UnavailableWorkspaceSearch {
-    fn warm(&self, _root: &std::path::Path) -> Result<(), neoism_agent_service_api::ServiceError> { Ok(()) }
-    fn pin_root(&self, _root: &std::path::Path) -> Result<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>, neoism_agent_service_api::ServiceError> {
-        Err(neoism_agent_service_api::ServiceError::new("workspace search service was not injected"))
+    fn warm(
+        &self,
+        _root: &std::path::Path,
+    ) -> Result<(), neoism_agent_service_api::ServiceError> {
+        Ok(())
     }
-    fn find_files(&self, _request: &neoism_agent_service_api::FindFilesRequest) -> Result<neoism_agent_service_api::FindFilesResult, neoism_agent_service_api::ServiceError> {
-        Err(neoism_agent_service_api::ServiceError::new("workspace search service was not injected"))
+    fn pin_root(
+        &self,
+        _root: &std::path::Path,
+    ) -> Result<
+        std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Err(neoism_agent_service_api::ServiceError::new(
+            "workspace search service was not injected",
+        ))
     }
-    fn grep(&self, _request: &neoism_agent_service_api::GrepWorkspaceRequest) -> Result<neoism_agent_service_api::GrepWorkspaceResult, neoism_agent_service_api::ServiceError> {
-        Err(neoism_agent_service_api::ServiceError::new("workspace search service was not injected"))
+    fn find_files(
+        &self,
+        _request: &neoism_agent_service_api::FindFilesRequest,
+    ) -> Result<
+        neoism_agent_service_api::FindFilesResult,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Err(neoism_agent_service_api::ServiceError::new(
+            "workspace search service was not injected",
+        ))
     }
-    fn search_directories(&self, _request: &neoism_agent_service_api::DirectorySearchRequest) -> Result<neoism_agent_service_api::DirectorySearchResult, neoism_agent_service_api::ServiceError> {
-        Err(neoism_agent_service_api::ServiceError::new("workspace search service was not injected"))
+    fn grep(
+        &self,
+        _request: &neoism_agent_service_api::GrepWorkspaceRequest,
+    ) -> Result<
+        neoism_agent_service_api::GrepWorkspaceResult,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Err(neoism_agent_service_api::ServiceError::new(
+            "workspace search service was not injected",
+        ))
+    }
+    fn search_directories(
+        &self,
+        _request: &neoism_agent_service_api::DirectorySearchRequest,
+    ) -> Result<
+        neoism_agent_service_api::DirectorySearchResult,
+        neoism_agent_service_api::ServiceError,
+    > {
+        Err(neoism_agent_service_api::ServiceError::new(
+            "workspace search service was not injected",
+        ))
     }
 }
 
@@ -248,7 +285,8 @@ pub async fn listen(
     if !address.ip().is_loopback()
         && std::env::var_os("NEOISM_AGENT_TOKEN").is_none()
         && std::env::var_os("NEOISM_AGENT_AUTH_CONFIG").is_none()
-        && std::env::var("NEOISM_AGENT_ALLOW_UNAUTHENTICATED_REMOTE").as_deref() != Ok("1")
+        && std::env::var("NEOISM_AGENT_ALLOW_UNAUTHENTICATED_REMOTE").as_deref()
+            != Ok("1")
     {
         anyhow::bail!(
             "refusing unauthenticated non-loopback agent server; set NEOISM_AGENT_TOKEN or explicitly set NEOISM_AGENT_ALLOW_UNAUTHENTICATED_REMOTE=1"
@@ -280,7 +318,11 @@ pub async fn listen(
         "server state opened"
     );
     state.start_session_list_backfill();
-    let result = axum::serve(listener, app_router::app_with_cors(state.clone(), &options.cors)).await;
+    let result = axum::serve(
+        listener,
+        app_router::app_with_cors(state.clone(), &options.cors),
+    )
+    .await;
     state.shutdown().await?;
     tracing::warn!(
         target: "neoism_agent::perf",

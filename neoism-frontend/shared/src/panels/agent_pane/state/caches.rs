@@ -234,6 +234,46 @@ impl NeoismAgentPane {
 
     pub fn set_connection_id(&mut self, connection_id: Option<String>) {
         self.connection_id = connection_id.filter(|value| !value.is_empty());
+        self.remember_current_provider_connection();
+    }
+
+    pub(in crate::panels::agent_pane::state) fn remember_provider_connection(
+        &mut self,
+        model: &str,
+        connection_id: Option<&str>,
+    ) {
+        let Some(connection_id) = connection_id.filter(|value| !value.is_empty()) else {
+            return;
+        };
+        let provider = model
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .unwrap_or("openai")
+            .trim();
+        if !provider.is_empty() {
+            self.provider_connection_preferences
+                .insert(provider.to_string(), connection_id.to_string());
+        }
+    }
+
+    pub(in crate::panels::agent_pane::state) fn remember_current_provider_connection(
+        &mut self,
+    ) {
+        let model = self.model.clone();
+        let connection_id = self.connection_id.clone();
+        self.remember_provider_connection(&model, connection_id.as_deref());
+    }
+
+    pub(in crate::panels::agent_pane::state) fn preferred_connection_for_model(
+        &self,
+        model: &str,
+    ) -> Option<String> {
+        let provider = model
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .unwrap_or("openai")
+            .trim();
+        self.provider_connection_preferences.get(provider).cloned()
     }
 
     pub fn agent_label(&self) -> &str {
@@ -241,7 +281,7 @@ impl NeoismAgentPane {
             Some("build") => "Build",
             Some("plan") => "Plan",
             Some(agent) => agent,
-            None => "server default",
+            None => "Build",
         }
     }
 

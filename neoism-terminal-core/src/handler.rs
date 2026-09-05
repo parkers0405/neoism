@@ -167,6 +167,10 @@ pub enum ScpUpdateMode {
 }
 
 pub trait Handler {
+    /// Optional exact one-shot filter for host-injected command echoes.
+    fn synthetic_echo_filter(&mut self) -> Option<&mut SyntheticEchoFilter> {
+        None
+    }
     /// OSC to set window title.
     fn set_title(&mut self, _: Option<String>) {}
 
@@ -179,6 +183,10 @@ pub trait Handler {
 
     /// Private Neoism OSC command to open an editor buffer tab.
     fn open_editor_tab(&mut self, _path: Option<std::path::PathBuf>) {}
+
+    /// Private Neoism OSC command requesting a terminal-local directory
+    /// change. Hosts route this back to the terminal that parsed the OSC.
+    fn change_terminal_directory(&mut self, _path: std::path::PathBuf) {}
 
     /// Set the cursor style.
     fn set_cursor_style(&mut self, _style: Option<CursorShape>, _blinking: bool) {}
@@ -611,6 +619,13 @@ impl<T: Timeout> Processor<T> {
     where
         H: Handler,
     {
+        let filtered;
+        let bytes = if let Some(filter) = handler.synthetic_echo_filter() {
+            filtered = filter.filter(bytes);
+            filtered.as_slice()
+        } else {
+            bytes
+        };
         let mut processed = 0;
         while processed != bytes.len() {
             if self.state.sync_state.timeout.pending_timeout() {
@@ -743,6 +758,53 @@ impl<T: Timeout> Processor<T> {
                 break;
             }
         }
+    }
+}
+
+/// Fragmentation-safe, fail-closed suppression of exactly one PTY echo. Any
+/// mismatching byte flushes the held prefix and disables the filter, so user
+/// input and unrelated output can never be broadly hidden.
+#[derive(Debug, Default)]
+pub struct SyntheticEchoFilter {
+    expected: Vec<u8>,
+    held: Vec<u8>,
+}
+
+impl SyntheticEchoFilter {
+    pub fn expect_command(&mut self, input: &[u8]) {
+        self.held.clear();
+        self.expected.clear();
+        let command = input.strip_suffix(b"\n").unwrap_or(input);
+        self.expected.extend_from_slice(command);
+    }
+
+    pub fn filter(&mut self, bytes: &[u8]) -> Vec<u8> {
+        if self.expected.is_empty() { return bytes.to_vec(); }
+        let mut out = Vec::new();
+        for &byte in bytes {
+            if self.expected.is_empty() {
+                out.push(byte);
+                continue;
+            }
+            let index = self.held.len();
+            if index < self.expected.len() && self.expected.get(index) == Some(&byte) {
+                self.held.push(byte);
+            } else if index == self.expected.len() && byte == b'\r' {
+                self.held.push(byte);
+            } else if (index == self.expected.len() && byte == b'\n')
+                || (index == self.expected.len() + 1
+                    && self.held.last() == Some(&b'\r')
+                    && byte == b'\n')
+            {
+                self.held.clear();
+                self.expected.clear();
+            } else {
+                out.append(&mut self.held);
+                out.push(byte);
+                self.expected.clear();
+            }
+        }
+        out
     }
 }
 
@@ -1162,6 +1224,7 @@ impl<U: Handler, T: Timeout> copa::Perform for Performer<'_, U, T> {
                 // Private Neoism command used by `neoism` inside a terminal pane:
                 //   OSC 777 ; neoism ; new ST
                 //   OSC 777 ; neoism ; open ; <base64 absolute path> ST
+                //   OSC 777 ; neoism ; cd ; <base64 absolute directory> ST
                 if params.len() >= 3 && params[1] == b"neoism" {
                     match params[2] {
                         b"new" => {
@@ -1175,6 +1238,23 @@ impl<U: Handler, T: Timeout> copa::Perform for Performer<'_, U, T> {
                                     self.handler
                                         .open_editor_tab(Some(PathBuf::from(path)));
                                     return;
+                                }
+                            }
+                        }
+                        b"cd" if params.len() == 4 => {
+                            if let Ok(bytes) = general_purpose::STANDARD.decode(params[3])
+                            {
+                                if let Ok(path) = String::from_utf8(bytes) {
+                                    if !path.is_empty()
+                                        && !path
+                                            .chars()
+                                            .any(|ch| ch == '\0' || ch.is_control())
+                                    {
+                                        self.handler.change_terminal_directory(
+                                            PathBuf::from(path),
+                                        );
+                                        return;
+                                    }
                                 }
                             }
                         }

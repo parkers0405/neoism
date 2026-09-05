@@ -178,17 +178,54 @@ fn agent_for_route_returns_set_agent() {
 
 #[test]
 fn hit_test_resolves_activate_inside_the_strip() {
-    // Strip width fits one full-width tab (>= MAX_TAB_WIDTH), so each
-    // tab is 220 px wide.
     let strip_width = 660.0_f32;
     let mut tabs: BufferTabs<TestAgent> = BufferTabs::new();
     tabs.open_path(PathBuf::from("/tmp/a.rs"));
     tabs.open_path(PathBuf::from("/tmp/b.rs"));
     tabs.open_path(PathBuf::from("/tmp/c.rs"));
+    // Render caches measured, variable-width slots; hit testing must consume
+    // those exact widths rather than divide by an old fixed width.
+    tabs.layout = vec![(0.0, 80.0), (80.0, 120.0), (200.0, 90.0)];
 
-    // Pointer in the middle of the second slot must hit tab #1.
-    let hit = tabs.hit_test(330.0, 14.0, 0.0, 0.0, strip_width);
+    let hit = tabs.hit_test(140.0, 14.0, 0.0, 0.0, strip_width);
     assert_eq!(hit, Some(TabHit::Activate(1)));
+}
+
+#[test]
+fn visual_width_is_content_sized_and_reserves_close_affordance() {
+    let short = BufferTabs::<TestAgent>::visual_tab_width(40.0, false, 1.0);
+    let closeable = BufferTabs::<TestAgent>::visual_tab_width(40.0, true, 1.0);
+
+    assert_eq!(short, 87.0);
+    assert_eq!(closeable, 98.5);
+    assert_eq!(closeable - short, 11.5);
+    // 82 px is the label + icon + declared horizontal padding. The visual
+    // box contributes only the 5 px glyph-overhang guard after that.
+    assert_eq!(short - 82.0, 5.0);
+}
+
+#[test]
+fn visual_width_keeps_touch_floor_and_caps_long_labels() {
+    let tiny = BufferTabs::<TestAgent>::visual_tab_width(1.0, false, 1.0);
+    let long = BufferTabs::<TestAgent>::visual_tab_width(2_000.0, true, 1.0);
+
+    assert_eq!(tiny, 72.0);
+    assert!(tiny >= 44.0);
+    assert_eq!(long, 520.0);
+    assert!(
+        BufferTabs::<TestAgent>::fit_title("a very long label", 6.0, |_| 1.0)
+            .ends_with('…')
+    );
+}
+
+#[test]
+fn long_closeable_tab_exposes_material_title_width_at_the_cap() {
+    let geometry = BufferTabs::<TestAgent>::visual_tab_geometry(1_000.0, 12.0, true, 1.0);
+
+    assert_eq!(geometry.tab_width, 520.0);
+    assert_eq!(geometry.close_reserved, 11.5);
+    assert_eq!(geometry.title_clip_width, 461.5);
+    assert_eq!(geometry.close_center_x, Some(508.0));
 }
 
 // ── Panel trait coverage ──────────────────────────────────────────
@@ -310,15 +347,14 @@ fn panel_pointer_down_activates_tab() {
     tabs.open_path(PathBuf::from("/tmp/c.rs"));
     assert_eq!(tabs.active(), 2);
 
-    // Seed the layout cache so `last_strip_width` sees a real strip.
-    // Three slots × 220 px each.
-    tabs.layout = vec![(0.0, 220.0), (220.0, 220.0), (440.0, 220.0)];
+    // Seed the latest variable-width render geometry used by Panel events.
+    tabs.layout = vec![(0.0, 80.0), (80.0, 120.0), (200.0, 90.0)];
 
     with_ctx(|ctx| {
         tabs.handle_event(
             &UiEvent::PointerDown {
                 button: PointerButton::Left,
-                x: 110.0, // middle of first slot
+                x: 40.0, // middle of first slot
                 y: 14.0,
                 modifiers: Modifiers::empty(),
                 click_count: 1,

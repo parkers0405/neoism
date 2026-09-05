@@ -128,6 +128,14 @@ impl Application<'_> {
                     _ => ClickState::Click,
                 };
 
+                if route.window.screen.renderer.file_browser.is_active() {
+                    if button == MouseButton::Left {
+                        route.window.screen.handle_file_browser_click();
+                    }
+                    route.request_redraw();
+                    return;
+                }
+
                 if route.window.screen.renderer.modal.is_active() {
                     if button == MouseButton::Left {
                         route.window.screen.handle_modal_click();

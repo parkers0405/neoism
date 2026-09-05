@@ -100,6 +100,7 @@ export class SearchService {
    * collisions.
    */
   private nextReqId = 0x6000_0000;
+  private readonly bridgePending = new Set<number>();
 
   constructor(
     private readonly client: ProtocolClient,
@@ -114,21 +115,27 @@ export class SearchService {
    */
   install(): void {
     this.bridge.setSearchCollectFiles?.((reqId, envelopeJson) => {
+      this.bridgePending.add(reqId);
       this.client.sendSearch(parseSearchEnvelope(reqId, envelopeJson));
     });
     this.bridge.setSearchFiles?.((reqId, envelopeJson) => {
+      this.bridgePending.add(reqId);
       this.client.sendSearch(parseSearchEnvelope(reqId, envelopeJson));
     });
     this.bridge.setSearchDirectories?.((reqId, envelopeJson) => {
+      this.bridgePending.add(reqId);
       this.client.sendSearch(parseSearchEnvelope(reqId, envelopeJson));
     });
     this.bridge.setSearchGrep?.((reqId, envelopeJson) => {
+      this.bridgePending.add(reqId);
       this.client.sendSearch(parseSearchEnvelope(reqId, envelopeJson));
     });
     this.bridge.setSearchGitChanges?.((reqId, envelopeJson) => {
+      this.bridgePending.add(reqId);
       this.client.sendSearch(parseSearchEnvelope(reqId, envelopeJson));
     });
     this.bridge.setSearchGitRepoRoot?.((reqId, envelopeJson) => {
+      this.bridgePending.add(reqId);
       this.client.sendSearch(parseSearchEnvelope(reqId, envelopeJson));
     });
     this.bridge.setSearchCancel?.((reqId) => {
@@ -140,6 +147,7 @@ export class SearchService {
         this.pending.delete(reqId);
         slot.reject(new Error("search cancelled"));
       }
+      this.bridgePending.delete(reqId);
     });
   }
 
@@ -158,6 +166,7 @@ export class SearchService {
       this.bridge.serviceReply?.(reqId, message);
       return;
     }
+    this.bridgePending.delete(reqId);
     const slot = this.pending.get(reqId);
     if (slot) {
       this.pending.delete(reqId);
@@ -189,6 +198,18 @@ export class SearchService {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+  }
+
+  /** Settle every JS-side search promise when its transport generation dies. */
+  rejectPending(error: Error): void {
+    for (const slot of this.pending.values()) slot.reject(error);
+    this.pending.clear();
+    for (const requestId of this.bridgePending) {
+      this.bridge.serviceReply?.(requestId, {
+        SearchError: { req_id: requestId, message: error.message },
+      });
+    }
+    this.bridgePending.clear();
   }
 }
 

@@ -59,7 +59,13 @@ async fn revert_session(
     message_id: String,
     part_id: Option<String>,
 ) -> Result<SessionInfo, ApiError> {
-    if state.inner.session_coordinator.active_run(&session_id).await.is_some() {
+    if state
+        .inner
+        .session_coordinator
+        .active_run(&session_id)
+        .await
+        .is_some()
+    {
         return Err(ApiError::conflict("Session is already running"));
     }
     let mut info = ensure_session(state, &session_id).await?;
@@ -239,7 +245,13 @@ async fn unrevert_session(
     state: &AppState,
     session_id: String,
 ) -> Result<SessionInfo, ApiError> {
-    if state.inner.session_coordinator.active_run(&session_id).await.is_some() {
+    if state
+        .inner
+        .session_coordinator
+        .active_run(&session_id)
+        .await
+        .is_some()
+    {
         return Err(ApiError::conflict("Session is already running"));
     }
     let mut info = ensure_session(state, &session_id).await?;

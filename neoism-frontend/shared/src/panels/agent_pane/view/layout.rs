@@ -5,6 +5,12 @@ use super::{
     INPUT_LINE_H, MAX_INPUT_LINES,
 };
 
+pub const NARROW_COMPOSER_MAX_W: f32 = 520.0;
+
+pub fn is_narrow_composer_width(width: f32, s: f32) -> bool {
+    width / s.max(0.001) < NARROW_COMPOSER_MAX_W
+}
+
 /// Horizontal padding applied to both the chat timeline and the input
 /// composer in the Neoism Agent pane. Keep narrow mobile panes edge-to-edge
 /// so the shared iOS/web layout does not lose precious text width.
@@ -78,14 +84,15 @@ pub fn home_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
     let input_x = x + (w - input_w) * 0.5;
     // The wordmark anchors a fixed gap above this card, so the pair
     // reads as one group centered slightly above the pane's midline.
-    let input_y = y + h * 0.46;
+    input_h = input_h.min(h.max(0.0));
+    let input_y = (y + h * 0.46).min(y + h - input_h).max(y);
     [input_x, input_y, input_w, input_h]
 }
 
 pub fn home_input_width(rect: [f32; 4], s: f32) -> f32 {
     let w = rect[2];
     let side_pad = (24.0 * s).min((w * 0.08).max(0.0));
-    let available_w = (w - side_pad * 2.0).max(1.0);
+    let available_w = (w - side_pad * 2.0).max(0.0);
     (820.0 * s).min(available_w)
 }
 
@@ -110,7 +117,8 @@ pub fn home_input_rect_for_visual_rows(
         input_h += INPUT_IMAGE_RAIL_H * s;
     }
     let input_x = x + (w - input_w) * 0.5;
-    let input_y = y + h * 0.46;
+    input_h = input_h.min(h.max(0.0));
+    let input_y = (y + h * 0.46).min(y + h - input_h).max(y);
     [input_x, input_y, input_w, input_h]
 }
 
@@ -122,7 +130,9 @@ pub fn home_input_rect_for_visual_rows(
 pub fn chat_column(rect: [f32; 4], s: f32) -> (f32, f32) {
     let [x, _y, w, _h] = rect;
     let side_pad = chat_horizontal_pad(w, s) + 8.0 * s;
-    let col_w = (w - side_pad * 2.0).max(220.0).min(960.0 * s);
+    // Never manufacture a minimum wider than the pane. The old 220px floor
+    // produced a negative centered x and put the composer under a sidebar.
+    let col_w = (w - side_pad * 2.0).max(0.0).min(960.0 * s).min(w.max(0.0));
     (x + (w - col_w) * 0.5, col_w)
 }
 
@@ -162,7 +172,13 @@ pub fn chat_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
     if pane.input_image_count() > 0 {
         input_h += INPUT_IMAGE_RAIL_H * s;
     }
-    [input_x, y + h - input_h - bottom_pad, input_w, input_h]
+    input_h = input_h.min((h - bottom_pad).max(0.0));
+    [
+        input_x,
+        (y + h - input_h - bottom_pad).max(y),
+        input_w,
+        input_h,
+    ]
 }
 
 pub fn chat_input_rect_for_visual_rows(
@@ -188,7 +204,13 @@ pub fn chat_input_rect_for_visual_rows(
     if pane.input_image_count() > 0 {
         input_h += INPUT_IMAGE_RAIL_H * s;
     }
-    [input_x, y + h - input_h - bottom_pad, input_w, input_h]
+    input_h = input_h.min((h - bottom_pad).max(0.0));
+    [
+        input_x,
+        (y + h - input_h - bottom_pad).max(y),
+        input_w,
+        input_h,
+    ]
 }
 
 pub fn input_height_for_width(
@@ -292,5 +314,26 @@ mod tests {
         assert_eq!(estimated[3], 98.0, "short text estimates one row");
         assert_eq!(measured[3], 120.0, "registered two-row geometry wins");
         assert_eq!(estimated[1] - measured[1], 22.0);
+    }
+
+    #[test]
+    fn narrow_touch_policy_does_not_expand_composer_layout() {
+        let narrow =
+            chat_input_rect(&TestPane { rows: Some(1) }, [0.0, 0.0, 390.0, 600.0], 1.0);
+        let wide =
+            chat_input_rect(&TestPane { rows: Some(1) }, [0.0, 0.0, 900.0, 600.0], 1.0);
+        assert_eq!(narrow[3], 98.0);
+        assert_eq!(narrow[3], wide[3]);
+    }
+
+    #[test]
+    fn composer_is_contained_when_available_column_is_smaller_than_old_minimum() {
+        for width in [0.0, 80.0, 219.0] {
+            let pane = [317.0, 40.0, width, 500.0];
+            let input = chat_input_rect(&TestPane { rows: Some(1) }, pane, 1.0);
+            assert!(input[0] >= pane[0]);
+            assert!(input[2] >= 0.0);
+            assert!(input[0] + input[2] <= pane[0] + pane[2]);
+        }
     }
 }

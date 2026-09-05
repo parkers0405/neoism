@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use neoism_agent_core::{GoalStatus, SessionGoal};
 use neoism_agent_plugin_api::{
-    PluginContributions, PluginDefinition, PluginHostError, PluginManifest, PluginRuntimeError,
-    PromptRequest, PromptService, RenderedPrompt, ServiceRequest, SystemContextSection,
-    SystemContextService,
+    PluginContributions, PluginDefinition, PluginHostError, PluginManifest,
+    PluginRuntimeError, PromptRequest, PromptService, RenderedPrompt, ServiceRequest,
+    SystemContextSection, SystemContextService,
 };
 
 pub const ID: &str = "dev.neoism.system-prompt";
@@ -28,8 +28,14 @@ impl PluginDefinition for SystemPromptPlugin {
         }
     }
 
-    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![ConfigRead, WorkspaceRead] }
-    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> {
+        use neoism_agent_plugin_api::HostCapability::*;
+        vec![ConfigRead, WorkspaceRead]
+    }
+    fn contributions(
+        &self,
+        registrar: &mut PluginContributions,
+    ) -> Result<(), PluginHostError> {
         registrar.system_context_service_runtime("workspace", Arc::new(WorkspaceContext));
         registrar.prompt_service_runtime("runtime", Arc::new(RuntimePrompts));
         Ok(())
@@ -97,7 +103,10 @@ impl SystemContextService for WorkspaceContext {
 struct RuntimePrompts;
 
 impl PromptService for RuntimePrompts {
-    fn render(&self, request: &PromptRequest) -> Result<RenderedPrompt, PluginRuntimeError> {
+    fn render(
+        &self,
+        request: &PromptRequest,
+    ) -> Result<RenderedPrompt, PluginRuntimeError> {
         let content = match request.prompt_id.as_str() {
             "active-run" => request
                 .variables
@@ -108,7 +117,10 @@ impl PromptService for RuntimePrompts {
             "active-goal-continuation" => "Continue working toward the active persistent goal. Do not stop just because one batch of work is done; keep going until the goal is genuinely accomplished. When it is fully done, call the complete_goal tool (status=complete) with a thorough summary instead of replying with plain text. If you are truly stuck and need the user, call complete_goal with status=blocked and explain exactly what you need.".into(),
             other => return Err(PluginRuntimeError::new(format!("unknown prompt {other}"))),
         };
-        Ok(RenderedPrompt { content, system: true })
+        Ok(RenderedPrompt {
+            content,
+            system: true,
+        })
     }
 }
 
@@ -123,11 +135,19 @@ fn goal_context(goal: &SessionGoal) -> Option<String> {
         GoalStatus::Active => format!("Persistent goal for this session. Keep working toward it across every turn, even if the latest message does not restate it. If a request conflicts with the goal, flag the conflict before proceeding. When the goal is fully accomplished, call the complete_goal tool (status=complete); if blocked, call it with status=blocked.\n\nGoal: {text}"),
     };
     if !goal.summary.trim().is_empty() {
-        content.push_str(&format!("\n\nYour last status note ({}): {}", goal.status.label(), goal.summary.trim()));
+        content.push_str(&format!(
+            "\n\nYour last status note ({}): {}",
+            goal.status.label(),
+            goal.summary.trim()
+        ));
     }
     for note in &goal.research {
         if !note.content.trim().is_empty() {
-            content.push_str(&format!("\n\nSource: {}\n{}", note.source, note.content.trim()));
+            content.push_str(&format!(
+                "\n\nSource: {}\n{}",
+                note.source,
+                note.content.trim()
+            ));
         }
     }
     Some(content)

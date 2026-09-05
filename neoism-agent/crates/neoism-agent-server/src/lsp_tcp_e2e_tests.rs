@@ -9,46 +9,48 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde_json::{json, Value};
 use neoism_agent_service_api::{
     LanguageRootPolicy, LanguageRouteCapability, LanguageServerCapability,
     LanguageServerOperations, LanguageServerTransport,
 };
+use serde_json::{json, Value};
 
 fn fake_tcp_adapter() -> super::super::lsp_adapters::LanguageAdapter {
-    super::super::lsp_adapters::LanguageAdapter::from_capability(&LanguageServerCapability {
-        id: "fake-tcp".to_string(),
-        name: "Fake TCP".to_string(),
-        catalog_packages: Vec::new(),
-        transport: LanguageServerTransport::Tcp {
-            default_host: "127.0.0.1".to_string(),
-            default_port: 6005,
-            host_env: None,
-            port_env: None,
+    super::super::lsp_adapters::LanguageAdapter::from_capability(
+        &LanguageServerCapability {
+            id: "fake-tcp".to_string(),
+            name: "Fake TCP".to_string(),
+            catalog_packages: Vec::new(),
+            transport: LanguageServerTransport::Tcp {
+                default_host: "127.0.0.1".to_string(),
+                default_port: 6005,
+                host_env: None,
+                port_env: None,
+            },
+            routes: vec![LanguageRouteCapability {
+                id: "fake-script".to_string(),
+                document_language_id: "fake-script".to_string(),
+                extensions: vec!["gd".to_string()],
+                filename_patterns: Vec::new(),
+            }],
+            markers: Vec::new(),
+            root_policy: LanguageRootPolicy::NearestMarker,
+            capabilities: LanguageServerOperations {
+                workspace_symbols: true,
+                completion: true,
+                hover: true,
+                definition: true,
+                references: true,
+                implementation: true,
+                call_hierarchy: true,
+                diagnostics: true,
+                document_symbols: true,
+                formatting: true,
+                code_actions: true,
+                rename: true,
+            },
         },
-        routes: vec![LanguageRouteCapability {
-            id: "fake-script".to_string(),
-            document_language_id: "fake-script".to_string(),
-            extensions: vec!["gd".to_string()],
-            filename_patterns: Vec::new(),
-        }],
-        markers: Vec::new(),
-        root_policy: LanguageRootPolicy::NearestMarker,
-        capabilities: LanguageServerOperations {
-            workspace_symbols: true,
-            completion: true,
-            hover: true,
-            definition: true,
-            references: true,
-            implementation: true,
-            call_hierarchy: true,
-            diagnostics: true,
-            document_symbols: true,
-            formatting: true,
-            code_actions: true,
-            rename: true,
-        },
-    })
+    )
 }
 
 /// Exercises the real Content-Length framing and shared JSON-RPC router over

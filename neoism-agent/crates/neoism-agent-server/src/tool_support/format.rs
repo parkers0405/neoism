@@ -81,7 +81,11 @@ fn formatting_enabled(config: &&Value) -> bool {
     }
 }
 
-fn formatter_commands(services: &neoism_agent_service_api::AgentServices, cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
+fn formatter_commands(
+    services: &neoism_agent_service_api::AgentServices,
+    cwd: &Path,
+    config: &Value,
+) -> Vec<FormatterCommand> {
     let mut commands = builtin_formatters(services, cwd, config);
     if let Value::Object(map) = config {
         for (name, value) in map {
@@ -116,7 +120,11 @@ fn formatter_commands(services: &neoism_agent_service_api::AgentServices, cwd: &
     commands
 }
 
-fn builtin_formatters(services: &neoism_agent_service_api::AgentServices, cwd: &Path, config: &Value) -> Vec<FormatterCommand> {
+fn builtin_formatters(
+    services: &neoism_agent_service_api::AgentServices,
+    cwd: &Path,
+    config: &Value,
+) -> Vec<FormatterCommand> {
     let mut commands = Vec::new();
     push_builtin(
         &mut commands,
@@ -130,14 +138,16 @@ fn builtin_formatters(services: &neoism_agent_service_api::AgentServices, cwd: &
         config,
         "gofmt",
         &[".go"],
-        which(services, "gofmt").map(|bin| vec![bin, "-w".to_string(), "$FILE".to_string()]),
+        which(services, "gofmt")
+            .map(|bin| vec![bin, "-w".to_string(), "$FILE".to_string()]),
     );
     push_builtin(
         &mut commands,
         config,
         "zig",
         &[".zig", ".zon"],
-        which(services, "zig").map(|bin| vec![bin, "fmt".to_string(), "$FILE".to_string()]),
+        which(services, "zig")
+            .map(|bin| vec![bin, "fmt".to_string(), "$FILE".to_string()]),
     );
     if find_up(cwd, ".clang-format").is_some() {
         push_builtin(
@@ -205,7 +215,8 @@ fn builtin_formatters(services: &neoism_agent_service_api::AgentServices, cwd: &
             config,
             "ruff",
             &[".py", ".pyi"],
-            which(services, "ruff").map(|bin| vec![bin, "format".to_string(), "$FILE".to_string()]),
+            which(services, "ruff")
+                .map(|bin| vec![bin, "format".to_string(), "$FILE".to_string()]),
         );
     }
     commands
@@ -273,7 +284,12 @@ fn custom_command(value: &Value) -> Option<Vec<String>> {
     }
 }
 
-fn run_formatter(services: &neoism_agent_service_api::AgentServices, cwd: &Path, path: &Path, formatter: &FormatterCommand) -> bool {
+fn run_formatter(
+    services: &neoism_agent_service_api::AgentServices,
+    cwd: &Path,
+    path: &Path,
+    formatter: &FormatterCommand,
+) -> bool {
     let Some((program, args)) = formatter.command.split_first() else {
         return false;
     };
@@ -329,12 +345,16 @@ fn normalize_extension(value: &str) -> String {
     }
 }
 
-fn which(services: &neoism_agent_service_api::AgentServices, program: &str) -> Option<String> {
+fn which(
+    services: &neoism_agent_service_api::AgentServices,
+    program: &str,
+) -> Option<String> {
     let request = neoism_agent_service_api::ExecutableRequest::new(
         program,
         neoism_agent_service_api::ExecutablePurpose::Formatter,
     );
-    services.executables
+    services
+        .executables
         .resolve(&request)
         .ok()
         .map(|result| result.path.display().to_string())

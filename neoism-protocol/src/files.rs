@@ -1,13 +1,20 @@
 //! File-related wire messages.
 //!
-//! Phase 9: file tree / read / write surface. Paths in every message are
-//! workspace-relative; the daemon side rejects `..` traversal and absolute
-//! paths with [`FilesServerMessage::Error`].
+//! File-tree operations remain workspace-relative. File-browser operations
+//! use absolute canonical paths, but only after the daemon advertises and
+//! authorizes a bounded set of roots (workspace and conventional user dirs).
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FilesClientMessage {
+    /// Discover canonical host locations suitable for a system-style picker.
+    ListBrowserLocations,
+    /// Picker-only operations. Absolute paths must be contained by one of the
+    /// roots returned by `BrowserLocations`.
+    BrowserListDir { path: String },
+    BrowserStat { path: String },
+    BrowserReadFile { path: String },
     /// List a directory. `path` is workspace-relative.
     ListDir { path: String },
     /// Stat a single path. `path` is workspace-relative.
@@ -46,6 +53,9 @@ pub enum FilesClientMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FilesServerMessage {
+    BrowserLocations {
+        locations: Vec<FileLocationDescriptor>,
+    },
     DirListing {
         path: String,
         entries: Vec<DirEntry>,
@@ -103,6 +113,24 @@ pub enum FilesServerMessage {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileLocationKind {
+    Workspace,
+    Home,
+    Documents,
+    Downloads,
+    Pictures,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileLocationDescriptor {
+    pub kind: FileLocationKind,
+    pub label: String,
+    /// Existing, canonical, absolute host directory.
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirEntry {
     pub name: String,
@@ -122,4 +150,23 @@ pub struct TreeEntry {
     pub path: String,
     pub is_dir: bool,
     pub depth: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_location_wire_round_trip_preserves_absolute_descriptor() {
+        let message = FilesServerMessage::BrowserLocations {
+            locations: vec![FileLocationDescriptor {
+                kind: FileLocationKind::Documents,
+                label: "Documents".into(),
+                path: "/home/test/Documents".into(),
+            }],
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("/home/test/Documents"));
+        assert!(matches!(serde_json::from_str::<FilesServerMessage>(&json).unwrap(), FilesServerMessage::BrowserLocations { .. }));
+    }
 }

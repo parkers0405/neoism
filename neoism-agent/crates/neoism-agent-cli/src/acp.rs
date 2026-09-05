@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use neoism_agent_core::{
-    event_type, AgentInfo, CommandInfo, CreateSessionRequest, EventEnvelope, EventPayload,
-    MessageInfo, MessageWithParts, ModelInfo, ModelRef, Page, Part, PermissionRequestInfo,
-    PromptRequest, ProviderInfo, ProviderListResult, QuestionRequestInfo, SessionInfo, TodoInfo,
-    ToolState,
+    event_type, AgentInfo, CommandInfo, CreateSessionRequest, EventEnvelope,
+    EventPayload, MessageInfo, MessageWithParts, ModelInfo, ModelRef, Page, Part,
+    PermissionRequestInfo, PromptRequest, ProviderInfo, ProviderListResult,
+    QuestionRequestInfo, SessionInfo, TodoInfo, ToolState,
 };
 use neoism_agent_server::ServerOptions;
 use serde::Deserialize;
@@ -358,8 +358,10 @@ impl AcpBridge {
         if let Some(cwd) = cwd.as_deref() {
             request = request.query(&[("directory", cwd), ("roots", "true")]);
         }
-        let page: Page<SessionInfo> = request.send().await?.error_for_status()?.json().await?;
-        let entries = page.items
+        let page: Page<SessionInfo> =
+            request.send().await?.error_for_status()?.json().await?;
+        let entries = page
+            .items
             .into_iter()
             .map(|session| {
                 json!({
@@ -1967,11 +1969,19 @@ mod canonical_route_tests {
     fn acp_source_contains_no_deleted_http_routes() {
         let source = include_str!("acp.rs");
         for route in [
-            "session", "provider", "command", "agent", "global/event", "permission",
+            "session",
+            "provider",
+            "command",
+            "agent",
+            "global/event",
+            "permission",
             "question",
         ] {
             let legacy = format!("\"/{route}");
-            assert!(!source.contains(&legacy), "legacy ACP route remains: {legacy}");
+            assert!(
+                !source.contains(&legacy),
+                "legacy ACP route remains: {legacy}"
+            );
         }
     }
 
@@ -1989,7 +1999,8 @@ mod canonical_route_tests {
         assert_eq!(event.kind, "message.updated");
         assert_eq!(event.data["sessionID"], "ses_1");
 
-        let legacy = "data: {\"id\":\"evt_1\",\"type\":\"message.updated\",\"properties\":{}}";
+        let legacy =
+            "data: {\"id\":\"evt_1\",\"type\":\"message.updated\",\"properties\":{}}";
         assert!(parse_sse_event(legacy).is_none());
     }
 }

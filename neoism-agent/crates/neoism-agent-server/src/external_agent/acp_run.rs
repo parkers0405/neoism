@@ -193,7 +193,8 @@ pub(crate) async fn run_acp_prompt(
 
     drain_pre_prompt_acp_events(runtime, &client, &mut events).await;
 
-    let terminal_manager = AcpTerminalManager::new(PathBuf::from(&cwd), state.services().clone());
+    let terminal_manager =
+        AcpTerminalManager::new(PathBuf::from(&cwd), state.services().clone());
     let event_task = tokio::spawn(handle_acp_events(AcpEventContext {
         state: state.clone(),
         child_id: child.id.to_string(),

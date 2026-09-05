@@ -479,10 +479,17 @@ async fn hello_with_valid_token_accepts_when_auth_required() {
     assert_eq!(rid, 1);
     match msg {
         WorkspaceServerMessage::HelloAck {
-            accepted, reason, ..
+            accepted,
+            reason,
+            connected_host_id,
+            ..
         } => {
             assert!(accepted, "expected accepted=true, reason={reason:?}");
             assert!(reason.as_deref().is_some_and(|r| !r.is_empty()));
+            assert_eq!(
+                connected_host_id.as_deref(),
+                Some(neoism_workspace_daemon::workspace::machine_host_id().as_str())
+            );
         }
         other => panic!("expected HelloAck, got {other:?}"),
     }

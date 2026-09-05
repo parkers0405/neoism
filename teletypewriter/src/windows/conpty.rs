@@ -1,5 +1,6 @@
 use crate::Winsize;
 use std::io::{Error, Result};
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::IntoRawHandle;
 use std::{mem, ptr};
 use tracing::*;
@@ -16,7 +17,7 @@ use windows_sys::{s, w};
 
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-    CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     STARTUPINFOW,
 };
@@ -108,6 +109,7 @@ pub fn new(
     working_directory: &Option<String>,
     columns: u16,
     rows: u16,
+    env_overrides: &[(String, String)],
 ) -> Result<Pty> {
     let api = ConptyApi::new();
     let mut pty_handle: HPCON = 0;
@@ -156,6 +158,30 @@ pub fn new(
     startup_info_ex.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
 
     // Create the appropriately sized thread attribute list.
+    let mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+        std::env::vars_os().collect();
+    for (key, value) in env_overrides {
+        if let Some((_, existing)) = environment
+            .iter_mut()
+            .find(|(existing, _)| existing.eq_ignore_ascii_case(std::ffi::OsStr::new(key)))
+        {
+            *existing = value.into();
+        } else {
+            environment.push((key.into(), value.into()));
+        }
+    }
+    environment.sort_by(|a, b| a.0.to_string_lossy().to_ascii_lowercase().cmp(
+        &b.0.to_string_lossy().to_ascii_lowercase(),
+    ));
+    let mut environment_block = Vec::<u16>::new();
+    for (key, value) in environment {
+        environment_block.extend(key.encode_wide());
+        environment_block.push('=' as u16);
+        environment_block.extend(value.encode_wide());
+        environment_block.push(0);
+    }
+    environment_block.push(0);
+
     unsafe {
         let failure = InitializeProcThreadAttributeList(
             ptr::null_mut(),
@@ -224,8 +250,8 @@ pub fn new(
             ptr::null_mut(),
             ptr::null_mut(),
             false as i32,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
-            ptr::null_mut(),
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            environment_block.as_mut_ptr().cast(),
             cwd.as_ref().map_or_else(ptr::null, |s| s.as_ptr()),
             &mut startup_info_ex.StartupInfo as *mut STARTUPINFOW,
             &mut proc_info as *mut PROCESS_INFORMATION,

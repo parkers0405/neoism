@@ -78,6 +78,49 @@ fn agent_timeline_scroll_caps_mouse_wheel_bursts() {
 }
 
 #[test]
+fn browser_agent_wheel_keeps_large_continuous_trackpad_deltas_as_pixels() {
+    assert_eq!(
+        agent_timeline_browser_wheel(48.0, 0, None, 24.0),
+        AgentTimelineWheel {
+            pixels: 48.0,
+            smooth: false,
+        }
+    );
+    assert_eq!(
+        agent_timeline_browser_wheel(-84.0, 0, Some(67.0), 24.0),
+        AgentTimelineWheel {
+            pixels: -84.0,
+            smooth: false,
+        }
+    );
+    assert_eq!(
+        agent_timeline_browser_wheel(-100.0, 0, Some(120.0), 24.0),
+        AgentTimelineWheel {
+            pixels: -100.0,
+            smooth: false,
+        }
+    );
+}
+
+#[test]
+fn browser_agent_wheel_promotes_confirmed_chromium_notches_to_lines() {
+    assert_eq!(
+        agent_timeline_browser_wheel(100.0, 0, Some(120.0), 24.0),
+        AgentTimelineWheel {
+            pixels: 72.0,
+            smooth: true,
+        }
+    );
+    assert_eq!(
+        agent_timeline_browser_wheel(-1.0, 1, None, 24.0),
+        AgentTimelineWheel {
+            pixels: -72.0,
+            smooth: true,
+        }
+    );
+}
+
+#[test]
 fn diagnostics_popup_wheel_maps_lines_to_rows_and_inline_px() {
     let wheel =
         DiagnosticsPopupWheel::from_delta(&ScrollDelta::Lines { x: 2.0, y: -3.0 });

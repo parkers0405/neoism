@@ -38,7 +38,10 @@ pub(crate) fn model_param(params: &Value) -> Option<UserModel> {
     Some(UserModel {
         provider_id: provider_id.to_string(),
         model_id: model_id.to_string(),
-        connection_id: model.get("connectionId").and_then(Value::as_str).map(ToOwned::to_owned),
+        connection_id: model
+            .get("connectionId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
         variant: model
             .get("variant")
             .and_then(Value::as_str)

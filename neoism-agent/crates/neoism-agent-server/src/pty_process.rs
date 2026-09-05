@@ -30,10 +30,7 @@ pub(crate) async fn serve_websocket(
     mut socket: Box<dyn PluginWebSocket>,
     on_exit: impl Fn(String, Option<i32>) + Send + Sync + 'static,
 ) {
-    let process = match registry
-        .get_or_spawn(info.clone(), Arc::new(on_exit))
-        .await
-    {
+    let process = match registry.get_or_spawn(info.clone(), Arc::new(on_exit)).await {
         Ok(process) => process,
         Err(error) => {
             let _ = socket
@@ -1149,11 +1146,16 @@ async fn send_output(
     data: &str,
     cursor: u64,
 ) -> Result<(), PluginRuntimeError> {
-    socket.send(WebSocketMessage::Text(data.to_string())).await?;
+    socket
+        .send(WebSocketMessage::Text(data.to_string()))
+        .await?;
     send_cursor(socket, cursor).await
 }
 
-async fn send_cursor(socket: &mut Box<dyn PluginWebSocket>, cursor: u64) -> Result<(), PluginRuntimeError> {
+async fn send_cursor(
+    socket: &mut Box<dyn PluginWebSocket>,
+    cursor: u64,
+) -> Result<(), PluginRuntimeError> {
     let mut payload = Vec::with_capacity(32);
     payload.push(0);
     payload.extend_from_slice(format!(r#"{{"cursor":{cursor}}}"#).as_bytes());

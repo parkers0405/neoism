@@ -33,8 +33,8 @@ mod lsp_service;
 #[path = "lsp_uri.rs"]
 mod lsp_uri;
 use lsp_adapters::{
-    best_route_in, AdapterOrigin, LanguageAdapter,
-    ResolvedLanguageRoute, ResolvedLspTransport,
+    best_route_in, AdapterOrigin, LanguageAdapter, ResolvedLanguageRoute,
+    ResolvedLspTransport,
 };
 #[cfg(test)]
 use lsp_client::read_lsp_message;
@@ -42,9 +42,9 @@ use lsp_languages::{LspOperation, WorkspaceScan};
 #[cfg(test)]
 use lsp_query::query_workspace_symbols_with_command;
 use lsp_scan::{
-    adapter_endpoint_available, detected_servers,
-    file_lifecycle_specs, file_query_specs, language_detected, normalized_file,
-    normalized_root, operation_supported, scan_workspace, server_status_for_file,
+    adapter_endpoint_available, detected_servers, file_lifecycle_specs, file_query_specs,
+    language_detected, normalized_file, normalized_root, operation_supported,
+    scan_workspace, server_status_for_file,
 };
 use lsp_uri::path_to_file_uri;
 
@@ -258,7 +258,11 @@ pub struct LspLanguageRouteMetadata {
 }
 
 pub fn language_server_adapters(runtime: &LspRuntime) -> Vec<LspAdapterMetadata> {
-    runtime.services().language_capabilities.snapshot().languages
+    runtime
+        .services()
+        .language_capabilities
+        .snapshot()
+        .languages
         .iter()
         .map(LanguageAdapter::from_capability)
         .map(|adapter| adapter_metadata(&adapter))
@@ -279,7 +283,8 @@ pub fn language_server_adapters_for_with_services(
     directory: impl AsRef<Path>,
 ) -> Vec<LspAdapterMetadata> {
     let root = normalized_root(directory.as_ref());
-    runtime.adapters_for_root(&root)
+    runtime
+        .adapters_for_root(&root)
         .iter()
         .map(adapter_metadata)
         .collect()
@@ -614,7 +619,8 @@ pub fn status_for_file(
     matching_adapters
         .iter()
         .map(|adapter| {
-            let mut status = server_status_for_file(runtime, &root, &file, &evidence, adapter);
+            let mut status =
+                server_status_for_file(runtime, &root, &file, &evidence, adapter);
             if let Some(language) = adapter.logical_language_for_path(&file) {
                 status.language = language.to_string();
             }
@@ -635,7 +641,10 @@ fn workspace_scan_for_file(_root: &Path, _file: &Path) -> WorkspaceScan {
 /// any (e.g. `foo.rs` -> "rust"). Used to narrow the workspace server
 /// list to the servers relevant to the open buffer for the status-bar
 /// pill. Returns `None` for extensions no bundled spec claims.
-pub fn language_id_for_path(runtime: &LspRuntime, file: impl AsRef<Path>) -> Option<String> {
+pub fn language_id_for_path(
+    runtime: &LspRuntime,
+    file: impl AsRef<Path>,
+) -> Option<String> {
     let file = file.as_ref();
     runtime
         .services()
@@ -646,7 +655,11 @@ pub fn language_id_for_path(runtime: &LspRuntime, file: impl AsRef<Path>) -> Opt
         .map(LanguageAdapter::from_capability)
         .filter_map(|adapter| adapter.match_priority(file).map(|score| (score, adapter)))
         .max_by_key(|(score, _)| *score)
-        .and_then(|(_, adapter)| adapter.logical_language_for_path(file).map(ToOwned::to_owned))
+        .and_then(|(_, adapter)| {
+            adapter
+                .logical_language_for_path(file)
+                .map(ToOwned::to_owned)
+        })
 }
 
 /// Workspace-aware language routing, including arbitrary adapters declared in
@@ -704,7 +717,12 @@ fn normalized_executable(command: &str) -> String {
         .unwrap_or(command);
     [".exe", ".cmd", ".bat"]
         .iter()
-        .find_map(|suffix| executable.to_ascii_lowercase().strip_suffix(suffix).map(ToOwned::to_owned))
+        .find_map(|suffix| {
+            executable
+                .to_ascii_lowercase()
+                .strip_suffix(suffix)
+                .map(ToOwned::to_owned)
+        })
         .unwrap_or_else(|| executable.to_string())
 }
 
@@ -733,7 +751,9 @@ pub struct DiagnosticsEvent {
 
 /// Subscribe to real-time `publishDiagnostics` pushes from every LSP client.
 /// The daemon drains this and forwards to the editor with zero polling.
-pub fn subscribe_diagnostics(runtime: &LspRuntime) -> broadcast::Receiver<DiagnosticsEvent> {
+pub fn subscribe_diagnostics(
+    runtime: &LspRuntime,
+) -> broadcast::Receiver<DiagnosticsEvent> {
     runtime.subscribe_diagnostics()
 }
 
@@ -822,8 +842,9 @@ fn resolve_lsp_command_with(
         let path = Path::new(first);
         path.is_absolute() || path.components().count() > 1
     };
-    let request = ExecutableRequest::new(first.as_str(), ExecutablePurpose::LanguageServer)
-        .with_preferred_id(id);
+    let request =
+        ExecutableRequest::new(first.as_str(), ExecutablePurpose::LanguageServer)
+            .with_preferred_id(id);
     let Ok(result) = services.executables.resolve(&request) else {
         return (command, LspCommandSource::Missing);
     };
@@ -1013,7 +1034,9 @@ pub fn signature_help(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::SignatureHelp) {
-        match runtime.service.signature_help(&root, &file, line, character, &spec)
+        match runtime
+            .service
+            .signature_help(&root, &file, line, character, &spec)
         {
             Ok(found) => {
                 for help in found {
@@ -1053,7 +1076,8 @@ pub fn inlay_hints(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::InlayHints) {
-        match runtime.service
+        match runtime
+            .service
             .inlay_hints(&root, &file, start_line, end_line, &spec)
         {
             Ok(found) => {
@@ -1098,7 +1122,8 @@ pub fn document_highlights(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::DocumentHighlight) {
-        match runtime.service
+        match runtime
+            .service
             .document_highlights(&root, &file, line, character, &spec)
         {
             Ok(found) => {
@@ -1188,7 +1213,9 @@ pub fn resolve_completion(
         .into_iter()
         .filter(|spec| spec.id == server_id)
     {
-        match runtime.service.resolve_completion(&root, &file, &spec, item.clone())
+        match runtime
+            .service
+            .resolve_completion(&root, &file, &spec, item.clone())
         {
             Ok(resolved) => return Some(resolved),
             Err(error) => {
@@ -1217,7 +1244,9 @@ pub fn execute_completion_command(
         .into_iter()
         .filter(|spec| spec.id == server_id)
     {
-        match runtime.service.execute_command(&root, &file, &spec, command.clone())
+        match runtime
+            .service
+            .execute_command(&root, &file, &spec, command.clone())
         {
             Ok(result) => return Some(result),
             Err(error) => {
@@ -1244,8 +1273,9 @@ pub fn completion_trigger_characters(
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     for spec in file_query_specs(runtime, &root, &file, LspOperation::Completion) {
-        if let Ok(chars) =
-            runtime.service.completion_trigger_characters(&root, &file, &spec)
+        if let Ok(chars) = runtime
+            .service
+            .completion_trigger_characters(&root, &file, &spec)
         {
             if !chars.is_empty() {
                 return chars;
@@ -1269,7 +1299,10 @@ pub fn definitions(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::Definition) {
-        match runtime.service.definitions(&root, &file, line, character, &spec) {
+        match runtime
+            .service
+            .definitions(&root, &file, line, character, &spec)
+        {
             Ok(found) => {
                 for location in found {
                     let key = (location.path.clone(), location.range.clone());
@@ -1308,7 +1341,10 @@ pub fn references(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::References) {
-        match runtime.service.references(&root, &file, line, character, &spec) {
+        match runtime
+            .service
+            .references(&root, &file, line, character, &spec)
+        {
             Ok(found) => {
                 for location in found {
                     let key = (location.path.clone(), location.range.clone());
@@ -1347,7 +1383,9 @@ pub fn implementations(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::Implementation) {
-        match runtime.service.implementations(&root, &file, line, character, &spec)
+        match runtime
+            .service
+            .implementations(&root, &file, line, character, &spec)
         {
             Ok(found) => {
                 for location in found {
@@ -1387,7 +1425,8 @@ pub fn prepare_call_hierarchy(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::CallHierarchy) {
-        match runtime.service
+        match runtime
+            .service
             .prepare_call_hierarchy(&root, &file, line, character, &spec)
         {
             Ok(found) => {
@@ -1449,7 +1488,8 @@ fn call_hierarchy_calls(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::CallHierarchy) {
-        let found = runtime.service
+        let found = runtime
+            .service
             .call_hierarchy_calls(&root, &file, line, character, &spec, incoming);
         match found {
             Ok(found) => {
@@ -1642,7 +1682,10 @@ pub fn code_actions(
     let mut results = Vec::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::CodeActions) {
-        match runtime.service.code_actions(&root, &file, line, character, &spec) {
+        match runtime
+            .service
+            .code_actions(&root, &file, line, character, &spec)
+        {
             Ok(result) => results.push(json!({
                 "language": spec.id,
                 "path": file.display().to_string(),
@@ -1676,12 +1719,10 @@ pub fn resolve_code_action(
         .into_iter()
         .filter(|spec| spec.id == server_id)
     {
-        match runtime.service.resolve_code_action(
-            &root,
-            &file,
-            &spec,
-            action.clone(),
-        ) {
+        match runtime
+            .service
+            .resolve_code_action(&root, &file, &spec, action.clone())
+        {
             Ok(resolved) => return Some(resolved),
             Err(error) => {
                 tracing::debug!(
@@ -1711,7 +1752,9 @@ pub fn execute_command(
         .into_iter()
         .filter(|spec| spec.id == server_id)
     {
-        match runtime.service.execute_command(&root, &file, &spec, command.clone())
+        match runtime
+            .service
+            .execute_command(&root, &file, &spec, command.clone())
         {
             Ok(result) => return Some(result),
             Err(error) => {
@@ -1741,7 +1784,8 @@ pub fn rename(
     let mut results = Vec::new();
 
     for spec in file_query_specs(runtime, &root, &file, LspOperation::Rename) {
-        match runtime.service
+        match runtime
+            .service
             .rename(&root, &file, line, character, new_name, &spec)
         {
             Ok(result) if !result.is_null() => results.push(json!({
@@ -1770,7 +1814,8 @@ pub fn touch_document(
     file: impl AsRef<Path>,
     text: Option<&str>,
 ) -> Vec<Value> {
-    let diagnostics = touch_document_diagnostics(runtime, directory.as_ref(), file.as_ref(), text);
+    let diagnostics =
+        touch_document_diagnostics(runtime, directory.as_ref(), file.as_ref(), text);
     diagnostics
         .into_iter()
         .map(|(language, path, cached_diagnostics)| {

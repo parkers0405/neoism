@@ -21,9 +21,14 @@ fn resolves_supported_external_agents() {
 fn external_acp_configs_use_expected_launchers() {
     let mut services = crate::standard_services();
     services.executables = std::sync::Arc::new(
-        crate::executable::test_support::FakeExecutableService::with("npx", "/injected/npx"),
+        crate::executable::test_support::FakeExecutableService::with(
+            "npx",
+            "/injected/npx",
+        ),
     );
-    let codex = ExternalRuntime::Codex.acp_config("/tmp", &services).unwrap();
+    let codex = ExternalRuntime::Codex
+        .acp_config("/tmp", &services)
+        .unwrap();
     assert_eq!(
         std::path::Path::new(&codex.command)
             .file_name()
@@ -35,7 +40,9 @@ fn external_acp_configs_use_expected_launchers() {
         vec!["--yes", "@zed-industries/codex-acp@latest"]
     );
 
-    let claude = ExternalRuntime::Claude.acp_config("/tmp", &services).unwrap();
+    let claude = ExternalRuntime::Claude
+        .acp_config("/tmp", &services)
+        .unwrap();
     assert_eq!(
         std::path::Path::new(&claude.command)
             .file_name()

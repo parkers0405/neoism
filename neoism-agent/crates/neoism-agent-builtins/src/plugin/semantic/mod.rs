@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use neoism_agent_plugin_api::{
-    ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture, PluginHostError, PluginManifest,
-    PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
-    RouteRequest, RouteResponse, RouteScope,
+    ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture,
+    PluginHostError, PluginManifest, PluginScope, RouteContribution, RouteDescriptor,
+    RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
 };
 
 pub const ID: &str = "dev.neoism.semantic";
@@ -26,22 +26,41 @@ impl SemanticPlugin {
 impl PluginDefinition for SemanticPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
-            id: ID.into(), name: "Semantic search".into(), version: env!("CARGO_PKG_VERSION").into(),
-            internal: true, disableable: true, capabilities: vec!["neoism.semantic".into()],
-            requires: vec![super::providers::ID.into()], event_namespaces: vec!["semantic".into()],
-            api_prefix: Some(format!("/v2/plugins/{ID}")), config: BTreeMap::new(),
+            id: ID.into(),
+            name: "Semantic search".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            internal: true,
+            disableable: true,
+            capabilities: vec!["neoism.semantic".into()],
+            requires: vec![super::providers::ID.into()],
+            event_namespaces: vec!["semantic".into()],
+            api_prefix: Some(format!("/v2/plugins/{ID}")),
+            config: BTreeMap::new(),
         }
     }
 
-    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { use neoism_agent_plugin_api::HostCapability::*; vec![WorkspaceRead, Network, SecretRead] }
-    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> {
+        use neoism_agent_plugin_api::HostCapability::*;
+        vec![WorkspaceRead, Network, SecretRead]
+    }
+    fn contributions(
+        &self,
+        registrar: &mut PluginContributions,
+    ) -> Result<(), PluginHostError> {
         registrar.runtime_route(RouteContribution {
             descriptor: RouteDescriptor {
-                id: "v2.plugins.semantic.search".into(), method: RouteMethod::Get,
-                path: format!("/v2/plugins/{ID}/search"), scope: RouteScope::Workspace,
-                request_schema: None, response_schema: None,
+                id: "v2.plugins.semantic.search".into(),
+                method: RouteMethod::Get,
+                path: format!("/v2/plugins/{ID}/search"),
+                scope: RouteScope::Workspace,
+                request_schema: None,
+                response_schema: None,
             },
-            metadata: ContributionMetadata::new("v2.plugins.semantic.search", ID, PluginScope::Workspace),
+            metadata: ContributionMetadata::new(
+                "v2.plugins.semantic.search",
+                ID,
+                PluginScope::Workspace,
+            ),
             handler: Arc::new(SemanticRoute(self.host.clone())),
         });
         Ok(())

@@ -1,11 +1,14 @@
 import { ProtocolClient } from "../workspace/ProtocolClient";
+import type { ConnectionState } from "../workspace/ProtocolClient";
 import type { PtyService } from "../services/PtyService";
+import { DaemonFilesService } from "../services/FilesService";
 import type { WorkplacePreferences } from "../services/WorkplaceService";
 import { isMarkdownPath, renderMarkdownDocument } from "./MarkdownRenderer";
 import { WasmTerminalStub, type TerminalSnapshot } from "./WasmTerminalStub";
 import {
   createTerminal,
   sizeContractFor,
+  wasmInputPolicy,
   type ChromeRect,
   type FileTreeContextTarget,
   type PaletteBufferTarget,
@@ -24,6 +27,18 @@ import {
 } from "../presence/PresencePublisher";
 import { RemotePresenceStore } from "../presence/RemotePresenceStore";
 import { MobileKeyboard } from "../mobile/MobileKeyboard";
+import {
+  focusCaptureOnTouchStart,
+  mobileDirectInputKeys,
+  mobileDirectInsertFallback,
+  mobileTextFieldIntent,
+  splashKeyboardIntent,
+  mobileViewportLayout,
+  preserveCommittedTouchFocus,
+  resolveTouchKeyboardIntent,
+  touchKeyboardIntent,
+  type TouchKeyboardIntent,
+} from "../mobile/mobileEditingPolicy";
 import {
   fromCompositionCommit,
   fromCompositionEnd,
@@ -45,12 +60,37 @@ import {
   shouldDropKeysDuringCompose,
 } from "../services/imePolicy";
 import {
-  MAX_TAP_DISTANCE,
+  longPressTextSurface,
   TouchPolicy,
   type TouchAction as TouchPolicyAction,
+  fontScaleAfterTouchAction,
   type TouchSample,
   type TouchZone,
 } from "../services/touchPolicy";
+import {
+  DirectTouchScrollGesture,
+  TouchMomentum,
+  normalizedTouchEventTime,
+  type TouchMomentumAxis,
+} from "../services/directTouchScroll";
+import { routeWheelToFirstOwner } from "./wheelOwnership";
+import { TabGestureOwnership } from "./tabGestureOwnership";
+import {
+  AgentTouchScrollOwnership,
+  agentMomentumAxis,
+} from "./agentTouchScrollOwnership";
+import { routeEditorTouchTap } from "./editorTouchTap";
+import {
+  ExactSyntheticEchoFilter,
+  resolveTerminalDirectoryTarget,
+  terminalDirectoryPlan,
+} from "./terminalDirectory";
+import {
+  NotesRefreshCoordinator,
+  collectNotesSnapshot,
+  notesChangedTouchesActiveVault,
+  normalizeNotesVaultRoot,
+} from "./notesRefresh";
 import type {
   FilesServerMessage,
   GitServerMessage,
@@ -69,16 +109,29 @@ import type {
   EditorClientMessage,
 } from "../workspace/types";
 import type { ServiceRegistryBridge } from "../services/ServiceRegistry";
+import { allocateAgentTabIdentity } from "./agentTabs";
+import {
+  TabCloseLifecycle,
+  confirmDirtyClose,
+  type CloseAuthority,
+} from "./tabCloseLifecycle";
+import {
+  VimExSaveCloseGate,
+  resolveVimExHostAction,
+  type VimExHostPlan,
+} from "./vimExHostPolicy";
 import {
   ensureConfigDocument,
   fetchConfig,
   fetchConfigDocument,
   fetchConfigSchema,
   fetchExtensions,
+  fetchMashupPacks,
   loadStoredNeoworldPet,
   parseSettingsActions,
   persistKeybind,
   persistSetting,
+  applyMashupPack,
   saveConfigDocument,
   saveStoredNeoworldPet,
 } from "../services/ConfigService";
@@ -88,7 +141,6 @@ const CELL_HEIGHT = 16;
 const MIN_COLS = 20;
 const MIN_ROWS = 6;
 const MAX_REPLAY_BYTES_PER_PTY = 2 * 1024 * 1024;
-const MOBILE_SCROLL_TAP_SLOP = 10;
 const TERMINAL_RESET_BYTES = new TextEncoder().encode("\x1bc\x1b[3J\x1b[H\x1b[2J");
 // FALLBACK theme list only — used while the wasm bridge is still
 // loading (or a stale bundle predates the export). The real catalog
@@ -119,10 +171,22 @@ interface WebBufferTab {
   path?: string;
   sessionId?: string;
   neoismAgentRouteId?: number;
+  /** Agent-server conversation represented by this tab. The shared wasm
+   * pane swaps its cached conversation when this tab is activated. */
+  agentSessionId?: string;
   /** Present only for the daemon-hosted config virtual document. */
   configRevision?: string;
   configDisplayPath?: string;
   configWritable?: boolean;
+  /** Last known saved-baseline comparison from the hosted Rust pane. */
+  modified?: boolean;
+}
+
+interface PendingTabClose {
+  key: string;
+  tab: WebBufferTab;
+  surfaceIds: string[];
+  sentGeneration: number | null;
 }
 
 interface PendingTerminalTabSpawn {
@@ -130,6 +194,7 @@ interface PendingTerminalTabSpawn {
   command?: string;
   /** Pane the freshly spawned shell should bind to (terminal split). */
   paneExternalId?: number;
+  openDirectoryPalette?: boolean;
 }
 
 interface WebPaneState {
@@ -182,21 +247,13 @@ type MobileChromeTouchTarget =
 interface MobileBufferTabPan {
   id: number;
   start: TouchSample;
-  last: TouchSample;
-  panning: boolean;
-  /** Trailing-window finger velocity samples for release momentum. */
-  samples: Array<{ t: number; dx: number; dy: number }>;
-  /** The touch-down stopped an in-flight glide; suppress the tap. */
-  suppressTap: boolean;
+  gesture: DirectTouchScrollGesture;
 }
 
 interface MobileFileTreePan {
   id: number;
   start: TouchSample;
-  last: TouchSample;
-  scrolling: boolean;
-  samples: Array<{ t: number; dx: number; dy: number }>;
-  suppressTap: boolean;
+  gesture: DirectTouchScrollGesture;
 }
 
 interface WebPaneRect {
@@ -366,6 +423,7 @@ export interface TerminalPanelOptions {
       kind: string;
       path: string | null;
       sessionId: string | null;
+      identity: string;
       active: boolean;
     }>,
   ) => void;
@@ -410,12 +468,20 @@ export class TerminalPanel {
   // available, sugarloaf via RenderedTerminal).
   private stubTerminal: WasmTerminalStub;
   private wasmAdapter: TerminalAdapter | null = null;
+  private readonly notesRefresh = new NotesRefreshCoordinator<TerminalAdapter>();
+  private notesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set only after App's workspace hydration barrier has replayed the active
+   * workspace/vault. Authentication alone is too early for Notes IO. */
+  private notesWorkspaceBarrierReady = false;
   // Latest unsolicited git status (request_id 0 daemon pushes). Kept
   // so the values survive until the wasm adapter is ready — the
   // daemon only re-sends them when they change.
   private lastGitBranch: string | null | undefined = undefined;
   private lastGitChanges: { added: number; deleted: number } | null = null;
   private terminalInitError: string | null = null;
+  private terminalSessionCwds = new Map<string, string>();
+  private syntheticCdEchoes = new Map<string, ExactSyntheticEchoFilter>();
+  private lastActiveTerminalSessionId: string | null = null;
   private workspaceClipboardPayload: ClipboardPayload | null = null;
   // Correlation table for outstanding `MaterializeClipboardImage`
   // requests: `request_id -> originating pane id`. The daemon round-trip
@@ -447,6 +513,7 @@ export class TerminalPanel {
   private readonly pointerMoveHandler: (event: PointerEvent) => void;
   private readonly pointerDownHandler: (event: PointerEvent) => void;
   private readonly pointerUpHandler: (event: PointerEvent) => void;
+  private readonly pointerCancelHandler: (event: PointerEvent) => void;
   private readonly pointerLeaveHandler: () => void;
   private readonly wheelHandler: (event: WheelEvent) => void;
   // IME composition tracking. `imeComposing` flips true between
@@ -480,10 +547,6 @@ export class TerminalPanel {
   // browser's swipe-from-edge back/forward gesture for the duration
   // of the gesture by calling `preventDefault()` on every touchmove.
   private touchSuppressSwipeBack = false;
-  // Recent agent-timeline drag deltas (trailing ~120ms) so touch
-  // release can launch a fling at the finger's velocity.
-  private agentTouchScrollSamples: Array<{ t: number; dy: number }> | null =
-    null;
   // A touch-down that stopped an in-flight glide must not also count
   // as a click when the finger lifts (iOS stop-scroll semantics).
   private agentTouchSuppressTap = false;
@@ -491,8 +554,27 @@ export class TerminalPanel {
   // consumed the current tap — handleTouchEnd must preventDefault so
   // compat mouse events don't steal focus from the soft keyboard.
   private agentTapConsumed = false;
+  // Hard hold selected canvas text. Only touchend is cancelled, preserving
+  // the initial one-finger touchstart user activation required by iOS.
+  private touchWordSelected = false;
+  private touchWordDragPoint: { x: number; y: number } | null = null;
+  /** Touch-down dismissed a modal (currently the share sheet). Defer
+   * preventDefault to touchend so iOS keeps touchstart user activation while
+   * compatibility mouse events still cannot click through afterward. */
+  private modalTouchConsumed = false;
   private mobileBufferTabPan: MobileBufferTabPan | null = null;
+  /** A tab-strip press owns its full pointer/touch lifetime because tab
+   * activation can replace the surface before move/up is delivered. */
+  private readonly tabGestureOwnership = new TabGestureOwnership();
   private mobileFileTreePan: MobileFileTreePan | null = null;
+  /** One release-velocity/deceleration policy drives every mobile surface. */
+  private readonly touchMomentum = new TouchMomentum();
+  private touchMomentumAnchor: { x: number; y: number } | null = null;
+  private touchMomentumRaf: number | null = null;
+  private touchMomentumSuppressTap = false;
+  private touchScrollHitBounds = false;
+  private readonly agentTouchScrollOwnership = new AgentTouchScrollOwnership();
+  private touchKeyboardIntent: TouchKeyboardIntent = "none";
   // DOM element for the active file-tree right-click menu (or null when
   // closed). Owned by `TerminalPanel` so we can dismiss + reposition on
   // re-open instead of layering overlays.
@@ -520,8 +602,14 @@ export class TerminalPanel {
   private readonly markdownContentCache = new Map<string, string>();
   private readonly markdownReloadInFlight = new Set<string>();
   private markdownReloadCursor = 0;
+  private transportAvailable = true;
+  private crdtTransportAvailable = true;
+  private readonly pendingReconnectSnapshots = new Set<string>();
+  private connectionRetry: (() => void) | null = null;
+  private connectionSwitch: (() => void) | null = null;
 
   constructor(private readonly options: TerminalPanelOptions) {
+    this.options.notesVaultRoot = normalizeNotesVaultRoot(this.options.notesVaultRoot);
     this.root = document.createElement("section");
     this.root.className = "terminal-panel";
     this.root.setAttribute("data-session-id", options.sessionId);
@@ -598,6 +686,7 @@ export class TerminalPanel {
           // that arrived while wasm was still loading only updated
           // `options.notesVaultRoot`.
           adapter.setNotesVaultRoot?.(this.options.notesVaultRoot ?? null);
+          this.ensureNotesSidebarSnapshot(true);
           adapter.refreshFileTree?.();
           // Align sugarloaf's clear color, the chrome panels, and the
           // terminal cell palette to one source so the web frontend
@@ -621,6 +710,7 @@ export class TerminalPanel {
       // canvas backing buffer is sized correctly (for the stub) or
       // the wgpu swapchain matches the canvas (for rendered).
       this.handleResize(this.root.clientWidth, this.root.clientHeight);
+      this.syncMobileDirectInsertMode();
       this.syncBridgeStateAfterAdapterReady();
       requestAnimationFrame(() => {
         this.handleResize(this.root.clientWidth, this.root.clientHeight);
@@ -658,19 +748,21 @@ export class TerminalPanel {
     this.mobileKeyboard = new MobileKeyboard({
       mount: this.root,
       onBytes: this.inputBytesHandler,
-      // When the soft keyboard opens, force a re-measure so the cell
-      // grid contracts above the keyboard inset. We can't rely on
-      // ResizeObserver alone: on iOS Safari the layout viewport keeps
-      // its full height when the keyboard pops; only `visualViewport`
-      // shrinks. Re-running `handleResize` with the trimmed height
-      // reflows chrome panels + the terminal grid so the caret row
-      // stays visible.
+      // Keep the physical render viewport stable when the soft keyboard
+      // opens. Shared chrome carves editable content at the keyboard top,
+      // while the status band remains pinned to the physical bottom.
       onInsetsChanged: (insets) => {
-        // Remember the inset: every other handleResize source (the
-        // per-frame terminal-rect sync above all) must keep deducting
-        // it, or the first relayout after the keyboard opens undoes
-        // the push-up.
+        // Remember the inset: every resize source must replay it to shared
+        // chrome, or a later root/DPR resize silently removes the composer
+        // lift.
         this.keyboardInsetBottom = insets.keyboardOpen ? insets.bottom : 0;
+        this.wasmAdapter?.setMobileKeyboardInset?.(this.keyboardInsetBottom);
+        const vv = window.visualViewport;
+        const top = vv?.offsetTop ?? 0;
+        const left = vv?.offsetLeft ?? 0;
+        const right = vv ? Math.max(0, window.innerWidth - vv.width - left) : 0;
+        this.wasmAdapter?.setOverlaySafeArea?.(top, right, this.keyboardInsetBottom, left);
+        this.scheduleDraw();
         // iOS fires visualViewport resizes continuously while the
         // keyboard animates; reflowing the PTY for every frame of
         // that animation reads as the viewport thrashing. Trail the
@@ -680,12 +772,13 @@ export class TerminalPanel {
         }
         this.insetResizeTimer = window.setTimeout(() => {
           this.insetResizeTimer = null;
-          const widthPx = this.root.clientWidth;
-          const heightPx = Math.max(
-            1,
-            this.root.clientHeight - this.keyboardInsetBottom,
+          const layout = mobileViewportLayout(
+            this.root.clientWidth,
+            this.root.clientHeight,
+            this.keyboardInsetBottom,
+            this.currentFontScale,
           );
-          this.handleResize(widthPx, heightPx);
+          this.handleResize(layout.layoutWidth, layout.renderHeight);
         }, 140);
       },
       scrollAnchor: this.markdownLayer,
@@ -705,6 +798,7 @@ export class TerminalPanel {
     this.pointerMoveHandler = (event) => this.handlePointerMove(event);
     this.pointerDownHandler = (event) => this.handlePointerDown(event);
     this.pointerUpHandler = (event) => this.handlePointerUp(event);
+    this.pointerCancelHandler = (event) => this.handlePointerCancel(event);
     this.pointerLeaveHandler = () => {
       this.hideCustomCursor();
       this.forwardChromeEvent(pointerLeaveEvent());
@@ -726,6 +820,7 @@ export class TerminalPanel {
     this.canvas.addEventListener("pointermove", this.pointerMoveHandler);
     this.canvas.addEventListener("pointerdown", this.pointerDownHandler);
     this.canvas.addEventListener("pointerup", this.pointerUpHandler);
+    this.canvas.addEventListener("pointercancel", this.pointerCancelHandler);
     this.canvas.addEventListener("pointerleave", this.pointerLeaveHandler);
     this.canvas.addEventListener("wheel", this.wheelHandler, { passive: false });
     this.canvas.addEventListener("paste", this.pasteHandler);
@@ -735,6 +830,7 @@ export class TerminalPanel {
     this.markdownLayer.addEventListener("pointermove", this.pointerMoveHandler);
     this.markdownLayer.addEventListener("pointerdown", this.pointerDownHandler);
     this.markdownLayer.addEventListener("pointerup", this.pointerUpHandler);
+    this.markdownLayer.addEventListener("pointercancel", this.pointerCancelHandler);
     this.markdownLayer.addEventListener("pointerleave", this.pointerLeaveHandler);
     this.markdownLayer.addEventListener("wheel", this.wheelHandler, { passive: false });
     this.markdownLayer.addEventListener("paste", this.pasteHandler);
@@ -800,6 +896,12 @@ export class TerminalPanel {
 
   /** Feed bytes from one daemon PTY session into the owning web tab. */
   ingestPty(sessionId: string, bytes: Uint8Array): void {
+    const echoFilter = this.syntheticCdEchoes.get(sessionId);
+    if (echoFilter) {
+      bytes = echoFilter.filter(bytes);
+      if (!echoFilter.active) this.syntheticCdEchoes.delete(sessionId);
+      if (bytes.length === 0) return;
+    }
     // Buffer EVERY session's stream (bounded per session by
     // MAX_REPLAY_BYTES_PER_PTY) — not just sessions we already have a
     // tab for. The daemon replays each live session's backlog right
@@ -815,7 +917,7 @@ export class TerminalPanel {
     // terminal pane owns a per-pane wasm terminal — route this
     // session's bytes into it (the focused pane's session ALSO feeds
     // the main grid below so an un-split is instant).
-    this.feedPaneTerminalBytes(sessionId, bytes);
+    const paneEffectsHandled = this.feedPaneTerminalBytes(sessionId, bytes);
     if (sessionId !== this.activePtySessionId()) {
       return;
     }
@@ -827,7 +929,7 @@ export class TerminalPanel {
     const attachedAt = this.ptyAttachedAt.get(sessionId);
     const inAttachBurst =
       attachedAt !== undefined && performance.now() - attachedAt < 1500;
-    this.feedVisiblePtyBytes(bytes, !inAttachBurst);
+    this.feedVisiblePtyBytes(bytes, !inAttachBurst, sessionId, !paneEffectsHandled);
     if (inAttachBurst) {
       this.wasmAdapter?.takePtyWrites();
     }
@@ -862,6 +964,9 @@ export class TerminalPanel {
     }
     this.replayBufferTabs();
     this.activatePtySession(sessionId);
+    if (pending?.openDirectoryPalette) {
+      this.openTerminalDirectoryPaletteFor(sessionId);
+    }
   }
 
   /**
@@ -1059,7 +1164,15 @@ export class TerminalPanel {
     let activeSessionId: string | null = null;
     let activePath: string | null = null;
     let firstTerminalSession: string | null = null;
-    const orderedTabs = this.workspaceTabsInDesktopOrder(tabs);
+    const presentKeys = new Set(
+      tabs.map((tab) => this.workspaceTabLifecycleKey(tab)).filter((key): key is string => !!key),
+    );
+    this.tabCloseLifecycle.acknowledgeMissing("workspace", presentKeys);
+    for (const key of this.pendingTabCloses.keys()) this.settlePendingTabClose(key);
+    const orderedTabs = this.workspaceTabsInDesktopOrder(tabs).filter((tab) => {
+      const key = this.workspaceTabLifecycleKey(tab);
+      return !key || !this.tabCloseLifecycle.blocks(key);
+    });
     for (const tab of orderedTabs) {
       if (tab.session_id && (tab.kind ?? "terminal") === "terminal") {
         this.attachTerminalTabInPlace(tab.session_id, tab.title || "Terminal 1");
@@ -1106,6 +1219,9 @@ export class TerminalPanel {
    * remains alive, false when the whole panel should tear down.
    */
   ptyClosed(sessionId: string): boolean {
+    const closeKey = `terminal:${sessionId}`;
+    this.tabCloseLifecycle.acknowledge(closeKey, "pty");
+    this.settlePendingTabClose(closeKey);
     const closingIndex = this.bufferTabs.findIndex(
       (tab) => tab.kind === "terminal" && tab.sessionId === sessionId,
     );
@@ -1130,7 +1246,12 @@ export class TerminalPanel {
     return this.bufferTabs.some((tab) => tab.kind === "terminal" && tab.sessionId);
   }
 
-  private feedVisiblePtyBytes(bytes: Uint8Array, flushPtyWrites = true): void {
+  private feedVisiblePtyBytes(
+    bytes: Uint8Array,
+    flushPtyWrites = true,
+    sourceSessionId = this.activePtySessionId() ?? this.options.sessionId,
+    processEffects = true,
+  ): void {
     // The stub keeps tracking byte counts / cursor for diagnostics
     // until sugarloaf is live; cheap and useful during dev.
     if (!this.wasmAdapter || !this.wasmAdapter.isRendered()) {
@@ -1145,11 +1266,14 @@ export class TerminalPanel {
       }
       // Forward any PTY response bytes (DSR, cursor pos, OSC 52) back
       // to the daemon.
-      if (flushPtyWrites) {
-        const ptyOut = this.wasmAdapter.takePtyWrites();
-        if (ptyOut.length > 0) {
-          this.sendPtyInput(ptyOut);
-        }
+      if (processEffects) {
+        this.handleTerminalEffects(
+          this.wasmAdapter.drainEffects(),
+          sourceSessionId,
+          flushPtyWrites,
+        );
+      } else {
+        this.wasmAdapter.drainEffects();
       }
     }
     this.scheduleDraw();
@@ -1157,6 +1281,97 @@ export class TerminalPanel {
 
   focus(): void {
     this.focusSurface();
+  }
+
+  /** Freeze transport-driven pumps while preserving every editor/panel bit. */
+  connectionInterrupted(reason: string): void {
+    this.transportAvailable = false;
+    this.notesWorkspaceBarrierReady = false;
+    this.crdtTransportAvailable = false;
+    this.pendingReconnectSnapshots.clear();
+    this.pendingClipboardImages.clear();
+    this.pendingTerminalTabSpawns = [];
+    if (this.notesRefreshTimer !== null) {
+      clearTimeout(this.notesRefreshTimer);
+      this.notesRefreshTimer = null;
+    }
+    for (const requestId of this.pendingServiceMappers.keys()) {
+      this.wasmAdapter?.serviceReply?.(requestId, {
+        Error: { message: reason || "Connection interrupted" },
+      });
+    }
+    this.pendingServiceMappers.clear();
+    this.scheduleDraw();
+  }
+
+  /** Ordered, idempotent read-side recovery after HelloAck. Never replays PTY
+   * input, saves, file writes, prompts, or other mutations. */
+  rehydrateConnection(): void {
+    this.transportAvailable = true;
+    this.notesWorkspaceBarrierReady = true;
+    this.flushPendingTabCloses(true);
+    const sessions = new Set<string>();
+    for (const tab of this.bufferTabs) {
+      if (tab.kind === "terminal" && tab.sessionId) sessions.add(tab.sessionId);
+    }
+    if (sessions.size === 0) sessions.add(this.options.sessionId);
+    for (const sessionId of sessions) {
+      this.options.client.attachPty(sessionId);
+      this.options.client.resize(sessionId, this.cols, this.rows);
+    }
+
+    this.requestedPresenceBuffers.clear();
+    this.pendingReconnectSnapshots.clear();
+    for (const bufferId of [this.activeMarkdownBufferId(), this.activeCodeBufferId()]) {
+      if (!bufferId) continue;
+      this.pendingReconnectSnapshots.add(bufferId);
+      this.options.client.sendCrdt({ OpenBuffer: { buffer_id: bufferId } });
+      this.options.client.sendCrdt({ RequestSnapshot: { buffer_id: bufferId } });
+      this.requestPresenceSnapshot(bufferId);
+    }
+    this.crdtTransportAvailable = this.pendingReconnectSnapshots.size === 0;
+    this.wasmAdapter?.refreshFileTree?.();
+    void this.refreshGitSidePanelData();
+    // Vault replay precedes refresh. The identity also contains the new
+    // protocol generation, so an old socket's completion cannot publish.
+    this.wasmAdapter?.setNotesVaultRoot?.(this.options.notesVaultRoot ?? null);
+    this.ensureNotesSidebarSnapshot(true);
+    (this.wasmAdapter as (TerminalAdapter & {
+      agentResumeActiveStream?(): boolean;
+    }) | null)?.agentResumeActiveStream?.();
+    this.scheduleDraw();
+  }
+
+  showConnectionGate(
+    state: ConnectionState,
+    retry: () => void,
+    switchWorkplace: () => void,
+  ): void {
+    this.connectionRetry = retry;
+    this.connectionSwitch = switchWorkplace;
+    const seconds = state.retryInMs === null ? null : Math.ceil(state.retryInMs / 1000);
+    const body = state.phase === "auth-rejected"
+      ? "Authentication was rejected. Check the pairing token or switch workplace."
+      : state.phase === "host-ended"
+        ? "The host ended this shared session. Your local view is preserved."
+      : state.phase === "offline"
+        ? "The browser is offline. The workspace is preserved and reconnects when the network returns."
+        : "The workspace is preserved while Neoism reconnects.";
+    const meta = [
+      state.reason ?? "Connection unavailable",
+      `Attempt ${Math.max(1, state.attempt)}`,
+      seconds === null ? null : `Retrying in ${seconds}s`,
+    ].filter(Boolean).join("  ·  ");
+    this.wasmAdapter?.showConnectionGate?.(body, meta);
+    this.pumpModalOutcomes();
+    this.scheduleDraw();
+  }
+
+  hideConnectionGate(): void {
+    this.connectionRetry = null;
+    this.connectionSwitch = null;
+    this.wasmAdapter?.hideConnectionGate?.();
+    this.scheduleDraw();
   }
 
   private focusSurface(): void {
@@ -1187,7 +1402,27 @@ export class TerminalPanel {
     }
   }
 
+  /** True only while a clean text-entry touch is being applied at touchend.
+   * The keyboard's viewport animation can move the painted composer before
+   * the same event is re-hit-tested; that stale geometry must not revoke the
+   * touchstart focus. */
+  private committingTouchKeyboardFocus = false;
+  private touchKeyboardOverlayActiveAtStart = false;
+  private touchKeyboardAnticipatesOverlay = false;
+  private touchAgentSidePanelActiveAtStart = false;
+
+  private mobileTextOverlayActive(): boolean {
+    return this.wasmAdapter?.pointerOverlayActive?.() === true ||
+      this.wasmAdapter?.agentSidePanelTakeoverActive?.() === true;
+  }
+
   dispose(): void {
+    this.notesRefresh.invalidate();
+    if (this.notesRefreshTimer !== null) {
+      clearTimeout(this.notesRefreshTimer);
+      this.notesRefreshTimer = null;
+    }
+    this.stopTouchMomentum();
     // Leave the presence plane cleanly: a final `tick(null)` emits the
     // ClearPresence for whatever buffer we were last in.
     if (this.presenceTimer !== null) {
@@ -1206,6 +1441,7 @@ export class TerminalPanel {
     this.canvas.removeEventListener("pointermove", this.pointerMoveHandler);
     this.canvas.removeEventListener("pointerdown", this.pointerDownHandler);
     this.canvas.removeEventListener("pointerup", this.pointerUpHandler);
+    this.canvas.removeEventListener("pointercancel", this.pointerCancelHandler);
     this.canvas.removeEventListener("pointerleave", this.pointerLeaveHandler);
     this.canvas.removeEventListener("wheel", this.wheelHandler);
     this.canvas.removeEventListener("paste", this.pasteHandler);
@@ -1215,6 +1451,7 @@ export class TerminalPanel {
     this.markdownLayer.removeEventListener("pointermove", this.pointerMoveHandler);
     this.markdownLayer.removeEventListener("pointerdown", this.pointerDownHandler);
     this.markdownLayer.removeEventListener("pointerup", this.pointerUpHandler);
+    this.markdownLayer.removeEventListener("pointercancel", this.pointerCancelHandler);
     this.markdownLayer.removeEventListener("pointerleave", this.pointerLeaveHandler);
     this.markdownLayer.removeEventListener("wheel", this.wheelHandler);
     this.markdownLayer.removeEventListener("paste", this.pasteHandler);
@@ -1310,15 +1547,18 @@ export class TerminalPanel {
    *  carries the revision so a late one is dropped rather than painted
    *  against text that has moved. */
   private requestCodeHighlight(path: string, text: string): void {
+    const adapter = this.wasmAdapter as {
+      codeBufferRevision?: () => number;
+    };
+    const revision = adapter?.codeBufferRevision?.() ?? 0;
+    const requestKey = `${path}\0${revision}`;
+    if (this.lastCodeHighlightRequest === requestKey) return;
+    this.lastCodeHighlightRequest = requestKey;
     if (this.codeHighlightTimer !== null) {
       clearTimeout(this.codeHighlightTimer);
     }
     this.codeHighlightTimer = setTimeout(() => {
       this.codeHighlightTimer = null;
-      const adapter = this.wasmAdapter as {
-        codeBufferRevision?: () => number;
-      };
-      const revision = adapter?.codeBufferRevision?.() ?? 0;
       this.options.client.sendEditor(
         { HighlightBuffer: { path, text, revision } },
         this.options.workspaceRoot ?? null,
@@ -1327,6 +1567,7 @@ export class TerminalPanel {
   }
 
   private codeHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastCodeHighlightRequest: string | null = null;
 
   /// Drain + execute host actions queued by the wasm LSP session
   /// (cross-file definition jumps, the rename prompt, finishing a
@@ -1403,6 +1644,30 @@ export class TerminalPanel {
     if (editorAdapter?.editorCrdtApply?.(payloadJson) === true) {
       textChanged = true;
     }
+    if ("Saved" in payload) {
+      this.markBufferSaved(payload.Saved.buffer_id);
+      const tabKey = this.vimExSaveClose.acknowledge(payload.Saved.buffer_id);
+      if (tabKey) this.closeTabByKey(tabKey);
+    } else if (
+      "Error" in payload &&
+      payload.Error.buffer_id &&
+      payload.Error.message.startsWith("save failed")
+    ) {
+      const pending = this.vimExSaveClose.peek();
+      if (pending?.bufferId === payload.Error.buffer_id) {
+        this.vimExSaveClose.cancel(pending.tabKey);
+      }
+    }
+    if ("Snapshot" in payload || "SnapshotFallback" in payload) {
+      const snapshot = "Snapshot" in payload ? payload.Snapshot : payload.SnapshotFallback;
+      this.pendingReconnectSnapshots.delete(snapshot.buffer_id);
+      if (this.pendingReconnectSnapshots.size === 0) {
+        // The authoritative snapshot is applied above before any preserved
+        // local outbox is drained, so Yrs can merge rather than blindly
+        // replaying edits against an unknown daemon document.
+        this.crdtTransportAvailable = true;
+      }
+    }
     this.pumpCodeCrdt();
     // Visible diagnostics (info level — debug is hidden by default):
     // one line per second per buffer saying what arrived and whether
@@ -1437,12 +1702,46 @@ export class TerminalPanel {
 
   agentReply(payload: AgentServerMessage): void {
     try {
+      let createdForRoute: number | null = null;
+      if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "ThreadCreated" in payload
+      ) {
+        createdForRoute = this.pendingAgentSessionRouteId;
+        this.pendingAgentSessionRouteId = null;
+        this.bindAgentSessionToRoute(
+          createdForRoute ?? this.activeAgentRouteId(),
+          payload.ThreadCreated.session_id,
+        );
+      } else if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "ThreadSwitched" in payload
+      ) {
+        this.bindAgentSessionToRoute(
+          this.activeAgentRouteId(),
+          payload.ThreadSwitched.session_id,
+        );
+      }
       // The wasm bridge's `agent_event` handler mirrors `Notice`
       // events into the chrome's global toast stack
       // (`mirror_agent_event_to_bridge` -> `chrome.notifications`),
       // so we don't double-push from here. Plain forward and let the
       // bridge fan it out.
       this.wasmAdapter?.agentEvent?.(JSON.stringify(payload));
+      // A CreateThread reply can arrive after the user has already opened a
+      // second fresh tab. Keep the reply bound to its originating tab and
+      // restore the currently visible tab's fresh-chat state.
+      if (
+        createdForRoute !== null &&
+        createdForRoute !== this.activeAgentRouteId()
+      ) {
+        const active = this.bufferTabs[this.activeTabIndex];
+        if (active?.kind === "neoism-agent") {
+          this.activateAgentTab(active);
+        }
+      }
       this.scheduleDraw();
     } catch (err) {
       console.warn("[agent] failed to forward agent frame", err);
@@ -1508,6 +1807,19 @@ export class TerminalPanel {
         if (snapshot) {
           this.applyWorkspaceLayoutSnapshot(snapshot);
         }
+      } else if ("HostWorkspaceTree" in payload && this.options.activeWorkspaceId) {
+        this.acknowledgeWorkspaceTabSnapshot(
+          payload.HostWorkspaceTree.tabs.filter(
+            (tab) => tab.workspace_id === this.options.activeWorkspaceId,
+          ),
+        );
+      } else if ("WorkspaceTabList" in payload) {
+        const tabs = this.options.activeWorkspaceId
+          ? payload.WorkspaceTabList.tabs.filter(
+              (tab) => tab.workspace_id === this.options.activeWorkspaceId,
+            )
+          : payload.WorkspaceTabList.tabs;
+        if (tabs.length > 0) this.acknowledgeWorkspaceTabSnapshot(tabs);
       }
       this.wasmAdapter?.workspaceEvent?.(JSON.stringify(payload));
       this.scheduleDraw();
@@ -1531,6 +1843,9 @@ export class TerminalPanel {
   /// referencing it. The matching `PtyClosed` arrives separately for
   /// the terminal half; this only handles the workspace-level cleanup.
   private ingestRemoteSessionClosed(sessionId: string): void {
+    const closeKey = `terminal:${sessionId}`;
+    this.tabCloseLifecycle.acknowledge(closeKey, "session");
+    this.settlePendingTabClose(closeKey);
     if (this.workspaceSessionId === sessionId) {
       this.workspaceSessionId = null;
     }
@@ -1558,6 +1873,9 @@ export class TerminalPanel {
   private ingestWorkspaceSessionList(
     sessions: Array<{ id: string; last_active?: number }>,
   ): void {
+    const presentKeys = new Set(sessions.map((session) => `terminal:${session.id}`));
+    this.tabCloseLifecycle.acknowledgeMissing("session", presentKeys);
+    for (const key of this.pendingTabCloses.keys()) this.settlePendingTabClose(key);
     if (
       this.workspaceSessionId &&
       sessions.some((session) => session.id === this.workspaceSessionId)
@@ -1568,6 +1886,14 @@ export class TerminalPanel {
       (a, b) => (b.last_active ?? 0) - (a.last_active ?? 0),
     )[0];
     this.workspaceSessionId = newest?.id ?? null;
+  }
+
+  private acknowledgeWorkspaceTabSnapshot(tabs: WorkspaceTabSummary[]): void {
+    const presentKeys = new Set(
+      tabs.map((tab) => this.workspaceTabLifecycleKey(tab)).filter((key): key is string => !!key),
+    );
+    this.tabCloseLifecycle.acknowledgeMissing("workspace", presentKeys);
+    for (const key of this.pendingTabCloses.keys()) this.settlePendingTabClose(key);
   }
 
   /// Forward a daemon-pushed `CursorOverlayServerMessage` to the
@@ -1672,6 +1998,15 @@ export class TerminalPanel {
         this.lastGitChanges = { added, deleted };
         this.wasmAdapter?.setStatusGitChanges?.(added, deleted);
         this.scheduleDraw();
+        return;
+      }
+      if ("Changed" in payload) {
+        if (notesChangedTouchesActiveVault(
+          payload.Changed.root,
+          this.options.notesVaultRoot,
+        )) {
+          this.ensureNotesSidebarSnapshot(true);
+        }
         return;
       }
     }
@@ -1806,6 +2141,13 @@ export class TerminalPanel {
       } catch (err) {
         console.warn("[agent] failed to parse outbound envelope", err);
         return;
+      }
+      if (
+        message &&
+        typeof message === "object" &&
+        "CreateThread" in message
+      ) {
+        this.pendingAgentSessionRouteId = this.activeAgentRouteId();
       }
       this.options.client.sendRaw(
         JSON.stringify({
@@ -1943,15 +2285,20 @@ export class TerminalPanel {
     // each of these. The web only queued a listing on first open, so a
     // freshly-created note never appeared until the panel was toggled.
     if (event.action === "CreateNeoismNote") {
-      void this.refreshNotesSidebarEntries();
+      this.ensureNotesSidebarSnapshot(true);
     }
   }
 
   private ingestEditorSurfaceList(surfaces: EditorSurfaceSummary[]): void {
+    const presentKeys = new Set(
+      surfaces.map((surface) => this.surfaceLifecycleKey(surface)).filter((key): key is string => !!key),
+    );
+    this.tabCloseLifecycle.acknowledgeMissing("surface", presentKeys);
     this.editorSurfaceBindings.clear();
     for (const surface of surfaces) {
       this.ingestEditorSurfaceChanged(surface, false);
     }
+    for (const key of this.pendingTabCloses.keys()) this.settlePendingTabClose(key);
     this.replayBufferTabs();
     this.renderPaneLayoutOverlay();
   }
@@ -1960,6 +2307,8 @@ export class TerminalPanel {
     surface: EditorSurfaceSummary,
     replay = true,
   ): void {
+    const lifecycleKey = this.surfaceLifecycleKey(surface);
+    if (lifecycleKey && this.tabCloseLifecycle.blocks(lifecycleKey)) return;
     if (!this.workspaceSessionId) {
       this.workspaceSessionId = surface.session_id;
     }
@@ -2021,6 +2370,14 @@ export class TerminalPanel {
   }
 
   private ingestEditorSurfaceClosed(surfaceId: string): void {
+    for (const close of this.pendingTabCloses.values()) {
+      if (!close.surfaceIds.includes(surfaceId)) continue;
+      close.surfaceIds = close.surfaceIds.filter((id) => id !== surfaceId);
+      if (close.surfaceIds.length === 0) {
+        this.tabCloseLifecycle.acknowledge(close.key, "surface");
+        this.settlePendingTabClose(close.key);
+      }
+    }
     this.editorSurfaceBindings.delete(surfaceId);
     const externalId = this.externalIdFromEditorSurface(surfaceId);
     if (externalId === null) {
@@ -2180,7 +2537,18 @@ export class TerminalPanel {
   }
 
   private isMobileViewport(): boolean {
-    return window.matchMedia("(max-width: 600px)").matches;
+    return this.mobileDirectInsertMode();
+  }
+
+  private mobileDirectInsertMode(): boolean {
+    const coarse = window.matchMedia("(pointer: coarse)").matches;
+    const touches = navigator.maxTouchPoints ?? 0;
+    return wasmInputPolicy()?.mobile_direct_insert_mode?.(coarse, touches) ??
+      mobileDirectInsertFallback(coarse, touches);
+  }
+
+  private syncMobileDirectInsertMode(): void {
+    this.wasmAdapter?.setMobileDirectInsert?.(this.mobileDirectInsertMode());
   }
 
   private isRendered(): boolean {
@@ -2352,6 +2720,7 @@ export class TerminalPanel {
   }
 
   private handleResize(widthPx: number, heightPx: number): void {
+    this.wasmAdapter?.setMobileKeyboardInset?.(this.keyboardInsetBottom);
     // One contract for every size source: canvas style = CSS rect,
     // chrome layout = CSS pixels, render scale = devicePixelRatio
     // clamped by the GPU texture cap (`sizeContractFor`), backing
@@ -2396,10 +2765,16 @@ export class TerminalPanel {
     const chromeTerminal = this.wasmAdapter?.chromeLayout?.()?.terminal;
     const terminalWidth = chromeTerminal?.w ?? width;
     const terminalHeight = chromeTerminal?.h ?? height;
+    const contentOccluded = chromeTerminal != null
+      && (terminalWidth <= 0 || terminalHeight <= 0);
     const scaledCellWidth = CELL_WIDTH * this.currentFontScale;
     const scaledCellHeight = CELL_HEIGHT * this.currentFontScale;
-    const cols = Math.max(MIN_COLS, Math.floor(terminalWidth / scaledCellWidth));
-    const rows = Math.max(MIN_ROWS, Math.floor(terminalHeight / scaledCellHeight));
+    const cols = contentOccluded
+      ? this.cols
+      : Math.max(MIN_COLS, Math.floor(terminalWidth / scaledCellWidth));
+    const rows = contentOccluded
+      ? this.rows
+      : Math.max(MIN_ROWS, Math.floor(terminalHeight / scaledCellHeight));
     if (cols !== this.cols || rows !== this.rows) {
       this.cols = cols;
       this.rows = rows;
@@ -2425,10 +2800,16 @@ export class TerminalPanel {
     { title: "Terminal 1", kind: "terminal" },
   ];
   private activeTabIndex = 0;
+  private readonly vimExSaveClose = new VimExSaveCloseGate();
   private pendingTerminalTabSpawns: PendingTerminalTabSpawn[] = [];
+  private readonly tabCloseLifecycle = new TabCloseLifecycle();
+  private readonly pendingTabCloses = new Map<string, PendingTabClose>();
   private lastBufferTabsFingerprint = "";
   private readonly ptyReplayBuffers = new Map<string, Uint8Array>();
-  private readonly neoismAgentRouteId = 1;
+  private nextNeoismAgentRouteId = 1;
+  /** Route which owned the most recently emitted CreateThread. This keeps a
+   * late ThreadCreated reply attached to the tab that initiated it. */
+  private pendingAgentSessionRouteId: number | null = null;
   private markdownLayerTabIndex: number | null = null;
   private sessionLayoutStateJson: string | null = null;
   private paneLayoutPanes: WebPaneRect[] = [];
@@ -2462,6 +2843,7 @@ export class TerminalPanel {
   private workspaceSessionId: string | null = null;
   private readonly editorSurfaceBindings = new Map<string, EditorSurfaceSummary>();
   private readonly editorResizeBySurface = new Map<string, { width: number; height: number }>();
+  private fileBrowserRequestInFlight = false;
 
   private drainChromeIntents(): void {
     this.drainTopBarActions();
@@ -2472,8 +2854,86 @@ export class TerminalPanel {
     this.drainBufferTabClicks();
     this.drainFinderOpenIntents();
     this.drainPaletteIntents();
+    this.pumpFileBrowser();
     this.pumpSidePanelRefreshes();
     this.pumpCompletionDirRequests();
+  }
+
+  /** Satisfy the shared Sugarloaf browser exclusively through the daemon's
+   * daemon-authorized browser roots, then materialize its image selection
+   * through the existing composer attachment path. The web client never
+   * fabricates a host path from a display label. */
+  private pumpFileBrowser(): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter) return;
+    if (adapter.fileBrowserActive?.()) {
+      try {
+        adapter.setFileBrowserRecents?.(localStorage.getItem("neoism.file-browser.recents") || "[]");
+      } catch { /* storage may be disabled */ }
+    }
+    const selected = adapter.drainFileBrowserSelection?.() as
+      | { mode?: string; path?: string }
+      | null
+      | undefined;
+    if (selected?.path && selected.mode === "attach_image") {
+      const path = selected.path;
+      const ext = path.split(".").pop()?.toLowerCase() ?? "";
+      const mime: Record<string, string> = {
+        png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+        gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
+        avif: "image/avif", svg: "image/svg+xml",
+      };
+      const kind = mime[ext];
+      if (kind) {
+        const files = new DaemonFilesService(this.options.client);
+        void files.browserStat(path).then((entry) => {
+          if ((entry.size ?? 0) > 20 * 1024 * 1024) {
+            throw new Error("Image is larger than the 20 MB attachment limit");
+          }
+          return files.browserReadFile(path);
+        }).then((bytes) => {
+          const name = path.split(/[\\/]/).pop() || "image";
+          if (!adapter.agentAttachFile?.(name, kind, bytes)) {
+            this.pushInAppNotification("Attachment failed", `Could not attach ${name}.`, "warn");
+          }
+          const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+          const parent = separator >= 0 ? path.slice(0, separator) : "";
+          try {
+            const old = JSON.parse(localStorage.getItem("neoism.file-browser.recents") || "[]") as string[];
+            localStorage.setItem("neoism.file-browser.recents", JSON.stringify([parent, ...old.filter((p) => p !== parent)].slice(0, 8)));
+          } catch { /* storage may be disabled */ }
+          this.scheduleDraw();
+        }).catch((error) => this.pushInAppNotification("Attachment failed", String(error), "warn"));
+      }
+    }
+    if (this.fileBrowserRequestInFlight) return;
+    const requests = adapter.drainFileBrowserRequests?.() as
+      | Array<{ kind?: string; path?: string }>
+      | null
+      | undefined;
+    const request = requests?.[0];
+    if (!request) return;
+    this.fileBrowserRequestInFlight = true;
+    const files = new DaemonFilesService(this.options.client);
+    const operation = request.kind === "load_locations"
+      ? files.browserLocations().then((locations) => {
+          adapter.setFileBrowserLocations?.(JSON.stringify(locations));
+        })
+      : request.kind === "list_directory" && typeof request.path === "string"
+        ? files.browserListDir(request.path).then((entries) => {
+            adapter.setFileBrowserEntries?.(request.path!, JSON.stringify(entries));
+          })
+        : Promise.resolve();
+    void operation
+      .then(() => {
+        this.scheduleDraw();
+      })
+      .catch((error) => {
+        const concise = String(error).replace(/^Error:\s*(files service error:\s*)?/, "");
+        adapter.setFileBrowserError?.(concise);
+        this.scheduleDraw();
+      })
+      .finally(() => { this.fileBrowserRequestInFlight = false; });
   }
 
   private drainTopBarActions(): void {
@@ -2551,8 +3011,10 @@ export class TerminalPanel {
           break;
         }
         case "open_search": {
+          // Defensive route for older wasm bundles. Current shared Chrome
+          // consumes this toggle directly; desktop semantics use Files.
           const adapter = this.wasmAdapter;
-          (adapter?.showFinderGrep ?? adapter?.showFinder)?.call(adapter);
+          (adapter?.showFinderFiles ?? adapter?.showFinder)?.call(adapter);
           break;
         }
       }
@@ -2816,7 +3278,9 @@ export class TerminalPanel {
       void this.refreshGitSidePanelData();
     }
     if (adapter.takeNotesRefresh?.()) {
-      void this.refreshNotesSidebarEntries();
+      // Opening Notes is an idempotent ensure, not a one-shot promise that
+      // can be lost if the request fails or the adapter/socket is replaced.
+      this.ensureNotesSidebarSnapshot(true);
     }
   }
 
@@ -2910,69 +3374,82 @@ export class TerminalPanel {
    *  each row's depth/parent by `strip_prefix`-ing the vault root, so
    *  even a correct listing would have rendered flat. Paths are
    *  absolute here for that reason. */
-  private async refreshNotesSidebarEntries(): Promise<void> {
+  private notesRefreshBarrierReady(): boolean {
+    return this.transportAvailable
+      && this.notesWorkspaceBarrierReady
+      && this.options.client.getConnectionState().phase === "connected"
+      && !!this.options.activeWorkspaceId;
+  }
+
+  private ensureNotesSidebarSnapshot(force = false): void {
     const adapter = this.wasmAdapter;
     if (!adapter?.notesSetEntries) return;
-    const vault = this.options.notesVaultRoot;
-    if (!vault) {
-      // No linked vault: clear rather than leave the previous vault's
-      // rows on screen. The sidebar shows its "no linked vault" state.
-      adapter.notesSetEntries(JSON.stringify([]));
-      this.scheduleDraw();
+    this.notesRefresh.ensure(
+      adapter,
+      this.options.notesVaultRoot,
+      this.options.activeWorkspaceId ?? null,
+      this.options.client.getGeneration(),
+      force,
+    );
+    if (!this.notesRefreshBarrierReady()) return;
+    this.scheduleNotesSidebarRefresh(0);
+  }
+
+  private scheduleNotesSidebarRefresh(delayMs: number): void {
+    if (this.notesRefreshTimer !== null || !this.notesRefreshBarrierReady()) return;
+    this.notesRefreshTimer = setTimeout(() => {
+      this.notesRefreshTimer = null;
+      void this.refreshNotesSidebarEntries();
+    }, Math.max(0, Math.min(5_000, delayMs)));
+  }
+
+  private async refreshNotesSidebarEntries(): Promise<void> {
+    if (!this.notesRefreshBarrierReady()) return;
+    const attempt = this.notesRefresh.beginDesired();
+    if (!attempt) return;
+    const adapter = attempt.adapter;
+    if (!attempt.vault) {
+      if (this.notesRefresh.finish(attempt, true)) {
+        adapter.notesSetEntries?.(JSON.stringify([]));
+        this.scheduleDraw();
+      }
       return;
     }
-    const base = vault.replace(/\/+$/, "");
-    const entries: Array<{
-      path: string;
-      is_dir: boolean;
-      icon?: string;
-    }> = [];
-    // `dir` is vault-relative ("" is the vault root); the pushed path is
-    // absolute.
-    const listDir = async (dir: string, depth: number): Promise<boolean> => {
-      if (depth > 6 || entries.length > 800) return true;
-      let reply: unknown;
-      try {
-        reply = await this.options.client.requestFiles(
-          { ListDir: { path: dir } },
-          base,
-        );
-      } catch {
-        return false;
+    const base = attempt.vault;
+    try {
+      const entries = await collectNotesSnapshot(
+        base,
+        async (dir) => {
+          const reply = await this.options.client.requestFiles(
+            { ListDir: { path: dir } },
+            base,
+          );
+          if (!reply || typeof reply !== "object" || !("DirListing" in reply)) {
+            throw new Error("notes directory listing failed");
+          }
+          return (reply as {
+            DirListing: {
+              entries: Array<{ name: string; is_dir: boolean; icon?: string }>;
+            };
+          }).DirListing.entries;
+        },
+      );
+      if (this.notesRefresh.finish(attempt, true)) {
+        adapter.notesSetEntries?.(JSON.stringify(entries));
+        this.scheduleDraw();
+      } else if (this.notesRefresh.needsRefresh()) {
+        this.scheduleNotesSidebarRefresh(0);
       }
-      if (!reply || typeof reply !== "object" || !("DirListing" in reply)) {
-        return false;
+    } catch {
+      // Preserve the last complete snapshot and remain dirty. Retry is
+      // coalesced and exponentially bounded; reconnect/open/root replay can
+      // also wake the same desired state without losing it.
+      if (this.notesRefresh.finish(attempt, false)) {
+        this.scheduleNotesSidebarRefresh(this.notesRefresh.retryDelayMs());
+      } else if (this.notesRefresh.needsRefresh()) {
+        this.scheduleNotesSidebarRefresh(0);
       }
-      const listing = (reply as {
-        DirListing: {
-          entries: Array<{ name: string; is_dir: boolean; icon?: string }>;
-        };
-      }).DirListing.entries;
-      for (const entry of listing) {
-        if (entry.name.startsWith(".")) continue;
-        const rel = dir.length > 0 ? `${dir}/${entry.name}` : entry.name;
-        // `icon` is the daemon-resolved markdown frontmatter icon: the
-        // browser has no filesystem, so it cannot read it itself.
-        entries.push({
-          path: `${base}/${rel}`,
-          is_dir: entry.is_dir,
-          icon: entry.icon,
-        });
-        if (entry.is_dir) {
-          await listDir(rel, depth + 1);
-        }
-      }
-      return true;
-    };
-    let ok = await listDir("", 0);
-    if (!ok) {
-      // One delayed retry covers a vault still being created host-side
-      // (the daemon creates it lazily on first note).
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      ok = await listDir("", 0);
     }
-    adapter.notesSetEntries(JSON.stringify(entries));
-    this.scheduleDraw();
   }
 
   private syncBridgeStateAfterAdapterReady(): void {
@@ -3053,11 +3530,15 @@ export class TerminalPanel {
     for (const intent of intents) {
       switch (intent.kind) {
         case "action":
-          this.dispatchPaletteAction(intent.action);
+          if (intent.action === "OpenTerminalDirectoryPalette") {
+            this.openTerminalDirectoryPalette();
+          } else {
+            this.dispatchPaletteAction(intent.action);
+          }
           break;
         case "ex_command":
           if (intent.command.length > 0) {
-            this.dispatchPaletteExCommand(intent.command, adapter);
+            this.dispatchPaletteExCommand(intent.command, intent.plan, adapter);
           }
           break;
         case "search":
@@ -3070,6 +3551,9 @@ export class TerminalPanel {
         case "theme":
           this.handlePaletteThemePick(intent.name, adapter);
           break;
+        case "mashup":
+          void this.applyWebMashupPack(intent.id, adapter);
+          break;
         case "shader":
           this.handlePaletteShaderPick(intent.title, intent.filter, adapter);
           break;
@@ -3079,9 +3563,48 @@ export class TerminalPanel {
         case "workspace":
           this.options.onWorkspaceSelected?.(intent.workspace_id);
           break;
-        case "directory":
-          this.options.onWorkspaceRootRequested?.(intent.path);
+        case "change_terminal_directory": {
+          const plan = terminalDirectoryPlan(
+            intent.cwd,
+            intent.path,
+            intent.selected,
+            intent.shell_kind,
+            (path, shell) => adapter.terminalChangeDirectoryPayload?.(path, shell) ?? new Uint8Array(),
+          );
+          const submit = () => {
+            if (plan.payload.length === 0 || !intent.session_id) return;
+            let filter = this.syntheticCdEchoes.get(intent.session_id);
+            if (!filter) {
+              filter = new ExactSyntheticEchoFilter();
+              this.syntheticCdEchoes.set(intent.session_id, filter);
+            }
+            filter.expect(plan.payload);
+            if (this.options.pty) this.options.pty.sendInput(intent.session_id, plan.payload);
+            else this.options.client.sendInput(intent.session_id, plan.payload);
+            const nextCwd = plan.optimisticCwd ?? intent.cwd;
+            if (plan.optimisticCwd) this.terminalSessionCwds.set(intent.session_id, plan.optimisticCwd);
+            adapter.continueTerminalDirectoryPalette?.(nextCwd);
+          };
+          if (plan.optimisticCwd) {
+            // Validate on the PTY's daemon, not in the browser filesystem.
+            // Keeping the captured session in the closure prevents focus
+            // changes while this request is in flight from redirecting it.
+            void new DaemonFilesService(this.options.client)
+              .browserStat(plan.optimisticCwd)
+              .then((entry) => {
+                if (!entry.is_dir) throw new Error(`Not a directory: ${plan.optimisticCwd}`);
+                submit();
+              })
+              .catch((error) => {
+                const concise = String(error).replace(/^Error:\s*(files service error:\s*)?/, "");
+                adapter.setTerminalDirectoryPaletteError?.(concise);
+                this.scheduleDraw();
+              });
+          } else {
+            submit();
+          }
           break;
+        }
         case "server":
           // Carries the picked server's id — the plain `action` intent
           // drops it, so this variant exists to keep the payload.
@@ -3161,6 +3684,7 @@ export class TerminalPanel {
   /** The workspace the share QR should deep-link to. */
   setShareWorkspaceId(id: string | null): void {
     this.options.activeWorkspaceId = id;
+    this.ensureNotesSidebarSnapshot(false);
   }
 
   /** Show the "Share with phone" QR for a daemon-resolved URL. A null
@@ -3170,16 +3694,20 @@ export class TerminalPanel {
     const adapter = this.wasmAdapter as {
       shareSheetShow?: (url: string, hint?: string) => void;
     };
+    // The daemon resolves this from the same canonical HostSummary.daemon_url
+    // used by workspace/server sharing. Do not replace its tailnet host with
+    // the browser's LAN or loopback origin.
     adapter?.shareSheetShow?.(url ?? "", hint ?? undefined);
     this.scheduleDraw();
   }
 
   setNotesVaultRoot(vault: string | null): void {
-    const next = vault && vault.length > 0 ? vault : null;
-    const changed = (this.options.notesVaultRoot ?? null) !== next;
+    const next = normalizeNotesVaultRoot(vault);
     this.options.notesVaultRoot = next;
     this.wasmAdapter?.setNotesVaultRoot?.(next);
-    if (changed) void this.refreshNotesSidebarEntries();
+    // Same-root replay is meaningful after adapter install/reconnect and can
+    // force a new all-or-nothing snapshot.
+    this.ensureNotesSidebarSnapshot(true);
     this.scheduleDraw();
   }
 
@@ -3194,7 +3722,44 @@ export class TerminalPanel {
     this.scheduleDraw();
   }
 
-  private dispatchPaletteExCommand(command: string, adapter: TerminalAdapter): void {
+  setTerminalCwd(sessionId: string, cwd: string): void {
+    if (sessionId && cwd) {
+      this.terminalSessionCwds.set(sessionId, cwd);
+      this.wasmAdapter?.updateTerminalDirectoryPaletteCwd?.(sessionId, cwd);
+    }
+  }
+
+  private openTerminalDirectoryPalette(): void {
+    const paneId = this.activePaneExternalId();
+    const associated = paneId === null ? null : this.paneSessionIds.get(paneId) ?? null;
+    const sessionId = resolveTerminalDirectoryTarget({
+      associated,
+      active: this.activePtySessionId(),
+      recent: this.lastActiveTerminalSessionId,
+      tabSessions: this.bufferTabs
+        .filter((tab) => tab.kind === "terminal")
+        .map((tab) => tab.sessionId),
+      isLive: (candidate) => this.knowsPtySession(candidate),
+    });
+    if (!sessionId) {
+      this.spawnTerminalTab({ openDirectoryPalette: true, paneExternalId: paneId ?? undefined });
+      return;
+    }
+    this.openTerminalDirectoryPaletteFor(sessionId);
+  }
+
+  private openTerminalDirectoryPaletteFor(sessionId: string): void {
+    const cwd = this.terminalSessionCwds.get(sessionId) ?? this.options.workspaceRoot ?? ".";
+    const routeId = this.activePaneExternalId() ?? this.activeTabIndex;
+    this.wasmAdapter?.openTerminalDirectoryPalette?.(routeId, sessionId, cwd, "zsh");
+    this.scheduleDraw();
+  }
+
+  private dispatchPaletteExCommand(
+    command: string,
+    wirePlan: VimExHostPlan | undefined,
+    adapter: TerminalAdapter,
+  ): void {
     const trimmed = command.trim();
     if (trimmed.length === 0) return;
     const normalized = trimmed.toLowerCase();
@@ -3206,31 +3771,13 @@ export class TerminalPanel {
       adapter.enterPaletteShadersMode?.(JSON.stringify(WEB_SHADER_FILTERS));
       return;
     }
-    if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
-      if (normalized === "w" || normalized === "write") {
-        this.saveActiveMarkdown();
-        return;
-      }
-      if (normalized === "q" || normalized === "quit") {
-        this.closeCurrentSplitOrTab();
-        return;
-      }
-    }
-    if (this.activeEditorPaneKind() !== null) {
-      // Native editor panes: `:w` / `:q` / `:wq` — the vim ex surface.
-      if (normalized === "w" || normalized === "write") {
-        this.saveActiveEditorPane();
-        return;
-      }
-      if (normalized === "q" || normalized === "quit") {
-        this.closeCurrentSplitOrTab();
-        return;
-      }
-      if (normalized === "wq" || normalized === "x") {
-        this.saveActiveEditorPane();
-        this.closeCurrentSplitOrTab();
-        return;
-      }
+    // New bundles classify through shared Rust. The fallback only protects a
+    // cached pre-protocol bundle; it deliberately contains lifecycle aliases
+    // only and can never produce an application/window quit.
+    const plan = wirePlan ?? this.legacyVimExPlan(normalized);
+    if (plan) {
+      this.dispatchVimExHostPlan(plan, adapter);
+      return;
     }
     // Unintercepted ex commands used to forward to the embedded nvim.
     // That backend is gone; surface the miss instead of silently
@@ -3239,6 +3786,73 @@ export class TerminalPanel {
       `Ex command ":${trimmed}" is not available in the web frontend.`,
       adapter,
     );
+  }
+
+  private legacyVimExPlan(command: string): VimExHostPlan | null {
+    if (["w", "w!", "write", "write!"].includes(command)) return "write";
+    if (["q", "quit", "quite", "close"].includes(command)) return "close";
+    if (["q!", "quit!", "quite!", "close!"].includes(command)) return "close_force";
+    if (["wq", "wq!", "x", "x!", "exit"].includes(command)) return "write_close";
+    if (["qa", "qall", "quitall"].includes(command)) return "close_all";
+    if (["qa!", "qall!", "quitall!"].includes(command)) return "close_all_force";
+    if (["wqa", "wqa!", "wqall", "wqall!", "xa", "xa!", "xall"].includes(command)) {
+      return "write_all_close";
+    }
+    return null;
+  }
+
+  private dispatchVimExHostPlan(plan: VimExHostPlan, adapter: TerminalAdapter): void {
+    const tab = this.bufferTabs[this.activeTabIndex];
+    const document = tab?.kind === "file";
+    const modified = this.syncActiveTabModified();
+    const action = resolveVimExHostAction(plan, {
+      document,
+      modified,
+      workspaceModified: this.bufferTabs.some((candidate) => candidate.modified === true),
+    });
+    switch (action.kind) {
+      case "save":
+        this.saveActiveDocument();
+        return;
+      case "close_buffer":
+        // Ex `:q` is a BufferTabs operation, not CloseCurrentSplitOrTab and
+        // never PaletteAction::Quit. Pane tab state is rebased by the same
+        // close policy used by the strip's X button.
+        this.closeActiveVimBuffer();
+        return;
+      case "save_then_close": {
+        const tabKey = this.activeTabKey();
+        if (!tabKey) return;
+        this.vimExSaveClose.arm({
+          tabKey,
+          bufferId:
+            tab?.path && tab.configRevision === undefined
+              ? presenceBufferIdForPath(tab.path, this.options.workspaceRoot)
+              : null,
+        });
+        if (!this.saveActiveDocument()) this.vimExSaveClose.cancel(tabKey);
+        return;
+      }
+      case "close_workspace_buffers":
+        this.closeWorkspaceBufferTabs();
+        return;
+      case "refuse_modified":
+        this.pushInAppNotification(
+          "Unsaved changes",
+          action.all
+            ? "Use :qall! to discard this workspace"
+            : "Use :q! to discard this buffer",
+          "warn",
+        );
+        return;
+      case "unavailable":
+        this.notifyPaletteUnavailable(
+          plan === "write_all_close"
+            ? "Write-all is not available until every web buffer has an independent document binding."
+            : "Write is only available for document buffers.",
+          adapter,
+        );
+    }
   }
 
   /// Map a stable PaletteAction variant name (as serialized by the
@@ -3282,6 +3896,9 @@ export class TerminalPanel {
           "Inlay hints haven't landed in the web LSP surface yet.",
           adapter,
         );
+        break;
+      case "OpenMashupPacks":
+        this.openWebMashupPacks();
         break;
       case "ToggleGitDiffPanel":
         this.toggleGitSidePanel();
@@ -3477,6 +4094,63 @@ export class TerminalPanel {
     );
   }
 
+  private openWebMashupPacks(): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.enterPaletteMashupsMode) return;
+    void fetchMashupPacks(this.options.client).then((packs) => {
+      const entries = packs.map((pack) => ({
+        id: pack.id,
+        name: pack.name,
+        detail: [pack.description, (pack.slots ?? []).join(" + ")]
+          .filter((part) => part.length > 0)
+          .join(" · ") || "empty pack",
+        theme: pack.theme ?? null,
+        shader_overlay: pack.shader_overlay ?? null,
+        font_family: pack.font_family ?? null,
+        theme_extends: pack.theme_extends ?? null,
+        theme_colors: pack.theme_colors ?? {},
+      }));
+      if (!adapter.enterPaletteMashupsMode?.(JSON.stringify(entries))) {
+        this.pushInAppNotification("Mash Up Packs", "Could not open the pack catalog.", "error");
+      }
+      this.scheduleDraw();
+    });
+  }
+
+  private async applyWebMashupPack(
+    id: string | null,
+    adapter: TerminalAdapter,
+  ): Promise<void> {
+    const result = await applyMashupPack(this.options.client, id);
+    if ("error" in result) {
+      this.pushInAppNotification("Mash Up Packs", result.error, "error");
+      return;
+    }
+    const appearance = (result.config as { appearance?: Record<string, unknown> } | null)
+      ?.appearance;
+    const theme = typeof appearance?.theme === "string" ? appearance.theme : null;
+    if (theme) this.setIdeTheme(theme);
+    const packs = await fetchMashupPacks(this.options.client);
+    const selected = id ? packs.find((pack) => pack.id === id) : undefined;
+    if (selected?.font_family) this.handlePaletteFontPick(selected.font_family, adapter);
+    const shader = selected?.shader_overlay ?? null;
+    const browserShader = shader?.startsWith("builtin:")
+      ? shader.slice("builtin:".length)
+      : null;
+    if (browserShader && WEB_SHADER_FILTERS.some((entry) => entry.filter === browserShader)) {
+      this.activeShaderFilter = browserShader;
+    } else if (!id || !shader) {
+      this.activeShaderFilter = null;
+    }
+    this.applyWebShaderFilter();
+    this.pushInAppNotification(
+      "Mash Up Packs",
+      id ? `Applied ${selected?.name ?? id}.` : "Mash Up Pack deactivated.",
+      "info",
+    );
+    this.scheduleDraw();
+  }
+
   private handlePaletteShaderPick(
     title: string,
     filter: string | null,
@@ -3535,6 +4209,7 @@ export class TerminalPanel {
   }
 
   private activatePaletteBuffer(target: PaletteBufferTarget): void {
+    this.syncActiveTabModified();
     const tabIndex = target.tab_index;
     if (tabIndex < 0 || tabIndex >= this.bufferTabs.length) return;
     this.activeTabIndex = tabIndex;
@@ -3564,8 +4239,11 @@ export class TerminalPanel {
     this.pendingTerminalTabSpawns.push(pending);
     // New shells open IN the workspace directory (the anchor). The user
     // can `cd` anywhere afterward — that stays local to this shell.
+    const focusedSession = this.activePtySessionId();
     this.options.pty.spawn({
-      cwd: this.options.workspaceRoot ?? null,
+      cwd: (focusedSession && this.terminalSessionCwds.get(focusedSession))
+        ?? this.options.workspaceRoot
+        ?? null,
       cols: this.cols,
       rows: this.rows,
     });
@@ -3583,6 +4261,205 @@ export class TerminalPanel {
 
   private closeActiveBufferTab(): void {
     this.applyBufferTabPolicy("close_active");
+  }
+
+  private tabLifecycleKey(tab: WebBufferTab | undefined): string | null {
+    if (!tab) return null;
+    if (tab.kind === "terminal") return tab.sessionId ? `terminal:${tab.sessionId}` : null;
+    if (tab.kind === "file" && tab.path) return `file:${this.tabIdentityPath(tab.path)}`;
+    if (tab.kind === "neoism-agent" && tab.neoismAgentRouteId !== undefined) {
+      return `agent:${tab.neoismAgentRouteId}`;
+    }
+    return null;
+  }
+
+  private tabIdentityPath(path: string): string {
+    const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
+    const root = (this.options.workspaceRoot ?? "").replace(/\\/g, "/").replace(/\/$/, "");
+    return root && normalized.startsWith(`${root}/`)
+      ? normalized.slice(root.length + 1)
+      : normalized;
+  }
+
+  private workspaceTabLifecycleKey(tab: WorkspaceTabSummary): string | null {
+    if ((tab.kind ?? "terminal") === "terminal" && tab.session_id) {
+      return `terminal:${tab.session_id}`;
+    }
+    if (this.isWorkspaceFileLikeTab(tab) && tab.cwd) {
+      return `file:${this.tabIdentityPath(tab.cwd)}`;
+    }
+    if (tab.kind === "neoism-agent") {
+      const marker = "-web-";
+      const encoded = tab.id.slice(tab.id.lastIndexOf(marker) + marker.length);
+      try {
+        const identity = decodeURIComponent(encoded);
+        return identity.startsWith("agent:") ? identity : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  private surfaceLifecycleKey(surface: EditorSurfaceSummary): string | null {
+    if (surface.path) return `file:${this.tabIdentityPath(surface.path)}`;
+    const pending = [...this.pendingTabCloses.values()].find((close) =>
+      close.surfaceIds.includes(surface.surface_id)
+    );
+    return pending?.key ?? null;
+  }
+
+  private beginTabClose(tab: WebBufferTab, removedIndex: number): void {
+    const key = this.tabLifecycleKey(tab);
+    if (!key) return;
+    const surfaceIds = [...this.editorSurfaceBindings]
+      .filter(([surfaceId, surface]) => {
+        const externalId = this.externalIdFromEditorSurface(surfaceId);
+        const paneOwned = externalId !== null &&
+          this.paneTabState.get(externalId)?.tabIndices.includes(removedIndex) === true;
+        return paneOwned || (!!tab.path && surface.path === tab.path);
+      })
+      .map(([surfaceId]) => surfaceId);
+    for (const [externalId, state] of this.paneTabState) {
+      if (state.tabIndices.includes(removedIndex)) {
+        const surfaceId = this.editorSurfaceId(externalId);
+        if (!surfaceIds.includes(surfaceId)) surfaceIds.push(surfaceId);
+      }
+    }
+    for (const surfaceId of surfaceIds) {
+      this.editorSurfaceBindings.delete(surfaceId);
+      this.editorResizeBySurface.delete(surfaceId);
+    }
+    const authorities: CloseAuthority[] = ["workspace"];
+    if (surfaceIds.length > 0) authorities.push("surface");
+    if (tab.kind === "terminal" && tab.sessionId) authorities.push("pty", "session");
+    if (
+      tab.kind === "neoism-agent" &&
+      this.pendingAgentSessionRouteId === tab.neoismAgentRouteId
+    ) {
+      this.pendingAgentSessionRouteId = null;
+    }
+    if (!this.tabCloseLifecycle.beginClose(key, authorities)) return;
+    this.pendingTabCloses.set(key, {
+      key,
+      tab: { ...tab },
+      surfaceIds,
+      sentGeneration: null,
+    });
+  }
+
+  private flushPendingTabCloses(republishWorkspace = false): void {
+    const generation = this.options.client.getGeneration();
+    this.tabCloseLifecycle.setGeneration(generation);
+    if (!this.transportAvailable) return;
+    for (const close of this.pendingTabCloses.values()) {
+      if (close.sentGeneration === generation) continue;
+      close.sentGeneration = generation;
+      for (const surfaceId of close.surfaceIds) this.options.client.closeEditorSurface(surfaceId);
+      if (close.tab.kind === "terminal" && close.tab.sessionId) {
+        this.options.pty?.close(close.tab.sessionId);
+        this.options.client.sendWorkspace({ CloseSession: { session_id: close.tab.sessionId } });
+      }
+    }
+    if (republishWorkspace) {
+      this.lastBufferTabsFingerprint = "";
+      this.notifyBufferTabsChanged();
+    }
+  }
+
+  private settlePendingTabClose(key: string): void {
+    if (!this.tabCloseLifecycle.blocks(key)) this.pendingTabCloses.delete(key);
+  }
+
+  private explicitlyReopenTabKey(key: string): void {
+    this.tabCloseLifecycle.explicitOpen(key);
+    this.pendingTabCloses.delete(key);
+  }
+
+  private closeActiveVimBuffer(): void {
+    const tabIndex = this.activeTabIndex;
+    const tab = this.bufferTabs[tabIndex];
+    const paneId = this.activePaneExternalId();
+    const ownsFocusedPane =
+      paneId !== null &&
+      (this.paneTabState.get(paneId)?.activeTabIndex === tabIndex ||
+        (tab?.kind === "terminal" &&
+          this.paneSessionIds.get(paneId) === (tab.sessionId ?? this.options.sessionId)));
+    this.closeActiveBufferTab();
+    if (!ownsFocusedPane || paneId === null || this.paneLayoutPanes.length <= 1) return;
+
+    const result = this.applySessionLayoutPolicy("close_focused");
+    if (!result) return;
+    this.closeEditorSurface(paneId);
+    this.paneSessionIds.delete(paneId);
+    this.wasmAdapter?.removePaneTerminal?.(paneId);
+    if (typeof result.focused_external_id === "number") {
+      this.activatePaneExternalId(result.focused_external_id, true);
+    }
+  }
+
+  private activeTabKey(): string | null {
+    const tab = this.bufferTabs[this.activeTabIndex];
+    if (!tab) return null;
+    return tab.path ?? (tab.sessionId ? `terminal:${tab.sessionId}` : `${tab.kind}:${this.activeTabIndex}`);
+  }
+
+  private syncActiveTabModified(): boolean {
+    const tab = this.bufferTabs[this.activeTabIndex];
+    if (!tab || tab.kind !== "file") return false;
+    let modified = tab.modified === true;
+    if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
+      modified = this.wasmAdapter?.markdownDirty?.() === true;
+    } else if (this.activeEditorPaneKind() !== null) {
+      modified = this.wasmAdapter?.editorDirty?.() === true;
+    }
+    tab.modified = modified;
+    return modified;
+  }
+
+  private saveActiveDocument(): boolean {
+    if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
+      return this.saveActiveMarkdown();
+    }
+    if (this.activeEditorPaneKind() !== null) {
+      return this.saveActiveEditorPane();
+    }
+    return false;
+  }
+
+  private markBufferSaved(bufferId: string): void {
+    for (const tab of this.bufferTabs) {
+      if (
+        tab.kind === "file" &&
+        tab.path &&
+        presenceBufferIdForPath(tab.path, this.options.workspaceRoot) === bufferId
+      ) {
+        tab.modified = false;
+      }
+    }
+  }
+
+  private closeTabByKey(tabKey: string): void {
+    const index = this.bufferTabs.findIndex(
+      (tab, ix) =>
+        (tab.path ?? (tab.sessionId ? `terminal:${tab.sessionId}` : `${tab.kind}:${ix}`)) ===
+        tabKey,
+    );
+    if (index === this.activeTabIndex) {
+      this.closeActiveVimBuffer();
+    } else if (index >= 0) {
+      this.applyBufferTabPolicy("close_index", index);
+    }
+  }
+
+  /** Web's active-workspace fallback for desktop `:qall`: drain every
+   * closeable BufferTabs entry but retain the root terminal/browser page. */
+  private closeWorkspaceBufferTabs(): void {
+    for (let index = this.bufferTabs.length - 1; index >= 0; index -= 1) {
+      const tab = this.bufferTabs[index];
+      const isRootTerminal = index === 0 && tab?.kind === "terminal";
+      if (!isRootTerminal) this.applyBufferTabPolicy("close_index", index);
+    }
   }
 
   private closeCurrentSplitOrTab(): void {
@@ -3676,6 +4553,7 @@ export class TerminalPanel {
    */
   private crdtStaleBundleWarned = false;
   private pumpCrdtOutbox(): void {
+    if (!this.transportAvailable || !this.crdtTransportAvailable) return;
     const bufferId = this.activeMarkdownBufferId();
     // Tripwire: a markdown tab is live on the rendered chrome but the
     // served wasm predates the co-editing exports. Without this the
@@ -3713,17 +4591,19 @@ export class TerminalPanel {
   /** Daemon-owned save for the active markdown tab (Ctrl+S): flush
    *  pending edits into the shared doc, then ask the daemon (single
    *  writer) to flush the CONVERGED doc to disk. */
-  private saveActiveMarkdown(): void {
+  private saveActiveMarkdown(): boolean {
     // Bind/flush first so the doc includes everything just typed.
     this.pumpCrdtOutbox();
     if (this.wasmAdapter?.markdownRequestSave?.() === true) {
       this.pumpCrdtOutbox();
+      return true;
     } else {
       this.pushInAppNotification(
         "Not saved",
         "This document isn't connected to the workspace daemon yet.",
         "error",
       );
+      return false;
     }
   }
 
@@ -3741,11 +4621,21 @@ export class TerminalPanel {
    *  Binds the active code pane's doc (OpenBuffer on first sight),
    *  flushes pane mutations, ships queued client messages. */
   private pumpCodeCrdt(): void {
+    if (!this.transportAvailable || !this.crdtTransportAvailable) return;
     const adapter = this.wasmAdapter as {
       codeCrdtPump?: (bufferId: string | null) => string | null;
+      editorSavePayload?: () => string | null;
     };
     if (!adapter?.codeCrdtPump) return;
-    const json = adapter.codeCrdtPump(this.activeCodeBufferId());
+    const bufferId = this.activeCodeBufferId();
+    const json = adapter.codeCrdtPump(bufferId);
+    if (bufferId) {
+      const tab = this.bufferTabs[this.activeTabIndex];
+      const text = adapter.editorSavePayload?.();
+      if (tab?.path && text !== null && text !== undefined) {
+        this.requestCodeHighlight(tab.path, text);
+      }
+    }
     if (!json) return;
     try {
       const messages = JSON.parse(json) as CrdtClientMessage[];
@@ -3761,14 +4651,14 @@ export class TerminalPanel {
    *  daemon-owned single-writer save (CRDT `SaveBuffer`, markdown
    *  parity); unbound code panes and notebook/draw panes fall back to
    *  a direct daemon `WriteFile` of the pane's serialized payload. */
-  private saveActiveEditorPane(skipFormat = false): void {
+  private saveActiveEditorPane(skipFormat = false): boolean {
     const adapter = this.wasmAdapter as {
       editorRequestSave?: () => string;
       editorRequestSaveFormatted?: () => string;
       editorSavePayload?: () => string | null;
       editorMarkSaved?: (payload: string) => void;
     };
-    if (!adapter?.editorRequestSave) return;
+    if (!adapter?.editorRequestSave) return false;
     const configTab = this.bufferTabs[this.activeTabIndex];
     if (configTab?.configRevision !== undefined) {
       const payload = adapter.editorSavePayload?.();
@@ -3778,15 +4668,17 @@ export class TerminalPanel {
           "The connected host config is read-only.",
           "error",
         );
-        return;
+        return false;
       }
       const expectedRevision = configTab.configRevision;
+      const configTabKey = configTab.path ?? configTab.configDisplayPath ?? "config";
       void saveConfigDocument(
         this.options.client,
         payload,
         expectedRevision,
       ).then((document) => {
         if (!document) {
+          this.vimExSaveClose.cancel(configTabKey);
           this.pushInAppNotification(
             "Config save failed",
             "The file changed, is invalid JSONC, or is no longer writable. Reopen it and retry.",
@@ -3797,6 +4689,9 @@ export class TerminalPanel {
         configTab.configRevision = document.revision;
         configTab.configWritable = document.writable;
         adapter.editorMarkSaved?.(payload);
+        configTab.modified = false;
+        const closeKey = this.vimExSaveClose.acknowledgeHostWrite(configTabKey);
+        if (closeKey) this.closeTabByKey(closeKey);
         this.pushInAppNotification(
           "Saved",
           `Wrote ${document.display_path}`,
@@ -3804,7 +4699,7 @@ export class TerminalPanel {
         );
         this.scheduleDraw();
       });
-      return;
+      return true;
     }
     // Bind/flush first so a bound doc includes everything just typed.
     this.pumpCodeCrdt();
@@ -3826,14 +4721,14 @@ export class TerminalPanel {
         this.editorLspFormatFallback = null;
         this.saveActiveEditorPane(true);
       }, 3000);
-      return;
+      return true;
     }
     if (mode === "crdt") {
       // The SaveBuffer message is queued in the wasm outbound — ship it.
       this.pumpCodeCrdt();
-      return;
+      return true;
     }
-    if (mode !== "host") return;
+    if (mode !== "host") return false;
     const tab = this.bufferTabs[this.activeTabIndex];
     const path = tab?.kind === "file" ? tab.path : null;
     const payload = adapter.editorSavePayload?.();
@@ -3843,17 +4738,22 @@ export class TerminalPanel {
         "The editor pane has no writable document.",
         "error",
       );
-      return;
+      return false;
     }
     const requestId = nextFileReadRequestId++;
     this.pendingServiceMappers.set(requestId, (reply) => {
       if ("FileWritten" in reply) {
         adapter.editorMarkSaved?.(payload);
+        const savedTab = this.bufferTabs.find((candidate) => candidate.path === path);
+        if (savedTab) savedTab.modified = false;
+        const closeKey = this.vimExSaveClose.acknowledgeHostWrite(path);
+        if (closeKey) this.closeTabByKey(closeKey);
         this.pushInAppNotification("Saved", `Wrote ${path}`, "info");
         this.scheduleDraw();
         return reply.FileWritten.bytes_written;
       }
       if ("Error" in reply) {
+        this.vimExSaveClose.cancel(path);
         this.pushInAppNotification("Save failed", reply.Error.message, "error");
       }
       return null;
@@ -3868,6 +4768,7 @@ export class TerminalPanel {
       },
       this.filesRootForPath(path),
     );
+    return true;
   }
 
   /**
@@ -4287,6 +5188,7 @@ export class TerminalPanel {
   }
 
   private activatePaneExternalId(externalId: number, openEditorBuffer: boolean): void {
+    this.syncActiveTabModified();
     const state = this.paneTabState.get(externalId);
     const tabIndex = state?.activeTabIndex;
     const editorTabBound =
@@ -4569,6 +5471,7 @@ export class TerminalPanel {
       ),
       path: t.path ?? null,
       kind: t.kind,
+      modified: t.modified === true,
       session_id: t.sessionId ?? null,
       neoism_agent_route_id: t.neoismAgentRouteId ?? null,
     }));
@@ -4599,6 +5502,7 @@ export class TerminalPanel {
       kind: tab.kind,
       path: tab.path ?? null,
       sessionId: tab.sessionId ?? null,
+      identity: this.tabLifecycleKey(tab) ?? `${tab.kind}:${index}`,
       active: index === this.activeTabIndex,
     }));
     const fingerprint = JSON.stringify(snapshot);
@@ -4658,29 +5562,59 @@ export class TerminalPanel {
   }
 
   private openNeoismAgentTab(): void {
-    const existing = this.bufferTabs.findIndex((t) => t.kind === "neoism-agent");
-    if (existing >= 0) {
-      this.activeTabIndex = existing;
-      // Explicitly re-invoking "Neoism Agent" means the user wants a
-      // FRESH chat, not a teleport back to the old conversation. The
-      // previous session stays reachable via /sessions.
-      if (this.wasmAdapter?.agentHasConversation?.()) {
-        const directory = this.wasmAdapter.fileTreeWorkspaceRoot?.() ?? null;
-        this.wasmAdapter.agentNewThread?.(directory);
-      }
-    } else {
-      this.bufferTabs.push({
-        title: "Neoism",
-        kind: "neoism-agent",
-        neoismAgentRouteId: this.neoismAgentRouteId,
-      });
-      this.activeTabIndex = this.bufferTabs.length - 1;
-    }
+    this.rememberActiveAgentSession();
+    const identity = allocateAgentTabIdentity(
+      this.bufferTabs.flatMap((tab) =>
+        tab.neoismAgentRouteId === undefined ? [] : [tab.neoismAgentRouteId],
+      ),
+      this.nextNeoismAgentRouteId,
+    );
+    this.nextNeoismAgentRouteId = identity.nextRouteId;
+    const tab: WebBufferTab = {
+      title: identity.title,
+      kind: "neoism-agent",
+      neoismAgentRouteId: identity.routeId,
+    };
+    this.explicitlyReopenTabKey(`agent:${identity.routeId}`);
+    this.bufferTabs.push(tab);
+    this.activeTabIndex = this.bufferTabs.length - 1;
     this.assignActiveTabToFocusedEditorPane();
     this.replayBufferTabs();
-    this.wasmAdapter?.agentSetInput?.(this.agentInput);
+    const directory = this.wasmAdapter?.fileTreeWorkspaceRoot?.() ?? null;
+    this.wasmAdapter?.agentNewThread?.(directory);
     this.ensureNeoismAgentAttached();
     this.scheduleDraw();
+  }
+
+  private activeAgentRouteId(): number | null {
+    const tab = this.bufferTabs[this.activeTabIndex];
+    return tab?.kind === "neoism-agent"
+      ? (tab.neoismAgentRouteId ?? null)
+      : null;
+  }
+
+  private bindAgentSessionToRoute(routeId: number | null, sessionId: string): void {
+    if (routeId === null || !sessionId) return;
+    const tab = this.bufferTabs.find(
+      (candidate) => candidate.neoismAgentRouteId === routeId,
+    );
+    if (tab?.kind === "neoism-agent") tab.agentSessionId = sessionId;
+  }
+
+  private rememberActiveAgentSession(): void {
+    const routeId = this.activeAgentRouteId();
+    const sessionId = this.wasmAdapter?.agentSessionId?.() ?? null;
+    if (sessionId) this.bindAgentSessionToRoute(routeId, sessionId);
+  }
+
+  private activateAgentTab(tab: WebBufferTab): void {
+    if (tab.agentSessionId) {
+      this.wasmAdapter?.agentSwitchThread?.(tab.agentSessionId);
+    } else {
+      const directory = this.wasmAdapter?.fileTreeWorkspaceRoot?.() ?? null;
+      this.wasmAdapter?.agentNewThread?.(directory);
+    }
+    this.ensureNeoismAgentAttached();
   }
 
   private ensureNeoismAgentAttached(): void {
@@ -4709,8 +5643,10 @@ export class TerminalPanel {
    *  file-tree, git-panel, and notes-sidebar activations. */
   private openActivatedPaths(opens: string[]): void {
     if (opens.length === 0) return;
+    this.syncActiveTabModified();
     let changed = false;
     for (const raw of opens) {
+      this.explicitlyReopenTabKey(`file:${this.tabIdentityPath(raw)}`);
       const fileName = raw.split(/[\\/]/).pop() ?? raw;
       const existing = this.bufferTabs.findIndex((t) => t.path === raw);
       if (existing >= 0) {
@@ -5019,6 +5955,12 @@ export class TerminalPanel {
           }
           break;
         }
+        case "generic": {
+          const id = str("id");
+          if (id === "connection.retry") this.connectionRetry?.();
+          if (id === "connection.switch") this.connectionSwitch?.();
+          break;
+        }
         default:
           // "generic" spec outcomes have no consumers on this panel
           // yet (vault/workspace flows adopt them as their wire
@@ -5217,6 +6159,7 @@ export class TerminalPanel {
   private drainBufferTabClicks(): void {
     const intents = this.wasmAdapter?.drainBufferTabIntents?.();
     if (!intents) return;
+    this.syncActiveTabModified();
     let changed = false;
     let activated = false;
     if (intents.close.length > 0) {
@@ -5224,7 +6167,7 @@ export class TerminalPanel {
       // later ones are spliced out. Skip index 0 — that's the always-
       // present Terminal tab, which chrome's `close_at` already
       // refuses, but be defensive in case JS gets a stale index.
-      const sorted = [...intents.close].sort((a, b) => b - a);
+      const sorted = [...new Set(intents.close)].sort((a, b) => b - a);
       for (const idx of sorted) {
         this.applyBufferTabPolicy("close_index", idx);
         changed = true;
@@ -5358,6 +6301,7 @@ export class TerminalPanel {
   }
 
   private activatePtySession(sessionId: string): void {
+    this.lastActiveTerminalSessionId = sessionId;
     const index = this.bufferTabs.findIndex(
       (tab) => tab.kind === "terminal" && tab.sessionId === sessionId,
     );
@@ -5409,13 +6353,15 @@ export class TerminalPanel {
     const firstSync = this.lastTerminalRectKey === "";
     this.lastTerminalRectKey = key;
     if (!firstSync) {
-      // Deduct the soft-keyboard inset — resizing back to the full
-      // root height here would cancel the keyboard push-up the
-      // MobileKeyboard insets handler just applied.
-      this.handleResize(
+      // Preserve physical canvas/status geometry. Rust carves the keyboard
+      // from the editable middle band only.
+      const layout = mobileViewportLayout(
         this.root.clientWidth,
-        Math.max(1, this.root.clientHeight - this.keyboardInsetBottom),
+        this.root.clientHeight,
+        this.keyboardInsetBottom,
+        this.currentFontScale,
       );
+      this.handleResize(layout.layoutWidth, layout.renderHeight);
     }
   }
 
@@ -5513,10 +6459,6 @@ export class TerminalPanel {
           if (this.markdownLayerTabIndex === tabIdx) {
             this.clearMarkdownLayer();
           }
-          // Whole-buffer syntax spans from the daemon (the browser has
-          // no tree-sitter); safe to fire alongside the pane open since
-          // the reply is revision-checked.
-          this.requestCodeHighlight(path, decoded);
           // Route the fetched file into the chrome-hosted native
           // editor pane (code / notebook / draw) — desktop parity.
           // Re-opening the same path keeps live pane state (cursor,
@@ -5528,6 +6470,8 @@ export class TerminalPanel {
               text: string,
             ) => string;
           })?.editorOpenFile?.(tabIdx, path, decoded);
+          // The pane must exist before quoting its revision in the request.
+          this.requestCodeHighlight(path, decoded);
           this.pumpCodeCrdt();
         }
         this.scheduleDraw();
@@ -5748,7 +6692,7 @@ export class TerminalPanel {
     }
     if (tab.kind === "neoism-agent") {
       this.assignActiveTabToFocusedEditorPane();
-      this.wasmAdapter?.agentSetInput?.(this.agentInput);
+      this.activateAgentTab(tab);
       this.scheduleDraw();
       return;
     }
@@ -5756,6 +6700,15 @@ export class TerminalPanel {
   }
 
   private handleKeyDown(event: KeyboardEvent): void {
+    if (this.wasmAdapter?.shareSheetVisible?.()) {
+      if (event.key === "Escape") {
+        this.wasmAdapter.shareSheetDismiss?.();
+        this.scheduleDraw();
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     // Mode-locking during compose. Mirrors the desktop fork's
     // `Screen::process_key_event` early return when
     // `context.ime.preedit().is_some()` — while the IME owns the
@@ -6261,6 +7214,14 @@ export class TerminalPanel {
         this.scheduleDraw();
         return true;
       }
+      if (matchesKey(event, "KeyT", "t") && this.activeSurface() === "terminal") {
+        this.openFreshTerminalTab();
+        return true;
+      }
+      if (matchesKey(event, "KeyD", "d")) {
+        this.openTerminalDirectoryPalette();
+        return true;
+      }
       // Alt+S -> finder / file search.
       if (matchesKey(event, "KeyS", "s")) {
         (this.wasmAdapter.showFinderFiles ?? this.wasmAdapter.showFinder)?.call(this.wasmAdapter);
@@ -6612,6 +7573,24 @@ export class TerminalPanel {
   }
 
   private applyBufferTabPolicy(operation: BufferTabPolicyOperation, index?: number): void {
+    if (operation.startsWith("select_") || operation.startsWith("move_")) {
+      this.syncActiveTabModified();
+    }
+    const requestedCloseIndex = operation === "close_active"
+      ? this.activeTabIndex
+      : operation === "close_index"
+        ? (index ?? -1)
+        : -1;
+    if (requestedCloseIndex >= 0) {
+      if (requestedCloseIndex === this.activeTabIndex) this.syncActiveTabModified();
+      const candidate = this.bufferTabs[requestedCloseIndex];
+      if (candidate?.modified === true && !confirmDirtyClose(true, () =>
+        window.confirm(`Discard unsaved changes to ${candidate.title}?`)
+      )) {
+        this.replayBufferTabs();
+        return;
+      }
+    }
     const raw = this.wasmAdapter?.applyBufferTabPolicy?.(
       JSON.stringify(this.bufferTabs),
       this.activeTabIndex,
@@ -6626,12 +7605,11 @@ export class TerminalPanel {
 
     if (typeof result.remove_index === "number") {
       const tab = this.bufferTabs[result.remove_index];
-      if (tab?.kind === "terminal" && tab.sessionId) {
-        this.options.pty?.close(tab.sessionId);
-        this.ptyReplayBuffers.delete(tab.sessionId);
-      }
+      if (tab) this.beginTabClose(tab, result.remove_index);
+      if (tab?.kind === "terminal" && tab.sessionId) this.ptyReplayBuffers.delete(tab.sessionId);
       this.bufferTabs.splice(result.remove_index, 1);
       this.removeTabFromPaneState(result.remove_index);
+      this.flushPendingTabCloses();
     } else if (
       typeof result.move_from === "number" &&
       typeof result.move_to === "number" &&
@@ -6735,10 +7713,22 @@ export class TerminalPanel {
     alt: boolean,
     meta: boolean,
   ): boolean {
+    const sidePanelWasOpen =
+      this.wasmAdapter?.agentSidePanelTakeoverActive?.() === true;
+    const sidePanelSearchWasFocused =
+      this.wasmAdapter?.agentSidePanelSearchFocused?.() === true;
     const handled =
       this.wasmAdapter?.agentHandleKey?.(key, code, text, shift, ctrl, alt, meta) ===
       true;
     if (!handled) return false;
+    if (
+      (sidePanelWasOpen &&
+        this.wasmAdapter?.agentSidePanelTakeoverActive?.() !== true) ||
+      (sidePanelSearchWasFocused &&
+        this.wasmAdapter?.agentSidePanelSearchFocused?.() !== true)
+    ) {
+      this.dismissSoftKeyboard();
+    }
     this.agentInput = this.wasmAdapter?.agentInput?.() ?? "";
     // Typing may have opened / extended an `@file` mention — make sure
     // the shared picker has candidates to rank.
@@ -6793,8 +7783,44 @@ export class TerminalPanel {
       active: false,
       target: null,
     };
-    this.canvas.setPointerCapture?.(event.pointerId);
     return true;
+  }
+
+  private pointIsInWorkspaceBufferTabs(x: number, y: number): boolean {
+    const rect = this.wasmAdapter?.chromeLayout?.()?.buffer_tabs;
+    return !!rect && pointInRect({ x, y }, rect);
+  }
+
+  /** Claim the complete strip, including close/new-tab buttons and empty
+   * chrome. Only tab bodies additionally arm the shared reorder pipeline. */
+  private beginWorkspaceTabGesture(event: PointerEvent): boolean {
+    const { x, y } = this.canvasLogicalPoint(event);
+    if (!this.pointIsInWorkspaceBufferTabs(x, y)) return false;
+    this.tabGestureOwnership.claim(event.pointerId, "workspace-tabs");
+    if (event.button === 0) this.beginBufferTabDrag(event);
+    try {
+      this.canvas.setPointerCapture(event.pointerId);
+    } catch {
+      // Logical ownership still protects routing when capture is unavailable.
+    }
+    return true;
+  }
+
+  private cancelBufferTabDrag(pointerId: number): void {
+    if (this.bufferTabDrag?.pointerId === pointerId) {
+      this.bufferTabDrag = null;
+      this.wasmAdapter?.bufferTabCancelDrag?.();
+      this.wasmAdapter?.paneGridCancelDrag?.();
+      // Shared drag reorders incrementally; cancellation restores the
+      // canonical host order instead of committing the preview.
+      this.replayBufferTabs();
+      this.scheduleDraw();
+    }
+    try {
+      this.canvas.releasePointerCapture(pointerId);
+    } catch {
+      // Not captured — fine.
+    }
   }
 
   private updateBufferTabDrag(event: PointerEvent): boolean {
@@ -6916,6 +7942,12 @@ export class TerminalPanel {
       this.drainPaneGridUpdates(true);
     }
     if (flags & 8) {
+      this.tabGestureOwnership.claim(event.pointerId, "pane-tabs");
+      try {
+        this.canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // Logical ownership still prevents content fall-through.
+      }
       this.drainPaneTabIntents();
     }
     event.preventDefault();
@@ -7182,20 +8214,61 @@ export class TerminalPanel {
 
   /** Route one session's PTY bytes into every visible pane terminal
    *  bound to it (split panes render live from these). */
-  private feedPaneTerminalBytes(sessionId: string, bytes: Uint8Array): void {
-    if (this.paneLayoutPanes.length <= 1) return;
+  private feedPaneTerminalBytes(sessionId: string, bytes: Uint8Array): boolean {
+    if (this.paneLayoutPanes.length <= 1) return false;
     const adapter = this.wasmAdapter;
-    if (!adapter?.feedPaneTerminal) return;
+    if (!adapter?.feedPaneTerminal) return false;
     let fed = false;
+    let effectsHandled = false;
     for (const [externalId, session] of this.paneSessionIds) {
       if (session !== sessionId) continue;
       if (!this.paneLayoutPanes.some((pane) => pane.external_id === externalId)) {
         continue;
       }
-      adapter.feedPaneTerminal(externalId, bytes);
+      const effects = adapter.feedPaneTerminal(externalId, bytes);
+      if (!effectsHandled) {
+        this.handleTerminalEffects(effects, sessionId, true);
+        effectsHandled = true;
+      }
       fed = true;
     }
     if (fed) this.scheduleDraw();
+    return effectsHandled;
+  }
+
+  private handleTerminalEffects(
+    effects: unknown[],
+    sourceSessionId: string,
+    allowPtyWrites: boolean,
+  ): void {
+    for (const raw of effects) {
+      if (!raw || typeof raw !== "object") continue;
+      const effect = raw as {
+        type?: string;
+        bytes?: Uint8Array | number[];
+        path?: string | null;
+      };
+      if (effect.type === "PtyWrite" && allowPtyWrites && effect.bytes) {
+        const bytes = effect.bytes instanceof Uint8Array
+          ? effect.bytes
+          : Uint8Array.from(effect.bytes);
+        if (bytes.length > 0) {
+          if (this.options.pty) this.options.pty.sendInput(sourceSessionId, bytes);
+          else this.options.client.sendInput(sourceSessionId, bytes);
+        }
+      } else if (effect.type === "ChangeTerminalDirectory" && effect.path) {
+        const payload = this.wasmAdapter?.terminalChangeDirectoryPayload?.(
+          effect.path,
+          "zsh",
+        ) ?? new Uint8Array();
+        if (payload.length > 0) {
+          if (this.options.pty) this.options.pty.sendInput(sourceSessionId, payload);
+          else this.options.client.sendInput(sourceSessionId, payload);
+        }
+      } else if (effect.type === "OpenEditorTab" && effect.path) {
+        this.openFileTabContent(effect.path);
+      }
+    }
   }
 
   private endBufferTabDrag(event: PointerEvent): boolean {
@@ -7351,6 +8424,20 @@ export class TerminalPanel {
     // double-fires every action (a folder tap toggled open on
     // pointerdown, then closed again on the synthesized tap).
     if (event.pointerType === "touch") return;
+    if (this.tabGestureOwnership.owns(event.pointerId)) {
+      // Even sub-threshold motion belongs to the original tab press. Without
+      // this guard it is routed against the newly active editor/markdown pane.
+      this.updateBufferTabDrag(event);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (this.wasmAdapter?.pointerOverlayActive?.()) {
+      this.forwardChromeEvent(fromPointerMoveEvent(event, this.canvas));
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
     if (this.updateBufferTabDrag(event)) return;
     if (this.paneGridHandlePointerMove(event)) return;
     // An agent-timeline selection drag owns the pointer until release —
@@ -7433,8 +8520,39 @@ export class TerminalPanel {
   }
 
   private handlePointerDown(event: PointerEvent): void {
+    if (this.wasmAdapter?.shareSheetVisible?.()) {
+      this.wasmAdapter.shareSheetDismiss?.();
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
     if (event.pointerType === "touch") return;
-    const bufferTabGesture = this.beginBufferTabDrag(event);
+    const overlayPoint = this.canvasLogicalPoint(event);
+    // Painted overlays own the press before pane-grid/editor/markdown/agent.
+    // Previously those broad content hit-tests ran first, so a visible theme
+    // row could be swallowed by the editor underneath it.
+    if (this.wasmAdapter?.chromePageOverlayActive?.()) {
+      this.forwardChromeEvent(
+        fromPointerDownEvent(event, event.detail || 1, this.canvas),
+      );
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
+    if ((this.wasmAdapter?.modalPointerDown?.(overlayPoint.x, overlayPoint.y) ?? 0) !== 0) {
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
+    if (this.wasmAdapter?.pointerOverlayActive?.()) {
+      this.forwardChromeEvent(
+        fromPointerDownEvent(event, event.detail || 1, this.canvas),
+      );
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
+    const bufferTabGesture = this.beginWorkspaceTabGesture(event);
     this.focusSurface();
     this.updateCustomCursorFromPointer(event, true);
     if (bufferTabGesture) {
@@ -7516,6 +8634,7 @@ export class TerminalPanel {
         // Splash menu clicks are navigation actions, not terminal
         // submissions. Keep the splash armed so returning to an empty
         // terminal still shows it; real command submit handles dismiss.
+        this.drainPaletteIntents();
         this.scheduleDraw();
         return;
       }
@@ -7529,14 +8648,6 @@ export class TerminalPanel {
         return;
       }
       if (this.wasmAdapter?.agentWordmarkClick?.(x, y)) {
-        this.scheduleDraw();
-        return;
-      }
-    }
-    {
-      // Center-modal row clicks (mouse parity with the touch path).
-      const { x, y } = this.canvasLogicalPoint(event);
-      if ((this.wasmAdapter?.modalPointerDown?.(x, y) ?? 0) !== 0) {
         this.scheduleDraw();
         return;
       }
@@ -7795,6 +8906,23 @@ export class TerminalPanel {
 
   private handlePointerUp(event: PointerEvent): void {
     if (event.pointerType === "touch") return;
+    if (this.tabGestureOwnership.owns(event.pointerId)) {
+      const source = this.tabGestureOwnership.release(event.pointerId);
+      if (source === "workspace-tabs" && this.bufferTabDrag?.pointerId === event.pointerId) {
+        this.endBufferTabDrag(event);
+      } else {
+        this.cancelBufferTabDrag(event.pointerId);
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (this.wasmAdapter?.pointerOverlayActive?.()) {
+      this.forwardChromeEvent(fromPointerUpEvent(event, this.canvas));
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
     // Any release ends a terminal selection drag's edge autoscroll
     // (desktop unschedules SelectionScrolling on button release).
     this.stopTerminalSelectionAutoscroll();
@@ -7851,6 +8979,15 @@ export class TerminalPanel {
     this.forwardChromeEvent(fromPointerUpEvent(event, this.canvas));
   }
 
+  private handlePointerCancel(event: PointerEvent): void {
+    if (event.pointerType === "touch") return;
+    if (!this.tabGestureOwnership.owns(event.pointerId)) return;
+    this.tabGestureOwnership.release(event.pointerId);
+    this.cancelBufferTabDrag(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   // ----------------------------------------------------------------
   // Touch (C3 polish). `services/touchPolicy.ts` routes gesture
   // classification through the shared Rust `touch_policy` state
@@ -7867,6 +9004,10 @@ export class TerminalPanel {
     const adapter = this.wasmAdapter;
     const layout = adapter?.chromeLayout?.();
     if (!layout) return "terminal-body";
+    // Phones use direct manipulation on every page surface. Horizontal text
+    // wobble must never promote a synthetic selection; explicit tab/tree
+    // owners below reset this classifier and apply their own axis lock.
+    if (this.isMobileViewport()) return "editor-area";
     const candidates: Array<{ rect: ChromeRect | null | undefined; zone: TouchZone }> = [
       { rect: layout.command_palette, zone: "chrome-panel" },
       { rect: layout.finder, zone: "chrome-panel" },
@@ -7904,6 +9045,15 @@ export class TerminalPanel {
 
   private shouldRequestSoftKeyboardForTap(x: number, y: number): boolean {
     if (!this.isMobileViewport()) return false;
+    if (this.activeSurface() === "terminal" && this.wasmAdapter?.splashActive?.()) {
+      const action = this.wasmAdapter.splashActionAt?.(x, y) || null;
+      return splashKeyboardIntent(
+        true,
+        action as Parameters<typeof splashKeyboardIntent>[1],
+      ) !== null;
+    }
+    if (this.wasmAdapter?.overlayTextEntryAt?.(x, y)) return true;
+    if (this.wasmAdapter?.pointerOverlayActive?.()) return false;
     const layout = this.wasmAdapter?.chromeLayout?.();
     if (!layout) return false;
     const target = this.mobileChromeTouchTarget(x, y);
@@ -7941,7 +9091,27 @@ export class TerminalPanel {
   private maybeRequestSoftKeyboardAfterTap(x: number, y: number): void {
     if (this.shouldRequestSoftKeyboardForTap(x, y)) {
       this.requestSoftKeyboard();
+    } else if (this.committingTouchKeyboardFocus) {
+      // `commitProvisionalFocus()` publishes the visualViewport inset before
+      // this click chain finishes. On iPhone that immediately lifts the Agent
+      // composer, so re-testing the release coordinate observes the new rect.
+      // Touchstart already proved text-entry intent; retain that synchronous
+      // focus through this touchend rather than treating reflow as an outside
+      // tap. A real overlay takeover is reconciled below.
+      return;
     } else {
+      this.dismissSoftKeyboard();
+    }
+  }
+
+  private reconcileCommittedTouchKeyboardFocus(): void {
+    if (!this.committingTouchKeyboardFocus) return;
+    if (!preserveCommittedTouchFocus(
+      true,
+      this.touchKeyboardOverlayActiveAtStart,
+      this.mobileTextOverlayActive(),
+      this.touchKeyboardAnticipatesOverlay,
+    )) {
       this.dismissSoftKeyboard();
     }
   }
@@ -7970,6 +9140,11 @@ export class TerminalPanel {
    *  mirroring the mouse path). */
   private markdownTapAt(x: number, y: number): boolean {
     if (!this.activeTabIsMarkdown() || !this.useWasmMarkdown()) return false;
+    // A markdown pane may have been created after the bridge first became
+    // ready. Reassert the single Rust-owned mode before click placement so
+    // the old mobile "send i to enter Vim Insert" compatibility path cannot
+    // insert a literal i in direct mode.
+    this.syncMobileDirectInsertMode();
     const adapter = this.wasmAdapter as {
       markdownClick?: (x: number, y: number) => boolean;
       markdownKey?: (key: string, ctrl: boolean) => boolean;
@@ -7986,65 +9161,56 @@ export class TerminalPanel {
     return true;
   }
 
-  /** Touch-drag scroll for the markdown pane (1:1; release momentum
-   *  comes from `finishMarkdownTouchScroll`). */
+  /** Touch-drag scroll for the markdown pane. This uses the direct shared
+   *  surface API: visual position follows the finger and no wheel momentum is
+   *  injected. */
   private routeMarkdownTouchScroll(dyPixels: number): boolean {
     if (!this.activeTabIsMarkdown() || !this.useWasmMarkdown()) return false;
     const adapter = this.wasmAdapter as {
+      markdownTouchScroll?: (dy: number, vh: number) => boolean;
       markdownScroll?: (dy: number, vh: number) => boolean;
     };
-    if (!adapter?.markdownScroll) return false;
+    if (!adapter?.markdownTouchScroll && !adapter?.markdownScroll) return false;
     const rect = this.canvas.getBoundingClientRect();
     // Finger down (positive dy) reveals earlier content = DOM scroll up.
-    adapter.markdownScroll(-dyPixels, rect.height);
-    TerminalPanel.pushVelocitySample(
-      (this.markdownTouchSamples ??= []),
-      0,
+    const moved = (adapter.markdownTouchScroll ?? adapter.markdownScroll)?.call(
+      adapter,
       -dyPixels,
-    );
-    this.scheduleDraw();
-    this.pumpMarkdownAnimation();
-    return true;
+      rect.height,
+    ) === true;
+    if (moved) this.scheduleDraw();
+    return moved;
   }
 
-  private markdownTouchSamples: Array<{ t: number; dx: number; dy: number }> | null =
-    null;
-  private markdownKineticRaf: number | null = null;
-
-  private finishMarkdownTouchScroll(): void {
-    const samples = this.markdownTouchSamples;
-    this.markdownTouchSamples = null;
-    if (!samples || samples.length === 0) return;
-    const { vy } = TerminalPanel.releaseVelocity(samples);
-    if (Math.abs(vy) < 80) return;
+  private routeEditorTouchScroll(
+    x: number,
+    y: number,
+    dxPixels: number,
+    dyPixels: number,
+  ): boolean {
+    if (this.activeEditorPaneKind() === null) return false;
     const adapter = this.wasmAdapter as {
-      markdownScroll?: (dy: number, vh: number) => boolean;
+      editorTouchScroll?: (
+        x: number,
+        y: number,
+        dx: number,
+        dy: number,
+      ) => boolean;
+      editorScroll?: (
+        x: number,
+        y: number,
+        dx: number,
+        dy: number,
+        ctrl: boolean,
+      ) => boolean;
     };
-    if (!adapter?.markdownScroll) return;
-    let velocity = vy;
-    let lastT = performance.now();
-    const step = () => {
-      this.markdownKineticRaf = null;
-      if (!this.activeTabIsMarkdown()) return;
-      const now = performance.now();
-      const dt = Math.min(0.05, (now - lastT) / 1000);
-      lastT = now;
-      velocity *= Math.exp(-dt / 0.28);
-      if (Math.abs(velocity) < 40) return;
-      const rect = this.canvas.getBoundingClientRect();
-      adapter.markdownScroll?.(velocity * dt, rect.height);
+    const moved = adapter.editorTouchScroll
+      ? adapter.editorTouchScroll(x, y, -dxPixels, -dyPixels)
+      : adapter.editorScroll?.(x, y, -dxPixels, -dyPixels, false) === true;
+    if (moved) {
       this.scheduleDraw();
-      this.pumpMarkdownAnimation();
-      this.markdownKineticRaf = requestAnimationFrame(step);
-    };
-    this.markdownKineticRaf = requestAnimationFrame(step);
-  }
-
-  private stopMarkdownKinetic(): void {
-    if (this.markdownKineticRaf !== null) {
-      cancelAnimationFrame(this.markdownKineticRaf);
-      this.markdownKineticRaf = null;
     }
+    return moved;
   }
 
   /** Run the desktop-priority agent click chain (picker rows, side
@@ -8057,8 +9223,20 @@ export class TerminalPanel {
   private agentSelectionActive = false;
 
   private agentPointerDownAt(x: number, y: number): boolean {
+    const sidePanelWasOpen =
+      this.wasmAdapter?.agentSidePanelTakeoverActive?.() === true;
+    const sidePanelSearchWasFocused =
+      this.wasmAdapter?.agentSidePanelSearchFocused?.() === true;
     const result = this.wasmAdapter?.agentPointerDown?.(x, y);
     if (!result?.handled) return false;
+    if (
+      (sidePanelWasOpen &&
+        this.wasmAdapter?.agentSidePanelTakeoverActive?.() !== true) ||
+      (sidePanelSearchWasFocused &&
+        this.wasmAdapter?.agentSidePanelSearchFocused?.() !== true)
+    ) {
+      this.dismissSoftKeyboard();
+    }
     this.agentSelectionActive = result.selecting === true;
     if (result.copy) {
       void this.writeClipboard(result.copy);
@@ -8083,148 +9261,46 @@ export class TerminalPanel {
 
   /** Touch-drag the agent timeline 1:1 with the finger. Positive
    *  `dyPixels` (finger moving down) reveals older history, matching
-   *  the shared timeline's sign convention. Returns true when the
-   *  gesture is owned by the agent surface even if the timeline is
-   *  pinned at an edge, so the delta never leaks into the chrome
-   *  wheel path mid-drag. */
-  private routeAgentTouchScroll(x: number, y: number, dyPixels: number): boolean {
-    if (this.activeSurface() !== "agent") return false;
+   *  the shared timeline's sign convention. Ownership stays fixed across
+   *  moving chunks; a hard bound returns false so release momentum stops. */
+  private routeAgentTouchScroll(
+    x: number,
+    y: number,
+    dxPixels: number,
+    dyPixels: number,
+  ): boolean {
+    if (this.activeSurface() !== "agent") {
+      this.agentTouchScrollOwnership.reset();
+      return false;
+    }
     const adapter = this.wasmAdapter;
     const terminal = adapter?.chromeLayout?.()?.terminal;
-    if (!terminal || !pointInRect({ x, y }, terminal)) return false;
-    // Position-aware drag: picker overlay / side panel / diff cards
-    // consume the drag without timeline fling; the timeline records
-    // fling samples for the release.
-    const consumed = adapter?.agentDragAt
-      ? adapter.agentDragAt(x, y, dyPixels)
-      : adapter?.agentDragTimeline?.(dyPixels)
-        ? 2
-        : 0;
-    debugAgentTimeline("touch-scroll", { x, y, dyPixels, consumed });
-    if (consumed === 0 && !adapter?.agentDragAt) return false;
-    this.scheduleDraw();
-    if (consumed === 2) {
-      const now = performance.now();
-      const samples = (this.agentTouchScrollSamples ??= []);
-      samples.push({ t: now, dy: dyPixels });
-      while (samples.length > 0 && now - samples[0].t > 120) {
-        samples.shift();
-      }
-    } else {
-      this.agentTouchScrollSamples = null;
-    }
-    return true;
-  }
-
-  // ----------------------------------------------------------------
-  // Kinetic wheel pump: iOS-style release momentum for chrome panels
-  // that scroll via forwarded Wheel events (file tree, buffer tabs).
-  // The agent timeline and the editor have their own springs; this
-  // covers the panels that don't.
-  // ----------------------------------------------------------------
-  private kineticWheelPump: {
-    raf: number;
-    vx: number;
-    vy: number;
-    lastT: number;
-  } | null = null;
-
-  private startKineticWheel(vx: number, vy: number): void {
-    this.stopKineticWheel();
-    if (Math.hypot(vx, vy) < 80) return;
-    const pump = { raf: 0, vx, vy, lastT: performance.now() };
-    this.kineticWheelPump = pump;
-    const step = () => {
-      if (this.kineticWheelPump !== pump) return;
-      const now = performance.now();
-      const dt = Math.min(0.05, (now - pump.lastT) / 1000);
-      pump.lastT = now;
-      // Same decay half-life the agent timeline glide uses.
-      const decay = Math.exp(-dt / 0.28);
-      pump.vx *= decay;
-      pump.vy *= decay;
-      if (Math.hypot(pump.vx, pump.vy) < 40) {
-        this.kineticWheelPump = null;
-        return;
-      }
-      this.forwardChromeEvent({
-        Wheel: {
-          dx: pump.vx * dt,
-          dy: pump.vy * dt,
-          mode: "Pixel",
-          modifiers: "",
-        },
-      });
-      this.scheduleDraw();
-      pump.raf = requestAnimationFrame(step);
-    };
-    pump.raf = requestAnimationFrame(step);
-  }
-
-  /** Stop the glide; returns true when one was actually running so
-   *  the stopping tap can be swallowed (iOS stop-scroll semantics). */
-  private stopKineticWheel(): boolean {
-    const pump = this.kineticWheelPump;
-    if (!pump) return false;
-    cancelAnimationFrame(pump.raf);
-    this.kineticWheelPump = null;
-    return true;
-  }
-
-  private static releaseVelocity(
-    samples: Array<{ t: number; dx: number; dy: number }>,
-  ): { vx: number; vy: number } {
-    const now = performance.now();
-    let totalX = 0;
-    let totalY = 0;
-    let oldest = now;
-    for (const sample of samples) {
-      totalX += sample.dx;
-      totalY += sample.dy;
-      if (sample.t < oldest) oldest = sample.t;
-    }
-    const dt = (now - oldest) / 1000;
-    if (dt < 0.005) return { vx: 0, vy: 0 };
-    return { vx: totalX / dt, vy: totalY / dt };
-  }
-
-  private static pushVelocitySample(
-    samples: Array<{ t: number; dx: number; dy: number }>,
-    dx: number,
-    dy: number,
-  ): void {
-    const now = performance.now();
-    samples.push({ t: now, dx, dy });
-    while (samples.length > 0 && now - samples[0].t > 120) {
-      samples.shift();
-    }
-  }
-
-  /** Finger lifted off an agent-timeline drag: launch a glide at the
-   *  finger's release velocity (trailing-120ms average). */
-  private finishAgentTouchScroll(): void {
-    const samples = this.agentTouchScrollSamples;
-    this.agentTouchScrollSamples = null;
-    if (!samples || samples.length === 0) return;
-    const adapter = this.wasmAdapter;
-    if (this.activeSurface() !== "agent" || !adapter?.agentFlingTimeline) {
-      return;
-    }
-    const now = performance.now();
-    let total = 0;
-    let oldest = now;
-    for (const sample of samples) {
-      total += sample.dy;
-      if (sample.t < oldest) oldest = sample.t;
-    }
-    const dtSeconds = (now - oldest) / 1000;
-    if (dtSeconds < 0.005) return;
-    const velocity = total / dtSeconds;
-    // A slow, deliberate drag should stop dead where the finger left
-    // it; only a real flick keeps gliding.
-    if (Math.abs(velocity) < 80) return;
-    adapter.agentFlingTimeline(velocity);
-    this.scheduleDraw();
+    // Once touch-down resolved inside the Agent surface, moving beyond its
+    // current rect must not retarget the gesture. Only actual surface/layout
+    // disappearance clears ownership.
+    const surfaceAvailable = !!terminal;
+    const moved = this.agentTouchScrollOwnership.route(
+      x,
+      y,
+      dxPixels,
+      dyPixels,
+      surfaceAvailable,
+      {
+        dragVertical: (anchorX, anchorY, dy, owner) =>
+          adapter?.agentDragOwnedAt
+            ? adapter.agentDragOwnedAt(anchorX, anchorY, dy, owner)
+            : adapter?.agentDragAt
+              ? adapter.agentDragAt(anchorX, anchorY, dy)
+              : adapter?.agentDragTimeline?.(dy)
+                ? 2
+                : 0,
+        dragHorizontal: (anchorX, anchorY, dx) =>
+          adapter?.agentScrollHorizontalAt?.(anchorX, anchorY, dx) === true,
+      },
+    );
+    debugAgentTimeline("touch-scroll", { x, y, dxPixels, dyPixels, moved });
+    if (moved) this.scheduleDraw();
+    return moved;
   }
 
   private terminalZone(): TouchZone {
@@ -8240,13 +9316,14 @@ export class TerminalPanel {
       : "terminal-body";
   }
 
-  private touchSampleFromEvent(touch: Touch): TouchSample {
+  private touchSampleFromEvent(touch: Touch, event?: TouchEvent): TouchSample {
     const rect = this.canvas.getBoundingClientRect();
+    const now = performance.now();
     return {
       id: touch.identifier,
       x: touch.clientX - rect.left,
       y: touch.clientY - rect.top,
-      timeMs: performance.now(),
+      timeMs: normalizedTouchEventTime(event?.timeStamp ?? now, now),
     };
   }
 
@@ -8260,6 +9337,12 @@ export class TerminalPanel {
     // 50ms tick: fast enough that the 500ms long-press fires within
     // one frame of the threshold without burning CPU on idle taps.
     this.touchLongPressTimer = setInterval(() => {
+      if (this.touchWordSelected && this.touchWordDragPoint) {
+        if (this.extendWordSelectionAt(
+          this.touchWordDragPoint.x,
+          this.touchWordDragPoint.y,
+        )) this.scheduleDraw();
+      }
       if (!this.touchPolicy.isActive()) {
         this.stopTouchLongPressTimer();
         return;
@@ -8281,33 +9364,99 @@ export class TerminalPanel {
     }
   }
 
+  private stopTouchMomentum(): boolean {
+    if (this.touchMomentumRaf !== null) {
+      cancelAnimationFrame(this.touchMomentumRaf);
+      this.touchMomentumRaf = null;
+    }
+    const stopped = this.touchMomentum.cancel();
+    this.touchMomentumAnchor = null;
+    this.agentTouchScrollOwnership.reset();
+    return stopped;
+  }
+
+  private beginTouchMomentum(sample: TouchSample): void {
+    this.touchMomentumSuppressTap = this.stopTouchMomentum();
+    this.touchMomentum.begin(sample.x, sample.y, sample.timeMs);
+    this.touchMomentumAnchor = { x: sample.x, y: sample.y };
+    this.touchScrollHitBounds = false;
+  }
+
+  private launchTouchMomentum(axis: TouchMomentumAxis = "dominant"): void {
+    if (!this.isMobileViewport() || !this.touchMomentumAnchor || this.touchScrollHitBounds) {
+      this.stopTouchMomentum();
+      return;
+    }
+    if (!this.touchMomentum.release(performance.now(), axis)) {
+      this.touchMomentumAnchor = null;
+      this.agentTouchScrollOwnership.reset();
+      return;
+    }
+    const tick = (now: number): void => {
+      this.touchMomentumRaf = null;
+      const frame = this.touchMomentum.step(now);
+      const anchor = this.touchMomentumAnchor;
+      if (
+        anchor &&
+        (Math.abs(frame.dx) > Number.EPSILON || Math.abs(frame.dy) > Number.EPSILON) &&
+        !this.routeTouchScrollAt(anchor.x, anchor.y, frame.dx, frame.dy)
+      ) {
+        // The owner disappeared or reported a hard bound: stop immediately,
+        // rather than spending frames decaying against an immovable edge.
+        this.touchMomentum.cancel();
+      }
+      if (frame.active && this.touchMomentum.isRunning()) {
+        this.touchMomentumRaf = requestAnimationFrame(tick);
+      } else {
+        this.touchMomentumAnchor = null;
+        this.agentTouchScrollOwnership.reset();
+      }
+    };
+    this.touchMomentumRaf = requestAnimationFrame(tick);
+  }
+
   private handleTouchStart(event: TouchEvent): void {
+    if (this.wasmAdapter?.shareSheetVisible?.()) {
+      this.wasmAdapter.shareSheetDismiss?.();
+      this.touchPolicy.reset();
+      this.modalTouchConsumed = true;
+      this.scheduleDraw();
+      return;
+    }
     // `changedTouches` contains the fingers that just landed in this
     // event; `touches` is every finger currently on the surface.
     let zoneForGesture: TouchZone | null = null;
     let firstSample: TouchSample | null = null;
     for (let i = 0; i < event.changedTouches.length; i += 1) {
       const t = event.changedTouches[i];
-      const sample = this.touchSampleFromEvent(t);
+      const sample = this.touchSampleFromEvent(t, event);
       if (firstSample === null) firstSample = sample;
       const zone = this.resolveTouchZone(sample.x, sample.y);
       if (zoneForGesture === null) zoneForGesture = zone;
       const action = this.touchPolicy.start(sample, zone);
       this.applyTouchAction(action);
     }
+    if (this.isMobileViewport() && event.touches.length === 1 && firstSample) {
+      this.beginTouchMomentum(firstSample);
+    } else if (event.touches.length >= 2) {
+      this.stopTouchMomentum();
+    }
+    if (event.touches.length === 1 && firstSample && this.activeSurface() === "agent") {
+      const terminal = this.wasmAdapter?.chromeLayout?.()?.terminal;
+      if (terminal && pointInRect(firstSample, terminal)) {
+        this.agentTouchScrollOwnership.begin(firstSample.x, firstSample.y);
+      }
+    }
     if (
-      this.isMobileViewport() &&
       event.touches.length === 1 &&
       firstSample &&
-      this.mobileChromeTouchTarget(firstSample.x, firstSample.y) === "buffer-tabs"
+      this.pointIsInWorkspaceBufferTabs(firstSample.x, firstSample.y)
     ) {
+      this.tabGestureOwnership.claim(firstSample.id, "workspace-tabs");
       this.mobileBufferTabPan = {
         id: firstSample.id,
         start: firstSample,
-        last: firstSample,
-        panning: false,
-        samples: [],
-        suppressTap: this.stopKineticWheel(),
+        gesture: new DirectTouchScrollGesture("x", firstSample.x, firstSample.y),
       };
       // Anchor chrome's pointer position so the pan's (and the
       // release glide's) coordinate-less Wheel events route here.
@@ -8317,7 +9466,6 @@ export class TerminalPanel {
       this.touchPolicy.reset();
       this.focusSurface();
       this.dismissSoftKeyboard();
-      event.preventDefault();
       return;
     }
     if (
@@ -8329,10 +9477,7 @@ export class TerminalPanel {
       this.mobileFileTreePan = {
         id: firstSample.id,
         start: firstSample,
-        last: firstSample,
-        scrolling: false,
-        samples: [],
-        suppressTap: this.stopKineticWheel(),
+        gesture: new DirectTouchScrollGesture("y", firstSample.x, firstSample.y),
       };
       this.forwardChromeEvent({
         PointerMove: { x: firstSample.x, y: firstSample.y, modifiers: "" },
@@ -8340,36 +9485,81 @@ export class TerminalPanel {
       this.touchPolicy.reset();
       this.focusSurface();
       this.dismissSoftKeyboard();
-      event.preventDefault();
       return;
     }
     // Any other touch-down halts a panel glide-in-flight.
-    this.stopKineticWheel();
-    this.stopMarkdownKinetic();
     if (zoneForGesture !== null) {
       this.touchSuppressSwipeBack =
         this.touchSuppressSwipeBack ||
-        TouchPolicy.shouldSuppressSwipeBack(zoneForGesture);
+        (!this.isMobileViewport() &&
+          TouchPolicy.shouldSuppressSwipeBack(zoneForGesture));
     }
-    // Touching a gliding agent timeline stops the glide (iOS
-    // semantics) — and that tap must not turn into a click on lift.
-    if (
-      event.touches.length === 1 &&
-      firstSample &&
-      this.activeSurface() === "agent"
-    ) {
-      const terminal = this.wasmAdapter?.chromeLayout?.()?.terminal;
-      if (terminal && pointInRect(firstSample, terminal)) {
-        this.agentTouchSuppressTap =
-          this.wasmAdapter?.agentFlingTimeline?.(0) === true;
-      }
+    // Older bundles can still have an agent-only glide in flight. Stop it and
+    // fold its no-click result into the shared iOS stop-touch policy.
+    if (event.touches.length === 1 && this.activeSurface() === "agent") {
+      this.agentTouchSuppressTap =
+        this.wasmAdapter?.agentFlingTimeline?.(0) === true;
+      this.touchMomentumSuppressTap ||= this.agentTouchSuppressTap;
     }
     // Keep key routing anchored without opening the soft keyboard.
     // Keyboard focus is requested after a tap lands on a text-entry
     // target, not on every touchstart.
     if (event.touches.length === 1) {
-      this.focusSurface();
-      if (firstSample && !this.shouldRequestSoftKeyboardForTap(firstSample.x, firstSample.y)) {
+      this.touchKeyboardOverlayActiveAtStart = this.mobileTextOverlayActive();
+      this.touchAgentSidePanelActiveAtStart =
+        this.wasmAdapter?.agentSidePanelTakeoverActive?.() === true;
+      const overlayActive = this.mobileTextOverlayActive();
+      const fieldFamily = firstSample
+        ? (this.wasmAdapter?.mobileTextFieldAt?.(firstSample.x, firstSample.y) ||
+          (this.wasmAdapter?.overlayTextEntryAt?.(firstSample.x, firstSample.y)
+            ? "universal-modal"
+            : null))
+        : null;
+      const surface = this.activeSurface();
+      const splashActive = surface === "terminal" &&
+        this.wasmAdapter?.splashActive?.() === true;
+      const splashAction = splashActive && firstSample
+        ? this.wasmAdapter?.splashActionAt?.(firstSample.x, firstSample.y) || null
+        : null;
+      const splashIntent = splashKeyboardIntent(
+        splashActive,
+        splashAction as Parameters<typeof splashKeyboardIntent>[1],
+      );
+      this.touchKeyboardAnticipatesOverlay = splashIntent?.anticipatedOverlay === true;
+      const field = splashActive
+        ? (splashIntent
+          ? { family: splashIntent.family, overlay: true as const }
+          : null)
+        : mobileTextFieldIntent(
+          surface,
+          overlayActive,
+          fieldFamily as Parameters<typeof mobileTextFieldIntent>[2],
+          !!firstSample && this.shouldRequestSoftKeyboardForTap(firstSample.x, firstSample.y),
+        );
+      const wantsKeyboard = field !== null;
+      const focusSurface = field?.overlay ? "overlay" : surface;
+      this.touchKeyboardIntent = touchKeyboardIntent(
+        focusSurface,
+        wantsKeyboard,
+        this.mobileKeyboard.isFocused(),
+      );
+      if (wantsKeyboard) {
+        this.mobileKeyboard.setContext(
+          focusSurface === "overlay"
+            ? "text"
+            : surface === "editor" || surface === "markdown"
+              ? "editor"
+              : "code",
+        );
+      }
+      if (focusCaptureOnTouchStart(focusSurface, wantsKeyboard) &&
+          this.touchKeyboardIntent === "provisional") {
+        // Same user gesture: no promise, timer, RAF, or preventDefault here.
+        this.mobileKeyboard.beginProvisionalFocus();
+      } else if (this.touchKeyboardIntent === "deferred-tap" || !wantsKeyboard) {
+        this.focusSurface();
+      }
+      if (!wantsKeyboard && !this.mobileKeyboard.isFocused()) {
         this.dismissSoftKeyboard();
       }
     }
@@ -8391,76 +9581,59 @@ export class TerminalPanel {
       const pan = this.mobileBufferTabPan;
       for (let i = 0; i < event.changedTouches.length; i += 1) {
         const t = event.changedTouches[i];
-        const sample = this.touchSampleFromEvent(t);
+        const sample = this.touchSampleFromEvent(t, event);
         if (sample.id !== pan.id) continue;
-        const dx = sample.x - pan.last.x;
-        const totalDx = sample.x - pan.start.x;
-        const totalDy = sample.y - pan.start.y;
-        if (pan.panning || Math.abs(totalDx) > MAX_TAP_DISTANCE) {
-          pan.panning = true;
-          this.forwardChromeEvent({
-            PointerMove: {
-              x: sample.x,
-              y: sample.y,
-              modifiers: "",
-            },
-          });
-          // Natural touch direction: the strip follows the finger
-          // (drag left → tabs move left). The wheel path keeps its
-          // own inverted mapping for trackpads.
-          this.forwardChromeEvent({
-            Wheel: {
-              dx,
-              dy: 0,
-              mode: "Pixel",
-              modifiers: "",
-            },
-          });
-          TerminalPanel.pushVelocitySample(pan.samples, dx, 0);
-        } else if (Math.abs(totalDy) > MAX_TAP_DISTANCE) {
-          pan.panning = true;
+        const update = pan.gesture.update(sample.x, sample.y);
+        if (update.scrolling) {
+          // Direct API updates current + target together and clamps against
+          // the live strip width. No render lerp or release glide.
+          if (this.wasmAdapter?.chromeTouchScrollAt) {
+            this.wasmAdapter.chromeTouchScrollAt(sample.x, sample.y, update.delta, 0);
+          } else {
+            this.forwardChromeEvent({
+              PointerMove: { x: sample.x, y: sample.y, modifiers: "" },
+            });
+            this.forwardChromeEvent({
+              Wheel: { dx: update.delta, dy: 0, mode: "Pixel", modifiers: "" },
+            });
+          }
+          this.touchMomentum.sample(sample.x, sample.y, sample.timeMs);
+          this.scheduleDraw();
         }
-        pan.last = sample;
+        if (update.moved) event.preventDefault();
       }
-      event.preventDefault();
       return;
     }
     if (this.mobileFileTreePan) {
       const pan = this.mobileFileTreePan;
       for (let i = 0; i < event.changedTouches.length; i += 1) {
         const t = event.changedTouches[i];
-        const sample = this.touchSampleFromEvent(t);
+        const sample = this.touchSampleFromEvent(t, event);
         if (sample.id !== pan.id) continue;
-        const dx = sample.x - pan.last.x;
-        const dy = sample.y - pan.last.y;
-        const totalDx = sample.x - pan.start.x;
-        const totalDy = sample.y - pan.start.y;
-        if (
-          pan.scrolling ||
-          Math.abs(totalDy) > MOBILE_SCROLL_TAP_SLOP ||
-          Math.hypot(totalDx, totalDy) > MOBILE_SCROLL_TAP_SLOP
-        ) {
-          pan.scrolling = true;
-          this.forwardChromeEvent({
-            Wheel: {
-              dx: -dx,
-              dy: -dy,
-              mode: "Pixel",
-              modifiers: "",
-            },
-          });
-          TerminalPanel.pushVelocitySample(pan.samples, -dx, -dy);
+        const update = pan.gesture.update(sample.x, sample.y);
+        if (update.scrolling) {
+          if (this.wasmAdapter?.chromeTouchScrollAt) {
+            this.wasmAdapter.chromeTouchScrollAt(sample.x, sample.y, 0, update.delta);
+          } else {
+            this.forwardChromeEvent({
+              PointerMove: { x: sample.x, y: sample.y, modifiers: "" },
+            });
+            this.forwardChromeEvent({
+              Wheel: { dx: 0, dy: -update.delta, mode: "Pixel", modifiers: "" },
+            });
+          }
+          this.touchMomentum.sample(sample.x, sample.y, sample.timeMs);
+          this.scheduleDraw();
         }
-        pan.last = sample;
+        if (update.moved) event.preventDefault();
       }
-      event.preventDefault();
       return;
     }
     const layout = this.layoutSizeForTouchPolicy();
     let suppressDefault = this.touchSuppressSwipeBack || event.touches.length >= 2;
     for (let i = 0; i < event.changedTouches.length; i += 1) {
       const t = event.changedTouches[i];
-      const sample = this.touchSampleFromEvent(t);
+      const sample = this.touchSampleFromEvent(t, event);
       let action = this.touchPolicy.move(sample, layout);
       // Promotion actions (tap→select / tap→scroll) require a re-feed
       // of the same sample so the new state's first delta lands.
@@ -8471,7 +9644,24 @@ export class TerminalPanel {
         this.applyTouchAction(action);
         action = this.touchPolicy.move(sample, layout);
       }
-      if (action.kind === "suppress-native-gesture") {
+      if (
+        action.kind === "suppress-native-gesture" ||
+        action.kind === "promote-tap-to-scroll" ||
+        action.kind === "scroll" ||
+        action.kind === "two-finger-scroll"
+      ) {
+        suppressDefault = true;
+        if (event.touches.length === 1) {
+          this.mobileKeyboard.cancelProvisionalFocus();
+          this.touchKeyboardIntent = "none";
+        }
+      }
+      if (action.kind === "extend-word-selection") suppressDefault = true;
+      // A one-finger touchstart remains native so iOS user activation and
+      // keyboard focus survive. Once motion has promoted that tap to a
+      // shared-overlay scroll, however, the canvas owns the gesture and the
+      // browser page must stop moving underneath it.
+      if (action.kind === "scroll" && this.wasmAdapter?.pointerOverlayActive?.()) {
         suppressDefault = true;
       }
       this.applyTouchAction(action);
@@ -8482,23 +9672,38 @@ export class TerminalPanel {
   }
 
   private handleTouchEnd(event: TouchEvent): void {
+    if (this.modalTouchConsumed) {
+      if (event.touches.length === 0) {
+        this.modalTouchConsumed = false;
+        this.stopTouchLongPressTimer();
+      }
+      event.preventDefault();
+      return;
+    }
     if (this.mobileBufferTabPan) {
       const pan = this.mobileBufferTabPan;
       let ended = false;
       for (let i = 0; i < event.changedTouches.length; i += 1) {
         const t = event.changedTouches[i];
-        const sample = this.touchSampleFromEvent(t);
+        const sample = this.touchSampleFromEvent(t, event);
         if (sample.id !== pan.id) continue;
-        if (pan.panning) {
-          const { vx } = TerminalPanel.releaseVelocity(pan.samples);
-          this.startKineticWheel(vx, 0);
-        } else if (!pan.suppressTap) {
+        if (
+          event.type !== "touchcancel" &&
+          !pan.gesture.didMove() &&
+          !this.touchMomentumSuppressTap
+        ) {
           this.synthesizeCanvasTap(sample.x, sample.y);
+        }
+        if (pan.gesture.isScrolling() && event.type !== "touchcancel") {
+          this.touchMomentum.sample(sample.x, sample.y, sample.timeMs);
+          this.launchTouchMomentum("x");
         }
         ended = true;
       }
       if (ended || event.touches.length === 0) {
+        this.tabGestureOwnership.release(pan.id);
         this.mobileBufferTabPan = null;
+        this.touchMomentumSuppressTap = false;
       }
       event.preventDefault();
       return;
@@ -8508,18 +9713,20 @@ export class TerminalPanel {
       let ended = false;
       for (let i = 0; i < event.changedTouches.length; i += 1) {
         const t = event.changedTouches[i];
-        const sample = this.touchSampleFromEvent(t);
+        const sample = this.touchSampleFromEvent(t, event);
         if (sample.id !== pan.id) continue;
-        if (pan.scrolling) {
-          const { vy } = TerminalPanel.releaseVelocity(pan.samples);
-          this.startKineticWheel(0, vy);
-        } else if (!pan.suppressTap) {
+        if (!pan.gesture.didMove() && !this.touchMomentumSuppressTap) {
           this.synthesizeCanvasTap(sample.x, sample.y);
+        }
+        if (pan.gesture.isScrolling() && event.type !== "touchcancel") {
+          this.touchMomentum.sample(sample.x, sample.y, sample.timeMs);
+          this.launchTouchMomentum("y");
         }
         ended = true;
       }
       if (ended || event.touches.length === 0) {
         this.mobileFileTreePan = null;
+        this.touchMomentumSuppressTap = false;
       }
       event.preventDefault();
       return;
@@ -8528,17 +9735,57 @@ export class TerminalPanel {
     let tapSummonedKeyboard = false;
     for (let i = 0; i < event.changedTouches.length; i += 1) {
       const t = event.changedTouches[i];
-      const sample = this.touchSampleFromEvent(t);
+      const sample = this.touchSampleFromEvent(t, event);
       // Mirror the desktop fork's "re-feed motion before resolving end"
       // call pattern so the trailing delta extends the gesture before
       // the state machine drops it.
-      const moveAction = this.touchPolicy.move(sample, layout);
+      let moveAction = this.touchPolicy.move(sample, layout);
+      if (
+        moveAction.kind === "start-simulated-left-click" ||
+        moveAction.kind === "promote-tap-to-scroll"
+      ) {
+        this.applyTouchAction(moveAction);
+        moveAction = this.touchPolicy.move(sample, layout);
+      }
       this.applyTouchAction(moveAction);
       const endAction = this.touchPolicy.end(sample, layout);
-      this.applyTouchAction(endAction);
+      const keyboardResolution = resolveTouchKeyboardIntent(
+        this.touchKeyboardIntent,
+        event.type === "touchcancel"
+          ? "cancel"
+          : endAction.kind === "end-simulated-left-click"
+            ? "tap"
+            : "scroll",
+      );
+      if (keyboardResolution !== "commit") {
+        this.mobileKeyboard.cancelProvisionalFocus();
+      }
+      this.committingTouchKeyboardFocus =
+        keyboardResolution === "commit" || keyboardResolution === "focus-on-end";
+      try {
+        this.applyTouchAction(endAction);
+        // Apply against the pre-keyboard geometry, then focus in this same
+        // trusted touchend turn. Keyboard inset reflow cannot retarget the tap.
+        if (keyboardResolution === "commit") {
+          this.mobileKeyboard.commitProvisionalFocus();
+        } else if (keyboardResolution === "focus-on-end") {
+          this.mobileKeyboard.focus();
+        }
+        if (
+          this.touchAgentSidePanelActiveAtStart &&
+          this.wasmAdapter?.agentSidePanelTakeoverActive?.() !== true
+        ) {
+          this.dismissSoftKeyboard();
+        }
+        this.reconcileCommittedTouchKeyboardFocus();
+      } finally {
+        this.committingTouchKeyboardFocus = false;
+      }
       if (
-        endAction.kind === "end-simulated-left-click" &&
-        this.shouldRequestSoftKeyboardForTap(endAction.x, endAction.y)
+        keyboardResolution === "commit" ||
+        keyboardResolution === "focus-on-end" ||
+        (endAction.kind === "end-simulated-left-click" &&
+          this.shouldRequestSoftKeyboardForTap(endAction.x, endAction.y))
       ) {
         tapSummonedKeyboard = true;
       }
@@ -8554,11 +9801,78 @@ export class TerminalPanel {
       // focus back and closes the keyboard before it ever opens.
       event.preventDefault();
     }
+    if (this.touchWordSelected) {
+      event.preventDefault();
+    }
+    if (event.type === "touchcancel") {
+      this.stopTouchMomentum();
+    }
     if (event.touches.length === 0) {
       this.touchSuppressSwipeBack = false;
       this.agentTouchSuppressTap = false;
+      this.touchMomentumSuppressTap = false;
       this.stopTouchLongPressTimer();
+      this.touchWordSelected = false;
+      this.touchKeyboardIntent = "none";
+      this.touchKeyboardOverlayActiveAtStart = false;
+      this.touchKeyboardAnticipatesOverlay = false;
+      this.touchAgentSidePanelActiveAtStart = false;
+      if (!this.touchMomentum.isRunning()) this.agentTouchScrollOwnership.reset();
     }
+  }
+
+  /** Apply finger-coordinate deltas to the surface under the original touch.
+   * Used unchanged for direct drag and shared release momentum. */
+  private routeTouchScrollAt(x: number, y: number, dx: number, dy: number): boolean {
+    if (
+      (this.wasmAdapter?.modalTouchScroll?.(x, y, dy) ??
+        this.wasmAdapter?.modalScroll?.(x, y, -dy))
+    ) {
+      this.scheduleDraw();
+      return true;
+    }
+    if (this.wasmAdapter?.chromeTouchScrollAt) {
+      const moved = this.wasmAdapter.chromeTouchScrollAt(x, y, dx, dy);
+      if (moved) {
+        this.scheduleDraw();
+        return true;
+      }
+      const layout = this.wasmAdapter.chromeLayout?.();
+      if (
+        layout &&
+        (pointInRect({ x, y }, layout.buffer_tabs) ||
+          (!!layout.file_tree && pointInRect({ x, y }, layout.file_tree)) ||
+          this.wasmAdapter.chromePageOverlayActive?.())
+      ) {
+        return false;
+      }
+    }
+    if (this.wasmAdapter?.pointerOverlayActive?.()) {
+      this.forwardChromeEvent({ PointerMove: { x, y, modifiers: "" } });
+      this.forwardChromeEvent({
+        Wheel: { dx: -dx, dy: -dy, mode: "Pixel", modifiers: "" },
+      });
+      this.scheduleDraw();
+      return true;
+    }
+    if (this.activeEditorPaneKind() !== null) {
+      return this.routeEditorTouchScroll(x, y, dx, dy);
+    }
+    if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
+      return this.routeMarkdownTouchScroll(dy);
+    }
+    if (this.activeSurface() === "agent") {
+      return this.routeAgentTouchScroll(x, y, dx, dy);
+    }
+    if (this.activeSurface() === "terminal") {
+      return this.routeTerminalTouchScroll(x, y, dx, dy);
+    }
+    this.forwardChromeEvent({ PointerMove: { x, y, modifiers: "" } });
+    this.forwardChromeEvent({
+      Wheel: { dx: -dx, dy: -dy, mode: "Pixel", modifiers: "" },
+    });
+    this.scheduleDraw();
+    return true;
   }
 
   /** Apply one `TouchAction` from the shared policy. Side effects are
@@ -8566,7 +9880,6 @@ export class TerminalPanel {
    *  paths use so a tap is genuinely a click and a two-finger pan is
    *  genuinely a wheel event. */
   private applyTouchAction(action: TouchPolicyAction): void {
-    const adapter = this.wasmAdapter;
     switch (action.kind) {
       case "none":
         return;
@@ -8593,9 +9906,16 @@ export class TerminalPanel {
         return;
       }
       case "end-simulated-left-click": {
-        if (this.agentTouchSuppressTap) {
+        if (this.agentTouchSuppressTap || this.touchMomentumSuppressTap) {
           // This tap's only job was stopping an in-flight glide.
           this.agentTouchSuppressTap = false;
+          this.touchMomentumSuppressTap = false;
+          return;
+        }
+        if (this.wasmAdapter?.chromePageOverlayActive?.()) {
+          this.synthesizeCanvasTap(action.x, action.y);
+          this.agentTapConsumed = true;
+          this.scheduleDraw();
           return;
         }
         // Center modals overlay everything: row taps commit, taps on
@@ -8604,17 +9924,42 @@ export class TerminalPanel {
         const modalHit = this.wasmAdapter?.modalPointerDown?.(action.x, action.y) ?? 0;
         if (modalHit !== 0) {
           this.agentTapConsumed = true;
-          if (modalHit === 2) {
-            this.requestSoftKeyboard();
-          }
           this.scheduleDraw();
           return;
         }
-        // Markdown caret tap — then summon the keyboard for typing.
+        if (this.wasmAdapter?.pointerOverlayActive?.()) {
+          // Outside-card light-dismiss and slim-modal presses still route
+          // through shared Chrome, never into the covered content surface.
+          this.synthesizeCanvasTap(action.x, action.y);
+          this.agentTapConsumed = true;
+          this.scheduleDraw();
+          return;
+        }
+        // Markdown caret tap; the resolved-touch lifecycle focuses afterward.
         if (this.markdownTapAt(action.x, action.y)) {
           this.agentTapConsumed = true;
-          this.requestSoftKeyboard();
           this.scheduleDraw();
+          return;
+        }
+        // A resolved code/notebook tap must enter through the editor's real
+        // pointer pair, not Chrome's generic pointer stream. This runs only
+        // for end-simulated-left-click (never a promoted scroll), after all
+        // overlays and Markdown have had precedence.
+        if (
+          routeEditorTouchTap(
+            this.wasmAdapter,
+            this.activeEditorPaneKind() === "code",
+            action.x,
+            action.y,
+            () => {
+              // Flush any selection/caret CRDT state after the complete
+              // pointer pair. The touch lifecycle claims keyboard focus after
+              // this callback, still in the same trusted touchend turn.
+              this.pumpCodeCrdt();
+              this.scheduleDraw();
+            },
+          )
+        ) {
           return;
         }
         // Splash menu rows (Open file tree / Neoism Agent / Search /
@@ -8625,11 +9970,17 @@ export class TerminalPanel {
         // and on the agent tab they sat underneath the slash-command
         // picker, eating its row taps ("click-through").
         if (this.activeSurface() === "terminal") {
+          const splashActive = this.wasmAdapter?.splashActive?.() === true;
           if (this.wasmAdapter?.splashClick?.(action.x, action.y)) {
+            this.drainPaletteIntents();
             this.scheduleDraw();
             return;
           }
           this.wasmAdapter?.splashWordmarkClick?.(action.x, action.y);
+          // While painted, the splash is a complete touch boundary. Its
+          // background, row gaps and area below the menu are inert rather
+          // than placing a terminal caret or opening the keyboard.
+          if (splashActive) return;
         }
         if (
           this.activeSurface() === "agent" &&
@@ -8682,41 +10033,35 @@ export class TerminalPanel {
         return;
       }
       case "end-scroll":
-        this.finishAgentTouchScroll();
-        this.finishMarkdownTouchScroll();
+        this.launchTouchMomentum(
+          agentMomentumAxis(this.agentTouchScrollOwnership.currentOwner()),
+        );
         return;
       case "promote-tap-to-scroll":
         // No immediate side effect; the policy state has flipped and
         // the next move/end will produce the trailing action.
+        this.mobileKeyboard.cancelProvisionalFocus();
+        this.touchKeyboardIntent = "none";
         return;
       case "scroll": {
-        // Single-finger scroll: drive the wheel path so chrome /
-        // editor scroll-spring code sees a familiar event shape. Sign
-        // is inverted because dragging a finger down should scroll
-        // the content up (natural touch scrolling).
-        if (this.wasmAdapter?.modalScroll?.(action.x, action.y, -action.dy)) {
-          this.scheduleDraw();
+        // Touchend commonly re-feeds the final unchanged coordinate. It is
+        // not a content boundary and must not cancel the velocity accumulated
+        // by the preceding drag samples.
+        if (
+          Math.abs(action.dx) <= Number.EPSILON &&
+          Math.abs(action.dy) <= Number.EPSILON
+        ) {
           return;
         }
-        if (this.routeMarkdownTouchScroll(action.dy)) {
-          return;
+        const moved = this.routeTouchScrollAt(action.x, action.y, action.dx, action.dy);
+        if (moved && this.isMobileViewport()) {
+          this.touchScrollHitBounds = false;
+          this.touchMomentum.sample(action.x, action.y, performance.now());
+          this.touchMomentumAnchor = { x: action.x, y: action.y };
+        } else if (this.isMobileViewport()) {
+          this.touchScrollHitBounds = true;
+          this.touchMomentum.cancel();
         }
-        if (this.routeAgentTouchScroll(action.x, action.y, action.dy)) {
-          return;
-        }
-        // Anchor chrome's pointer position so the coordinate-less
-        // Wheel routes to the panel under the finger.
-        this.forwardChromeEvent({
-          PointerMove: { x: action.x, y: action.y, modifiers: "" },
-        });
-        this.forwardChromeEvent({
-          Wheel: {
-            dx: -action.dx,
-            dy: -action.dy,
-            mode: "Pixel",
-            modifiers: "",
-          },
-        });
         return;
       }
       case "two-finger-scroll": {
@@ -8740,29 +10085,34 @@ export class TerminalPanel {
         return;
       }
       case "change-font-size": {
-        if (!adapter) return;
-        const current = this.currentFontScale;
-        const step = action.direction === "increase" ? 0.1 : -0.1;
-        const next = Math.max(0.5, Math.min(3.0, current + step));
-        if (Math.abs(next - current) < 1e-3) return;
-        this.applyFontScale(next);
+        // Current shared policy never emits this. Keep stale generated wasm
+        // bundles inert too: touch pinch is not a font/config zoom command.
+        const next = fontScaleAfterTouchAction(this.currentFontScale, action);
+        if (Math.abs(next - this.currentFontScale) >= 1e-3) {
+          this.applyFontScale(next);
+        }
         return;
       }
-      case "open-context-menu": {
-        // Long-press → right-click-equivalent context menu. Reuse the
-        // mouse contextmenu pipeline so the file-tree path opens its
-        // existing menu and other zones fall back to the browser's
-        // default. We synthesise a MouseEvent so `handleContextMenu`
-        // can read clientX / clientY for menu positioning.
-        const rect = this.canvas.getBoundingClientRect();
-        const synthetic = new MouseEvent("contextmenu", {
-          clientX: rect.left + action.x,
-          clientY: rect.top + action.y,
-          button: 2,
-          bubbles: true,
-          cancelable: true,
-        });
-        this.canvas.dispatchEvent(synthetic);
+      case "select-word": {
+        this.mobileKeyboard.cancelProvisionalFocus();
+        this.touchKeyboardIntent = "none";
+        this.touchWordSelected = this.selectWordAt(action.x, action.y);
+        this.touchWordDragPoint = this.touchWordSelected
+          ? { x: action.x, y: action.y }
+          : null;
+        if (this.touchWordSelected) this.scheduleDraw();
+        return;
+      }
+      case "extend-word-selection": {
+        this.touchWordDragPoint = { x: action.x, y: action.y };
+        if (this.touchWordSelected && this.extendWordSelectionAt(action.x, action.y)) {
+          this.scheduleDraw();
+        }
+        return;
+      }
+      case "end-word-selection": {
+        this.endWordSelection();
+        this.touchWordDragPoint = null;
         return;
       }
       case "suppress-native-gesture":
@@ -8770,6 +10120,83 @@ export class TerminalPanel {
         // do here; the policy is consuming the gesture.
         return;
     }
+  }
+
+  /** Route hard hold only to surfaces backed by real canvas text/caret
+   * models. Chrome labels/buttons and the draw pane intentionally have no
+   * fallback, and browser DOM selection never participates. */
+  private selectWordAt(x: number, y: number): boolean {
+    const adapter = this.wasmAdapter;
+    if (!adapter || adapter.pointerOverlayActive?.()) return false;
+    const surface = longPressTextSurface(
+      this.activeSurface(),
+      this.activeTabIsMarkdown() && this.useWasmMarkdown(),
+      this.activeEditorPaneKind(),
+    );
+    switch (surface) {
+      case "markdown":
+        return adapter.markdownSelectWordAt?.(x, y) === true;
+      case "editor":
+        return adapter.editorSelectWordAt?.(x, y) === true;
+      case "agent":
+        return adapter.agentSelectWordAt?.(x, y) === true;
+      case "terminal":
+        return adapter.terminalSelectWordAt?.(x, y) === true;
+      case "none":
+        return false;
+    }
+  }
+
+  private extendWordSelectionAt(x: number, y: number): boolean {
+    const adapter = this.wasmAdapter;
+    if (!adapter) return false;
+    const surface = longPressTextSurface(
+      this.activeSurface(),
+      this.activeTabIsMarkdown() && this.useWasmMarkdown(),
+      this.activeEditorPaneKind(),
+    );
+    if (surface === "markdown") return adapter.markdownExtendWordSelectionAt?.(x, y) === true;
+    if (surface === "editor") return adapter.editorExtendWordSelectionAt?.(x, y) === true;
+    if (surface === "agent") return adapter.agentExtendWordSelectionAt?.(x, y) === true;
+    if (surface === "terminal") {
+      const moved = adapter.terminalExtendWordSelectionAt?.(x, y) === true;
+      return adapter.terminalDragScrollTick?.() === true || moved;
+    }
+    return false;
+  }
+
+  private endWordSelection(): void {
+    const adapter = this.wasmAdapter;
+    const surface = longPressTextSurface(
+      this.activeSurface(),
+      this.activeTabIsMarkdown() && this.useWasmMarkdown(),
+      this.activeEditorPaneKind(),
+    );
+    if (surface === "markdown") adapter?.markdownEndWordSelection?.();
+    else if (surface === "editor") adapter?.editorEndWordSelection?.();
+    else if (surface === "agent") adapter?.agentEndWordSelection?.();
+    else if (surface === "terminal") adapter?.terminalEndWordSelection?.();
+  }
+
+  /** Terminal scrollback/TUI direct touch route. TerminalScroll retains a
+   *  persistent sub-row residual (no spring), while mouse-mode applications
+   *  receive the same bounded accumulated reports as desktop. */
+  private routeTerminalTouchScroll(
+    x: number,
+    y: number,
+    dxPixels: number,
+    dyPixels: number,
+  ): boolean {
+    if (this.activeSurface() !== "terminal") return false;
+    const adapter = this.wasmAdapter;
+    if (!adapter?.terminalTouchScroll && !adapter?.terminalWheel) return false;
+    const flags = adapter.terminalTouchScroll
+      ? adapter.terminalTouchScroll(x, y, dxPixels, dyPixels)
+      : adapter.terminalWheel!(x, y, dxPixels, dyPixels, false);
+    if ((flags & 1) === 0) return false;
+    if (flags & 2) this.flushTerminalPointerBytes();
+    this.scheduleDraw();
+    return true;
   }
 
   private updateCustomCursorFromPointer(
@@ -8789,17 +10216,60 @@ export class TerminalPanel {
         return;
       }
     }
+    if (this.wasmAdapter?.pointerOverlayActive?.()) {
+      // Full-page overlays and modal scrims swallow wheel before markdown,
+      // editor, agent, or terminal routing. Center/context lists returned
+      // above after mutating their shared scroll state.
+      this.forwardChromeEvent(fromPointerMoveEvent(event, this.canvas));
+      this.forwardChromeEvent(fromWheelEvent(event));
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
+    const owner = routeWheelToFirstOwner([
+      {
+        owner: "chrome",
+        route: () => {
+          const { x, y } = this.canvasLogicalPoint(event);
+          return this.wasmAdapter?.chromeWheelScrollAt?.(
+            x,
+            y,
+            event.deltaX,
+            event.deltaY,
+            event.deltaMode,
+            event.shiftKey,
+          ) === true;
+        },
+      },
+      { owner: "active-content", route: () => this.routeWheelToActiveContent(event) },
+      { owner: "terminal", route: () => this.routeWheelToTerminalGrid(event) },
+    ]);
+    if (owner !== null) {
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
+    if (this.wasmAdapter?.isChrome()) {
+      event.preventDefault();
+    }
+    this.forwardChromeEvent(fromPointerMoveEvent(event, this.canvas));
+    this.forwardChromeEvent(
+      fromWheelEvent(event, { invertX: this.isWheelOverBufferTabs(event) }),
+    );
+  }
+
+  private routeWheelToActiveContent(event: WheelEvent): boolean {
     if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
       // Real-renderer markdown: the pane owns scrolling.
       const rect = this.canvas.getBoundingClientRect();
       const adapter = this.wasmAdapter as {
         markdownScroll?: (dy: number, vh: number) => boolean;
       };
-      if (adapter?.markdownScroll?.(event.deltaY, rect.height)) {
+      if (adapter?.markdownScroll?.(wheelDeltaYPixels(event), rect.height)) {
         event.preventDefault();
         this.scheduleDraw();
         this.pumpMarkdownAnimation();
-        return;
+        return true;
       }
     }
     if (this.activeEditorPaneKind() !== null) {
@@ -8827,27 +10297,13 @@ export class TerminalPanel {
       ) {
         event.preventDefault();
         this.scheduleDraw();
-        return;
+        return true;
       }
     }
     if (this.routeWheelToAgent(event)) {
-      event.preventDefault();
-      return;
+      return true;
     }
-    // Terminal grid scrollback / TUI wheel. The bridge hit-tests the
-    // chrome terminal rect itself, so wheels over the side panels
-    // still fall through to the chrome route below.
-    if (this.routeWheelToTerminalGrid(event)) {
-      event.preventDefault();
-      return;
-    }
-    if (this.wasmAdapter?.isChrome()) {
-      event.preventDefault();
-    }
-    this.forwardChromeEvent(fromPointerMoveEvent(event, this.canvas));
-    this.forwardChromeEvent(
-      fromWheelEvent(event, { invertX: this.isWheelOverBufferTabs(event) }),
-    );
+    return false;
   }
 
   /** Route a wheel event into the wasm terminal grid: scrollback via
@@ -8904,15 +10360,13 @@ export class TerminalPanel {
     }
 
     // The shared timeline uses the desktop (winit) sign convention:
-    // positive delta scrolls UP into history, one wheel notch = 42px
-    // (`agent_timeline_scroll_pixels`). DOM deltaY is positive when
+    // positive delta scrolls UP into history. DOM deltaY is positive when
     // scrolling DOWN, so negate it or the conversation scrolls
     // backwards.
     const deltaY =
       event.deltaMode === WheelEvent.DOM_DELTA_LINE
         ? -event.deltaY * 42
         : -wheelDeltaYPixels(event);
-    if (Math.abs(deltaY) < 0.5) return false;
     // Desktop-parity path: hand the RAW delta + deltaMode to the shared
     // `agent_timeline_wheel` policy, which turns a notch into a smooth
     // 3x-line-height glide and leaves trackpad pixels raw. Sign is
@@ -8924,15 +10378,20 @@ export class TerminalPanel {
         y: number,
         deltaY: number,
         deltaMode: number,
+        legacyWheelDeltaY: number,
       ) => boolean;
     };
     if (wheelAdapter.agentScrollWheelAt) {
       const { x, y } = this.canvasLogicalPoint(event);
+      const legacyWheelDeltaY = (
+        event as WheelEvent & { wheelDeltaY?: number }
+      ).wheelDeltaY;
       const moved = wheelAdapter.agentScrollWheelAt(
         x,
         y,
         -event.deltaY,
         event.deltaMode,
+        legacyWheelDeltaY === undefined ? Number.NaN : legacyWheelDeltaY,
       );
       if (moved) {
         this.scheduleDraw();
@@ -8940,6 +10399,10 @@ export class TerminalPanel {
       }
       return false;
     }
+    // Old bundles only expose the pre-device-aware pixel path. Keep its
+    // historical noise floor there; the shared path above accepts the same
+    // subpixel precision events as desktop.
+    if (Math.abs(deltaY) < 0.5) return false;
     // Position-aware: pickers, the side panel, and diff/code cards
     // under the cursor scroll themselves before the timeline moves.
     if (adapter.agentScrollAt) {
@@ -9428,6 +10891,7 @@ export class TerminalPanel {
   /// falling back to the raw protocol client for back-compat with hosts
   /// that wired the panel up before the service existed.
   private sendPtyInput(bytes: Uint8Array): void {
+    if (!this.transportAvailable) return;
     const sessionId = this.activePtySessionId() ?? this.options.sessionId;
     if (this.options.pty) {
       this.options.pty.sendInput(sessionId, bytes);
@@ -9439,6 +10903,7 @@ export class TerminalPanel {
   /// Same back-compat shape as `sendPtyInput` for SIGWINCH-style
   /// resize notifications.
   private resizePty(cols: number, rows: number): void {
+    if (!this.transportAvailable) return;
     if (this.options.pty) {
       const sessions = new Set<string>();
       for (const tab of this.bufferTabs) {
@@ -9529,7 +10994,8 @@ export class TerminalPanel {
     }
 
     if (bytes[0] === 0x1b) return false;
-    const text = new TextDecoder().decode(bytes);
+    const named = keyNameFromTerminalBytes(bytes);
+    const text = named ?? new TextDecoder().decode(bytes);
     if (!text || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) return false;
     const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const newline = normalized.search(/\n/);
@@ -9620,19 +11086,8 @@ export class TerminalPanel {
       markdownKey?: (key: string, ctrl: boolean) => boolean;
     };
     if (!adapter?.markdownKey) return false;
-    const text = new TextDecoder().decode(bytes);
     let handled = false;
-    for (const ch of text) {
-      const key =
-        ch === "\r" || ch === "\n"
-          ? "Enter"
-          : ch === "\x7f" || ch === "\b"
-            ? "Backspace"
-            : ch === "\x1b"
-              ? "Escape"
-              : ch === "\t"
-                ? "Tab"
-                : ch;
+    for (const key of mobileDirectInputKeys(bytes)) {
       if (adapter.markdownKey(key, false)) {
         handled = true;
       }
@@ -9659,19 +11114,8 @@ export class TerminalPanel {
       ) => boolean;
     };
     if (!adapter?.editorKey) return;
-    const text = new TextDecoder().decode(bytes);
     let handled = false;
-    for (const ch of text) {
-      const key =
-        ch === "\r" || ch === "\n"
-          ? "Enter"
-          : ch === "\x7f" || ch === "\b"
-            ? "Backspace"
-            : ch === "\x1b"
-              ? "Escape"
-              : ch === "\t"
-                ? "Tab"
-                : ch;
+    for (const key of mobileDirectInputKeys(bytes)) {
       if (adapter.editorKey(key, false, false, false)) {
         handled = true;
       }
@@ -9684,17 +11128,23 @@ export class TerminalPanel {
 
   private routeInputBytesToChrome(bytes: Uint8Array): boolean {
     if (!this.isChromeKeyboardCaptureActive()) return false;
+    const dismissIfClosed = () => {
+      if (!this.isChromeKeyboardCaptureActive()) this.dismissSoftKeyboard();
+    };
     if (bytes.length === 1) {
       if (bytes[0] === 0x0d) {
         this.forwardChromeEvent(fromKeyPressEvent({ key: "Enter" }));
+        dismissIfClosed();
         return true;
       }
       if (bytes[0] === 0x7f) {
         this.forwardChromeEvent(fromKeyPressEvent({ key: "Backspace" }));
+        dismissIfClosed();
         return true;
       }
       if (bytes[0] === 0x1b) {
         this.forwardChromeEvent(fromKeyPressEvent({ key: "Escape" }));
+        dismissIfClosed();
         return true;
       }
     }
@@ -9702,6 +11152,7 @@ export class TerminalPanel {
     if (text.length > 0) {
       this.forwardChromeEvent(fromTextEvent(text));
     }
+    dismissIfClosed();
     return true;
   }
 }

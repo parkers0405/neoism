@@ -10,9 +10,9 @@ use neoism_agent_core::{
     AgentConfigDocument, EventPayload, PluginConfig, ProviderMessage, ToolListItem,
 };
 use neoism_agent_plugin_api::{
-    PluginContributions, PluginDefinition, PluginFactory, PluginHostError, PluginManifest, PluginRuntimeError,
-    ProcessHookRequest, ProcessHookResponse, RegistrySnapshot, RuntimeHook,
-    PROCESS_PLUGIN_PROTOCOL,
+    PluginContributions, PluginDefinition, PluginFactory, PluginHostError,
+    PluginManifest, PluginRuntimeError, ProcessHookRequest, ProcessHookResponse,
+    RegistrySnapshot, RuntimeHook, PROCESS_PLUGIN_PROTOCOL,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,16 +94,23 @@ impl PluginDefinition for DeclarativePlugin {
     }
 
     fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> {
-        let Some(process) = &self.process else { return Vec::new() };
+        let Some(process) = &self.process else {
+            return Vec::new();
+        };
         let mut capabilities = vec![
             neoism_agent_plugin_api::HostCapability::ProcessSpawn,
             neoism_agent_plugin_api::HostCapability::WorkspaceRead,
         ];
-        if process.network { capabilities.push(neoism_agent_plugin_api::HostCapability::Network); }
+        if process.network {
+            capabilities.push(neoism_agent_plugin_api::HostCapability::Network);
+        }
         capabilities
     }
 
-    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
+    fn contributions(
+        &self,
+        registrar: &mut PluginContributions,
+    ) -> Result<(), PluginHostError> {
         registrar.hook(self.id.clone());
         registrar.runtime_hook(Arc::new(self.clone()));
         Ok(())
@@ -123,22 +130,33 @@ impl Clone for DeclarativePlugin {
 }
 
 impl RuntimeHook for DeclarativePlugin {
-    fn invoke(&self, hook: &str, context: Value, mut value: Value) -> Result<Value, PluginRuntimeError> {
+    fn invoke(
+        &self,
+        hook: &str,
+        context: Value,
+        mut value: Value,
+    ) -> Result<Value, PluginRuntimeError> {
         let configured = match hook {
-            "chat.headers" => serde_json::to_value(merge_string_map(value, &self.headers)),
+            "chat.headers" => {
+                serde_json::to_value(merge_string_map(value, &self.headers))
+            }
             "chat.options" => serde_json::to_value(merge_value_map(value, &self.options)),
             "shell.env" => serde_json::to_value(merge_string_map(value, &self.shell_env)),
             _ => Ok(value),
         }
         .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
         value = configured;
-        let Some(process) = &self.process else { return Ok(value) };
-        process.invoke(ProcessHookRequest {
-            protocol: PROCESS_PLUGIN_PROTOCOL.to_string(),
-            hook: hook.to_string(),
-            context,
-            value,
-        }).map_err(|error| PluginRuntimeError::new(error.to_string()))
+        let Some(process) = &self.process else {
+            return Ok(value);
+        };
+        process
+            .invoke(ProcessHookRequest {
+                protocol: PROCESS_PLUGIN_PROTOCOL.to_string(),
+                hook: hook.to_string(),
+                context,
+                value,
+            })
+            .map_err(|error| PluginRuntimeError::new(error.to_string()))
     }
 }
 
@@ -164,7 +182,9 @@ impl ProcessPlugin {
         let stdout = child.stdout.take().expect("piped plugin stdout");
         let reader = std::thread::spawn(move || {
             let mut output = Vec::new();
-            stdout.take(MAX_RESPONSE_BYTES + 1).read_to_end(&mut output)?;
+            stdout
+                .take(MAX_RESPONSE_BYTES + 1)
+                .read_to_end(&mut output)?;
             Ok::<_, std::io::Error>(output)
         });
         let deadline = Instant::now() + self.timeout;
@@ -185,7 +205,9 @@ impl ProcessPlugin {
                     anyhow::bail!("unsupported plugin protocol {}", response.protocol);
                 }
                 if !response.ok {
-                    anyhow::bail!(response.error.unwrap_or_else(|| "plugin hook failed".to_string()));
+                    anyhow::bail!(response
+                        .error
+                        .unwrap_or_else(|| "plugin hook failed".to_string()));
                 }
                 return Ok(response.value);
             }
@@ -193,7 +215,10 @@ impl ProcessPlugin {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = reader.join();
-                anyhow::bail!("plugin process timed out after {} ms", self.timeout.as_millis());
+                anyhow::bail!(
+                    "plugin process timed out after {} ms",
+                    self.timeout.as_millis()
+                );
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -211,7 +236,6 @@ impl ProcessPlugin {
             self.network,
         )
     }
-
 }
 
 /// Resolve + (on Linux) bubblewrap-sandbox a plugin command line. Shared by
@@ -227,7 +251,8 @@ pub(crate) fn build_plugin_command(
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("plugin command is empty"))?;
     {
-        let requested_program = crate::executable::in_directory(program, working_directory);
+        let requested_program =
+            crate::executable::in_directory(program, working_directory);
         let program = if Path::new(&requested_program).is_absolute() {
             PathBuf::from(&requested_program)
         } else {
@@ -244,38 +269,39 @@ pub(crate) fn build_plugin_command(
                 })?
                 .path
         };
-    // Windows `CreateProcess` cannot exec `.cmd`/`.bat` shims (npm-installed
-    // global tools resolve to these); route them through `cmd /C`, mirroring
-    // the LSP launcher. The wrap logic itself compiles and is unit-tested on
-    // every platform; only the interpreter resolution is Windows-gated.
-    #[cfg(windows)]
-    let (program, arguments) = {
-        if is_batch_shim(&program) {
-            let cmd = executables
-                .resolve(&neoism_agent_service_api::ExecutableRequest::new(
-                    "cmd",
-                    neoism_agent_service_api::ExecutablePurpose::PlatformShell,
-                ))
-                .map_err(|error| {
-                    anyhow::anyhow!("Windows command interpreter is unavailable: {error}")
-                })?
-                .path;
-            batch_shim_command(cmd, &program, arguments)
-        } else {
-            (program, arguments.to_vec())
-        }
-    };
-    #[cfg(windows)]
-    let arguments = &arguments[..];
+        // Windows `CreateProcess` cannot exec `.cmd`/`.bat` shims (npm-installed
+        // global tools resolve to these); route them through `cmd /C`, mirroring
+        // the LSP launcher. The wrap logic itself compiles and is unit-tested on
+        // every platform; only the interpreter resolution is Windows-gated.
+        #[cfg(windows)]
+        let (program, arguments) = {
+            if is_batch_shim(&program) {
+                let cmd = executables
+                    .resolve(&neoism_agent_service_api::ExecutableRequest::new(
+                        "cmd",
+                        neoism_agent_service_api::ExecutablePurpose::PlatformShell,
+                    ))
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "Windows command interpreter is unavailable: {error}"
+                        )
+                    })?
+                    .path;
+                batch_shim_command(cmd, &program, arguments)
+            } else {
+                (program, arguments.to_vec())
+            }
+        };
+        #[cfg(windows)]
+        let arguments = &arguments[..];
 
         #[cfg(target_os = "linux")]
         if !matches!(sandbox, SandboxPolicy::Off) {
-            let bwrap = executables.resolve(
-                &neoism_agent_service_api::ExecutableRequest::new(
+            let bwrap =
+                executables.resolve(&neoism_agent_service_api::ExecutableRequest::new(
                     "bwrap",
                     neoism_agent_service_api::ExecutablePurpose::Sandbox,
-                ),
-            );
+                ));
             let bwrap_error = bwrap.as_ref().err().map(ToString::to_string);
             if let Ok(bwrap) = bwrap {
                 let mut command = Command::new(bwrap.path);
@@ -430,13 +456,17 @@ fn invoke<T: Serialize + serde::de::DeserializeOwned>(
     context: &impl Serialize,
     value: &mut T,
 ) -> anyhow::Result<()> {
-    snapshot.ensure_active().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    snapshot
+        .ensure_active()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let context = serde_json::to_value(context)?;
     let mut next = serde_json::to_value(&*value)?;
     for runtime in &snapshot.runtime_hooks {
         next = runtime
             .invoke(hook, context.clone(), next)
-            .map_err(|error| anyhow::anyhow!("plugin {} {hook} failed: {error}", runtime.plugin_id))?;
+            .map_err(|error| {
+                anyhow::anyhow!("plugin {} {hook} failed: {error}", runtime.plugin_id)
+            })?;
     }
     *value = serde_json::from_value(next)?;
     Ok(())
@@ -447,53 +477,94 @@ pub(crate) fn publish_event(snapshot: &RegistrySnapshot, event: &EventPayload) {
     let _ = invoke(snapshot, "event", event, &mut value);
 }
 
-pub(crate) fn chat_messages_transform(snapshot: &RegistrySnapshot, ctx: &ChatHookContext, value: &mut Vec<ProviderMessage>) -> anyhow::Result<()> {
+pub(crate) fn chat_messages_transform(
+    snapshot: &RegistrySnapshot,
+    ctx: &ChatHookContext,
+    value: &mut Vec<ProviderMessage>,
+) -> anyhow::Result<()> {
     invoke(snapshot, "chat.messages", ctx, value)
 }
 
-pub(crate) fn chat_options(snapshot: &RegistrySnapshot, ctx: &ChatHookContext, value: &mut BTreeMap<String, Value>) -> anyhow::Result<()> {
+pub(crate) fn chat_options(
+    snapshot: &RegistrySnapshot,
+    ctx: &ChatHookContext,
+    value: &mut BTreeMap<String, Value>,
+) -> anyhow::Result<()> {
     invoke(snapshot, "chat.options", ctx, value)
 }
 
-pub(crate) fn chat_headers(snapshot: &RegistrySnapshot, ctx: &ChatHookContext, value: &mut BTreeMap<String, String>) -> anyhow::Result<()> {
+pub(crate) fn chat_headers(
+    snapshot: &RegistrySnapshot,
+    ctx: &ChatHookContext,
+    value: &mut BTreeMap<String, String>,
+) -> anyhow::Result<()> {
     invoke(snapshot, "chat.headers", ctx, value)
 }
 
-pub(crate) fn tool_definition(snapshot: &RegistrySnapshot, value: &mut ToolListItem) -> anyhow::Result<()> {
-    let ctx = ToolDefinitionContext { tool_id: value.id.clone() };
+pub(crate) fn tool_definition(
+    snapshot: &RegistrySnapshot,
+    value: &mut ToolListItem,
+) -> anyhow::Result<()> {
+    let ctx = ToolDefinitionContext {
+        tool_id: value.id.clone(),
+    };
     invoke(snapshot, "tool.definition", &ctx, value)
 }
 
-pub(crate) fn tool_execute_before(snapshot: &RegistrySnapshot, ctx: &ToolExecutionContext, value: &mut Value) -> anyhow::Result<()> {
+pub(crate) fn tool_execute_before(
+    snapshot: &RegistrySnapshot,
+    ctx: &ToolExecutionContext,
+    value: &mut Value,
+) -> anyhow::Result<()> {
     invoke(snapshot, "tool.before", ctx, value)
 }
 
-pub(crate) fn tool_execute_after(snapshot: &RegistrySnapshot, ctx: &ToolExecutionContext, value: &mut ToolExecutionResult) -> anyhow::Result<()> {
+pub(crate) fn tool_execute_after(
+    snapshot: &RegistrySnapshot,
+    ctx: &ToolExecutionContext,
+    value: &mut ToolExecutionResult,
+) -> anyhow::Result<()> {
     invoke(snapshot, "tool.after", ctx, value)
 }
 
-pub(crate) fn shell_env(snapshot: &RegistrySnapshot, ctx: &ShellEnvContext, value: &mut BTreeMap<String, String>) -> anyhow::Result<()> {
+pub(crate) fn shell_env(
+    snapshot: &RegistrySnapshot,
+    ctx: &ShellEnvContext,
+    value: &mut BTreeMap<String, String>,
+) -> anyhow::Result<()> {
     invoke(snapshot, "shell.env", ctx, value)
 }
 
-fn merge_string_map(value: Value, configured: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let mut value: BTreeMap<String, String> = serde_json::from_value(value).unwrap_or_default();
+fn merge_string_map(
+    value: Value,
+    configured: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut value: BTreeMap<String, String> =
+        serde_json::from_value(value).unwrap_or_default();
     value.extend(configured.clone());
     value
 }
 
-fn merge_value_map(value: Value, configured: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
-    let mut value: BTreeMap<String, Value> = serde_json::from_value(value).unwrap_or_default();
+fn merge_value_map(
+    value: Value,
+    configured: &BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    let mut value: BTreeMap<String, Value> =
+        serde_json::from_value(value).unwrap_or_default();
     value.extend(configured.clone());
     value
 }
 
 fn configured_plugins(config: &AgentConfigDocument) -> Vec<PluginConfig> {
-    config.plugins.iter().map(|(id, plugin)| {
-        let mut plugin = plugin.clone();
-        plugin.id = Some(id.clone());
-        plugin
-    }).collect()
+    config
+        .plugins
+        .iter()
+        .map(|(id, plugin)| {
+            let mut plugin = plugin.clone();
+            plugin.id = Some(id.clone());
+            plugin
+        })
+        .collect()
 }
 
 fn plugin_id(plugin: &PluginConfig) -> Option<String> {
@@ -555,7 +626,9 @@ fn load_declarative_plugin(
         .map(|command| ProcessPlugin {
             executables: Arc::clone(&services.executables),
             command,
-            timeout: Duration::from_millis(manifest.timeout_ms.unwrap_or(10_000).clamp(100, 120_000)),
+            timeout: Duration::from_millis(
+                manifest.timeout_ms.unwrap_or(10_000).clamp(100, 120_000),
+            ),
             working_directory: path
                 .parent()
                 .unwrap_or_else(|| Path::new(directory))
@@ -580,7 +653,9 @@ pub(crate) fn sandbox_policy(configured: Option<bool>) -> SandboxPolicy {
     match configured {
         Some(false) => SandboxPolicy::Off,
         Some(true) => SandboxPolicy::Required,
-        None if std::env::var_os("NEOISM_AGENT_AUTH_CONFIG").is_some() => SandboxPolicy::Required,
+        None if std::env::var_os("NEOISM_AGENT_AUTH_CONFIG").is_some() => {
+            SandboxPolicy::Required
+        }
         None => match std::env::var("NEOISM_AGENT_PLUGIN_SANDBOX").as_deref() {
             Ok("required" | "1" | "true") => SandboxPolicy::Required,
             Ok("off" | "0" | "false") => SandboxPolicy::Off,
@@ -595,14 +670,17 @@ fn process_plugin(value: &Value) -> anyhow::Result<Vec<String>> {
         Value::Array(parts) => parts
             .iter()
             .map(|part| {
-                part.as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| anyhow::anyhow!("plugin command entries must be strings"))
+                part.as_str().map(str::to_string).ok_or_else(|| {
+                    anyhow::anyhow!("plugin command entries must be strings")
+                })
             })
             .collect::<anyhow::Result<Vec<_>>>()?,
         _ => anyhow::bail!("plugin command must be a string or string array"),
     };
-    if command.first().is_none_or(|program| program.trim().is_empty()) {
+    if command
+        .first()
+        .is_none_or(|program| program.trim().is_empty())
+    {
         anyhow::bail!("plugin command is empty");
     }
     Ok(command)
@@ -631,7 +709,11 @@ fn resolve_plugin_manifest(
     candidates.into_iter().find(|path| path.is_file())
 }
 
-fn resolve_path_candidates(services: &neoism_agent_service_api::AgentServices, directory: &str, raw: &str) -> Vec<PathBuf> {
+fn resolve_path_candidates(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &str,
+    raw: &str,
+) -> Vec<PathBuf> {
     let raw = PathBuf::from(raw);
     if raw.is_absolute() {
         return vec![raw];
@@ -643,32 +725,35 @@ fn resolve_path_candidates(services: &neoism_agent_service_api::AgentServices, d
     candidates
 }
 
-fn discovered_plugin_configs(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<PluginConfig> {
+fn discovered_plugin_configs(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &str,
+) -> Vec<PluginConfig> {
     let mut configs = Vec::new();
     for root in crate::config::roots(services, directory) {
-            let dir = root.join("plugins");
-            let Ok(entries) = std::fs::read_dir(&dir) else {
+        let dir = root.join("plugins");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                    continue;
-                }
-                let id = path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or("plugin")
-                    .to_string();
-                configs.push(PluginConfig {
-                    id: Some(id),
-                    options: BTreeMap::from([(
-                        "path".to_string(),
-                        Value::String(path.display().to_string()),
-                    )]),
-                    ..PluginConfig::default()
-                });
             }
+            let id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("plugin")
+                .to_string();
+            configs.push(PluginConfig {
+                id: Some(id),
+                options: BTreeMap::from([(
+                    "path".to_string(),
+                    Value::String(path.display().to_string()),
+                )]),
+                ..PluginConfig::default()
+            });
+        }
     }
     configs
 }
@@ -707,7 +792,10 @@ mod process_tests {
 
         let injected = PathBuf::from("/injected/plugin-runtime");
         let process = ProcessPlugin {
-            executables: Arc::new(FakeExecutableService::with("plugin-runtime", &injected)),
+            executables: Arc::new(FakeExecutableService::with(
+                "plugin-runtime",
+                &injected,
+            )),
             command: vec!["plugin-runtime".to_string()],
             timeout: Duration::from_secs(1),
             working_directory: std::env::current_dir().unwrap(),
@@ -715,7 +803,10 @@ mod process_tests {
             network: false,
         };
         assert_eq!(
-            process.command("plugin-runtime", &[]).unwrap().get_program(),
+            process
+                .command("plugin-runtime", &[])
+                .unwrap()
+                .get_program(),
             injected.as_os_str()
         );
 
@@ -723,7 +814,10 @@ mod process_tests {
             executables: Arc::new(FakeExecutableService::default()),
             ..process
         };
-        let error = missing.command("plugin-runtime", &[]).unwrap_err().to_string();
+        let error = missing
+            .command("plugin-runtime", &[])
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("plugin executable `plugin-runtime` is unavailable"));
         assert!(error.contains("install it"));
     }
@@ -768,16 +862,27 @@ mod process_tests {
             }),
         };
         let context = neoism_agent_plugin_api::PluginContext::new(
-            neoism_agent_plugin_api::RuntimeScope::Workspace(neoism_agent_plugin_api::WorkspaceIdentity {
-                id: "test".into(), root: PathBuf::from("."),
-            }),
+            neoism_agent_plugin_api::RuntimeScope::Workspace(
+                neoism_agent_plugin_api::WorkspaceIdentity {
+                    id: "test".into(),
+                    root: PathBuf::from("."),
+                },
+            ),
             neoism_agent_plugin_api::CapabilityGrants::default()
                 .allow(neoism_agent_plugin_api::HostCapability::ProcessSpawn)
                 .allow(neoism_agent_plugin_api::HostCapability::WorkspaceRead),
         );
-        let instance = tokio::time::timeout(Duration::from_millis(20), neoism_agent_plugin_api::PluginFactory::create(&plugin, context))
-            .await.unwrap().unwrap();
-        tokio::time::timeout(Duration::from_millis(20), instance.start()).await.unwrap().unwrap();
+        let instance = tokio::time::timeout(
+            Duration::from_millis(20),
+            neoism_agent_plugin_api::PluginFactory::create(&plugin, context),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(Duration::from_millis(20), instance.start())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.contributions().runtime_hooks.len(), 1);
     }
 
@@ -809,10 +914,13 @@ mod process_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn subprocess_hook_runs_in_required_bubblewrap_sandbox() {
-        if standard_executables().resolve(&neoism_agent_service_api::ExecutableRequest::new(
-            "bwrap",
-            neoism_agent_service_api::ExecutablePurpose::Sandbox,
-        )).is_err() {
+        if standard_executables()
+            .resolve(&neoism_agent_service_api::ExecutableRequest::new(
+                "bwrap",
+                neoism_agent_service_api::ExecutablePurpose::Sandbox,
+            ))
+            .is_err()
+        {
             return;
         }
         let process = ProcessPlugin {
@@ -843,7 +951,12 @@ mod process_tests {
     }
 
     impl RuntimeHook for RecoveringPlugin {
-        fn invoke(&self, _hook: &str, _context: Value, value: Value) -> Result<Value, PluginRuntimeError> {
+        fn invoke(
+            &self,
+            _hook: &str,
+            _context: Value,
+            value: Value,
+        ) -> Result<Value, PluginRuntimeError> {
             if self.failing.load(Ordering::SeqCst) {
                 return Err(PluginRuntimeError::new("intentional failure"));
             }
@@ -856,11 +969,17 @@ mod process_tests {
         let failing = Arc::new(AtomicBool::new(true));
         let hook = neoism_agent_plugin_api::RegisteredRuntimeHook::for_test(
             "dev.neoism.test",
-            Arc::new(RecoveringPlugin { failing: failing.clone() }),
+            Arc::new(RecoveringPlugin {
+                failing: failing.clone(),
+            }),
         );
         assert!(hook.invoke("shell.env", Value::Null, Value::Null).is_err());
         assert!(!hook.lifecycle().active);
-        assert!(hook.lifecycle().reason.unwrap().contains("intentional failure"));
+        assert!(hook
+            .lifecycle()
+            .reason
+            .unwrap()
+            .contains("intentional failure"));
 
         failing.store(false, Ordering::SeqCst);
         hook.invoke("shell.env", Value::Null, Value::Null).unwrap();

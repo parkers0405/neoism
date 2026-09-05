@@ -66,6 +66,22 @@ fn spawn_echo_emits_hello() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn spawn_applies_scoped_child_environment() {
+    let config = PtySessionConfig {
+        shell: Some("/bin/sh".to_string()),
+        args: vec!["-c".to_string(), "printf $NEOISM".to_string()],
+        cwd: None,
+        env: vec![("NEOISM".to_string(), "1".to_string())],
+        cols: 80,
+        rows: 24,
+    };
+    let got = read_until_hello(PtySession::spawn(config).expect("spawn PTY"), Duration::from_secs(1));
+    assert!(got.contains(&b'1'), "child did not receive scoped env: {got:?}");
+}
+
 /// Windows leg: same smoke through ConPTY. `cmd.exe` cold-starts much
 /// slower than `/bin/sh` (console host + conhost handshake), hence the
 /// generous deadline.

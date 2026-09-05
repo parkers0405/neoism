@@ -134,7 +134,12 @@ pub(crate) async fn wait_for_cancel(cancel: Arc<AtomicBool>) {
 }
 
 pub(crate) async fn session_is_running(state: &AppState, session_id: &str) -> bool {
-    state.inner.session_coordinator.active_run(session_id).await.is_some()
+    state
+        .inner
+        .session_coordinator
+        .active_run(session_id)
+        .await
+        .is_some()
 }
 
 pub(crate) fn ensure_child_task_belongs_to_parent(

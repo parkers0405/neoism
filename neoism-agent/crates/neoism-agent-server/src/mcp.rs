@@ -21,9 +21,9 @@ mod mcp_transport;
 #[path = "mcp_wire.rs"]
 mod mcp_wire;
 #[cfg(test)]
-use mcp_oauth::origin;
-#[cfg(test)]
 pub(crate) use mcp_oauth::auth_start;
+#[cfg(test)]
+use mcp_oauth::origin;
 pub(crate) use mcp_oauth::{
     auth_callback_with_attempt, auth_callback_with_config, auth_start_with_config,
     authenticate_status_with_config,
@@ -48,10 +48,20 @@ pub(crate) async fn status(
     let runtime = state.inner.workspace_runtimes.loaded(directory).await;
     let mut statuses = BTreeMap::new();
     for (name, entry) in &config {
-        let status = runtime.as_ref()
+        let status = runtime
+            .as_ref()
             .and_then(|runtime| runtime.mcp_if_allocated())
             .and_then(|mcp| mcp.status(directory, name))
-            .unwrap_or(status_for_entry_with_directory(Some(directory), name, entry, auth_store, Some(state)).await);
+            .unwrap_or(
+                status_for_entry_with_directory(
+                    Some(directory),
+                    name,
+                    entry,
+                    auth_store,
+                    Some(state),
+                )
+                .await,
+            );
         statuses.insert(name.clone(), status);
     }
     Ok(statuses)
@@ -66,22 +76,38 @@ pub(crate) async fn catalog_with_state(
     let config = configured_servers(directory, state)?;
     let mut catalog = BTreeMap::new();
     for (name, entry) in &config {
-            let oauth_capable = matches!(
-                entry,
-                McpConfig::Remote { oauth, .. } if usable_oauth_config(oauth).is_some()
-            );
-            let status = status_for_entry_with_directory(Some(directory), name, entry, auth_store, state).await;
-            let has_credentials = match entry { McpConfig::Remote { url, .. } => auth_store.get_for_url(name, url).await.ok().flatten(), _ => None }
-                .is_some_and(|entry| entry.tokens.is_some() || entry.client_registration.is_some());
-            catalog.insert(name.clone(),
-                McpCatalogEntry {
-                    enabled: is_enabled(entry),
-                    runtime_connected: matches!(status, McpStatus::Connected),
-                    status,
-                    oauth_capable,
-                    has_credentials,
-                    config_writable: config_source_writable(directory, name, state),
-                });
+        let oauth_capable = matches!(
+            entry,
+            McpConfig::Remote { oauth, .. } if usable_oauth_config(oauth).is_some()
+        );
+        let status = status_for_entry_with_directory(
+            Some(directory),
+            name,
+            entry,
+            auth_store,
+            state,
+        )
+        .await;
+        let has_credentials = match entry {
+            McpConfig::Remote { url, .. } => {
+                auth_store.get_for_url(name, url).await.ok().flatten()
+            }
+            _ => None,
+        }
+        .is_some_and(|entry| {
+            entry.tokens.is_some() || entry.client_registration.is_some()
+        });
+        catalog.insert(
+            name.clone(),
+            McpCatalogEntry {
+                enabled: is_enabled(entry),
+                runtime_connected: matches!(status, McpStatus::Connected),
+                status,
+                oauth_capable,
+                has_credentials,
+                config_writable: config_source_writable(directory, name, state),
+            },
+        );
     }
     Ok(catalog)
 }
@@ -97,10 +123,20 @@ pub(crate) async fn status_with_snapshot(
     let runtime = snapshot.mcp().ok();
     let mut statuses = BTreeMap::new();
     for (name, entry) in &config.mcp {
-            let status = runtime.as_ref()
-                .and_then(|runtime| runtime.status(directory, name))
-                .unwrap_or(status_for_entry_with_directory(None, name, entry, auth_store, Some(state)).await);
-            statuses.insert(name.clone(), status);
+        let status = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.status(directory, name))
+            .unwrap_or(
+                status_for_entry_with_directory(
+                    None,
+                    name,
+                    entry,
+                    auth_store,
+                    Some(state),
+                )
+                .await,
+            );
+        statuses.insert(name.clone(), status);
     }
     statuses
 }
@@ -116,31 +152,57 @@ pub(crate) async fn catalog_with_snapshot(
     crate::config::inject_builtin_mcp(&mut config, state.services());
     let mut catalog = BTreeMap::new();
     for (name, entry) in &config.mcp {
-            let status = statuses.get(name).cloned().unwrap_or(McpStatus::Disabled);
-            let oauth_capable = matches!(
-                entry,
-                McpConfig::Remote { oauth, .. } if usable_oauth_config(oauth).is_some()
-            );
-            let has_credentials = match entry { McpConfig::Remote { url, .. } => auth_store.get_for_url(name, url).await.ok().flatten(), _ => None }
-                .is_some_and(|entry| entry.tokens.is_some() || entry.client_registration.is_some());
-            catalog.insert(name.clone(),
-                McpCatalogEntry {
-                    enabled: is_enabled(entry),
-                    runtime_connected: matches!(status, McpStatus::Connected),
-                    status,
-                    oauth_capable,
-                    has_credentials,
-                    config_writable: config_source_writable(directory, name, Some(state)),
-                });
+        let status = statuses.get(name).cloned().unwrap_or(McpStatus::Disabled);
+        let oauth_capable = matches!(
+            entry,
+            McpConfig::Remote { oauth, .. } if usable_oauth_config(oauth).is_some()
+        );
+        let has_credentials = match entry {
+            McpConfig::Remote { url, .. } => {
+                auth_store.get_for_url(name, url).await.ok().flatten()
+            }
+            _ => None,
+        }
+        .is_some_and(|entry| {
+            entry.tokens.is_some() || entry.client_registration.is_some()
+        });
+        catalog.insert(
+            name.clone(),
+            McpCatalogEntry {
+                enabled: is_enabled(entry),
+                runtime_connected: matches!(status, McpStatus::Connected),
+                status,
+                oauth_capable,
+                has_credentials,
+                config_writable: config_source_writable(directory, name, Some(state)),
+            },
+        );
     }
     catalog
 }
 
 fn config_source_writable(directory: &str, name: &str, state: Option<&AppState>) -> bool {
-    let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
-    crate::config::snapshot(&services, directory).ok().map(|snapshot| {
-        snapshot.layers.iter().rev().find(|layer| layer.document.get("mcp").and_then(|mcp| mcp.get(name)).is_some()).map(|layer| layer.writable).unwrap_or(true)
-    }).unwrap_or(false)
+    let services = state
+        .map(|state| state.services().clone())
+        .unwrap_or_else(crate::standard_services);
+    crate::config::snapshot(&services, directory)
+        .ok()
+        .map(|snapshot| {
+            snapshot
+                .layers
+                .iter()
+                .rev()
+                .find(|layer| {
+                    layer
+                        .document
+                        .get("mcp")
+                        .and_then(|mcp| mcp.get(name))
+                        .is_some()
+                })
+                .map(|layer| layer.writable)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -160,7 +222,11 @@ async fn status_for_config_with_directory(
 ) -> BTreeMap<String, McpStatus> {
     let mut statuses = BTreeMap::new();
     for (name, config) in config {
-        statuses.insert(name.clone(), status_for_entry_with_directory(directory, name, config, auth_store, state).await);
+        statuses.insert(
+            name.clone(),
+            status_for_entry_with_directory(directory, name, config, auth_store, state)
+                .await,
+        );
     }
     statuses
 }
@@ -317,7 +383,10 @@ async fn connect_config(
                             let status = if usable_oauth_config(oauth).is_some()
                                 && looks_like_http_auth_error(&error)
                             {
-                                let cleared = auth_store.clear_tokens(name, url).await.unwrap_or(false);
+                                let cleared = auth_store
+                                    .clear_tokens(name, url)
+                                    .await
+                                    .unwrap_or(false);
                                 tracing::warn!(
                                     mcp = name,
                                     url,
@@ -349,12 +418,7 @@ async fn connect_config(
                 }
                 other => {
                     let _ = runtime.disconnect(directory, name).await;
-                    runtime.connect_remote_status(
-                        directory,
-                        name,
-                        url,
-                        other.clone(),
-                    );
+                    runtime.connect_remote_status(directory, name, url, other.clone());
                     Ok(other)
                 }
             }
@@ -367,7 +431,13 @@ pub(crate) async fn disconnect(
     directory: &str,
     name: &str,
 ) -> anyhow::Result<bool> {
-    state.workspace_runtime(directory).await.map_err(anyhow::Error::msg)?.mcp()?.disconnect(directory, name).await
+    state
+        .workspace_runtime(directory)
+        .await
+        .map_err(anyhow::Error::msg)?
+        .mcp()?
+        .disconnect(directory, name)
+        .await
 }
 
 #[cfg(test)]
@@ -402,15 +472,20 @@ pub(crate) async fn tools_with_snapshot(
     if let Some(service) = builtin_service(Some(&state), name)
         .filter(|_| config.mcp.get(name).is_some_and(is_enabled))
     {
-        return Ok(service.tools().into_iter().map(|tool| McpToolInfo {
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.input_schema,
-            client: name.to_string(),
-            annotations: tool.annotations,
-        }).collect());
+        return Ok(service
+            .tools()
+            .into_iter()
+            .map(|tool| McpToolInfo {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+                client: name.to_string(),
+                annotations: tool.annotations,
+            })
+            .collect());
     }
-    ensure_connected_with_snapshot(directory, name, auth_store, state.clone(), snapshot).await?;
+    ensure_connected_with_snapshot(directory, name, auth_store, state.clone(), snapshot)
+        .await?;
     snapshot
         .mcp()?
         .tools(directory, name)
@@ -449,16 +524,21 @@ async fn resources_with_snapshot(
     if let Some(service) = builtin_service(Some(&state), name)
         .filter(|_| config.mcp.get(name).is_some_and(is_enabled))
     {
-        return Ok(service.resources().into_iter().map(|resource| McpResource {
-            name: resource.name,
-            uri: resource.uri,
-            description: resource.description,
-            mime_type: resource.mime_type,
-            client: name.to_string(),
-        }).collect());
+        return Ok(service
+            .resources()
+            .into_iter()
+            .map(|resource| McpResource {
+                name: resource.name,
+                uri: resource.uri,
+                description: resource.description,
+                mime_type: resource.mime_type,
+                client: name.to_string(),
+            })
+            .collect());
     }
     ensure_connected_with_snapshot(directory, name, auth_store, state, snapshot).await?;
-    snapshot.mcp()?
+    snapshot
+        .mcp()?
         .resources(directory, name)
         .ok_or_else(|| anyhow!("MCP server {name} is not connected"))
 }
@@ -495,19 +575,28 @@ async fn prompts_with_snapshot(
     if let Some(service) = builtin_service(Some(&state), name)
         .filter(|_| config.mcp.get(name).is_some_and(is_enabled))
     {
-        return Ok(service.prompts().into_iter().map(|prompt| McpPromptInfo {
-            name: prompt.name,
-            description: prompt.description,
-            arguments: prompt.arguments.into_iter().map(|argument| neoism_agent_core::McpPromptArgument {
-                name: argument.name,
-                description: argument.description,
-                required: argument.required,
-            }).collect(),
-            client: name.to_string(),
-        }).collect());
+        return Ok(service
+            .prompts()
+            .into_iter()
+            .map(|prompt| McpPromptInfo {
+                name: prompt.name,
+                description: prompt.description,
+                arguments: prompt
+                    .arguments
+                    .into_iter()
+                    .map(|argument| neoism_agent_core::McpPromptArgument {
+                        name: argument.name,
+                        description: argument.description,
+                        required: argument.required,
+                    })
+                    .collect(),
+                client: name.to_string(),
+            })
+            .collect());
     }
     ensure_connected_with_snapshot(directory, name, auth_store, state, snapshot).await?;
-    snapshot.mcp()?
+    snapshot
+        .mcp()?
         .prompts(directory, name)
         .ok_or_else(|| anyhow!("MCP server {name} is not connected"))
 }
@@ -534,13 +623,7 @@ pub(crate) async fn call_tool_with_state(
 ) -> anyhow::Result<McpToolCallResult> {
     let snapshot = state.refreshed_plugin_snapshot(directory).await;
     call_tool_with_snapshot(
-        directory,
-        client,
-        tool,
-        arguments,
-        auth_store,
-        state,
-        &snapshot,
+        directory, client, tool, arguments, auth_store, state, &snapshot,
     )
     .await
 }
@@ -559,31 +642,72 @@ pub(crate) async fn call_tool_with_snapshot(
     if let Some(service) = builtin_service(Some(&state), client)
         .filter(|_| config.mcp.get(client).is_some_and(is_enabled))
     {
-        let result = service.call_tool_async(std::path::Path::new(directory), tool, arguments).await?;
+        let result = service
+            .call_tool_async(std::path::Path::new(directory), tool, arguments)
+            .await?;
         return Ok(McpToolCallResult {
-            content: result.content.into_iter().map(|content| match content {
-                neoism_agent_service_api::BuiltinMcpContent::Text { text, annotations } => McpContent::Text { text, annotations },
-                neoism_agent_service_api::BuiltinMcpContent::Resource { resource, annotations } => McpContent::Resource { resource, annotations },
-                neoism_agent_service_api::BuiltinMcpContent::ResourceLink { uri, name, description, mime_type, annotations } => McpContent::ResourceLink { uri, name, description, mime_type, annotations },
-            }).collect(),
+            content: result
+                .content
+                .into_iter()
+                .map(|content| match content {
+                    neoism_agent_service_api::BuiltinMcpContent::Text {
+                        text,
+                        annotations,
+                    } => McpContent::Text { text, annotations },
+                    neoism_agent_service_api::BuiltinMcpContent::Resource {
+                        resource,
+                        annotations,
+                    } => McpContent::Resource {
+                        resource,
+                        annotations,
+                    },
+                    neoism_agent_service_api::BuiltinMcpContent::ResourceLink {
+                        uri,
+                        name,
+                        description,
+                        mime_type,
+                        annotations,
+                    } => McpContent::ResourceLink {
+                        uri,
+                        name,
+                        description,
+                        mime_type,
+                        annotations,
+                    },
+                })
+                .collect(),
             is_error: result.is_error,
         });
     }
-    ensure_connected_with_snapshot(directory, client, auth_store, state.clone(), snapshot).await?;
+    ensure_connected_with_snapshot(
+        directory,
+        client,
+        auth_store,
+        state.clone(),
+        snapshot,
+    )
+    .await?;
     let retry_arguments = arguments.clone();
     let runtime = snapshot.mcp()?;
-    let result = runtime
-        .call_tool(directory, client, tool, arguments)
-        .await;
+    let result = runtime.call_tool(directory, client, tool, arguments).await;
     if let Err(error) = &result {
         if refresh_remote_credentials_after_auth_error(
-            client, auth_store, error, &config.mcp,
+            client,
+            auth_store,
+            error,
+            &config.mcp,
         )
         .await?
         {
             let _ = runtime.disconnect(directory, client).await;
-            ensure_connected_with_snapshot(directory, client, auth_store, state.clone(), snapshot)
-                .await?;
+            ensure_connected_with_snapshot(
+                directory,
+                client,
+                auth_store,
+                state.clone(),
+                snapshot,
+            )
+            .await?;
             return runtime
                 .call_tool(directory, client, tool, retry_arguments)
                 .await;
@@ -630,10 +754,14 @@ async fn ensure_connected_with_snapshot(
     let mut config = snapshot.config().clone();
     crate::config::inject_builtin_mcp(&mut config, state.services());
     let Some(entry) = config.mcp.get(name) else {
-        if let Ok(runtime) = snapshot.mcp() { let _ = runtime.disconnect(directory, name).await; }
+        if let Ok(runtime) = snapshot.mcp() {
+            let _ = runtime.disconnect(directory, name).await;
+        }
         return Err(anyhow!("MCP server {name} is not configured"));
     };
-    match connect_config(directory, name, entry, auth_store, state, snapshot.mcp()?).await? {
+    match connect_config(directory, name, entry, auth_store, state, snapshot.mcp()?)
+        .await?
+    {
         McpStatus::Connected => Ok(()),
         McpStatus::Disabled => Err(anyhow!("MCP server {name} is disabled")),
         McpStatus::NeedsAuth => {
@@ -650,7 +778,9 @@ pub(crate) fn configured_servers(
     directory: &str,
     state: Option<&AppState>,
 ) -> anyhow::Result<BTreeMap<String, McpConfig>> {
-    let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
+    let services = state
+        .map(|state| state.services().clone())
+        .unwrap_or_else(crate::standard_services);
     let mut info = neoism_agent_builtins::plugin::config::load(&services, directory)?.0;
     if let Some(state) = state {
         crate::config::inject_builtin_mcp(&mut info, state.services());
@@ -675,7 +805,9 @@ pub(crate) async fn reconcile_configured_servers(
         .filter(|(_, entry)| is_enabled(entry))
         .map(|(name, _)| name.clone())
         .collect::<BTreeSet<_>>();
-    if let Ok(runtime) = snapshot.mcp() { runtime.disconnect_except(directory, &configured).await; }
+    if let Ok(runtime) = snapshot.mcp() {
+        runtime.disconnect_except(directory, &configured).await;
+    }
 }
 
 async fn refresh_remote_credentials_after_auth_error(

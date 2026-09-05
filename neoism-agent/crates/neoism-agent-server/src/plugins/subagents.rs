@@ -10,10 +10,8 @@ use std::collections::BTreeSet;
 use tokio::sync::Mutex;
 
 use crate::error::ApiError;
-use crate::session_actions::{
-    create_subtask_session, spawn_background_subtask_prompt,
-};
 use crate::plugins;
+use crate::session_actions::{create_subtask_session, spawn_background_subtask_prompt};
 use crate::state::AppState;
 use crate::tool::ToolExecutionResult;
 use crate::workspace_runtime::PluginGenerationLease;
@@ -37,14 +35,22 @@ impl SubagentWorkspaceRuntime {
 
 #[cfg(test)]
 fn enabled_in_config(config: &neoism_agent_core::AgentConfigDocument) -> bool {
-    config.plugins.get(neoism_agent_builtins::plugin::subagents::ID).is_none_or(|plugin| plugin.enabled)
+    config
+        .plugins
+        .get(neoism_agent_builtins::plugin::subagents::ID)
+        .is_none_or(|plugin| plugin.enabled)
 }
 
 async fn require_enabled(state: &AppState, directory: &str) -> Result<(), String> {
     let snapshot = state.plugin_snapshot(directory).await;
     plugins::enabled(&snapshot, neoism_agent_builtins::plugin::subagents::ID)
         .then_some(())
-        .ok_or_else(|| format!("plugin {} is disabled for this workspace", neoism_agent_builtins::plugin::subagents::ID))
+        .ok_or_else(|| {
+            format!(
+                "plugin {} is disabled for this workspace",
+                neoism_agent_builtins::plugin::subagents::ID
+            )
+        })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -88,13 +94,21 @@ pub(crate) async fn start_task_tool(
     let description = string_arg(&input, "description")
         .unwrap_or_else(|| prompt.chars().take(48).collect::<String>());
     let command = string_arg(&input, "command").unwrap_or_else(|| description.clone());
-    let background = input.get("background").and_then(Value::as_bool).unwrap_or(true);
+    let background = input
+        .get("background")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     let parent = parent_session(state, session_id.as_str())
         .await
         .map_err(|error| error.to_string())?;
     plugins::enabled(&snapshot, neoism_agent_builtins::plugin::subagents::ID)
         .then_some(())
-        .ok_or_else(|| format!("plugin {} is disabled for this workspace", neoism_agent_builtins::plugin::subagents::ID))?;
+        .ok_or_else(|| {
+            format!(
+                "plugin {} is disabled for this workspace",
+                neoism_agent_builtins::plugin::subagents::ID
+            )
+        })?;
     let task_id = string_arg(&input, "task_id");
     let continuing = task_id.is_some();
     if !continuing {
@@ -147,16 +161,34 @@ pub(crate) async fn start_task_tool(
             .await
             .map_err(|error| error.to_string())?
         {
-            crate::tool_runtime::ensure_child_task_belongs_to_parent(state, &parent, &child)
-                .await?;
+            crate::tool_runtime::ensure_child_task_belongs_to_parent(
+                state, &parent, &child,
+            )
+            .await?;
             child.id.to_string()
         } else {
-            create_child(state, &snapshot, &parent, &command, &description, &agent.name, child_model.clone())
-                .await?
+            create_child(
+                state,
+                &snapshot,
+                &parent,
+                &command,
+                &description,
+                &agent.name,
+                child_model.clone(),
+            )
+            .await?
         }
     } else {
-        create_child(state, &snapshot, &parent, &command, &description, &agent.name, child_model.clone())
-            .await?
+        create_child(
+            state,
+            &snapshot,
+            &parent,
+            &command,
+            &description,
+            &agent.name,
+            child_model.clone(),
+        )
+        .await?
     };
     if crate::tool_runtime::session_is_running(state, &child_session_id).await {
         if continuing {
@@ -170,7 +202,10 @@ pub(crate) async fn start_task_tool(
             .await?;
             return Ok(ToolExecutionResult {
                 title: description,
-                output: crate::tool_runtime::task_queued_output(&child_session_id, queue_len),
+                output: crate::tool_runtime::task_queued_output(
+                    &child_session_id,
+                    queue_len,
+                ),
                 metadata: Some(crate::tool_runtime::task_metadata(
                     &child_session_id,
                     &agent.name,
@@ -208,9 +243,13 @@ pub(crate) async fn start_task_tool(
             .await
         }
         .map_err(|error| error.to_string())?;
-        crate::session_actions::mark_subtask_notify_on_idle(state, &child_session_id, &generation)
-            .await
-            .map_err(|error| error.to_string())?;
+        crate::session_actions::mark_subtask_notify_on_idle(
+            state,
+            &child_session_id,
+            &generation,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         spawn_background_subtask_prompt(
             state.clone(),
             child_session_id.clone(),
@@ -295,7 +334,11 @@ async fn create_child(
     let child = create_subtask_session(state, parent, command, description, agent, model)
         .await
         .map_err(|error| error.to_string())?;
-    snapshot.subagents().map_err(|error| error.to_string())?.track(child.id.to_string()).await;
+    snapshot
+        .subagents()
+        .map_err(|error| error.to_string())?
+        .track(child.id.to_string())
+        .await;
     Ok(child.id.to_string())
 }
 
@@ -311,9 +354,10 @@ pub(crate) async fn list_tasks(
     require_enabled(&state, &parent.directory)
         .await
         .map_err(ApiError::not_found)?;
-    let mut children = crate::tool_runtime::descendant_sessions(&state, parent.id.as_str())
-        .await
-        .map_err(ApiError::internal)?;
+    let mut children =
+        crate::tool_runtime::descendant_sessions(&state, parent.id.as_str())
+            .await
+            .map_err(ApiError::internal)?;
     children.sort_by(|left, right| right.time.updated.cmp(&left.time.updated));
     let mut tasks = Vec::with_capacity(children.len());
     for child in children {
@@ -348,10 +392,16 @@ pub(crate) async fn task_result_tool(
         .map_err(|error| error.to_string())?;
     plugins::enabled(snapshot, neoism_agent_builtins::plugin::subagents::ID)
         .then_some(())
-        .ok_or_else(|| format!("plugin {} is disabled for this workspace", neoism_agent_builtins::plugin::subagents::ID))?;
+        .ok_or_else(|| {
+            format!(
+                "plugin {} is disabled for this workspace",
+                neoism_agent_builtins::plugin::subagents::ID
+            )
+        })?;
     if let Some(task_id) = input.get("task_id").and_then(Value::as_str) {
         let child = child_session(state, task_id).await?;
-        crate::tool_runtime::ensure_child_task_belongs_to_parent(state, &parent, &child).await?;
+        crate::tool_runtime::ensure_child_task_belongs_to_parent(state, &parent, &child)
+            .await?;
         let (status, output) =
             crate::tool_runtime::task_result_output_for_child(state, &child).await?;
         return Ok(ToolExecutionResult {
@@ -365,7 +415,8 @@ pub(crate) async fn task_result_tool(
         });
     }
 
-    let mut children = crate::tool_runtime::descendant_sessions(state, parent.id.as_str()).await?;
+    let mut children =
+        crate::tool_runtime::descendant_sessions(state, parent.id.as_str()).await?;
     children.sort_by(|left, right| right.time.updated.cmp(&left.time.updated));
     if children.is_empty() {
         return Ok(ToolExecutionResult {
@@ -374,12 +425,14 @@ pub(crate) async fn task_result_tool(
             metadata: Some(json!({ "tasks": [] })),
         });
     }
-    let mut lines = vec!["Subagent tasks for this session (including nested subagents):".to_string()];
+    let mut lines =
+        vec!["Subagent tasks for this session (including nested subagents):".to_string()];
     let mut metadata = Vec::new();
     for child in children {
         let status = crate::tool_runtime::task_status_for_child(state, &child).await?;
         let agent = child.agent.as_deref().unwrap_or("subagent");
-        let nested = child.parent_id.as_ref().map(|id| id.as_str()) != Some(parent.id.as_str());
+        let nested =
+            child.parent_id.as_ref().map(|id| id.as_str()) != Some(parent.id.as_str());
         lines.push(format!(
             "task_id: {} status: {} agent: {} title: {}{}",
             child.id,
@@ -414,7 +467,12 @@ pub(crate) async fn stop_task_tool(
         .map_err(|error| error.to_string())?;
     plugins::enabled(snapshot, neoism_agent_builtins::plugin::subagents::ID)
         .then_some(())
-        .ok_or_else(|| format!("plugin {} is disabled for this workspace", neoism_agent_builtins::plugin::subagents::ID))?;
+        .ok_or_else(|| {
+            format!(
+                "plugin {} is disabled for this workspace",
+                neoism_agent_builtins::plugin::subagents::ID
+            )
+        })?;
     let task_id = input.get("task_id").and_then(Value::as_str);
     let result = stop(state, &parent, task_id).await?;
     let count = result.stopped.len();
@@ -442,7 +500,8 @@ async fn stop(
 ) -> Result<StopSubagentsResult, String> {
     let roots = if let Some(task_id) = task_id {
         let child = child_session(state, task_id).await?;
-        crate::tool_runtime::ensure_child_task_belongs_to_parent(state, parent, &child).await?;
+        crate::tool_runtime::ensure_child_task_belongs_to_parent(state, parent, &child)
+            .await?;
         vec![child]
     } else {
         crate::tool_runtime::descendant_sessions(state, parent.id.as_str()).await?
@@ -467,7 +526,8 @@ async fn stop(
             stopped.push(child.id.to_string());
         }
         let cleared =
-            crate::session_queue::clear_session_prompt_queue(state, child.id.as_str()).await;
+            crate::session_queue::clear_session_prompt_queue(state, child.id.as_str())
+                .await;
         cleared_prompts += cleared;
         if cleared > 0 {
             let _ = crate::execution_activity::finish_subtask_for_child(
@@ -489,15 +549,19 @@ async fn task_info(
     parent: &SessionInfo,
     child: &SessionInfo,
 ) -> Result<SubagentTaskInfo, ApiError> {
-    let (status, output) = crate::tool_runtime::task_result_output_for_child(state, child)
-        .await
-        .map_err(ApiError::internal)?;
+    let (status, output) =
+        crate::tool_runtime::task_result_output_for_child(state, child)
+            .await
+            .map_err(ApiError::internal)?;
     let result = matches!(status.as_str(), "completed" | "error").then_some(output);
     Ok(SubagentTaskInfo {
         id: child.id.to_string(),
         session_id: parent.id.to_string(),
         child_session_id: child.id.to_string(),
-        agent: child.agent.clone().unwrap_or_else(|| "subagent".to_string()),
+        agent: child
+            .agent
+            .clone()
+            .unwrap_or_else(|| "subagent".to_string()),
         status,
         description: child.title.clone(),
         result,
@@ -505,7 +569,10 @@ async fn task_info(
     })
 }
 
-async fn parent_session(state: &AppState, session_id: &str) -> Result<SessionInfo, ApiError> {
+async fn parent_session(
+    state: &AppState,
+    session_id: &str,
+) -> Result<SessionInfo, ApiError> {
     state
         .inner
         .store
@@ -539,7 +606,11 @@ mod tests {
             },
         );
         assert!(!enabled_in_config(&config));
-        config.plugins.get_mut(neoism_agent_builtins::plugin::subagents::ID).unwrap().enabled = true;
+        config
+            .plugins
+            .get_mut(neoism_agent_builtins::plugin::subagents::ID)
+            .unwrap()
+            .enabled = true;
         assert!(enabled_in_config(&config));
     }
 }

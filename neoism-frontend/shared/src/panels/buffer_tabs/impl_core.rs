@@ -1,5 +1,10 @@
 use super::*;
 
+// Intrinsic tab widths must not depend on sibling count. This generous cap
+// only prevents pathological generated titles from creating multi-screen
+// slots; ordinary descriptive filenames are no longer cut at the old 220px.
+pub(super) const INTRINSIC_TAB_MAX_WIDTH: f32 = 520.0;
+
 impl<A> BufferTabs<A> {
     pub fn new() -> Self {
         BufferTabs {
@@ -10,6 +15,7 @@ impl<A> BufferTabs<A> {
             scale: 1.0,
             scroll_x: 0.0,
             scroll_target_x: 0.0,
+            strip_viewport_width: 0.0,
             pending_ensure_active: false,
             drag: None,
             tear_out_anim: None,
@@ -128,6 +134,7 @@ impl<A> BufferTabs<A> {
         self.hover_to = None;
         self.focused_index = self.active;
         self.focused_cursor_rect = None;
+        self.pending_ensure_active = !self.tabs.is_empty();
     }
 
     pub fn set_hover(&mut self, hover: Option<TabHit>) -> bool {
@@ -189,6 +196,7 @@ impl<A> BufferTabs<A> {
     pub fn set_title(&mut self, ix: usize, title: impl Into<String>) -> bool {
         if let Some(tab) = self.tabs.get_mut(ix) {
             tab.title = title.into();
+            self.layout.clear();
             true
         } else {
             false
@@ -212,25 +220,6 @@ impl<A> BufferTabs<A> {
         tab.custom_icon.clone_from(&source.custom_icon);
         self.layout.clear();
         true
-    }
-
-    /// The agent session id backing the tab at `ix`, if this is an
-    /// agent tab whose title should be published at the daemon level on
-    /// rename. Terminal-agent tabs key off `terminal_route_id`; native
-    /// neoism-agent tabs key off `neoism_agent_route_id`. Both are
-    /// stringified so the daemon `SetTitle { session_id, .. }` path
-    /// receives the route identifier the host can resolve to a session.
-    pub fn agent_session_id_at(&self, ix: usize) -> Option<String> {
-        let tab = self.tabs.get(ix)?;
-        if let Some(route) = tab.neoism_agent_route_id {
-            return Some(route.to_string());
-        }
-        if tab.agent_kind.is_some() {
-            if let Some(route) = tab.terminal_route_id {
-                return Some(route.to_string());
-            }
-        }
-        None
     }
 
     pub fn is_focused(&self) -> bool {
@@ -476,21 +465,108 @@ impl<A> BufferTabs<A> {
         false
     }
 
-    /// Width of every tab slot for `count` tabs in `available_width`.
-    ///
-    /// Tabs keep their natural `NATURAL_TAB_WIDTH` regardless of count:
-    /// we no longer shrink-to-fit and truncate titles when the strip is
-    /// crowded. When the tabs overflow the strip, the strip scrolls
-    /// horizontally instead (it is already a scroll surface). The only
-    /// remaining clamp is the strip width itself — a fixed natural-width
-    /// tab on a phone-width strip left a huge empty band on its right, so
-    /// a lone tab never exceeds the strip.
+    /// Conservative fallback width used before the first text-measured frame.
+    /// Rendered tabs use [`Self::visual_tab_width`] per label instead.
     pub fn tab_width_for(count: usize, available_width: f32) -> f32 {
         let _ = count;
-        // Never wider than the strip (keeps a single tab from leaving a
-        // dead band), never narrower than MIN so titles stay legible.
-        let upper = NATURAL_TAB_WIDTH.min(available_width.max(MIN_TAB_WIDTH));
-        NATURAL_TAB_WIDTH.clamp(MIN_TAB_WIDTH.min(upper), upper)
+        MIN_TAB_WIDTH.min(available_width.max(MIN_TAB_WIDTH))
+    }
+
+    /// Shared natural-width policy for every buffer kind and host.
+    /// `title_width` is the actual label advance at the scaled strip font.
+    /// The generous intrinsic maximum only guards against pathological titles;
+    /// it is independent of viewport and sibling count. Crowded strips retain
+    /// these widths and scroll rather than redistributing them.
+    pub fn visual_tab_width(title_width: f32, close_affordance: bool, scale: f32) -> f32 {
+        Self::visual_tab_geometry(
+            title_width,
+            ICON_FONT_SIZE * scale.clamp(0.5, 3.0),
+            close_affordance,
+            scale,
+        )
+        .tab_width
+    }
+
+    /// Exact inverse sizing/clip policy used by the renderer. `title_width`
+    /// and `icon_width` are already measured at the scaled paint font.
+    pub fn visual_tab_geometry(
+        title_width: f32,
+        icon_width: f32,
+        close_affordance: bool,
+        scale: f32,
+    ) -> TabVisualGeometry {
+        let scale = scale.clamp(0.5, 3.0);
+        let pad = TAB_PADDING_X * scale;
+        let close_reserved = if close_affordance {
+            // Right padding runs from the close centre to the edge. Only the
+            // left half of the glyph plus its label gap is additional space.
+            (CLOSE_BTN_SIZE * 0.5 + CLOSE_BTN_GAP) * scale
+        } else {
+            0.0
+        };
+        let fixed = pad * 2.0
+            + icon_width.max(0.0)
+            + ICON_GAP * scale
+            + TITLE_OVERHANG_GUARD * scale
+            + close_reserved;
+        let tab_width = (fixed + title_width.max(0.0))
+            .clamp(MIN_TAB_WIDTH * scale, INTRINSIC_TAB_MAX_WIDTH * scale);
+        TabVisualGeometry {
+            tab_width,
+            title_clip_width: (tab_width - fixed).max(0.0),
+            icon_width: icon_width.max(0.0),
+            close_reserved,
+            close_center_x: close_affordance.then_some(tab_width - pad),
+        }
+    }
+
+    fn estimated_widths(&self) -> Vec<f32> {
+        use unicode_width::UnicodeWidthStr;
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, tab)| {
+                let title_width = UnicodeWidthStr::width(tab.title.as_str()) as f32
+                    * FONT_SIZE
+                    * self.scale
+                    * 0.58;
+                Self::visual_tab_width(
+                    title_width,
+                    !self.is_root_terminal_at(ix),
+                    self.scale,
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn geometry_widths(&self) -> Vec<f32> {
+        if self.layout.len() == self.tabs.len() {
+            self.layout.iter().map(|(_, width)| *width).collect()
+        } else {
+            self.estimated_widths()
+        }
+    }
+
+    pub(super) fn ensure_index_visible_with_widths(
+        &mut self,
+        ix: usize,
+        available_width: f32,
+        widths: &[f32],
+    ) {
+        if widths.is_empty() || available_width <= 0.0 {
+            return;
+        }
+        let ix = ix.min(widths.len() - 1);
+        let tab_left: f32 = widths[..ix].iter().sum();
+        let tab_right = tab_left + widths[ix];
+        let max_scroll = (widths.iter().sum::<f32>() - available_width).max(0.0);
+        let mut target = self.scroll_target_x;
+        if tab_left < target {
+            target = tab_left;
+        } else if tab_right > target + available_width {
+            target = tab_right - available_width;
+        }
+        self.scroll_target_x = target.clamp(0.0, max_scroll);
     }
 
     /// Truncate `title` so that it (plus a single-char ellipsis) fits
@@ -500,28 +576,77 @@ impl<A> BufferTabs<A> {
         max_width: f32,
         mut char_width: impl FnMut(char) -> f32,
     ) -> std::borrow::Cow<'a, str> {
+        use unicode_segmentation::UnicodeSegmentation;
+
         let suffix_width = char_width(TITLE_ELLIPSIS);
-        let mut accumulated: f32 = 0.0;
-        let mut truncate_ix: usize = 0;
-        for (ix, c) in title.char_indices() {
-            if accumulated + suffix_width <= max_width {
-                truncate_ix = ix;
-            }
-            accumulated += char_width(c);
-            if accumulated > max_width {
-                let mut out =
-                    String::with_capacity(truncate_ix + TITLE_ELLIPSIS.len_utf8());
-                out.push_str(&title[..truncate_ix]);
-                out.push(TITLE_ELLIPSIS);
-                return std::borrow::Cow::Owned(out);
-            }
+        if max_width <= 0.0 || suffix_width > max_width {
+            return std::borrow::Cow::Owned(String::new());
         }
-        std::borrow::Cow::Borrowed(title)
+        let graphemes: Vec<(usize, f32)> = title
+            .grapheme_indices(true)
+            .map(|(start, grapheme)| {
+                let end = start + grapheme.len();
+                let width = grapheme.chars().map(&mut char_width).sum();
+                (end, width)
+            })
+            .collect();
+        if graphemes.iter().map(|(_, width)| width).sum::<f32>() <= max_width {
+            return std::borrow::Cow::Borrowed(title);
+        }
+
+        let prefix_budget = max_width - suffix_width;
+        let mut prefix_width = 0.0;
+        let mut prefix_end = 0;
+        for (end, width) in graphemes {
+            if prefix_width + width > prefix_budget {
+                break;
+            }
+            prefix_width += width;
+            prefix_end = end;
+        }
+        let mut out = String::with_capacity(prefix_end + TITLE_ELLIPSIS.len_utf8());
+        out.push_str(&title[..prefix_end]);
+        out.push(TITLE_ELLIPSIS);
+        std::borrow::Cow::Owned(out)
     }
 
     /// Bump the scroll target by `delta` logical pixels.
     pub fn scroll_by(&mut self, delta: f32) {
         self.scroll_target_x += delta;
+    }
+
+    /// Route a wheel/trackpad gesture into the horizontal tab strip. Deltas
+    /// use the shared `UiEvent` convention; callers retain ownership even at
+    /// the strip boundary so the gesture cannot chain into page content.
+    pub fn scroll_wheel(&mut self, dx: f32, dy: f32, mode: WheelMode) {
+        let delta = match mode {
+            WheelMode::Pixel => SessionScrollDelta::Pixels { x: dx, y: dy },
+            WheelMode::Line => SessionScrollDelta::Lines { x: dx, y: dy },
+            WheelMode::Page => SessionScrollDelta::Pixels {
+                x: dx * self.last_strip_width().max(1.0),
+                y: dy * self.height().max(1.0),
+            },
+        };
+        let scroll = buffer_tabs_scroll_dx(delta, 0.5);
+        if scroll != 0.0 {
+            self.scroll_by(scroll);
+        }
+    }
+
+    /// Direct horizontal finger tracking. Unlike wheel/keyboard scrolling,
+    /// touch updates both positions together so render-time easing cannot lag
+    /// behind the hand. `finger_delta_x` is positive when the finger moves
+    /// right; content follows it, therefore the scroll coordinate decreases.
+    pub fn scroll_touch_by(&mut self, finger_delta_x: f32, available_width: f32) -> bool {
+        let widths = self.geometry_widths();
+        let max_scroll = (widths.iter().sum::<f32>() + NEW_TAB_BTN_WIDTH * self.scale
+            - available_width)
+            .max(0.0);
+        let before = self.scroll_x.clamp(0.0, max_scroll);
+        let next = (before - finger_delta_x).clamp(0.0, max_scroll);
+        self.scroll_x = next;
+        self.scroll_target_x = next;
+        (next - before).abs() > f32::EPSILON
     }
 
     /// Move the scroll target so that the active tab is fully visible.
@@ -538,18 +663,8 @@ impl<A> BufferTabs<A> {
             return;
         }
         let ix = ix.min(self.tabs.len() - 1);
-        let tab_width = Self::tab_width_for(self.tabs.len(), available_width);
-        let total_w = tab_width * self.tabs.len() as f32;
-        let max_scroll = (total_w - available_width).max(0.0);
-        let tab_left = ix as f32 * tab_width;
-        let tab_right = tab_left + tab_width;
-        let mut target = self.scroll_target_x;
-        if tab_left < target {
-            target = tab_left;
-        } else if tab_right > target + available_width {
-            target = tab_right - available_width;
-        }
-        self.scroll_target_x = target.clamp(0.0, max_scroll);
+        let widths = self.geometry_widths();
+        self.ensure_index_visible_with_widths(ix, available_width, &widths);
     }
 
     pub fn move_active(&mut self, previous: bool) -> bool {
@@ -897,15 +1012,18 @@ impl<A> BufferTabs<A> {
         if raw_local_x < 0.0 || raw_local_x > available_width {
             return None;
         }
+        let widths = self.geometry_widths();
         let local_x = raw_local_x + self.scroll_x;
-        let tab_width = Self::tab_width_for(self.tabs.len(), available_width);
-        let total_w = tab_width * self.tabs.len() as f32;
-        if local_x < 0.0 || local_x > total_w {
+        let mut edge = 0.0;
+        let Some(ix) = widths.iter().position(|width| {
+            let hit = local_x >= edge && local_x <= edge + *width;
+            edge += *width;
+            hit
+        }) else {
             return None;
-        }
-        let raw_ix = (local_x / tab_width).floor() as usize;
-        let ix = raw_ix.min(self.tabs.len() - 1);
-        let tab_left = x_left - self.scroll_x + ix as f32 * tab_width;
+        };
+        let tab_left = x_left - self.scroll_x + widths[..ix].iter().sum::<f32>();
+        let tab_width = widths[ix];
         if self.is_root_terminal_at(ix) {
             return Some(TabHit::Activate(ix));
         }
@@ -931,14 +1049,18 @@ impl<A> BufferTabs<A> {
         mouse_x: f32,
         mouse_y: f32,
         x_left: f32,
-        available_width: f32,
+        _available_width: f32,
     ) {
         if ix >= self.tabs.len() || !self.visible {
             return;
         }
-        let tab_width = Self::tab_width_for(self.tabs.len(), available_width);
+        let widths = self.geometry_widths();
+        let tab_width = widths
+            .get(ix)
+            .copied()
+            .unwrap_or(MIN_TAB_WIDTH * self.scale);
         let local_x = mouse_x - x_left + self.scroll_x;
-        let slot_left = ix as f32 * tab_width;
+        let slot_left: f32 = widths[..ix.min(widths.len())].iter().sum();
         let grab_offset = (local_x - slot_left).clamp(0.0, tab_width);
         self.drag = Some(DragState {
             current_ix: ix,
@@ -968,6 +1090,7 @@ impl<A> BufferTabs<A> {
         y_top: f32,
         available_width: f32,
     ) -> bool {
+        let widths = self.geometry_widths();
         let Some(drag) = self.drag.as_mut() else {
             return false;
         };
@@ -975,7 +1098,10 @@ impl<A> BufferTabs<A> {
         if count == 0 {
             return false;
         }
-        let tab_width = Self::tab_width_for(count, available_width);
+        let tab_width = widths
+            .get(drag.current_ix)
+            .copied()
+            .unwrap_or_else(|| Self::tab_width_for(count, available_width));
         let local_x = mouse_x - x_left + self.scroll_x;
         drag.current_local_x = local_x;
         drag.current_y = mouse_y;
@@ -1000,7 +1126,8 @@ impl<A> BufferTabs<A> {
         let dragged_center = dragged_left + tab_width * 0.5;
         let cur = drag.current_ix;
         let mut swapped = false;
-        if cur + 1 < count && dragged_center > (cur as f32 + 1.0) * tab_width {
+        let slot_left: f32 = widths[..cur.min(widths.len())].iter().sum();
+        if cur + 1 < count && dragged_center > slot_left + tab_width {
             let result = apply_buffer_tab_policy(
                 BufferTabPolicyInput {
                     len: count,
@@ -1019,7 +1146,7 @@ impl<A> BufferTabs<A> {
             }
             self.layout.clear();
             swapped = true;
-        } else if cur > 0 && dragged_center < cur as f32 * tab_width {
+        } else if cur > 0 && dragged_center < slot_left {
             let result = apply_buffer_tab_policy(
                 BufferTabPolicyInput {
                     len: count,

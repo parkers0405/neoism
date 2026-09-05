@@ -28,7 +28,8 @@ pub(crate) fn run_action(
                     "Neoism LSP workspace symbols need a search query".to_string(),
                 )
             } else {
-                let result = language_server::workspace_symbols(runtime, workspace_root, query);
+                let result =
+                    language_server::workspace_symbols(runtime, workspace_root, query);
                 let symbols: Vec<EditorLspSymbol> =
                     result.into_iter().map(map_workspace_symbol).collect();
                 let summary = format!(

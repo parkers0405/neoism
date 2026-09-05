@@ -23,6 +23,7 @@
       <ComponentRef Id="NeoismExe" />
       <ComponentRef Id="WorkspaceDaemonExe" />
       <ComponentRef Id="AgentExe" />
+      <ComponentGroupRef Id="WebFiles" />
       <ComponentRef Id="InstallRegistration" />
       <ComponentRef Id="UserPath" />
       <ComponentRef Id="StartMenuShortcut" />
@@ -31,7 +32,9 @@
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="LocalProgramsFolder" Name="Programs">
-        <Directory Id="INSTALLFOLDER" Name="Neoism" />
+        <Directory Id="INSTALLFOLDER" Name="Neoism">
+          <Directory Id="WebFolder" Name="web" />
+        </Directory>
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
@@ -128,6 +131,10 @@
         </RegistryKey>
       </Component>
     </DirectoryRef>
+
+    <ComponentGroup Id="WebFiles" Directory="WebFolder">
+      <Files Include="$(var.BinaryDir)\web\**" />
+    </ComponentGroup>
 
     <DirectoryRef Id="NeoismProgramMenu">
       <Component Id="StartMenuShortcut" Guid="55bfe706-7a8f-471b-b9c3-055483f3af8d" Bitness="always64">

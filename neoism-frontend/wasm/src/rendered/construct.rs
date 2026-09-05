@@ -42,6 +42,7 @@ impl ChromeBridge {
         // / narrower sidebar can flip via `set_file_tree_width`
         // through a follow-up bridge method (omitted for now).
         let mut chrome: Chrome<()> = Chrome::new();
+        chrome.set_mobile_web_agent_panel_enabled(true);
         // Default IdeTheme — pastel_dark. JS pushes the user's
         // preferred theme name via `ChromeBridge::set_ide_theme`
         // shortly after construction; this seeds the static
@@ -142,6 +143,7 @@ impl ChromeBridge {
             active_tab_index: 0,
             tab_contents: std::collections::HashMap::new(),
             last_markdown_viewport_h: 600.0,
+            mobile_direct_insert: false,
             markdown_crdt_client_id: generate_crdt_client_id(),
             markdown_crdt_binding: None,
             crdt_outbound: Vec::new(),

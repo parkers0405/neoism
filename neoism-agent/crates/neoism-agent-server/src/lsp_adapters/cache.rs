@@ -48,8 +48,8 @@ pub(in crate::lsp) fn adapters_for_root_with(
         if let Some(cached) = cache.get(root) {
             if !configuration_valid
                 || (cached.loaded_at.elapsed() < ADAPTER_CACHE_TTL
-                && cached.snapshot_identity == snapshot_identity
-                && cached.capability_generation == capability_generation)
+                    && cached.snapshot_identity == snapshot_identity
+                    && cached.capability_generation == capability_generation)
             {
                 return cached.adapters.clone();
             }
@@ -97,7 +97,8 @@ fn resolve_adapters_uncached(
     capability_snapshot: &neoism_agent_service_api::LanguageCapabilitySnapshot,
     generation_config: Option<&neoism_agent_core::AgentConfigDocument>,
 ) -> Vec<LanguageAdapter> {
-    let mut adapters = capability_snapshot.languages
+    let mut adapters = capability_snapshot
+        .languages
         .iter()
         .map(LanguageAdapter::from_capability)
         .collect::<Vec<_>>();
@@ -127,9 +128,7 @@ fn resolve_adapters_uncached(
             ));
             continue;
         };
-        let referenced_adapter = object
-            .get("adapter")
-            .and_then(Value::as_str);
+        let referenced_adapter = object.get("adapter").and_then(Value::as_str);
         let disabled = object.get("enabled").and_then(Value::as_bool) == Some(false);
         if disabled {
             adapters.retain(|adapter| {

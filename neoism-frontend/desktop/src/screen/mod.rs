@@ -641,6 +641,9 @@ pub struct Screen<'screen> {
     /// editor activation can finish asynchronously; a mismatch is repaired
     /// in status sync before the grid is painted.
     last_chrome_layout_signature: Option<ChromeLayoutSignature>,
+    /// Most recently rendered live terminal. Resolution still verifies that
+    /// the route belongs to the current workspace before using it.
+    last_active_terminal_route: Option<usize>,
     /// One-shot guard for the first-run welcome reveal. `Screen::new`
     /// returns an inline `Ok(Screen { .. })` so there is no `self` to call
     /// a startup method on; instead we flip this on the first `render`
@@ -1765,6 +1768,7 @@ impl Screen<'_> {
             touchpurpose: TouchPurpose::default(),
             renderer,
             last_chrome_layout_signature: None,
+            last_active_terminal_route: None,
             welcome_reveal_pending: true,
             pending_notebook_executions: Vec::new(),
             pending_python_kernel_retry: None,

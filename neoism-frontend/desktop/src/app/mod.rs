@@ -468,7 +468,8 @@ impl Application<'_> {
             return;
         };
         let reconnect = self.ssh_attaches.get_mut(&endpoint).and_then(|attach| {
-            (!attach.is_running()).then(|| (attach.alias.clone(), attach.ssh_args.clone()))
+            (!attach.is_running())
+                .then(|| (attach.alias.clone(), attach.ssh_args.clone()))
         });
         let Some((target, ssh_args)) = reconnect else {
             return;
@@ -993,7 +994,8 @@ impl Application<'_> {
             let (code_crdt_messages, code_pane_changed) =
                 route.window.screen.drain_code_crdt_messages();
             outbound_crdt.extend(code_crdt_messages);
-            let code_analysis_changed = route.window.screen.service_code_revision_changes();
+            let code_analysis_changed =
+                route.window.screen.service_code_revision_changes();
             let (markdown_disk_messages, markdown_disk_changed) =
                 route.window.screen.reload_open_markdown_files_from_disk();
             outbound_crdt.extend(markdown_disk_messages);
@@ -2372,7 +2374,8 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 for route in self.router.routes.values_mut() {
                     let mut changed = false;
                     for snapshot in &snapshots {
-                        changed |= route.window.screen.apply_code_diagnostic_snapshot(snapshot);
+                        changed |=
+                            route.window.screen.apply_code_diagnostic_snapshot(snapshot);
                     }
                     if changed {
                         route.request_redraw();
@@ -2474,7 +2477,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
                     if failed {
-                        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+                        use neoism_ui::widgets::modal::{
+                            ModalAction, ModalButton, ModalSpec,
+                        };
                         route.window.screen.renderer.modal.open(ModalSpec {
                             title: "Update failed".to_string(),
                             body: message.clone(),
@@ -2556,6 +2561,20 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             RioEventType::Rio(RioEvent::OpenEditorTab { route_id: _, path }) => {
                 self.apply_open_editor_tab(window_id, path);
+            }
+            RioEventType::Rio(RioEvent::ChangeTerminalDirectory { route_id, path }) => {
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    if let Some(context) =
+                        route.window.screen.ctx_mut().get_by_route_id(route_id)
+                    {
+                        let shell = context.context().terminal_shell_kind;
+                        if let Ok(bytes) =
+                            shell.change_directory_payload(&path.to_string_lossy())
+                        {
+                            context.context_mut().messenger.send_bytes(bytes);
+                        }
+                    }
+                }
             }
             RioEventType::Rio(RioEvent::PtyWrite(route_id, text)) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {

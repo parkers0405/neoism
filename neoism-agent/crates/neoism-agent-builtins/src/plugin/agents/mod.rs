@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use neoism_agent_plugin_api::{
-    AgentCatalog as ServiceAgentCatalog, AgentService, AgentSource, PluginDefinition,
-    AgentSourceSnapshot, ContributionMetadata, PluginFuture, PluginHostError,
-    PluginContributions, PluginManifest, PluginRuntimeError, PluginScope, RouteContribution, RouteDescriptor,
-    RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope, ServiceRequest,
+    AgentCatalog as ServiceAgentCatalog, AgentService, AgentSource, AgentSourceSnapshot,
+    ContributionMetadata, PluginContributions, PluginDefinition, PluginFuture,
+    PluginHostError, PluginManifest, PluginRuntimeError, PluginScope, RouteContribution,
+    RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
+    ServiceRequest,
 };
 
 mod catalog;
@@ -43,8 +44,13 @@ impl PluginDefinition for AgentsPlugin {
         }
     }
 
-    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> { vec![neoism_agent_plugin_api::HostCapability::ConfigRead] }
-    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
+    fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> {
+        vec![neoism_agent_plugin_api::HostCapability::ConfigRead]
+    }
+    fn contributions(
+        &self,
+        registrar: &mut PluginContributions,
+    ) -> Result<(), PluginHostError> {
         let source = Arc::new(BuiltinAgentSource(self.catalog.clone()));
         registrar.agent_source_runtime("workspace-agents", source.clone());
         registrar.agent_service_runtime("workspace-agents", source.clone());
@@ -81,7 +87,10 @@ impl AgentSource for BuiltinAgentSource {
 }
 
 impl AgentService for BuiltinAgentSource {
-    fn list<'a>(&'a self, _request: ServiceRequest) -> PluginFuture<'a, ServiceAgentCatalog> {
+    fn list<'a>(
+        &'a self,
+        _request: ServiceRequest,
+    ) -> PluginFuture<'a, ServiceAgentCatalog> {
         Box::pin(async move {
             Ok(ServiceAgentCatalog {
                 agents: self.0.list(),
@@ -106,19 +115,26 @@ impl RouteHandler for AgentRoute {
     fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
         Box::pin(async move {
             let directory = request.workspace.unwrap_or_default();
-            let catalog = self.service.list(ServiceRequest {
-                workspace_id: None,
-                directory: Some(directory.to_string_lossy().into_owned()),
-                options: BTreeMap::new(),
-            }).await?;
+            let catalog = self
+                .service
+                .list(ServiceRequest {
+                    workspace_id: None,
+                    directory: Some(directory.to_string_lossy().into_owned()),
+                    options: BTreeMap::new(),
+                })
+                .await?;
             let body = match self.action {
                 AgentRouteAction::List => serde_json::to_value(catalog.agents)
                     .map_err(|error| PluginRuntimeError::new(error.to_string()))?,
                 AgentRouteAction::Get => {
                     let name = request.path.get("name").cloned().unwrap_or_default();
-                    let agent = catalog.agents.into_iter().find(|agent| agent.name == name);
+                    let agent =
+                        catalog.agents.into_iter().find(|agent| agent.name == name);
                     let Some(agent) = agent else {
-                        return Ok(RouteResponse::json(404, serde_json::json!({ "message": "Agent not found" })));
+                        return Ok(RouteResponse::json(
+                            404,
+                            serde_json::json!({ "message": "Agent not found" }),
+                        ));
                     };
                     serde_json::to_value(agent)
                         .map_err(|error| PluginRuntimeError::new(error.to_string()))?

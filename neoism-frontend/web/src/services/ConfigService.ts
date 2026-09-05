@@ -14,6 +14,7 @@ import type {
   ConfigDocument,
   ConfigServerMessage,
   ExtensionSummary,
+  MashupPackSummary,
 } from "../workspace/types";
 
 /** Structural slice of `ProtocolClient` this service needs — avoids a
@@ -179,6 +180,38 @@ export async function fetchExtensions(
     // Fall through to empty.
   }
   return [];
+}
+
+export async function fetchMashupPacks(
+  client: ConfigClientLike,
+): Promise<MashupPackSummary[]> {
+  try {
+    const reply = await client.requestConfig("ListMashupPacks");
+    if (reply && typeof reply === "object" && "MashupPacks" in reply) {
+      return reply.MashupPacks.entries;
+    }
+  } catch {
+    // The palette reports an empty catalog and can be retried.
+  }
+  return [];
+}
+
+export async function applyMashupPack(
+  client: ConfigClientLike,
+  id: string | null,
+): Promise<{ config: unknown } | { error: string }> {
+  try {
+    const reply = await client.requestConfig({ ApplyMashupPack: { id } });
+    if (reply && typeof reply === "object" && "MashupPackApplied" in reply) {
+      return { config: reply.MashupPackApplied.config };
+    }
+    if (reply && typeof reply === "object" && "Error" in reply) {
+      return { error: reply.Error.message };
+    }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+  return { error: "The daemon did not acknowledge the Mash Up Pack." };
 }
 
 /** localStorage key for the web NeoWorld pet — the browser-profile

@@ -8,7 +8,12 @@ async fn wait_for_session_message_count(
     let mut messages = Vec::new();
     for _ in 0..500 {
         messages = state.inner.store.list_messages(session_id).await.unwrap();
-        let running = state.inner.session_coordinator.active_run(session_id).await.is_some();
+        let running = state
+            .inner
+            .session_coordinator
+            .active_run(session_id)
+            .await
+            .is_some();
         if messages.len() >= count && !running {
             return messages;
         }
@@ -123,10 +128,13 @@ Review $1
             .unwrap(),
     )
     .await;
-    let last_parent_id = match &parent_messages.items.last().expect("parent messages").info {
-        MessageInfo::Assistant(assistant) => assistant.id.clone(),
-        MessageInfo::User(_) => panic!("expected last parent message to be assistant"),
-    };
+    let last_parent_id =
+        match &parent_messages.items.last().expect("parent messages").info {
+            MessageInfo::Assistant(assistant) => assistant.id.clone(),
+            MessageInfo::User(_) => {
+                panic!("expected last parent message to be assistant")
+            }
+        };
     assert_eq!(last_parent_id, response_id);
     let Some((metadata, output)) = parent_messages.items.iter().find_map(|message| {
         message.parts.iter().find_map(|part| {
@@ -161,7 +169,8 @@ Review $1
             .unwrap(),
     )
     .await;
-    let child = sessions.items
+    let child = sessions
+        .items
         .iter()
         .find(|session| session.parent_id.as_ref() == Some(&parent.id))
         .expect("child session should be linked to parent");
@@ -706,7 +715,12 @@ async fn background_task_runs_shell_command_and_result_can_be_collected() {
     assert!(collected.output.contains("background-ok"));
 
     for _ in 0..50 {
-        if !state.inner.session_coordinator.active_run(session.id.as_str()).await.is_some()
+        if !state
+            .inner
+            .session_coordinator
+            .active_run(session.id.as_str())
+            .await
+            .is_some()
         {
             break;
         }

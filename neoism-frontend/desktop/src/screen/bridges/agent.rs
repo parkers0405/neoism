@@ -1232,7 +1232,7 @@ impl Screen<'_> {
             .as_ref()
             .is_some_and(|agent| agent.usage_chip_contains(mx, my));
         if usage_hit {
-            self.open_neoism_agent_usage_menu(mx, my);
+            self.open_agent_image_browser();
             self.mark_dirty();
             return true;
         }
@@ -1246,6 +1246,23 @@ impl Screen<'_> {
             if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut()
             {
                 agent.open_status_chip_picker(chip);
+            }
+            self.mark_dirty();
+            return true;
+        }
+        // The renderer registers the exact fixed square used for both send
+        // and stop. Consume even a disabled idle click so it cannot start a
+        // timeline selection behind the control.
+        let composer_control_hit = self
+            .context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .is_some_and(|agent| agent.composer_control_contains(mx, my));
+        if composer_control_hit {
+            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut()
+            {
+                let _ = agent.activate_composer_control();
             }
             self.mark_dirty();
             return true;
@@ -1659,6 +1676,59 @@ impl Screen<'_> {
             return self.find_neoism_file_by_name(&root, &raw, 4);
         }
         None
+    }
+
+    pub(crate) fn open_agent_image_browser(&mut self) {
+        let persisted = neoism_backend::config::config_dir_path().join("file-browser-recents.json");
+        let recents = std::fs::read(&persisted)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+            .unwrap_or_else(|| self.renderer.file_browser.recents().to_vec());
+        self.renderer.file_browser.open(
+            neoism_ui::panels::file_browser::FileBrowserMode::AttachImage,
+            "",
+            recents,
+        );
+        let root = self.active_pane_workspace_root()
+            .or_else(|| self.active_workspace_root.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let candidates = [
+            ("workspace", "Workspace", Some(root)),
+            ("home", "Home", dirs::home_dir()),
+            ("documents", "Documents", dirs::document_dir()),
+            ("downloads", "Downloads", dirs::download_dir()),
+            ("pictures", "Pictures", dirs::picture_dir()),
+        ];
+        let mut locations = Vec::new();
+        for (kind, label, path) in candidates {
+            let Some(path) = path.and_then(|path| path.canonicalize().ok()).filter(|path| path.is_dir()) else { continue; };
+            let path = path.to_string_lossy().into_owned();
+            locations.push(neoism_ui::panels::file_browser::FileBrowserLocation { kind: kind.into(), label: label.into(), path });
+        }
+        self.renderer.file_browser.set_locations(locations);
+        self.pump_agent_image_browser();
+    }
+
+    pub(crate) fn pump_agent_image_browser(&mut self) {
+        let root = self.active_pane_workspace_root()
+            .or_else(|| self.active_workspace_root.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        self.renderer.file_browser.fulfill_requests_native(&root);
+        if let Some(selection) = self.renderer.file_browser.take_selection() {
+            let state_path = neoism_backend::config::config_dir_path().join("file-browser-recents.json");
+            if let Ok(bytes) = serde_json::to_vec(self.renderer.file_browser.recents()) {
+                let _ = std::fs::create_dir_all(neoism_backend::config::config_dir_path());
+                let _ = std::fs::write(state_path, bytes);
+            }
+            if selection.mode == neoism_ui::panels::file_browser::FileBrowserMode::AttachImage {
+                let resolved = self.renderer.file_browser.resolve_native_selection(&selection.path);
+                if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                    if let Ok(path) = resolved {
+                        let _ = agent.attach_path(&path);
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn find_neoism_file_by_name(

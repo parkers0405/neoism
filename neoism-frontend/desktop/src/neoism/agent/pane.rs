@@ -29,10 +29,10 @@ use serde_json::{json, Value};
 use super::api::{
     api_request_json, delete_session, fetch_agent_options, fetch_config_defaults,
     fetch_family_runtime, fetch_model_context_limit, fetch_model_options,
-    fetch_pending_permissions, fetch_pending_questions, fetch_session_entries, fetch_session_goal,
-    fetch_session_options, fetch_session_statuses, fetch_skill_options, fetch_subagent_entries,
-    fetch_subagent_options, neoism_agent_server, rename_session, set_session_pinned,
-    SessionStatusSnapshot,
+    fetch_pending_permissions, fetch_pending_questions, fetch_session_entries,
+    fetch_session_goal, fetch_session_options, fetch_session_statuses,
+    fetch_skill_options, fetch_subagent_entries, fetch_subagent_options,
+    neoism_agent_server, rename_session, set_session_pinned, SessionStatusSnapshot,
 };
 use super::commands::slash_options;
 use super::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
@@ -41,7 +41,8 @@ use super::side_panel::{
     SessionGoal,
 };
 use super::updates::{
-    start_session_event_stream, AgentEventWake, AgentSessionEventStream, AgentSessionUpdate,
+    start_session_event_stream, AgentEventWake, AgentSessionEventStream,
+    AgentSessionUpdate,
 };
 
 const DEFAULT_AGENT: &str = "build";
@@ -388,8 +389,8 @@ impl CachedAgentRuntime {
         );
         self.queued_prompt_count = decision.count;
         self.queued_prompt_preview = decision.preview;
-        if decision.should_enter_thinking {
-            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+        if decision.should_enter_generating {
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
         if let Some(started_at) = decision.started_at {
             let started = instant_from_epoch_millis(started_at);
@@ -835,8 +836,11 @@ pub struct NeoismAgentPane {
     skill_options: Vec<NeoismAgentPickerOption>,
     skill_options_directory: Option<Option<String>>,
     file_mention_anchor: Option<usize>,
-    file_mention_search: std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchService>,
-    file_mention_root_pin: Mutex<Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
+    file_mention_search:
+        std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchService>,
+    file_mention_root_pin: Mutex<
+        Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>,
+    >,
     event_stream: Option<AgentSessionEventStream>,
     event_wake: Option<AgentEventWake>,
     /// When the most recent update was drained from the event stream.
@@ -943,6 +947,7 @@ pub struct NeoismAgentPane {
     link_hit_rects: Vec<(String, [f32; 4])>,
     mermaid_raw_blocks: BTreeSet<u64>,
     usage_chip_rect: Option<[f32; 4]>,
+    composer_control_rect: Option<[f32; 4]>,
     status_chip_rects: [Option<[f32; 4]>; 3],
     background_status_rect: Option<[f32; 4]>,
     background_task_details_expanded: bool,
@@ -1198,6 +1203,7 @@ impl Default for NeoismAgentPane {
             link_hit_rects: Vec::new(),
             mermaid_raw_blocks: BTreeSet::new(),
             usage_chip_rect: None,
+            composer_control_rect: None,
             status_chip_rects: [None; 3],
             background_status_rect: None,
             background_task_details_expanded: false,
@@ -1287,7 +1293,9 @@ mod timeline;
 /// and capped to `limit`.
 fn file_mention_options(
     search: &dyn neoism_agent_service_api::WorkspaceSearchService,
-    active_root: &Mutex<Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
+    active_root: &Mutex<
+        Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>,
+    >,
     root: &Path,
     query: &str,
     limit: usize,
@@ -1318,7 +1326,9 @@ fn file_mention_options(
 
 fn file_mention_search(
     search: &dyn neoism_agent_service_api::WorkspaceSearchService,
-    active_root: &Mutex<Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
+    active_root: &Mutex<
+        Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>,
+    >,
     root: &Path,
     query: &str,
     limit: usize,
@@ -1332,14 +1342,15 @@ fn file_mention_search(
             *pin = search.pin_root(root).ok();
         }
     }
-    search.find_files(&neoism_agent_service_api::FindFilesRequest {
-        root: root.to_path_buf(),
-        query: query.to_string(),
-        include_hidden: false,
-        offset: 0,
-        limit,
-        control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
-    })
+    search
+        .find_files(&neoism_agent_service_api::FindFilesRequest {
+            root: root.to_path_buf(),
+            query: query.to_string(),
+            include_hidden: false,
+            offset: 0,
+            limit,
+            control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
+        })
         .inspect_err(|error| {
             tracing::warn!(
                 target: "neoism::agent_mentions",
@@ -1348,7 +1359,13 @@ fn file_mention_search(
                 "workspace file-mention search failed"
             );
         })
-        .map(|result| result.items.into_iter().map(|item| item.path.replace('\\', "/")).collect())
+        .map(|result| {
+            result
+                .items
+                .into_iter()
+                .map(|item| item.path.replace('\\', "/"))
+                .collect()
+        })
         .unwrap_or_default()
 }
 

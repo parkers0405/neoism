@@ -158,6 +158,7 @@ export type WorkplaceListener = (
         accepted: boolean;
         reason: string | null;
         peerIdentity: string | null;
+        connectedHostId: string | null;
       }
     | {
         // F3: emitted whenever the daemon pushes a
@@ -220,6 +221,8 @@ export class WorkplaceService {
   private readonly preferences = new Map<string, WorkplacePreferences>();
   private activeId: DaemonId | null = null;
   private activeClient: ProtocolClient | null = null;
+  /** Durable machine id learned from the active daemon's accepted HelloAck. */
+  private connectedHostId: string | null = null;
   /** Wave 4B "follow the workspace" state. `followedWorkspaceId` is the
    *  workspace the web client is currently *viewing* (set by the chrome
    *  via `setFollowedWorkspace`); `followedHomeHostId` is the last
@@ -309,6 +312,12 @@ export class WorkplaceService {
    *  per-service wrappers. */
   getActiveClient(): ProtocolClient | null {
     return this.activeClient;
+  }
+
+  /** Stable host id for the active connection. Null means the connected
+   * daemon predates this handshake field, not that URL comparison is safe. */
+  getConnectedHostId(): string | null {
+    return this.connectedHostId;
   }
 
   /** The URL of the currently-focused workplace — handy for the
@@ -402,7 +411,11 @@ export class WorkplaceService {
    * where construction and dial are separated so the chrome can
    * register one-shot listeners between the two.
    */
-  connect(id: DaemonId, handlers: ProtocolClientHandlers): ProtocolClient {
+  connect(
+    id: DaemonId,
+    handlers: ProtocolClientHandlers,
+    replacementIntent: "switch" | "rehome" = "switch",
+  ): ProtocolClient {
     const entry = this.registry.get(id);
     if (!entry) {
       throw new Error(`unknown workplace id: ${id}`);
@@ -411,7 +424,7 @@ export class WorkplaceService {
       return this.activeClient;
     }
     if (this.activeClient) {
-      this.disconnectInternal(/*emit*/ false);
+      this.disconnectInternal(/*emit*/ false, replacementIntent);
     }
     const token = this.tokens.get(id);
     // Wrap the caller's `onHelloAck` (if any) so we always observe
@@ -421,15 +434,23 @@ export class WorkplaceService {
     // pushing into a doomed socket while the daemon is mid-close.
     const userOnHelloAck = handlers.onHelloAck;
     const userOnWorkspaceReply = handlers.onWorkspaceReply;
+    let client: ProtocolClient;
     const wrappedHandlers: ProtocolClientHandlers = {
       ...handlers,
-      onHelloAck: (accepted, reason, peerIdentity) => {
+      onHelloAck: (accepted, reason, peerIdentity, connectedHostId) => {
+        // A superseded socket may finish its handshake after switchTo has
+        // installed another client. Never let that stale acknowledgement
+        // overwrite the active daemon identity or disconnect the new socket.
+        if (this.activeId !== id || this.activeClient !== client) return;
+        const stableHostId = accepted ? (connectedHostId ?? null) : null;
+        this.connectedHostId = stableHostId;
         this.emit({
           kind: "hello-ack",
           activeId: id,
           accepted,
           reason,
           peerIdentity,
+          connectedHostId: stableHostId,
         });
         if (!accepted) {
           // The daemon is closing the socket on its end; mirror that
@@ -442,9 +463,12 @@ export class WorkplaceService {
               `[workplace] daemon rejected Hello: ${reason ?? "(no reason)"}`,
             );
           }
-          this.disconnect();
+          // ProtocolClient owns the terminal auth-rejected state and has
+          // already stopped auto-retry. Keep the stable facade registered so
+          // the connection gate can offer a workplace switch without a
+          // misleading transient `closed` state overwriting the rejection.
         }
-        userOnHelloAck?.(accepted, reason, peerIdentity);
+        userOnHelloAck?.(accepted, reason, peerIdentity, stableHostId);
       },
       onWorkspaceReply: (payload) => {
         // F3: intercept WorkplacePreferences / WorkplacePreferencesChanged
@@ -457,7 +481,7 @@ export class WorkplaceService {
         userOnWorkspaceReply?.(payload);
       },
     };
-    const client = this.clientFactory(
+    client = this.clientFactory(
       {
         url: entry.url,
         authToken: token,
@@ -526,20 +550,27 @@ export class WorkplaceService {
    * a new daemon connection. Returns the freshly-constructed
    * `ProtocolClient`; the caller still owns the `connect()` call.
    */
-  switchTo(id: DaemonId, handlers: ProtocolClientHandlers): ProtocolClient {
-    return this.connect(id, handlers);
+  switchTo(
+    id: DaemonId,
+    handlers: ProtocolClientHandlers,
+    intent: "switch" | "rehome" = "switch",
+  ): ProtocolClient {
+    return this.connect(id, handlers, intent);
   }
 
   /** Close the active connection (if any) without changing the
    *  registry. Emits `active-changed` with `null`. */
   disconnect(): void {
-    this.disconnectInternal(/*emit*/ true);
+    this.disconnectInternal(/*emit*/ true, "manual");
   }
 
-  private disconnectInternal(emit: boolean): void {
+  private disconnectInternal(
+    emit: boolean,
+    intent: "manual" | "switch" | "rehome" = "manual",
+  ): void {
     if (this.activeClient) {
       try {
-        this.activeClient.disconnect();
+        this.activeClient.disconnect(intent);
       } catch (err) {
         if (typeof console !== "undefined") {
           console.warn("[workplace] disconnect threw", err);
@@ -547,6 +578,7 @@ export class WorkplaceService {
       }
     }
     this.activeClient = null;
+    this.connectedHostId = null;
     const previous = this.activeId;
     this.activeId = null;
     // F3 preferences are daemon-scoped — drop the cache so a future
@@ -677,7 +709,7 @@ export class WorkplaceService {
     // the swap with its own handler bundle.
     this.ensureRegistered(target);
     if (this.rehomeHandlers) {
-      this.switchTo(target.id, this.rehomeHandlers);
+      this.switchTo(target.id, this.rehomeHandlers, "rehome");
     }
     this.emit({
       kind: "rehome",

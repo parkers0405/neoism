@@ -8,6 +8,7 @@ mod tests {
     use super::super::helpers::*;
     use super::super::links::{markdown_contact_value, markdown_link_open_action};
     use super::super::rendered_inline_text;
+    use super::super::scroll::preserve_anchor_for_line_edit;
     use super::super::source_map::InlineSourceMap;
     use super::super::types::*;
     use super::super::vim::VimState;
@@ -39,6 +40,7 @@ mod tests {
             cursor_col: 0,
             visual_anchor: None,
             mouse_select_anchor: None,
+            touch_word_edges: None,
             cursor_rect: None,
             follow_cursor: false,
             goal_visual_col: None,
@@ -99,6 +101,26 @@ mod tests {
             saved_baseline: vec![String::new()],
             error: None,
         }
+    }
+
+    #[test]
+    fn line_deletion_preserves_scrolled_viewport_anchor_even_during_caret_edit() {
+        assert!(preserve_anchor_for_line_edit(
+            Some(MarkdownPendingLineEdit::Delete {
+                line: 12,
+                byte_delta: -8,
+            }),
+            false,
+            420.0,
+        ));
+        assert!(!preserve_anchor_for_line_edit(
+            Some(MarkdownPendingLineEdit::Delete {
+                line: 0,
+                byte_delta: -2,
+            }),
+            false,
+            0.0,
+        ));
     }
 
     #[test]
@@ -670,6 +692,70 @@ mod tests {
         assert!(pane.tick_scroll());
         assert!(pane.target_scroll_y > first_target);
         assert_eq!(pane.cursor_line, 0);
+    }
+
+    #[test]
+    fn touch_scroll_is_exact_bounded_and_suspends_follow_until_navigation() {
+        let mut pane = pane_for_test();
+        pane.lines = (0..40).map(|line| format!("line {line}")).collect();
+        pane.set_content_height(1000.0, 200.0);
+        pane.follow_cursor = true;
+        assert!(pane.scroll_touch_pixels(37.0, 200.0));
+        assert_eq!(pane.scroll_y, 37.0);
+        assert_eq!(pane.target_scroll_y, 37.0);
+        assert_eq!(pane.scroll_velocity_px_s, 0.0);
+        assert!(!pane.tick_scroll());
+        assert!(!pane.follow_cursor);
+        assert!(!pane.scroll_cursor_into_view(0.0, 200.0));
+
+        assert!(pane.scroll_touch_pixels(10_000.0, 200.0));
+        assert_eq!(pane.scroll_y, 800.0);
+        assert_eq!(pane.target_scroll_y, 800.0);
+        assert!(!pane.scroll_touch_pixels(10_000.0, 200.0));
+
+        pane.move_down();
+        assert!(
+            pane.follow_cursor,
+            "explicit navigation rearms caret follow"
+        );
+    }
+
+    #[test]
+    fn touch_scroll_then_repeated_newline_rearms_and_advances_caret_reveal() {
+        let mut pane = pane_for_test();
+        pane.lines = (0..30).map(|line| format!("line {line}")).collect();
+        pane.cursor_line = 29;
+        pane.cursor_col = pane.lines[29].len();
+        pane.set_content_height(600.0, 200.0);
+        assert!(pane.scroll_touch_pixels(200.0, 200.0));
+        assert!(!pane.follow_cursor);
+
+        let mut previous_target = pane.target_scroll_y;
+        for _ in 0..12 {
+            pane.insert_newline();
+            assert!(pane.follow_cursor, "every explicit Enter rearms follow");
+            pane.cursor_rect = Some([0.0, 100.0, 2.0, 20.0]);
+            assert!(!pane.scroll_cursor_into_view(0.0, 200.0));
+            assert!(
+                pane.follow_cursor,
+                "stale pre-splice geometry cannot consume follow"
+            );
+            // Stand in for the virtual render applying the pending line splice
+            // and publishing the new caret rectangle.
+            pane.pending_line_edit = None;
+            pane.set_content_height(pane.content_height + 20.0, 200.0);
+            pane.cursor_rect = Some([0.0, 201.0, 2.0, 20.0]);
+            assert!(pane.scroll_cursor_into_view(0.0, 200.0));
+            assert!(pane.target_scroll_y > previous_target);
+            previous_target = pane.target_scroll_y;
+            pane.snap_scroll_to_target();
+        }
+
+        pane.scroll_touch_pixels(-20.0, 200.0);
+        assert!(!pane.follow_cursor, "a scroll alone keeps follow suspended");
+        pane.backspace();
+        pane.rearm_caret_follow();
+        assert!(pane.follow_cursor, "explicit Backspace reclaims follow");
     }
 
     #[test]

@@ -162,7 +162,7 @@ fn render_question_prompt(
     theme: &IdeTheme,
     s: f32,
 ) -> Option<[f32; 4]> {
-    let (title, typed, rows_data, selected, responding, has_options) = {
+    let (title, typed, rows_data, selected, scroll_offset, responding, has_options) = {
         let question = pane.pending_question()?;
         let item = question.current_item()?;
         let title = if question.questions.len() > 1 {
@@ -180,6 +180,7 @@ fn render_question_prompt(
             question.typed.clone(),
             question.visible_rows(),
             question.selected,
+            question.scroll_offset,
             question.responding,
             !item.options.is_empty(),
         )
@@ -222,7 +223,7 @@ fn render_question_prompt(
             title: &title,
             query: &typed,
             selected: selected.min(rows_data.len().saturating_sub(1)),
-            scroll_offset: 0,
+            scroll_offset,
             list_scroll_offset: 0.0,
             cursor_offset: 0.0,
             rows: &rows,
@@ -243,10 +244,14 @@ fn render_question_prompt(
         s,
     )?;
     if !responding {
-        for index in 0..rows_data.len() {
+        for visible_index in 0..state.visible_rows {
+            let source_index = state.first_row + visible_index;
+            if source_index >= rows_data.len() {
+                break;
+            }
             pane.register_question_option_rect(
-                index,
-                inline_picker::row_rect(state.rect, index, s),
+                source_index,
+                inline_picker::row_rect(state.rect, visible_index, s),
             );
         }
     }

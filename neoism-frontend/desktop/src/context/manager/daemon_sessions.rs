@@ -863,7 +863,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 shell: Some(spawn_shell.program.clone()),
                 args: spawn_shell.args.clone(),
                 cwd: config.working_dir.as_ref().map(PathBuf::from),
-                env: Vec::new(),
+                // Scoped to the shell child: app-wide mutation makes helper
+                // invocations outside Neoism look like terminal controls.
+                env: vec![("NEOISM".to_string(), "1".to_string())],
                 cols,
                 rows,
             };
@@ -949,7 +951,9 @@ fn workspace_icon_kind(workspace: &WorkspaceSummary, local_host: &str) -> String
         WorkspaceHostKind::DockerSandbox => "docker_sandbox".to_string(),
         WorkspaceHostKind::Tailscale => "tailscale".to_string(),
         WorkspaceHostKind::Local => match workspace.visibility {
-            WorkspaceVisibility::Shared | WorkspaceVisibility::Team => "shared".to_string(),
+            WorkspaceVisibility::Shared | WorkspaceVisibility::Team => {
+                "shared".to_string()
+            }
             WorkspaceVisibility::Private => "local".to_string(),
         },
     }

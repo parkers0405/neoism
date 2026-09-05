@@ -32,7 +32,10 @@ impl ApiError {
     }
 
     pub(crate) fn gone(message: impl Into<String>) -> Self {
-        Self { status: StatusCode::GONE, message: message.into() }
+        Self {
+            status: StatusCode::GONE,
+            message: message.into(),
+        }
     }
 
     pub(crate) fn forbidden(message: impl Into<String>) -> Self {

@@ -58,7 +58,9 @@ pub(crate) async fn auth_start(
     name: &str,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<McpAuthStartResponse> {
-    let config = neoism_agent_builtins::plugin::config::load(services, directory)?.0.mcp;
+    let config = neoism_agent_builtins::plugin::config::load(services, directory)?
+        .0
+        .mcp;
     auth_start_with_config(&config, directory, name, auth_store).await
 }
 
@@ -102,15 +104,17 @@ pub(crate) async fn auth_start_with_config(
     entry.tokens = None;
     entry.client_registration = client.client_info;
     auth_store.set_for_url(name, url, entry).await?;
-    auth_store.put_attempt(McpOAuthAttempt {
-        scope: auth_store.scope().clone(),
-        connection: McpAuthStore::connection(name, url),
-        state: state.clone(),
-        code_verifier,
-        redirect_uri: redirect_uri.clone(),
-        directory: directory.to_string(),
-        expires_at: unix_timestamp().saturating_add(600),
-    }).await?;
+    auth_store
+        .put_attempt(McpOAuthAttempt {
+            scope: auth_store.scope().clone(),
+            connection: McpAuthStore::connection(name, url),
+            state: state.clone(),
+            code_verifier,
+            redirect_uri: redirect_uri.clone(),
+            directory: directory.to_string(),
+            expires_at: unix_timestamp().saturating_add(600),
+        })
+        .await?;
 
     Ok(McpAuthStartResponse {
         authorization_url: append_query(&authorization_url, &params),
@@ -137,7 +141,10 @@ pub(crate) async fn auth_callback_with_config(
     let attempt = match state {
         Some(state) => auth_store.consume_attempt(state, true).await?,
         None => auth_store.consume_connection_attempt(name, url).await?,
-    }.ok_or_else(|| anyhow!("MCP OAuth flow for {name} was not started, expired, or was already used"))?;
+    }
+    .ok_or_else(|| {
+        anyhow!("MCP OAuth flow for {name} was not started, expired, or was already used")
+    })?;
     auth_callback_with_attempt(config, name, code, attempt, auth_store).await
 }
 
@@ -148,10 +155,17 @@ pub(crate) async fn auth_callback_with_attempt(
     attempt: McpOAuthAttempt,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<McpStatus> {
-    let remote = config.get(name).ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
-    let McpConfig::Remote { url, oauth, .. } = remote else { return Err(anyhow!("MCP server {name} does not support OAuth")); };
-    let oauth = usable_oauth_config(oauth).ok_or_else(|| anyhow!("MCP server {name} does not support OAuth"))?;
-    if attempt.scope != *auth_store.scope() || attempt.connection != McpAuthStore::connection(name, url) {
+    let remote = config
+        .get(name)
+        .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
+    let McpConfig::Remote { url, oauth, .. } = remote else {
+        return Err(anyhow!("MCP server {name} does not support OAuth"));
+    };
+    let oauth = usable_oauth_config(oauth)
+        .ok_or_else(|| anyhow!("MCP server {name} does not support OAuth"))?;
+    if attempt.scope != *auth_store.scope()
+        || attempt.connection != McpAuthStore::connection(name, url)
+    {
         return Err(anyhow!("MCP OAuth callback scope or connection mismatch"));
     }
     let code_verifier = attempt.code_verifier;
@@ -181,9 +195,7 @@ pub(crate) async fn auth_callback_with_attempt(
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!(
-            "MCP OAuth token exchange failed with {status}"
-        ));
+        return Err(anyhow!("MCP OAuth token exchange failed with {status}"));
     }
     let tokens: OAuthTokenResponse = serde_json::from_str(&body)
         .context("failed to parse MCP OAuth token response")?;
@@ -197,7 +209,9 @@ pub(crate) async fn auth_callback_with_attempt(
                 .map(|expires_in| unix_timestamp() + expires_in)
         }),
     });
-    if let Some(scope) = tokens.scope { entry.scopes = scope.split_whitespace().map(str::to_owned).collect(); }
+    if let Some(scope) = tokens.scope {
+        entry.scopes = scope.split_whitespace().map(str::to_owned).collect();
+    }
     auth_store.set_for_url(name, url, entry).await?;
 
     Ok(super::status_for_entry(name, remote, auth_store).await)
@@ -296,23 +310,23 @@ pub(super) async fn refresh_oauth_tokens(
             );
             return Ok(false);
         }
-        return Err(anyhow!(
-            "MCP OAuth token refresh failed with {status}"
-        ));
+        return Err(anyhow!("MCP OAuth token refresh failed with {status}"));
     }
     let tokens: OAuthTokenResponse = serde_json::from_str(&body)
         .context("failed to parse MCP OAuth refresh response")?;
     let mut entry = auth_store.get_for_url(name, url).await?.unwrap_or_default();
     entry.tokens = Some(McpAuthTokens {
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token.or(existing_tokens.refresh_token),
-            expires_at: tokens.expires_at.or_else(|| {
-                tokens
-                    .expires_in
-                    .map(|expires_in| unix_timestamp() + expires_in)
-            }),
-        });
-    if let Some(scope) = tokens.scope { entry.scopes = scope.split_whitespace().map(str::to_owned).collect(); }
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token.or(existing_tokens.refresh_token),
+        expires_at: tokens.expires_at.or_else(|| {
+            tokens
+                .expires_in
+                .map(|expires_in| unix_timestamp() + expires_in)
+        }),
+    });
+    if let Some(scope) = tokens.scope {
+        entry.scopes = scope.split_whitespace().map(str::to_owned).collect();
+    }
     auth_store.set_for_url(name, url, entry).await?;
     Ok(true)
 }
@@ -463,7 +477,8 @@ pub(super) async fn bearer_token_for_url(
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<Option<String>> {
     Ok(auth_store
-        .get_for_url(name, url).await?
+        .get_for_url(name, url)
+        .await?
         .and_then(|entry| entry.tokens)
         .filter(|tokens| !tokens_expired(tokens))
         .map(|tokens| tokens.access_token))
@@ -579,7 +594,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            bearer_token_for_url("remote", "https://mcp.example.com", &store).await.unwrap(),
+            bearer_token_for_url("remote", "https://mcp.example.com", &store)
+                .await
+                .unwrap(),
             None
         );
         let _ = std::fs::remove_file(path);

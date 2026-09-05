@@ -17,7 +17,7 @@
 
 use neoism_protocol::config::{
     ConfigClientMessage, ConfigDocument, ConfigServerMessage, ExtensionStatusSummary,
-    ExtensionSummary,
+    ExtensionSummary, MashupPackSummary,
 };
 
 use crate::files as files_handler;
@@ -31,13 +31,15 @@ pub fn required_permission(
         ConfigClientMessage::GetConfig
         | ConfigClientMessage::GetConfigSchema
         | ConfigClientMessage::GetConfigDocument
-        | ConfigClientMessage::ListExtensions => {
+        | ConfigClientMessage::ListExtensions
+        | ConfigClientMessage::ListMashupPacks => {
             neoism_protocol::pairing::Permission::ReadFiles
         }
         ConfigClientMessage::EnsureConfigDocument
         | ConfigClientMessage::SaveConfigDocument { .. }
         | ConfigClientMessage::SetSetting { .. }
-        | ConfigClientMessage::SetKeybind { .. } => {
+        | ConfigClientMessage::SetKeybind { .. }
+        | ConfigClientMessage::ApplyMashupPack { .. } => {
             neoism_protocol::pairing::Permission::WriteFiles
         }
     }
@@ -145,13 +147,84 @@ pub async fn handle(
         ConfigClientMessage::ListExtensions => {
             let root = files_handler::workspace_root();
             let runtime = runtime.clone();
-            let entries =
-                tokio::task::spawn_blocking(move || collect_extension_entries(&runtime, &root))
-                    .await
-                    .unwrap_or_default();
+            let entries = tokio::task::spawn_blocking(move || {
+                collect_extension_entries(&runtime, &root)
+            })
+            .await
+            .unwrap_or_default();
             vec![ConfigServerMessage::Extensions { entries }]
         }
+        ConfigClientMessage::ListMashupPacks => {
+            let entries = tokio::task::spawn_blocking(collect_mashup_entries)
+                .await
+                .unwrap_or_default();
+            vec![ConfigServerMessage::MashupPacks { entries }]
+        }
+        ConfigClientMessage::ApplyMashupPack { id } => {
+            let requested = id.clone();
+            let result = tokio::task::spawn_blocking(move || apply_mashup_pack(requested)).await;
+            match result {
+                Ok(Ok(())) => vec![ConfigServerMessage::MashupPackApplied {
+                    id,
+                    config: neoism_backend::config::load_config_json_value(),
+                }],
+                Ok(Err(message)) => vec![ConfigServerMessage::Error { message }],
+                Err(error) => vec![ConfigServerMessage::Error {
+                    message: format!("apply Mash Up Pack task: {error}"),
+                }],
+            }
+        }
     }
+}
+
+fn collect_mashup_entries() -> Vec<MashupPackSummary> {
+    let theme_specs = neoism_backend::config::mashup::load_ide_theme_specs();
+    neoism_backend::config::mashup::load_mashup_packs()
+        .into_iter()
+        .map(|pack| {
+            let mut slots = Vec::new();
+            if pack.theme.is_some() { slots.push("theme".to_string()); }
+            if pack.shader_overlay.is_some() { slots.push("shader".to_string()); }
+            if pack.wallpaper.is_some() { slots.push("wallpaper".to_string()); }
+            if !pack.filters.is_empty() { slots.push("filters".to_string()); }
+            if pack.font_family.is_some() { slots.push("font".to_string()); }
+            let theme_spec = pack.theme.as_deref().and_then(|name| {
+                theme_specs.iter().find(|spec| spec.name == name)
+            });
+            MashupPackSummary {
+                id: pack.id,
+                name: pack.name,
+                description: pack.description,
+                theme: pack.theme,
+                shader_overlay: pack.shader_overlay,
+                font_family: pack.font_family,
+                slots,
+                theme_extends: theme_spec.map(|spec| spec.extends.clone()),
+                theme_colors: theme_spec
+                    .map(|spec| spec.colors.iter().cloned().collect())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+fn apply_mashup_pack(id: Option<String>) -> Result<(), String> {
+    let Some(id) = id else {
+        return neoism_backend::config::write_neoism_preferences(None, None, Some(""))
+            .map_err(|error| format!("deactivate Mash Up Pack: {error}"));
+    };
+    let pack = neoism_backend::config::mashup::find_mashup_pack(&id)
+        .ok_or_else(|| format!("Mash Up Pack not found: {id}"))?;
+    if let Some(theme) = pack.theme.as_deref() {
+        neoism_backend::config::write_neoism_preferences(Some(theme), None, None)
+            .map_err(|error| format!("persist pack theme: {error}"))?;
+    }
+    if let Some(family) = pack.font_family.as_deref() {
+        neoism_backend::config::write_fonts_family(family)
+            .map_err(|error| format!("persist pack font: {error}"))?;
+    }
+    neoism_backend::config::write_neoism_preferences(None, None, Some(&id))
+        .map_err(|error| format!("persist Mash Up Pack: {error}"))
 }
 
 fn document_result(
@@ -521,6 +594,8 @@ mod tests {
             required_permission(&ConfigClientMessage::GetConfigDocument),
             Permission::ReadFiles
         );
+        assert_eq!(required_permission(&ConfigClientMessage::ListMashupPacks), Permission::ReadFiles);
+        assert_eq!(required_permission(&ConfigClientMessage::ApplyMashupPack { id: None }), Permission::WriteFiles);
         assert_eq!(
             required_permission(&ConfigClientMessage::GetConfigSchema),
             Permission::ReadFiles

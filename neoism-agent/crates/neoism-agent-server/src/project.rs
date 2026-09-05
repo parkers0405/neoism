@@ -15,9 +15,10 @@ pub(crate) fn discover(
 ) -> ProjectContext {
     let directory = canonicalize_lossy(directory.as_ref());
     let directory_text = path_text(&directory);
-    let Some(worktree) = git_output(services, &directory, &["rev-parse", "--show-toplevel"])
-        .map(PathBuf::from)
-        .map(|path| canonicalize_lossy(&path))
+    let Some(worktree) =
+        git_output(services, &directory, &["rev-parse", "--show-toplevel"])
+            .map(PathBuf::from)
+            .map(|path| canonicalize_lossy(&path))
     else {
         return ProjectContext {
             info: fallback_project(directory_text.clone()),
@@ -42,23 +43,33 @@ pub(crate) fn discover(
     }
 }
 
-fn project_id(services: &neoism_agent_service_api::AgentServices, directory: &Path) -> Option<String> {
+fn project_id(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &Path,
+) -> Option<String> {
     if let Some(cached) = read_cached_id(services, directory) {
         return Some(cached);
     }
-    let mut roots = git_output(services, directory, &["rev-list", "--max-parents=0", "HEAD"])?
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
+    let mut roots = git_output(
+        services,
+        directory,
+        &["rev-list", "--max-parents=0", "HEAD"],
+    )?
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+    .map(ToString::to_string)
+    .collect::<Vec<_>>();
     roots.sort();
     let id = roots.into_iter().next()?;
     let _ = write_cached_id(services, directory, &id);
     Some(id)
 }
 
-fn read_cached_id(services: &neoism_agent_service_api::AgentServices, directory: &Path) -> Option<String> {
+fn read_cached_id(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &Path,
+) -> Option<String> {
     let path = cache_path(services, directory)?;
     std::fs::read_to_string(path)
         .ok()
@@ -66,14 +77,21 @@ fn read_cached_id(services: &neoism_agent_service_api::AgentServices, directory:
         .filter(|value| !value.is_empty())
 }
 
-fn write_cached_id(services: &neoism_agent_service_api::AgentServices, directory: &Path, id: &str) -> anyhow::Result<()> {
+fn write_cached_id(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &Path,
+    id: &str,
+) -> anyhow::Result<()> {
     let Some(path) = cache_path(services, directory) else {
         return Ok(());
     };
     std::fs::write(path, id).context("failed to cache project id")
 }
 
-fn cache_path(services: &neoism_agent_service_api::AgentServices, directory: &Path) -> Option<PathBuf> {
+fn cache_path(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &Path,
+) -> Option<PathBuf> {
     let common = git_output(services, directory, &["rev-parse", "--git-common-dir"])?;
     let common = PathBuf::from(common);
     let path = if common.is_absolute() {
@@ -117,7 +135,11 @@ fn path_text(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn git_output(services: &neoism_agent_service_api::AgentServices, directory: &Path, args: &[&str]) -> Option<String> {
+fn git_output(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &Path,
+    args: &[&str],
+) -> Option<String> {
     let mut command = git_command(services, directory, args).ok()?;
     crate::tool::process::set_new_process_group_std(&mut command);
     let output = command.output().ok()?;
@@ -213,7 +235,8 @@ mod tests {
             ],
         );
         let root_commit =
-            git_output(&services(), &root, &["rev-list", "--max-parents=0", "HEAD"]).unwrap();
+            git_output(&services(), &root, &["rev-list", "--max-parents=0", "HEAD"])
+                .unwrap();
 
         let context = discover(&services(), &child);
         assert_eq!(context.info.id, root_commit);

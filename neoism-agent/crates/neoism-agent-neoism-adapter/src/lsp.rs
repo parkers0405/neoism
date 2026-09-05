@@ -32,9 +32,14 @@ impl NeoismLanguageCapabilityService {
                     })
                     .collect(),
                 transport: match spec.transport {
-                    LspTransportSpec::Stdio { command } => LanguageServerTransport::Stdio {
-                        command: command.iter().map(|part| (*part).to_string()).collect(),
-                    },
+                    LspTransportSpec::Stdio { command } => {
+                        LanguageServerTransport::Stdio {
+                            command: command
+                                .iter()
+                                .map(|part| (*part).to_string())
+                                .collect(),
+                        }
+                    }
                     LspTransportSpec::Tcp {
                         default_host,
                         default_port,
@@ -53,15 +58,31 @@ impl NeoismLanguageCapabilityService {
                     .map(|route| LanguageRouteCapability {
                         id: route.id.to_string(),
                         document_language_id: route.document_language_id.to_string(),
-                        extensions: route.extensions.iter().map(|value| (*value).to_string()).collect(),
-                        filename_patterns: route.filename_patterns.iter().map(|value| (*value).to_string()).collect(),
+                        extensions: route
+                            .extensions
+                            .iter()
+                            .map(|value| (*value).to_string())
+                            .collect(),
+                        filename_patterns: route
+                            .filename_patterns
+                            .iter()
+                            .map(|value| (*value).to_string())
+                            .collect(),
                     })
                     .collect(),
-                markers: spec.markers.iter().map(|marker| (*marker).to_string()).collect(),
+                markers: spec
+                    .markers
+                    .iter()
+                    .map(|marker| (*marker).to_string())
+                    .collect(),
                 root_policy: match spec.root_strategy {
-                    WorkspaceRootStrategySpec::NearestMarker => LanguageRootPolicy::NearestMarker,
+                    WorkspaceRootStrategySpec::NearestMarker => {
+                        LanguageRootPolicy::NearestMarker
+                    }
                     WorkspaceRootStrategySpec::CargoMetadata { manifest } => {
-                        LanguageRootPolicy::CargoMetadata { manifest: manifest.to_string() }
+                        LanguageRootPolicy::CargoMetadata {
+                            manifest: manifest.to_string(),
+                        }
                     }
                 },
                 capabilities: LanguageServerOperations {
@@ -90,7 +111,9 @@ impl NeoismLanguageCapabilityService {
 }
 
 impl LanguageCapabilityService for NeoismLanguageCapabilityService {
-    fn snapshot(&self) -> Arc<LanguageCapabilitySnapshot> { self.snapshot.clone() }
+    fn snapshot(&self) -> Arc<LanguageCapabilitySnapshot> {
+        self.snapshot.clone()
+    }
 }
 
 #[cfg(test)]
@@ -104,7 +127,10 @@ mod tests {
         for (projected, original) in snapshot.languages.iter().zip(LANGUAGE_SPECS) {
             assert_eq!(projected.id, original.id);
             assert_eq!(projected.routes.len(), original.routes.len());
-            assert_eq!(projected.catalog_packages.len(), original.catalog_packages.len());
+            assert_eq!(
+                projected.catalog_packages.len(),
+                original.catalog_packages.len()
+            );
         }
     }
 }

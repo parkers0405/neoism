@@ -117,12 +117,12 @@ impl SessionListCursor {
         let value = value
             .strip_prefix("v1:")
             .context("unsupported session cursor version")?;
-        let (updated, id) = value
-            .split_once(':')
-            .context("invalid session cursor")?;
+        let (updated, id) = value.split_once(':').context("invalid session cursor")?;
         anyhow::ensure!(!id.is_empty(), "invalid session cursor");
         Ok(Self {
-            updated: updated.parse().context("invalid session cursor timestamp")?,
+            updated: updated
+                .parse()
+                .context("invalid session cursor timestamp")?,
             id: id.to_string(),
         })
     }
@@ -146,7 +146,7 @@ pub(crate) struct SessionStore {
 
 /// Turso database access shared by the store. Reads may run concurrently,
 /// while writes pass through one process-local gate so ordinary in-process
-    /// contention does not consume the store's bounded busy retry budget.
+/// contention does not consume the store's bounded busy retry budget.
 #[derive(Clone)]
 struct Db {
     database: turso::Database,
@@ -235,7 +235,9 @@ fn int(value: i64) -> SqlValue {
     SqlValue::Integer(value)
 }
 
-fn session_list_index_statement(info: &SessionInfo) -> anyhow::Result<(String, Vec<SqlValue>)> {
+fn session_list_index_statement(
+    info: &SessionInfo,
+) -> anyhow::Result<(String, Vec<SqlValue>)> {
     let mut extra = BTreeMap::new();
     for key in [crate::caller::TENANT_EXTRA_KEY, "pinned"] {
         if let Some(value) = info.extra.get(key) {
@@ -291,7 +293,10 @@ fn session_list_index_statement(info: &SessionInfo) -> anyhow::Result<(String, V
 }
 
 fn session_list_info_from_row(row: &DbRow) -> anyhow::Result<SessionInfo> {
-    if let Some(summary) = row.get_opt_str("summary_json")?.filter(|value| !value.is_empty()) {
+    if let Some(summary) = row
+        .get_opt_str("summary_json")?
+        .filter(|value| !value.is_empty())
+    {
         return decode_json(summary);
     }
     // Legacy sidecars predate compact summary_json. Reconstruct the list
@@ -562,7 +567,13 @@ impl AppState {
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("artifacts");
         let store = SessionStore::open(path).await?;
-        Self::from_store(store, artifact_root, services, crate::management::ManagementPolicy::from_env()).await
+        Self::from_store(
+            store,
+            artifact_root,
+            services,
+            crate::management::ManagementPolicy::from_env(),
+        )
+        .await
     }
 
     pub async fn open_database_with_services_and_management(
@@ -571,7 +582,10 @@ impl AppState {
         management_policy: crate::management::ManagementPolicy,
     ) -> anyhow::Result<Self> {
         let path = path.into();
-        let artifact_root = path.parent().unwrap_or_else(|| std::path::Path::new(".")).join("artifacts");
+        let artifact_root = path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("artifacts");
         let store = SessionStore::open(path).await?;
         Self::from_store(store, artifact_root, services, management_policy).await
     }
@@ -613,9 +627,10 @@ impl AppState {
         // continuing with a permanently incomplete timeline.
         let (events, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
-        let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> = Arc::new(
-            neoism_agent_builtins::ProviderPlatform::new(services.provider_credentials.clone()),
-        );
+        let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> =
+            Arc::new(neoism_agent_builtins::ProviderPlatform::new(
+                services.provider_credentials.clone(),
+            ));
         let caller_policy = crate::caller::CallerPolicy::from_env();
         let utilities = crate::utility_runtime::UtilityRuntime::new(&services);
         let recovery_started = crate::perf::now();
@@ -727,14 +742,14 @@ impl AppState {
                 if lease_control.stopping.load(Ordering::SeqCst) {
                     break;
                 }
-                let Some(inner) = weak_state.upgrade() else { break; };
+                let Some(inner) = weak_state.upgrade() else {
+                    break;
+                };
                 let now = crate::now_millis();
                 let store = inner.store.clone();
                 let owner_id = inner.execution_owner_id.clone();
                 drop(inner);
-                if let Err(error) = store
-                    .heartbeat_execution_owner(&owner_id, now)
-                    .await
+                if let Err(error) = store.heartbeat_execution_owner(&owner_id, now).await
                 {
                     tracing::warn!(%error, "failed to heartbeat execution activity owner");
                 }
@@ -762,7 +777,11 @@ impl AppState {
                 }
             }
         });
-        *state.inner.execution_lease_handle.lock().expect("execution lease handle poisoned") = Some(lease_handle);
+        *state
+            .inner
+            .execution_lease_handle
+            .lock()
+            .expect("execution lease handle poisoned") = Some(lease_handle);
         let durable_store = state.inner.store.clone();
         let durable_state = state.clone();
         tokio::spawn(async move {
@@ -773,7 +792,9 @@ impl AppState {
             while let Some(event) = event_reader.recv().await {
                 match durable_store.append_event(&event).await {
                     Ok(()) => {
-                        for runtime in durable_state.inner.workspace_runtimes.runtimes().await {
+                        for runtime in
+                            durable_state.inner.workspace_runtimes.runtimes().await
+                        {
                             crate::plugin::publish_event(&runtime.snapshot(), &event);
                         }
                     }
@@ -799,7 +820,10 @@ impl AppState {
                 // session metadata, but it does not affect catalog validity.
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 let phase_started = crate::perf::now();
-                crate::session_actions::resume_pending_subtask_completions(&recovery_state).await;
+                crate::session_actions::resume_pending_subtask_completions(
+                    &recovery_state,
+                )
+                .await;
                 tracing::info!(
                     target: "neoism_agent::perf",
                     phase_ms = crate::perf::elapsed_ms(phase_started),
@@ -828,7 +852,9 @@ impl AppState {
         &self.inner.services
     }
 
-    pub(crate) fn management_enabled(&self) -> bool { self.inner.management_policy.is_enabled() }
+    pub(crate) fn management_enabled(&self) -> bool {
+        self.inner.management_policy.is_enabled()
+    }
 
     pub(crate) fn start_session_list_backfill(&self) {
         let store = self.inner.store.clone();
@@ -878,17 +904,28 @@ impl AppState {
         snapshot
     }
 
-    pub(crate) async fn workspace_runtime(&self, directory: &str) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
+    pub(crate) async fn workspace_runtime(
+        &self,
+        directory: &str,
+    ) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
         self.try_workspace_runtime(directory).await
     }
 
-    pub(crate) async fn try_workspace_runtime(&self, directory: &str) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
-        let (runtime, evicted) = self.inner
+    pub(crate) async fn try_workspace_runtime(
+        &self,
+        directory: &str,
+    ) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
+        let (runtime, evicted) = self
+            .inner
             .workspace_runtimes
             .acquire(directory, self)
             .await?;
         for stale in evicted {
-            self.inner.workspace_plugin_generations.lock().await.remove(&stale.root);
+            self.inner
+                .workspace_plugin_generations
+                .lock()
+                .await
+                .remove(&stale.root);
         }
         self.reconcile_semantic_service().await;
         let snapshot = runtime.published_snapshot();
@@ -927,9 +964,12 @@ impl AppState {
         if enabled.contains(neoism_agent_builtins::plugin::semantic::ID) {
             snapshot.enable_semantic(self.clone()).await;
             if let Some(memory) = self.inner.services.memory.as_ref() {
-                memory.set_semantic_index(Some(Arc::new(crate::semantic::AgentSemanticMemoryIndex::new(
-                    self.inner.store.clone(), snapshot.semantic_client(),
-                ))));
+                memory.set_semantic_index(Some(Arc::new(
+                    crate::semantic::AgentSemanticMemoryIndex::new(
+                        self.inner.store.clone(),
+                        snapshot.semantic_client(),
+                    ),
+                )));
             }
         } else {
             let semantic_enabled = generations.values().any(|(_, plugins)| {
@@ -944,8 +984,15 @@ impl AppState {
     }
 
     async fn reconcile_semantic_service(&self) {
-        let enabled = self.inner.workspace_plugin_generations.lock().await.values()
-            .any(|(_, plugins)| plugins.contains(neoism_agent_builtins::plugin::semantic::ID));
+        let enabled = self
+            .inner
+            .workspace_plugin_generations
+            .lock()
+            .await
+            .values()
+            .any(|(_, plugins)| {
+                plugins.contains(neoism_agent_builtins::plugin::semantic::ID)
+            });
         if !enabled {
             if let Some(memory) = self.inner.services.memory.as_ref() {
                 memory.set_semantic_index(None);
@@ -954,8 +1001,13 @@ impl AppState {
     }
 
     /// Stop state-owned subprocesses and background transport tasks.
-    pub async fn shutdown(&self) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
-        self.inner.execution_lease_control.stopping.store(true, Ordering::SeqCst);
+    pub async fn shutdown(
+        &self,
+    ) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
+        self.inner
+            .execution_lease_control
+            .stopping
+            .store(true, Ordering::SeqCst);
         self.inner.execution_lease_control.notify.notify_waiters();
         let lease_handle = self
             .inner
@@ -971,7 +1023,10 @@ impl AppState {
             if let Err(error) = runtime.teardown(self).await {
                 tracing::error!(%error, root = %runtime.root.display(), "workspace runtime shutdown failed");
                 errors.push(format!("{}: {error}", runtime.root.display()));
-                self.inner.workspace_runtimes.retain_failed_shutdown(runtime).await;
+                self.inner
+                    .workspace_runtimes
+                    .retain_failed_shutdown(runtime)
+                    .await;
             }
         }
         if let Err(error) = self.inner.workspace_runtimes.retry_quarantines().await {
@@ -982,7 +1037,9 @@ impl AppState {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(neoism_agent_plugin_api::PluginRuntimeError::new(errors.join("; ")))
+            Err(neoism_agent_plugin_api::PluginRuntimeError::new(
+                errors.join("; "),
+            ))
         }
     }
 
@@ -1479,7 +1536,10 @@ impl SessionStore {
             // Additive migrations for databases created by the first execution
             // timer implementation. Column checks replace ignored ALTER errors,
             // and the data copy runs only once instead of on every launch.
-            if !self.table_has_column("execution_activity", "family_revision").await? {
+            if !self
+                .table_has_column("execution_activity", "family_revision")
+                .await?
+            {
                 self.db
                     .execute(
                         "ALTER TABLE execution_activity ADD COLUMN family_revision INTEGER NOT NULL DEFAULT 0",
@@ -1623,10 +1683,7 @@ impl SessionStore {
         // Existing stores predate actor-level audit identity.
         let _ = self
             .db
-            .execute(
-                "ALTER TABLE audit_log ADD COLUMN subject TEXT",
-                Vec::new(),
-            )
+            .execute("ALTER TABLE audit_log ADD COLUMN subject TEXT", Vec::new())
             .await;
         self.db
             .execute(
@@ -1678,10 +1735,22 @@ impl SessionStore {
             ("lease_expires_at", "INTEGER"),
         ] {
             if !self.table_has_column("workflow_runs", column).await? {
-                self.db.execute(&format!("ALTER TABLE workflow_runs ADD COLUMN {column} {definition}"), Vec::new()).await?;
+                self.db
+                    .execute(
+                        &format!(
+                            "ALTER TABLE workflow_runs ADD COLUMN {column} {definition}"
+                        ),
+                        Vec::new(),
+                    )
+                    .await?;
             }
         }
-        self.db.execute("UPDATE workflow_runs SET root_run_id = id WHERE root_run_id = ''", Vec::new()).await?;
+        self.db
+            .execute(
+                "UPDATE workflow_runs SET root_run_id = id WHERE root_run_id = ''",
+                Vec::new(),
+            )
+            .await?;
         self.db.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (5, 'workflow-run-administration', ?)",
             vec![int(store_i64(crate::now_millis()))],
@@ -1927,13 +1996,7 @@ impl SessionStore {
         let mut params = vec![text(model)];
         params.extend(session_ids.iter().cloned().map(text));
         params.push(int(limit.clamp(1, 256) as i64));
-        let rows = self
-            .db
-            .fetch_all(
-                &sql,
-                params,
-            )
-            .await?;
+        let rows = self.db.fetch_all(&sql, params).await?;
         rows.into_iter()
             .map(|row| {
                 Ok(PendingEmbedding {
@@ -2327,7 +2390,9 @@ impl SessionStore {
             params.push(text(format!("%{}%", search.to_lowercase())));
         }
         if let Some(cursor) = cursor {
-            clauses.push("(i.updated < ? OR (i.updated = ? AND i.session_id < ?))".to_string());
+            clauses.push(
+                "(i.updated < ? OR (i.updated = ? AND i.session_id < ?))".to_string(),
+            );
             params.push(int(store_i64(cursor.updated)));
             params.push(int(store_i64(cursor.updated)));
             params.push(text(&cursor.id));
@@ -2370,7 +2435,9 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?
-            .is_some_and(|row| row.get_str("state").is_ok_and(|state| state == "complete")))
+            .is_some_and(|row| {
+                row.get_str("state").is_ok_and(|state| state == "complete")
+            }))
     }
 
     /// Decode only sessions carrying a particular flattened `extra` key.
@@ -2396,7 +2463,8 @@ impl SessionStore {
         self.db
             .execute_transaction(vec![
                 (
-                    "INSERT INTO sessions (id, info_json, updated) VALUES (?, ?, ?)".to_string(),
+                    "INSERT INTO sessions (id, info_json, updated) VALUES (?, ?, ?)"
+                        .to_string(),
                     vec![
                         text(info.id.to_string()),
                         text(serde_json::to_string(info)?),
@@ -2543,7 +2611,9 @@ impl SessionStore {
         run: &crate::workflow::WorkflowRun,
         concurrency: &crate::workflow::WorkflowConcurrencyPolicy,
     ) -> anyhow::Result<bool> {
-        let insert = if concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Replace {
+        let insert = if concurrency.mode
+            == crate::workflow::WorkflowConcurrencyMode::Replace
+        {
             workflow_run_insert_sql(None)
         } else {
             r#"INSERT OR IGNORE INTO workflow_runs
@@ -2553,7 +2623,14 @@ impl SessionStore {
                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 WHERE NOT EXISTS (SELECT 1 FROM workflow_runs WHERE activation_id = ? AND status IN ('queued', 'running') LIMIT 1 OFFSET ?)"#.to_string()
         };
-        let mut statements = vec![(insert, workflow_run_insert_params(run, (concurrency.mode != crate::workflow::WorkflowConcurrencyMode::Replace).then_some(concurrency.max_running)))];
+        let mut statements = vec![(
+            insert,
+            workflow_run_insert_params(
+                run,
+                (concurrency.mode != crate::workflow::WorkflowConcurrencyMode::Replace)
+                    .then_some(concurrency.max_running),
+            ),
+        )];
         let result_index = 0;
         if concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Replace {
             statements.push(("UPDATE workflow_runs SET status = 'replaced', finished_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE activation_id = ? AND id <> ? AND status IN ('queued', 'running') AND changes() > 0".to_string(), vec![int(store_i64(crate::now_millis())), text(&run.activation_id), text(&run.id)]));
@@ -2564,10 +2641,7 @@ impl SessionStore {
                     updated = ? WHERE activation_id = ?"#.to_string(),
             vec![int(store_i64(run.scheduled_at)), int(store_i64(run.scheduled_at)), int(store_i64(crate::now_millis())), text(&run.activation_id)],
         ));
-        let results = self
-            .db
-            .execute_transaction_with_results(statements)
-            .await?;
+        let results = self.db.execute_transaction_with_results(statements).await?;
         Ok(results.get(result_index).copied().unwrap_or_default() > 0)
     }
 
@@ -2614,8 +2688,18 @@ impl SessionStore {
             .collect()
     }
 
-    pub(crate) async fn get_workflow_run(&self, run_id: &str) -> anyhow::Result<Option<crate::workflow::WorkflowRun>> {
-        self.db.fetch_optional("SELECT * FROM workflow_runs WHERE id = ?", vec![text(run_id)]).await?.map(decode_workflow_run).transpose()
+    pub(crate) async fn get_workflow_run(
+        &self,
+        run_id: &str,
+    ) -> anyhow::Result<Option<crate::workflow::WorkflowRun>> {
+        self.db
+            .fetch_optional(
+                "SELECT * FROM workflow_runs WHERE id = ?",
+                vec![text(run_id)],
+            )
+            .await?
+            .map(decode_workflow_run)
+            .transpose()
     }
 
     pub(crate) async fn schedule_workflow_retry(
@@ -2630,10 +2714,14 @@ impl SessionStore {
             ),
             (workflow_run_conditional_insert_sql(), workflow_run_insert_params(retry, None)),
         ]).await?;
-        Ok(results.first().copied().unwrap_or_default() > 0 && results.get(1).copied().unwrap_or_default() > 0)
+        Ok(results.first().copied().unwrap_or_default() > 0
+            && results.get(1).copied().unwrap_or_default() > 0)
     }
 
-    pub(crate) async fn list_due_workflow_retries(&self, now: u64) -> anyhow::Result<Vec<crate::workflow::WorkflowRun>> {
+    pub(crate) async fn list_due_workflow_retries(
+        &self,
+        now: u64,
+    ) -> anyhow::Result<Vec<crate::workflow::WorkflowRun>> {
         self.db.fetch_all(
             "SELECT r.* FROM workflow_runs r JOIN workflows w ON w.activation_id = r.activation_id WHERE w.active = 1 AND r.status = 'retry_waiting' AND r.next_attempt_at <= ? ORDER BY r.next_attempt_at, r.created",
             vec![int(store_i64(now))],
@@ -2670,7 +2758,11 @@ impl SessionStore {
         ).await? > 0)
     }
 
-    pub(crate) async fn defer_workflow_retry(&self, run_id: &str, next_attempt_at: u64) -> anyhow::Result<()> {
+    pub(crate) async fn defer_workflow_retry(
+        &self,
+        run_id: &str,
+        next_attempt_at: u64,
+    ) -> anyhow::Result<()> {
         self.db.execute(
             "UPDATE workflow_runs SET next_attempt_at = ? WHERE id = ? AND status = 'retry_waiting'",
             vec![int(store_i64(next_attempt_at)), text(run_id)],
@@ -2696,7 +2788,8 @@ impl SessionStore {
         self.db
             .execute_transaction(vec![
                 (
-                    "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?".to_string(),
+                    "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?"
+                        .to_string(),
                     vec![
                         text(serde_json::to_string(info)?),
                         int(store_i64(info.time.updated)),
@@ -3305,13 +3398,17 @@ impl SessionStore {
             match row.get_str("row_kind")?.as_str() {
                 "segment" => {
                     let segment_id = row.get_str("item_id")?;
-                    let started_at = row.get_opt_i64("item_started_at")?
-                        .unwrap_or_default().max(0) as u64;
+                    let started_at = row
+                        .get_opt_i64("item_started_at")?
+                        .unwrap_or_default()
+                        .max(0) as u64;
                     active_segments.insert(segment_id.clone(), started_at);
                     if let Some(session_id) = row.get_opt_str("item_parent")? {
                         session_activities
                             .entry(session_id)
-                            .or_insert_with(neoism_agent_core::ProviderActivitySnapshot::default)
+                            .or_insert_with(
+                                neoism_agent_core::ProviderActivitySnapshot::default,
+                            )
                             .active_segments
                             .insert(segment_id, started_at);
                     }
@@ -3320,24 +3417,28 @@ impl SessionStore {
                     let session_id = row.get_str("item_id")?;
                     session_activities
                         .entry(session_id)
-                        .or_insert_with(neoism_agent_core::ProviderActivitySnapshot::default)
-                        .completed_ms = row.get_opt_i64("item_completed_ms")?
-                        .unwrap_or_default().max(0) as u64;
+                        .or_insert_with(
+                            neoism_agent_core::ProviderActivitySnapshot::default,
+                        )
+                        .completed_ms = row
+                        .get_opt_i64("item_completed_ms")?
+                        .unwrap_or_default()
+                        .max(0) as u64;
                 }
                 "task" => {
                     let child_session_id = row.get_str("item_id")?;
                     branches.entry(child_session_id.clone()).or_insert(
-                    neoism_agent_core::SubtaskLifecycleSnapshot {
-                        session_id: child_session_id,
-                        parent_session_id: row
-                            .get_opt_str("item_parent")?
-                            .unwrap_or_default(),
-                        status: row.get_opt_str("item_status")?.unwrap_or_default(),
-                        started_at: row
-                            .get_opt_i64("item_started_at")?
-                            .map(|value| value.max(0) as u64),
-                    },
-                );
+                        neoism_agent_core::SubtaskLifecycleSnapshot {
+                            session_id: child_session_id,
+                            parent_session_id: row
+                                .get_opt_str("item_parent")?
+                                .unwrap_or_default(),
+                            status: row.get_opt_str("item_status")?.unwrap_or_default(),
+                            started_at: row
+                                .get_opt_i64("item_started_at")?
+                                .map(|value| value.max(0) as u64),
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -3383,11 +3484,26 @@ impl SessionStore {
             ("DELETE FROM execution_activity WHERE root_session_id = ?".to_string(), vec![text(session_id)]),
             ("DELETE FROM execution_activity_owners WHERE NOT EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.owner_instance_id = execution_activity_owners.owner_instance_id) AND NOT EXISTS (SELECT 1 FROM execution_subtasks t WHERE t.owner_instance_id = execution_activity_owners.owner_instance_id AND t.status = 'outstanding')".to_string(), Vec::new()),
         ];
-        for table in ["messages", "prompt_queue", "session_runs", "session_context_epochs", "message_embeddings"] {
-            statements.push((format!("DELETE FROM {table} WHERE session_id = ?"), vec![text(session_id)]));
+        for table in [
+            "messages",
+            "prompt_queue",
+            "session_runs",
+            "session_context_epochs",
+            "message_embeddings",
+        ] {
+            statements.push((
+                format!("DELETE FROM {table} WHERE session_id = ?"),
+                vec![text(session_id)],
+            ));
         }
-        statements.push(("DELETE FROM session_list_index WHERE session_id = ?".to_string(), vec![text(session_id)]));
-        statements.push(("DELETE FROM sessions WHERE id = ?".to_string(), vec![text(session_id)]));
+        statements.push((
+            "DELETE FROM session_list_index WHERE session_id = ?".to_string(),
+            vec![text(session_id)],
+        ));
+        statements.push((
+            "DELETE FROM sessions WHERE id = ?".to_string(),
+            vec![text(session_id)],
+        ));
         let results = self.db.execute_transaction_with_results(statements).await?;
         Ok(results.last().copied().unwrap_or(0) > 0)
     }
@@ -3402,7 +3518,9 @@ impl SessionStore {
                     Vec::new(),
                 )
                 .await?;
-            let Some(migration) = migration else { return Ok(()); };
+            let Some(migration) = migration else {
+                return Ok(());
+            };
             if migration.get_str("state")? == "complete" {
                 return Ok(());
             }
@@ -3429,7 +3547,8 @@ impl SessionStore {
                 return Ok(());
             }
             let batch_len = rows.len();
-            let last_updated = rows.last().expect("non-empty batch").get_i64("updated")?;
+            let last_updated =
+                rows.last().expect("non-empty batch").get_i64("updated")?;
             let last_id = rows.last().expect("non-empty batch").get_str("id")?;
             let payloads = rows
                 .into_iter()
@@ -4026,11 +4145,19 @@ impl SessionStore {
         revision: &str,
         bundle: &crate::management::SkillWriteRequest,
     ) -> anyhow::Result<crate::management::SkillVersion> {
-        static VERSION_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static VERSION_SEQUENCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
         let created_at = crate::now_millis();
         let sequence = VERSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let version = crate::management::SkillVersion {
-            id: format!("sv_{created_at}_{sequence}_{}", revision.trim_start_matches("sha256:").chars().take(12).collect::<String>()),
+            id: format!(
+                "sv_{created_at}_{sequence}_{}",
+                revision
+                    .trim_start_matches("sha256:")
+                    .chars()
+                    .take(12)
+                    .collect::<String>()
+            ),
             skill_id: skill_id.to_string(),
             scope,
             revision: revision.to_string(),
@@ -4397,7 +4524,11 @@ impl SessionStore {
                     .to_string(),
             ),
         ];
-        params.extend(session_ids.iter().map(|session_id| text(session_id.clone())));
+        params.extend(
+            session_ids
+                .iter()
+                .map(|session_id| text(session_id.clone())),
+        );
         let affected = self
             .db
             .execute(
@@ -4524,9 +4655,13 @@ fn decode_workflow_run(row: DbRow) -> anyhow::Result<crate::workflow::WorkflowRu
         attempt: row.get_i64("attempt")?.max(1) as u32,
         root_run_id: row.get_str("root_run_id")?,
         retry_of: row.get_opt_str("retry_of")?,
-        next_attempt_at: row.get_opt_i64("next_attempt_at")?.map(|value| value.max(0) as u64),
+        next_attempt_at: row
+            .get_opt_i64("next_attempt_at")?
+            .map(|value| value.max(0) as u64),
         lease_owner: row.get_opt_str("lease_owner")?,
-        lease_expires_at: row.get_opt_i64("lease_expires_at")?.map(|value| value.max(0) as u64),
+        lease_expires_at: row
+            .get_opt_i64("lease_expires_at")?
+            .map(|value| value.max(0) as u64),
     })
 }
 
@@ -4535,7 +4670,8 @@ fn workflow_run_insert_sql(_: Option<u32>) -> String {
        (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
         session_id, status, trigger, error, created, attempt, root_run_id, retry_of,
         next_attempt_at, lease_owner, lease_expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#.to_string()
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+        .to_string()
 }
 
 fn workflow_run_conditional_insert_sql() -> String {
@@ -4543,18 +4679,40 @@ fn workflow_run_conditional_insert_sql() -> String {
        (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
         session_id, status, trigger, error, created, attempt, root_run_id, retry_of,
         next_attempt_at, lease_owner, lease_expires_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() > 0"#.to_string()
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() > 0"#
+        .to_string()
 }
 
-fn workflow_run_insert_params(run: &crate::workflow::WorkflowRun, max_running: Option<u32>) -> Vec<SqlValue> {
+fn workflow_run_insert_params(
+    run: &crate::workflow::WorkflowRun,
+    max_running: Option<u32>,
+) -> Vec<SqlValue> {
     let mut params = vec![
-        text(&run.id), text(&run.activation_id), text(&run.workflow_id), int(store_i64(run.scheduled_at)),
-        run.started_at.map(|value| int(store_i64(value))).unwrap_or(SqlValue::Null),
-        run.finished_at.map(|value| int(store_i64(value))).unwrap_or(SqlValue::Null),
-        opt_text(run.session_id.clone()), text(&run.status), text(&run.trigger), opt_text(run.error.clone()),
-        int(store_i64(run.created)), int(i64::from(run.attempt)), text(&run.root_run_id),
-        opt_text(run.retry_of.clone()), run.next_attempt_at.map(|value| int(store_i64(value))).unwrap_or(SqlValue::Null),
-        opt_text(run.lease_owner.clone()), run.lease_expires_at.map(|value| int(store_i64(value))).unwrap_or(SqlValue::Null),
+        text(&run.id),
+        text(&run.activation_id),
+        text(&run.workflow_id),
+        int(store_i64(run.scheduled_at)),
+        run.started_at
+            .map(|value| int(store_i64(value)))
+            .unwrap_or(SqlValue::Null),
+        run.finished_at
+            .map(|value| int(store_i64(value)))
+            .unwrap_or(SqlValue::Null),
+        opt_text(run.session_id.clone()),
+        text(&run.status),
+        text(&run.trigger),
+        opt_text(run.error.clone()),
+        int(store_i64(run.created)),
+        int(i64::from(run.attempt)),
+        text(&run.root_run_id),
+        opt_text(run.retry_of.clone()),
+        run.next_attempt_at
+            .map(|value| int(store_i64(value)))
+            .unwrap_or(SqlValue::Null),
+        opt_text(run.lease_owner.clone()),
+        run.lease_expires_at
+            .map(|value| int(store_i64(value)))
+            .unwrap_or(SqlValue::Null),
     ];
     if let Some(max_running) = max_running {
         params.push(text(&run.activation_id));

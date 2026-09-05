@@ -120,6 +120,8 @@ impl ChromeBridge {
         struct JsTab {
             title: String,
             #[serde(default)]
+            modified: bool,
+            #[serde(default)]
             path: Option<String>,
             #[serde(default)]
             kind: Option<String>,
@@ -137,6 +139,7 @@ impl ChromeBridge {
                         .into_iter()
                         .map(|title| JsTab {
                             title,
+                            modified: false,
                             path: None,
                             kind: None,
                             neoism_agent_route_id: None,
@@ -191,7 +194,7 @@ impl ChromeBridge {
                 };
                 BufferTab {
                     title: t.title,
-                    modified: false,
+                    modified: t.modified,
                     custom_icon: None,
                     // A tab with no `path` (and no scratch/agent route)
                     // is treated as the root terminal — sticky, no close
@@ -732,10 +735,10 @@ impl ChromeBridge {
 
     /// Feed one pane terminal's PTY stream (creating the pane-sized
     /// terminal on first feed, seeded with the active IdeTheme). PTY
-    /// responses (DSR / capability replies inside replayed streams)
-    /// are drained and dropped — nobody is listening on a pane
-    /// terminal's write side.
-    pub fn feed_pane_terminal(&mut self, external_id: u32, bytes: &[u8]) {
+    /// Returns effects to the host so replies and private Neoism OSC commands
+    /// are routed to the source pane/session rather than whichever tab later
+    /// owns focus.
+    pub fn feed_pane_terminal(&mut self, external_id: u32, bytes: &[u8]) -> JsValue {
         let id = external_id as u64;
         let cell_w = self.rendered.cell_w.max(1.0);
         let cell_h = self.rendered.cell_h.max(1.0);
@@ -762,7 +765,12 @@ impl ChromeBridge {
         if !bytes.is_empty() {
             term.feed(bytes);
         }
-        let _ = term.take_pty_writes();
+        let effects: Vec<WasmEffect> = term
+            .inner
+            .drain_effects()
+            .filter_map(WasmEffect::from_core)
+            .collect();
+        serde_wasm_bindgen::to_value(&effects).unwrap_or(JsValue::NULL)
     }
 
     /// True when a pane terminal already exists for `external_id` —
@@ -1210,7 +1218,10 @@ impl ChromeBridge {
                 rect.x,
                 rect.y,
                 [rect.x, rect.y, rect.w, rect.h],
-                focused,
+                // A focused strip, reached via Alt+Up, owns the only cursor.
+                // Keep split-pane terminals from retaining their block caret
+                // while the shared tab trail paints the desktop-style bar.
+                focused && !self.chrome.buffer_tabs.is_focused(),
             );
             drawn.push(id);
         }

@@ -225,7 +225,9 @@ pub fn default_model_from_providers_json(value: &Value) -> Option<String> {
                 continue;
             };
             let is_fallback = provider_id == "opencode";
-            if is_fallback != prefer_fallback || (has_connected && !is_connected(provider_id)) {
+            if is_fallback != prefer_fallback
+                || (has_connected && !is_connected(provider_id))
+            {
                 continue;
             }
             let Some(model_id) = defaults
@@ -320,12 +322,8 @@ pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|s| !s.is_empty());
-    let input_help_visible = value
-        .get("input-hints")
-        .and_then(Value::as_bool);
-    let sidebar_visible = value
-        .get("sidebar")
-        .and_then(Value::as_bool);
+    let input_help_visible = value.get("input-hints").and_then(Value::as_bool);
+    let sidebar_visible = value.get("sidebar").and_then(Value::as_bool);
     ConfigDefaults {
         agent,
         model,
@@ -573,9 +571,7 @@ pub fn message_blocks_from_response(
             _ => None,
         })
         .flat_map(|(message, assistant)| {
-            let created = user_created
-                .get(assistant.parent_id.as_str())
-                .copied();
+            let created = user_created.get(assistant.parent_id.as_str()).copied();
             message
                 .get("parts")
                 .and_then(Value::as_array)
@@ -586,33 +582,32 @@ pub fn message_blocks_from_response(
                 })
         })
         .collect::<HashMap<_, _>>();
-    let runtime_origins = messages
-        .iter()
-        .zip(&infos)
-        .filter_map(|(message, info)| {
-            let Some(MessageInfo::User(user)) = info else {
-                return None;
-            };
-            if !user
-                .system
-                .as_deref()
-                .is_some_and(|system| system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER))
-            {
-                return None;
-            }
-            let message_id = user.id.to_string();
-            let origin = message
-                .get("parts")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .flat_map(task_ids_from_completion_text)
-                .filter_map(|task_id| task_origins.get(task_id).copied())
-                .min()?;
-            Some((message_id, origin))
-        })
-        .collect::<HashMap<_, _>>();
+    let runtime_origins =
+        messages
+            .iter()
+            .zip(&infos)
+            .filter_map(|(message, info)| {
+                let Some(MessageInfo::User(user)) = info else {
+                    return None;
+                };
+                if !user.system.as_deref().is_some_and(|system| {
+                    system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER)
+                }) {
+                    return None;
+                }
+                let message_id = user.id.to_string();
+                let origin = message
+                    .get("parts")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .flat_map(task_ids_from_completion_text)
+                    .filter_map(|task_id| task_origins.get(task_id).copied())
+                    .min()?;
+                Some((message_id, origin))
+            })
+            .collect::<HashMap<_, _>>();
     let mut indexes = (0..messages.len()).collect::<Vec<_>>();
     if newest_first {
         indexes.reverse();
@@ -799,11 +794,7 @@ fn message_blocks_with_start(
         // "errors that have to stop", which the user DOES want to see. Render
         // it here so it's visible even from a reloaded snapshot (the live
         // `session.error` broadcast is lost if the SSE dropped when it fired).
-        if let Some(text) = assistant
-            .error
-            .as_ref()
-            .and_then(assistant_error_message)
-        {
+        if let Some(text) = assistant.error.as_ref().and_then(assistant_error_message) {
             blocks.push(agent_message_system("Agent error", text));
         }
     }

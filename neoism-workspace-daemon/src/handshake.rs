@@ -1004,13 +1004,25 @@ mod tests {
         assert_eq!(outcome.replies.len(), 1, "expected exactly one HelloAck");
         match &outcome.replies[0] {
             WorkspaceServerMessage::HelloAck {
-                accepted, reason, ..
+                accepted,
+                reason,
+                connected_host_id,
+                ..
             } => {
                 assert_eq!(*accepted, expect_accepted, "accepted flag mismatch");
                 assert!(
                     reason.as_ref().map(|r| !r.is_empty()).unwrap_or(false),
                     "expected non-empty reason: {reason:?}"
                 );
+                if expect_accepted {
+                    let expected_host_id = crate::workspace::machine_host_id();
+                    assert_eq!(
+                        connected_host_id.as_deref(),
+                        Some(expected_host_id.as_str())
+                    );
+                } else {
+                    assert!(connected_host_id.is_none());
+                }
             }
             other => panic!("expected HelloAck, got {other:?}"),
         }

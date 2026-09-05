@@ -661,6 +661,22 @@ fn touchpad_overscroll_is_discarded_at_edges() {
 }
 
 #[test]
+fn touch_scroll_tracks_subrow_pixels_directly_and_stops_without_tail() {
+    let mut t = FileTree::empty();
+    t.set_entries(sample_entries(20));
+    t.set_visible(true);
+
+    assert!(t.scroll_touch_pixels(-7.0, 5));
+    assert_eq!(t.scroll_top, 0);
+    assert_eq!(t.tick_scroll(), -7.0);
+    assert!(!t.is_animating());
+
+    assert!(t.scroll_touch_pixels(-ROW_HEIGHT, 5));
+    assert_eq!(t.tick_scroll(), -7.0);
+    assert!(!t.is_animating());
+}
+
+#[test]
 fn icon_for_routes_extensions() {
     let make = |label: &str| TreeEntry {
         label: label.into(),
@@ -798,26 +814,56 @@ fn project_dotfiles_are_toggleable_but_git_and_cache_metadata_stay_hidden() {
     let mut tree = FileTree::new(root.clone());
     with_ctx(|ctx| tree.populate_from_dir(&root, ctx));
     assert!(tree.entries().iter().any(|entry| entry.label == ".agent"));
-    assert!(tree.entries().iter().any(|entry| entry.label == ".env.example"));
+    assert!(tree
+        .entries()
+        .iter()
+        .any(|entry| entry.label == ".env.example"));
     assert!(tree.entries().iter().all(|entry| entry.label != ".git"));
     assert!(tree.entries().iter().all(|entry| entry.label != ".hg"));
     assert!(tree.entries().iter().all(|entry| entry.label != ".svn"));
     assert!(tree.entries().iter().any(|entry| entry.label == "target"));
-    assert!(tree.entries().iter().any(|entry| entry.label == "node_modules"));
+    assert!(tree
+        .entries()
+        .iter()
+        .any(|entry| entry.label == "node_modules"));
 
     with_ctx(|ctx| assert!(!tree.toggle_hidden(ctx)));
-    assert!(tree.entries().iter().all(|entry| !entry.label.starts_with('.')));
-    assert!(tree.entries().iter().any(|entry| entry.label == "README.md"));
+    assert!(tree
+        .entries()
+        .iter()
+        .all(|entry| !entry.label.starts_with('.')));
+    assert!(tree
+        .entries()
+        .iter()
+        .any(|entry| entry.label == "README.md"));
 
     with_ctx(|ctx| assert!(tree.toggle_hidden(ctx)));
-    let neoism_index = tree.entries().iter().position(|entry| entry.label == ".neoism").unwrap();
-    with_ctx(|ctx| { tree.toggle_dir_at(neoism_index, ctx); });
+    let neoism_index = tree
+        .entries()
+        .iter()
+        .position(|entry| entry.label == ".neoism")
+        .unwrap();
+    with_ctx(|ctx| {
+        tree.toggle_dir_at(neoism_index, ctx);
+    });
     assert!(tree.entries().iter().all(|entry| entry.label != "cache"));
 
-    let claude_index = tree.entries().iter().position(|entry| entry.label == ".claude").unwrap();
-    with_ctx(|ctx| { tree.toggle_dir_at(claude_index, ctx); });
-    assert!(tree.entries().iter().any(|entry| entry.label == "settings.json"));
-    assert!(tree.entries().iter().all(|entry| entry.label != "worktrees"));
+    let claude_index = tree
+        .entries()
+        .iter()
+        .position(|entry| entry.label == ".claude")
+        .unwrap();
+    with_ctx(|ctx| {
+        tree.toggle_dir_at(claude_index, ctx);
+    });
+    assert!(tree
+        .entries()
+        .iter()
+        .any(|entry| entry.label == "settings.json"));
+    assert!(tree
+        .entries()
+        .iter()
+        .all(|entry| entry.label != "worktrees"));
 
     let _ = std::fs::remove_dir_all(root);
 }

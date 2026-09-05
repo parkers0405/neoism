@@ -2,7 +2,8 @@ use std::pin::Pin;
 
 use futures_core::Stream;
 use neoism_agent_core::{
-    AuthInfo, ProviderApiInfo, ProviderGenerationRequest, ProviderInfo, ProviderStreamEvent,
+    AuthInfo, ProviderApiInfo, ProviderGenerationRequest, ProviderInfo,
+    ProviderStreamEvent,
 };
 use neoism_agent_service_api::CredentialScope;
 
@@ -57,8 +58,19 @@ impl ProviderRegistry {
         &self,
         providers: &[ProviderInfo],
     ) -> anyhow::Result<Vec<String>> {
-        let mut connected = self.auth_store.all().await?.keys().cloned().collect::<Vec<_>>();
+        let mut connected = self
+            .auth_store
+            .all()
+            .await?
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         for provider in providers {
+            if provider.models.values().any(|model| {
+                model.api.auth != neoism_agent_core::ProviderAuthMode::Required
+            }) {
+                connected.push(provider.id.clone());
+            }
             if provider.env.iter().any(|key| std::env::var(key).is_ok()) {
                 connected.push(provider.id.clone());
             }
@@ -92,10 +104,9 @@ impl ProviderRegistry {
             request.provider_id.clone()
         };
         if provider_id == "openai" {
-            let scoped_auth = self.auth_store.scoped(
-                credential_scope.clone(),
-                request.connection_id.clone(),
-            );
+            let scoped_auth = self
+                .auth_store
+                .scoped(credential_scope.clone(), request.connection_id.clone());
             let auth = scoped_auth.get("openai").await?;
             request.provider_id = "openai".to_string();
             if request.model_id == "stub" {
@@ -110,6 +121,7 @@ impl ProviderRegistry {
                 auth_store: scoped_auth,
                 use_oauth_responses: true,
                 allow_openai_env_fallback: true,
+                auth_mode: neoism_agent_core::ProviderAuthMode::Required,
             };
             return Ok(ProviderStream {
                 provider_id: "openai".to_string(),
@@ -120,11 +132,15 @@ impl ProviderRegistry {
 
         if let Some(api) = request.api.clone() {
             if let Some(adapter) = ProviderAdapter::from_api(&api) {
-                let scoped_auth = self.auth_store.scoped(
-                    credential_scope,
-                    request.connection_id.clone(),
-                );
-                let auth = self.provider_auth(&scoped_auth, &provider_id, &request.auth_env).await?;
+                let scoped_auth = self
+                    .auth_store
+                    .scoped(credential_scope, request.connection_id.clone());
+                let auth = if api.auth == neoism_agent_core::ProviderAuthMode::None {
+                    None
+                } else {
+                    self.provider_auth(&scoped_auth, &provider_id, &request.auth_env)
+                        .await?
+                };
                 let model_id = request.model_id.clone();
                 request.provider_id = provider_id.clone();
                 return match adapter.kind {
@@ -135,6 +151,7 @@ impl ProviderRegistry {
                             auth_store: scoped_auth,
                             use_oauth_responses: false,
                             allow_openai_env_fallback: false,
+                            auth_mode: api.auth,
                         };
                         Ok(ProviderStream {
                             provider_id,

@@ -6,14 +6,13 @@ use neoism_agent_core::{McpToolInfo, PermissionAction, PermissionRule, ToolListI
 use neoism_agent_plugin_api::{RegisteredContribution, RegistrySnapshot};
 use serde_json::{json, Value};
 
-use neoism_agent_plugin_api::AgentSourceSnapshot;
 use crate::error::ApiError;
 use crate::session_loop::wait_for_cancellation;
 use crate::state::AppState;
 use crate::{
-    ensure_tool_permission, mcp, mcp_auth, permission, tool,
-    tool_allowed_for_model,
+    ensure_tool_permission, mcp, mcp_auth, permission, tool, tool_allowed_for_model,
 };
+use neoism_agent_plugin_api::AgentSourceSnapshot;
 
 const MCP_GATEWAY_TOOL: &str = "execute";
 const MCP_CATALOG_BUDGET: usize = 2_000;
@@ -31,7 +30,12 @@ pub(crate) async fn acquire_workspace_plugin_snapshot(
     state: &AppState,
     directory: &str,
 ) -> Result<WorkspacePluginSnapshot, ApiError> {
-    let (runtime, evicted) = state.inner.workspace_runtimes.acquire(directory, state).await.map_err(ApiError::gone)?;
+    let (runtime, evicted) = state
+        .inner
+        .workspace_runtimes
+        .acquire(directory, state)
+        .await
+        .map_err(ApiError::gone)?;
     for stale in evicted {
         let _ = stale.teardown(state).await;
         state
@@ -60,7 +64,10 @@ pub(crate) fn tool_contribution<'a>(
 }
 
 pub(crate) fn plugin_present(snapshot: &RegistrySnapshot, plugin_id: &str) -> bool {
-    snapshot.manifests.iter().any(|manifest| manifest.id == plugin_id)
+    snapshot
+        .manifests
+        .iter()
+        .any(|manifest| manifest.id == plugin_id)
 }
 
 async fn configured_mcp_tools_with_snapshot(
@@ -147,7 +154,10 @@ pub(crate) async fn provider_tools_for_agent(
     model_id: &str,
 ) -> Result<Vec<ToolListItem>, ApiError> {
     let tools = available_tools_for_snapshot(state, directory, snapshot).await?;
-    if tools.iter().any(|tool| matches!(tool.id.as_str(), "grep" | "glob")) {
+    if tools
+        .iter()
+        .any(|tool| matches!(tool.id.as_str(), "grep" | "glob"))
+    {
         tool::warm_search(state.services(), std::path::Path::new(directory));
     }
     let ids = tools.iter().map(|tool| tool.id.clone()).collect::<Vec<_>>();
@@ -366,14 +376,16 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     let runtime_state = state
         .clone()
         .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
-    let Some(tool) = configured_mcp_tools_with_snapshot(directory, runtime_state, snapshot)
-        .await
-        .into_iter()
-        .find(|tool| mcp::tool_runtime_id(&tool.client, &tool.name) == runtime_id)
+    let Some(tool) =
+        configured_mcp_tools_with_snapshot(directory, runtime_state, snapshot)
+            .await
+            .into_iter()
+            .find(|tool| mcp::tool_runtime_id(&tool.client, &tool.name) == runtime_id)
     else {
         anyhow::bail!("unknown MCP tool {runtime_id}");
     };
-    let state = state.ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
+    let state =
+        state.ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
     let auth_store = mcp_auth::McpAuthStore::local(state.services());
     let call = mcp::call_tool_with_snapshot(
         directory,
@@ -427,7 +439,8 @@ pub(crate) async fn execute_mcp_gateway(
     let runtime_state = state
         .clone()
         .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
-    let mut tools = configured_mcp_tools_with_snapshot(directory, runtime_state, snapshot).await;
+    let mut tools =
+        configured_mcp_tools_with_snapshot(directory, runtime_state, snapshot).await;
     let runtime_ids = tools
         .iter()
         .map(|tool| mcp::tool_runtime_id(&tool.client, &tool.name))
@@ -680,16 +693,16 @@ mod tests {
         let db = root.join("agent.sqlite3");
         let state = AppState::open_database(db.clone()).await.unwrap();
 
-        let canonical = acquire_workspace_plugin_snapshot(
-            &state,
-            root.to_string_lossy().as_ref(),
-        )
-        .await.unwrap();
+        let canonical =
+            acquire_workspace_plugin_snapshot(&state, root.to_string_lossy().as_ref())
+                .await
+                .unwrap();
         let alias = acquire_workspace_plugin_snapshot(
             &state,
             root.join(".").to_string_lossy().as_ref(),
         )
-        .await.unwrap();
+        .await
+        .unwrap();
 
         assert_eq!(canonical.directory, alias.directory);
         assert!(Arc::ptr_eq(&canonical.runtime, &alias.runtime));
@@ -865,10 +878,7 @@ mod tests {
         let memory = mcp_tool("neoism-memory", "memory.recall", "Recall memory");
         assert_eq!(mcp_canonical_path(&memory), "neoism_memory.recall");
         assert!(mcp_path_matches(&memory, "neoism_memory.recall"));
-        assert!(mcp_path_matches(
-            &memory,
-            "neoism_memory.memory_recall"
-        ));
+        assert!(mcp_path_matches(&memory, "neoism_memory.memory_recall"));
         assert!(mcp_path_matches(
             &memory,
             "mcp__neoism_memory__memory_recall"
@@ -887,7 +897,11 @@ mod tests {
     #[test]
     fn gateway_namespace_filter_accepts_advertised_sanitized_name() {
         let tools = vec![
-            mcp_tool("product-help", "docs.search", "Search product documentation"),
+            mcp_tool(
+                "product-help",
+                "docs.search",
+                "Search product documentation",
+            ),
             mcp_tool("github", "search", "Search repositories"),
         ];
         let result = mcp_search_result(

@@ -1,3 +1,4 @@
+use super::impl_core::INTRINSIC_TAB_MAX_WIDTH;
 use super::impl_render::first_glyph_ink_center_y;
 use super::*;
 
@@ -55,6 +56,33 @@ fn terminal(title: &str, route: Option<usize>) -> BufferTab<()> {
     }
 }
 
+#[test]
+fn touch_scroll_is_direct_bounded_and_has_no_glide_target() {
+    let mut tabs = BufferTabs::<()>::new();
+    tabs.set_tabs(
+        (0..8)
+            .map(|index| terminal(&format!("Terminal {index}"), Some(index)))
+            .collect(),
+        0,
+    );
+    let viewport = 300.0;
+    assert!(tabs.scroll_touch_by(-37.0, viewport));
+    assert_eq!(tabs.scroll_x, 37.0);
+    assert_eq!(tabs.scroll_target_x, tabs.scroll_x);
+
+    tabs.scroll_touch_by(-10_000.0, viewport);
+    let max = tabs.geometry_widths().iter().sum::<f32>()
+        + NEW_TAB_BTN_WIDTH * tabs.scale()
+        - viewport;
+    assert_eq!(tabs.scroll_x, max);
+    assert_eq!(tabs.scroll_target_x, max);
+    assert!(!tabs.is_animating());
+
+    tabs.scroll_touch_by(10_000.0, viewport);
+    assert_eq!(tabs.scroll_x, 0.0);
+    assert_eq!(tabs.scroll_target_x, 0.0);
+}
+
 fn file(path: &str) -> BufferTab<()> {
     BufferTab {
         title: path.rsplit('/').next().unwrap_or(path).to_string(),
@@ -98,6 +126,275 @@ fn short_tab_title_is_not_needlessly_changed() {
         BufferTabs::<()>::fit_title("Bible.epub", 40.0, |_| 1.0),
         "Bible.epub"
     );
+}
+
+#[test]
+fn short_tab_width_tracks_content_and_close_reservation() {
+    let without_close = BufferTabs::<()>::visual_tab_width(40.0, false, 1.0);
+    let with_close = BufferTabs::<()>::visual_tab_width(40.0, true, 1.0);
+
+    assert_eq!(without_close, 87.0);
+    assert_eq!(with_close, 98.5);
+    assert_eq!(
+        with_close - without_close,
+        CLOSE_BTN_SIZE * 0.5 + CLOSE_BTN_GAP
+    );
+    assert!(with_close < MAX_TAB_WIDTH);
+}
+
+#[test]
+fn tiny_label_keeps_a_practical_visual_and_interaction_target() {
+    let width = BufferTabs::<()>::visual_tab_width(1.0, false, 1.0);
+    assert_eq!(width, MIN_TAB_WIDTH);
+    assert!(width >= 44.0);
+}
+
+#[test]
+fn one_long_tab_keeps_its_full_natural_width_in_a_wide_strip() {
+    let natural = BufferTabs::<()>::visual_tab_geometry(420.0, 12.0, true, 1.0);
+
+    assert!(natural.tab_width > MAX_TAB_WIDTH);
+    assert_eq!(natural.title_clip_width, 420.0);
+}
+
+#[test]
+fn content_sized_tab_has_only_the_declared_trailing_guard() {
+    let title_width = 40.0;
+    let width = BufferTabs::<()>::visual_tab_width(title_width, false, 1.0);
+    let occupied = TAB_PADDING_X * 2.0 + ICON_FONT_SIZE + ICON_GAP + title_width;
+
+    assert_eq!(width - occupied, TITLE_OVERHANG_GUARD);
+}
+
+#[test]
+fn render_geometry_uses_measured_icon_and_reserves_close_exactly_once() {
+    let title_width = 137.0;
+    let icon_width = 16.0;
+    let without_close =
+        BufferTabs::<()>::visual_tab_geometry(title_width, icon_width, false, 1.0);
+    let with_close =
+        BufferTabs::<()>::visual_tab_geometry(title_width, icon_width, true, 1.0);
+
+    assert_eq!(without_close.title_clip_width, title_width);
+    assert_eq!(with_close.title_clip_width, title_width);
+    assert_eq!(with_close.icon_width, icon_width);
+    assert_eq!(
+        with_close.close_reserved,
+        CLOSE_BTN_SIZE * 0.5 + CLOSE_BTN_GAP
+    );
+    assert_eq!(
+        with_close.tab_width - without_close.tab_width,
+        with_close.close_reserved
+    );
+    assert_eq!(
+        with_close.close_center_x,
+        Some(with_close.tab_width - TAB_PADDING_X)
+    );
+}
+
+#[test]
+fn appending_tabs_past_overflow_never_resizes_existing_tabs() {
+    let viewport = 430.0;
+    let mut tabs = BufferTabs::<()>::new();
+    tabs.set_tabs(
+        vec![
+            file("one.rs"),
+            file("medium-length-name.rs"),
+            file("a-much-longer-descriptive-buffer-name.rs"),
+        ],
+        0,
+    );
+    let before = tabs.geometry_widths();
+    let before_extent = before.iter().sum::<f32>() + NEW_TAB_BTN_WIDTH - viewport;
+
+    let mut expanded = tabs.tabs().to_vec();
+    expanded.push(file("another-buffer-after-overflow.rs"));
+    expanded.push(file("and-one-more-buffer.rs"));
+    tabs.set_tabs(expanded, 4);
+    let after = tabs.geometry_widths();
+    let after_extent = after.iter().sum::<f32>() + NEW_TAB_BTN_WIDTH - viewport;
+
+    assert_eq!(&after[..before.len()], &before);
+    assert!(before_extent > 0.0);
+    assert!(after_extent > before_extent);
+}
+
+#[test]
+fn removing_tabs_does_not_resize_remaining_tabs() {
+    let mut tabs = BufferTabs::<()>::new();
+    tabs.set_tabs(
+        vec![
+            file("one.rs"),
+            file("medium-length-name.rs"),
+            file("a-much-longer-descriptive-buffer-name.rs"),
+            file("four.rs"),
+        ],
+        0,
+    );
+    let before = tabs.geometry_widths();
+    let remaining = vec![
+        tabs.tabs()[0].clone(),
+        tabs.tabs()[2].clone(),
+        tabs.tabs()[3].clone(),
+    ];
+    tabs.set_tabs(remaining, 0);
+    let after = tabs.geometry_widths();
+
+    assert_eq!(after, vec![before[0], before[2], before[3]]);
+}
+
+#[test]
+fn active_last_intrinsic_tab_can_be_fully_revealed() {
+    let viewport = 300.0;
+    let mut tabs = BufferTabs::<()>::new();
+    tabs.set_tabs(
+        vec![
+            file("one.rs"),
+            file("two.rs"),
+            file("three.rs"),
+            file("four.rs"),
+        ],
+        3,
+    );
+    let widths = tabs.geometry_widths();
+
+    tabs.ensure_index_visible_with_widths(3, viewport, &widths);
+
+    let last_right = widths.iter().sum::<f32>();
+    assert_eq!(tabs.scroll_target_x, last_right - viewport);
+    assert!(last_right <= tabs.scroll_target_x + viewport);
+}
+
+#[test]
+fn pathological_title_uses_stable_intrinsic_cap_and_close_spacing() {
+    let geometry = BufferTabs::<()>::visual_tab_geometry(5_000.0, 12.0, true, 1.0);
+
+    assert_eq!(geometry.tab_width, INTRINSIC_TAB_MAX_WIDTH);
+    assert_eq!(
+        geometry.close_center_x,
+        Some(INTRINSIC_TAB_MAX_WIDTH - TAB_PADDING_X)
+    );
+    assert_eq!(
+        geometry.close_reserved,
+        CLOSE_BTN_SIZE * 0.5 + CLOSE_BTN_GAP
+    );
+    assert!(geometry.title_clip_width < 5_000.0);
+}
+
+#[test]
+fn unicode_title_measurement_uses_supplied_advances_and_grapheme_boundaries() {
+    let title = "文e\u{301}件名.rs";
+    let measured = title
+        .chars()
+        .map(|character| if character.is_ascii() { 1.0 } else { 2.0 })
+        .sum::<f32>();
+    let natural = BufferTabs::<()>::visual_tab_geometry(measured, 12.0, true, 1.0);
+    // The 72px interaction minimum may leave extra title room, but Unicode
+    // demand must be based on the supplied glyph advances rather than bytes.
+    assert!(natural.title_clip_width >= measured);
+
+    let fitted = BufferTabs::<()>::fit_title(title, 5.0, |character| {
+        if character.is_ascii() {
+            1.0
+        } else {
+            2.0
+        }
+    });
+    assert_eq!(fitted, "文…");
+    assert!(!fitted.starts_with('\u{301}'));
+}
+
+#[test]
+fn hover_surface_is_a_stable_editor_tab_not_a_scaled_pill() {
+    let inactive = tab_surface_geometry(
+        30.0,
+        8.0,
+        180.0,
+        BUFFER_TABS_HEIGHT,
+        1.0,
+        TabSurfaceState::Inactive,
+    );
+    let hovered = tab_surface_geometry(
+        30.0,
+        8.0,
+        180.0,
+        BUFFER_TABS_HEIGHT,
+        1.0,
+        TabSurfaceState::Hovered,
+    );
+    let active = tab_surface_geometry(
+        30.0,
+        8.0,
+        180.0,
+        BUFFER_TABS_HEIGHT,
+        1.0,
+        TabSurfaceState::Active,
+    );
+
+    assert_eq!(
+        (hovered.x, hovered.y, hovered.width, hovered.height),
+        (30.0, 8.0, 180.0, 28.0)
+    );
+    assert_eq!(
+        (active.x, active.y, active.width, active.height),
+        (30.0, 8.0, 180.0, 28.0)
+    );
+    assert_eq!(inactive.top_radius, 0.0);
+    assert_eq!(hovered.top_radius, 3.0);
+    assert_eq!(active.top_radius, 3.0);
+}
+
+#[test]
+fn ellipsis_is_not_emitted_when_it_cannot_fit_the_clip() {
+    assert_eq!(BufferTabs::<()>::fit_title("long", 0.5, |_| 1.0), "");
+}
+
+#[test]
+fn scaled_render_geometry_does_not_scale_measured_advances_twice() {
+    let geometry = BufferTabs::<()>::visual_tab_geometry(274.0, 32.0, true, 2.0);
+
+    assert_eq!(geometry.tab_width, 399.0);
+    assert_eq!(geometry.title_clip_width, 274.0);
+    assert_eq!(geometry.close_reserved, 23.0);
+    assert_eq!(geometry.close_center_x, Some(375.0));
+}
+
+#[test]
+fn focused_tab_reveal_scrolls_variable_slots_instead_of_shrinking_them() {
+    let mut tabs = BufferTabs::<()>::new();
+    tabs.set_tabs(
+        vec![file("first-long-file.rs"), file("second-long-file.rs")],
+        1,
+    );
+    let widths = [190.0, 210.0];
+
+    tabs.ensure_index_visible_with_widths(1, 240.0, &widths);
+
+    assert_eq!(tabs.scroll_target_x, 160.0);
+    assert!(tabs.pending_ensure_active);
+}
+
+#[test]
+fn panel_hit_viewport_is_not_the_overflowing_content_width() {
+    let mut tabs = BufferTabs::<()>::new();
+    tabs.strip_viewport_width = 240.0;
+    tabs.layout = vec![(0.0, 190.0), (190.0, 210.0)];
+
+    assert_eq!(tabs.last_strip_width(), 240.0);
+}
+
+#[test]
+fn variable_width_drop_preview_uses_measured_edges() {
+    let widths = [80.0, 140.0, 100.0];
+    let before_second_midpoint =
+        drop_preview_geometry_for_widths(10.0, 400.0, 10.0 + 80.0 + 69.0, 0.0, &widths);
+    let after_second_midpoint =
+        drop_preview_geometry_for_widths(10.0, 400.0, 10.0 + 80.0 + 71.0, 0.0, &widths);
+
+    assert_eq!(before_second_midpoint.insert_index, 1);
+    assert_eq!(before_second_midpoint.caret_x, 90.0);
+    assert_eq!(after_second_midpoint.insert_index, 2);
+    assert_eq!(after_second_midpoint.caret_x, 230.0);
 }
 
 #[test]

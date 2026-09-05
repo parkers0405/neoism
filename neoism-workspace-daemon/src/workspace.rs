@@ -62,8 +62,8 @@ use crate::persistence::{self, Snapshot, SnapshotProducer, SnapshotWriter};
 mod clipboard;
 mod dispatch;
 mod handlers;
-mod manager;
 mod management_bridge;
+mod manager;
 mod shell_ops;
 
 #[cfg(test)]

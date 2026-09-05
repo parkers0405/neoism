@@ -30,7 +30,12 @@ pub(crate) fn live_buffer_text(file: &Path) -> Option<String> {
 /// stall PTY forwarding behind a keystroke sync). Because it runs
 /// inline, queue order matches socket order — interactive queries that
 /// later `flush_document_sync` are guaranteed to see this text.
-pub(crate) fn queue_buffer_sync(runtime: &language_server::LspRuntime, workspace_root: &Path, file: &Path, text: String) {
+pub(crate) fn queue_buffer_sync(
+    runtime: &language_server::LspRuntime,
+    workspace_root: &Path,
+    file: &Path,
+    text: String,
+) {
     if let Ok(mut store) = live_text_store().lock() {
         store.insert(file.to_path_buf(), text.clone());
     }
@@ -65,8 +70,9 @@ pub(crate) fn buffer_snapshot_message(
     }
     super::live_sync::flush_document_sync(runtime, workspace_root, file);
     let statuses = language_server::status(runtime, workspace_root, Some(file));
-    let filetype = language_server::language_id_for_path_in(runtime, workspace_root, file)
-        .unwrap_or_default();
+    let filetype =
+        language_server::language_id_for_path_in(runtime, workspace_root, file)
+            .unwrap_or_default();
     let servers = statuses
         .into_iter()
         .map(|status| {

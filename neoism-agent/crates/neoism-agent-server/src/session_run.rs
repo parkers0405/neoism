@@ -143,12 +143,7 @@ pub(crate) async fn session_status_payload(
     status: &SessionStatus,
 ) -> Value {
     let mut payload = json!({ "sessionID": session_id, "status": status });
-    if let Some(run) = state
-        .inner
-        .session_coordinator
-        .active_run(session_id)
-        .await
-    {
+    if let Some(run) = state.inner.session_coordinator.active_run(session_id).await {
         payload["runID"] = json!(run.id.clone());
         payload["startedAt"] = json!(run.started_at);
         if let Some(status) = payload.get_mut("status") {

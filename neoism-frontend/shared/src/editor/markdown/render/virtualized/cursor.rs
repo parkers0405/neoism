@@ -285,13 +285,7 @@ fn set_cursor_rect_clipped(
         pane.set_cursor_rect(Some(rect));
         return;
     };
-    let x0 = rect[0].max(clip[0]);
-    let y0 = rect[1].max(clip[1]);
-    let x1 = (rect[0] + rect[2]).min(clip[0] + clip[2]);
-    let y1 = (rect[1] + rect[3]).min(clip[1] + clip[3]);
-    if x1 > x0 && y1 > y0 {
-        pane.set_cursor_rect(Some([x0, y0, x1 - x0, y1 - y0]));
-    }
+    pane.set_cursor_rect(cursor_rect_intersection(rect, clip));
 }
 
 /// Caret for the cursor on trailing blank lines. Markdown nodes never

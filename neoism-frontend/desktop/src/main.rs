@@ -91,22 +91,27 @@ fn emit_neoism_osc(action: &str, payload: Option<&str>) -> io::Result<()> {
 }
 
 fn run_neoism_terminal_command() -> Result<bool, Box<dyn std::error::Error>> {
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let is_cd_command = args.first().and_then(|arg| arg.to_str()) == Some("cd");
+
     if std::env::var_os("NEOISM").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        if is_cd_command {
+            return Err("neoism cd is available inside a Neoism terminal".into());
+        }
         return Ok(false);
     }
 
     if let Some(argv0) = std::env::args_os().next() {
+        if !terminal_control_allowed(&argv0, is_cd_command) {
         // Inside a Neoism pane, a bare `neoism` acts like a lightweight
         // editor command. Explicit paths (`./target/debug/neoism`,
         // `/usr/bin/neoism`) are treated as real app launches so testing
         // the freshly-built binary from an embedded terminal works.
-        if std::path::Path::new(&argv0).components().count() > 1 {
             return Ok(false);
         }
     }
 
-    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if args.iter().any(|arg| {
+    if !is_cd_command && args.iter().any(|arg| {
         matches!(arg.to_str(), Some("-h" | "--help" | "-V" | "--version"))
             || arg == ipc::NEW_WINDOW_ARG
     }) {
@@ -119,6 +124,16 @@ fn run_neoism_terminal_command() -> Result<bool, Box<dyn std::error::Error>> {
     }
 
     let cwd = std::env::current_dir()?;
+    if is_cd_command {
+        let path = resolve_terminal_cd_path(&args[1..], &cwd, |key| std::env::var_os(key))?;
+        let path_text = path.to_string_lossy();
+        if path_text.chars().any(|ch| ch == '\0' || ch.is_control()) {
+            return Err("directory contains a control character".into());
+        }
+        let encoded = general_purpose::STANDARD.encode(path_text.as_bytes());
+        emit_neoism_osc("cd", Some(&encoded))?;
+        return Ok(true);
+    }
     for arg in args {
         let path = PathBuf::from(arg);
         let path = if path.is_absolute() {
@@ -143,6 +158,111 @@ fn run_neoism_terminal_command() -> Result<bool, Box<dyn std::error::Error>> {
     }
 
     Ok(true)
+}
+
+fn terminal_control_allowed(argv0: &std::ffi::OsStr, is_cd_command: bool) -> bool {
+    is_cd_command || std::path::Path::new(argv0).components().count() <= 1
+}
+
+#[cfg(test)]
+mod terminal_cd_tests {
+    use super::*;
+    use std::ffi::{OsStr, OsString};
+
+    fn env(home: &std::path::Path, oldpwd: Option<&std::path::Path>) -> impl FnMut(&str) -> Option<OsString> {
+        let home = home.to_path_buf();
+        let oldpwd = oldpwd.map(std::path::Path::to_path_buf);
+        move |key| match key {
+            "HOME" | "USERPROFILE" => Some(home.clone().into_os_string()),
+            "OLDPWD" => oldpwd.clone().map(PathBuf::into_os_string),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn resolves_home_relative_absolute_tilde_and_oldpwd() {
+        let root = std::env::temp_dir().join(format!("neoism-cd-{}", std::process::id()));
+        let home = root.join("home");
+        let cwd = root.join("work/current");
+        let child = cwd.join("child");
+        let tilde = home.join("x/y");
+        for dir in [&home, &cwd, &child, &tilde] { std::fs::create_dir_all(dir).unwrap(); }
+        let none: Vec<OsString> = vec![];
+        assert_eq!(resolve_terminal_cd_path(&none, &cwd, env(&home, None)).unwrap(), std::fs::canonicalize(&home).unwrap());
+        assert_eq!(resolve_terminal_cd_path(&["child".into()], &cwd, env(&home, None)).unwrap(), std::fs::canonicalize(&child).unwrap());
+        assert_eq!(resolve_terminal_cd_path(&[child.clone().into_os_string()], &cwd, env(&home, None)).unwrap(), std::fs::canonicalize(&child).unwrap());
+        assert_eq!(resolve_terminal_cd_path(&["~/x/y".into()], &cwd, env(&home, None)).unwrap(), std::fs::canonicalize(&tilde).unwrap());
+        assert_eq!(resolve_terminal_cd_path(&["-".into()], &cwd, env(&home, Some(&home))).unwrap(), std::fs::canonicalize(&home).unwrap());
+        assert!(resolve_terminal_cd_path(&["missing".into()], &cwd, env(&home, None)).is_err());
+        assert!(resolve_terminal_cd_path(&["a".into(), "b".into()], &cwd, env(&home, None)).unwrap_err().to_string().contains("usage"));
+        let file = root.join("file");
+        std::fs::write(&file, "x").unwrap();
+        assert!(resolve_terminal_cd_path(&[file.into_os_string()], &cwd, env(&home, None)).unwrap_err().to_string().contains("not a directory"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_binary_path_does_not_bypass_cd_control_precedence() {
+        let explicit = OsStr::new("./target/debug/neoism");
+        assert!(std::path::Path::new(explicit).components().count() > 1);
+        // This is the exact gate used by run_neoism_terminal_command: explicit
+        // app testing bypass applies only when the first command is not `cd`.
+        assert!(terminal_control_allowed(explicit, true));
+        assert!(!terminal_control_allowed(explicit, false));
+        assert!(terminal_control_allowed(OsStr::new("neoism"), false));
+    }
+}
+
+fn terminal_home(
+    mut env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env("USERPROFILE").map(PathBuf::from).or_else(|| {
+            let mut drive = env("HOMEDRIVE")?;
+            drive.push(env("HOMEPATH")?);
+            Some(PathBuf::from(drive))
+        }).or_else(|| env("HOME").map(PathBuf::from))
+    }
+    #[cfg(not(windows))]
+    {
+        env("HOME").map(PathBuf::from)
+    }
+}
+
+fn resolve_terminal_cd_path(
+    operands: &[std::ffi::OsString],
+    cwd: &std::path::Path,
+    mut env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if operands.len() > 1 {
+        return Err("usage: neoism cd [directory]".into());
+    }
+    let home = terminal_home(&mut env);
+    let raw = operands.first();
+    let mut path = match raw {
+        None => home.ok_or("cannot determine home directory")?,
+        Some(value) if value == "-" => {
+            env("OLDPWD").map(PathBuf::from).ok_or("OLDPWD not set")?
+        }
+        Some(value) if value == "~" => home.ok_or("cannot determine home directory")?,
+        Some(value) if value.to_str().is_some_and(|value| value.starts_with("~/") || value.starts_with("~\\")) => home
+            .ok_or("cannot determine home directory")?
+            .join(&value.to_string_lossy()[2..]),
+        Some(value) if value.to_str().is_some_and(|value| value.starts_with('~')) => {
+            return Err("unsupported home expansion (use ~ or ~/path)".into())
+        }
+        Some(value) => PathBuf::from(value),
+    };
+    if !path.is_absolute() {
+        path = cwd.join(path);
+    }
+    let path = std::fs::canonicalize(&path)
+        .map_err(|error| format!("cannot cd to {}: {error}", path.display()))?;
+    if !path.is_dir() {
+        return Err(format!("not a directory: {}", path.display()).into());
+    }
+    Ok(path)
 }
 
 fn run_workspace_notes_command() -> Result<bool, Box<dyn std::error::Error>> {
@@ -485,8 +605,6 @@ pub fn setup_environment_variables(config: &neoism_backend::config::Config) {
     // https://github.com/raphamorim/rio/issues/200
     std::env::set_var("TERM_PROGRAM", "neoism");
     std::env::set_var("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-    std::env::set_var("NEOISM", "1");
-
     std::env::set_var("COLORTERM", "truecolor");
     std::env::remove_var("DESKTOP_STARTUP_ID");
     std::env::remove_var("XDG_ACTIVATION_TOKEN");
@@ -1542,6 +1660,21 @@ fn self_update(
         println!("  ✓ {}", dst.display());
     }
 
+    #[cfg(not(windows))]
+    {
+        let web_src = extracted.join("web");
+        if !web_src.join("index.html").is_file() {
+            return Err(format!("`web/index.html` missing from {asset}").into());
+        }
+        let staged = dir.join(".web.new");
+        let _ = std::fs::remove_dir_all(&staged);
+        copy_directory(&web_src, &staged)?;
+        let destination = dir.join("web");
+        let _ = std::fs::remove_dir_all(&destination);
+        std::fs::rename(&staged, &destination)?;
+        println!("  ✓ {}", destination.display());
+    }
+
     let _ = std::fs::remove_dir_all(&tmp);
     if options.gui {
         reporter.ready("Restarting Neoism to finish the update");
@@ -1575,6 +1708,24 @@ fn self_update(
     Ok(())
 }
 
+#[cfg(not(windows))]
+fn copy_directory(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_arch = "wasm32"))]
     if neoism_desktop::notes_mcp::maybe_run()? {
@@ -1586,7 +1737,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-
     #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     configure_debug_service_isolation()?;
 

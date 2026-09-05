@@ -9,8 +9,7 @@
 //      to the white pixels — no rectangle washing the bg).
 //   2. The "neoism · terminal" tagline, rendered via sugarloaf
 //      text inside the tagline band.
-//   3. Four rounded-rect menu buttons (Open file tree / Neoism Agent
-//      / Search / Command palette) inside the menu band, each with hover
+//   3. Seven rounded-rect menu buttons inside the menu band, each with hover
 //      + click states and click-to-shortcut wired through the
 //      input layer.
 //   4. The click "fidget" on the wordmark — a
@@ -123,31 +122,73 @@ const DEPTH: f32 = 0.0;
 // so the splash, command sheet, and palette share one canonical glyph
 // per service (and Mash Up Pack `palette.*` overrides reach all
 // three). Search has no owning service — it keeps its own glyph.
-const MENU: [MenuSpec; 5] = [
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplashMenuAction {
+    OpenFileTree,
+    OpenNotes,
+    OpenAgent,
+    Search,
+    OpenCommandPalette,
+    NewTerminal,
+    ChangeDirectory,
+}
+
+impl SplashMenuAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenFileTree => "open-file-tree",
+            Self::OpenNotes => "open-notes",
+            Self::OpenAgent => "open-agent",
+            Self::Search => "search",
+            Self::OpenCommandPalette => "open-command-palette",
+            Self::NewTerminal => "new-terminal",
+            Self::ChangeDirectory => "change-directory",
+        }
+    }
+}
+
+const MENU: [MenuSpec; 7] = [
     MenuSpec {
+        action: SplashMenuAction::ChangeDirectory,
+        icon: MenuIcon::Glyph("\u{f07b}"),
+        label: "Change Directory",
+        keybind: "Alt + D",
+    },
+    MenuSpec {
+        action: SplashMenuAction::OpenFileTree,
         icon: MenuIcon::Service(CommandService::Workspace),
         label: "Open file tree",
         keybind: "Alt + E",
     },
     MenuSpec {
+        action: SplashMenuAction::OpenNotes,
         icon: MenuIcon::Service(CommandService::Markdown),
         label: "Notes",
         keybind: "Alt + N",
     },
     MenuSpec {
+        action: SplashMenuAction::OpenAgent,
         icon: MenuIcon::Service(CommandService::Agent),
         label: "Neoism",
         keybind: "Alt + A",
     },
     MenuSpec {
+        action: SplashMenuAction::Search,
         icon: MenuIcon::Glyph("\u{f002}"),
         label: "Search",
         keybind: "Alt + S",
     },
     MenuSpec {
+        action: SplashMenuAction::OpenCommandPalette,
         icon: MenuIcon::Service(CommandService::Neoism),
         label: "Command palette",
         keybind: "Alt + P",
+    },
+    MenuSpec {
+        action: SplashMenuAction::NewTerminal,
+        icon: MenuIcon::Glyph("\u{f120}"),
+        label: "New Terminal",
+        keybind: "Alt + T",
     },
 ];
 
@@ -181,6 +222,10 @@ struct Click {
 
 #[derive(Default)]
 pub struct SplashOverlay {
+    /// Paint-time visibility, separate from cached hit rectangles. Hosts use
+    /// this as an input ownership boundary so gaps/background do not fall
+    /// through to the terminal composer on touch devices.
+    active: bool,
     started: Option<Instant>,
     click: Option<Click>,
     image_registered: bool,
@@ -200,7 +245,7 @@ pub struct SplashOverlay {
     /// Per-menu-button rects cached on the last render — used by
     /// the input layer to translate clicks into shortcut
     /// actions.
-    menu_rects: [Option<[f32; 4]>; 5],
+    menu_rects: Vec<(SplashMenuAction, [f32; 4])>,
     /// `Some(t)` for the duration of the dismiss animation
     /// (when the user runs their first command and the splash
     /// fades + scales + drifts up out of view). `None` while the
@@ -219,6 +264,7 @@ pub struct SplashOverlay {
 
 #[derive(Clone, Copy)]
 struct MenuSpec {
+    action: SplashMenuAction,
     icon: MenuIcon,
     label: &'static str,
     keybind: &'static str,
@@ -266,16 +312,18 @@ impl SplashOverlay {
         self.mouse = pos;
     }
 
-    /// Returns the menu-button index under (x, y), if any.
-    pub fn menu_hit(&self, x: f32, y: f32) -> Option<usize> {
-        for (i, slot) in self.menu_rects.iter().enumerate() {
-            if let Some([rx, ry, rw, rh]) = *slot {
-                if x >= rx && x <= rx + rw && y >= ry && y <= ry + rh {
-                    return Some(i);
-                }
+    /// Returns the typed menu action under (x, y), if any.
+    pub fn menu_hit(&self, x: f32, y: f32) -> Option<SplashMenuAction> {
+        for (action, [rx, ry, rw, rh]) in &self.menu_rects {
+            if x >= *rx && x <= *rx + *rw && y >= *ry && y <= *ry + *rh {
+                return Some(*action);
             }
         }
         None
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
     }
 
     pub fn wordmark_hit(&self, x: f32, y: f32) -> bool {
@@ -315,9 +363,10 @@ impl SplashOverlay {
     }
 
     pub fn reset(&mut self) {
+        self.active = false;
         self.click = None;
         self.wordmark_rect = None;
-        self.menu_rects = [None; 5];
+        self.menu_rects.clear();
         self.dismiss_started = None;
         // Keep image cache + start time so re-showing the splash
         // doesn't reset the breathing phase.
@@ -336,6 +385,7 @@ impl SplashOverlay {
         wants_visible: bool,
         occlusion_rects: &[[f32; 4]],
     ) {
+        self.active = false;
         let _ = cell_w;
         let tint = crate::primitives::look::wordmark_colors_or(theme.fg);
         if !self.image_registered || self.wordmark_tint.as_deref() != Some(&tint) {
@@ -345,6 +395,7 @@ impl SplashOverlay {
             }
             self.wordmark_tint = Some(tint);
         }
+        self.active = wants_visible;
 
         // Clear our own image-overlay queue for this panel before
         // emitting this frame's batch. `image_overlays` is an
@@ -391,7 +442,7 @@ impl SplashOverlay {
             // Animation done — paint nothing this frame, the
             // renderer will stop calling us next.
             self.wordmark_rect = None;
-            self.menu_rects = [None; 5];
+            self.menu_rects.clear();
             return;
         }
         // Ease-in cubic on the dismiss timeline so it eases out
@@ -674,12 +725,15 @@ impl SplashOverlay {
             label_gap: menu_label_gap,
             radius: menu_radius,
         };
+        self.menu_rects.clear();
         for (i, spec) in MENU.iter().enumerate() {
             let y = menu_block_top + i as f32 * (menu_btn_h + menu_btn_gap);
             let rect = [menu_x, y, menu_btn_w, menu_btn_h];
             // Cancel hit-test rects during dismiss so a stray
             // click as the splash fades doesn't fire a shortcut.
-            self.menu_rects[i] = if dismiss_t > 0.0 { None } else { Some(rect) };
+            if dismiss_t <= 0.0 {
+                self.menu_rects.push((spec.action, rect));
+            }
             let hovered = self
                 .mouse
                 .map(|(mx, my)| {
@@ -930,6 +984,57 @@ impl SplashOverlay {
 
     pub fn clear_image_overlays(sugarloaf: &mut Sugarloaf) {
         sugarloaf.clear_image_overlays_for(SPLASH_PANEL_ID);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splash_has_seven_typed_rows_in_display_order() {
+        assert_eq!(MENU.len(), 7);
+        assert_eq!(
+            MENU.map(|item| item.action),
+            [
+                SplashMenuAction::ChangeDirectory,
+                SplashMenuAction::OpenFileTree,
+                SplashMenuAction::OpenNotes,
+                SplashMenuAction::OpenAgent,
+                SplashMenuAction::Search,
+                SplashMenuAction::OpenCommandPalette,
+                SplashMenuAction::NewTerminal,
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_menu_hits_return_actions_not_indices() {
+        let mut overlay = SplashOverlay::new();
+        overlay.menu_rects = MENU
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (item.action, [0.0, index as f32 * 10.0, 20.0, 9.0]))
+            .collect();
+        for (index, item) in MENU.iter().enumerate() {
+            assert_eq!(
+                overlay.menu_hit(5.0, index as f32 * 10.0 + 2.0),
+                Some(item.action)
+            );
+        }
+        assert_eq!(overlay.menu_hit(50.0, 50.0), None);
+    }
+
+    #[test]
+    fn splash_active_state_and_wire_action_are_typed() {
+        let mut overlay = SplashOverlay::new();
+        overlay.active = true;
+        overlay.menu_rects = vec![(SplashMenuAction::Search, [10.0, 20.0, 80.0, 30.0])];
+        assert!(overlay.is_active());
+        assert_eq!(overlay.menu_hit(20.0, 25.0).map(SplashMenuAction::as_str), Some("search"));
+        assert_eq!(overlay.menu_hit(20.0, 55.0), None);
+        overlay.reset();
+        assert!(!overlay.is_active());
     }
 }
 

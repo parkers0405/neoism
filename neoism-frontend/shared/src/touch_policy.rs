@@ -2,7 +2,7 @@
 //!
 //! Pure decision logic extracted from the desktop fork's
 //! `app/window_event/touch.rs` so the web frontend can apply the same
-//! classification — tap vs pinch-zoom vs scroll vs select — to its own
+//! classification — tap vs suppressed pinch vs scroll vs select — to its own
 //! touch event source.
 //!
 //! All inputs are POD (`TouchPoint` carries id + (x, y) + phase). Callers
@@ -10,7 +10,7 @@
 //! [`TouchPoint`] and feed it to [`classify_touch_start`],
 //! [`classify_touch_move`], or [`classify_touch_end`]; the returned
 //! [`TouchAction`] tells the caller what to do (start a simulated click,
-//! scroll by N pixels, increase/decrease font size, etc.).
+//! scroll by N pixels, suppress a native pinch, etc.).
 //!
 //! What lives here:
 //!
@@ -42,14 +42,14 @@ const TOUCH_ZOOM_FACTOR: f32 = 1.0;
 /// considered a drag (tap → scroll/select gate).
 pub const MAX_TAP_DISTANCE: f64 = 5.;
 
-/// Editor-area movement budget before a tap commits to scrolling.
-/// This keeps small finger settle as a tap/cursor jump and makes a
-/// deliberate mobile pan scroll instead of entering drag-select.
-pub const EDITOR_SCROLL_TAP_DISTANCE: f64 = 16.;
+/// Small axis-intent budget before a direct-manipulation surface commits to
+/// scrolling.  Mobile must promote quickly; the full displacement is retained
+/// by anchoring the new Scroll state at touch-down and re-feeding the sample.
+pub const EDITOR_SCROLL_TAP_DISTANCE: f64 = 4.;
 
 /// Long-press threshold in milliseconds. A finger that stays within
 /// the tap radius for at least this many millis is promoted to a
-/// long-press (right-click / context menu).
+/// long-press word selection.
 pub const LONG_PRESS_MS: u64 = 500;
 
 /// Two-finger pan threshold. Once both fingers have moved this many
@@ -123,8 +123,8 @@ impl TouchPoint {
 /// Coarse classification of a screen region for the purpose of
 /// gesture gating. Callers (web adapter / desktop fork) hit-test the
 /// touch start location against their `ChromeLayout` and feed the
-/// result back so [`touch_policy`] can decide whether pinch-zoom is
-/// allowed, whether swipe-from-edge should be eaten, etc.
+/// result back so [`touch_policy`] can decide whether swipe-from-edge
+/// should be eaten, etc.
 ///
 /// The variants are intentionally coarse — finer-grained zones (e.g.
 /// "tab strip vs status line") are not needed for gesture policy.
@@ -136,8 +136,7 @@ pub enum TouchZone {
     #[default]
     TerminalBody,
     /// Buffer tabs / status line / file tree headers / pane borders.
-    /// Pinch-zoom is suppressed here so dragging on a header doesn't
-    /// resize fonts.
+    /// Chrome surface. Pinch is suppressed in every zone.
     ChromePanel,
     /// Editor surface (code pane). Swipe-from-edge back/forward must
     /// be eaten so the browser's native gesture doesn't steal vi
@@ -155,7 +154,7 @@ pub enum TouchPurpose {
     Zoom(TouchZoom),
     Tap(TouchPoint, TouchZone),
     /// Single-finger tap that crossed the long-press threshold and
-    /// fired a context-menu action. The tap location is held until
+    /// fired a word-selection action. The tap location is held until
     /// the finger lifts so the lift doesn't double-fire as a click.
     LongPressed(TouchPoint),
     /// Two-finger pan: both fingers are moving in the same direction
@@ -171,9 +170,8 @@ pub struct TouchZoom {
     /// slots when the gesture demotes to two-finger scroll.
     pub(crate) slots: (TouchPoint, TouchPoint),
     fractions: f32,
-    /// Zone the gesture started in. Pinch-zoom is suppressed when
-    /// this is [`TouchZone::ChromePanel`] (e.g. dragging two fingers
-    /// on the buffer-tabs strip must not warp font size).
+    /// Zone the gesture started in. Retained for gesture ownership/debugging;
+    /// pinch is suppressed in every zone.
     start_zone: TouchZone,
     /// Initial finger distance — used by [`pinch_committed`] to gate
     /// "is this really a pinch?" before the policy commits to scroll
@@ -209,9 +207,7 @@ impl TouchZoom {
         }
     }
 
-    /// Touch zone the pinch gesture started in. Pinch-zoom side
-    /// effects should be suppressed when this is
-    /// [`TouchZone::ChromePanel`].
+    /// Touch zone the pinch gesture started in.
     pub fn start_zone(&self) -> TouchZone {
         self.start_zone
     }
@@ -299,7 +295,8 @@ pub enum TouchAction {
     Scroll { dx: f64, dy: f64, x: f64, y: f64 },
     /// Update the simulated mouse position (drag-to-select tracking).
     UpdateMousePosition { x: usize, y: usize },
-    /// Change font size by one step.
+    /// Legacy wire action retained for generated-bundle compatibility. The
+    /// touch classifier no longer emits font-size actions.
     ChangeFontSize(FontSizeAction),
     /// Click-release: emit a simulated left-click at the given pixel
     /// position and immediately mark the button as released.
@@ -313,10 +310,17 @@ pub enum TouchAction {
     /// [`classify_touch_move`] so the first scroll delta lands on the
     /// new `Scroll` state.
     PromoteTapToScroll,
-    /// Long-press fired: emit a context-menu / right-click at the
-    /// given pixel position. The lift event will not double-fire as a
+    /// Long-press fired: select the Unicode word/grapheme at the given
+    /// pixel position. The lift event will not double-fire as a
     /// left-click (state has moved to [`TouchPurpose::LongPressed`]).
-    OpenContextMenu { x: usize, y: usize },
+    SelectWord { x: usize, y: usize },
+    /// Continue the drag that began as a long-press word selection. The
+    /// concrete text surface keeps the two original word edges and chooses
+    /// the opposite edge as the fixed anchor as the finger crosses the word.
+    ExtendWordSelection { x: usize, y: usize },
+    /// Lift after a long-press drag. Unlike a mouse selection release this
+    /// only clears transient touch state; the visible selection is retained.
+    EndWordSelection,
     /// Two-finger same-direction pan: scroll by these pixel deltas
     /// (x, y) and DO NOT change font size, regardless of dead-zone.
     TwoFingerScroll { dx: f64, dy: f64 },
@@ -427,9 +431,10 @@ pub fn classify_touch_move(
             let delta_x = touch.x - start.x;
             let delta_y = touch.y - start.y;
             if *zone == TouchZone::EditorArea {
-                if delta_y.abs() > EDITOR_SCROLL_TAP_DISTANCE
-                    || delta_x.hypot(delta_y) > EDITOR_SCROLL_TAP_DISTANCE
-                {
+                // Axis intent, not radial distance: diagonal finger noise must
+                // not consume the threshold early. Whichever axis first clears
+                // the small budget promotes direct scrolling.
+                if delta_y.abs().max(delta_x.abs()) > EDITOR_SCROLL_TAP_DISTANCE {
                     let start_point = *start;
                     *purpose = TouchPurpose::Scroll(start_point);
                     TouchAction::PromoteTapToScroll
@@ -473,18 +478,12 @@ pub fn classify_touch_move(
                 // Still ambiguous; consume the move without zooming.
                 return TouchAction::None;
             }
-            // Pinch has committed — but suppress it on chrome panels.
-            if matches!(zoom.start_zone(), TouchZone::ChromePanel) {
-                return TouchAction::SuppressNativeGesture;
-            }
-            let font_delta = zoom.last_font_delta;
-            if font_delta == 0.0 {
-                TouchAction::None
-            } else if font_delta >= 0. {
-                TouchAction::ChangeFontSize(FontSizeAction::Increase)
-            } else {
-                TouchAction::ChangeFontSize(FontSizeAction::Decrease)
-            }
+            // Pinch is never a font-size gesture. Keep this a distinct,
+            // swallowed action rather than demoting it to scroll: divergent
+            // fingers must not resize terminal/editor/chrome or leak through
+            // to browser page zoom. Same-direction motion commits to
+            // `TwoFingerScroll` above and remains supported.
+            TouchAction::SuppressNativeGesture
         }
         TouchPurpose::TwoFingerScroll(a, b) => {
             // Two-finger pan: scroll by the average finger delta and
@@ -510,10 +509,11 @@ pub fn classify_touch_move(
             TouchAction::TwoFingerScroll { dx, dy }
         }
         TouchPurpose::Scroll(last_touch) => {
+            let delta_x = touch.x - last_touch.x;
             let delta_y = touch.y - last_touch.y;
             *purpose = TouchPurpose::Scroll(touch);
             TouchAction::Scroll {
-                dx: 0.,
+                dx: delta_x,
                 dy: delta_y,
                 x: touch.x,
                 y: touch.y,
@@ -523,15 +523,19 @@ pub fn classify_touch_move(
             let (x, y) = clamp_to_layout(touch, layout);
             TouchAction::UpdateMousePosition { x, y }
         }
-        TouchPurpose::LongPressed(_) => TouchAction::None,
+        TouchPurpose::LongPressed(last) => {
+            *last = touch;
+            let (x, y) = clamp_to_layout(touch, layout);
+            TouchAction::ExtendWordSelection { x, y }
+        }
         TouchPurpose::Invalid(_) => TouchAction::None,
     }
 }
 
 /// Check whether the active touch gesture should be promoted to a
-/// long-press (right-click / context menu). Caller drives this on a
+/// long-press word selection. Caller drives this on a
 /// timer / RAF loop with `now_ms` set to wall-clock millis. Returns
-/// [`TouchAction::OpenContextMenu`] exactly once per gesture; further
+/// [`TouchAction::SelectWord`] exactly once per gesture; further
 /// calls return [`TouchAction::None`] until the finger lifts.
 ///
 /// The touch is promoted iff:
@@ -555,7 +559,7 @@ pub fn classify_long_press(
     let start_point = *start;
     *purpose = TouchPurpose::LongPressed(start_point);
     let (x, y) = clamp_to_layout(start_point, layout);
-    TouchAction::OpenContextMenu { x, y }
+    TouchAction::SelectWord { x, y }
 }
 
 /// Decide whether the platform's native back/forward swipe-from-edge
@@ -611,10 +615,10 @@ pub fn classify_touch_end(
             }
         }
         TouchPurpose::LongPressed(_) => {
-            // The lift after a long-press must NOT fire a click — the
-            // context menu already opened. Just reset state.
+            // The lift after a long-press must NOT fire a click and must not
+            // clear the selection. It only ends the transient touch anchor.
             *purpose = TouchPurpose::None;
-            TouchAction::None
+            TouchAction::EndWordSelection
         }
         TouchPurpose::Invalid(slots) => {
             slots.remove(&touch.id);
@@ -649,6 +653,10 @@ pub fn classify_touch_end(
 /// treated as "no keyboard" — browsers report sub-4px deltas on
 /// URL-bar hide/show that aren't a real keyboard event.
 pub const KEYBOARD_INSET_SLOP_PX: f64 = 4.0;
+
+pub fn mobile_direct_insert_mode(coarse_pointer: bool, max_touch_points: u32) -> bool {
+    coarse_pointer || max_touch_points > 0
+}
 
 /// Keyboard-adjusted bottom inset decision.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -866,7 +874,7 @@ mod tests {
         );
         match action {
             TouchAction::Scroll { dx, dy, .. } => {
-                assert_eq!(dx, 0.0);
+                assert_eq!(dx, 1.0);
                 assert!(dy > 0.0);
             }
             other => panic!("expected Scroll, got {other:?}"),
@@ -884,7 +892,7 @@ mod tests {
 
         let small = classify_touch_move(
             &mut state,
-            pt(1, 23.0, 10.0, TouchPhase::Moved),
+            pt(1, 14.0, 10.0, TouchPhase::Moved),
             layout(),
         );
         assert!(matches!(small, TouchAction::None));
@@ -892,7 +900,7 @@ mod tests {
 
         let promoted = classify_touch_move(
             &mut state,
-            pt(1, 28.0, 10.0, TouchPhase::Moved),
+            pt(1, 15.0, 10.0, TouchPhase::Moved),
             layout(),
         );
         assert!(matches!(promoted, TouchAction::PromoteTapToScroll));
@@ -921,13 +929,52 @@ mod tests {
 
         match action {
             TouchAction::Scroll { dx, dy, x, y } => {
-                assert_eq!(dx, 0.0);
+                assert_eq!(dx, 2.0);
                 assert_eq!(dy, 36.0);
                 assert_eq!(x, 12.0);
                 assert_eq!(y, 46.0);
             }
             other => panic!("expected Scroll, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn scroll_promotion_refeed_preserves_threshold_displacement_and_suppresses_click() {
+        let mut state = TouchPurpose::default();
+        classify_touch_start_zoned(
+            &mut state,
+            pt(7, 30.0, 100.0, TouchPhase::Started),
+            TouchZone::EditorArea,
+        );
+        assert!(matches!(
+            classify_touch_move(
+                &mut state,
+                pt(7, 31.0, 104.0, TouchPhase::Moved),
+                layout(),
+            ),
+            TouchAction::None
+        ));
+        let sample = pt(7, 32.0, 107.0, TouchPhase::Moved);
+        assert!(matches!(
+            classify_touch_move(&mut state, sample, layout()),
+            TouchAction::PromoteTapToScroll
+        ));
+        assert!(matches!(
+            classify_touch_move(&mut state, sample, layout()),
+            TouchAction::Scroll {
+                dx: 2.0,
+                dy: 7.0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_touch_end(
+                &mut state,
+                pt(7, 32.0, 107.0, TouchPhase::Ended),
+                layout(),
+            ),
+            TouchAction::EndScroll
+        ));
     }
 
     #[test]
@@ -986,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn long_press_promotes_to_context_menu() {
+    fn long_press_promotes_to_word_selection_once() {
         let mut state = TouchPurpose::default();
         classify_touch_start_zoned(
             &mut state,
@@ -997,14 +1044,14 @@ mod tests {
         let early = classify_long_press(&mut state, 1_000 + 100, layout());
         assert!(matches!(early, TouchAction::None));
         assert!(matches!(state, TouchPurpose::Tap(_, _)));
-        // Past threshold: fire context menu.
+        // Past threshold: select the word under the original touch.
         let action = classify_long_press(&mut state, 1_000 + LONG_PRESS_MS + 1, layout());
         match action {
-            TouchAction::OpenContextMenu { x, y } => {
+            TouchAction::SelectWord { x, y } => {
                 assert_eq!(x, 40);
                 assert_eq!(y, 50);
             }
-            other => panic!("expected OpenContextMenu, got {other:?}"),
+            other => panic!("expected SelectWord, got {other:?}"),
         }
         assert!(matches!(state, TouchPurpose::LongPressed(_)));
         // Idempotent: second call returns None.
@@ -1043,56 +1090,67 @@ mod tests {
             pt(1, 40.0, 50.0, TouchPhase::Ended),
             layout(),
         );
-        assert!(matches!(lift, TouchAction::None));
+        assert!(matches!(lift, TouchAction::EndWordSelection));
         assert!(matches!(state, TouchPurpose::None));
     }
 
     #[test]
-    fn pinch_on_chrome_panel_is_suppressed() {
+    fn long_press_drag_extends_until_selection_preserving_release() {
         let mut state = TouchPurpose::default();
         classify_touch_start_zoned(
             &mut state,
-            pt(1, 100.0, 10.0, TouchPhase::Started),
-            TouchZone::ChromePanel,
+            pt_at(1, 40.0, 50.0, TouchPhase::Started, 1_000),
+            TouchZone::EditorArea,
         );
-        classify_touch_start_zoned(
-            &mut state,
-            pt(2, 200.0, 10.0, TouchPhase::Started),
-            TouchZone::ChromePanel,
-        );
-        assert!(matches!(state, TouchPurpose::Zoom(_)));
-        // Spread the fingers wide enough to trip pinch_committed.
-        let action = classify_touch_move(
-            &mut state,
-            pt(2, 500.0, 10.0, TouchPhase::Moved),
-            layout(),
-        );
-        assert!(matches!(action, TouchAction::SuppressNativeGesture));
+        assert!(matches!(
+            classify_long_press(&mut state, 1_000 + LONG_PRESS_MS, layout()),
+            TouchAction::SelectWord { .. }
+        ));
+        assert!(matches!(
+            classify_touch_move(
+                &mut state,
+                pt_at(1, 12.0, 52.0, TouchPhase::Moved, 1_550),
+                layout(),
+            ),
+            TouchAction::ExtendWordSelection { x: 12, y: 52 }
+        ));
+        assert!(matches!(
+            classify_touch_end(
+                &mut state,
+                pt_at(1, 12.0, 52.0, TouchPhase::Ended, 1_560),
+                layout(),
+            ),
+            TouchAction::EndWordSelection
+        ));
     }
 
     #[test]
-    fn pinch_on_terminal_body_changes_font_size() {
-        let mut state = TouchPurpose::default();
-        classify_touch_start_zoned(
-            &mut state,
-            pt(1, 100.0, 10.0, TouchPhase::Started),
+    fn divergent_pinch_is_suppressed_on_terminal_editor_and_chrome() {
+        for zone in [
             TouchZone::TerminalBody,
-        );
-        classify_touch_start_zoned(
-            &mut state,
-            pt(2, 200.0, 10.0, TouchPhase::Started),
-            TouchZone::TerminalBody,
-        );
-        // Spread fingers — distance grows by 300px, well past commit.
-        let action = classify_touch_move(
-            &mut state,
-            pt(2, 500.0, 10.0, TouchPhase::Moved),
-            layout(),
-        );
-        assert!(matches!(
-            action,
-            TouchAction::ChangeFontSize(FontSizeAction::Increase)
-        ));
+            TouchZone::EditorArea,
+            TouchZone::ChromePanel,
+        ] {
+            let mut state = TouchPurpose::default();
+            classify_touch_start_zoned(
+                &mut state,
+                pt(1, 100.0, 10.0, TouchPhase::Started),
+                zone,
+            );
+            classify_touch_start_zoned(
+                &mut state,
+                pt(2, 200.0, 10.0, TouchPhase::Started),
+                zone,
+            );
+            assert!(matches!(state, TouchPurpose::Zoom(_)));
+            // Spread the fingers well past the pinch commit threshold.
+            let action = classify_touch_move(
+                &mut state,
+                pt(2, 500.0, 10.0, TouchPhase::Moved),
+                layout(),
+            );
+            assert!(matches!(action, TouchAction::SuppressNativeGesture));
+        }
     }
 
     #[test]
@@ -1194,6 +1252,13 @@ mod tests {
         let inset = keyboard_inset(800.0, 500.0, 100.0);
         assert_eq!(inset.bottom, 200.0);
         assert!(inset.keyboard_open);
+    }
+
+    #[test]
+    fn mobile_direct_insert_is_touch_only() {
+        assert!(mobile_direct_insert_mode(true, 0));
+        assert!(mobile_direct_insert_mode(false, 5));
+        assert!(!mobile_direct_insert_mode(false, 0));
     }
 
     #[test]

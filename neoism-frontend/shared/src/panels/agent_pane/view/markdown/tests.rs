@@ -534,6 +534,17 @@ fn list_parser_preserves_kind_marker_depth_and_task_state() {
 }
 
 #[test]
+fn sentence_openers_are_agent_prose_not_ordered_list_markers() {
+    for source in [
+        "Fair. Outages hit especially hard when your workflow depends on a single provider.",
+        "Monkey. What's the move?",
+        "Chill. OpenAI still giving you trouble?",
+    ] {
+        assert_eq!(markdown_list_item(source), None, "{source}");
+    }
+}
+
+#[test]
 fn emphasis_markers_render_semantically_without_leaking_delimiters() {
     let source = "*italic* **bold** ***both*** __strong__";
     assert_eq!(rendered_inline_text(source), "italic bold both strong");

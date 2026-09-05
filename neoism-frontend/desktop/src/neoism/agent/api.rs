@@ -68,7 +68,10 @@ pub(crate) fn agent_reverse_proxy_for_daemon_workspace(
     if workspace_id.is_empty() {
         return None;
     }
-    Some(format!("{base}/workspaces/{}", percent_encode(workspace_id)))
+    Some(format!(
+        "{base}/workspaces/{}",
+        percent_encode(workspace_id)
+    ))
 }
 
 fn agent_server_credentials() -> &'static RwLock<HashMap<String, String>> {
@@ -78,15 +81,25 @@ fn agent_server_credentials() -> &'static RwLock<HashMap<String, String>> {
 
 pub(crate) fn register_agent_server_credential(server: &str, credential: Option<&str>) {
     let key = server.trim().trim_end_matches('/').to_string();
-    let Ok(mut credentials) = agent_server_credentials().write() else { return; };
+    let Ok(mut credentials) = agent_server_credentials().write() else {
+        return;
+    };
     match credential.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(credential) => { credentials.insert(key, credential.to_string()); }
-        None => { credentials.remove(&key); }
+        Some(credential) => {
+            credentials.insert(key, credential.to_string());
+        }
+        None => {
+            credentials.remove(&key);
+        }
     }
 }
 
 fn agent_server_credential(server: &str) -> Option<String> {
-    agent_server_credentials().read().ok()?.get(server.trim().trim_end_matches('/')).cloned()
+    agent_server_credentials()
+        .read()
+        .ok()?
+        .get(server.trim().trim_end_matches('/'))
+        .cloned()
 }
 
 pub(super) fn fetch_model_options(
@@ -288,7 +301,12 @@ fn fetch_sessions_page(
 ) -> Result<SessionValuesPage, String> {
     let mut path = directory
         .filter(|directory| !directory.trim().is_empty())
-        .map(|dir| format!("/v2/sessions?roots=true&limit=24&directory={}", percent_encode(dir)))
+        .map(|dir| {
+            format!(
+                "/v2/sessions?roots=true&limit=24&directory={}",
+                percent_encode(dir)
+            )
+        })
         .unwrap_or_else(|| "/v2/sessions?roots=true&limit=24".to_string());
     if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
         path.push_str("&cursor=");
@@ -346,7 +364,8 @@ pub(super) fn fetch_session_entries_page(
     // hold the catalogue behind the serial status endpoint.
     let statuses = HashMap::new();
     let _ = current_id;
-    let entries = page.items
+    let entries = page
+        .items
         .iter()
         .filter_map(|session| session_entry(session, &statuses))
         .collect();
@@ -630,7 +649,10 @@ mod subagent_runtime_snapshot_tests {
             "id": "child-1",
             "externalAgent": { "status": "running" }
         });
-        assert_eq!(session_explicit_runtime_status(&session, &HashMap::new()), None);
+        assert_eq!(
+            session_explicit_runtime_status(&session, &HashMap::new()),
+            None
+        );
 
         let mut statuses = HashMap::new();
         statuses.insert(
@@ -679,13 +701,25 @@ mod subagent_runtime_snapshot_tests {
         let source = include_str!("api.rs");
         for route in ["config", "agent", "skill"] {
             let legacy = format!("format!(\"/{route}");
-            assert!(!source.contains(&legacy), "legacy desktop route remains: {legacy}");
+            assert!(
+                !source.contains(&legacy),
+                "legacy desktop route remains: {legacy}"
+            );
         }
         for route in [
-            "config", "event", "provider", "permission", "question", "command", "mcp",
+            "config",
+            "event",
+            "provider",
+            "permission",
+            "question",
+            "command",
+            "mcp",
         ] {
             let legacy = format!("\"/{route}");
-            assert!(!source.contains(&legacy), "legacy desktop route remains: {legacy}");
+            assert!(
+                !source.contains(&legacy),
+                "legacy desktop route remains: {legacy}"
+            );
         }
         let stripped_session = ["trim_end_matches(\"", "/session\")"].concat();
         assert!(!source.contains(&stripped_session));
@@ -718,7 +752,10 @@ mod subagent_runtime_snapshot_tests {
             agent_reverse_proxy_for_daemon_endpoint("wss://host.example/session"),
             Some("https://host.example/agent".to_string())
         );
-        assert_eq!(agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878"), None);
+        assert_eq!(
+            agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878"),
+            None
+        );
         assert_eq!(
             agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878/session/"),
             None
@@ -850,7 +887,9 @@ pub(crate) fn family_runtime_from_json(
             ))
         })
         .collect();
-    let execution = value.get("execution").and_then(execution_activity_from_json);
+    let execution = value
+        .get("execution")
+        .and_then(execution_activity_from_json);
     let running_background_tasks = value
         .get("runningBackgroundTasks")
         .and_then(Value::as_array)
@@ -888,39 +927,47 @@ pub(crate) fn family_runtime_from_json(
 pub(crate) fn execution_activity_from_json(
     activity: &Value,
 ) -> Option<neoism_ui::panels::agent_pane::state::ExecutionActivityState> {
-        let active_segments = activity
-            .get("activeSegments")?
-            .as_object()?
-            .iter()
-            .filter_map(|(id, started)| Some((id.clone(), started.as_u64()?)))
-            .collect::<BTreeMap<_, _>>();
-        let session_activities = activity
-            .get("sessionActivities")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-            .filter_map(|(session_id, value)| {
-                let active_segments = value
-                    .get("activeSegments")?
-                    .as_object()?
-                    .iter()
-                    .filter_map(|(id, started)| Some((id.clone(), started.as_u64()?)))
-                    .collect();
-                Some((session_id.clone(), neoism_ui::panels::agent_pane::state::ProviderActivityState {
+    let active_segments = activity
+        .get("activeSegments")?
+        .as_object()?
+        .iter()
+        .filter_map(|(id, started)| Some((id.clone(), started.as_u64()?)))
+        .collect::<BTreeMap<_, _>>();
+    let session_activities = activity
+        .get("sessionActivities")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(session_id, value)| {
+            let active_segments = value
+                .get("activeSegments")?
+                .as_object()?
+                .iter()
+                .filter_map(|(id, started)| Some((id.clone(), started.as_u64()?)))
+                .collect();
+            Some((
+                session_id.clone(),
+                neoism_ui::panels::agent_pane::state::ProviderActivityState {
                     completed_ms: value.get("completedMs")?.as_u64()?,
                     active_segments,
-                }))
-            })
-            .collect();
-        Some(neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+                },
+            ))
+        })
+        .collect();
+    Some(
+        neoism_ui::panels::agent_pane::state::ExecutionActivityState {
             execution_id: activity.get("executionId")?.as_str()?.to_string(),
             root_session_id: activity.get("rootSessionId")?.as_str()?.to_string(),
             completed_ms: activity.get("completedMs")?.as_u64()?,
             active_segments,
             session_activities,
             revision: activity.get("revision")?.as_u64()?,
-            finished: activity.get("finished").and_then(Value::as_bool).unwrap_or(false),
-        })
+            finished: activity
+                .get("finished")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+    )
 }
 
 pub(super) fn fetch_session_statuses(
@@ -977,8 +1024,10 @@ pub(super) fn fetch_pending_permissions(
 
 pub(super) fn fetch_pending_questions(
     server: &str,
-) -> Result<Vec<neoism_ui::panels::agent_pane::question_policy::NeoismAgentPendingQuestion>, String>
-{
+) -> Result<
+    Vec<neoism_ui::panels::agent_pane::question_policy::NeoismAgentPendingQuestion>,
+    String,
+> {
     let value = api_request_json(server, "GET", "/v2/interactions/questions", None)?
         .ok_or_else(|| "Neoism Agent returned an empty questions response".to_string())?;
     let requests = value
@@ -986,14 +1035,14 @@ pub(super) fn fetch_pending_questions(
         .ok_or_else(|| "Neoism Agent returned malformed pending questions".to_string())?;
     Ok(requests
         .iter()
-        .map(
-            neoism_ui::panels::agent_pane::question_policy::question_request_from_event,
-        )
+        .map(neoism_ui::panels::agent_pane::question_policy::question_request_from_event)
         .filter(|question| !question.id.is_empty() && !question.questions.is_empty())
         .collect())
 }
 
-fn parse_pending_permissions(value: &Value) -> Result<Vec<NeoismAgentPendingPermission>, String> {
+fn parse_pending_permissions(
+    value: &Value,
+) -> Result<Vec<NeoismAgentPendingPermission>, String> {
     let requests = value.as_array().ok_or_else(|| {
         "Neoism Agent returned malformed pending permissions".to_string()
     })?;
@@ -1062,11 +1111,13 @@ pub(super) fn fetch_config_defaults(
         None,
         std::time::Duration::from_secs(12),
     )?
-        .ok_or_else(|| "Neoism Agent returned an empty config response".to_string())?;
+    .ok_or_else(|| "Neoism Agent returned an empty config response".to_string())?;
     let mut defaults = config_defaults_from_json(&value);
     if defaults.model.is_none() {
         let provider_path = directory
-            .map(|dir| format!("/v2/providers/configured?directory={}", percent_encode(dir)))
+            .map(|dir| {
+                format!("/v2/providers/configured?directory={}", percent_encode(dir))
+            })
             .unwrap_or_else(|| "/v2/providers/configured".to_string());
         // `server` is also the joined host's reverse-proxy URL. Resolve from
         // that host's provider catalog, never from the guest's local catalog.
@@ -1087,8 +1138,11 @@ pub(super) fn fetch_session_state(
     server: &str,
     session_id: &str,
 ) -> Result<SessionState, String> {
-    let value = api_request_json(server, "GET", &format!("/v2/sessions/{session_id}"), None)?
-        .ok_or_else(|| "Neoism Agent returned an empty session response".to_string())?;
+    let value =
+        api_request_json(server, "GET", &format!("/v2/sessions/{session_id}"), None)?
+            .ok_or_else(|| {
+                "Neoism Agent returned an empty session response".to_string()
+            })?;
     Ok(session_state_from_json(&value))
 }
 
@@ -1198,7 +1252,10 @@ pub(super) fn api_request_json(
     body: Option<&Value>,
 ) -> Result<Option<Value>, String> {
     crate::agent_server::ensure_started_for_request();
-    let response = http_request(server, method, path, body, Duration::from_millis(900))?;
+    // Cold Windows machines can still be finishing agent-store migrations
+    // when the listener first becomes healthy. Catalog/config requests are
+    // not latency-sensitive enough to justify failing after 900 ms.
+    let response = http_request(server, method, path, body, Duration::from_secs(5))?;
     response_json(response)
 }
 
@@ -1221,9 +1278,13 @@ pub(super) fn fetch_session_goal(
     server: &str,
     session_id: &str,
 ) -> Result<Option<SessionGoal>, String> {
-    let value =
-        api_request_json(server, "GET", &format!("/v2/plugins/dev.neoism.goals/{session_id}"), None)?
-            .unwrap_or(Value::Null);
+    let value = api_request_json(
+        server,
+        "GET",
+        &format!("/v2/plugins/dev.neoism.goals/{session_id}"),
+        None,
+    )?
+    .unwrap_or(Value::Null);
     Ok(value.get("goal").and_then(SessionGoal::from_json))
 }
 
@@ -1236,12 +1297,28 @@ fn response_json(response: HttpResponse) -> Result<Option<Value>, String> {
         .map_err(|error| format!("Neoism Agent returned invalid JSON: {error}"))
 }
 
-pub(super) fn prompt_model_json(model: &str, thinking: Option<&str>, connection_id: Option<&str>) -> Option<Value> {
-    neoism_ui::panels::agent_pane::api_mapping::prompt_model_json_with_connection(model, thinking, connection_id)
+pub(super) fn prompt_model_json(
+    model: &str,
+    thinking: Option<&str>,
+    connection_id: Option<&str>,
+) -> Option<Value> {
+    neoism_ui::panels::agent_pane::api_mapping::prompt_model_json_with_connection(
+        model,
+        thinking,
+        connection_id,
+    )
 }
 
-pub(super) fn session_model_json(model: &str, thinking: Option<&str>, connection_id: Option<&str>) -> Option<Value> {
-    neoism_ui::panels::agent_pane::api_mapping::session_model_json_with_connection(model, thinking, connection_id)
+pub(super) fn session_model_json(
+    model: &str,
+    thinking: Option<&str>,
+    connection_id: Option<&str>,
+) -> Option<Value> {
+    neoism_ui::panels::agent_pane::api_mapping::session_model_json_with_connection(
+        model,
+        thinking,
+        connection_id,
+    )
 }
 
 pub(super) fn normalize_model_ref(model: &str) -> String {
@@ -1276,10 +1353,7 @@ pub(super) fn first_interaction_value(
     let items = value
         .as_array()
         .ok_or_else(|| "Neoism Agent returned malformed interactions".to_string())?;
-    Ok(items
-        .iter()
-        .next()
-        .cloned())
+    Ok(items.iter().next().cloned())
 }
 
 pub(super) fn permission_reply_alias(value: &str) -> &'static str {
@@ -1430,7 +1504,10 @@ pub(crate) fn fetch_semantic_session_hits(
     current_session: Option<&str>,
     directory: Option<&str>,
 ) -> Result<Option<Vec<NeoismAgentSemanticSessionHit>>, String> {
-    let path = format!("/v2/plugins/dev.neoism.semantic/search?q={}&limit=20", percent_encode(query));
+    let path = format!(
+        "/v2/plugins/dev.neoism.semantic/search?q={}&limit=20",
+        percent_encode(query)
+    );
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "empty semantic search response".to_string())?;
     if !value
@@ -1873,7 +1950,12 @@ pub(super) fn set_session_pinned(
 
 /// `DELETE /session/:id` — permanently delete a session.
 pub(super) fn delete_session(server: &str, session_id: &str) -> Result<(), String> {
-    api_request_json(server, "DELETE", &format!("/v2/sessions/{session_id}"), None)?;
+    api_request_json(
+        server,
+        "DELETE",
+        &format!("/v2/sessions/{session_id}"),
+        None,
+    )?;
     Ok(())
 }
 

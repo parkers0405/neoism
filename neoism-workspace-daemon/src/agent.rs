@@ -79,6 +79,7 @@ pub fn ensure_agent_server_started_with_services(
     // Re-publish the resolved URL so child crates (e.g. agent-server
     // helpers in this module) read the same value.
     std::env::set_var("NEOISM_SERVER", &server);
+    std::env::set_var("NEOISM_AGENT_SERVER", &server);
     let Some((hostname, port)) = local_bind_target(&server) else {
         tracing::warn!(
             target: "neoism_workspace_daemon::agent",

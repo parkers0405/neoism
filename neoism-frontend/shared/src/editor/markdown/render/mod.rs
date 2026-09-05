@@ -46,6 +46,24 @@ use scrollbar::draw_markdown_scrollbar;
 use table::{parse_table, render_table};
 use types::{RenderLineKind, DEPTH, ORDER_BG, ORDER_TEXT};
 
+/// Clip a document-anchored caret to the actual viewport. A caret with no
+/// positive-area intersection is not a screen caret and must publish `None`;
+/// pinning it to an edge makes touch scrolling appear to move the selection.
+fn cursor_rect_intersection(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
+    if rect[2] <= 0.0 || rect[3] <= 0.0 || clip[2] <= 0.0 || clip[3] <= 0.0 {
+        return None;
+    }
+    let x0 = rect[0].max(clip[0]);
+    let y0 = rect[1].max(clip[1]);
+    let x1 = (rect[0] + rect[2]).min(clip[0] + clip[2]);
+    let y1 = (rect[1] + rect[3]).min(clip[1] + clip[3]);
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
+}
+
+fn publish_cursor_rect(pane: &mut MarkdownPane, rect: [f32; 4], clip: [f32; 4]) {
+    pane.set_cursor_rect(cursor_rect_intersection(rect, clip));
+}
+
 pub fn render(
     sugarloaf: &mut Sugarloaf,
     pane: &mut MarkdownPane,
@@ -395,15 +413,20 @@ pub fn render(
                         let local = visible
                             .saturating_sub(row.start)
                             .min(row.stops.len().saturating_sub(1));
-                        pane.set_cursor_rect(Some([
-                            text_x + row.stops.get(local).copied().unwrap_or_default(),
-                            cursor_y_for_text_line(
-                                text_y + row_index as f32 * paragraph_line_h,
-                                &paragraph_opts,
-                            ),
-                            cursor_cell_width(&paragraph_opts),
-                            caret_height(&paragraph_opts),
-                        ]));
+                        publish_cursor_rect(
+                            pane,
+                            [
+                                text_x
+                                    + row.stops.get(local).copied().unwrap_or_default(),
+                                cursor_y_for_text_line(
+                                    text_y + row_index as f32 * paragraph_line_h,
+                                    &paragraph_opts,
+                                ),
+                                cursor_cell_width(&paragraph_opts),
+                                caret_height(&paragraph_opts),
+                            ],
+                            clip,
+                        );
                     }
                 }
                 let mut line_y = text_y;
@@ -490,12 +513,16 @@ pub fn render(
                     draw_block_actions(sugarloaf, block_rect, theme, clip, dragging);
                 }
                 if is_cursor_line {
-                    pane.set_cursor_rect(Some([
-                        content_x + 10.0,
-                        caret_y,
-                        cursor_cell_width(&empty_opts),
-                        caret_h,
-                    ]));
+                    publish_cursor_rect(
+                        pane,
+                        [
+                            content_x + 10.0,
+                            caret_y,
+                            cursor_cell_width(&empty_opts),
+                            caret_h,
+                        ],
+                        clip,
+                    );
                 }
                 draw_selection_for_line(
                     sugarloaf,
@@ -1350,12 +1377,16 @@ pub fn render(
                 if is_cursor_line {
                     let div_line_h = line_height(&div_opts);
                     let caret_h = caret_height(&div_opts);
-                    pane.set_cursor_rect(Some([
-                        content_x,
-                        cursor_y + (div_line_h - caret_h) * 0.5,
-                        cursor_cell_width(&div_opts),
-                        caret_h,
-                    ]));
+                    publish_cursor_rect(
+                        pane,
+                        [
+                            content_x,
+                            cursor_y + (div_line_h - caret_h) * 0.5,
+                            cursor_cell_width(&div_opts),
+                            caret_h,
+                        ],
+                        clip,
+                    );
                 }
                 cursor_y += 28.0;
                 continue;
@@ -1544,12 +1575,16 @@ pub fn render(
                         + sugarloaf.text_mut().measure(&row_prefix, &opts))
                     .clamp(text_x, text_x + cursor_wrap_width.max(2.0) - 2.0);
                     let cursor_y = text_y + visual_line as f32 * line_h;
-                    pane.set_cursor_rect(Some([
-                        cursor_x,
-                        cursor_y_for_text_line(cursor_y, &opts),
-                        cursor_cell_width(&opts),
-                        caret_height(&opts),
-                    ]));
+                    publish_cursor_rect(
+                        pane,
+                        [
+                            cursor_x,
+                            cursor_y_for_text_line(cursor_y, &opts),
+                            cursor_cell_width(&opts),
+                            caret_height(&opts),
+                        ],
+                        clip,
+                    );
                     continue;
                 }
             }
@@ -1581,12 +1616,16 @@ pub fn render(
                 &prefix,
             );
             let caret_h = caret_height(&opts);
-            pane.set_cursor_rect(Some([
-                cursor_x,
-                cursor_y_for_text_line(cursor_y, &opts),
-                cursor_cell_width(&opts),
-                caret_h,
-            ]));
+            publish_cursor_rect(
+                pane,
+                [
+                    cursor_x,
+                    cursor_y_for_text_line(cursor_y, &opts),
+                    cursor_cell_width(&opts),
+                    caret_h,
+                ],
+                clip,
+            );
         }
     }
 
@@ -1608,6 +1647,43 @@ pub fn render(
     let content_height = cursor_y - y + 60.0 + pane.scroll_y;
     pane.set_content_height(content_height, h);
     draw_markdown_scrollbar(sugarloaf, pane, rect, content_height, theme, mouse, clip);
+}
+
+#[cfg(test)]
+mod cursor_clip_tests {
+    use super::cursor_rect_intersection;
+
+    const CLIP: [f32; 4] = [30.0, 40.0, 120.0, 90.0];
+
+    #[test]
+    fn legacy_markdown_caret_is_none_when_fully_offscreen() {
+        assert_eq!(
+            cursor_rect_intersection([10.0, 60.0, 8.0, 20.0], CLIP),
+            None
+        );
+        assert_eq!(
+            cursor_rect_intersection([60.0, 10.0, 8.0, 20.0], CLIP),
+            None
+        );
+        assert_eq!(
+            cursor_rect_intersection([160.0, 60.0, 8.0, 20.0], CLIP),
+            None
+        );
+        assert_eq!(
+            cursor_rect_intersection([60.0, 140.0, 8.0, 20.0], CLIP),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_markdown_caret_publishes_only_real_intersection() {
+        assert_eq!(
+            cursor_rect_intersection([26.0, 34.0, 8.0, 20.0], CLIP),
+            Some([30.0, 40.0, 4.0, 14.0])
+        );
+        let visible = [70.0, 80.0, 8.0, 20.0];
+        assert_eq!(cursor_rect_intersection(visible, CLIP), Some(visible));
+    }
 }
 
 fn callout_accent(kind: MarkdownCalloutKind, theme: &IdeTheme) -> u32 {

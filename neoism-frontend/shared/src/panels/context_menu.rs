@@ -626,7 +626,8 @@ impl ContextMenu {
         let window_h = dimensions.1 / scale_factor;
         self.update_visible_limit(window_h);
         self.fit_visible_limit(window_h);
-        let (w, h) = self.dimensions();
+        let (desired_w, h) = self.dimensions();
+        let w = desired_w.min((window_w - MENU_MARGIN * 2.0).max(1.0));
         self.x = self
             .x
             .clamp(MENU_MARGIN, (window_w - w - MENU_MARGIN).max(MENU_MARGIN));

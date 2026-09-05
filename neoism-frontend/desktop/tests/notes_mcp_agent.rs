@@ -18,7 +18,8 @@ fn request(method: Method, uri: &str, body: Option<Value>) -> Request<Body> {
 
 async fn response_json<T: DeserializeOwned>(response: axum::response::Response) -> T {
     assert_eq!(response.status(), StatusCode::OK);
-    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+        .unwrap()
 }
 
 #[tokio::test]
@@ -33,9 +34,10 @@ async fn desktop_notes_are_discovered_and_called_through_agent_mcp() {
         neoism_agent_neoism_adapter::neoism_services(),
         env!("CARGO_BIN_EXE_neoism"),
     );
-    let state = AppState::open_database_with_services(root.path().join("agent.db"), services)
-        .await
-        .unwrap();
+    let state =
+        AppState::open_database_with_services(root.path().join("agent.db"), services)
+            .await
+            .unwrap();
     let app = neoism_agent_server::app(state.clone());
     let directory = workspace.to_string_lossy();
 
@@ -69,9 +71,7 @@ async fn desktop_notes_are_discovered_and_called_through_agent_mcp() {
     );
 
     let endpoint = |tool: &str| {
-        format!(
-            "/v2/plugins/dev.neoism.mcp/notes/tools/{tool}?directory={directory}"
-        )
+        format!("/v2/plugins/dev.neoism.mcp/notes/tools/{tool}?directory={directory}")
     };
     let created: Value = response_json(
         app.clone()

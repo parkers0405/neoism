@@ -21,6 +21,7 @@ pub mod command_composer;
 pub mod command_palette;
 pub mod cross_window_drag;
 pub mod file_tree;
+pub mod file_browser;
 pub mod finder;
 pub mod git_diff;
 pub mod status_line;
@@ -65,6 +66,7 @@ pub use extensions_page::{
     ExtensionEntry, ExtensionFilter, ExtensionStatus, ExtensionTab, NeoismExtensionsPane,
 };
 pub use file_tree::{FileTree, TreeNode};
+pub use file_browser::{FileBrowserEntry, FileBrowserLocation, FileBrowserModal, FileBrowserMode, FileBrowserRequest, FileBrowserSelection};
 pub use finder::{Finder, FinderMode};
 pub use git_diff::{DiffFile, DiffHunk, DiffLine, GitDiff};
 pub use neoworld::NeoWorldPane;

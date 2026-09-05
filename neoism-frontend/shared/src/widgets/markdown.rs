@@ -384,10 +384,14 @@ pub fn parse_ordered_line(line: &str) -> Option<(usize, &str, usize, &str)> {
     }
     let all_digits = token.chars().all(|ch| ch.is_ascii_digit());
     let all_letters = token.chars().all(|ch| ch.is_ascii_alphabetic());
-    if !all_digits && !all_letters {
+    let delimiter = trimmed_start[delimiter_ix..].chars().next()?;
+    // A multi-letter `word. Rest` is overwhelmingly a sentence, not a list.
+    // Keep alphabetic lists with `)` (including Excel-style `AA)`) and the
+    // conventional single-letter `a.` form without stealing sentence openers.
+    let alphabetic_marker = all_letters && (delimiter == ')' || token.len() == 1);
+    if !all_digits && !alphabetic_marker {
         return None;
     }
-    let delimiter = trimmed_start[delimiter_ix..].chars().next()?;
     let marker_end = delimiter_ix + delimiter.len_utf8();
     let after = &trimmed_start[marker_end..];
     if !after.is_empty() && !after.chars().next().is_some_and(char::is_whitespace) {
@@ -1137,6 +1141,24 @@ mod tests {
             _ => panic!("expected task"),
         }
         assert_eq!(parsed.text, "done");
+    }
+
+    #[test]
+    fn ordered_parse_does_not_steal_sentence_openers() {
+        for sentence in [
+            "Fair. Outages hit especially hard.",
+            "Monkey. What's the move?",
+            "Chill. OpenAI still giving you trouble?",
+        ] {
+            let parsed = parse_line(sentence, false);
+            assert!(matches!(parsed.kind, MarkdownBlockKind::Paragraph));
+            assert_eq!(parsed.text, sentence);
+            assert!(parse_ordered_line(sentence).is_none());
+        }
+
+        for list in ["1. Numeric", "a. Alpha", "a) Alpha", "AA) Excel style"] {
+            assert!(parse_ordered_line(list).is_some(), "{list}");
+        }
     }
 
     #[test]

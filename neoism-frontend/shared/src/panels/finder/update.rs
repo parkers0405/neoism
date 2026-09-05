@@ -422,6 +422,7 @@ impl Finder {
     }
 
     pub(super) fn set_scroll_offset(&mut self, new_offset: usize) {
+        self.touch_scroll_offset = 0.0;
         let max_offset = self
             .results
             .len()
@@ -442,6 +443,7 @@ impl Finder {
     }
 
     pub fn scroll_pixels(&mut self, delta_pixels: f32) {
+        self.touch_scroll_offset = 0.0;
         let visible_rows = self.visible_rows_hint.max(1);
         self.visible_rows_hint = visible_rows;
         if self.results.len() <= visible_rows || delta_pixels == 0.0 {
@@ -472,6 +474,24 @@ impl Finder {
         self.set_scroll_offset(next_offset);
 
         self.clamp_selected_to_viewport(visible_rows);
+    }
+
+    /// Pixel-exact touch list scroll using the current visible-row budget.
+    pub fn scroll_touch_pixels(&mut self, finger_delta: f32) -> bool {
+        let count = self.results.len();
+        let visible = self.visible_rows_hint.max(1).min(count.max(1));
+        if count <= visible || finger_delta == 0.0 {
+            return count > visible;
+        }
+        let row_h = (RESULT_ITEM_HEIGHT * self.scale).max(1.0);
+        let max_px = count.saturating_sub(visible) as f32 * row_h;
+        let before = self.scroll_offset as f32 * row_h - self.touch_scroll_offset;
+        let next = (before - finger_delta).clamp(0.0, max_px);
+        self.scroll_offset = (next / row_h).floor() as usize;
+        self.touch_scroll_offset = self.scroll_offset as f32 * row_h - next;
+        self.list_scroll_spring.reset();
+        self.wheel_accumulator = 0.0;
+        true
     }
 
     pub(super) fn clamp_selected_to_viewport(&mut self, visible_rows: usize) {
@@ -557,6 +577,21 @@ impl Finder {
         Some([x, y, width, height])
     }
 
+    /// Exact query-row hit test for touch keyboard intent.
+    pub fn text_entry_at(&self, x: f32, y: f32, dimensions: (f32, f32, f32)) -> bool {
+        let Some([rx, ry, rw, _]) = self.active_rect(dimensions) else {
+            return false;
+        };
+        let pad = FINDER_PADDING * self.scale;
+        let rect = [
+            rx + pad,
+            ry + pad,
+            (rw - pad * 2.0).max(0.0),
+            INPUT_HEIGHT * self.scale,
+        ];
+        x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3]
+    }
+
     /// Hit-test finder rows in logical coordinates. `Ok(Some(index))`
     /// means a result row was clicked, `Ok(None)` means inside finder
     /// chrome/input/preview, and `Err(())` means outside the overlay.
@@ -601,7 +636,10 @@ impl Finder {
             return Ok(None);
         }
 
-        let relative_y = mouse_y - results_y - self.list_scroll_spring.position;
+        let relative_y = mouse_y
+            - results_y
+            - self.list_scroll_spring.position
+            - self.touch_scroll_offset;
         if relative_y < 0.0 {
             return Ok(None);
         }

@@ -174,11 +174,7 @@ fn get_external_clipboard(ty: ClipboardType) -> Option<String> {
             ("wl-paste", &["--no-newline", "--type", "text/plain"]),
             (
                 "wl-paste",
-                &[
-                    "--no-newline",
-                    "--type",
-                    "text/plain;charset=utf-8",
-                ],
+                &["--no-newline", "--type", "text/plain;charset=utf-8"],
             ),
             ("wl-paste", &["--no-newline"]),
             ("xclip", &["-selection", "clipboard", "-out"]),

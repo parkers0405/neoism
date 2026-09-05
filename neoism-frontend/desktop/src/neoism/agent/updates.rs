@@ -200,6 +200,7 @@ pub(super) enum AgentSessionUpdate {
     SessionMetadataUpdated {
         agent: Option<String>,
         model: Option<String>,
+        connection_id: Option<Option<String>>,
         thinking: Option<Option<String>>,
     },
     ExecutionUpdated(Value),
@@ -1138,10 +1139,12 @@ fn send_event_updates(
             SessionEventUpdate::SessionMetadataUpdated {
                 agent,
                 model,
+                connection_id,
                 thinking,
             } => tx.send(AgentSessionUpdate::SessionMetadataUpdated {
                 agent,
                 model,
+                connection_id,
                 thinking,
             })?,
             SessionEventUpdate::ExecutionUpdated(snapshot) => {
@@ -1330,6 +1333,7 @@ mod tests {
                         "model": {
                             "providerId": "openai",
                             "id": "gpt-5.6",
+                            "connectionId": "conn-work",
                             "variant": "high"
                         },
                         "time": { "updated": 1 }
@@ -1347,9 +1351,10 @@ mod tests {
 
         assert!(rx.try_iter().any(|update| matches!(
             update,
-            AgentSessionUpdate::SessionMetadataUpdated { agent, model, thinking }
+            AgentSessionUpdate::SessionMetadataUpdated { agent, model, connection_id, thinking }
                 if agent.as_deref() == Some("plan")
                     && model.as_deref() == Some("openai/gpt-5.6")
+                    && connection_id.as_ref().and_then(|value| value.as_deref()) == Some("conn-work")
                     && thinking.as_ref().and_then(|value| value.as_deref()) == Some("high")
         )));
     }

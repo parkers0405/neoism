@@ -225,24 +225,6 @@ impl EmbeddedDaemonHandle {
                         }
                     };
 
-                    // COLD-START GATE ends HERE. The moment the primary
-                    // listener is bound, signal readiness so the desktop's
-                    // main thread unblocks (`resolve_daemon` in main.rs) and
-                    // goes straight on to create + paint its window.
-                    // Everything below — auth/workspace bootstrap, router
-                    // build, the `tailscale ip -4` subprocess, and the extra
-                    // TCP binds — now runs concurrently on THIS daemon
-                    // thread instead of on the launch critical path. A bound
-                    // listener is all the caller needs to avoid racing a
-                    // second embedded daemon (the sole reason this readiness
-                    // handshake exists); connections opened before the serve
-                    // loop spins up just queue in the listener backlog
-                    // (sub-millisecond).
-                    #[cfg(unix)]
-                    let _ = ready_tx.send(Ok(None));
-                    #[cfg(not(unix))]
-                    let _ = ready_tx.send(Ok(Some(primary_port)));
-
                     // Build the same AppState the binary's main()
                     // constructs. Auth + pairing degrade to in-memory
                     // for the embedded case. Local-mode users don't
@@ -264,6 +246,17 @@ impl EmbeddedDaemonHandle {
                             return;
                         }
                     };
+                    // Resolve bind addresses before workspace bootstrap so the
+                    // local HostSummary advertises the same Tailscale endpoint
+                    // this daemon is about to listen on. Previously the bind
+                    // succeeded but Share with phone saw no daemon_url.
+                    let tcp_port = default_tcp_port();
+                    let embedded_bind_addrs = embedded_tcp_bind_addrs();
+                    if std::env::var_os("NEOISM_HOST_URL").is_none() {
+                        if let Some(url) = advertised_tailnet_url(&embedded_bind_addrs, tcp_port) {
+                            std::env::set_var("NEOISM_HOST_URL", url);
+                        }
+                    }
                     let workspaces = WorkspaceManager::bootstrap();
                     // The workspace daemon owns the Agent process. Start its
                     // supervisor eagerly so native desktop HTTP requests do
@@ -272,6 +265,15 @@ impl EmbeddedDaemonHandle {
                         workspaces.clone(),
                         neoism_desktop::notes_mcp::install(neoism_agent_neoism_adapter::neoism_services()),
                     );
+                    // Do not release the desktop while the daemon-owned agent
+                    // supervisor is still absent. In particular, the Windows
+                    // Tailscale probe above can take seconds; advertising a
+                    // bound daemon port before this point let `/connect` race
+                    // an agent server that had not even begun starting.
+                    #[cfg(unix)]
+                    let _ = ready_tx.send(Ok(None));
+                    #[cfg(not(unix))]
+                    let _ = ready_tx.send(Ok(Some(primary_port)));
                     let pairing_tokens = handshake::PairingTokenStore::in_memory();
                     // Paired hosts DO persist (unlike pairing tokens):
                     // a cross-host pairing the user set up from the
@@ -316,7 +318,6 @@ impl EmbeddedDaemonHandle {
                     // reachable from the tailnet. Bind the machine's Tailscale
                     // IPv4 when present instead of requiring the user to stop
                     // desktop and launch the standalone daemon manually.
-                    let tcp_port = default_tcp_port();
                     let mut tcp_listeners = Vec::new();
                     let mut bound_addrs = Vec::new();
                     #[cfg(not(unix))]
@@ -328,7 +329,7 @@ impl EmbeddedDaemonHandle {
                         tcp_listeners.push(primary_tcp);
                         bound_addrs.push(IpAddr::from([127, 0, 0, 1]));
                     }
-                    for (label, addr) in embedded_tcp_bind_addrs() {
+                    for (label, addr) in embedded_bind_addrs {
                         if bound_addrs.contains(&addr) {
                             continue;
                         }
@@ -500,10 +501,10 @@ impl EmbeddedDaemonHandle {
                 )
             })?;
 
-        // Wait for the runtime thread to either bind the socket
-        // successfully or report a startup failure. Without this, the
-        // caller could probe before the socket exists and decide to
-        // spawn a *second* embedded daemon, racing into EADDRINUSE.
+        // Wait for the runtime thread to bind the primary listener and launch
+        // the agent supervisor, or report a startup failure. Without this,
+        // callers can race either a second daemon or an agent request against
+        // startup that has not begun yet.
         match ready_rx.recv() {
             Ok(Ok(_local_tcp_port)) => Ok(Self {
                 #[cfg(unix)]
@@ -561,6 +562,13 @@ fn embedded_tcp_bind_addrs() -> Vec<(&'static str, IpAddr)> {
         }
     }
     addrs
+}
+
+fn advertised_tailnet_url(addrs: &[(&str, IpAddr)], port: u16) -> Option<String> {
+    addrs
+        .iter()
+        .find(|(label, _)| *label == "tailscale")
+        .map(|(_, ip)| format!("ws://{ip}:{port}/session"))
 }
 
 /// The address this machine would use to reach the local network, or
@@ -843,9 +851,21 @@ mod tests {
         );
     }
 
-    /// Exercise the desktop's real Unix `DaemonClient` editor route. The
-    /// daemon no longer hosts an embedded-Neovim grid, so grid requests must
-    /// return an error while `OpenBuffer` returns the Rust-owned LSP snapshot.
+    #[test]
+    fn embedded_daemon_advertises_its_bound_tailnet_endpoint() {
+        let addrs = [
+            ("loopback", "127.0.0.1".parse().unwrap()),
+            ("tailscale", "100.64.0.7".parse().unwrap()),
+        ];
+        assert_eq!(
+            advertised_tailnet_url(&addrs, 7878).as_deref(),
+            Some("ws://100.64.0.7:7878/session")
+        );
+    }
+
+    /// Exercise the desktop's real Unix `DaemonClient` editor route. Obsolete
+    /// embedded-grid requests are silent while `OpenBuffer` still returns the
+    /// Rust-owned LSP snapshot.
     #[test]
     fn desktop_daemonclient_streams_editor_replies_over_unix() {
         let _ = tracing_subscriber::fmt()
@@ -912,7 +932,6 @@ mod tests {
                 .await
                 .expect("send open");
 
-            let mut saw_grid_error = false;
             let mut saw_lsp_snapshot = false;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
             while tokio::time::Instant::now() < deadline {
@@ -922,11 +941,8 @@ mod tests {
                         ..
                     })) => {
                         match message {
-                            neoism_protocol::editor::EditorServerMessage::Error {
-                                surface_id,
-                                ..
-                            } if surface_id.as_deref() == Some("s1") => {
-                                saw_grid_error = true;
+                            neoism_protocol::editor::EditorServerMessage::Error { .. } => {
+                                return false;
                             }
                             neoism_protocol::editor::EditorServerMessage::LspSnapshot {
                                 surface_id,
@@ -939,7 +955,7 @@ mod tests {
                             }
                             _ => {}
                         }
-                        if saw_grid_error && saw_lsp_snapshot {
+                        if saw_lsp_snapshot {
                             break;
                         }
                     }
@@ -948,7 +964,7 @@ mod tests {
                     Err(_) => {}
                 }
             }
-            saw_grid_error && saw_lsp_snapshot
+            saw_lsp_snapshot
         });
 
         assert!(

@@ -759,11 +759,7 @@ impl Screen<'_> {
                 true
             }
             FilesServerMessage::Error { message } => {
-                if !self
-                    .renderer
-                    .file_tree
-                    .fail_service_request(request_id)
-                {
+                if !self.renderer.file_tree.fail_service_request(request_id) {
                     return false;
                 }
                 self.file_tree_notify(

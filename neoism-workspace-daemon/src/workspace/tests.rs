@@ -52,6 +52,95 @@ fn make_manager(td: &TempDir) -> WorkspaceManager {
 }
 
 #[test]
+fn first_and_later_terminal_cwd_never_reroot_workspace() {
+    let td = TempDir::new().unwrap();
+    let mgr = make_manager(&td);
+    let mut conn = ConnectionWorkspace::default();
+    let declared = td.path().join("declared");
+    handle(
+        &mgr,
+        &mut conn,
+        WorkspaceClientMessage::OpenProjectRoot {
+            path: declared.clone(),
+            init_if_missing: true,
+        },
+    );
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let created = handle(
+            &mgr,
+            &mut conn,
+            WorkspaceClientMessage::NewSession {
+                cwd: None,
+                label: None,
+            },
+        );
+        sessions.push(
+            created
+                .into_iter()
+                .find_map(|message| match message {
+                    WorkspaceServerMessage::SessionCreated { session } => {
+                        Some(session.id)
+                    }
+                    _ => None,
+                })
+                .expect("session"),
+        );
+    }
+    let hosted = mgr.create_host_workspace(
+        "host-a".into(),
+        Some("cwd-stable-workspace".into()),
+        None,
+        Some(declared.clone()),
+    );
+    {
+        let mut inner = mgr.inner.lock();
+        for session_id in &sessions {
+            inner.sessions.get_mut(session_id).unwrap().workspace_id = hosted.id.clone();
+        }
+        inner
+            .host_workspaces
+            .get_mut(&hosted.id)
+            .unwrap()
+            .main_session_id = Some(sessions[0].clone());
+        inner
+            .session_pty_links
+            .insert(sessions[0].clone(), "pty-first".into());
+        inner
+            .session_pty_links
+            .insert(sessions[1].clone(), "pty-later".into());
+    }
+    let roots_before: Vec<_> = mgr
+        .inner
+        .lock()
+        .host_workspaces
+        .values()
+        .map(|workspace| workspace.root_dir.clone())
+        .collect();
+    assert!(mgr.track_pty_cwd("pty-first", "/tmp/first".into()));
+    let roots_after_first: Vec<_> = mgr
+        .inner
+        .lock()
+        .host_workspaces
+        .values()
+        .map(|workspace| workspace.root_dir.clone())
+        .collect();
+    assert_eq!(roots_after_first, roots_before);
+    assert!(mgr.track_pty_cwd("pty-later", "/tmp/later".into()));
+    let roots_after: Vec<_> = mgr
+        .inner
+        .lock()
+        .host_workspaces
+        .values()
+        .map(|workspace| workspace.root_dir.clone())
+        .collect();
+    assert_eq!(roots_after, roots_before);
+    assert!(roots_after
+        .iter()
+        .any(|root| root.as_deref() == Some(declared.as_path())));
+}
+
+#[test]
 fn open_workspace_creates_directory_when_requested() {
     let td = TempDir::new().unwrap();
     let mgr = make_manager(&td);
@@ -268,9 +357,33 @@ fn closing_session_clears_pty_link() {
         last_active: now_secs(),
     };
     mgr.insert_session(session);
+    mgr.publish_workspace_tabs(
+        "ws",
+        vec![WorkspaceTabSummary {
+            id: "tab-x".into(),
+            workspace_id: "ws".into(),
+            title: "Terminal".into(),
+            kind: Some("terminal".into()),
+            session_id: Some("tab-x".into()),
+            surface_id: None,
+            cwd: Some(".".into()),
+            active: true,
+            last_active: now_secs(),
+        }],
+    );
+    mgr.upsert_editor_surface(EditorSurfaceSummary {
+        surface_id: "pane-x".into(),
+        workspace_id: "ws".into(),
+        session_id: "tab-x".into(),
+        path: Some(PathBuf::from("src/main.rs")),
+        last_active: now_secs(),
+        route_id: Some(7),
+    });
     assert!(mgr.link_pty_session("tab-x", "pty-x".into()));
     assert!(mgr.remove_session("tab-x"));
     assert!(mgr.pty_session_for("tab-x").is_none());
+    assert!(mgr.list_workspace_tabs("ws").is_empty());
+    assert!(mgr.editor_surfaces_for_workspace("ws").is_empty());
 }
 
 #[test]
@@ -341,6 +454,14 @@ fn editor_surfaces_are_keyed_by_active_workspace() {
             surface_id: "pane-a".into(),
         }]
     );
+    let duplicate = handle(
+        &mgr,
+        &mut conn,
+        WorkspaceClientMessage::CloseEditorSurface {
+            surface_id: "pane-a".into(),
+        },
+    );
+    assert_eq!(duplicate, closed, "duplicate close remains acknowledged");
 }
 
 #[test]

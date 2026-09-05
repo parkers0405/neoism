@@ -1,5 +1,7 @@
 use anyhow::Context;
-use neoism_agent_core::{CreateSessionRequest, Id, IdKind, PromptPart, PromptRequest, UserModel};
+use neoism_agent_core::{
+    CreateSessionRequest, Id, IdKind, PromptPart, PromptRequest, UserModel,
+};
 use serde_json::{json, Value};
 
 use crate::{
@@ -11,8 +13,7 @@ pub(super) async fn doctor(server: String, dir: Option<String>) -> anyhow::Resul
     let server = normalize_server(&server);
     let client = reqwest::Client::new();
     let health =
-        response_json(client.get(format!("{server}/v2/health")).send().await?)
-            .await?;
+        response_json(client.get(format!("{server}/v2/health")).send().await?).await?;
     let providers =
         response_json(client.get(format!("{server}/v2/providers")).send().await?).await?;
     let config_validation = response_json(
@@ -106,17 +107,16 @@ pub(super) async fn run(
     let session_id = match session {
         Some(id) => id,
         None => {
-            let mut request =
-                client
-                    .post(format!("{server}/v2/sessions"))
-                    .json(&CreateSessionRequest {
-                        parent_id: None,
-                        title: None,
-                        agent: agent.clone(),
-                        model: None,
-                        permission: None,
-                        workspace_id: None,
-                    });
+            let mut request = client.post(format!("{server}/v2/sessions")).json(
+                &CreateSessionRequest {
+                    parent_id: None,
+                    title: None,
+                    agent: agent.clone(),
+                    model: None,
+                    permission: None,
+                    workspace_id: None,
+                },
+            );
             if let Some(dir) = &dir {
                 request = request.query(&[("directory", dir)]);
             }
@@ -230,7 +230,10 @@ fn page_contains_message(messages: &[Value], message_id: &str) -> bool {
     })
 }
 
-fn assistant_response_to<'a>(messages: &'a Value, user_message_id: &str) -> Option<&'a Value> {
+fn assistant_response_to<'a>(
+    messages: &'a Value,
+    user_message_id: &str,
+) -> Option<&'a Value> {
     messages
         .get("items")
         .and_then(Value::as_array)
@@ -264,7 +267,10 @@ mod tests {
                 { "info": { "role": "assistant", "id": "old", "parentId": "older-prompt" } }
             ]
         });
-        assert_eq!(assistant_response_to(&messages, "prompt").unwrap()["info"]["id"], "final");
+        assert_eq!(
+            assistant_response_to(&messages, "prompt").unwrap()["info"]["id"],
+            "final"
+        );
         assert!(assistant_response_to(&messages, "failed-prompt").is_none());
     }
 }

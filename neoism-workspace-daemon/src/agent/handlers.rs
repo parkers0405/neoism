@@ -9,6 +9,7 @@ pub(crate) async fn handle_create_thread(
     agent: Option<String>,
     model: Option<String>,
     connection_id: Option<String>,
+    thinking: Option<String>,
 ) {
     let mut body = serde_json::Map::new();
     if let Some(title) = title.clone() {
@@ -24,7 +25,8 @@ pub(crate) async fn handle_create_thread(
                 json!({
                     "providerId": provider_id,
                     "id": model_id,
-                    "connectionId": connection_id,
+                    "connectionId": connection_id.clone(),
+                    "variant": thinking.clone(),
                 }),
             );
         }
@@ -65,8 +67,32 @@ pub(crate) async fn handle_create_thread(
                 session_id: session_id.clone(),
                 title: resolved_title,
                 directory: resolved_dir,
-                agent: resolved_agent,
+                agent: resolved_agent.clone(),
                 model: resolved_model,
+            });
+            let _ = inner.tx.send(AgentServerMessage::ProviderState {
+                session_id: session_id.clone(),
+                authoritative: true,
+                provider_id: value
+                    .get("model")
+                    .and_then(|model| model.get("providerId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                model: value.get("model").and_then(model_label_from_value),
+                connection_id: value
+                    .get("model")
+                    .and_then(|model| model.get("connectionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(connection_id),
+                agent: resolved_agent,
+                thinking: value
+                    .get("model")
+                    .and_then(|model| model.get("variant"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(thinking),
+                context_limit: None,
             });
             // Auto-bind the SSE stream so deltas start flowing.
             if !session_id.is_empty() {
@@ -88,11 +114,27 @@ pub(crate) async fn handle_switch_thread(inner: Arc<AgentInner>, session_id: Str
             });
             let _ = inner.tx.send(AgentServerMessage::ProviderState {
                 session_id,
-                provider_id: value.get("model").and_then(|model| model.get("providerId")).and_then(Value::as_str).map(str::to_string),
+                authoritative: true,
+                provider_id: value
+                    .get("model")
+                    .and_then(|model| model.get("providerId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 model: value.get("model").and_then(model_label_from_value),
-                connection_id: value.get("model").and_then(|model| model.get("connectionId")).and_then(Value::as_str).map(str::to_string),
-                agent: value.get("agent").and_then(Value::as_str).map(str::to_string),
-                thinking: value.get("model").and_then(|model| model.get("variant")).and_then(Value::as_str).map(str::to_string),
+                connection_id: value
+                    .get("model")
+                    .and_then(|model| model.get("connectionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                agent: value
+                    .get("agent")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                thinking: value
+                    .get("model")
+                    .and_then(|model| model.get("variant"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 context_limit: None,
             });
         }
@@ -249,36 +291,50 @@ pub(crate) async fn handle_get_history(
     cursor: Option<String>,
     limit: Option<u32>,
 ) {
-    // The agent-server doesn't surface a paginated cursor; we map
-    // `limit` onto its `limit=` query and ignore `cursor` for now.
-    // The reply is a single terminal chunk. `order=desc` matches the
+    // `order=desc` matches the
     // desktop's `fetch_session_messages` — without it a long session
     // returns its OLDEST messages and the recent conversation never
     // loads. The shared `message_blocks_from_response` (same code the
     // desktop renders through) re-orders newest-first input back into
     // timeline order and expands every part kind (tool cards, todos,
     // reasoning, subtasks) instead of flattening to plain text.
-    let _ = cursor;
     let take = limit.unwrap_or(80).clamp(1, 200);
-    let path = format!("/v2/sessions/{session_id}/messages?order=desc&limit={take}&slim=true");
+    let mut path =
+        format!("/v2/sessions/{session_id}/messages?order=desc&limit={take}&slim=true");
+    if let Some(cursor) = cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
+        path.push_str("&cursor=");
+        path.push_str(&percent_encode(cursor));
+    }
     match http_get_json(&inner, &path).await {
         Ok(value) => {
-            let messages = value
-                .get("items")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    neoism_ui::panels::agent_pane::api_mapping::message_blocks_from_response(
-                        items, true,
-                    )
-                    .into_iter()
-                    .map(history_from_agent_message)
-                    .collect::<Vec<_>>()
-                })
+            let items = value
+                .as_array()
+                .or_else(|| value.get("items").and_then(Value::as_array))
+                .cloned()
                 .unwrap_or_default();
+            let next_cursor = (items.len() == take as usize)
+                .then(|| {
+                    items
+                        .last()
+                        .and_then(|message| message.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .flatten();
+            let messages = if items.is_empty() {
+                Vec::new()
+            } else {
+                neoism_ui::panels::agent_pane::api_mapping::message_blocks_from_response(
+                    &items, true,
+                )
+                .into_iter()
+                .map(history_from_agent_message)
+                .collect::<Vec<_>>()
+            };
             let _ = inner.tx.send(AgentServerMessage::HistoryChunk {
                 session_id,
                 messages,
-                next_cursor: None,
+                next_cursor,
             });
         }
         Err(err) => emit_error(&inner.tx, err),
@@ -416,7 +472,9 @@ pub(crate) async fn handle_submit_prompt(
 }
 
 pub(crate) async fn handle_clear_queue(inner: Arc<AgentInner>, session_id: String) {
-    if let Err(err) = http_delete(&inner, &format!("/v2/sessions/{session_id}/queue")).await {
+    if let Err(err) =
+        http_delete(&inner, &format!("/v2/sessions/{session_id}/queue")).await
+    {
         emit_error(&inner.tx, err);
     }
 }
@@ -503,6 +561,7 @@ pub(crate) async fn handle_set_provider(
 ) {
     let _ = inner.tx.send(AgentServerMessage::ProviderState {
         session_id,
+        authoritative: false,
         provider_id: Some(provider_id),
         model: None,
         connection_id: None,
@@ -538,21 +597,37 @@ pub(crate) async fn handle_set_model(
     let resolved_model = format!("{provider_id}/{model_id}");
     match http_patch_json(&inner, &format!("/v2/sessions/{session_id}"), &body).await {
         Ok(value) => {
-            let context_limit = value
-                .get("model")
+            let returned_model = value.get("model");
+            let context_limit = returned_model
                 .and_then(|m| m.get("limit"))
                 .and_then(|l| l.get("context"))
                 .and_then(Value::as_u64);
             let _ = inner.tx.send(AgentServerMessage::ProviderState {
                 session_id,
-                provider_id: Some(provider_id),
-                model: Some(resolved_model),
-                connection_id,
+                authoritative: true,
+                provider_id: returned_model
+                    .and_then(|model| model.get("providerId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(Some(provider_id)),
+                model: returned_model
+                    .and_then(model_label_from_value)
+                    .or(Some(resolved_model)),
+                connection_id: returned_model
+                    .and_then(|model| model.get("connectionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(connection_id),
                 agent: value
                     .get("agent")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                thinking,
+                thinking: returned_model
+                    .and_then(|model| model.get("variant"))
+                    .and_then(Value::as_str)
+                    .filter(|thinking| !thinking.is_empty())
+                    .map(str::to_string)
+                    .or(thinking),
                 context_limit,
             });
         }
@@ -570,11 +645,24 @@ pub(crate) async fn handle_set_agent(
         Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ProviderState {
                 session_id,
-                provider_id: None,
+                authoritative: true,
+                provider_id: value
+                    .get("model")
+                    .and_then(|model| model.get("providerId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 model: value.get("model").and_then(model_label_from_value),
-                connection_id: value.get("model").and_then(|model| model.get("connectionId")).and_then(Value::as_str).map(str::to_string),
+                connection_id: value
+                    .get("model")
+                    .and_then(|model| model.get("connectionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 agent: Some(agent),
-                thinking: None,
+                thinking: value
+                    .get("model")
+                    .and_then(|model| model.get("variant"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 context_limit: None,
             });
         }
@@ -589,7 +677,8 @@ pub(crate) async fn handle_set_thinking(
 ) {
     // The agent-server stores `variant` on `model`; fetch the active
     // model id and PATCH the variant only.
-    let session = match http_get_json(&inner, &format!("/v2/sessions/{session_id}")).await {
+    let session = match http_get_json(&inner, &format!("/v2/sessions/{session_id}")).await
+    {
         Ok(value) => value,
         Err(err) => {
             emit_error(&inner.tx, err);
@@ -613,9 +702,18 @@ pub(crate) async fn handle_set_thinking(
         Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ProviderState {
                 session_id,
-                provider_id: None,
+                authoritative: true,
+                provider_id: value
+                    .get("model")
+                    .and_then(|model| model.get("providerId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 model: value.get("model").and_then(model_label_from_value),
-                connection_id: value.get("model").and_then(|model| model.get("connectionId")).and_then(Value::as_str).map(str::to_string),
+                connection_id: value
+                    .get("model")
+                    .and_then(|model| model.get("connectionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 agent: value
                     .get("agent")
                     .and_then(Value::as_str)
@@ -680,21 +778,41 @@ pub(crate) async fn handle_connect_list_providers(
         .send(AgentServerMessage::ConnectProviderCatalog { providers, auth });
 }
 
-pub(crate) async fn handle_connect_list_connections(inner: Arc<AgentInner>, provider_id: String) {
-    match http_get_json(&inner, &format!("/v2/providers/{provider_id}/connections")).await {
+pub(crate) async fn handle_connect_list_connections(
+    inner: Arc<AgentInner>,
+    provider_id: String,
+) {
+    match http_get_json(&inner, &format!("/v2/providers/{provider_id}/connections")).await
+    {
         Ok(value) => {
-            let connections = value.as_array().into_iter().flatten().filter_map(|item| {
-                Some(neoism_protocol::agent::ProviderConnectionInfo {
-                    provider_id: item.get("providerId")?.as_str()?.to_string(),
-                    connection_id: item.get("connectionId")?.as_str()?.to_string(),
-                    label: item.get("label")?.as_str()?.to_string(),
-                    auth_type: item.get("authType")?.as_str()?.to_string(),
-                    is_default: item.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
+            let connections = value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| {
+                    Some(neoism_protocol::agent::ProviderConnectionInfo {
+                        provider_id: item.get("providerId")?.as_str()?.to_string(),
+                        connection_id: item.get("connectionId")?.as_str()?.to_string(),
+                        label: item.get("label")?.as_str()?.to_string(),
+                        auth_type: item.get("authType")?.as_str()?.to_string(),
+                        is_default: item
+                            .get("isDefault")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    })
                 })
-            }).collect();
-            let _ = inner.tx.send(AgentServerMessage::ConnectConnections { provider: provider_id, connections });
+                .collect();
+            let _ = inner.tx.send(AgentServerMessage::ConnectConnections {
+                provider: provider_id,
+                connections,
+            });
         }
-        Err(error) => { let _ = inner.tx.send(AgentServerMessage::ConnectFailed { provider: provider_id, error }); }
+        Err(error) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFailed {
+                provider: provider_id,
+                error,
+            });
+        }
     }
 }
 
@@ -710,7 +828,12 @@ pub(crate) async fn handle_connect_store_api_key(
 ) {
     let body = json!({ "type": "api", "key": key });
     let result = if let Some(label) = label {
-        http_post_json(&inner, &format!("/v2/providers/{provider_id}/connections"), &json!({ "label": label, "credential": body, "setDefault": false })).await
+        http_post_json(
+            &inner,
+            &format!("/v2/providers/{provider_id}/connections"),
+            &json!({ "label": label, "credential": body, "setDefault": false }),
+        )
+        .await
     } else {
         http_put_json(&inner, &format!("/v2/providers/{provider_id}/auth"), &body).await
     };
@@ -718,7 +841,10 @@ pub(crate) async fn handle_connect_store_api_key(
         Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
                 provider: provider_id,
-                connection_id: value.get("connectionId").and_then(Value::as_str).map(str::to_string),
+                connection_id: value
+                    .get("connectionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             });
         }
         Err(err) => {
@@ -736,7 +862,15 @@ pub(crate) async fn handle_connect_disconnect(
     provider_id: String,
     connection_id: Option<String>,
 ) {
-    let path = connection_id.as_ref().map(|id| format!("/v2/providers/{provider_id}/connections/{}", percent_encode(id))).unwrap_or_else(|| format!("/v2/providers/{provider_id}/auth"));
+    let path = connection_id
+        .as_ref()
+        .map(|id| {
+            format!(
+                "/v2/providers/{provider_id}/connections/{}",
+                percent_encode(id)
+            )
+        })
+        .unwrap_or_else(|| format!("/v2/providers/{provider_id}/auth"));
     match http_delete(&inner, &path).await {
         Ok(()) => {
             let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
@@ -757,19 +891,54 @@ pub(crate) async fn handle_connect_disconnect(
     }
 }
 
-pub(crate) async fn handle_connect_rename(inner: Arc<AgentInner>, provider_id: String, connection_id: String, label: String) {
-    let path = format!("/v2/providers/{provider_id}/connections/{}", percent_encode(&connection_id));
+pub(crate) async fn handle_connect_rename(
+    inner: Arc<AgentInner>,
+    provider_id: String,
+    connection_id: String,
+    label: String,
+) {
+    let path = format!(
+        "/v2/providers/{provider_id}/connections/{}",
+        percent_encode(&connection_id)
+    );
     match http_patch_json(&inner, &path, &json!({ "label": label })).await {
-        Ok(_) => { let _ = inner.tx.send(AgentServerMessage::ConnectFinished { provider: provider_id, connection_id: Some(connection_id) }); }
-        Err(error) => { let _ = inner.tx.send(AgentServerMessage::ConnectFailed { provider: provider_id, error }); }
+        Ok(_) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
+                provider: provider_id,
+                connection_id: Some(connection_id),
+            });
+        }
+        Err(error) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFailed {
+                provider: provider_id,
+                error,
+            });
+        }
     }
 }
 
-pub(crate) async fn handle_connect_set_default(inner: Arc<AgentInner>, provider_id: String, connection_id: String) {
-    let path = format!("/v2/providers/{provider_id}/connections/{}/default", percent_encode(&connection_id));
+pub(crate) async fn handle_connect_set_default(
+    inner: Arc<AgentInner>,
+    provider_id: String,
+    connection_id: String,
+) {
+    let path = format!(
+        "/v2/providers/{provider_id}/connections/{}/default",
+        percent_encode(&connection_id)
+    );
     match post_no_body(&inner, &path).await {
-        Ok(_) => { let _ = inner.tx.send(AgentServerMessage::ConnectFinished { provider: provider_id, connection_id: Some(connection_id) }); }
-        Err(error) => { let _ = inner.tx.send(AgentServerMessage::ConnectFailed { provider: provider_id, error }); }
+        Ok(_) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
+                provider: provider_id,
+                connection_id: Some(connection_id),
+            });
+        }
+        Err(error) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFailed {
+                provider: provider_id,
+                error,
+            });
+        }
     }
 }
 
@@ -803,7 +972,10 @@ pub(crate) async fn handle_connect_oauth_authorize(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let attempt_id = value.get("attemptId").and_then(Value::as_str).map(str::to_string);
+            let attempt_id = value
+                .get("attemptId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let _ = inner.tx.send(AgentServerMessage::ConnectOauthUrl {
                 url,
                 auto,
@@ -833,7 +1005,9 @@ pub(crate) async fn handle_connect_oauth_callback(
     attempt_id: Option<String>,
 ) {
     let body = match code {
-        Some(code) => json!({ "method": method_index, "code": code, "attemptId": attempt_id }),
+        Some(code) => {
+            json!({ "method": method_index, "code": code, "attemptId": attempt_id })
+        }
         None => json!({ "method": method_index, "attemptId": attempt_id }),
     };
     match http_post_json(
@@ -846,7 +1020,10 @@ pub(crate) async fn handle_connect_oauth_callback(
         Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
                 provider: provider_id,
-                connection_id: value.get("connectionId").and_then(Value::as_str).map(str::to_string),
+                connection_id: value
+                    .get("connectionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             });
         }
         Err(err) => {
@@ -877,7 +1054,10 @@ pub(crate) async fn handle_get_config_defaults(
                 configured_model
             } else {
                 let provider_path = match directory.as_deref() {
-                    Some(dir) => format!("/v2/providers/configured?directory={}", percent_encode(dir)),
+                    Some(dir) => format!(
+                        "/v2/providers/configured?directory={}",
+                        percent_encode(dir)
+                    ),
                     None => "/v2/providers/configured".to_string(),
                 };
                 http_get_json(&inner, &provider_path)
@@ -897,9 +1077,7 @@ pub(crate) async fn handle_get_config_defaults(
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
-                input_help_visible: value
-                    .get("input-hints")
-                    .and_then(Value::as_bool),
+                input_help_visible: value.get("input-hints").and_then(Value::as_bool),
                 sidebar_visible: value.get("sidebar").and_then(Value::as_bool),
             });
         }
@@ -1253,7 +1431,10 @@ fn emit_mcp_changed(inner: &AgentInner, name: String, result: Result<Value, Stri
 }
 
 pub(crate) async fn handle_show_permissions(inner: Arc<AgentInner>, session_id: String) {
-    let path = format!("/v2/interactions/permissions?sessionId={}", percent_encode(&session_id));
+    let path = format!(
+        "/v2/interactions/permissions?sessionId={}",
+        percent_encode(&session_id)
+    );
     emit_command_result(
         &inner,
         Some(session_id),
@@ -1263,7 +1444,10 @@ pub(crate) async fn handle_show_permissions(inner: Arc<AgentInner>, session_id: 
 }
 
 pub(crate) async fn handle_show_questions(inner: Arc<AgentInner>, session_id: String) {
-    let path = format!("/v2/interactions/questions?sessionId={}", percent_encode(&session_id));
+    let path = format!(
+        "/v2/interactions/questions?sessionId={}",
+        percent_encode(&session_id)
+    );
     let result = http_get_json(&inner, &path).await;
     // Typed snapshot first so the pane's pending-question state syncs
     // (the prompt picker uses this); the human-readable listing keeps
@@ -1283,8 +1467,8 @@ pub(crate) async fn handle_show_questions(inner: Arc<AgentInner>, session_id: St
 /// on stream (re-)attach so a reloaded client recovers a `question`
 /// tool call that parked the run while no client was listening.
 /// Tell a freshly-attached client whether this session is CURRENTLY
-/// mid-run, so the composer's activity indicator ("Crafting…",
-/// "Tinkering…") lights up immediately instead of waiting for the next
+/// mid-run, so the composer's activity indicator lights up immediately
+/// instead of waiting for the next
 /// live `StreamingState` event — which, for a turn already in flight,
 /// may not arrive for a long time or at all.
 ///
@@ -1302,22 +1486,45 @@ pub(crate) async fn push_session_running_state(
     let Some(status) = value.get(&session_id) else {
         return;
     };
-    // Same live-run vocabulary the desktop status mapping uses.
-    let running = matches!(
+    let Some(message) = running_state_message(session_id, status) else {
+        return;
+    };
+    let _ = inner.tx.send(message);
+}
+
+pub(crate) fn running_state_message(
+    session_id: String,
+    status: &Value,
+) -> Option<AgentServerMessage> {
+    if !matches!(
         status
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default(),
         "created" | "active" | "busy" | "running"
-    );
-    if !running {
-        return;
+    ) {
+        return None;
     }
-    let _ = inner.tx.send(AgentServerMessage::StreamingState {
+    // A status snapshot proves only that a run is live. Preserve its queue
+    // metadata and clock, and let actual transcript parts promote Crafting to
+    // Pondering/Tinkering. Claiming Working here made reconnect invent tool
+    // activity that never happened.
+    let queue = status.get("queue");
+    Some(AgentServerMessage::QueueUpdate {
         session_id,
-        state: neoism_protocol::agent::StreamingState::Working,
-        label: None,
-    });
+        count: queue
+            .and_then(|queue| queue.get("count"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
+        preview: queue
+            .and_then(|queue| queue.get("preview"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        started_at: status
+            .get("startedAt")
+            .or_else(|| status.get("started"))
+            .and_then(Value::as_u64),
+    })
 }
 
 pub(crate) async fn push_runtime_snapshot(inner: Arc<AgentInner>, session_id: String) {
@@ -1338,7 +1545,10 @@ pub(crate) async fn push_runtime_snapshot(inner: Arc<AgentInner>, session_id: St
 }
 
 pub(crate) async fn push_pending_questions(inner: Arc<AgentInner>, session_id: String) {
-    let path = format!("/v2/interactions/questions?sessionId={}", percent_encode(&session_id));
+    let path = format!(
+        "/v2/interactions/questions?sessionId={}",
+        percent_encode(&session_id)
+    );
     let Ok(value) = http_get_json(&inner, &path).await else {
         // Recovery is best-effort; a failed poll must not spam the
         // transcript with errors on every reconnect.
@@ -1389,7 +1599,8 @@ pub(crate) async fn handle_slash_command(
             return;
         }
         let body = json!({ "directory": directory });
-        match http_patch_json(&inner, &format!("/v2/sessions/{session_id}"), &body).await {
+        match http_patch_json(&inner, &format!("/v2/sessions/{session_id}"), &body).await
+        {
             Ok(value) => {
                 let resolved = value
                     .get("directory")
@@ -1422,14 +1633,14 @@ pub(crate) async fn handle_queue(
     action: Option<String>,
 ) {
     let result = match action.as_deref() {
-        Some("clear") => {
-            http_delete(&inner, &format!("/v2/sessions/{session_id}/queue"))
-                .await
-                .map(|_| Value::String("queue cleared".to_string()))
-        }
-        Some("pop") => post_no_body(&inner, &format!("/v2/sessions/{session_id}/queue/pop"))
+        Some("clear") => http_delete(&inner, &format!("/v2/sessions/{session_id}/queue"))
             .await
-            .map(|_| Value::String("queue popped".to_string())),
+            .map(|_| Value::String("queue cleared".to_string())),
+        Some("pop") => {
+            post_no_body(&inner, &format!("/v2/sessions/{session_id}/queue/pop"))
+                .await
+                .map(|_| Value::String("queue popped".to_string()))
+        }
         _ => http_get_json(&inner, &format!("/v2/sessions/{session_id}/queue")).await,
     };
     emit_command_result(&inner, Some(session_id), "Queue", result);
@@ -1443,7 +1654,13 @@ pub(crate) async fn handle_permit(
 ) {
     let request_id = match request_id {
         Some(id) => id,
-        None => match first_interaction_id(&inner, "/v2/interactions/permissions", &session_id).await {
+        None => match first_interaction_id(
+            &inner,
+            "/v2/interactions/permissions",
+            &session_id,
+        )
+        .await
+        {
             Ok(Some(id)) => id,
             Ok(None) => {
                 emit_command_output(
@@ -1465,7 +1682,12 @@ pub(crate) async fn handle_permit(
         &inner,
         Some(session_id),
         "Permission",
-        http_post_json(&inner, &format!("/v2/interactions/permissions/{request_id}/reply"), &body).await,
+        http_post_json(
+            &inner,
+            &format!("/v2/interactions/permissions/{request_id}/reply"),
+            &body,
+        )
+        .await,
     );
 }
 
@@ -1474,12 +1696,13 @@ pub(crate) async fn handle_answer(
     session_id: String,
     answer: String,
 ) {
-    let Some(item) = first_interaction_value(&inner, "/v2/interactions/questions", &session_id)
-        .await
-        .unwrap_or_else(|err| {
-            emit_error(&inner.tx, err);
-            None
-        })
+    let Some(item) =
+        first_interaction_value(&inner, "/v2/interactions/questions", &session_id)
+            .await
+            .unwrap_or_else(|err| {
+                emit_error(&inner.tx, err);
+                None
+            })
     else {
         emit_command_output(&inner, Some(session_id), "Question", "no pending questions");
         return;
@@ -1499,7 +1722,12 @@ pub(crate) async fn handle_answer(
         &inner,
         Some(session_id),
         "Question",
-        http_post_json(&inner, &format!("/v2/interactions/questions/{id}/reply"), &body).await,
+        http_post_json(
+            &inner,
+            &format!("/v2/interactions/questions/{id}/reply"),
+            &body,
+        )
+        .await,
     );
 }
 
@@ -1539,14 +1767,20 @@ pub(crate) async fn handle_reject(
         }
     }
 
-    match first_interaction_id(&inner, "/v2/interactions/permissions", &session_id).await {
+    match first_interaction_id(&inner, "/v2/interactions/permissions", &session_id).await
+    {
         Ok(Some(id)) => {
             let body = json!({ "reply": "reject" });
             emit_command_result(
                 &inner,
                 Some(session_id.clone()),
                 "Permission",
-                http_post_json(&inner, &format!("/v2/interactions/permissions/{id}/reply"), &body).await,
+                http_post_json(
+                    &inner,
+                    &format!("/v2/interactions/permissions/{id}/reply"),
+                    &body,
+                )
+                .await,
             );
         }
         Ok(None) => emit_command_output(
@@ -1574,7 +1808,10 @@ pub(crate) async fn handle_answer_question(
     answers: Vec<Vec<String>>,
 ) {
     let body = json!({ "answers": answers });
-    let path = format!("/v2/interactions/questions/{}/reply", percent_encode(&request_id));
+    let path = format!(
+        "/v2/interactions/questions/{}/reply",
+        percent_encode(&request_id)
+    );
     match http_post_json(&inner, &path, &body).await {
         Ok(_) => {
             let _ = inner.tx.send(AgentServerMessage::QuestionRemoved {
@@ -1597,7 +1834,10 @@ pub(crate) async fn handle_reject_question(
     session_id: String,
     request_id: String,
 ) {
-    let path = format!("/v2/interactions/questions/{}/reject", percent_encode(&request_id));
+    let path = format!(
+        "/v2/interactions/questions/{}/reject",
+        percent_encode(&request_id)
+    );
     match post_no_body(&inner, &path).await {
         Ok(_) => {
             let _ = inner.tx.send(AgentServerMessage::QuestionRemoved {
@@ -1767,21 +2007,40 @@ pub(crate) async fn handle_set_pinned(
 
 #[cfg(test)]
 mod canonical_route_tests {
-    use super::session_list_path;
+    use super::{running_state_message, session_list_path};
+    use neoism_protocol::agent::AgentServerMessage;
+    use serde_json::json;
 
     #[test]
     fn daemon_agent_source_contains_no_deleted_http_routes() {
         let source = include_str!("handlers.rs");
         let event_source = include_str!("events.rs");
         for route in [
-            "config", "agent", "skill", "event", "provider", "permission", "question",
-            "command", "mcp", "global/event",
+            "config",
+            "agent",
+            "skill",
+            "event",
+            "provider",
+            "permission",
+            "question",
+            "command",
+            "mcp",
+            "global/event",
         ] {
             let legacy = format!("format!(\"/{route}");
-            assert!(!source.contains(&legacy), "legacy daemon route remains: {legacy}");
+            assert!(
+                !source.contains(&legacy),
+                "legacy daemon route remains: {legacy}"
+            );
             let direct = format!("\"/{route}");
-            assert!(!source.contains(&direct), "legacy daemon route remains: {direct}");
-            assert!(!event_source.contains(&direct), "legacy daemon event route remains: {direct}");
+            assert!(
+                !source.contains(&direct),
+                "legacy daemon route remains: {direct}"
+            );
+            assert!(
+                !event_source.contains(&direct),
+                "legacy daemon event route remains: {direct}"
+            );
         }
     }
 
@@ -1791,5 +2050,28 @@ mod canonical_route_tests {
             session_list_path(Some("/tmp/my project"), 50, Some("v1:42:ses_1")),
             "/v2/sessions?roots=true&limit=50&directory=%2Ftmp%2Fmy%20project&cursor=v1%3A42%3Ases_1"
         );
+    }
+
+    #[test]
+    fn running_state_hydration_keeps_queue_clock_without_inventing_work() {
+        let message = running_state_message(
+            "root".to_string(),
+            &json!({
+                "type": "busy",
+                "startedAt": 41,
+                "queue": { "count": 2, "preview": "next prompt" }
+            }),
+        )
+        .expect("busy state");
+
+        assert!(matches!(
+            message,
+            AgentServerMessage::QueueUpdate {
+                session_id,
+                count: 2,
+                preview: Some(preview),
+                started_at: Some(41),
+            } if session_id == "root" && preview == "next prompt"
+        ));
     }
 }

@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   TouchPolicy,
   LONG_PRESS_MS,
+  fontScaleAfterTouchAction,
+  longPressTextSurface,
   type TouchSample,
 } from "./touchPolicy.ts";
 import {
@@ -29,6 +31,17 @@ function sample(id: number, x: number, y: number, timeMs = 0): TouchSample {
 
 function policy(): TouchPolicy {
   return new TouchPolicy(wasm);
+}
+
+function longPressBundleSkip(): string | undefined {
+  if (touchSkip) return touchSkip;
+  const probe = policy();
+  probe.start(sample(99, 1, 1, 1_000), "terminal-body");
+  const action = probe.tickLongPress(1_000 + LONG_PRESS_MS + 1, layout);
+  const drag = probe.move(sample(99, 8, 1, 1_550), layout);
+  return action.kind === "select-word" && drag.kind === "extend-word-selection"
+    ? undefined
+    : "generated wasm bundle predates held-word drag; run npm run build:wasm";
 }
 
 test("pre-load: adapter is inert until the bundle arrives", () => {
@@ -70,7 +83,7 @@ test("vertical motion promotes to scroll with re-feed delta", { skip: touchSkip 
   const action = touch.move(sample(1, 11, 60), layout);
   assert.equal(action.kind, "scroll");
   if (action.kind === "scroll") {
-    assert.equal(action.dx, 0);
+    assert.equal(action.dx, 1);
     assert.ok(action.dy > 0);
   }
   assert.deepEqual(touch.end(sample(1, 11, 60), layout), { kind: "end-scroll" });
@@ -79,27 +92,31 @@ test("vertical motion promotes to scroll with re-feed delta", { skip: touchSkip 
 test("editor-area horizontal motion scrolls instead of selecting", { skip: touchSkip }, () => {
   const touch = policy();
   touch.start(sample(1, 10, 10), "editor-area");
-  assert.deepEqual(touch.move(sample(1, 23, 10), layout), { kind: "none" });
-  assert.deepEqual(touch.move(sample(1, 28, 10), layout), {
+  assert.deepEqual(touch.move(sample(1, 13, 10), layout), { kind: "none" });
+  assert.deepEqual(touch.move(sample(1, 15, 10), layout), {
     kind: "promote-tap-to-scroll",
   });
 });
 
-test("pinch on terminal body changes font size; chrome panel suppresses", { skip: touchSkip }, () => {
-  const body = policy();
-  body.start(sample(1, 100, 10), "terminal-body");
-  body.start(sample(2, 200, 10), "terminal-body");
-  assert.deepEqual(body.move(sample(2, 500, 10), layout), {
-    kind: "change-font-size",
-    direction: "increase",
-  });
+test("divergent pinch cannot zoom terminal, editor, or chrome", { skip: touchSkip }, () => {
+  for (const zone of ["terminal-body", "editor-area", "chrome-panel"] as const) {
+    const touch = policy();
+    touch.start(sample(1, 100, 10), zone);
+    touch.start(sample(2, 200, 10), zone);
+    const action = touch.move(sample(2, 500, 10), layout);
+    assert.deepEqual(action, { kind: "suppress-native-gesture" }, zone);
+    assert.equal(fontScaleAfterTouchAction(1.25, action), 1.25, zone);
+  }
+});
 
-  const panel = policy();
-  panel.start(sample(1, 100, 10), "chrome-panel");
-  panel.start(sample(2, 200, 10), "chrome-panel");
-  assert.deepEqual(panel.move(sample(2, 500, 10), layout), {
-    kind: "suppress-native-gesture",
-  });
+test("stale touch font actions cannot change web font scale", () => {
+  assert.equal(
+    fontScaleAfterTouchAction(1.25, {
+      kind: "change-font-size",
+      direction: "increase",
+    }),
+    1.25,
+  );
 });
 
 test("two-finger same-direction pan scrolls instead of zooming", { skip: touchSkip }, () => {
@@ -116,20 +133,66 @@ test("two-finger same-direction pan scrolls instead of zooming", { skip: touchSk
   }
 });
 
-test("long-press promotes to context menu exactly once", { skip: touchSkip }, () => {
+test(
+  "long-press promotes to word selection exactly once",
+  { skip: longPressBundleSkip() },
+  () => {
+    const touch = policy();
+    touch.start(sample(1, 40, 50, 1_000), "terminal-body");
+    assert.deepEqual(touch.tickLongPress(1_100, layout), { kind: "none" });
+    assert.deepEqual(touch.tickLongPress(1_000 + LONG_PRESS_MS + 1, layout), {
+      kind: "select-word",
+      x: 40,
+      y: 50,
+    });
+    assert.deepEqual(touch.tickLongPress(1_000 + LONG_PRESS_MS + 50, layout), {
+      kind: "none",
+    });
+    // The lift after a long-press must not double-fire a click.
+    assert.deepEqual(touch.end(sample(1, 40, 50), layout), {
+      kind: "end-word-selection",
+    });
+  },
+);
+
+test("long-press text routing covers content surfaces but excludes chrome/draw", () => {
+  assert.equal(longPressTextSurface("terminal", false, null), "terminal");
+  assert.equal(longPressTextSurface("markdown", true, null), "markdown");
+  assert.equal(longPressTextSurface("editor", false, "code"), "editor");
+  assert.equal(longPressTextSurface("editor", false, "notebook"), "editor");
+  assert.equal(longPressTextSurface("agent", false, null), "agent");
+  assert.equal(longPressTextSurface("editor", false, "draw"), "none");
+  assert.equal(longPressTextSurface("chrome", false, null), "none");
+});
+
+test("motion cancels a pending hard hold by promoting to scroll", { skip: touchSkip }, () => {
   const touch = policy();
-  touch.start(sample(1, 40, 50, 1_000), "terminal-body");
-  assert.deepEqual(touch.tickLongPress(1_100, layout), { kind: "none" });
-  assert.deepEqual(touch.tickLongPress(1_000 + LONG_PRESS_MS + 1, layout), {
-    kind: "open-context-menu",
-    x: 40,
-    y: 50,
+  touch.start(sample(1, 40, 50, 1_000), "editor-area");
+  assert.deepEqual(touch.move(sample(1, 40, 80, 1_100), layout), {
+    kind: "promote-tap-to-scroll",
   });
-  assert.deepEqual(touch.tickLongPress(1_000 + LONG_PRESS_MS + 50, layout), {
+  assert.deepEqual(touch.tickLongPress(1_000 + LONG_PRESS_MS + 10, layout), {
     kind: "none",
   });
-  // The lift after a long-press must not double-fire a click.
-  assert.deepEqual(touch.end(sample(1, 40, 50), layout), { kind: "none" });
+});
+
+test("continued motion after hold extends selection and release preserves it", { skip: longPressBundleSkip() }, () => {
+  const touch = policy();
+  touch.start(sample(1, 40, 50, 1_000), "editor-area");
+  assert.equal(touch.tickLongPress(1_000 + LONG_PRESS_MS + 1, layout).kind, "select-word");
+  assert.deepEqual(touch.move(sample(1, 12, 52, 1_550), layout), {
+    kind: "extend-word-selection",
+    x: 12,
+    y: 52,
+  });
+  assert.deepEqual(touch.move(sample(1, 88, 52, 1_570), layout), {
+    kind: "extend-word-selection",
+    x: 88,
+    y: 52,
+  });
+  assert.deepEqual(touch.end(sample(1, 88, 52, 1_580), layout), {
+    kind: "end-word-selection",
+  });
 });
 
 test("swipe-back suppression matches the shared rule", { skip: touchSkip }, () => {

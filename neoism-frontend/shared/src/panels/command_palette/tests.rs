@@ -15,6 +15,201 @@ use super::commands::EX_COMMANDS;
 use super::fuzzy::fuzzy_score;
 use super::modes::{PaletteMode, PaletteRow};
 use super::state::{CommandPalette, WorkspaceMovePhase};
+use crate::TerminalShellKind;
+
+#[test]
+fn cd_operand_parser_handles_bare_quotes_and_rejects_multiple_words() {
+    use super::actions::parse_cd_operand;
+    assert_eq!(parse_cd_operand(""), Ok(String::new()));
+    assert_eq!(parse_cd_operand(".."), Ok("..".into()));
+    assert_eq!(parse_cd_operand("~/x/y"), Ok("~/x/y".into()));
+    assert_eq!(parse_cd_operand("'/tmp/a b'"), Ok("/tmp/a b".into()));
+    assert_eq!(parse_cd_operand("\"/tmp/a b\""), Ok("/tmp/a b".into()));
+    assert!(parse_cd_operand("one two").unwrap_err().contains("quote"));
+    assert!(parse_cd_operand("'unterminated").is_err());
+    assert!(parse_cd_operand("bad\npath").is_err());
+}
+
+#[test]
+fn persistent_cd_resets_query_and_advances_only_captured_session() {
+    use super::actions::TerminalDirectoryTarget;
+    let mut palette = CommandPalette::new();
+    palette.open_commands_for_terminal("cd ..", TerminalDirectoryTarget {
+        route_id: 7, session_id: Some("captured".into()), cwd: "/a/b".into(),
+        shell_kind: TerminalShellKind::Zsh,
+    });
+    palette.continue_terminal_directory("/a");
+    assert!(palette.is_enabled());
+    assert_eq!(palette.query, "cd ");
+    assert_eq!(palette.terminal_directory_target().unwrap().cwd, "/a");
+    assert!(!palette.update_captured_terminal_cwd("focused-elsewhere", "/wrong"));
+    assert!(palette.update_captured_terminal_cwd("captured", "/authoritative"));
+    assert_eq!(palette.terminal_directory_target().unwrap().cwd, "/authoritative");
+    palette.continue_terminal_directory_pending();
+    assert_eq!(palette.query, "cd ");
+    assert_eq!(palette.terminal_directory_target().unwrap().route_id, 7);
+    assert_eq!(palette.terminal_directory_target().unwrap().cwd, "/authoritative");
+}
+
+#[test]
+fn invalid_cd_stays_open_with_inline_error_and_escape_is_explicit_close() {
+    use super::actions::TerminalDirectoryTarget;
+    let mut palette = CommandPalette::new();
+    palette.open_commands_for_terminal("cd one two", TerminalDirectoryTarget {
+        route_id: 1, session_id: None, cwd: "/tmp".into(), shell_kind: TerminalShellKind::Bash,
+    });
+    assert!(palette.typed_change_terminal_directory_intent().is_none());
+    assert!(palette.cd_error().unwrap().contains("quote"));
+    assert!(palette.is_enabled());
+    palette.set_enabled(false);
+    assert!(!palette.is_enabled());
+}
+
+#[test]
+fn query_cursor_edits_at_unicode_boundaries() {
+    let mut palette = CommandPalette::new();
+    palette.set_query("cd café/世界".into());
+    palette.set_query_cursor("cd ".len());
+    palette.insert_query_text("~/");
+    assert_eq!(palette.query, "cd ~/café/世界");
+    palette.move_query_cursor_right();
+    palette.backspace_query();
+    assert!(palette.query.is_char_boundary(palette.query_cursor()));
+}
+
+#[test]
+fn measured_wrap_prefers_spaces_and_breaks_long_unicode_tokens() {
+    use super::render::{visible_wrap_window, wrap_grapheme_ranges};
+    let rows = wrap_grapheme_ranges("cd alpha beta", 8.0, |s| s.chars().count() as f32);
+    let text = "cd alpha beta";
+    assert!(rows.len() >= 2);
+    assert!(rows.iter().all(|(a, b)| text.is_char_boundary(*a) && text.is_char_boundary(*b)));
+    let token = "世界世界世界世界";
+    let rows = wrap_grapheme_ranges(token, 3.0, |s| s.chars().count() as f32);
+    assert!(rows.len() >= 3);
+    assert!(rows.iter().all(|(a, b)| token.is_char_boundary(*a) && token.is_char_boundary(*b)));
+
+    let long = "command-with-no-spaces-and-many-graphemes-世界世界世界";
+    let narrow = wrap_grapheme_ranges(long, 6.0, |s| s.chars().count() as f32);
+    let wide = wrap_grapheme_ranges(long, 80.0, |s| s.chars().count() as f32);
+    assert!(narrow.len() > 5);
+    assert_eq!(wide.len(), 1);
+    assert_eq!(visible_wrap_window(&narrow, 0, 5), (0, 5));
+    let (middle_first, middle_count) = visible_wrap_window(&narrow, long.len() / 2, 5);
+    assert!(middle_first < narrow.len());
+    assert_eq!(middle_count, 5);
+    let (end_first, end_count) = visible_wrap_window(&narrow, long.len(), 5);
+    assert_eq!(end_count, 5);
+    assert_eq!(end_first + end_count, narrow.len());
+}
+
+#[test]
+fn persistent_cd_dynamic_input_shifts_result_hits() {
+    use super::actions::TerminalDirectoryTarget;
+    let mut palette = CommandPalette::new();
+    palette.open_commands_for_terminal("cd /a/very/long/query", TerminalDirectoryTarget {
+        route_id: 1, session_id: None, cwd: "/".into(), shell_kind: TerminalShellKind::Zsh,
+    });
+    palette.set_cd_directory_results(vec![PaletteDirectoryEntry::new("/a/result")]);
+    palette.input_band_height = super::INPUT_HEIGHT * 4.0;
+    let (x, y) = palette.row_center_coords(0, 480.0, 1.0);
+    assert_eq!(palette.hit_test(x, y, 480.0, 1.0), Ok(Some(0)));
+    assert!(!palette.text_entry_at(x, y, 480.0, 1.0));
+}
+
+#[test]
+fn cd_choices_are_useful_ordered_and_deduped() {
+    use super::actions::TerminalDirectoryTarget;
+    let mut palette = CommandPalette::new();
+    palette.open_commands_for_terminal("cd ", TerminalDirectoryTarget {
+        route_id: 1, session_id: Some("s".into()), cwd: "/work/project/src".into(),
+        shell_kind: TerminalShellKind::Zsh,
+    });
+    palette.record_terminal_directory("/recent");
+    palette.compose_terminal_directory_choices(
+        Some("/home/me".into()),
+        Some("/work".into()),
+        vec![PaletteDirectoryEntry::new("/recent"), PaletteDirectoryEntry::new("/completion")],
+    );
+    let rows = &palette.cd_directory_results;
+    assert_eq!(rows.iter().map(|row| row.display.as_deref().unwrap_or("")).take(5).collect::<Vec<_>>(),
+        vec!["Current directory", "Parent directory", "Home", "Workspace root", "Recent"]);
+    assert_eq!(rows.iter().filter(|row| row.absolute_path == "/recent").count(), 1);
+}
+
+#[test]
+fn tab_cycle_animates_cursor_wraps_and_scrolls_to_selection() {
+    use super::actions::TerminalDirectoryTarget;
+    let mut palette = CommandPalette::new();
+    palette.open_commands_for_terminal("cd ", TerminalDirectoryTarget {
+        route_id: 1, session_id: None, cwd: "/".into(), shell_kind: TerminalShellKind::Bash,
+    });
+    palette.set_cd_directory_results((0..20).map(|i| PaletteDirectoryEntry::new(format!("/d{i}"))).collect());
+    assert!(palette.cycle_cd_selection(false));
+    assert_ne!(palette.cursor_spring.position, 0.0);
+    for _ in 0..12 { palette.cycle_cd_selection(false); }
+    assert!(palette.scroll_offset > 0);
+    assert_ne!(palette.list_scroll_spring.position, 0.0);
+    let selected = palette.selected_index;
+    assert!(palette.cycle_cd_selection(true));
+    assert_ne!(palette.selected_index, selected);
+    assert_eq!(palette.query, "cd ");
+}
+#[test]
+fn commands_can_open_with_exact_prefill() {
+    let mut palette = CommandPalette::new();
+    palette.open_commands_with_query("cd ");
+    assert!(palette.is_enabled());
+    assert_eq!(palette.query, "cd ");
+}
+
+#[test]
+fn change_directory_payload_quotes_hostile_names_and_rejects_controls() {
+    assert_eq!(
+        TerminalShellKind::Zsh
+            .change_directory_payload("/tmp/a'; echo pwn")
+            .unwrap(),
+        b"cd -- '/tmp/a'\\''; echo pwn'\n"
+    );
+    assert_eq!(
+        TerminalShellKind::PowerShell
+            .change_directory_payload("C:\\a'b")
+            .unwrap(),
+        b"Set-Location -LiteralPath 'C:\\a''b'\r"
+    );
+    assert_eq!(
+        TerminalShellKind::Cmd
+            .change_directory_payload("C:\\a & b")
+            .unwrap(),
+        b"cd /d \"C:\\a & b\"\r"
+    );
+    assert!(TerminalShellKind::Bash
+        .change_directory_payload("/tmp/x\ny")
+        .is_err());
+}
+
+#[test]
+fn terminal_directory_intent_keeps_captured_route_and_session() {
+    use super::actions::TerminalDirectoryTarget;
+
+    let mut palette = CommandPalette::new();
+    palette.open_commands_for_terminal(
+        "cd ",
+        TerminalDirectoryTarget {
+            route_id: 41,
+            session_id: Some("pty-source".into()),
+            cwd: "/captured/cwd".into(),
+            shell_kind: TerminalShellKind::Fish,
+        },
+    );
+    // Simulate unrelated host focus state changing: palette intent contains no
+    // late-bound "current route" lookup.
+    let intent = palette.change_terminal_directory_intent("child").unwrap();
+    assert_eq!(intent.target.route_id, 41);
+    assert_eq!(intent.target.session_id.as_deref(), Some("pty-source"));
+    assert_eq!(intent.target.cwd, "/captured/cwd");
+    assert_eq!(intent.destination, "child");
+}
 use super::MAX_VISIBLE_RESULTS;
 
 /// Build a workspace entry under an explicit host, for the grouped-tree
@@ -57,6 +252,15 @@ fn test_set_enabled_resets_state() {
     assert!(palette.query.is_empty());
     assert_eq!(palette.selected_index, 0);
     assert_eq!(palette.scroll_offset, 0);
+}
+
+#[test]
+fn mobile_text_entry_hit_is_input_only_not_result_rows() {
+    let mut palette = CommandPalette::new();
+    palette.set_enabled(true);
+    let [x, y, w, _] = palette.active_rect(390.0, 1.0).unwrap();
+    assert!(palette.text_entry_at(x + w * 0.5, y + 10.0, 390.0, 1.0));
+    assert!(!palette.text_entry_at(x + w * 0.5, y + 50.0, 390.0, 1.0));
 }
 
 #[test]
@@ -532,9 +736,17 @@ fn code_buffer_commands_are_visible_only_on_editor_surface() {
     assert!(editor_titles.contains(&"Go to Line…"));
     assert!(editor_titles.contains(&"Toggle Minimap"));
 
+    palette.set_surface(PaletteSurface::Markdown);
+    let markdown_titles: Vec<&str> = palette
+        .filtered_rows()
+        .into_iter()
+        .map(|(_, row)| row.title())
+        .collect();
+    assert!(markdown_titles.contains(&"Go to Line…"));
+    assert!(!markdown_titles.contains(&"Toggle Minimap"));
+
     for surface in [
         PaletteSurface::Terminal,
-        PaletteSurface::Markdown,
         PaletteSurface::Epub,
         PaletteSurface::Notebook,
     ] {
@@ -1093,6 +1305,54 @@ fn themes_mode_is_wide_and_preview_pane_does_not_select_rows() {
 }
 
 #[test]
+fn theme_row_tap_selects_the_hit_theme_before_commit() {
+    let mut palette = CommandPalette::new();
+    palette.enter_themes_mode(vec![
+        "pastel_dark".into(),
+        "tokyo_night".into(),
+        "catppuccin_mocha".into(),
+    ]);
+    let [card_x, _, _, _] = palette.active_rect(1200.0, 1.0).unwrap();
+    let (_, y) = palette.row_center_coords(1, 1200.0, 1.0);
+    let hit = palette
+        .hit_test(card_x + 40.0, y, 1200.0, 1.0)
+        .expect("tap is inside theme card")
+        .expect("tap is over a theme row");
+
+    palette.select_clicked(hit);
+
+    assert_eq!(palette.get_selected_theme().as_deref(), Some("tokyo_night"));
+}
+
+#[test]
+fn theme_touch_scroll_moves_down_and_clamps_at_both_bounds() {
+    let mut palette = CommandPalette::new();
+    palette.enter_themes_mode((0..30).map(|i| format!("theme_{i:02}")).collect());
+    let row_h = palette.row_height();
+
+    // Panel scroll APIs use the desktop/winit sign: negative reveals later
+    // rows. The web bridge converts DOM wheel and natural-touch deltas.
+    palette.scroll_pixels(-row_h * 100.0);
+    assert_eq!(
+        palette.scroll_offset,
+        palette.filtered_rows().len() - MAX_VISIBLE_RESULTS
+    );
+
+    palette.scroll_pixels(row_h * 100.0);
+    assert_eq!(palette.scroll_offset, 0);
+}
+
+#[test]
+fn direct_touch_scroll_keeps_subrow_displacement_and_has_no_spring_tail() {
+    let mut palette = CommandPalette::new();
+    palette.enter_themes_mode((0..30).map(|i| format!("theme_{i:02}")).collect());
+    assert!(palette.scroll_touch_pixels(-7.0));
+    assert_eq!(palette.scroll_offset, 0);
+    assert_eq!(palette.tick_list_scroll(), -7.0);
+    assert_eq!(palette.list_scroll_spring.position, 0.0);
+}
+
+#[test]
 fn mashups_mode_keeps_names_visible_and_returns_pack_id() {
     let mut palette = CommandPalette::new();
     palette.enter_mashups_mode(vec![PaletteMashupEntry {
@@ -1354,6 +1614,16 @@ fn ex_mode_recommends_search_finder_commands() {
     assert!(names.contains(&"Search Files"));
     assert!(names.contains(&"Search Words"));
     assert!(names.contains(&"Search Git Changes"));
+}
+
+#[test]
+fn ex_mode_q_selects_buffer_command_not_application_quit() {
+    let mut palette = CommandPalette::new();
+    palette.enter_ex_mode();
+    palette.set_query("q".to_string());
+
+    assert_eq!(palette.get_selected_ex_command().as_deref(), Some("q"));
+    assert_eq!(palette.get_selected_action(), None);
 }
 
 // ---------------------------------------------------------------------

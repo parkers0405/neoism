@@ -175,6 +175,66 @@ fn completed_child_ignores_stale_permission_request_event() {
 }
 
 #[test]
+fn child_metadata_update_never_changes_or_recreates_native_lifecycle() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.upsert_live_subagent_entry(
+        "child-1",
+        Some("Old title".to_string()),
+        Some("explore".to_string()),
+    );
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, Some(1));
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "parent",
+        [AgentSessionUpdate::SubagentMetadata {
+            session_id: "child-1".to_string(),
+            title: Some("Renamed child".to_string()),
+            agent: Some("build".to_string()),
+        }],
+    ));
+
+    pane.drain_server_updates();
+
+    let child = pane
+        .side_panel
+        .subagents()
+        .iter()
+        .find(|entry| entry.id == "child-1")
+        .expect("tracked child");
+    assert_eq!(child.title, "Renamed child");
+    assert_eq!(child.time_label, "build");
+    assert_eq!(
+        pane.side_panel
+            .branch_activity("child-1")
+            .map(|activity| activity.status),
+        Some(BranchStatus::Active)
+    );
+
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "parent".to_string(),
+        2,
+        [("child-1".to_string(), "completed".to_string(), Some(1))],
+    ));
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "parent",
+        [AgentSessionUpdate::SubagentMetadata {
+            session_id: "child-1".to_string(),
+            title: Some("Late rename".to_string()),
+            agent: None,
+        }],
+    ));
+
+    pane.drain_server_updates();
+
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "child-1"));
+}
+
+#[test]
 fn stale_busy_child_event_cannot_reopen_completed_branch_but_newer_runtime_can() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
@@ -227,12 +287,14 @@ fn terminal_revision_rejects_delayed_active_snapshot_then_allows_continuation() 
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
     assert!(pane.apply_runtime_lifecycle_snapshot(
-        Some(neoism_ui::panels::agent_pane::state::ExecutionActivityState {
-            execution_id: "execution-a".to_string(),
-            root_session_id: "parent".to_string(),
-            revision: 1,
-            ..Default::default()
-        }),
+        Some(
+            neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+                execution_id: "execution-a".to_string(),
+                root_session_id: "parent".to_string(),
+                revision: 1,
+                ..Default::default()
+            }
+        ),
         "parent".to_string(),
         8,
         [("child-1".to_string(), "outstanding".to_string(), Some(1))],
@@ -308,6 +370,40 @@ fn terminal_runtime_snapshot_settles_parent_task_sidebar_and_footer() {
 }
 
 #[test]
+fn equal_revision_empty_snapshot_clears_locally_resurrected_children() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "parent".to_string(),
+        8,
+        std::iter::empty::<(String, String, Option<u64>)>(),
+    ));
+
+    for child in ["child-1", "child-2"] {
+        pane.upsert_live_subagent_entry(
+            child,
+            Some(child.to_string()),
+            Some("explore".into()),
+        );
+        pane.note_subagent_runtime(child.to_string(), BranchStatus::Active, Some(1));
+    }
+    assert_eq!(pane.active_subagent_count(), 2);
+
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "parent".to_string(),
+        8,
+        std::iter::empty::<(String, String, Option<u64>)>(),
+    ));
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(!pane.has_status_activity());
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| !entry.id.starts_with("child-")));
+}
+
+#[test]
 fn terminal_runtime_snapshot_settles_viewed_child_streaming_label() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("child-1".to_string());
@@ -329,32 +425,40 @@ fn stale_runtime_response_cannot_resurrect_finished_desktop_child() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".to_string());
     assert!(pane.apply_runtime_lifecycle_snapshot(
-        Some(neoism_ui::panels::agent_pane::state::ExecutionActivityState {
-            execution_id: "execution-a".to_string(),
-            root_session_id: "root".to_string(),
-            revision: 2,
-            finished: true,
-            ..Default::default()
-        }),
+        Some(
+            neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+                execution_id: "execution-a".to_string(),
+                root_session_id: "root".to_string(),
+                revision: 2,
+                finished: true,
+                ..Default::default()
+            }
+        ),
         "root".to_string(),
         2,
         [("child-1".to_string(), "completed".to_string(), Some(1))],
     ));
     assert!(!pane.apply_runtime_lifecycle_snapshot(
-        Some(neoism_ui::panels::agent_pane::state::ExecutionActivityState {
-            execution_id: "execution-a".to_string(),
-            root_session_id: "root".to_string(),
-            revision: 1,
-            finished: false,
-            ..Default::default()
-        }),
+        Some(
+            neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+                execution_id: "execution-a".to_string(),
+                root_session_id: "root".to_string(),
+                revision: 1,
+                finished: false,
+                ..Default::default()
+            }
+        ),
         "root".to_string(),
         3,
         [("child-1".to_string(), "outstanding".to_string(), Some(1))],
     ));
     assert_eq!(pane.active_subagent_count(), 0);
     assert!(!pane.has_status_activity());
-    assert!(pane.side_panel.subagents().iter().all(|entry| entry.id != "child-1"));
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "child-1"));
 }
 
 #[test]
@@ -1235,11 +1339,7 @@ fn historical_unmatched_background_task_is_not_live_activity() {
 #[test]
 fn background_runtime_rejects_stale_revision_and_accepts_new_server_epoch() {
     let mut pane = NeoismAgentPane::default();
-    assert!(pane.apply_running_background_tasks(
-        "server-a",
-        2,
-        &[("job-1".into(), 100)],
-    ));
+    assert!(pane.apply_running_background_tasks("server-a", 2, &[("job-1".into(), 100)],));
     assert_eq!(pane.running_background_task_count(), 1);
     assert!(!pane.apply_running_background_tasks("server-a", 1, &[]));
     assert_eq!(pane.running_background_task_count(), 1);
@@ -1554,6 +1654,7 @@ fn offscreen_root_stream_is_live_before_switching_back() {
             AgentSessionUpdate::SessionMetadataUpdated {
                 agent: Some("plan".to_string()),
                 model: Some("openai/gpt-5.6".to_string()),
+                connection_id: Some(Some("conn-work".to_string())),
                 thinking: Some(Some("high".to_string())),
             },
             AgentSessionUpdate::PartDelta {
@@ -1582,6 +1683,7 @@ fn offscreen_root_stream_is_live_before_switching_back() {
     );
     assert_eq!(pane.agent.as_deref(), Some("plan"));
     assert_eq!(pane.model, "openai/gpt-5.6");
+    assert_eq!(pane.connection_id.as_deref(), Some("conn-work"));
     assert_eq!(pane.thinking.as_deref(), Some("high"));
     assert!(pane.runtime_status_requests.get("root").is_none());
 }
@@ -1738,14 +1840,16 @@ fn approval_card_persists_across_parent_child_navigation() {
     pane.switch_session("child".to_string());
     assert!(pane.is_subagent_session());
     assert_eq!(
-        pane.pending_permission().map(|permission| permission.id.as_str()),
+        pane.pending_permission()
+            .map(|permission| permission.id.as_str()),
         Some("perm-family")
     );
 
     pane.switch_session("root".to_string());
     assert!(!pane.is_subagent_session());
     assert_eq!(
-        pane.pending_permission().map(|permission| permission.id.as_str()),
+        pane.pending_permission()
+            .map(|permission| permission.id.as_str()),
         Some("perm-family")
     );
 }
@@ -1829,16 +1933,17 @@ fn activation_snapshot_rehydrates_missed_question() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".to_string());
     pane.runtime_status_requests.insert("root".to_string(), 1);
-    let question = neoism_ui::panels::agent_pane::question_policy::question_request_from_event(
-        &serde_json::json!({
-            "id": "question-missed",
-            "sessionId": "root",
-            "questions": [{
-                "question": "Continue?",
-                "options": [{ "label": "Yes", "description": "Continue now" }]
-            }]
-        }),
-    );
+    let question =
+        neoism_ui::panels::agent_pane::question_policy::question_request_from_event(
+            &serde_json::json!({
+                "id": "question-missed",
+                "sessionId": "root",
+                "questions": [{
+                    "question": "Continue?",
+                    "options": [{ "label": "Yes", "description": "Continue now" }]
+                }]
+            }),
+        );
     pane.background_sender()
         .send(NeoismAgentBackgroundUpdate::SessionRuntimeStatusRefreshed {
             session_id: "root".to_string(),
@@ -1940,7 +2045,10 @@ fn omitted_child_from_live_run_snapshot_remains_outstanding() {
 
     assert_eq!(pane.active_subagent_count(), 1);
     assert!(pane.subagent_waiting_started_at.is_some());
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::WaitingSubagents);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
     assert_eq!(
         pane.side_panel
             .branch_activity("child")
@@ -2372,22 +2480,24 @@ fn connect_secret_paste_fills_the_secret_field_not_the_composer() {
 #[test]
 fn pending_question_paste_fills_the_typed_answer_not_the_composer() {
     let mut pane = NeoismAgentPane::default();
-    let question = neoism_ui::panels::agent_pane::question_policy::question_request_from_event(
-        &serde_json::json!({
-            "id": "question-email",
-            "sessionId": "session-1",
-            "questions": [{
-                "question": "Who should receive the recording?",
-                "options": []
-            }]
-        }),
-    );
+    let question =
+        neoism_ui::panels::agent_pane::question_policy::question_request_from_event(
+            &serde_json::json!({
+                "id": "question-email",
+                "sessionId": "session-1",
+                "questions": [{
+                    "question": "Who should receive the recording?",
+                    "options": []
+                }]
+            }),
+        );
     pane.enqueue_pending_question(question);
 
     pane.insert_paste("dusty@elevatedintx.com");
 
     assert_eq!(
-        pane.pending_question().map(|question| question.typed.as_str()),
+        pane.pending_question()
+            .map(|question| question.typed.as_str()),
         Some("dusty@elevatedintx.com")
     );
     assert!(pane.input().is_empty(), "paste must not enter the composer");
@@ -3543,7 +3653,8 @@ fn delayed_subagent_completion_stays_before_its_live_assistant_response() {
     );
     pane.remember_live_part_parent("thinking", Some("msg_03a800b6c001assistant"));
     pane.upsert_part_message(
-        NeoismAgentMessage::reasoning("Summarizing confirmed findings").with_id("thinking"),
+        NeoismAgentMessage::reasoning("Summarizing confirmed findings")
+            .with_id("thinking"),
     );
 
     assert_eq!(

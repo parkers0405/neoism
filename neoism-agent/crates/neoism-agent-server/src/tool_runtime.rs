@@ -52,12 +52,16 @@ async fn execute_tool_call_with_env_and_cancel(
     cancel: Option<Arc<AtomicBool>>,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> Result<tool::ToolExecutionResult, String> {
-    snapshot.ensure_active().map_err(|error| error.to_string())?;
+    snapshot
+        .ensure_active()
+        .map_err(|error| error.to_string())?;
     let started = crate::perf::now();
     let input_bytes = input.to_string().len();
     let services = state.services().clone();
     let contribution = crate::agent_tool_registry::tool_contribution(snapshot, tool_name);
-    if contribution.is_some_and(|item| item.plugin_id == neoism_agent_builtins::plugin::mcp::ID) {
+    if contribution
+        .is_some_and(|item| item.plugin_id == neoism_agent_builtins::plugin::mcp::ID)
+    {
         if let Some(result) = execute_mcp_gateway(
             directory,
             tool_name,
@@ -82,7 +86,9 @@ async fn execute_tool_call_with_env_and_cancel(
             return Ok(result);
         }
     }
-    if contribution.is_some_and(|item| item.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID) {
+    if contribution.is_some_and(|item| {
+        item.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID
+    }) {
         let result = crate::custom_tool::execute(
             &services,
             directory,
@@ -346,7 +352,9 @@ async fn execute_stateful_tool_call(
         "background_task_result" => {
             ensure_tool_permission(permissions, "background_task_result", "*")?;
             let result = crate::background_job::background_task_result_tool(
-                snapshot.background().map_err(|error| error.to_string())?, session_id, input,
+                snapshot.background().map_err(|error| error.to_string())?,
+                session_id,
+                input,
             )
             .await?;
             Ok(Some(result))
@@ -368,10 +376,7 @@ async fn execute_stateful_tool_call(
         "task_result" => {
             ensure_tool_permission(permissions, "task_result", "*")?;
             let result = crate::plugins::subagents::task_result_tool(
-                state,
-                snapshot,
-                session_id,
-                input,
+                state, snapshot, session_id, input,
             )
             .await?;
             Ok(Some(result))
@@ -379,10 +384,7 @@ async fn execute_stateful_tool_call(
         "stop_task" => {
             ensure_tool_permission(permissions, "stop_task", "*")?;
             let result = crate::plugins::subagents::stop_task_tool(
-                state,
-                snapshot,
-                session_id,
-                input,
+                state, snapshot, session_id, input,
             )
             .await?;
             Ok(Some(result))
@@ -401,7 +403,10 @@ async fn execute_stateful_tool_call(
                 .await
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("session {session_id} not found"))?;
-            if !crate::plugins::enabled(snapshot, neoism_agent_builtins::plugin::goals::ID) {
+            if !crate::plugins::enabled(
+                snapshot,
+                neoism_agent_builtins::plugin::goals::ID,
+            ) {
                 return Err("Goal plugin is disabled for the workspace".to_string());
             }
             let Some(mut goal) = info.goal() else {
@@ -522,7 +527,10 @@ async fn execute_stateful_tool_call(
 pub(crate) const MAX_SUBTASK_DEPTH: usize = 3;
 
 /// Number of ancestors above `session` in the subagent tree (root => 0).
-pub(crate) async fn session_subtask_depth(state: &AppState, session: &SessionInfo) -> usize {
+pub(crate) async fn session_subtask_depth(
+    state: &AppState,
+    session: &SessionInfo,
+) -> usize {
     let mut depth = 0usize;
     let mut ancestor = session.parent_id.clone();
     // Bounded walk so malformed parent links can never loop forever.
@@ -539,7 +547,9 @@ pub(crate) async fn session_subtask_depth(state: &AppState, session: &SessionInf
     depth
 }
 
-fn dangerously_skip_permissions_enabled(config: &neoism_agent_core::AgentConfigDocument) -> bool {
+fn dangerously_skip_permissions_enabled(
+    config: &neoism_agent_core::AgentConfigDocument,
+) -> bool {
     config.dangerously_skip_permissions
 }
 
@@ -665,7 +675,12 @@ pub(crate) async fn descendant_sessions(
 }
 
 pub(crate) async fn session_is_running(state: &AppState, session_id: &str) -> bool {
-    state.inner.session_coordinator.active_run(session_id).await.is_some()
+    state
+        .inner
+        .session_coordinator
+        .active_run(session_id)
+        .await
+        .is_some()
 }
 
 pub(crate) async fn steer_child_task_prompt(
@@ -961,19 +976,23 @@ pub(crate) async fn execute_tool_call_in_generation(
     plugin::tool_execute_before(&snapshot, &ctx, &mut hooked_input)
         .map_err(|error| error.to_string())?;
     let mut env = BTreeMap::new();
-    let is_custom_tool = crate::agent_tool_registry::tool_contribution(&snapshot, tool_name)
-        .is_some_and(|contribution| contribution.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID);
+    let is_custom_tool = crate::agent_tool_registry::tool_contribution(
+        &snapshot, tool_name,
+    )
+    .is_some_and(|contribution| {
+        contribution.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID
+    });
     if tool_name == "bash" || tool_name == "background_task" || is_custom_tool {
         plugin::shell_env(
-                &snapshot,
-                &plugin::ShellEnvContext {
-                    cwd: directory.to_string(),
-                    session_id: Some(session_id.to_string()),
-                    call_id: Some(call_id.to_string()),
-                },
-                &mut env,
-            )
-            .map_err(|error| error.to_string())?;
+            &snapshot,
+            &plugin::ShellEnvContext {
+                cwd: directory.to_string(),
+                session_id: Some(session_id.to_string()),
+                call_id: Some(call_id.to_string()),
+            },
+            &mut env,
+        )
+        .map_err(|error| error.to_string())?;
     }
     let cancel = state
         .inner

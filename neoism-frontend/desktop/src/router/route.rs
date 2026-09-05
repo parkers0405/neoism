@@ -637,6 +637,26 @@ impl Route<'_> {
             }
         }
 
+        // Workspace file browser owns the keyboard while visible. Navigation
+        // and text editing stay in the shared state; native only translates
+        // winit's logical key vocabulary and pumps local listings.
+        if self.window.screen.renderer.file_browser.is_active() {
+            if key_event.state == ElementState::Pressed {
+                match &key_event.logical_key {
+                    Key::Named(NamedKey::Escape) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::Escape),
+                    Key::Named(NamedKey::Enter) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::Enter),
+                    Key::Named(NamedKey::ArrowUp) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::ArrowUp),
+                    Key::Named(NamedKey::ArrowDown) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::ArrowDown),
+                    Key::Named(NamedKey::Backspace) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::Backspace),
+                    Key::Character(text) => self.window.screen.renderer.file_browser.input_text(text),
+                    _ => {}
+                }
+                self.window.screen.pump_agent_image_browser();
+                self.request_overlay_redraw();
+            }
+            return true;
+        }
+
         // GUI settings panel — a full-screen overlay. While it's open it
         // owns the keyboard: Esc steps out (clear search → unfocus →
         // close), typing filters when the search box is focused, and
@@ -1056,7 +1076,31 @@ impl Route<'_> {
                         self.preview_palette_search_match_if_any();
                         self.request_overlay_redraw();
                     }
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        self.window.screen.renderer.command_palette.move_query_cursor_left();
+                        self.request_overlay_redraw();
+                    }
+                    Key::Named(NamedKey::ArrowRight) => {
+                        self.window.screen.renderer.command_palette.move_query_cursor_right();
+                        self.request_overlay_redraw();
+                    }
+                    Key::Named(NamedKey::Home) => {
+                        self.window.screen.renderer.command_palette.set_query_cursor(0);
+                        self.request_overlay_redraw();
+                    }
+                    Key::Named(NamedKey::End) => {
+                        let end = self.window.screen.renderer.command_palette.query.len();
+                        self.window.screen.renderer.command_palette.set_query_cursor(end);
+                        self.request_overlay_redraw();
+                    }
                     Key::Named(NamedKey::Tab) => {
+                        if self.window.screen.renderer.command_palette.is_cd_query() {
+                            self.window.screen.renderer.command_palette.cycle_cd_selection(
+                                self.window.screen.modifiers.state().shift_key(),
+                            );
+                            self.request_overlay_redraw();
+                            return true;
+                        }
                         tracing::trace!(target: "neoism::input", "command palette tab completes selection");
                         // Tab fills the query with the selected row's
                         // title — noice / snacks-style completion.
@@ -1103,11 +1147,7 @@ impl Route<'_> {
                                 });
                             if let Some(target) = target {
                                 if self.window.screen.commit_palette_cd(&target) {
-                                    self.window
-                                        .screen
-                                        .renderer
-                                        .command_palette
-                                        .set_enabled(false);
+                                    self.window.screen.refresh_cd_palette_results();
                                 }
                                 self.request_overlay_redraw();
                             }
@@ -1558,23 +1598,14 @@ impl Route<'_> {
                     }
                     Key::Named(NamedKey::Backspace) => {
                         tracing::trace!(target: "neoism::input", "command palette handling Backspace");
-                        let current_query =
-                            self.window.screen.renderer.command_palette.query.clone();
-                        if !current_query.is_empty() {
-                            let mut chars = current_query.chars().collect::<Vec<_>>();
-                            chars.pop();
-                            let new_query: String = chars.into_iter().collect();
+                        if self.window.screen.renderer.command_palette.backspace_query() {
+                            let new_query = self.window.screen.renderer.command_palette.query.clone();
                             let was_search = self
                                 .window
                                 .screen
                                 .renderer
                                 .command_palette
                                 .is_search_mode();
-                            self.window
-                                .screen
-                                .renderer
-                                .command_palette
-                                .set_query(new_query.clone());
                             self.window.screen.refresh_cd_palette_results();
                             if was_search {
                                 self.dispatch_palette_search_query(&new_query);
@@ -1597,25 +1628,14 @@ impl Route<'_> {
                                     text = %text_str.escape_debug(),
                                     "command palette appending text"
                                 );
-                                let current_query = self
-                                    .window
-                                    .screen
-                                    .renderer
-                                    .command_palette
-                                    .query
-                                    .clone();
-                                let new_query = format!("{}{}", current_query, text_str);
                                 let was_search = self
                                     .window
                                     .screen
                                     .renderer
                                     .command_palette
                                     .is_search_mode();
-                                self.window
-                                    .screen
-                                    .renderer
-                                    .command_palette
-                                    .set_query(new_query.clone());
+                                self.window.screen.renderer.command_palette.insert_query_text(text_str);
+                                let new_query = self.window.screen.renderer.command_palette.query.clone();
                                 self.window.screen.refresh_cd_palette_results();
                                 if was_search {
                                     self.dispatch_palette_search_query(&new_query);

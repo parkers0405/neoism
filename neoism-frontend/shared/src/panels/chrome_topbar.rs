@@ -45,6 +45,7 @@ const HAMBURGER_GLYPH: &str = "\u{f0c9}"; // FA bars
 const SEARCH_GLYPH: &str = "\u{f002}"; // FA magnifying-glass — opens the finder
 const NOTES_GLYPH: &str = "\u{f15c}"; // Same glyph as Markdown files in the tree
 const NEOISM_AGENT_GLYPH: &str = "n"; // Same mark used by Agent buffer tabs.
+const AGENT_PANEL_GLYPH: &str = "\u{eb56}"; // codicon split-horizontal / side panel
 
 /// Which half of an icon paints in the accent color while active.
 #[derive(Clone, Copy)]
@@ -57,6 +58,10 @@ const MENU_FONT_SIZE: f32 = 12.5;
 const EDGE_PAD_X: f32 = 8.0;
 const BTN_GAP: f32 = 4.0;
 const BTN_SIZE: f32 = 22.0;
+/// Mobile controls keep the compact desktop visual but own an accessible
+/// touch target. The target is laid out in its own slot, so it cannot overlap
+/// the adjacent global Agent button.
+const MOBILE_HIT_SIZE: f32 = 44.0;
 const MENU_ITEM_HEIGHT: f32 = 26.0;
 const MENU_WIDTH: f32 = 196.0;
 const MENU_PAD_Y: f32 = 4.0;
@@ -83,6 +88,9 @@ const ORDER_MENU_BORDER: u8 = 33;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarAction {
     TogglePanel,
+    /// Mobile-only, active-Agent-tab control for the pane's existing side
+    /// panel. Chrome consumes this directly through `toggle_side_panel`.
+    ToggleAgentSidePanel,
     /// Right-side button — opens or creates an Agent tab. Only fires
     /// when the host has enabled the right button via
     /// `set_right_button_visible(true)`.
@@ -201,6 +209,7 @@ pub struct ChromeTopBar {
     /// True when the host has an agent side panel to toggle. Drives
     /// whether the right-edge button is painted + hit-tested.
     right_button_visible: bool,
+    mobile_agent_panel_button_visible: bool,
     /// Open/closed state of the panels the two toggle buttons drive
     /// (left = file tree, right = agent side panel). When `true` the
     /// button paints in the active accent style so the user can see at
@@ -211,6 +220,7 @@ pub struct ChromeTopBar {
     /// Web hosts set this to surface the "Share with Phone" row.
     share_with_phone_enabled: bool,
     left_safe_inset: f32,
+    right_safe_inset: f32,
     /// Last hit rects (in window-global coords) refreshed every paint.
     /// Hit-testing reads these, so layout drift between frames can't
     /// activate the wrong region.
@@ -220,6 +230,8 @@ pub struct ChromeTopBar {
     search_btn_rect: Rect,
     server_btn_rect: Rect,
     right_btn_rect: Rect,
+    mobile_agent_panel_btn_rect: Rect,
+    mobile_agent_panel_hit_rect: Rect,
     menu_rect: Rect,
     hover_panel_btn: bool,
     hover_menu_btn: bool,
@@ -227,6 +239,7 @@ pub struct ChromeTopBar {
     hover_search_btn: bool,
     hover_server_btn: bool,
     hover_right_btn: bool,
+    hover_mobile_agent_panel_btn: bool,
     hover_menu_item: Option<usize>,
     server_status: ServerIndicatorStatus,
     /// Connected remote peers, pushed by the host each frame (cheap: a
@@ -248,17 +261,21 @@ impl ChromeTopBar {
             scale: 1.0,
             menu_open: false,
             right_button_visible: false,
+            mobile_agent_panel_button_visible: false,
             panel_open: false,
             right_panel_open: false,
             agent_icon_overlay: false,
             share_with_phone_enabled: false,
             left_safe_inset: 0.0,
+            right_safe_inset: 0.0,
             panel_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             notes_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             search_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             server_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             right_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            mobile_agent_panel_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            mobile_agent_panel_hit_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             hover_panel_btn: false,
             hover_menu_btn: false,
@@ -266,6 +283,7 @@ impl ChromeTopBar {
             hover_search_btn: false,
             hover_server_btn: false,
             hover_right_btn: false,
+            hover_mobile_agent_panel_btn: false,
             hover_menu_item: None,
             server_status: ServerIndicatorStatus::Unknown,
             peers: Vec::new(),
@@ -286,6 +304,29 @@ impl ChromeTopBar {
 
     pub fn is_right_button_visible(&self) -> bool {
         self.right_button_visible
+    }
+
+    pub fn set_mobile_agent_panel_button_visible(&mut self, visible: bool) {
+        self.mobile_agent_panel_button_visible = visible;
+        if !visible {
+            self.hover_mobile_agent_panel_btn = false;
+            self.mobile_agent_panel_btn_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
+            self.mobile_agent_panel_hit_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
+        }
+    }
+
+    pub fn is_mobile_agent_panel_button_visible(&self) -> bool {
+        self.mobile_agent_panel_button_visible
+    }
+
+    pub fn mobile_agent_panel_button_rect(&self) -> [f32; 4] {
+        let r = self.mobile_agent_panel_btn_rect;
+        [r.x, r.y, r.w, r.h]
+    }
+
+    pub fn mobile_agent_panel_hit_rect(&self) -> Option<Rect> {
+        self.mobile_agent_panel_button_visible
+            .then_some(self.mobile_agent_panel_hit_rect)
     }
 
     /// Suppress the glyph fallback when the host paints the same PNG-backed
@@ -340,6 +381,10 @@ impl ChromeTopBar {
 
     pub fn set_left_safe_inset(&mut self, inset: f32) {
         self.left_safe_inset = inset.max(0.0);
+    }
+
+    pub fn set_right_safe_inset(&mut self, inset: f32) {
+        self.right_safe_inset = inset.max(0.0);
     }
 
     pub fn set_scale(&mut self, scale: f32) {
@@ -431,12 +476,35 @@ impl ChromeTopBar {
         self.panel_btn_rect = Rect::new(left_x + btn + gap, cy, btn, btn);
         self.notes_btn_rect = Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn);
         self.search_btn_rect = Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn);
-        self.server_btn_rect = Rect::new(strip.x + strip.w - edge - btn, cy, btn, btn);
+        self.server_btn_rect = Rect::new(
+            strip.x + strip.w - edge - self.right_safe_inset * scale - btn,
+            cy,
+            btn,
+            btn,
+        );
         self.right_btn_rect = if self.right_button_visible {
             Rect::new(self.server_btn_rect.x - gap - btn, cy, btn, btn)
         } else {
             Rect::new(0.0, 0.0, 0.0, 0.0)
         };
+        let right_anchor = if self.right_button_visible {
+            self.right_btn_rect.x - gap
+        } else {
+            self.server_btn_rect.x - gap
+        };
+        if self.mobile_agent_panel_button_visible {
+            let hit = MOBILE_HIT_SIZE * scale;
+            let hit_x = right_anchor - hit;
+            // Keep the visual compact and wholly inside top chrome. The hit
+            // target extends down into the content band when the top bar is
+            // shorter than 44px, matching iOS touch-target guidance.
+            self.mobile_agent_panel_hit_rect = Rect::new(hit_x, strip.y, hit, hit);
+            self.mobile_agent_panel_btn_rect =
+                Rect::new(hit_x + (hit - btn) * 0.5, cy, btn, btn);
+        } else {
+            self.mobile_agent_panel_hit_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
+            self.mobile_agent_panel_btn_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
+        }
         // Connected-peer orb cluster, right-aligned just left of the
         // left-most existing button (the agent toggle if present, else
         // the server selector). The server selector stays pinned to the
@@ -445,7 +513,9 @@ impl ChromeTopBar {
         if !self.peers.is_empty() {
             let av = (btn * 0.74).clamp(16.0, 22.0);
             let step = av * 0.64;
-            let anchor_x = if self.right_button_visible {
+            let anchor_x = if self.mobile_agent_panel_button_visible {
+                self.mobile_agent_panel_hit_rect.x
+            } else if self.right_button_visible {
                 self.right_btn_rect.x
             } else {
                 self.server_btn_rect.x
@@ -495,6 +565,8 @@ impl ChromeTopBar {
             || self.notes_btn_rect.contains(x, y)
             || self.server_btn_rect.contains(x, y)
             || (self.right_button_visible && self.right_btn_rect.contains(x, y))
+            || (self.mobile_agent_panel_button_visible
+                && self.mobile_agent_panel_hit_rect.contains(x, y))
             || self
                 .menu_overlay_rect()
                 .map(|r| r.contains(x, y))
@@ -510,6 +582,8 @@ impl ChromeTopBar {
         self.hover_server_btn = self.server_btn_rect.contains(x, y);
         self.hover_right_btn =
             self.right_button_visible && self.right_btn_rect.contains(x, y);
+        self.hover_mobile_agent_panel_btn = self.mobile_agent_panel_button_visible
+            && self.mobile_agent_panel_hit_rect.contains(x, y);
         self.hover_menu_item = if self.menu_open {
             (0..MenuItem::visible(self.share_with_phone_enabled).len())
                 .find(|i| self.menu_item_rect(*i).contains(x, y))
@@ -548,6 +622,13 @@ impl ChromeTopBar {
         }
         if self.right_button_visible && self.right_btn_rect.contains(x, y) {
             self.pending_action = Some(TopBarAction::OpenAgent);
+            self.menu_open = false;
+            return true;
+        }
+        if self.mobile_agent_panel_button_visible
+            && self.mobile_agent_panel_hit_rect.contains(x, y)
+        {
+            self.pending_action = Some(TopBarAction::ToggleAgentSidePanel);
             self.menu_open = false;
             return true;
         }
@@ -655,6 +736,16 @@ impl ChromeTopBar {
                 sugarloaf,
                 self.right_btn_rect,
                 self.hover_right_btn,
+                theme,
+            );
+        }
+        if self.mobile_agent_panel_button_visible {
+            self.draw_icon_button(
+                sugarloaf,
+                self.mobile_agent_panel_btn_rect,
+                AGENT_PANEL_GLYPH,
+                self.hover_mobile_agent_panel_btn,
+                self.right_panel_open.then_some(ActiveHalf::Left),
                 theme,
             );
         }
@@ -1190,6 +1281,15 @@ mod tests {
     }
 
     #[test]
+    fn search_button_queues_search_on_first_press() {
+        let mut bar = ChromeTopBar::new();
+        paint_strip(&mut bar, Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT));
+        let btn = bar.search_btn_rect;
+        assert!(bar.pointer_down(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5));
+        assert_eq!(bar.take_action(), Some(TopBarAction::OpenSearch));
+    }
+
+    #[test]
     fn left_safe_inset_offsets_left_icons_only() {
         let mut bar = ChromeTopBar::new();
         bar.set_left_safe_inset(76.0);
@@ -1230,6 +1330,24 @@ mod tests {
         let agent = bar.right_btn_rect;
         bar.handle_pointer_down(agent.x + agent.w * 0.5, agent.y + agent.h * 0.5);
         assert_eq!(bar.take_action(), Some(TopBarAction::OpenAgent));
+    }
+
+    #[test]
+    fn mobile_agent_panel_toggle_has_a_distinct_44px_target() {
+        let mut bar = ChromeTopBar::new();
+        bar.set_right_button_visible(true);
+        bar.set_mobile_agent_panel_button_visible(true);
+        paint_strip(&mut bar, Rect::new(0.0, 0.0, 390.0, CHROME_TOPBAR_HEIGHT));
+
+        let panel = bar.mobile_agent_panel_hit_rect().unwrap();
+        assert_eq!(panel.w, MOBILE_HIT_SIZE);
+        assert_eq!(panel.h, MOBILE_HIT_SIZE);
+        assert!(panel.x + panel.w <= bar.right_btn_rect.x);
+        let global = bar.right_btn_rect;
+        assert!(!panel.contains(global.x + global.w * 0.5, global.y + global.h * 0.5));
+
+        bar.handle_pointer_down(panel.x + panel.w * 0.5, panel.y + panel.h * 0.5);
+        assert_eq!(bar.take_action(), Some(TopBarAction::ToggleAgentSidePanel));
     }
 
     #[test]

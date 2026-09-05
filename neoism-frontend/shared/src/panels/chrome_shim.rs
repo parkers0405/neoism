@@ -81,7 +81,9 @@ impl CommandPalette {
                         // TODO(wave6-cutover): `preview_palette_search_match_if_any` — bridge.
                     }
                     LogicalKey::Named(NamedKey::Tab) => {
-                        if !self.tab_complete() {
+                        if self.is_cd_query() {
+                            self.cycle_cd_selection(key.modifiers.contains(crate::event::Modifiers::SHIFT));
+                        } else if !self.tab_complete() {
                             self.move_selection_down();
                         }
                         // TODO(wave6-cutover): re-dispatch search query when
@@ -91,12 +93,12 @@ impl CommandPalette {
                         // TODO(wave6-cutover): native commits via
                         // ex/search/font/buffer/action paths. Bridge
                         // resolves the selection; until then, close.
-                        self.set_enabled(false);
+                        if !(self.terminal_directory_target().is_some() && self.is_cd_query()) {
+                            self.set_enabled(false);
+                        }
                     }
                     LogicalKey::Named(NamedKey::Backspace) => {
-                        let mut q = self.query.clone();
-                        if q.pop().is_some() {
-                            self.set_query(q);
+                        if self.backspace_query() {
                             // TODO(wave6-cutover): re-dispatch search
                             // preview when in search mode — bridge.
                         }
@@ -108,10 +110,13 @@ impl CommandPalette {
                             && !key.modifiers.contains(crate::event::Modifiers::ALT)
                             && !key.modifiers.contains(crate::event::Modifiers::META)
                         {
-                            let new_query = format!("{}{}", self.query, text.as_str());
-                            self.set_query(new_query);
+                            self.insert_query_text(text);
                         }
                     }
+                    LogicalKey::Named(NamedKey::ArrowLeft) => self.move_query_cursor_left(),
+                    LogicalKey::Named(NamedKey::ArrowRight) => self.move_query_cursor_right(),
+                    LogicalKey::Named(NamedKey::Home) => self.set_query_cursor(0),
+                    LogicalKey::Named(NamedKey::End) => self.set_query_cursor(self.query.len()),
                     _ => {}
                 }
             }
@@ -119,8 +124,7 @@ impl CommandPalette {
                 // Host may emit a separate `Text` event (IME commit
                 // path / DOM `beforeinput`). Treat as query append.
                 if !text.is_empty() && text.chars().all(|c| !c.is_control()) {
-                    let new_query = format!("{}{}", self.query, text);
-                    self.set_query(new_query);
+                    self.insert_query_text(text);
                 }
             }
             _ => {}

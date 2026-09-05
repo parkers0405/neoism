@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use neoism_agent_plugin_api::{
-    CapabilityGrants, PluginContributions, PluginContext, PluginDefinition, PluginFactory,
-    PluginHost, PluginHostError, PluginManifest, RuntimeScope, WorkspaceIdentity,
-    PluginToolDefinition, PluginToolInvocation, PluginToolResult, RuntimeHook,
-    RuntimeTool,
+    CapabilityGrants, PluginContext, PluginContributions, PluginDefinition,
+    PluginFactory, PluginHost, PluginHostError, PluginManifest, PluginToolDefinition,
+    PluginToolInvocation, PluginToolResult, RuntimeHook, RuntimeScope, RuntimeTool,
+    WorkspaceIdentity,
 };
 use serde_json::{json, Value};
 
@@ -32,7 +32,10 @@ impl PluginDefinition for ConformingPlugin {
         }
     }
 
-    fn contributions(&self, registrar: &mut PluginContributions) -> Result<(), PluginHostError> {
+    fn contributions(
+        &self,
+        registrar: &mut PluginContributions,
+    ) -> Result<(), PluginHostError> {
         registrar.route("fixture");
         registrar.event("fixture.changed", Some(json!({ "type": "object" })));
         registrar.runtime_tool(Arc::new(EchoTool));
@@ -95,7 +98,8 @@ impl RuntimeHook for EchoHook {
 /// checks without linking the server.
 fn assert_plugin_conforms(plugin: Box<dyn PluginFactory>) {
     let host = PluginHost::default();
-    let installed = block_on(host.install(vec![plugin], &[], context())).expect("plugin installs");
+    let installed =
+        block_on(host.install(vec![plugin], &[], context())).expect("plugin installs");
     let snapshot = installed.snapshot();
     let manifest = snapshot
         .manifests
@@ -142,10 +146,9 @@ fn assert_plugin_conforms(plugin: Box<dyn PluginFactory>) {
     assert!(hook.lifecycle().active);
 
     let disabled_ids = [ID.to_string()];
-    let disabled = host
-        .install(vec![Box::new(ConformingPlugin)], &disabled_ids, context());
-    let disabled = block_on(disabled)
-        .expect("disableable plugin can be disabled");
+    let disabled =
+        host.install(vec![Box::new(ConformingPlugin)], &disabled_ids, context());
+    let disabled = block_on(disabled).expect("disableable plugin can be disabled");
     let disabled = disabled.snapshot();
     assert!(
         disabled.manifests.is_empty(),
@@ -158,7 +161,10 @@ fn assert_plugin_conforms(plugin: Box<dyn PluginFactory>) {
 
 fn context() -> PluginContext {
     PluginContext::new(
-        RuntimeScope::Workspace(WorkspaceIdentity { id: "test".into(), root: ".".into() }),
+        RuntimeScope::Workspace(WorkspaceIdentity {
+            id: "test".into(),
+            root: ".".into(),
+        }),
         CapabilityGrants::default(),
     )
 }

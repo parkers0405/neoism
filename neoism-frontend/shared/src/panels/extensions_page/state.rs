@@ -627,6 +627,13 @@ impl NeoismExtensionsPane {
         self.focused_search
     }
 
+    /// Main catalog search plus the open language picker's filter field.
+    pub fn text_entry_at(&self, x: f32, y: f32) -> bool {
+        point_in_rect(x, y, self.search_input_rect)
+            || (self.language_picker_open
+                && point_in_rect(x, y, self.language_search_rect))
+    }
+
     /// Dispatch a pointer-down event against the cached hit rects.
     /// Only left-button clicks fire interaction; everything else is
     /// a no-op.

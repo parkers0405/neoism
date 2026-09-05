@@ -229,6 +229,10 @@ pub enum WorkspaceClientMessage {
         #[serde(default)]
         client_id: Uuid,
     },
+    /// Application-level liveness probe. Browsers cannot originate WebSocket
+    /// control Ping frames, and Safari may retain an OPEN-looking socket after
+    /// page suspension even though the transport is dead.
+    Ping { nonce: String },
     /// Ask the daemon to send a [`WorkspaceServerMessage::FullSnapshot`]
     /// describing the connection's current authoritative view (sessions,
     /// pane layout, persisted preferences, per-route PTY offsets). The

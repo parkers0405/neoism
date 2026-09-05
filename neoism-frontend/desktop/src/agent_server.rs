@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_SERVER: &str = "http://127.0.0.1:4096";
 const DEFAULT_PORT: u16 = 4096;
 const HEALTH_PATH: &str = "/v2/health";
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(crate) fn ensure_started() {
     ensure_started_inner(false);
@@ -17,13 +18,14 @@ pub(crate) fn ensure_started_for_request() {
 fn ensure_started_inner(wait_for_health: bool) {
     let server = configured_server();
     std::env::set_var("NEOISM_SERVER", &server);
+    std::env::set_var("NEOISM_AGENT_SERVER", &server);
 
     if is_healthy(&server) {
         tracing::info!(target: "neoism::agent_server", server, "using existing Neoism Agent server");
         return;
     }
 
-    if wait_for_health && !wait_until_healthy(&server, Duration::from_millis(1500)) {
+    if wait_for_health && !wait_until_healthy(&server, STARTUP_TIMEOUT) {
         tracing::warn!(
             target: "neoism::agent_server",
             server,
@@ -33,8 +35,9 @@ fn ensure_started_inner(wait_for_health: bool) {
 }
 
 fn configured_server() -> String {
-    std::env::var("NEOISM_SERVER")
+    std::env::var("NEOISM_AGENT_SERVER")
         .ok()
+        .or_else(|| std::env::var("NEOISM_SERVER").ok())
         .map(|server| server.trim().trim_end_matches('/').to_string())
         .filter(|server| !server.is_empty())
         .unwrap_or_else(|| DEFAULT_SERVER.to_string())

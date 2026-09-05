@@ -24,6 +24,9 @@ pub fn candidate_web_roots() -> Vec<PathBuf> {
         if let Some(dir) = exe.parent() {
             out.push(dir.join("web"));
             if let Some(prefix) = dir.parent() {
+                // Standard macOS bundle layout: Contents/MacOS/<binary> and
+                // Contents/Resources/web/<assets>.
+                out.push(prefix.join("Resources/web"));
                 out.push(prefix.join("share/neoism/web"));
             }
         }

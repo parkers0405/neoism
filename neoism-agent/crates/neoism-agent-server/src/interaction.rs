@@ -31,20 +31,32 @@ pub(crate) async fn permission_list(
     Query(query): Query<InteractionListQuery>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Json<Vec<Value>> {
-    let allowed_sessions = allowed_sessions(&state, claims.as_ref().map(|Extension(claims)| claims)).await;
+    let allowed_sessions =
+        allowed_sessions(&state, claims.as_ref().map(|Extension(claims)| claims)).await;
     let requests = state
         .inner
         .permissions
         .read()
         .await
         .values()
-        .filter(|request| query.session_id.as_ref().is_none_or(|id| &request.session_id == id))
-        .filter(|request| allowed_sessions.as_ref().is_none_or(|ids| ids.contains(&request.session_id)))
+        .filter(|request| {
+            query
+                .session_id
+                .as_ref()
+                .is_none_or(|id| &request.session_id == id)
+        })
+        .filter(|request| {
+            allowed_sessions
+                .as_ref()
+                .is_none_or(|ids| ids.contains(&request.session_id))
+        })
         .cloned()
         .collect::<Vec<_>>();
     let mut enriched = Vec::with_capacity(requests.len());
     for request in requests {
-        enriched.push(crate::permission_runtime::permission_request_payload(&state, &request).await);
+        enriched.push(
+            crate::permission_runtime::permission_request_payload(&state, &request).await,
+        );
     }
     Json(enriched)
 }
@@ -195,7 +207,8 @@ pub(crate) async fn question_list(
     Query(query): Query<InteractionListQuery>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Json<Vec<QuestionRequestInfo>> {
-    let allowed_sessions = allowed_sessions(&state, claims.as_ref().map(|Extension(claims)| claims)).await;
+    let allowed_sessions =
+        allowed_sessions(&state, claims.as_ref().map(|Extension(claims)| claims)).await;
     Json(
         state
             .inner
@@ -203,8 +216,17 @@ pub(crate) async fn question_list(
             .read()
             .await
             .values()
-            .filter(|request| query.session_id.as_ref().is_none_or(|id| &request.session_id == id))
-            .filter(|request| allowed_sessions.as_ref().is_none_or(|ids| ids.contains(&request.session_id)))
+            .filter(|request| {
+                query
+                    .session_id
+                    .as_ref()
+                    .is_none_or(|id| &request.session_id == id)
+            })
+            .filter(|request| {
+                allowed_sessions
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&request.session_id))
+            })
             .cloned()
             .collect(),
     )
@@ -342,9 +364,7 @@ pub(crate) async fn cancel_session_interactions(state: &AppState, session_id: &s
     for id in question_ids {
         let request = state.inner.questions.write().await.remove(&id);
         if let Some(waiter) = state.inner.question_waiters.write().await.remove(&id) {
-            let _ = waiter
-                .sender
-                .send(Err("Session cancelled".to_string()));
+            let _ = waiter.sender.send(Err("Session cancelled".to_string()));
         }
         state.publish(EventPayload::new(
             event_type::QUESTION_REJECTED,

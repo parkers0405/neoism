@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AgentService, AgentSource, CommandService, CommandSource, ConfigService, Contribution,
-    ContributionKind, PluginContext, PluginFuture, PluginManifest, PluginScope, PromptService,
-    ProviderService, RouteContribution, RuntimeHook, RuntimeTool, ServiceContribution,
-    SkillService, SkillSource, SystemContextService, WebSocketRouteContribution,
+    AgentService, AgentSource, CommandService, CommandSource, ConfigService,
+    Contribution, ContributionKind, PluginContext, PluginFuture, PluginManifest,
+    PluginScope, PromptService, ProviderService, RouteContribution, RuntimeHook,
+    RuntimeTool, ServiceContribution, SkillService, SkillSource, SystemContextService,
+    WebSocketRouteContribution,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -105,68 +106,186 @@ impl PluginContributions {
             && self.websocket_routes.is_empty()
     }
 
-    pub fn contribute(&mut self, contribution: Contribution) { self.declarations.push(contribution); }
-    pub fn agent(&mut self, id: impl Into<String>) { self.item(ContributionKind::Agent, id); }
-    pub fn agent_source_runtime(&mut self, id: impl Into<String>, source: Arc<dyn AgentSource>) {
-        let id = id.into(); self.agent(id.clone()); self.agent_sources.insert(id, source);
+    pub fn contribute(&mut self, contribution: Contribution) {
+        self.declarations.push(contribution);
     }
-    pub fn agent_service_runtime(&mut self, id: impl Into<String>, service: Arc<dyn AgentService>) {
-        let id = id.into(); self.agents.push(ServiceContribution { metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace), service });
+    pub fn agent(&mut self, id: impl Into<String>) {
+        self.item(ContributionKind::Agent, id);
     }
-    pub fn command(&mut self, id: impl Into<String>) { self.item(ContributionKind::Command, id); }
-    pub fn command_source_runtime(&mut self, id: impl Into<String>, source: Arc<dyn CommandSource>) {
-        let id = id.into(); self.command(id.clone()); self.command_sources.insert(id, source);
+    pub fn agent_source_runtime(
+        &mut self,
+        id: impl Into<String>,
+        source: Arc<dyn AgentSource>,
+    ) {
+        let id = id.into();
+        self.agent(id.clone());
+        self.agent_sources.insert(id, source);
     }
-    pub fn command_service_runtime(&mut self, id: impl Into<String>, service: Arc<dyn CommandService>) {
-        let id = id.into(); self.command(id.clone()); self.commands.push(ServiceContribution { metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace), service });
+    pub fn agent_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn AgentService>,
+    ) {
+        let id = id.into();
+        self.agents.push(ServiceContribution {
+            metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace),
+            service,
+        });
     }
-    pub fn provider(&mut self, id: impl Into<String>) { self.item(ContributionKind::Provider, id); }
-    pub fn provider_service_runtime(&mut self, id: impl Into<String>, service: Arc<dyn ProviderService>) {
-        let id = id.into(); self.provider(id.clone()); self.providers.push(ServiceContribution { metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace), service });
+    pub fn command(&mut self, id: impl Into<String>) {
+        self.item(ContributionKind::Command, id);
     }
-    pub fn skill_source(&mut self, id: impl Into<String>) { self.item(ContributionKind::SkillSource, id); }
-    pub fn skill_source_runtime(&mut self, id: impl Into<String>, source: Arc<dyn SkillSource>) {
-        let id = id.into(); self.skill_source(id.clone()); self.skill_sources.insert(id, source);
+    pub fn command_source_runtime(
+        &mut self,
+        id: impl Into<String>,
+        source: Arc<dyn CommandSource>,
+    ) {
+        let id = id.into();
+        self.command(id.clone());
+        self.command_sources.insert(id, source);
     }
-    pub fn skill_service_runtime(&mut self, id: impl Into<String>, service: Arc<dyn SkillService>) {
-        let id = id.into(); self.skill_source(id.clone()); self.skills.push(ServiceContribution { metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace), service });
+    pub fn command_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn CommandService>,
+    ) {
+        let id = id.into();
+        self.command(id.clone());
+        self.commands.push(ServiceContribution {
+            metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace),
+            service,
+        });
     }
-    pub fn system_prompt(&mut self, id: impl Into<String>) { self.item(ContributionKind::SystemPrompt, id); }
+    pub fn provider(&mut self, id: impl Into<String>) {
+        self.item(ContributionKind::Provider, id);
+    }
+    pub fn provider_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn ProviderService>,
+    ) {
+        let id = id.into();
+        self.provider(id.clone());
+        self.providers.push(ServiceContribution {
+            metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace),
+            service,
+        });
+    }
+    pub fn skill_source(&mut self, id: impl Into<String>) {
+        self.item(ContributionKind::SkillSource, id);
+    }
+    pub fn skill_source_runtime(
+        &mut self,
+        id: impl Into<String>,
+        source: Arc<dyn SkillSource>,
+    ) {
+        let id = id.into();
+        self.skill_source(id.clone());
+        self.skill_sources.insert(id, source);
+    }
+    pub fn skill_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn SkillService>,
+    ) {
+        let id = id.into();
+        self.skill_source(id.clone());
+        self.skills.push(ServiceContribution {
+            metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace),
+            service,
+        });
+    }
+    pub fn system_prompt(&mut self, id: impl Into<String>) {
+        self.item(ContributionKind::SystemPrompt, id);
+    }
     pub fn tool(&mut self, id: impl Into<String>, schema: Option<Value>) {
-        self.declarations.push(Contribution { kind: ContributionKind::Tool, id: id.into(), schema });
+        self.declarations.push(Contribution {
+            kind: ContributionKind::Tool,
+            id: id.into(),
+            schema,
+        });
     }
     pub fn runtime_tool(&mut self, tool: Arc<dyn RuntimeTool>) {
         let definition = tool.definition();
         self.tool(definition.id.clone(), Some(definition.parameters.clone()));
         self.runtime_tools.insert(definition.id, tool);
     }
-    pub fn runtime_hook(&mut self, hook: Arc<dyn RuntimeHook>) { self.runtime_hooks.push(hook); }
-    pub fn route(&mut self, id: impl Into<String>) { self.item(ContributionKind::Route, id); }
+    pub fn runtime_hook(&mut self, hook: Arc<dyn RuntimeHook>) {
+        self.runtime_hooks.push(hook);
+    }
+    pub fn route(&mut self, id: impl Into<String>) {
+        self.item(ContributionKind::Route, id);
+    }
     pub fn runtime_route(&mut self, route: RouteContribution) {
-        self.route(route.descriptor.id.clone()); self.routes.push(route);
+        self.route(route.descriptor.id.clone());
+        self.routes.push(route);
     }
     pub fn runtime_websocket_route(&mut self, route: WebSocketRouteContribution) {
-        self.route(route.descriptor.id.clone()); self.websocket_routes.push(route);
+        self.route(route.descriptor.id.clone());
+        self.websocket_routes.push(route);
     }
     pub fn event(&mut self, id: impl Into<String>, schema: Option<Value>) {
-        self.declarations.push(Contribution { kind: ContributionKind::Event, id: id.into(), schema });
+        self.declarations.push(Contribution {
+            kind: ContributionKind::Event,
+            id: id.into(),
+            schema,
+        });
     }
     pub fn part(&mut self, id: impl Into<String>, schema: Option<Value>) {
-        self.declarations.push(Contribution { kind: ContributionKind::Part, id: id.into(), schema });
+        self.declarations.push(Contribution {
+            kind: ContributionKind::Part,
+            id: id.into(),
+            schema,
+        });
     }
-    pub fn config_loader(&mut self, id: impl Into<String>) { self.item(ContributionKind::ConfigLoader, id); }
-    pub fn config_service_runtime(&mut self, id: impl Into<String>, service: Arc<dyn ConfigService>) {
-        let id = id.into(); self.config_loader(id.clone()); self.config.push(ServiceContribution { metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace), service });
+    pub fn config_loader(&mut self, id: impl Into<String>) {
+        self.item(ContributionKind::ConfigLoader, id);
     }
-    pub fn system_context_service_runtime(&mut self, id: impl Into<String>, service: Arc<dyn SystemContextService>) {
-        let id = id.into(); self.system_prompt(id.clone()); self.system_context.push(ServiceContribution { metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace), service });
+    pub fn config_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn ConfigService>,
+    ) {
+        let id = id.into();
+        self.config_loader(id.clone());
+        self.config.push(ServiceContribution {
+            metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace),
+            service,
+        });
     }
-    pub fn prompt_service_runtime(&mut self, id: impl Into<String>, service: Arc<dyn PromptService>) {
-        let id = id.into(); self.system_prompt(id.clone()); self.prompts.push(ServiceContribution { metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace), service });
+    pub fn system_context_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn SystemContextService>,
+    ) {
+        let id = id.into();
+        self.system_prompt(id.clone());
+        self.system_context.push(ServiceContribution {
+            metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace),
+            service,
+        });
     }
-    pub fn hook(&mut self, id: impl Into<String>) { self.item(ContributionKind::Hook, id); }
+    pub fn prompt_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn PromptService>,
+    ) {
+        let id = id.into();
+        self.system_prompt(id.clone());
+        self.prompts.push(ServiceContribution {
+            metadata: ContributionMetadata::new(id, "unknown", PluginScope::Workspace),
+            service,
+        });
+    }
+    pub fn hook(&mut self, id: impl Into<String>) {
+        self.item(ContributionKind::Hook, id);
+    }
     fn item(&mut self, kind: ContributionKind, id: impl Into<String>) {
-        self.declarations.push(Contribution { kind, id: id.into(), schema: None });
+        self.declarations.push(Contribution {
+            kind,
+            id: id.into(),
+            schema: None,
+        });
     }
 }
 
@@ -189,9 +308,16 @@ pub trait PluginFactory: Send + Sync + 'static {
 /// factory/instance lifecycle as stateful plugins; no registration side path exists.
 pub trait PluginDefinition: Send + Sync + 'static {
     fn manifest(&self) -> PluginManifest;
-    fn contributions(&self, contributions: &mut PluginContributions) -> Result<(), crate::PluginHostError>;
-    fn scope(&self) -> PluginScope { PluginScope::Workspace }
-    fn required_capabilities(&self) -> Vec<crate::HostCapability> { Vec::new() }
+    fn contributions(
+        &self,
+        contributions: &mut PluginContributions,
+    ) -> Result<(), crate::PluginHostError>;
+    fn scope(&self) -> PluginScope {
+        PluginScope::Workspace
+    }
+    fn required_capabilities(&self) -> Vec<crate::HostCapability> {
+        Vec::new()
+    }
 }
 
 impl<T: PluginDefinition> PluginFactory for T {
@@ -204,12 +330,16 @@ impl<T: PluginDefinition> PluginFactory for T {
         }
     }
 
-    fn create<'a>(&'a self, _context: PluginContext) -> PluginFuture<'a, Box<dyn PluginInstance>> {
+    fn create<'a>(
+        &'a self,
+        _context: PluginContext,
+    ) -> PluginFuture<'a, Box<dyn PluginInstance>> {
         Box::pin(async move {
             let mut contributions = PluginContributions::default();
             self.contributions(&mut contributions)
                 .map_err(|error| crate::PluginRuntimeError::new(error.to_string()))?;
-            Ok(Box::new(StaticPluginInstance::new(contributions)) as Box<dyn PluginInstance>)
+            Ok(Box::new(StaticPluginInstance::new(contributions))
+                as Box<dyn PluginInstance>)
         })
     }
 }
@@ -235,13 +365,21 @@ pub struct StaticPluginInstance {
 }
 
 impl StaticPluginInstance {
-    pub fn new(contributions: PluginContributions) -> Self { Self { contributions } }
+    pub fn new(contributions: PluginContributions) -> Self {
+        Self { contributions }
+    }
 }
 
 impl PluginInstance for StaticPluginInstance {
-    fn readiness(&self) -> PluginReadiness { PluginReadiness::ready() }
-    fn contributions(&self) -> PluginContributions { self.contributions.clone() }
-    fn shutdown<'a>(&'a self) -> PluginFuture<'a, ()> { Box::pin(async { Ok(()) }) }
+    fn readiness(&self) -> PluginReadiness {
+        PluginReadiness::ready()
+    }
+    fn contributions(&self) -> PluginContributions {
+        self.contributions.clone()
+    }
+    fn shutdown<'a>(&'a self) -> PluginFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 impl ContributionMetadata {

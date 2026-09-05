@@ -2,10 +2,10 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde_json::Value;
 
+use crate::compact_session_context;
 use crate::error::ApiError;
 use crate::session_actions::abort_session_run;
 use crate::state::AppState;
-use crate::compact_session_context;
 
 pub(crate) async fn session_abort(
     State(state): State<AppState>,

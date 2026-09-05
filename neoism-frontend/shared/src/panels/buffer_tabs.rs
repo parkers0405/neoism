@@ -70,16 +70,69 @@ const TAB_PADDING_X: f32 = 12.0;
 const CLOSE_BTN_SIZE: f32 = 11.0;
 const CLOSE_HIT_SIZE: f32 = 18.0;
 const CLOSE_BTN_GAP: f32 = 6.0;
-const MIN_TAB_WIDTH: f32 = 96.0;
+/// Smallest painted tab. This protects rename/context-menu and drag targets;
+/// normal tabs are wider because their measured label is included below.
+const MIN_TAB_WIDTH: f32 = 72.0;
 const MAX_TAB_WIDTH: f32 = 220.0;
-/// The comfortable per-tab width every tab keeps regardless of how many
-/// tabs are open. Crowded strips no longer crush tabs down toward
-/// `MIN_TAB_WIDTH` and truncate titles; instead the strip overflows and
-/// scrolls horizontally (the strip is already a scroll surface). Matches
-/// the `MAX_TAB_WIDTH` cap so a single tab on a wide strip doesn't
-/// balloon past it.
-const NATURAL_TAB_WIDTH: f32 = MAX_TAB_WIDTH;
+/// Extra room between the measured title ink and the trailing affordance.
+/// This is an overhang guard, not a second right-side padding reservation.
+const TITLE_OVERHANG_GUARD: f32 = 5.0;
 const TITLE_ELLIPSIS: char = '…';
+
+/// Pixel geometry shared by width measurement and paint. Keeping the title
+/// budget here prevents the icon/close reservations from being applied once
+/// while sizing the slot and again (with slightly different math) while
+/// clipping its label.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabVisualGeometry {
+    pub tab_width: f32,
+    pub title_clip_width: f32,
+    pub icon_width: f32,
+    pub close_reserved: f32,
+    /// Close-glyph centre measured from the tab's left edge.
+    pub close_center_x: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabSurfaceState {
+    Inactive,
+    Hovered,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TabSurfaceGeometry {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub top_radius: f32,
+}
+
+/// Editor-tab surfaces occupy their slot exactly. Hover changes only the
+/// fill, never the bounds; this is what keeps neighbors, text, and the close
+/// target from jumping or turning into detached pills.
+pub(crate) fn tab_surface_geometry(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    scale: f32,
+    state: TabSurfaceState,
+) -> TabSurfaceGeometry {
+    let top_radius = if state == TabSurfaceState::Inactive {
+        0.0
+    } else {
+        (3.0 * scale).min(height * 0.25).min(width * 0.5)
+    };
+    TabSurfaceGeometry {
+        x,
+        y,
+        width,
+        height,
+        top_radius,
+    }
+}
 
 /// Width (logical px, pre-scale) of the trailing "+" new-tab button
 /// that sits to the right of the furthest tab. Kept square-ish so the
@@ -794,6 +847,49 @@ pub fn drop_preview_geometry(
     }
 }
 
+/// Variable-width counterpart used by the shared desktop/web renderer.
+/// Insertion changes at each tab midpoint, and the caret follows the actual
+/// measured tab edges rather than an assumed fixed slot width.
+pub fn drop_preview_geometry_for_widths(
+    x_left: f32,
+    available_width: f32,
+    mouse_x: f32,
+    scroll_x: f32,
+    widths: &[f32],
+) -> DropPreviewGeometry {
+    if widths.is_empty() {
+        return drop_preview_geometry(
+            x_left,
+            available_width,
+            mouse_x,
+            scroll_x,
+            0,
+            available_width.max(1.0),
+        );
+    }
+    let local_x = (mouse_x - x_left + scroll_x).max(0.0);
+    let mut edge = 0.0;
+    let mut insert_index = widths.len();
+    for (index, width) in widths.iter().copied().enumerate() {
+        let width = width.max(0.0);
+        if local_x < edge + width * 0.5 {
+            insert_index = index;
+            break;
+        }
+        edge += width;
+    }
+    let caret_offset: f32 = widths[..insert_index].iter().sum();
+    DropPreviewGeometry {
+        insert_index,
+        tab_width: widths
+            .get(insert_index.min(widths.len() - 1))
+            .copied()
+            .unwrap_or(available_width.max(1.0)),
+        caret_x: (x_left + caret_offset - scroll_x)
+            .clamp(x_left, x_left + available_width),
+    }
+}
+
 // ── Hit-test ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1033,6 +1129,9 @@ pub struct BufferTabs<A> {
     /// frame toward `scroll_target_x`.
     pub scroll_x: f32,
     pub scroll_target_x: f32,
+    /// Actual clipped strip viewport from the latest frame. This is distinct
+    /// from the sum of tab widths when content overflows horizontally.
+    pub strip_viewport_width: f32,
     /// Set when `active` changes outside of render.
     pub pending_ensure_active: bool,
     pub drag: Option<DragState>,
@@ -1166,8 +1265,8 @@ impl<A: Copy> BufferTabs<A> {
     /// Web/wasm `Panel`-path painter — desktop tab-chrome parity.
     ///
     /// Delegates to the exact same `render_with_icons` pass the native
-    /// frontend paints with (Obsidian-style two-tone strip, rounded
-    /// active tab, hover scale, drag previews, trailing "+" new-tab
+    /// frontend paints with (editor-style two-tone strip, integrated
+    /// active/hover tabs, drag previews, trailing "+" new-tab
     /// button), minus the PNG agent-logo overlay: the web host has no
     /// `AgentIconProvider`, so the Nerd-Font glyph fallback paints
     /// instead. The theme comes from the shared `active_ide_theme`
@@ -1287,18 +1386,7 @@ impl<A: Send + Copy + 'static> Panel for BufferTabs<A> {
                 self.set_hover(None);
             }
             UiEvent::Wheel { dx, dy, mode, .. } => {
-                let delta = match mode {
-                    WheelMode::Pixel => SessionScrollDelta::Pixels { x: *dx, y: *dy },
-                    WheelMode::Line => SessionScrollDelta::Lines { x: *dx, y: *dy },
-                    WheelMode::Page => SessionScrollDelta::Pixels {
-                        x: *dx * self.last_strip_width().max(1.0),
-                        y: *dy * self.height().max(1.0),
-                    },
-                };
-                let scroll = buffer_tabs_scroll_dx(delta, 0.5);
-                if scroll != 0.0 {
-                    self.scroll_by(scroll);
-                }
+                self.scroll_wheel(*dx, *dy, *mode);
             }
             UiEvent::Resize { .. } => {
                 // Next render frame recomputes layout slots against
@@ -1376,21 +1464,7 @@ impl<A> BufferTabs<A> {
     /// when no frame has rendered yet so the very first event still
     /// resolves to no-op rather than panicking on divide-by-zero.
     fn last_strip_width(&self) -> f32 {
-        if self.layout.is_empty() {
-            // Nothing rendered yet → pretend the strip is one max-width
-            // tab so the click maps to slot 0 if there's one tab.
-            MAX_TAB_WIDTH
-        } else {
-            // Reconstruct the width: total_w = tabs * tab_width; but the
-            // layout stores `(x_left, width)` per tab and each slot
-            // shares the same width, so just multiply.
-            let per = self
-                .layout
-                .first()
-                .map(|(_, w)| *w)
-                .unwrap_or(MAX_TAB_WIDTH);
-            per * self.tabs.len() as f32
-        }
+        self.strip_viewport_width.max(MIN_TAB_WIDTH * self.scale)
     }
 }
 

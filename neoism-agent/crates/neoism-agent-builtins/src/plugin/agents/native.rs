@@ -125,8 +125,18 @@ For large or complex changes, lead with the solution, then explain what you did 
 Use `todowrite` only when a long task materially benefits from visible progress tracking. Do not create a task list for ordinary debugging or let planning delay the first useful inspection or edit."#;
 
 pub(super) fn native_agents() -> BTreeMap<String, AgentInfo> {
-    [build_agent(), plan_agent(), general_agent(), explore_agent(), compaction_agent(), title_agent(), summary_agent()]
-        .into_iter().map(|agent| (agent.name.clone(), agent)).collect()
+    [
+        build_agent(),
+        plan_agent(),
+        general_agent(),
+        explore_agent(),
+        compaction_agent(),
+        title_agent(),
+        summary_agent(),
+    ]
+    .into_iter()
+    .map(|agent| (agent.name.clone(), agent))
+    .collect()
 }
 
 pub(super) fn build_agent() -> AgentInfo {
@@ -190,20 +200,48 @@ Complete the user's search request efficiently and report your findings clearly.
     }
 }
 
-fn compaction_agent() -> AgentInfo { hidden_primary("compaction", "Compacts long sessions into durable context while preserving decisions, constraints, and next actions.") }
-fn summary_agent() -> AgentInfo { hidden_primary("summary", "Summarizes a session for handoff or sync.") }
-fn title_agent() -> AgentInfo { let mut agent = hidden_primary("title", "Generates concise session titles."); agent.temperature = Some(0.5); agent }
-
-fn hidden_primary(name: &str, prompt: &str) -> AgentInfo {
-    AgentInfo { name: name.into(), description: None, mode: "primary".into(), native: true, hidden: true, top_p: None, temperature: None, color: None, permission: permissions(&[("*", json!("deny"))]), model: None, variant: None, prompt: Some(prompt.into()), options: BTreeMap::new(), steps: None }
+fn compaction_agent() -> AgentInfo {
+    hidden_primary("compaction", "Compacts long sessions into durable context while preserving decisions, constraints, and next actions.")
+}
+fn summary_agent() -> AgentInfo {
+    hidden_primary("summary", "Summarizes a session for handoff or sync.")
+}
+fn title_agent() -> AgentInfo {
+    let mut agent = hidden_primary("title", "Generates concise session titles.");
+    agent.temperature = Some(0.5);
+    agent
 }
 
-fn read_permission() -> Value { json!({ "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" }) }
+fn hidden_primary(name: &str, prompt: &str) -> AgentInfo {
+    AgentInfo {
+        name: name.into(),
+        description: None,
+        mode: "primary".into(),
+        native: true,
+        hidden: true,
+        top_p: None,
+        temperature: None,
+        color: None,
+        permission: permissions(&[("*", json!("deny"))]),
+        model: None,
+        variant: None,
+        prompt: Some(prompt.into()),
+        options: BTreeMap::new(),
+        steps: None,
+    }
+}
+
+fn read_permission() -> Value {
+    json!({ "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" })
+}
 
 fn external_directory_permission() -> Value {
     let mut permissions = serde_json::Map::new();
     permissions.insert("*".into(), json!("ask"));
-    permissions.insert(std::env::temp_dir().join("*").to_string_lossy().to_string(), json!("allow"));
+    permissions.insert(
+        std::env::temp_dir().join("*").to_string_lossy().to_string(),
+        json!("allow"),
+    );
     Value::Object(permissions)
 }
 
@@ -212,15 +250,30 @@ fn plan_edit_permission() -> Value {
     permissions.insert("*".into(), json!("deny"));
     permissions.insert(".agent/plans/*.md".into(), json!("allow"));
     if let Some(data) = data_dir() {
-        permissions.insert(data.join("agent").join("plans/*.md").to_string_lossy().to_string(), json!("allow"));
+        permissions.insert(
+            data.join("agent")
+                .join("plans/*.md")
+                .to_string_lossy()
+                .to_string(),
+            json!("allow"),
+        );
     }
     Value::Object(permissions)
 }
 
 fn data_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from).map(|home| home.join(".local/share")))
+    std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".local/share"))
+        })
 }
 
 fn permissions(entries: &[(&str, Value)]) -> BTreeMap<String, Value> {
-    entries.iter().map(|(key, value)| ((*key).to_string(), value.clone())).collect()
+    entries
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), value.clone()))
+        .collect()
 }

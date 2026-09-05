@@ -227,14 +227,11 @@ impl ChromeBridge {
                 }
             }
             AgentServerMessage::PermissionRemoved { request_id, .. } => {
-                if self
-                    .agent_state
-                    .pending_permission
-                    .as_ref()
-                    .is_some_and(|permission| {
+                if self.agent_state.pending_permission.as_ref().is_some_and(
+                    |permission| {
                         permission.tool_request_id.as_deref() == Some(request_id.as_str())
-                    })
-                {
+                    },
+                ) {
                     self.agent_state.pending_permission = None;
                 }
             }
@@ -354,6 +351,7 @@ impl ChromeBridge {
             agent: self.agent_state.default_agent.clone(),
             model: self.agent_state.default_model.clone(),
             connection_id,
+            thinking: self.agent_state.default_thinking.clone(),
         });
     }
 
@@ -459,9 +457,40 @@ impl ChromeBridge {
             physical_key: agent_bridge_physical_key_from_web(code),
             text: text.to_string(),
         };
+        let dismiss_side_panel_after_navigation =
+            self.chrome.agent_side_panel_takeover_active();
+        let mut relayout_after_key = false;
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return false;
         };
+        // This painted field is a distinct text owner above the hidden Agent
+        // composer. The general side-panel key policy intentionally swallows
+        // printable keys, so route its focused search before that policy.
+        if pane.side_panel().search_focused() {
+            let search_handled = match key {
+                "Backspace" => {
+                    pane.side_panel_mut().backspace_session_query();
+                    true
+                }
+                "Escape" => {
+                    if pane.side_panel().session_query().is_empty() {
+                        pane.side_panel_mut().set_focused(false);
+                    } else {
+                        pane.side_panel_mut().clear_session_query();
+                    }
+                    true
+                }
+                _ if !text.is_empty() && !text.chars().any(char::is_control) => {
+                    pane.side_panel_mut().push_session_query(text);
+                    true
+                }
+                _ => false,
+            };
+            if search_handled {
+                let _ = self.drain_agent_outbound();
+                return true;
+            }
+        }
         let ctx = AgentKeyContext {
             side_panel_focused: pane.side_panel().is_focused(),
             pending_permission: pane.pending_permission().is_some(),
@@ -575,20 +604,12 @@ impl ChromeBridge {
                     } else {
                         let showing_sessions = !pane.has_conversation()
                             || pane.side_panel().show_home_override();
-                        let mut activated = if showing_sessions {
-                            pane.activate_side_panel_selection()
-                        } else {
-                            pane.activate_side_panel_subagent()
-                        };
-                        if !activated
-                            && pane.side_panel().show_home_override()
-                            && pane.selected_side_panel_session_is_current()
-                        {
-                            activated = true;
-                        }
-                        if activated {
-                            pane.side_panel_mut().set_show_home_override(false);
-                            pane.side_panel_mut().set_focused(false);
+                        let activated = pane.activate_side_panel_row(
+                            showing_sessions,
+                            dismiss_side_panel_after_navigation,
+                        );
+                        if activated && dismiss_side_panel_after_navigation {
+                            relayout_after_key = true;
                         }
                     }
                 }
@@ -597,6 +618,7 @@ impl ChromeBridge {
                 }
                 AgentKeyIntent::SidePanelSelectNext => {
                     pane.side_panel_mut().select_next();
+                    pane.maybe_request_side_panel_session_page();
                 }
                 AgentKeyIntent::SidePanelSelectPrev => {
                     pane.side_panel_mut().select_prev();
@@ -616,6 +638,9 @@ impl ChromeBridge {
                 // payload (see `agent_insert_paste`).
                 AgentKeyIntent::Paste => {}
             }
+        }
+        if relayout_after_key {
+            self.relayout_chrome();
         }
         let _ = self.drain_agent_outbound();
         true
@@ -665,7 +690,13 @@ impl ChromeBridge {
     pub fn agent_input_rect_json(&mut self) -> JsValue {
         use neoism_ui::panels::agent_pane::view::{layout as agent_layout, side_panel};
 
-        let terminal_rect = self.chrome.layout().terminal;
+        if self.chrome.agent_side_panel_takeover_active() {
+            return JsValue::NULL;
+        }
+        let terminal_rect = self.chrome.focused_content_rect();
+        if terminal_rect.w <= 0.0 || terminal_rect.h <= 0.0 {
+            return JsValue::NULL;
+        }
         let scale = self.chrome.chrome_scale().clamp(0.5, 3.0);
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return JsValue::NULL;
@@ -688,9 +719,22 @@ impl ChromeBridge {
         serde_wasm_bindgen::to_value(&input).unwrap_or(JsValue::NULL)
     }
 
+    pub fn agent_side_panel_takeover_active(&self) -> bool {
+        self.chrome.agent_side_panel_takeover_active()
+    }
+
+    pub fn agent_side_panel_search_focused(&self) -> bool {
+        self.chrome
+            .agent_pane()
+            .is_some_and(|pane| pane.side_panel().search_focused())
+    }
+
     /// Scroll the agent timeline by `delta_pixels`. Returns `true`
     /// if the shared pane moved, so the host can request a redraw.
     pub fn agent_scroll_timeline(&mut self, delta_pixels: f32) -> bool {
+        if !self.chrome.content_surface_available() {
+            return false;
+        }
         self.chrome
             .agent_pane_mut()
             .map(|pane| pane.scroll_timeline_pixels(delta_pixels))
@@ -701,6 +745,9 @@ impl ChromeBridge {
     /// injection, the content tracks the finger exactly. Pair with
     /// `agent_fling_timeline` on touch release.
     pub fn agent_drag_timeline(&mut self, delta_pixels: f32) -> bool {
+        if !self.chrome.content_surface_available() {
+            return false;
+        }
         self.chrome
             .agent_pane_mut()
             .map(|pane| pane.drag_timeline_pixels(delta_pixels))
@@ -711,6 +758,9 @@ impl ChromeBridge {
     /// agent timeline. Returns `true` if the timeline was gliding
     /// before the call so the host can swallow glide-stopping taps.
     pub fn agent_fling_timeline(&mut self, velocity_px_s: f32) -> bool {
+        if !self.chrome.content_surface_available() {
+            return false;
+        }
         self.chrome
             .agent_pane_mut()
             .map(|pane| pane.fling_timeline(velocity_px_s))
@@ -1241,7 +1291,11 @@ impl ChromeBridge {
         // waiting on a server ack left the old conversation on
         // screen, which reads as "it just took me back".
         if let Some(pane) = self.chrome.agent_pane_mut() {
-            pane.start_new_conversation();
+            pane.start_new_conversation_with_defaults(
+                self.agent_state.default_model.clone(),
+                self.agent_state.default_agent.clone(),
+                self.agent_state.default_thinking.clone(),
+            );
         }
         // Gate out the old session's still-streaming events until
         // the next thread announces itself (see
@@ -1254,6 +1308,30 @@ impl ChromeBridge {
             .as_ref()
             .filter(|dir| !dir.trim().is_empty())
             .cloned();
+    }
+
+    /// Session currently displayed by the shared web agent pane. The JS tab
+    /// host persists this on its unique tab before changing surfaces.
+    pub fn agent_session_id(&self) -> Option<String> {
+        self.agent_state.session_id.clone()
+    }
+
+    /// Restore a conversation represented by a web buffer tab. AgentPane's
+    /// session cache makes the visual swap immediate; the daemon reply then
+    /// refreshes history and resumes the event stream.
+    pub fn agent_switch_thread(&mut self, session_id: &str) {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return;
+        }
+        self.agent_state.suppress_stale_session_events = false;
+        if let Some(pane) = self.chrome.agent_pane_mut() {
+            pane.switch_session(session_id.to_string());
+        }
+        // `switch_session` queues one host-agnostic command. Drain it through
+        // canonical protocol_mapping so web receives the same
+        // SwitchThread/GetHistory/ResumeStream expansion as every other host.
+        self.drain_agent_outbound();
     }
 
     /// Fire one `AgentClientMessage` through the JS-installed
@@ -1309,7 +1387,10 @@ impl ChromeBridge {
                 default_directory: self.agent_state.default_directory.clone(),
                 default_agent: self.agent_state.default_agent.clone(),
                 default_model: self.agent_state.default_model.clone(),
-                default_connection_id: self.chrome.agent_pane().and_then(|pane| pane.connection_id().map(str::to_string)),
+                default_connection_id: self
+                    .chrome
+                    .agent_pane()
+                    .and_then(|pane| pane.connection_id().map(str::to_string)),
                 default_thinking: self.agent_state.default_thinking.clone(),
                 local_author: self.agent_state.local_presence_name.clone(),
             };
@@ -1347,9 +1428,6 @@ impl ChromeBridge {
                 }
                 AgentProtocolMapping::Messages(messages) => {
                     for envelope in messages {
-                        // Session we just moved to, if any — it needs a
-                        // backfill (see below).
-                        let mut opened_session: Option<String> = None;
                         match &envelope {
                             neoism_protocol::agent::AgentClientMessage::SwitchThread {
                                 session_id,
@@ -1357,7 +1435,6 @@ impl ChromeBridge {
                                 self.agent_state.session_id = Some(session_id.clone());
                                 self.agent_state.requested_session_id =
                                     Some(session_id.clone());
-                                opened_session = Some(session_id.clone());
                             }
                             neoism_protocol::agent::AgentClientMessage::SubmitPrompt {
                                 text,
@@ -1369,40 +1446,6 @@ impl ChromeBridge {
                         }
                         if self.send_agent_envelope(&envelope) {
                             delivered = delivered.saturating_add(1);
-                        }
-                        // `SwitchThread` only BINDS the daemon's SSE stream,
-                        // so events flow from that instant onward and
-                        // anything the turn already produced is missing —
-                        // open a session mid-run (or reload the page during
-                        // one) and the timeline never caught up. Desktop
-                        // fetches the transcript over HTTP on entry; the web
-                        // twin is `GetHistory`, which the daemon answers with
-                        // a `HistoryChunk` that `apply_history` folds in.
-                        // Nothing in the web build sent either of these
-                        // before — they existed end-to-end and had zero
-                        // callers.
-                        //
-                        // `ResumeStream` additionally replays interactions
-                        // that were parked while no client was attached (a
-                        // `question` tool call blocks the run and its SSE
-                        // event is long gone by the time the page loads).
-                        if let Some(session_id) = opened_session {
-                            let history =
-                                neoism_protocol::agent::AgentClientMessage::GetHistory {
-                                    session_id: session_id.clone(),
-                                    cursor: None,
-                                    limit: None,
-                                };
-                            if self.send_agent_envelope(&history) {
-                                delivered = delivered.saturating_add(1);
-                            }
-                            let resume =
-                                neoism_protocol::agent::AgentClientMessage::ResumeStream {
-                                    session_id,
-                                };
-                            if self.send_agent_envelope(&resume) {
-                                delivered = delivered.saturating_add(1);
-                            }
                         }
                     }
                 }
@@ -1435,18 +1478,20 @@ impl ChromeBridge {
             selecting: bool,
         }
         let mut result = ClickResult::default();
+        if !self.chrome.agent_interaction_surface_contains(x, y) {
+            return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+        }
         let mut relayout = false;
+        let dismiss_side_panel_after_navigation =
+            self.chrome.agent_side_panel_takeover_active();
         let mut usage_menu_lines = None;
-        // The full-width chrome top bar paints above the agent pane.
-        // Let clicks in its row fall through to the chrome event path
-        // (top-bar panel toggles) instead of being eaten by the
-        // timeline / wordmark here — otherwise the right-edge toggle
-        // would close the panel but never re-open it.
+        let mut open_attachment_browser = false;
+        // Match desktop z-order: the top bar and its open menu own their full
+        // painted area before the agent timeline can begin a selection.
         let in_top_bar = self
             .chrome
-            .layout()
-            .top_bar
-            .is_some_and(|r| y >= r.y && y < r.y + r.h);
+            .top_bar_pointer_rect()
+            .is_some_and(|rect| rect.contains(x, y));
         'chain: {
             if in_top_bar {
                 break 'chain;
@@ -1478,6 +1523,12 @@ impl ChromeBridge {
                 result.handled = true;
                 break 'chain;
             }
+            if pane.side_panel().session_search_contains(x, y) {
+                pane.side_panel_mut().set_focused(true);
+                pane.side_panel_mut().focus_search();
+                result.handled = true;
+                break 'chain;
+            }
             if pane.side_panel().contains_point(x, y) {
                 pane.side_panel_mut().set_focused(true);
                 if pane.side_panel().back_button_contains(x, y) {
@@ -1493,20 +1544,12 @@ impl ChromeBridge {
                         // conversation OR the Back override is active.
                         let showing_sessions = !pane.has_conversation()
                             || pane.side_panel().show_home_override();
-                        let mut activated = if showing_sessions {
-                            pane.activate_side_panel_selection()
-                        } else {
-                            pane.activate_side_panel_subagent()
-                        };
-                        if !activated
-                            && pane.side_panel().show_home_override()
-                            && pane.selected_side_panel_session_is_current()
-                        {
-                            activated = true;
-                        }
-                        if activated {
-                            pane.side_panel_mut().set_show_home_override(false);
-                            pane.side_panel_mut().set_focused(false);
+                        let activated = pane.activate_side_panel_row(
+                            showing_sessions,
+                            dismiss_side_panel_after_navigation,
+                        );
+                        if activated && dismiss_side_panel_after_navigation {
+                            relayout = true;
                         }
                     }
                 }
@@ -1527,12 +1570,17 @@ impl ChromeBridge {
                 break 'chain;
             }
             if pane.usage_chip_contains(x, y) {
-                usage_menu_lines = Some(pane.usage_detail_lines());
+                open_attachment_browser = true;
                 result.handled = true;
                 break 'chain;
             }
             if let Some(chip) = pane.status_chip_at(x, y) {
                 pane.open_status_chip_picker(chip);
+                result.handled = true;
+                break 'chain;
+            }
+            if pane.composer_control_contains(x, y) {
+                let _ = pane.activate_composer_control();
                 result.handled = true;
                 break 'chain;
             }
@@ -1578,6 +1626,13 @@ impl ChromeBridge {
         if let Some(lines) = usage_menu_lines {
             open_agent_usage_menu(self, lines, x, y);
         }
+        if open_attachment_browser {
+            self.chrome.open_file_browser(
+                neoism_ui::panels::file_browser::FileBrowserMode::AttachImage,
+                "",
+                Vec::new(),
+            );
+        }
         if result.handled {
             // Picker commits / permission replies queue outbound
             // agent messages — flush them to the daemon now.
@@ -1591,10 +1646,42 @@ impl ChromeBridge {
     /// after `agent_pointer_down` reported `selecting: true`. Mirrors
     /// desktop's `drag_selection_to` call in `bridges/agent.rs`.
     pub fn agent_selection_drag(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return false;
         };
         pane.drag_selection_to(x, y)
+    }
+
+    pub fn agent_extend_word_selection_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return false;
+        };
+        let scrolled = pane.scroll_for_drag_edge(y);
+        pane.extend_touch_word_selection_to(x, y) || scrolled
+    }
+
+    pub fn agent_end_word_selection(&mut self) -> bool {
+        self.chrome
+            .agent_pane_mut()
+            .is_some_and(|pane| pane.end_touch_word_selection())
+    }
+
+    /// Mobile hard hold on timeline/message/composer text. Exact selectable
+    /// rows only: picker, sidebar, toolbar, and other chrome labels are not
+    /// promoted through the nearest-line fallback.
+    pub fn agent_select_word_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
+        self.chrome
+            .agent_pane_mut()
+            .is_some_and(|pane| pane.select_word_at(x, y))
     }
 
     /// Finish the drag and hand back the selected text so the host can
@@ -1617,6 +1704,9 @@ impl ChromeBridge {
     /// cursor → timeline. `delta_pixels` uses the timeline sign
     /// convention (positive scrolls up into history).
     pub fn agent_scroll_at(&mut self, x: f32, y: f32, delta_pixels: f32) -> bool {
+        if !self.chrome.agent_interaction_surface_contains(x, y) {
+            return false;
+        }
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return false;
         };
@@ -1634,7 +1724,11 @@ impl ChromeBridge {
             // over them; their sign is flipped vs the timeline
             // (mirrors desktop's `scroll_diff_at` call).
             if let Some(scrolled) = pane.scroll_diff_at(x, y, -delta_pixels) {
-                return scrolled;
+                if scrolled {
+                    return true;
+                }
+                // The nested viewport is exhausted in this direction. Let
+                // the same wheel residual chain into the outer timeline.
             }
             return pane.scroll_timeline_pixels(delta_pixels);
         }
@@ -1653,32 +1747,27 @@ impl ChromeBridge {
     /// trackpad pixel deltas go through raw. That policy difference is
     /// the whole reason chat scrolling felt worse in the browser.
     ///
-    /// Browsers report a mouse wheel in pixels on most platforms, so a
-    /// large quantised pixel delta is treated as a notch too — otherwise
-    /// the smooth path would only ever engage on Firefox.
+    /// Browsers report a mouse wheel in pixels on most platforms. The shared
+    /// normalizer uses the legacy 120-unit wheel signal to identify those
+    /// notches without treating a fast trackpad event as a wheel by magnitude.
     pub fn agent_scroll_wheel_at(
         &mut self,
         x: f32,
         y: f32,
         delta_y: f32,
         delta_mode: u32,
+        legacy_wheel_delta_y: f32,
     ) -> bool {
-        use neoism_ui::editor::scroll_model::agent_timeline_wheel;
-        use neoism_ui::panels::completion_menu::ScrollDelta;
+        if !self.chrome.agent_interaction_surface_contains(x, y) {
+            return false;
+        }
+        use neoism_ui::editor::scroll_model::agent_timeline_browser_wheel;
         const LINE_HEIGHT: f32 = 24.0;
-        // A notch is either an explicit line/page delta, or a pixel
-        // delta big enough that no trackpad would emit it per event.
-        let notch_lines = match delta_mode {
-            1 => Some(delta_y),
-            2 => Some(delta_y * 3.0),
-            _ if delta_y.abs() >= 40.0 => Some(delta_y / 100.0),
-            _ => None,
-        };
-        let shared = match notch_lines {
-            Some(y) => ScrollDelta::Lines { x: 0.0, y },
-            None => ScrollDelta::Pixels { x: 0.0, y: delta_y },
-        };
-        let wheel = agent_timeline_wheel(&shared, LINE_HEIGHT);
+        let legacy = legacy_wheel_delta_y
+            .is_finite()
+            .then_some(legacy_wheel_delta_y);
+        let wheel =
+            agent_timeline_browser_wheel(delta_y, delta_mode, legacy, LINE_HEIGHT);
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return false;
         };
@@ -1696,7 +1785,10 @@ impl ChromeBridge {
             return false;
         }
         if let Some(scrolled) = pane.scroll_diff_at(x, y, -wheel.pixels) {
-            return scrolled;
+            if scrolled {
+                return true;
+            }
+            // Some(false) is a boundary, not ownership: bubble outward.
         }
         if wheel.smooth {
             pane.scroll_timeline_wheel_pixels(wheel.pixels)
@@ -1714,6 +1806,9 @@ impl ChromeBridge {
         y: f32,
         delta_pixels: f32,
     ) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return false;
         };
@@ -1744,27 +1839,46 @@ impl ChromeBridge {
             .is_some_and(|pane| pane.end_markdown_horizontal_scrollbar_drag())
     }
 
-    /// Touch-drag routing over the agent pane. Returns which
-    /// surface consumed the drag: 0 = none, 1 = overlay/diff card
-    /// (no fling on release), 2 = timeline (host may fling).
+    /// Touch-drag routing over the agent pane. Vertical direct manipulation
+    /// intentionally ignores diff-card overflow: a full-finger chat drag owns
+    /// the outer timeline. 0 = none/bound, 1 = picker/side panel, 2 = timeline.
     pub fn agent_drag_at(&mut self, x: f32, y: f32, dy_pixels: f32) -> i32 {
+        self.agent_drag_owned_at(x, y, dy_pixels, 0)
+    }
+
+    /// Sticky-owner touch route. `owner` is 0 to resolve at touch-down, 1 to
+    /// retain picker/side-panel ownership, or 2 to retain timeline ownership.
+    pub fn agent_drag_owned_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        dy_pixels: f32,
+        owner: i32,
+    ) -> i32 {
+        if !self.chrome.content_surface_contains(x, y) {
+            return 0;
+        }
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return 0;
         };
-        if pane.picker_contains_point(x, y) {
-            pane.scroll_picker_pixels(dy_pixels);
-            return 1;
-        }
-        if pane.side_panel().contains_point(x, y) {
-            let rows = pane.side_panel().last_panel_height_rows();
-            pane.scroll_side_panel_pixels(dy_pixels, rows);
-            return 1;
-        }
-        if pane.timeline_contains_point(x, y) {
-            if pane.scroll_diff_at(x, y, -dy_pixels).is_some() {
+        if owner != 2 {
+            if pane.picker_contains_point(x, y) {
+                pane.scroll_picker_touch_pixels(dy_pixels);
                 return 1;
             }
-            pane.drag_timeline_pixels(dy_pixels);
+            if pane.side_panel().contains_point(x, y) {
+                let rows = pane.side_panel().last_panel_height_rows();
+                pane.scroll_side_panel_touch_pixels(dy_pixels, rows);
+                return 1;
+            }
+            if owner == 1 {
+                // Its nested surface disappeared during the gesture.
+                return 0;
+            }
+        }
+        if (owner == 2 || pane.timeline_contains_point(x, y))
+            && pane.drag_timeline_pixels(dy_pixels)
+        {
             return 2;
         }
         0

@@ -203,7 +203,10 @@ pub fn maybe_run(
     })
 }
 
-fn run(command: Command, services: neoism_agent_service_api::AgentServices) -> Result<(), String> {
+fn run(
+    command: Command,
+    services: neoism_agent_service_api::AgentServices,
+) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -216,7 +219,10 @@ fn run(command: Command, services: neoism_agent_service_api::AgentServices) -> R
     })
 }
 
-async fn run_auth(command: AuthCommand, services: &neoism_agent_service_api::AgentServices) -> Result<(), String> {
+async fn run_auth(
+    command: AuthCommand,
+    services: &neoism_agent_service_api::AgentServices,
+) -> Result<(), String> {
     match command {
         AuthCommand::Login(args) => auth_login(args, services).await,
         AuthCommand::List(output) => auth_list(output).await,
@@ -273,7 +279,9 @@ async fn auth_login(
                 &json!({ "method": index, "inputs": {} }),
             )
             .await?
-            .ok_or_else(|| format!("provider {provider} did not start OAuth authorization"))?;
+            .ok_or_else(|| {
+                format!("provider {provider} did not start OAuth authorization")
+            })?;
             println!("{}\n\n{}", authorization.instructions, authorization.url);
             if !args.no_open {
                 if let Err(error) = open_browser(services, &authorization.url) {
@@ -320,8 +328,11 @@ async fn auth_list(output: OutputArgs) -> Result<(), String> {
 
 async fn auth_status(args: AuthProviderArgs) -> Result<(), String> {
     let provider = provider_id(&args.provider);
-    let auth: Option<Value> =
-        get_json(&args.output.server, &format!("/v2/providers/{provider}/auth")).await?;
+    let auth: Option<Value> = get_json(
+        &args.output.server,
+        &format!("/v2/providers/{provider}/auth"),
+    )
+    .await?;
     if args.output.json {
         return print_json(&json!({ "provider": provider, "auth": auth }));
     }
@@ -331,8 +342,11 @@ async fn auth_status(args: AuthProviderArgs) -> Result<(), String> {
 
 async fn auth_logout(args: AuthProviderArgs) -> Result<(), String> {
     let provider = provider_id(&args.provider);
-    let removed: bool =
-        delete_json(&args.output.server, &format!("/v2/providers/{provider}/auth")).await?;
+    let removed: bool = delete_json(
+        &args.output.server,
+        &format!("/v2/providers/{provider}/auth"),
+    )
+    .await?;
     print_result(
         &args.output,
         json!({ "provider": provider, "removed": removed }),
@@ -587,10 +601,7 @@ fn percent_encode(value: &str) -> String {
 }
 
 fn mcp_auth_path(name: &str) -> String {
-    format!(
-        "/v2/plugins/dev.neoism.mcp/{}/auth",
-        percent_encode(name)
-    )
+    format!("/v2/plugins/dev.neoism.mcp/{}/auth", percent_encode(name))
 }
 
 fn print_result<T: serde::Serialize>(
@@ -685,7 +696,12 @@ fn normalize_server(server: &str) -> String {
 fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
     let message = serde_json::from_str::<Value>(body)
         .ok()
-        .and_then(|value| value.get("message").and_then(Value::as_str).map(str::to_string))
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| body.trim().to_string());
     format!("Neoism returned {status}: {message}")
 }
@@ -755,7 +771,10 @@ mod tests {
         let source = include_str!("auth_cli.rs");
         for suffix in ["provider", "auth/", "mcp/"] {
             let legacy = format!("\"/{suffix}");
-            assert!(!source.contains(&legacy), "legacy auth CLI route remains: {legacy}");
+            assert!(
+                !source.contains(&legacy),
+                "legacy auth CLI route remains: {legacy}"
+            );
         }
         assert!(!source.contains(&["/data", "/message"].concat()));
     }

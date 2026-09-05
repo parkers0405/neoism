@@ -113,7 +113,10 @@ pub trait WebSocketSession: Send + Sync + 'static {
 }
 
 pub trait WebSocketRouteHandler: Send + Sync + 'static {
-    fn prepare<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, Arc<dyn WebSocketSession>>;
+    fn prepare<'a>(
+        &'a self,
+        request: RouteRequest,
+    ) -> PluginFuture<'a, Arc<dyn WebSocketSession>>;
 }
 
 #[derive(Clone)]

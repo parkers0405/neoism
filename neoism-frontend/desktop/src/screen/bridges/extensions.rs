@@ -307,9 +307,9 @@ fn language_server_entries(
         neoism_agent_neoism_adapter::neoism_services(),
     );
     let adapters = match workspace_root {
-        Some(root) => {
-            neoism_agent_server::language_server::language_server_adapters_for(&runtime, root)
-        }
+        Some(root) => neoism_agent_server::language_server::language_server_adapters_for(
+            &runtime, root,
+        ),
         None => neoism_agent_server::language_server::language_server_adapters(&runtime),
     };
     let live = workspace_root

@@ -1641,7 +1641,17 @@ fn prepare_large_line_surface(
             )
         };
 
-        preserve_scroll_anchor = preserve_after_apply && !pane.follow_cursor;
+        // A line splice can move every node after it before caret-follow gets
+        // a chance to run. Preserve the measured visual anchor first. An
+        // explicit edit still keeps its follow request: after restoration the
+        // reveal pass may need to advance again when the caret/new tail crossed
+        // the viewport bottom (notably repeated mobile Enter).
+        preserve_scroll_anchor =
+            crate::editor::markdown::scroll::preserve_anchor_for_line_edit(
+                pending_line_edit,
+                preserve_after_apply,
+                pane.scroll_y,
+            );
         if preserve_scroll_anchor {
             measure_anchor = state
                 .surface
@@ -1670,10 +1680,12 @@ fn prepare_large_line_surface(
     pane.pending_line_edit = None;
 
     if preserve_scroll_anchor {
+        let follow_after_anchor = pane.follow_cursor;
         let restored_scroll_y = pane.virtual_render.surface.scroll().scroll_y;
         pane.scroll_y = restored_scroll_y;
         pane.target_scroll_y = restored_scroll_y;
         pane.virtual_render.pending_measure_anchor = measure_anchor;
+        pane.follow_cursor = follow_after_anchor;
     }
 
     true

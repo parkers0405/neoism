@@ -10,6 +10,7 @@ export interface DaemonLocation {
 export interface DaemonTarget {
   url: string;
   token?: string;
+  workspaceId?: string;
   /** True when the page was given an explicit daemon (`?daemon=` / `?url=`)
    *  or is being served from the daemon itself (same-origin `/session`). */
   autoConnect: boolean;
@@ -32,10 +33,12 @@ export function resolveDaemonTarget(
   const params = new URLSearchParams(loc.search);
   const queryUrl = firstNonEmpty(params.get("daemon"), params.get("url"));
   const token = firstNonEmpty(params.get("token"));
+  const workspaceId = firstNonEmpty(params.get("workspace"));
   if (queryUrl) {
     return {
       url: queryUrl,
       token,
+      workspaceId,
       autoConnect: true,
       fromQuery: true,
     };
@@ -47,6 +50,7 @@ export function resolveDaemonTarget(
     return {
       url: `${ws}//${loc.host}/session`,
       token,
+      workspaceId,
       autoConnect: true,
       fromQuery: false,
     };
@@ -57,6 +61,7 @@ export function resolveDaemonTarget(
     return {
       url: injected,
       token,
+      workspaceId,
       autoConnect: false,
       fromQuery: false,
     };
@@ -65,6 +70,7 @@ export function resolveDaemonTarget(
   return {
     url: DEFAULT_DAEMON_URL,
     token,
+    workspaceId,
     autoConnect: false,
     fromQuery: false,
   };

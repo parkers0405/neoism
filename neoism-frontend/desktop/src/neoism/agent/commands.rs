@@ -422,7 +422,11 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(in crate::neoism::agent) fn apply_model_with_connection(&mut self, value: String, connection_id: Option<String>) {
+    pub(in crate::neoism::agent) fn apply_model_with_connection(
+        &mut self,
+        value: String,
+        connection_id: Option<String>,
+    ) {
         self.remember_model_value(&value);
         self.model = value;
         self.connection_id = connection_id;
@@ -435,9 +439,11 @@ impl NeoismAgentPane {
         self.refresh_model_context_limit();
         self.close_picker();
         if let Some(session_id) = self.session_id.clone() {
-            if let Some(model) =
-                session_model_json(self.model.as_str(), self.thinking.as_deref(), self.connection_id.as_deref())
-            {
+            if let Some(model) = session_model_json(
+                self.model.as_str(),
+                self.thinking.as_deref(),
+                self.connection_id.as_deref(),
+            ) {
                 self.push_outbound(OutboundAgentCommand::ApplyModel {
                     session_id,
                     model,
@@ -488,8 +494,11 @@ impl NeoismAgentPane {
         model: String,
         thinking: Option<String>,
     ) {
-        let Some(model_json) = session_model_json(model.as_str(), thinking.as_deref(), self.connection_id.as_deref())
-        else {
+        let Some(model_json) = session_model_json(
+            model.as_str(),
+            thinking.as_deref(),
+            self.connection_id.as_deref(),
+        ) else {
             return;
         };
         let body = json!({ "model": model_json });
@@ -1149,7 +1158,12 @@ impl NeoismAgentPane {
         let path = self
             .directory
             .as_deref()
-            .map(|dir| format!("/v2/plugins/dev.neoism.mcp/catalog?directory={}", percent_encode(dir)))
+            .map(|dir| {
+                format!(
+                    "/v2/plugins/dev.neoism.mcp/catalog?directory={}",
+                    percent_encode(dir)
+                )
+            })
             .unwrap_or_else(|| "/v2/plugins/dev.neoism.mcp/catalog".to_string());
         match api_request_json(&self.server, "GET", &path, None) {
             Ok(value) => {
@@ -1174,7 +1188,10 @@ impl NeoismAgentPane {
             .as_deref()
             .map(|dir| format!("?directory={}", percent_encode(dir)))
             .unwrap_or_default();
-        let path = format!("/v2/plugins/dev.neoism.mcp/{}/auth{directory}", percent_encode(&name));
+        let path = format!(
+            "/v2/plugins/dev.neoism.mcp/{}/auth{directory}",
+            percent_encode(&name)
+        );
         let value = match api_request_json(&self.server, "POST", &path, Some(&json!({})))
         {
             Ok(value) => value.unwrap_or(Value::Null),
@@ -1217,27 +1234,42 @@ impl NeoismAgentPane {
         let (method, path, body) = match action {
             "enable" => (
                 "PATCH",
-                format!("/v2/plugins/dev.neoism.mcp/{}/config{directory}", percent_encode(name)),
+                format!(
+                    "/v2/plugins/dev.neoism.mcp/{}/config{directory}",
+                    percent_encode(name)
+                ),
                 Some(json!({ "enabled": true })),
             ),
             "disable" => (
                 "PATCH",
-                format!("/v2/plugins/dev.neoism.mcp/{}/config{directory}", percent_encode(name)),
+                format!(
+                    "/v2/plugins/dev.neoism.mcp/{}/config{directory}",
+                    percent_encode(name)
+                ),
                 Some(json!({ "enabled": false })),
             ),
             "connect" => (
                 "POST",
-                format!("/v2/plugins/dev.neoism.mcp/{}/connect{directory}", percent_encode(name)),
+                format!(
+                    "/v2/plugins/dev.neoism.mcp/{}/connect{directory}",
+                    percent_encode(name)
+                ),
                 Some(json!({})),
             ),
             "disconnect" => (
                 "POST",
-                format!("/v2/plugins/dev.neoism.mcp/{}/disconnect{directory}", percent_encode(name)),
+                format!(
+                    "/v2/plugins/dev.neoism.mcp/{}/disconnect{directory}",
+                    percent_encode(name)
+                ),
                 Some(json!({})),
             ),
             "logout" => (
                 "DELETE",
-                format!("/v2/plugins/dev.neoism.mcp/{}/auth{directory}", percent_encode(name)),
+                format!(
+                    "/v2/plugins/dev.neoism.mcp/{}/auth{directory}",
+                    percent_encode(name)
+                ),
                 None,
             ),
             _ => return,
@@ -1271,7 +1303,8 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn execute_show_permissions_command(&mut self, session_id: String) {
-        match api_request_json(&self.server, "GET", "/v2/interactions/permissions", None) {
+        match api_request_json(&self.server, "GET", "/v2/interactions/permissions", None)
+        {
             Ok(value) => self.system_message(
                 "Permissions",
                 format_permissions(value.as_ref(), Some(&session_id)),
@@ -1328,9 +1361,13 @@ impl NeoismAgentPane {
         id: Option<String>,
     ) {
         let id = id.or_else(|| {
-            first_interaction_id(&self.server, "/v2/interactions/permissions", Some(&session_id))
-                .ok()
-                .flatten()
+            first_interaction_id(
+                &self.server,
+                "/v2/interactions/permissions",
+                Some(&session_id),
+            )
+            .ok()
+            .flatten()
         });
         let Some(id) = id else {
             self.system_message("Permissions", "no pending permissions");
@@ -1368,9 +1405,13 @@ impl NeoismAgentPane {
         session_id: String,
         answer: String,
     ) {
-        let item = first_interaction_value(&self.server, "/v2/interactions/questions", Some(&session_id))
-            .ok()
-            .flatten();
+        let item = first_interaction_value(
+            &self.server,
+            "/v2/interactions/questions",
+            Some(&session_id),
+        )
+        .ok()
+        .flatten();
         let Some(item) = item else {
             self.system_message("Questions", "no pending questions");
             return;
@@ -1409,9 +1450,13 @@ impl NeoismAgentPane {
         id_arg: Option<String>,
     ) {
         if let Some(id) = id_arg.or_else(|| {
-            first_interaction_id(&self.server, "/v2/interactions/questions", Some(&session_id))
-                .ok()
-                .flatten()
+            first_interaction_id(
+                &self.server,
+                "/v2/interactions/questions",
+                Some(&session_id),
+            )
+            .ok()
+            .flatten()
         }) {
             match api_request_json(
                 &self.server,
@@ -1424,10 +1469,13 @@ impl NeoismAgentPane {
             }
             return;
         }
-        if let Some(id) =
-            first_interaction_id(&self.server, "/v2/interactions/permissions", Some(&session_id))
-                .ok()
-                .flatten()
+        if let Some(id) = first_interaction_id(
+            &self.server,
+            "/v2/interactions/permissions",
+            Some(&session_id),
+        )
+        .ok()
+        .flatten()
         {
             let body = json!({ "reply": "reject" });
             match api_request_json(

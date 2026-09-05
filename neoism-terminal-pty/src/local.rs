@@ -26,7 +26,7 @@
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read as _};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::mpsc::{self, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::thread::{Builder, JoinHandle};
 
@@ -149,12 +149,13 @@ impl LocalPty {
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned());
 
-        let pty = teletypewriter::create_pty_with_spawn(
+        let pty = teletypewriter::create_pty_with_spawn_env(
             &Cow::Borrowed(shell.as_str()),
             config.args.clone(),
             &working_dir,
             config.cols,
             config.rows,
+            &config.env,
         )
         .map_err(|e| PtySessionError::Spawn(format!("{e:?}")))?;
 
@@ -233,9 +234,18 @@ impl LocalPty {
                 std::io::Error::new(ErrorKind::BrokenPipe, "PTY worker is gone")
             })?;
 
-        completed.recv().map_err(|_| {
-            std::io::Error::new(ErrorKind::BrokenPipe, "PTY worker dropped reply write")
-        })??;
+        completed
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    "timed out waiting for PTY reply write",
+                ),
+                RecvTimeoutError::Disconnected => std::io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    "PTY worker dropped reply write",
+                ),
+            })??;
         Ok(len)
     }
 

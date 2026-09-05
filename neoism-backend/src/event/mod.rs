@@ -173,6 +173,12 @@ pub enum RioEvent {
         body: String,
     },
 
+    /// Terminal-local cwd request from private OSC 777.
+    ChangeTerminalDirectory {
+        route_id: usize,
+        path: std::path::PathBuf,
+    },
+
     /// Shutdown request.
     Exit,
 
@@ -265,6 +271,9 @@ impl Debug for RioEvent {
             } => write!(f, "IdeToolInstallFinished({tool}, {success}, {message})"),
             RioEvent::OpenEditorTab { route_id, path } => {
                 write!(f, "OpenEditorTab({path:?} on route {route_id})")
+            }
+            RioEvent::ChangeTerminalDirectory { route_id, path } => {
+                write!(f, "ChangeTerminalDirectory({path:?} on route {route_id})")
             }
             RioEvent::ClipboardLoad(route_id, ty, _) => {
                 write!(f, "ClipboardLoad({ty:?} on route {route_id})")

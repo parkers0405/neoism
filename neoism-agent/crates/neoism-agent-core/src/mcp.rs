@@ -289,7 +289,8 @@ mod tests {
             "mcp": {
                 "legacy": { "type": "local", "command": ["node"], "env": { "A": "B" } }
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let McpConfig::Local { environment, .. } = &config.mcp["legacy"] else {
             panic!("expected local config");
         };

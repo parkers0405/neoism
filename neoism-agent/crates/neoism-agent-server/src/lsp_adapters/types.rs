@@ -156,9 +156,7 @@ impl LanguageAdapter {
                 .collect(),
             markers: spec.markers.clone(),
             root_strategy: match &spec.root_policy {
-                LanguageRootPolicy::NearestMarker => {
-                    WorkspaceRootStrategy::NearestMarker
-                }
+                LanguageRootPolicy::NearestMarker => WorkspaceRootStrategy::NearestMarker,
                 LanguageRootPolicy::CargoMetadata { manifest } => {
                     WorkspaceRootStrategy::CargoMetadata {
                         manifest: manifest.clone(),

@@ -25,6 +25,39 @@ impl NeoismAgentPane {
         self.prompt_picker_rect
     }
 
+    pub fn question_text_entry_at(&self, x: f32, y: f32) -> bool {
+        if self.pending_question.is_none() {
+            return false;
+        }
+        self.prompt_picker_rect.is_some_and(|[rx, ry, rw, rh]| {
+            x >= rx && x <= rx + rw && y >= ry && y <= ry + (rh * 0.34).max(44.0)
+        })
+    }
+
+    pub fn scroll_question_at(&mut self, x: f32, y: f32, finger_delta: f32) -> bool {
+        let Some(rect) = self.prompt_picker_rect else {
+            return false;
+        };
+        if self.pending_question.is_none()
+            || x < rect[0]
+            || x > rect[0] + rect[2]
+            || y < rect[1]
+            || y > rect[1] + rect[3]
+        {
+            return false;
+        }
+        let question = self.pending_question.as_mut().unwrap();
+        let max = question.visible_rows().len().saturating_sub(7);
+        if finger_delta.abs() >= 4.0 {
+            if finger_delta < 0.0 {
+                question.scroll_offset = (question.scroll_offset + 1).min(max);
+            } else {
+                question.scroll_offset = question.scroll_offset.saturating_sub(1);
+            }
+        }
+        true
+    }
+
     pub fn enqueue_pending_question(&mut self, question: NeoismAgentPendingQuestion) {
         permission_policy::enqueue_permission(
             &mut self.pending_question,

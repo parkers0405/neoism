@@ -48,10 +48,6 @@ export class ConnectionScreen {
     this.installWordmarkHover(wordmark);
     hero.appendChild(wordmark);
 
-    const subhead = document.createElement("p");
-    subhead.className = "connection-sub";
-    subhead.textContent = "Connect to a workspace daemon";
-    hero.appendChild(subhead);
     form.appendChild(hero);
 
     this.urlInput = makeField(form, {
@@ -113,6 +109,11 @@ export class ConnectionScreen {
 
   setStatus(text: string): void {
     this.statusEl.textContent = text;
+    if (/\b(error|failed|rejected|closed)\b/i.test(text)) {
+      this.statusEl.dataset.state = "error";
+    } else {
+      delete this.statusEl.dataset.state;
+    }
   }
 
   setBusy(busy: boolean): void {

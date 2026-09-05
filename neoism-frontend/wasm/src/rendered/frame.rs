@@ -99,17 +99,24 @@ impl ChromeBridge {
                 let rows = hits
                     .into_iter()
                     .map(|hit| {
-                        let absolute = self.workspace_root.join(&hit.path);
+                        let base = self.chrome.command_palette.terminal_directory_target()
+                            .map(|target| PathBuf::from(&target.cwd))
+                            .unwrap_or_else(|| self.workspace_root.clone());
+                        let absolute = base.join(&hit.path);
                         neoism_ui::panels::command_palette::PaletteDirectoryEntry {
                             absolute_path: absolute.to_string_lossy().into_owned(),
                             display: Some(hit.path),
                             detail: Some(
-                                self.workspace_root.to_string_lossy().into_owned(),
+                                base.to_string_lossy().into_owned(),
                             ),
                         }
                     })
                     .collect();
-                self.chrome.command_palette.set_cd_directory_results(rows);
+                self.chrome.command_palette.compose_terminal_directory_choices(
+                    None,
+                    Some(self.workspace_root.to_string_lossy().into_owned()),
+                    rows,
+                );
             }
             self.cd_search_pending = None;
         }
@@ -177,7 +184,10 @@ impl ChromeBridge {
             let want_rows = ((term_rect.h / cell_h).floor() as u32).max(1);
             let have_cols = self.rendered.terminal_ref().inner.columns() as u32;
             let have_rows = self.rendered.terminal_ref().inner.screen_lines() as u32;
-            if want_cols != have_cols || want_rows != have_rows {
+            if term_rect.w > 0.0
+                && term_rect.h > 0.0
+                && (want_cols != have_cols || want_rows != have_rows)
+            {
                 self.rendered.set_cell_metrics(
                     term_rect.w / want_cols as f32,
                     term_rect.h / want_rows as f32,
@@ -188,11 +198,14 @@ impl ChromeBridge {
 
         // 1. Terminal cells into sugarloaf (no present).
         let terminal_rect = self.chrome.layout().terminal;
-        let chrome_owns_prompt = self.chrome.command_composer.is_visible()
-            || self.chrome.command_palette.is_visible()
-            || self.chrome.finder.is_visible()
-            || self.chrome.git_diff.is_visible();
-        if self.chrome.is_terminal_tab_active()
+        // Prompt-row removal and block-row reservation belong only to the
+        // effective terminal composer. Generic overlays suppress that
+        // composer; they must not punch a prompt-row hole into the terminal
+        // underneath or keep its old keyboard-lift reservation alive.
+        let chrome_owns_prompt = self.chrome.terminal_composer_eligible();
+        if terminal_rect.w > 0.0
+            && terminal_rect.h > 0.0
+            && self.chrome.is_terminal_tab_active()
             && !self.chrome.is_neoism_agent_tab_active()
         {
             self.draw_terminal_blocks_or_cells(terminal_rect, chrome_owns_prompt);
@@ -289,14 +302,22 @@ impl ChromeBridge {
         // this the grid keeps painting all `rows` worth of cells and
         // the prompt/shell content bleeds into the composer band.
         let term_rect = self.chrome.layout().terminal;
-        let term_cols = ((term_rect.w / cell_w).floor() as u32).max(1);
-        let term_rows = ((term_rect.h / cell_h).floor() as u32).max(1);
-        self.rendered.set_cell_metrics(
-            term_rect.w / term_cols.max(1) as f32,
-            term_rect.h / term_rows.max(1) as f32,
-        );
-        self.rendered
-            .resize_grid_and_surface(term_cols, term_rows, scale, width_px, height_px);
+        if term_rect.w > 0.0 && term_rect.h > 0.0 {
+            let term_cols = ((term_rect.w / cell_w).floor() as u32).max(1);
+            let term_rows = ((term_rect.h / cell_h).floor() as u32).max(1);
+            self.rendered.set_cell_metrics(
+                term_rect.w / term_cols.max(1) as f32,
+                term_rect.h / term_rows.max(1) as f32,
+            );
+            self.rendered.resize_grid_and_surface(
+                term_cols, term_rows, scale, width_px, height_px,
+            );
+        } else {
+            let cols = self.rendered.terminal_ref().inner.columns() as u32;
+            let rows = self.rendered.terminal_ref().inner.screen_lines() as u32;
+            self.rendered
+                .resize_grid_and_surface(cols, rows, scale, width_px, height_px);
+        }
     }
 
     /// PTY responses (DSR / OSC) the terminal wants written back.
@@ -381,13 +402,17 @@ impl ChromeBridge {
             neoism_ui::panels::TopBarAction::OpenExtensions => "open_extensions",
             neoism_ui::panels::TopBarAction::OpenNeoWorld => "open_neoworld",
             neoism_ui::panels::TopBarAction::TogglePanel => "toggle_panel",
+            // Consumed inside shared Chrome; never duplicated in JS.
+            neoism_ui::panels::TopBarAction::ToggleAgentSidePanel => {
+                return None;
+            }
             neoism_ui::panels::TopBarAction::OpenAgent => {
                 self.queue_agent_tab_open();
                 return None;
             }
-            // Chrome handles OpenNotes internally (toggles the shared
-            // notes sidebar) and never queues it, but keep the arm
-            // exhaustive so a future queuing change surfaces to JS.
+            // Chrome handles OpenNotes and OpenSearch internally (strict
+            // shared-panel toggles) and never queues them, but keep these
+            // arms exhaustive for compatibility with older bridge behavior.
             neoism_ui::panels::TopBarAction::OpenNotes => "open_notes",
             neoism_ui::panels::TopBarAction::OpenSearch => "open_search",
             neoism_ui::panels::TopBarAction::OpenAbout => "open_about",
@@ -405,6 +430,7 @@ impl ChromeBridge {
         // Extensions / NeoWorld tab) routes raw keys through
         // `Chrome::handle_event` instead of the PTY / editor paths.
         self.chrome.chrome_page_wants_keyboard()
+            || self.chrome.share_sheet.is_visible()
             || self.chrome.command_palette.is_visible()
             || self.chrome.finder.is_visible()
             || self.chrome.git_diff.is_visible()

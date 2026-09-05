@@ -353,7 +353,10 @@ async fn main() -> anyhow::Result<()> {
             use std::io::Write;
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
-            serde_json::to_writer_pretty(&mut output, &neoism_agent_server::canonical_openapi())?;
+            serde_json::to_writer_pretty(
+                &mut output,
+                &neoism_agent_server::canonical_openapi(),
+            )?;
             writeln!(output)?;
         }
         Command::Serve {
@@ -367,11 +370,7 @@ async fn main() -> anyhow::Result<()> {
                 cors,
             };
             println!("neoism agent listening on http://{hostname}:{port}");
-            neoism_agent_server::listen(
-                options,
-                standalone_services(),
-            )
-            .await?;
+            neoism_agent_server::listen(options, standalone_services()).await?;
         }
         Command::Acp {
             port,
@@ -419,15 +418,18 @@ async fn main() -> anyhow::Result<()> {
             agent,
             variant,
         } => {
-            tui_launcher::run(tui_launcher::TuiOptions {
-                server,
-                session,
-                dir,
-                model,
-                provider,
-                agent,
-                variant,
-            }, &standalone_services())
+            tui_launcher::run(
+                tui_launcher::TuiOptions {
+                    server,
+                    session,
+                    dir,
+                    model,
+                    provider,
+                    agent,
+                    variant,
+                },
+                &standalone_services(),
+            )
             .await?
         }
         Command::Doctor { server, dir } => {

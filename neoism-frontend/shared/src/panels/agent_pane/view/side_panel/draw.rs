@@ -398,6 +398,8 @@ pub(crate) fn render_sessions_list(
     let search_focused = pane.side_panel().search_focused();
     let search_hl_y = (search_top - 2.0 * s).max(cy);
     let search_hl_h = search_row_h + 2.0 * s;
+    pane.side_panel_mut()
+        .set_session_search_rect([cx, search_hl_y, cw, search_hl_h]);
     {
         let query = pane.side_panel().session_query().to_string();
         if search_focused {
@@ -713,8 +715,7 @@ pub(crate) fn render_sessions_list(
         // activating it resumes the parent session — so the shared hover
         // treatment below still applies.
         if entry.is_excerpt {
-            let first_of_run = absolute_ix == 0
-                || !sessions[absolute_ix - 1].is_excerpt;
+            let first_of_run = absolute_ix == 0 || !sessions[absolute_ix - 1].is_excerpt;
             let hover = if pane.side_panel().hovered_session() == Some(absolute_ix) {
                 pane.side_panel().session_hover_scale()
             } else {
@@ -757,7 +758,8 @@ pub(crate) fn render_sessions_list(
             };
             let excerpt_x = title_x + 10.0 * s;
             let excerpt_w = text_w - dot_gutter - 10.0 * s;
-            let label = truncate_to_fit(&entry.title, excerpt_w, sugarloaf, &excerpt_opts);
+            let label =
+                truncate_to_fit(&entry.title, excerpt_w, sugarloaf, &excerpt_opts);
             // Matched search terms render as bright segments over a soft
             // accent wash — the excerpt reads like a real search result.
             // Lines are pre-wrapped to the measured budget, so truncation

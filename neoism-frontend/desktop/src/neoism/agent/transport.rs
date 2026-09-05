@@ -55,7 +55,9 @@ impl AgentTransport {
             }
         }
         let _ = stream.set_read_timeout(Some(read_timeout));
-        Ok(Self::Tls(Box::new(rustls::StreamOwned::new(connection, stream))))
+        Ok(Self::Tls(Box::new(rustls::StreamOwned::new(
+            connection, stream,
+        ))))
     }
 
     pub(crate) fn set_read_timeout(&self, timeout: Option<Duration>) {

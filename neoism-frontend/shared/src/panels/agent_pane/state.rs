@@ -19,7 +19,7 @@ mod timeline;
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use web_time::Duration;
 
@@ -32,6 +32,9 @@ use sugarloaf::{
 };
 use web_time::Instant;
 
+use self::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
+pub use self::pickers_state::{mcp_action_options, mcp_options_from_status};
+use self::side_panel::{BranchStatus, BranchStatusTransition, NeoismAgentSidePanel};
 use crate::panels::agent_pane::input_controller::{self, AgentInputBuffer, InputWrapRow};
 use crate::panels::agent_pane::interaction_policy;
 use crate::panels::agent_pane::outbound::OutboundAgentCommand;
@@ -42,9 +45,6 @@ use crate::panels::agent_pane::timeline_scroll_policy::ctrl_u_d_scroll_delta;
 use crate::panels::agent_pane::usage_policy::{
     usage_detail_lines, usage_summary_label, UsageSnapshot,
 };
-use self::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
-pub use self::pickers_state::{mcp_action_options, mcp_options_from_status};
-use self::side_panel::{BranchStatus, BranchStatusTransition, NeoismAgentSidePanel};
 
 use crate::panels::agent_pane::question_policy::NeoismAgentPendingQuestion;
 
@@ -542,6 +542,9 @@ pub struct NeoismAgentPane {
     agent_label_changed_at: Option<Instant>,
     pub(super) model: String,
     pub(super) connection_id: Option<String>,
+    /// Pane-level credential choice keyed by provider. This deliberately
+    /// outlives a session so fresh chats do not repeatedly ask API vs OAuth.
+    provider_connection_preferences: HashMap<String, String>,
     /// Model waiting for secret-free connection reconciliation.
     pub(super) pending_account_model: Option<String>,
     pub(super) thinking: Option<String>,
@@ -620,6 +623,7 @@ pub struct NeoismAgentPane {
     link_hit_rects: Vec<(String, [f32; 4])>,
     mermaid_raw_blocks: BTreeSet<u64>,
     usage_chip_rect: Option<[f32; 4]>,
+    composer_control_rect: Option<[f32; 4]>,
     status_chip_rects: [Option<[f32; 4]>; 3],
     background_status_rect: Option<[f32; 4]>,
     background_task_details_expanded: bool,
@@ -631,6 +635,7 @@ pub struct NeoismAgentPane {
     selectable_lines_len: usize,
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
+    touch_word_edges: Option<(SelectionPoint, SelectionPoint)>,
     timeline_scroll_px: f32,
     timeline_follow_bottom: bool,
     timeline_content_height_px: f32,
@@ -939,6 +944,7 @@ impl Default for NeoismAgentPane {
             agent_label_changed_at: None,
             model: DEFAULT_MODEL.to_string(),
             connection_id: None,
+            provider_connection_preferences: HashMap::new(),
             pending_account_model: None,
             thinking: None,
             session_id: None,
@@ -986,6 +992,7 @@ impl Default for NeoismAgentPane {
             link_hit_rects: Vec::new(),
             mermaid_raw_blocks: BTreeSet::new(),
             usage_chip_rect: None,
+            composer_control_rect: None,
             status_chip_rects: [None; 3],
             background_status_rect: None,
             background_task_details_expanded: false,
@@ -994,6 +1001,7 @@ impl Default for NeoismAgentPane {
             selectable_lines_len: 0,
             selection_anchor: None,
             selection_focus: None,
+            touch_word_edges: None,
             timeline_scroll_px: 0.0,
             timeline_follow_bottom: true,
             timeline_content_height_px: 0.0,
@@ -1086,17 +1094,21 @@ pub struct ProviderActivityState {
 
 impl ProviderActivityState {
     pub fn elapsed_ms_at(&self, now_ms: u64) -> u64 {
-        self.active_segments.values().fold(self.completed_ms, |total, started| {
-            total.saturating_add(now_ms.saturating_sub(*started))
-        })
+        self.active_segments
+            .values()
+            .fold(self.completed_ms, |total, started| {
+                total.saturating_add(now_ms.saturating_sub(*started))
+            })
     }
 }
 
 impl ExecutionActivityState {
     pub fn elapsed_ms_at(&self, now_ms: u64) -> u64 {
-        self.active_segments.values().fold(self.completed_ms, |total, started| {
-            total.saturating_add(now_ms.saturating_sub(*started))
-        })
+        self.active_segments
+            .values()
+            .fold(self.completed_ms, |total, started| {
+                total.saturating_add(now_ms.saturating_sub(*started))
+            })
     }
 
     pub fn elapsed_ms_for_session(&self, session_id: Option<&str>, now_ms: u64) -> u64 {
@@ -1390,8 +1402,13 @@ impl NeoismAgentPane {
         );
         self.queued_prompt_count = decision.count;
         self.queued_prompt_preview = decision.preview;
-        if decision.should_enter_thinking {
-            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+        if decision.should_enter_generating {
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
+        }
+        if let Some(started_at) = decision.started_at {
+            let started = instant_from_epoch_millis(started_at);
+            self.streaming_started_at = Some(started);
+            self.streaming_state_changed_at.get_or_insert(started);
         }
     }
 
@@ -1541,6 +1558,59 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Apply a complete provider snapshot from the persisted session. Unlike
+    /// partial mutation acknowledgements, missing connection/thinking values
+    /// authoritatively clear stale local selections.
+    pub fn apply_authoritative_provider_state(
+        &mut self,
+        model: Option<String>,
+        connection_id: Option<String>,
+        agent: Option<String>,
+        thinking: Option<String>,
+        context_limit: Option<u64>,
+    ) {
+        if let Some(model) = model {
+            self.set_model_local(model);
+        }
+        self.connection_id = connection_id.filter(|value| !value.is_empty());
+        self.remember_current_provider_connection();
+        if let Some(agent) = agent {
+            self.set_agent_local(agent);
+        }
+        self.thinking = thinking.filter(|value| !value.is_empty());
+        if context_limit.is_some() {
+            self.set_model_context_limit(context_limit);
+        }
+    }
+
+    /// Apply workspace defaults without racing a session-specific provider
+    /// snapshot or an explicit choice the user already made.
+    pub fn apply_config_defaults_if_unset(
+        &mut self,
+        model: Option<String>,
+        agent: Option<String>,
+        thinking: Option<String>,
+    ) {
+        if self.session_id.is_some() {
+            return;
+        }
+        if self.model.is_empty() {
+            if let Some(model) = model {
+                self.set_model_local(model);
+            }
+        }
+        if self.agent.is_none() {
+            if let Some(agent) = agent {
+                self.set_agent_local(agent);
+            }
+        }
+        if self.thinking.is_none() {
+            if let Some(thinking) = thinking {
+                self.set_thinking_local(thinking);
+            }
+        }
+    }
+
     /// Record a session-idle transition. Mirrors `SessionIdle`.
     pub fn note_session_idle(&mut self) {
         // Clear unconditionally: an interrupted/reconnected stream can retain
@@ -1640,7 +1710,6 @@ impl NeoismAgentPane {
         if session_id.is_empty() {
             return;
         }
-        self.upsert_live_subagent_entry(&session_id, title, agent);
         let applied = self.note_subagent_observed_runtime(
             session_id.clone(),
             status,
@@ -1648,9 +1717,20 @@ impl NeoismAgentPane {
             started_at,
         );
         if !applied {
+            // Metadata attached to late activity may refine a row that is
+            // still visible, but must never recreate a pruned terminal child.
+            if self
+                .side_panel
+                .subagents()
+                .iter()
+                .any(|entry| entry.id == session_id)
+            {
+                self.upsert_live_subagent_entry(&session_id, title, agent);
+            }
             self.sync_subagent_waiting_clock();
             return;
         }
+        self.upsert_live_subagent_entry(&session_id, title, agent);
         if self.session_id.as_deref() == Some(session_id.as_str())
             && matches!(status, BranchStatus::Completed | BranchStatus::Stopped)
         {
@@ -1673,6 +1753,67 @@ impl NeoismAgentPane {
             self.set_task_message_status(&session_id, status_label);
         }
         self.sync_subagent_waiting_clock();
+        if matches!(status, BranchStatus::Completed | BranchStatus::Stopped) {
+            // The child may be parked while its completion lands on the root
+            // family stream. Settle that cached per-session verb on the same
+            // authoritative edge so tab switching cannot restore stale work.
+            self.cache_note_session_idle(&session_id);
+            // A terminal Task/subtask edge is authoritative for this child.
+            // Once it removes the final active branch, discard only the
+            // aggregate waiting hint/hold; a concurrently running parent verb
+            // remains untouched. This also covers protocols that do not emit a
+            // separate execution.finished event for foreground Task results.
+            if self.active_subagent_count() == 0 {
+                self.note_waiting_subagents_hint();
+            }
+            // The daemon publishes the terminal family snapshot before the
+            // final SubagentUpdate. Reconcile again on that last ordered edge
+            // so stale root/parked-tab "Crafting" state cannot survive it.
+            let root_session_id = self
+                .execution_activity
+                .as_ref()
+                .map(|activity| activity.root_session_id.clone());
+            if let Some(root_session_id) = root_session_id {
+                let branch_ids = self
+                    .side_panel
+                    .subagents()
+                    .iter()
+                    .skip(1)
+                    .map(|entry| entry.id.clone())
+                    .chain(std::iter::once(session_id))
+                    .collect::<BTreeSet<_>>();
+                self.reconcile_authoritative_family_transients(
+                    &root_session_id,
+                    branch_ids.iter().map(String::as_str),
+                );
+            }
+        }
+    }
+
+    /// Refine an existing child row without implying any lifecycle state.
+    /// Returns false when the child is no longer tracked, ensuring a late
+    /// metadata event cannot recreate a completed/pruned subagent.
+    pub fn note_subagent_metadata(
+        &mut self,
+        session_id: &str,
+        title: Option<String>,
+        agent: Option<String>,
+    ) -> bool {
+        let Some((existing_title, existing_agent)) = self
+            .side_panel
+            .subagents()
+            .iter()
+            .find(|entry| entry.id == session_id)
+            .map(|entry| (entry.title.clone(), entry.time_label.clone()))
+        else {
+            return false;
+        };
+        self.side_panel.upsert_subagent(
+            session_id.to_string(),
+            title.unwrap_or(existing_title),
+            agent.unwrap_or(existing_agent),
+        );
+        true
     }
 
     /// Drive a compaction lifecycle event. Mirrors `Compaction`.
@@ -1720,12 +1861,52 @@ impl NeoismAgentPane {
         let messages = self.preserve_streamed_response_text(messages);
         let messages = self.preserve_background_completion_cards(messages);
         self.messages = messages;
-        if self.background_tasks_started_at.is_some() || self.running_background_task_count > 0 {
+        if self.background_tasks_started_at.is_some()
+            || self.running_background_task_count > 0
+        {
             self.refresh_background_task_activity_clock();
         }
         self.rebase_current_turn_trace();
         self.invalidate_timeline_layout();
         self.clamp_timeline_scroll();
+    }
+
+    /// Apply either the initial transcript or a cursor continuation. Older
+    /// pages prepend without replacing live messages and release the paging
+    /// latch even when the server reports the final page.
+    pub fn apply_history_page(
+        &mut self,
+        mut messages: Vec<NeoismAgentMessage>,
+        next_cursor: Option<String>,
+    ) {
+        if !self.timeline_history.loading_older {
+            self.apply_history(messages);
+            self.timeline_history.oldest_loaded_cursor = next_cursor.clone();
+            self.timeline_history.has_older = next_cursor.is_some();
+            self.timeline_history.last_requested_session_id = None;
+            return;
+        }
+
+        self.timeline_history.loading_older = false;
+        self.timeline_history.last_requested_session_id = None;
+        let existing = self
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<HashSet<_>>();
+        messages.retain(|message| {
+            message.id.is_empty() || !existing.contains(message.id.as_str())
+        });
+        self.timeline_history.oldest_loaded_cursor = next_cursor.clone();
+        self.timeline_history.has_older = next_cursor.is_some();
+        if messages.is_empty() {
+            return;
+        }
+        let previous_height = self.timeline_content_height_px;
+        self.messages.splice(0..0, messages);
+        self.rebase_current_turn_trace();
+        self.invalidate_timeline_layout();
+        self.pending_timeline_prepend_height_px = Some(previous_height);
     }
 
     // -----------------------------------------------------------------

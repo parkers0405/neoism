@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::Context;
-use neoism_agent_core::{AuthInfo, ProviderGenerationRequest, ProviderStreamEvent};
+use neoism_agent_core::{
+    AuthInfo, ProviderAuthMode, ProviderGenerationRequest, ProviderStreamEvent,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -38,6 +40,7 @@ pub(super) struct OpenAiRuntime {
     pub(super) auth_store: AuthStore,
     pub(super) use_oauth_responses: bool,
     pub(super) allow_openai_env_fallback: bool,
+    pub(super) auth_mode: ProviderAuthMode,
 }
 
 impl OpenAiClient {
@@ -66,6 +69,7 @@ impl ProviderRuntime for OpenAiRuntime {
         let auth = self.auth.clone();
         let auth_store = self.auth_store.clone();
         let allow_openai_env_fallback = self.allow_openai_env_fallback;
+        let auth_mode = self.auth_mode;
         if self.use_oauth_responses && matches!(auth, Some(AuthInfo::OAuth { .. })) {
             return openai_oauth_responses_stream(client, auth_store, auth, request);
         }
@@ -90,11 +94,12 @@ impl ProviderRuntime for OpenAiRuntime {
                 &client.client,
             )
             .await?;
-            let api_key = openai_key_with_fallback(auth.as_ref(), allow_openai_env_fallback).ok_or_else(|| {
-                anyhow::anyhow!(
+            let api_key = openai_key_with_fallback(auth.as_ref(), allow_openai_env_fallback);
+            if auth_mode == ProviderAuthMode::Required && api_key.is_none() {
+                Err::<(), anyhow::Error>(anyhow::anyhow!(
                     "OpenAI-compatible provider requested but no API key was found in stored auth or provider environment variables"
-                )
-            })?;
+                ))?;
+            }
 
             yield ProviderStreamEvent::Start;
             yield ProviderStreamEvent::StartStep;
@@ -104,14 +109,21 @@ impl ProviderRuntime for OpenAiRuntime {
                 "model": request.api.as_ref().map(|api| api.id.as_str()).unwrap_or(&request.model_id),
                 "messages": messages,
                 "stream": true,
-                "stream_options": { "include_usage": true },
             });
-            let tools = chat_completion_tools(&request.model_id, &request.tools);
+            if request.api.as_ref().and_then(|api| api.stream_usage).unwrap_or(true) {
+                body["stream_options"] = json!({ "include_usage": true });
+            }
+            let tools = if request.api.as_ref().and_then(|api| api.tool_call) == Some(false) {
+                Vec::new()
+            } else {
+                chat_completion_tools(&request.model_id, &request.tools)
+            };
             if !tools.is_empty() {
                 body["tools"] = Value::Array(tools);
                 body["tool_choice"] = Value::String("auto".to_string());
             }
-            if request
+            if request.api.as_ref().and_then(|api| api.reasoning_effort) != Some(false)
+                && request
                 .api
                 .as_ref()
                 .is_none_or(|api| api.npm != "@openrouter/ai-sdk-provider")
@@ -135,10 +147,10 @@ impl ProviderRuntime for OpenAiRuntime {
             crate::provider_transform::apply_openai_compatible_request_quirks(&request, &mut body);
             merge_provider_options(&mut body, &request.options);
 
-            let mut http = client
-                .client
-                .post(format!("{}/chat/completions", client.base_url))
-                .bearer_auth(api_key);
+            let mut http = client.client.post(format!("{}/chat/completions", client.base_url));
+            if let Some(api_key) = api_key.filter(|_| auth_mode != ProviderAuthMode::None) {
+                http = http.bearer_auth(api_key);
+            }
             for (name, value) in &request.headers {
                 http = http.header(name, value);
             }

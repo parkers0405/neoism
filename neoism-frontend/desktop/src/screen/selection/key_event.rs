@@ -44,6 +44,28 @@ impl Screen<'_> {
             return;
         }
 
+        // Alt+D is global but captures a deterministic terminal target.
+        let alt_only = mods.alt_key()
+            && !mods.control_key()
+            && !mods.super_key()
+            && !mods.shift_key();
+        if alt_only {
+            let new_terminal =
+                matches!(key.physical_key, PhysicalKey::Code(KeyCode::KeyT));
+            let change_directory =
+                matches!(key.physical_key, PhysicalKey::Code(KeyCode::KeyD));
+            if change_directory || (new_terminal && !self.context_manager.current().has_non_terminal_surface()) {
+                if key.state == ElementState::Pressed {
+                    if new_terminal {
+                        self.create_focused_terminal_tab();
+                    } else {
+                        self.open_terminal_directory_palette();
+                    }
+                }
+                return;
+            }
+        }
+
         if self.handle_context_menu_key(key, clipboard) {
             return;
         }
@@ -491,8 +513,10 @@ impl Screen<'_> {
             return;
         }
 
-        // Alt+D toggles in-place draw mode on a markdown note.
+        // Alt+Shift+D toggles in-place draw mode on a markdown note. Plain
+        // Alt+D is app-global Change Directory and was consumed above.
         if mods.alt_key()
+            && mods.shift_key()
             && !mods.control_key()
             && key.state == ElementState::Pressed
             && self.context_manager.current().markdown.is_some()

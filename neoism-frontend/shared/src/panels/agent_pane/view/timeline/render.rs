@@ -173,7 +173,8 @@ pub fn render_timeline_with<P, D>(
         visible_timeline_row_range(&layout.rows, scroll_top, scroll_top + viewport_h);
     if let Some(row) = layout.rows.get(anchor_range.start) {
         if !pane.timeline_view_anchor_matches(row.source_index, pane.messages().len()) {
-            let key = TimelineViewAnchorKey::for_source(pane.messages(), row.source_index);
+            let key =
+                TimelineViewAnchorKey::for_source(pane.messages(), row.source_index);
             pane.set_timeline_view_anchor(key, row.top - scroll_top);
         }
     } else {
@@ -524,11 +525,16 @@ pub(crate) fn display_timeline_message<M: AgentTimelineMessage>(
     Some(display_message)
 }
 
-pub(crate) fn is_subagent_runtime_notification<M: AgentTimelineMessage>(message: &M) -> bool {
+pub(crate) fn is_subagent_runtime_notification<M: AgentTimelineMessage>(
+    message: &M,
+) -> bool {
     // This is provider context injected by the runtime, never a human or
     // assistant transcript row. Check the reserved opening immediately so a
     // partial live delta cannot flash before its role/system metadata lands.
-    message.text().trim_start().starts_with("Subagent finished.")
+    message
+        .text()
+        .trim_start()
+        .starts_with("Subagent finished.")
 }
 
 fn strip_redundant_edit_recap_code(text: &str) -> Option<String> {

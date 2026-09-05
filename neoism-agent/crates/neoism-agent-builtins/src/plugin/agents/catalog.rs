@@ -74,7 +74,10 @@ impl AgentCatalog {
         }
     }
 
-    fn with_default(agents: BTreeMap<String, AgentInfo>, configured: Option<String>) -> Self {
+    fn with_default(
+        agents: BTreeMap<String, AgentInfo>,
+        configured: Option<String>,
+    ) -> Self {
         let default_agent = configured
             .filter(|name| is_valid_default(agents.get(name)))
             .or_else(|| {
@@ -101,7 +104,10 @@ fn apply_override(agent: &mut AgentInfo, config: &AgentConfig) {
     }
     agent.variant = config.variant.clone().or_else(|| agent.variant.clone());
     agent.prompt = config.prompt.clone().or_else(|| agent.prompt.clone());
-    agent.description = config.description.clone().or_else(|| agent.description.clone());
+    agent.description = config
+        .description
+        .clone()
+        .or_else(|| agent.description.clone());
     agent.temperature = config.temperature.or(agent.temperature);
     agent.top_p = config.top_p.or(agent.top_p);
     agent.mode = config.mode.clone().unwrap_or_else(|| agent.mode.clone());
@@ -176,16 +182,34 @@ mod tests {
         );
         let catalog = AgentCatalog::from_config(&config);
         assert_eq!(catalog.get("build").unwrap().name, "Builder");
-        assert_eq!(catalog.get("Builder").unwrap().permission["bash"], json!("allow"));
+        assert_eq!(
+            catalog.get("Builder").unwrap().permission["bash"],
+            json!("allow")
+        );
     }
 
     #[test]
     fn native_agents_preserve_prompts_and_modes() {
         let catalog = AgentCatalog::from_config(&AgentConfigDocument::default());
-        assert!(catalog.get("build").unwrap().prompt.unwrap().contains("GOLDEN STANDARD"));
-        assert!(catalog.get("plan").unwrap().prompt.unwrap().contains("plan agent"));
+        assert!(catalog
+            .get("build")
+            .unwrap()
+            .prompt
+            .unwrap()
+            .contains("GOLDEN STANDARD"));
+        assert!(catalog
+            .get("plan")
+            .unwrap()
+            .prompt
+            .unwrap()
+            .contains("plan agent"));
         assert_eq!(catalog.get("general").unwrap().mode, "subagent");
-        assert!(catalog.get("explore").unwrap().prompt.unwrap().contains("file search specialist"));
+        assert!(catalog
+            .get("explore")
+            .unwrap()
+            .prompt
+            .unwrap()
+            .contains("file search specialist"));
     }
 
     #[test]
@@ -195,7 +219,10 @@ mod tests {
             ..AgentConfigDocument::default()
         };
         let catalog = AgentCatalog::from_config(&config);
-        assert_eq!(catalog.list().first().map(|agent| agent.name.as_str()), Some("plan"));
+        assert_eq!(
+            catalog.list().first().map(|agent| agent.name.as_str()),
+            Some("plan")
+        );
 
         let edit = catalog.get("plan").unwrap().permission["edit"]
             .as_object()
@@ -203,7 +230,10 @@ mod tests {
             .unwrap();
         assert_eq!(edit["*"], json!("deny"));
         assert_eq!(edit[".agent/plans/*.md"], json!("allow"));
-        assert_eq!(catalog.get("build").unwrap().permission["*"], json!("allow"));
+        assert_eq!(
+            catalog.get("build").unwrap().permission["*"],
+            json!("allow")
+        );
     }
 
     #[test]
@@ -216,7 +246,10 @@ mod tests {
             .join("\n")
             .to_ascii_lowercase();
         for assumption in ["neoism", "vault", "product documentation", "durable memory"] {
-            assert!(!prompts.contains(assumption), "provider prompt contains {assumption}");
+            assert!(
+                !prompts.contains(assumption),
+                "provider prompt contains {assumption}"
+            );
         }
     }
 }

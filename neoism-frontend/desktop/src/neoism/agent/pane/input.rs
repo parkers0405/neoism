@@ -299,6 +299,17 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Activate the painted composer control. A stop click interrupts even
+    /// when a queued draft is present; Escape retains its clear-first policy.
+    pub fn activate_composer_control(&mut self) -> bool {
+        if self.interruptible_run_active() {
+            self.abort_session();
+            true
+        } else {
+            self.submit()
+        }
+    }
+
     pub fn move_input_up_or_history(&mut self) {
         if self.picker.is_some() {
             let _ = self.move_picker_selection(-1);
@@ -381,7 +392,12 @@ impl NeoismAgentPane {
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Agent,
             "Agents",
-            vec![NeoismAgentPickerOption::new("Loading agents...", "", "", "")],
+            vec![NeoismAgentPickerOption::new(
+                "Loading agents...",
+                "",
+                "",
+                "",
+            )],
             0,
         ));
         let server = self.server.clone();
@@ -401,7 +417,12 @@ impl NeoismAgentPane {
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Model,
             "Select model",
-            vec![NeoismAgentPickerOption::new("Loading models...", "", "", "")],
+            vec![NeoismAgentPickerOption::new(
+                "Loading models...",
+                "",
+                "",
+                "",
+            )],
             0,
         ));
         let server = self.server.clone();
@@ -554,7 +575,12 @@ impl NeoismAgentPane {
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Session,
             "Sessions",
-            vec![NeoismAgentPickerOption::new("Loading sessions...", "", "", "")],
+            vec![NeoismAgentPickerOption::new(
+                "Loading sessions...",
+                "",
+                "",
+                "",
+            )],
             0,
         ));
         let server = self.server.clone();
@@ -565,7 +591,11 @@ impl NeoismAgentPane {
             .name("neoism-session-options".into())
             .spawn(move || {
                 let _ = tx.send(NeoismAgentBackgroundUpdate::SessionOptionsRefreshed(
-                    fetch_session_options(&server, current.as_deref(), directory.as_deref()),
+                    fetch_session_options(
+                        &server,
+                        current.as_deref(),
+                        directory.as_deref(),
+                    ),
                 ));
             })
             .ok();
@@ -743,7 +773,12 @@ impl NeoismAgentPane {
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Skill,
             "Skills",
-            vec![NeoismAgentPickerOption::new("Loading skills...", "", "", "")],
+            vec![NeoismAgentPickerOption::new(
+                "Loading skills...",
+                "",
+                "",
+                "",
+            )],
             0,
         ));
         let server = self.server.clone();
@@ -790,25 +825,61 @@ impl NeoismAgentPane {
         if let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) {
             match kind {
                 NeoismAgentPickerKind::ConnectSecret => {
-                    if self.connect.as_ref().and_then(|flow| flow.provider_id()).is_some() { self.open_connect_auth_methods(); return; }
+                    if self
+                        .connect
+                        .as_ref()
+                        .and_then(|flow| flow.provider_id())
+                        .is_some()
+                    {
+                        self.open_connect_auth_methods();
+                        return;
+                    }
                     self.close_connect();
                     return;
                 }
-                NeoismAgentPickerKind::ConnectLabel | NeoismAgentPickerKind::ConnectAccountActions | NeoismAgentPickerKind::ConnectConfirm => {
-                    if let Some((provider_id, connections)) = self.connect.as_ref().and_then(|flow| flow.provider_id().map(|id| (id, flow.connections.clone()))) {
-                        self.open_account_picker(NeoismAgentPickerKind::ConnectAccount, &provider_id, &connections);
+                NeoismAgentPickerKind::ConnectLabel
+                | NeoismAgentPickerKind::ConnectAccountActions
+                | NeoismAgentPickerKind::ConnectConfirm => {
+                    if let Some((provider_id, connections)) =
+                        self.connect.as_ref().and_then(|flow| {
+                            flow.provider_id().map(|id| (id, flow.connections.clone()))
+                        })
+                    {
+                        self.open_account_picker(
+                            NeoismAgentPickerKind::ConnectAccount,
+                            &provider_id,
+                            &connections,
+                        );
                         return;
                     }
                 }
-                NeoismAgentPickerKind::ConnectAccount => { self.reopen_connect_provider_picker(); return; }
-                NeoismAgentPickerKind::ModelAccount => { self.close_connect(); self.pending_account_model = None; return; }
+                NeoismAgentPickerKind::ConnectAccount => {
+                    self.reopen_connect_provider_picker();
+                    return;
+                }
+                NeoismAgentPickerKind::ModelAccount => {
+                    self.close_connect();
+                    self.pending_account_model = None;
+                    return;
+                }
                 NeoismAgentPickerKind::ConnectAuth => {
-                    if let Some((provider_id, connections)) = self.connect.as_ref().and_then(|flow| flow.provider_id().map(|id| (id, flow.connections.clone()))) {
-                        if let Some(flow) = self.connect.as_mut() { flow.reset_account_addition(); }
-                        self.open_account_picker(NeoismAgentPickerKind::ConnectAccount, &provider_id, &connections);
+                    if let Some((provider_id, connections)) =
+                        self.connect.as_ref().and_then(|flow| {
+                            flow.provider_id().map(|id| (id, flow.connections.clone()))
+                        })
+                    {
+                        if let Some(flow) = self.connect.as_mut() {
+                            flow.reset_account_addition();
+                        }
+                        self.open_account_picker(
+                            NeoismAgentPickerKind::ConnectAccount,
+                            &provider_id,
+                            &connections,
+                        );
                         return;
                     }
-                    self.reopen_connect_provider_picker(); return;
+                    self.reopen_connect_provider_picker();
+                    return;
                 }
                 NeoismAgentPickerKind::Connect => {
                     self.close_connect();

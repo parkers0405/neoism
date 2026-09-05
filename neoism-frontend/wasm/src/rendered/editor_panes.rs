@@ -16,6 +16,7 @@ use neoism_ui::editor::markdown::vim::{VimAction, VimKeyFeed, VimStage};
 use neoism_ui::editor::markdown::{MarkdownMode, MarkdownPane};
 use neoism_ui::editor::neodraw::Tool;
 use neoism_ui::editor::notebook::NotebookCellAction;
+use neoism_ui::editor::text_selection::unicode_word_or_grapheme_span;
 use neoism_ui::panels::notifications::NotificationLevel;
 
 // Editor-pane clipboard register. Wasm is single-threaded and the
@@ -255,40 +256,6 @@ fn queue_clipboard_out(text: &str) {
     EDITOR_CLIPBOARD_OUT.with(|cell| *cell.borrow_mut() = Some(text.to_string()));
 }
 
-/// Byte range of the "word" at `col`: an identifier run when the char
-/// is word-class, else the single char clicked. (Copy of the desktop
-/// double-click helper, `bridges/code/input.rs`.)
-fn word_range_at(line: &str, col: usize) -> (usize, usize) {
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    if line.is_empty() {
-        return (0, 0);
-    }
-    let mut start = col.min(line.len().saturating_sub(1));
-    while start > 0 && !line.is_char_boundary(start) {
-        start -= 1;
-    }
-    let ch = line[start..].chars().next().unwrap_or(' ');
-    if !is_word(ch) {
-        return (start, start + ch.len_utf8());
-    }
-    let mut begin = start;
-    while begin > 0 {
-        let prev = line[..begin].chars().next_back().unwrap_or(' ');
-        if !is_word(prev) {
-            break;
-        }
-        begin -= prev.len_utf8();
-    }
-    let mut end = start;
-    for c in line[start..].chars() {
-        if !is_word(c) {
-            break;
-        }
-        end += c.len_utf8();
-    }
-    (begin, end)
-}
-
 /// The single-char payload of a browser `event.key`, if it is one.
 fn single_char(key: &str) -> Option<char> {
     let mut chars = key.chars();
@@ -302,7 +269,7 @@ fn single_char(key: &str) -> Option<char> {
 /// document). Mirrors the `.md` tab routing in
 /// `status_line.rs::markdown_key`, parameterized over the pane so the
 /// notebook surface gets the same vim-mode key surface.
-fn route_markdown_pane_key(
+pub(crate) fn route_markdown_pane_key(
     pane: &mut MarkdownPane,
     key: &str,
     ctrl: bool,
@@ -393,6 +360,9 @@ fn route_markdown_pane_key(
             }
         }
     }
+    // This route represents explicit keyboard/IME intent. Reclaim follow even
+    // when the operation itself was a boundary no-op.
+    pane.rearm_caret_follow();
     true
 }
 
@@ -407,6 +377,11 @@ impl ChromeBridge {
     /// edits) across tab round-trips.
     pub fn editor_open_file(&mut self, tab_index: u32, path: &str, text: &str) -> String {
         let kind = self.chrome.open_editor_file(tab_index as usize, path, text);
+        if self.mobile_direct_insert {
+            if let Some(pane) = self.chrome.code_pane_mut() {
+                pane.buffer.mode = CodeMode::Insert;
+            }
+        }
         if kind == EditorPaneKind::Code {
             // Lazy LSP backend install: every code pane passes through
             // here, and the service is a stateless shim.
@@ -558,6 +533,36 @@ impl ChromeBridge {
         }
     }
 
+    pub fn set_mobile_direct_insert(&mut self, enabled: bool) {
+        self.mobile_direct_insert = enabled;
+        if enabled {
+            if let Some(pane) = self.chrome.code_pane_mut() {
+                pane.buffer.mode = CodeMode::Insert;
+            }
+            if let Some(pane) = self.chrome.markdown_pane_mut() {
+                pane.vim_enabled = false;
+                pane.enter_insert();
+            }
+        }
+    }
+
+    /// Host obstruction below editable content, in layout CSS pixels. This is
+    /// deliberately independent of render DPR and visualViewport pinch scale.
+    pub fn set_mobile_keyboard_inset(&mut self, bottom: f32) {
+        self.chrome.set_bottom_content_inset(bottom);
+        self.chrome.settings_page.set_safe_area_insets(0.0, 0.0, bottom, 0.0);
+        self.chrome.file_browser.set_safe_area(0.0, 0.0, bottom, 0.0);
+        self.relayout_chrome();
+    }
+
+    pub fn set_overlay_safe_area(&mut self, top: f32, right: f32, bottom: f32, left: f32) {
+        self.chrome.settings_page.set_safe_area_insets(top, right, bottom, left);
+        self.chrome.file_browser.set_safe_area(top, right, bottom, left);
+        self.chrome.top_bar.set_left_safe_inset(left);
+        self.chrome.top_bar.set_right_safe_inset(right);
+        self.relayout_chrome();
+    }
+
     /// Insert pasted text into the active hosted editor pane (browser
     /// `paste` event → here; the keydown path never sees the payload).
     pub fn editor_insert_paste(&mut self, text: &str) -> bool {
@@ -619,8 +624,7 @@ impl ChromeBridge {
         let Some(kind) = self.chrome.active_editor_pane_kind() else {
             return false;
         };
-        let rect = self.chrome.layout().terminal;
-        if !(x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
+        if !self.chrome.content_surface_contains(x, y) {
             return false;
         }
         // A press in the buffer returns chrome focus to the content
@@ -644,9 +648,72 @@ impl ChromeBridge {
         }
     }
 
+    /// Mobile hard hold for hosted text editors. Draw/notebook chrome is not
+    /// text-selectable; notebook content delegates to its Markdown pane.
+    pub fn editor_select_word_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
+        match self.chrome.active_editor_pane_kind() {
+            Some(EditorPaneKind::Code) => {
+                let rect = self.chrome.layout().terminal;
+                let Some(pane) = self.chrome.code_pane_mut() else {
+                    return false;
+                };
+                if !(x >= rect.x
+                    && x <= rect.x + rect.w
+                    && y >= rect.y
+                    && y <= rect.y + rect.h)
+                {
+                    return false;
+                }
+                pane.select_touch_word_at(x, y)
+            }
+            Some(EditorPaneKind::Notebook) => self
+                .chrome
+                .notebook_pane_mut()
+                .is_some_and(|pane| pane.markdown.select_word_at(x, y)),
+            _ => false,
+        }
+    }
+
+    pub fn editor_extend_word_selection_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
+        match self.chrome.active_editor_pane_kind() {
+            Some(EditorPaneKind::Code) => self
+                .chrome
+                .code_pane_mut()
+                .is_some_and(|pane| pane.extend_touch_word_selection_at(x, y)),
+            Some(EditorPaneKind::Notebook) => self
+                .chrome
+                .notebook_pane_mut()
+                .is_some_and(|pane| pane.markdown.extend_touch_word_selection_at(x, y)),
+            _ => false,
+        }
+    }
+
+    pub fn editor_end_word_selection(&mut self) -> bool {
+        match self.chrome.active_editor_pane_kind() {
+            Some(EditorPaneKind::Code) => self
+                .chrome
+                .code_pane_mut()
+                .is_some_and(|pane| pane.end_touch_word_selection()),
+            Some(EditorPaneKind::Notebook) => self
+                .chrome
+                .notebook_pane_mut()
+                .is_some_and(|pane| pane.markdown.end_touch_word_selection()),
+            _ => false,
+        }
+    }
+
     /// Pointer move: code drag-select / scrollbar drag, draw gesture
     /// drag + graph hover. True when the move mutated pane state.
     pub fn editor_pointer_move(&mut self, x: f32, y: f32) -> bool {
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
         match self.chrome.active_editor_pane_kind() {
             Some(EditorPaneKind::Code) => {
                 let Some(pane) = self.chrome.code_pane_mut() else {
@@ -727,8 +794,8 @@ impl ChromeBridge {
         let Some(kind) = self.chrome.active_editor_pane_kind() else {
             return false;
         };
-        let rect = self.chrome.layout().terminal;
-        if !(x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
+        let rect = self.chrome.focused_content_rect();
+        if !self.chrome.content_surface_contains(x, y) {
             return false;
         }
         let viewport_h = rect.h.max(1.0);
@@ -760,6 +827,47 @@ impl ChromeBridge {
                 } else {
                     pane.pan_by(-delta_x, -delta_y);
                 }
+                true
+            }
+        }
+    }
+
+    /// Exact touch frame for hosted editor panes. Mouse wheels retain desktop
+    /// easing; direct drag and host-driven release momentum both stay 1:1 here.
+    pub fn editor_touch_scroll(
+        &mut self,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> bool {
+        let Some(kind) = self.chrome.active_editor_pane_kind() else {
+            return false;
+        };
+        let rect = self.chrome.focused_content_rect();
+        if !self.chrome.content_surface_contains(x, y) {
+            return false;
+        }
+        let viewport_h = rect.h.max(1.0);
+        match kind {
+            EditorPaneKind::Code => {
+                let Some(pane) = self.chrome.code_pane_mut() else {
+                    return false;
+                };
+                pane.scroll_touch_pixels(-delta_y, viewport_h)
+            }
+            EditorPaneKind::Notebook => {
+                self.last_markdown_viewport_h = viewport_h;
+                let Some(pane) = self.chrome.notebook_pane_mut() else {
+                    return false;
+                };
+                pane.markdown.scroll_touch_pixels(delta_y, viewport_h)
+            }
+            EditorPaneKind::Draw => {
+                let Some(pane) = self.chrome.draw_pane_mut() else {
+                    return false;
+                };
+                pane.pan_by(-delta_x, -delta_y);
                 true
             }
         }
@@ -1595,6 +1703,11 @@ impl ChromeBridge {
     // ------------------------------------------------------------
 
     fn code_pane_key(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
+        if self.mobile_direct_insert {
+            if let Some(pane) = self.chrome.code_pane_mut() {
+                pane.buffer.mode = CodeMode::Insert;
+            }
+        }
         // Multi-cursor: Ctrl+Alt+Up/Down stacks a caret — intercepted
         // BEFORE the vim layer so it works in every input mode.
         if ctrl && alt {
@@ -1629,7 +1742,11 @@ impl ChromeBridge {
             .chrome
             .code_pane()
             .map(|pane| (pane.input_mode, pane.buffer.mode));
-        match vim_state {
+        match if self.mobile_direct_insert {
+            None
+        } else {
+            vim_state
+        } {
             Some((CodeInputMode::Vim, CodeMode::Normal | CodeMode::Visual)) => {
                 return self.code_vim_key(key, ctrl, shift);
             }
@@ -1792,6 +1909,24 @@ impl ChromeBridge {
                     pane.buffer.insert_char(ch);
                 }
             }
+        }
+        if matches!(
+            key,
+            "Enter"
+                | "Backspace"
+                | "Delete"
+                | "Tab"
+                | "ArrowLeft"
+                | "ArrowRight"
+                | "ArrowUp"
+                | "ArrowDown"
+                | "Home"
+                | "End"
+                | "PageUp"
+                | "PageDown"
+        ) || single_char(key).is_some()
+        {
+            pane.rearm_caret_follow();
         }
         // Post-edit LSP hook (desktop `dispatch_code_key` tail):
         // completion open/refilter/dismiss + signature retriggering.
@@ -1982,7 +2117,7 @@ impl ChromeBridge {
             .is_some_and(|pane| pane.buffer.vim.pending.is_empty());
         // `:` opens the command palette (the vim ex-command surface).
         if ch == ':' && pending_empty {
-            self.chrome.command_palette.set_enabled(true);
+            self.chrome.command_palette.enter_ex_mode();
             self.relayout_chrome();
             return true;
         }
@@ -2220,7 +2355,11 @@ impl ChromeBridge {
         let (line, col) = pane.geometry.hit_position(&pane.buffer.lines, x, y);
         match click_count {
             2 if !ctrl => {
-                let (start, end) = word_range_at(&pane.buffer.lines[line], col);
+                let Some((start, end)) =
+                    unicode_word_or_grapheme_span(&pane.buffer.lines[line], col)
+                else {
+                    return true;
+                };
                 pane.buffer.set_cursor_position(line, start, false);
                 pane.buffer.set_cursor_position(line, end, true);
                 pane.mouse_selecting = true;

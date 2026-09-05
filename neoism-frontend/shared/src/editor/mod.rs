@@ -15,3 +15,4 @@ pub mod optimistic;
 pub mod reconcile;
 pub mod scroll_model;
 pub mod selection_model;
+pub mod text_selection;

@@ -60,10 +60,18 @@ impl NeoismAgentPane {
             }
             NeoismAgentPickerKind::FileMention => self.apply_file_mention(option.value),
             NeoismAgentPickerKind::Connect => self.enter_connect_auth(&option.value),
-            NeoismAgentPickerKind::ConnectAccount => self.choose_connect_account(&option.value),
-            NeoismAgentPickerKind::ModelAccount => self.choose_model_account(option.value),
-            NeoismAgentPickerKind::ConnectAccountActions => self.run_account_action(&option.value),
-            NeoismAgentPickerKind::ConnectConfirm => self.confirm_account_disconnect(option.value == super::connect::CONFIRM_DISCONNECT_VALUE),
+            NeoismAgentPickerKind::ConnectAccount => {
+                self.choose_connect_account(&option.value)
+            }
+            NeoismAgentPickerKind::ModelAccount => {
+                self.choose_model_account(option.value)
+            }
+            NeoismAgentPickerKind::ConnectAccountActions => {
+                self.run_account_action(&option.value)
+            }
+            NeoismAgentPickerKind::ConnectConfirm => self.confirm_account_disconnect(
+                option.value == super::connect::CONFIRM_DISCONNECT_VALUE,
+            ),
             NeoismAgentPickerKind::ConnectAuth => {
                 if option.value == super::connect::DISCONNECT_VALUE {
                     self.disconnect_connect_provider();
@@ -72,7 +80,8 @@ impl NeoismAgentPane {
                 }
             }
             // Handled above (no selectable row).
-            NeoismAgentPickerKind::ConnectSecret | NeoismAgentPickerKind::ConnectLabel => {}
+            NeoismAgentPickerKind::ConnectSecret
+            | NeoismAgentPickerKind::ConnectLabel => {}
         }
         true
     }

@@ -654,8 +654,13 @@ pub struct NeoismSettingsPane {
     pub(crate) search_rect: [f32; 4],
     pub(crate) edit_json_rect: [f32; 4],
     pub(crate) close_rect: [f32; 4],
+    pub(crate) back_rect: [f32; 4],
     pub(crate) hover_control: Option<usize>,
     pub(crate) hover_category: Option<Category>,
+    safe_insets: [f32; 4],
+    compact_layout: bool,
+    compact_detail: bool,
+    layout_initialized: bool,
 }
 
 impl Default for NeoismSettingsPane {
@@ -692,8 +697,13 @@ impl NeoismSettingsPane {
             search_rect: [0.0; 4],
             edit_json_rect: [0.0; 4],
             close_rect: [0.0; 4],
+            back_rect: [0.0; 4],
             hover_control: None,
             hover_category: None,
+            safe_insets: [0.0; 4],
+            compact_layout: false,
+            compact_detail: false,
+            layout_initialized: false,
         }
     }
 
@@ -714,6 +724,62 @@ impl NeoismSettingsPane {
         Some([0.0, 0.0, window_w / s, window_h / s])
     }
 
+    /// Host-provided safe area insets in logical pixels: top/right/bottom/left.
+    pub fn set_safe_area_insets(&mut self, top: f32, right: f32, bottom: f32, left: f32) {
+        self.safe_insets = [top.max(0.0), right.max(0.0), bottom.max(0.0), left.max(0.0)];
+    }
+
+    pub(crate) fn safe_area_insets(&self) -> [f32; 4] {
+        self.safe_insets
+    }
+
+    /// Synchronize navigation with the responsive renderer. Crossing the
+    /// compact breakpoint always lands on the category root; desktop has no
+    /// pushed-page state and continues to show its rail and detail together.
+    pub(crate) fn set_compact_layout(&mut self, compact: bool) {
+        if !self.layout_initialized || self.compact_layout != compact {
+            self.compact_detail = false;
+            self.scroll = 0.0;
+            self.search.clear();
+            self.search_focused = false;
+            self.open_dropdown = None;
+            self.dropdown_search.clear();
+            self.editing = None;
+            self.capturing = None;
+        }
+        self.compact_layout = compact;
+        self.layout_initialized = true;
+    }
+
+    pub(crate) fn compact_root(&self) -> bool {
+        self.compact_layout && !self.compact_detail
+    }
+
+    pub(crate) fn compact_detail(&self) -> bool {
+        self.compact_layout && self.compact_detail
+    }
+
+    /// One painted-overlay text-entry hit test for search, dropdown search,
+    /// generic values, and keybind capture controls.
+    pub fn text_entry_at(&self, x: f32, y: f32) -> bool {
+        if !self.active {
+            return false;
+        }
+        if point_in(self.search_rect, x, y) || point_in(self.dropdown_search_rect, x, y) {
+            return true;
+        }
+        self.control_rects.iter().any(|(rect, index)| {
+            point_in(*rect, x, y)
+                && self
+                    .rows
+                    .get(*index)
+                    .is_some_and(|row| row.control == RowControl::Text)
+        }) || self
+            .keybind_rects
+            .iter()
+            .any(|(rect, _)| point_in(*rect, x, y))
+    }
+
     pub fn open(&mut self) {
         self.active = true;
         self.search.clear();
@@ -724,6 +790,7 @@ impl NeoismSettingsPane {
         self.edit_buffer.clear();
         self.capturing = None;
         self.scroll = 0.0;
+        self.compact_detail = false;
     }
 
     pub fn close(&mut self) {
@@ -732,6 +799,7 @@ impl NeoismSettingsPane {
         self.open_dropdown = None;
         self.editing = None;
         self.capturing = None;
+        self.compact_detail = false;
     }
 
     pub fn set_values(&mut self, values: Value) {
@@ -823,6 +891,12 @@ impl NeoismSettingsPane {
             } else {
                 self.open_dropdown = None;
             }
+        } else if self.compact_detail() {
+            self.compact_detail = false;
+            self.scroll = 0.0;
+            self.search.clear();
+            self.search_focused = false;
+            self.back_rect = [0.0; 4];
         } else if self.search_focused && !self.search.is_empty() {
             self.search.clear();
         } else if self.search_focused {
@@ -833,9 +907,9 @@ impl NeoismSettingsPane {
         true
     }
 
-    pub fn scroll_by(&mut self, delta: f32) {
+    pub fn scroll_by(&mut self, delta: f32) -> bool {
         if !self.active {
-            return;
+            return false;
         }
         // A one-notch step for the open dropdown, otherwise the content.
         if self.open_dropdown.is_some() {
@@ -844,9 +918,11 @@ impl NeoismSettingsPane {
             } else {
                 self.dropdown_scroll += 1;
             }
-            return;
+            return true;
         }
+        let before = self.scroll;
         self.scroll = (self.scroll - delta).clamp(0.0, self.max_scroll);
+        (self.scroll - before).abs() > f32::EPSILON
     }
 
     // ── accessors for the renderer ──
@@ -1110,8 +1186,12 @@ impl NeoismSettingsPane {
             .iter()
             .enumerate()
             .filter(|(_, def)| {
-                if query.is_empty() {
+                if query.is_empty() || self.compact_detail() {
                     def.category == self.category
+                        && (query.is_empty()
+                            || def.label.to_lowercase().contains(&query)
+                            || def.path.to_lowercase().contains(query.as_str())
+                            || def.description.to_lowercase().contains(&query))
                 } else {
                     def.label.to_lowercase().contains(&query)
                         || def.path.to_lowercase().contains(query.as_str())
@@ -1182,6 +1262,20 @@ impl NeoismSettingsPane {
             return swallow();
         }
 
+        if self.compact_detail() && point_in(self.back_rect, x, y) {
+            if self.editing.is_some() {
+                self.editing = None;
+                self.edit_buffer.clear();
+            } else if self.capturing.is_some() {
+                self.capturing = None;
+            } else {
+                self.compact_detail = false;
+                self.scroll = 0.0;
+                self.search.clear();
+                self.search_focused = false;
+            }
+            return swallow();
+        }
         if point_in(self.close_rect, x, y) {
             self.close();
             return swallow();
@@ -1202,6 +1296,9 @@ impl NeoismSettingsPane {
                 self.category = cat;
                 self.scroll = 0.0;
                 self.capturing = None;
+                if self.compact_root() {
+                    self.compact_detail = true;
+                }
                 return swallow();
             }
         }
@@ -1312,7 +1409,12 @@ fn option_to_json(opt: &str, kind: ConfigValueKind) -> Value {
 }
 
 pub(crate) fn point_in(rect: [f32; 4], x: f32, y: f32) -> bool {
-    x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3]
+    rect[2] > 0.0
+        && rect[3] > 0.0
+        && x >= rect[0]
+        && x <= rect[0] + rect[2]
+        && y >= rect[1]
+        && y <= rect[1] + rect[3]
 }
 
 #[cfg(test)]
@@ -1508,5 +1610,55 @@ mod descriptor_tests {
         let row = SettingRow::from_descriptor(number);
         assert_eq!(row.control, RowControl::Select);
         assert_eq!(row.options[0].value, json!(16.5));
+    }
+
+    #[test]
+    fn compact_category_pushes_detail_then_escape_pops_before_close() {
+        let mut pane = NeoismSettingsPane::new();
+        pane.open();
+        pane.set_compact_layout(true);
+        pane.category_rects
+            .push(([10.0, 70.0, 370.0, 54.0], Category::Appearance));
+
+        pane.pointer_down(20.0, 80.0);
+        assert!(pane.compact_detail());
+        assert_eq!(pane.current_category(), Category::Appearance);
+        assert!(pane.is_active());
+
+        assert!(pane.on_escape());
+        assert!(pane.compact_root());
+        assert!(pane.is_active());
+        assert!(pane.on_escape());
+        assert!(!pane.is_active());
+    }
+
+    #[test]
+    fn compact_escape_resolves_detail_interactions_before_navigation() {
+        let mut pane = NeoismSettingsPane::new();
+        pane.open();
+        pane.set_compact_layout(true);
+        pane.compact_detail = true;
+        pane.open_dropdown = Some(0);
+
+        pane.on_escape();
+        assert!(pane.compact_detail());
+        assert!(pane.open_dropdown.is_none());
+        pane.search = "font".into();
+        pane.search_focused = true;
+        pane.on_escape();
+        assert!(pane.compact_root());
+        assert!(pane.search.is_empty());
+    }
+
+    #[test]
+    fn crossing_compact_breakpoint_returns_to_category_root() {
+        let mut pane = NeoismSettingsPane::new();
+        pane.open();
+        pane.set_compact_layout(true);
+        pane.compact_detail = true;
+        pane.set_compact_layout(false);
+        assert!(!pane.compact_detail());
+        pane.set_compact_layout(true);
+        assert!(pane.compact_root());
     }
 }

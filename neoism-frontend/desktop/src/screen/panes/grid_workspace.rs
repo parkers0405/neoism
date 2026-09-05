@@ -200,33 +200,10 @@ impl Screen<'_> {
                 .map(Self::normalize_workspace_root);
         }
 
-        // Split terminals are helpers inside the workspace. They should
-        // not become the workspace/tree root just because they are
-        // focused; only the root terminal owns cwd-driven tree updates.
-        let grid = self.context_manager.current_grid();
-        if grid.root != Some(grid.current) {
-            return self
-                .active_workspace_root
-                .clone()
-                .or_else(|| {
-                    self.context_manager
-                        .config
-                        .working_dir
-                        .clone()
-                        .map(PathBuf::from)
-                })
-                .or_else(|| std::env::current_dir().ok())
-                .map(Self::normalize_workspace_root);
-        }
-
-        self.active_terminal_process_cwd()
-            .or_else(|| {
-                current
-                    .terminal
-                    .try_lock_unfair()
-                    .and_then(|terminal| terminal.current_directory.clone())
-            })
-            .or_else(|| self.active_workspace_root.clone())
+        // Terminal process cwd remains per-terminal completion state. It must
+        // never replace the workspace's declared Explorer root.
+        self.active_workspace_root
+            .clone()
             .or_else(|| {
                 self.context_manager
                     .config

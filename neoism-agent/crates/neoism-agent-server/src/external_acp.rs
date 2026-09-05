@@ -542,7 +542,10 @@ pub(crate) struct AcpTerminalManager {
 }
 
 impl AcpTerminalManager {
-    pub(crate) fn new(cwd: PathBuf, services: neoism_agent_service_api::AgentServices) -> Self {
+    pub(crate) fn new(
+        cwd: PathBuf,
+        services: neoism_agent_service_api::AgentServices,
+    ) -> Self {
         Self {
             cwd,
             services,
@@ -583,10 +586,10 @@ impl AcpTerminalManager {
             .unwrap_or(DEFAULT_TERMINAL_OUTPUT_LIMIT);
 
         let executable = resolve_acp_terminal_command(&self.services, &command, &cwd)
-        .map_err(|error| AcpRpcError {
-            code: -32000,
-            message: error.to_string(),
-        })?;
+            .map_err(|error| AcpRpcError {
+                code: -32000,
+                message: error.to_string(),
+            })?;
         let mut child_cmd = Command::new(executable);
         child_cmd
             .args(&args)
@@ -709,17 +712,21 @@ mod executable_tests {
     fn acp_terminal_honors_injected_path_and_reports_missing_executable() {
         let injected = PathBuf::from("/injected/acp-command");
         let mut services = crate::standard_services();
-        services.executables = Arc::new(FakeExecutableService::with("acp-command", &injected));
+        services.executables =
+            Arc::new(FakeExecutableService::with("acp-command", &injected));
         assert_eq!(
-            resolve_acp_terminal_command(&services, "acp-command", Path::new(".")).unwrap(),
+            resolve_acp_terminal_command(&services, "acp-command", Path::new("."))
+                .unwrap(),
             injected
         );
 
         services.executables = Arc::new(FakeExecutableService::default());
-        let error = resolve_acp_terminal_command(&services, "acp-command", Path::new("."))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("ACP terminal command executable `acp-command` is unavailable"));
+        let error =
+            resolve_acp_terminal_command(&services, "acp-command", Path::new("."))
+                .unwrap_err()
+                .to_string();
+        assert!(error
+            .contains("ACP terminal command executable `acp-command` is unavailable"));
         assert!(error.contains("install it"));
     }
 }

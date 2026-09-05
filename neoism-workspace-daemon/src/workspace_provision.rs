@@ -164,16 +164,24 @@ fn short_hash(value: &str) -> String {
     out
 }
 
-fn clone_repo(git_url: &str, path: &Path, depth: Option<u32>) -> Result<(), ProvisionError> {
+fn clone_repo(
+    git_url: &str,
+    path: &Path,
+    depth: Option<u32>,
+) -> Result<(), ProvisionError> {
     let mut command = Command::new("git");
     #[cfg(windows)]
     crate::hide_std_command(&mut command);
     command.arg("clone");
     let depth_value = depth.map(|value| value.to_string());
-    if let Some(value) = depth_value.as_deref() { command.args(["--depth", value]); }
+    if let Some(value) = depth_value.as_deref() {
+        command.args(["--depth", value]);
+    }
     command.arg("--").arg(git_url).arg(path);
     let output = command.output()?;
-    if output.status.success() { return Ok(()); }
+    if output.status.success() {
+        return Ok(());
+    }
     Err(ProvisionError::Git(command_error(&output)))
 }
 

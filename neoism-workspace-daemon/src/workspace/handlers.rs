@@ -215,9 +215,9 @@ pub(crate) fn close_session(
     conn: &mut ConnectionWorkspace,
     session_id: String,
 ) -> Vec<WorkspaceServerMessage> {
-    if !manager.remove_session(&session_id) {
-        return vec![err(format!("no such session: {session_id}"))];
-    }
+    // Idempotent for reconnect replay: the first request may have committed
+    // while its acknowledgement was lost with the socket.
+    manager.remove_session(&session_id);
     let mut out = vec![WorkspaceServerMessage::SessionClosed {
         session_id: session_id.clone(),
     }];

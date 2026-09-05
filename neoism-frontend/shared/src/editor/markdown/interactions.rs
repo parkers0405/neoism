@@ -419,6 +419,120 @@ impl MarkdownPane {
         Some(MarkdownPosition { line, col: column })
     }
 
+    /// Select the Unicode word (or one emoji/punctuation grapheme) painted
+    /// under a mobile hard hold. Both source and live-preview rendering feed
+    /// this through `text_position_at_point`, preserving their cleaned↔raw
+    /// caret mapping and the normal visual-selection renderer.
+    pub fn select_word_at(&mut self, x: f32, y: f32) -> bool {
+        let position = match self.text_position_at_point(x, y) {
+            Some(position) => position,
+            None => return false,
+        };
+        let Some(line) = self.lines.get(position.line) else {
+            return false;
+        };
+        let Some((start, end)) =
+            crate::editor::text_selection::unicode_word_or_grapheme_span(
+                line,
+                position.col,
+            )
+        else {
+            return false;
+        };
+        self.cursor_line = position.line;
+        self.cursor_col = end;
+        self.visual_anchor = Some(MarkdownPosition {
+            line: position.line,
+            col: start,
+        });
+        self.touch_word_edges = Some((
+            MarkdownPosition {
+                line: position.line,
+                col: start,
+            },
+            MarkdownPosition {
+                line: position.line,
+                col: end,
+            },
+        ));
+        self.mouse_select_anchor = None;
+        self.mode = MarkdownMode::Visual;
+        self.vim.visual_linewise = false;
+        self.follow_cursor = false;
+        true
+    }
+
+    pub fn extend_touch_word_selection_at(&mut self, x: f32, y: f32) -> bool {
+        let Some((start, end)) = self.touch_word_edges else {
+            return false;
+        };
+        let Some(target) = self.text_position_at_point(x, y).or_else(|| {
+            self.block_rects
+                .iter()
+                .copied()
+                .min_by(|a, b| {
+                    let distance = |rect: [f32; 4]| {
+                        if y < rect[1] {
+                            rect[1] - y
+                        } else if y > rect[1] + rect[3] {
+                            y - rect[1] - rect[3]
+                        } else {
+                            0.0
+                        }
+                    };
+                    distance(a.rect).total_cmp(&distance(b.rect))
+                })
+                .and_then(|block| {
+                    self.text_position_at_point(
+                        x,
+                        y.clamp(block.rect[1], block.rect[1] + block.rect[3]),
+                    )
+                })
+        }) else {
+            return false;
+        };
+        let key = |p: MarkdownPosition| (p.line, p.col);
+        let (anchor_key, focus_key) =
+            crate::editor::text_selection::anchored_word_selection(
+                key(start),
+                key(end),
+                key(target),
+            );
+        let position = |(line, col)| MarkdownPosition { line, col };
+        let (anchor, focus) = (position(anchor_key), position(focus_key));
+        self.visual_anchor = Some(anchor);
+        self.cursor_line = focus.line;
+        self.cursor_col = focus.col;
+        self.mode = MarkdownMode::Visual;
+        self.vim.visual_linewise = false;
+        if let Some(top) = self
+            .block_rects
+            .iter()
+            .map(|block| block.rect[1])
+            .min_by(f32::total_cmp)
+        {
+            let edge = 28.0;
+            let bottom = top + self.scroll_viewport_height.max(edge * 2.0);
+            let delta = if y < top + edge {
+                -(top + edge - y).min(18.0)
+            } else if y > bottom - edge {
+                (y - (bottom - edge)).min(18.0)
+            } else {
+                0.0
+            };
+            if delta != 0.0 {
+                self.scroll_touch_pixels(delta, self.scroll_viewport_height);
+            }
+        }
+        self.follow_cursor = false;
+        true
+    }
+
+    pub fn end_touch_word_selection(&mut self) -> bool {
+        self.follow_cursor = false;
+        self.touch_word_edges.take().is_some()
+    }
+
     pub fn update_drag(&mut self, x: f32, y: f32) -> bool {
         if self.dragging_scrollbar.is_some() {
             self.drag_mouse_y = y;

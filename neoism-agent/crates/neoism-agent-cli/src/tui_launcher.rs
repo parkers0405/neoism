@@ -54,7 +54,9 @@ pub(crate) async fn run(
     Ok(())
 }
 
-fn resolve_bun(services: &neoism_agent_service_api::AgentServices) -> anyhow::Result<PathBuf> {
+fn resolve_bun(
+    services: &neoism_agent_service_api::AgentServices,
+) -> anyhow::Result<PathBuf> {
     let bun = std::env::var_os("BUN").unwrap_or_else(|| "bun".into());
     resolve_bun_program(services, bun)
 }
@@ -90,14 +92,21 @@ mod tests {
     struct Fake(Option<PathBuf>);
 
     impl ExecutableService for Fake {
-        fn resolve(&self, request: &ExecutableRequest) -> Result<ExecutableResult, ExecutableError> {
+        fn resolve(
+            &self,
+            request: &ExecutableRequest,
+        ) -> Result<ExecutableResult, ExecutableError> {
             self.0
                 .clone()
                 .map(|path| ExecutableResult {
                     path,
-                    source: ExecutableSource::Managed { provider: "test".into() },
+                    source: ExecutableSource::Managed {
+                        provider: "test".into(),
+                    },
                 })
-                .ok_or_else(|| ExecutableError::NotFound { program: request.program.clone() })
+                .ok_or_else(|| ExecutableError::NotFound {
+                    program: request.program.clone(),
+                })
         }
     }
 
@@ -106,10 +115,15 @@ mod tests {
         let injected = PathBuf::from("/injected/bun");
         let mut services = neoism_agent_server::standard_services();
         services.executables = Arc::new(Fake(Some(injected.clone())));
-        assert_eq!(resolve_bun_program(&services, "bun".into()).unwrap(), injected);
+        assert_eq!(
+            resolve_bun_program(&services, "bun".into()).unwrap(),
+            injected
+        );
 
         services.executables = Arc::new(Fake(None));
-        let error = resolve_bun_program(&services, "bun".into()).unwrap_err().to_string();
+        let error = resolve_bun_program(&services, "bun".into())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Bun executable `bun` is unavailable"));
         assert!(error.contains("install Bun"));
     }

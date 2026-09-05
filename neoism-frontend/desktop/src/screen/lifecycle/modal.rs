@@ -1,6 +1,15 @@
 use super::*;
 
 impl Screen<'_> {
+    pub fn handle_file_browser_click(&mut self) -> bool {
+        if !self.renderer.file_browser.is_active() { return false; }
+        let (x, y) = self.mouse_logical_for_hit_test();
+        self.renderer.file_browser.pointer_down(x, y, 1);
+        self.pump_agent_image_browser();
+        self.mark_dirty();
+        true
+    }
+
     pub fn handle_modal_click(&mut self) -> bool {
         if !self.renderer.modal.is_active() {
             return false;
@@ -98,8 +107,9 @@ impl Screen<'_> {
             ModalAction::UpdateNeoism => {
                 #[cfg(debug_assertions)]
                 if std::env::var_os("NEOISM_UPDATE_CHECK").is_some() {
-                    self.renderer.modal.open(
-                        neoism_ui::widgets::modal::ModalSpec {
+                    self.renderer
+                        .modal
+                        .open(neoism_ui::widgets::modal::ModalSpec {
                             title: "Updating Neoism (preview)".to_string(),
                             body: "Preparing the update preview".to_string(),
                             meta: "0% complete".to_string(),
@@ -111,8 +121,7 @@ impl Screen<'_> {
                             )],
                             busy: true,
                             blocking: false,
-                        },
-                    );
+                        });
                     crate::update::spawn_install_preview(
                         self.context_manager.event_proxy(),
                         self.context_manager.window_id(),
@@ -544,27 +553,10 @@ impl Screen<'_> {
                 }
                 let name = name.to_string();
                 self.renderer.modal.close();
-                // Local label first — always applies, every tab kind.
+                // Tab labels are presentation-only. Renaming a Neoism Agent
+                // tab must not rename its persisted conversation.
                 self.renderer.buffer_tabs.set_title(index, name.clone());
-                // Agent tabs additionally publish the title at the daemon
-                // level so it survives reloads / shows in the session list
-                // / syncs cross-device. We resolve the live agent pane on
-                // the CURRENT workspace (where the right-click happened)
-                // and queue an `OutboundAgentCommand::SetTitle`.
-                if agent_session_id.is_some() {
-                    if let Some(agent) =
-                        self.context_manager.current_mut().neoism_agent.as_mut()
-                    {
-                        if !agent.publish_session_title(name) {
-                            tracing::debug!(
-                                target: "neoism::neoism_agent",
-                                index,
-                                "rename: agent pane had no live session yet; \
-                                 kept local tab label only"
-                            );
-                        }
-                    }
-                }
+                let _ = agent_session_id;
             }
             ModalAction::NotesVaultPromptAdd => {
                 self.open_notes_vault_add_prompt();

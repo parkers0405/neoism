@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use crate::{
     ContributionMetadata, PluginContext, PluginDescriptor, PluginFactory, PluginFuture,
-    PluginInstance, PluginRuntimeError, PluginScope, ReadinessState, RoutePrefixPolicy, RuntimeScope,
+    PluginInstance, PluginRuntimeError, PluginScope, ReadinessState, RoutePrefixPolicy,
+    RuntimeScope,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -41,16 +42,22 @@ pub fn check_factory_with_policy<'a>(
     Box::pin(async move {
         let descriptor = factory.descriptor();
         let mut report = ConformanceReport::default();
-        if let Err(error) = crate::validate_host_descriptor(&descriptor, &context, &route_prefix_policy) {
+        if let Err(error) =
+            crate::validate_host_descriptor(&descriptor, &context, &route_prefix_policy)
+        {
             report.errors.push(error.to_string());
             return Ok(report);
         }
 
-        let instance = factory.create(context.restricted_to(&descriptor.required_capabilities)).await?;
+        let instance = factory
+            .create(context.restricted_to(&descriptor.required_capabilities))
+            .await?;
         if let Err(primary) = instance.start().await {
             return match shutdown_retries(instance.as_ref()).await {
                 Ok(()) => Err(primary),
-                Err(cleanup) => Err(PluginRuntimeError::new(format!("{primary}; cleanup also failed: {cleanup}"))),
+                Err(cleanup) => Err(PluginRuntimeError::new(format!(
+                    "{primary}; cleanup also failed: {cleanup}"
+                ))),
             };
         }
         check_instance_with_policy(
@@ -67,7 +74,9 @@ pub fn check_factory_with_policy<'a>(
     })
 }
 
-async fn shutdown_retries(instance: &dyn PluginInstance) -> Result<(), PluginRuntimeError> {
+async fn shutdown_retries(
+    instance: &dyn PluginInstance,
+) -> Result<(), PluginRuntimeError> {
     let mut last_error = None;
     for _ in 0..3 {
         match instance.shutdown().await {
@@ -84,7 +93,13 @@ pub fn check_instance(
     instance: &dyn PluginInstance,
     report: &mut ConformanceReport,
 ) {
-    check_instance_with_policy(descriptor, runtime_scope, instance, report, &RoutePrefixPolicy::default());
+    check_instance_with_policy(
+        descriptor,
+        runtime_scope,
+        instance,
+        report,
+        &RoutePrefixPolicy::default(),
+    );
 }
 
 fn check_instance_with_policy(
@@ -103,9 +118,20 @@ fn check_instance_with_policy(
     let plugin_id = descriptor.manifest.id.as_str();
     let scope = descriptor.scope;
     let mut contributions = instance.contributions();
-    let workspace_id = match runtime_scope { RuntimeScope::Workspace(workspace) => Some(workspace.id.clone()) };
+    let workspace_id = match runtime_scope {
+        RuntimeScope::Workspace(workspace) => Some(workspace.id.clone()),
+    };
     macro_rules! stamp_services {
-        ($items:expr) => { for item in &mut $items { stamp_metadata(&mut item.metadata, plugin_id, scope, workspace_id.as_deref()); } };
+        ($items:expr) => {
+            for item in &mut $items {
+                stamp_metadata(
+                    &mut item.metadata,
+                    plugin_id,
+                    scope,
+                    workspace_id.as_deref(),
+                );
+            }
+        };
     }
     stamp_services!(contributions.config);
     stamp_services!(contributions.agents);
@@ -114,9 +140,25 @@ fn check_instance_with_policy(
     stamp_services!(contributions.providers);
     stamp_services!(contributions.system_context);
     stamp_services!(contributions.prompts);
-    for route in &mut contributions.routes { stamp_metadata(&mut route.metadata, plugin_id, scope, workspace_id.as_deref()); }
-    for route in &mut contributions.websocket_routes { stamp_metadata(&mut route.metadata, plugin_id, scope, workspace_id.as_deref()); }
-    if let Err(error) = crate::validate_contributions(descriptor, &contributions, route_prefix_policy) {
+    for route in &mut contributions.routes {
+        stamp_metadata(
+            &mut route.metadata,
+            plugin_id,
+            scope,
+            workspace_id.as_deref(),
+        );
+    }
+    for route in &mut contributions.websocket_routes {
+        stamp_metadata(
+            &mut route.metadata,
+            plugin_id,
+            scope,
+            workspace_id.as_deref(),
+        );
+    }
+    if let Err(error) =
+        crate::validate_contributions(descriptor, &contributions, route_prefix_policy)
+    {
         report.errors.push(error.to_string());
     }
     let mut ids = BTreeSet::new();
@@ -152,11 +194,23 @@ fn check_instance_with_policy(
         );
     }
     for contribution in &contributions.websocket_routes {
-        check_metadata(plugin_id, scope, runtime_scope, &contribution.metadata, &mut ids, report);
+        check_metadata(
+            plugin_id,
+            scope,
+            runtime_scope,
+            &contribution.metadata,
+            &mut ids,
+            report,
+        );
     }
 }
 
-fn stamp_metadata(metadata: &mut ContributionMetadata, plugin_id: &str, scope: PluginScope, workspace_id: Option<&str>) {
+fn stamp_metadata(
+    metadata: &mut ContributionMetadata,
+    plugin_id: &str,
+    scope: PluginScope,
+    workspace_id: Option<&str>,
+) {
     metadata.owner.plugin_id = plugin_id.to_string();
     metadata.owner.scope = scope;
     metadata.owner.workspace_id = workspace_id.map(str::to_string);
@@ -259,7 +313,9 @@ mod tests {
         }
 
         fn shutdown<'a>(&'a self) -> PluginFuture<'a, ()> {
-            let _ = self.0.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);
+            let _ = self
+                .0
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);
             Box::pin(async { Ok(()) })
         }
     }
@@ -284,7 +340,13 @@ mod tests {
         let shutdowns = Arc::new(AtomicUsize::new(0));
         let report = block_on(check_factory(
             &Factory(shutdowns.clone()),
-            PluginContext::new(RuntimeScope::Workspace(crate::WorkspaceIdentity { id: "workspace".into(), root: ".".into() }), CapabilityGrants::default()),
+            PluginContext::new(
+                RuntimeScope::Workspace(crate::WorkspaceIdentity {
+                    id: "workspace".into(),
+                    root: ".".into(),
+                }),
+                CapabilityGrants::default(),
+            ),
         ))
         .unwrap();
         assert!(report.is_conformant(), "{:?}", report.errors);
@@ -299,7 +361,10 @@ mod tests {
             descriptor
         }
 
-        fn create<'a>(&'a self, _context: PluginContext) -> PluginFuture<'a, Box<dyn PluginInstance>> {
+        fn create<'a>(
+            &'a self,
+            _context: PluginContext,
+        ) -> PluginFuture<'a, Box<dyn PluginInstance>> {
             panic!("descriptor preflight must run before create")
         }
     }
@@ -307,7 +372,10 @@ mod tests {
     #[test]
     fn factory_preflight_matches_the_host_descriptor_validator() {
         let context = PluginContext::new(
-            RuntimeScope::Workspace(crate::WorkspaceIdentity { id: "workspace".into(), root: ".".into() }),
+            RuntimeScope::Workspace(crate::WorkspaceIdentity {
+                id: "workspace".into(),
+                root: ".".into(),
+            }),
             CapabilityGrants::default(),
         );
         let host_error = match block_on(crate::PluginHost::default().install(
@@ -324,59 +392,118 @@ mod tests {
 
     struct Hook;
     impl crate::RuntimeHook for Hook {
-        fn invoke(&self, _: &str, _: serde_json::Value, value: serde_json::Value) -> Result<serde_json::Value, PluginRuntimeError> { Ok(value) }
+        fn invoke(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            value: serde_json::Value,
+        ) -> Result<serde_json::Value, PluginRuntimeError> {
+            Ok(value)
+        }
     }
     struct WebSocketHandler;
     impl crate::WebSocketRouteHandler for WebSocketHandler {
-        fn prepare<'a>(&'a self, _: crate::RouteRequest) -> PluginFuture<'a, Arc<dyn crate::WebSocketSession>> {
+        fn prepare<'a>(
+            &'a self,
+            _: crate::RouteRequest,
+        ) -> PluginFuture<'a, Arc<dyn crate::WebSocketSession>> {
             Box::pin(async { Err(PluginRuntimeError::new("not invoked by conformance")) })
         }
     }
     struct CoverageInstance;
     impl PluginInstance for CoverageInstance {
-        fn readiness(&self) -> PluginReadiness { PluginReadiness::ready() }
+        fn readiness(&self) -> PluginReadiness {
+            PluginReadiness::ready()
+        }
         fn contributions(&self) -> PluginContributions {
             let mut contributions = PluginContributions::default();
             contributions.hook("transform");
             contributions.runtime_hook(Arc::new(Hook));
             contributions.runtime_websocket_route(crate::WebSocketRouteContribution {
-                metadata: ContributionMetadata::new("socket", PLUGIN_ID, PluginScope::Workspace),
-                descriptor: crate::RouteDescriptor { id: "socket".into(), method: crate::RouteMethod::Get, path: format!("/v2/plugins/{PLUGIN_ID}/socket"), scope: crate::RouteScope::Workspace, request_schema: None, response_schema: None },
+                metadata: ContributionMetadata::new(
+                    "socket",
+                    PLUGIN_ID,
+                    PluginScope::Workspace,
+                ),
+                descriptor: crate::RouteDescriptor {
+                    id: "socket".into(),
+                    method: crate::RouteMethod::Get,
+                    path: format!("/v2/plugins/{PLUGIN_ID}/socket"),
+                    scope: crate::RouteScope::Workspace,
+                    request_schema: None,
+                    response_schema: None,
+                },
                 handler: Arc::new(WebSocketHandler),
             });
             contributions
         }
-        fn shutdown<'a>(&'a self) -> PluginFuture<'a, ()> { Box::pin(async { Ok(()) }) }
+        fn shutdown<'a>(&'a self) -> PluginFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
     }
 
     #[test]
     fn instance_check_covers_websockets_hooks_and_declarations_after_host_stamping() {
-        let scope = RuntimeScope::Workspace(crate::WorkspaceIdentity { id: "workspace".into(), root: ".".into() });
+        let scope = RuntimeScope::Workspace(crate::WorkspaceIdentity {
+            id: "workspace".into(),
+            root: ".".into(),
+        });
         let mut report = ConformanceReport::default();
-        check_instance(&Factory(Arc::new(AtomicUsize::new(0))).descriptor(), &scope, &CoverageInstance, &mut report);
+        check_instance(
+            &Factory(Arc::new(AtomicUsize::new(0))).descriptor(),
+            &scope,
+            &CoverageInstance,
+            &mut report,
+        );
         assert!(report.is_conformant(), "{:?}", report.errors);
     }
 
     struct MismatchedRouteInstance;
     impl PluginInstance for MismatchedRouteInstance {
-        fn readiness(&self) -> PluginReadiness { PluginReadiness::ready() }
+        fn readiness(&self) -> PluginReadiness {
+            PluginReadiness::ready()
+        }
         fn contributions(&self) -> PluginContributions {
             let mut contributions = PluginContributions::default();
             contributions.runtime_websocket_route(crate::WebSocketRouteContribution {
-                metadata: ContributionMetadata::new("metadata-id", PLUGIN_ID, PluginScope::Workspace),
-                descriptor: crate::RouteDescriptor { id: "descriptor-id".into(), method: crate::RouteMethod::Get, path: format!("/v2/plugins/{PLUGIN_ID}/socket"), scope: crate::RouteScope::Workspace, request_schema: None, response_schema: None },
+                metadata: ContributionMetadata::new(
+                    "metadata-id",
+                    PLUGIN_ID,
+                    PluginScope::Workspace,
+                ),
+                descriptor: crate::RouteDescriptor {
+                    id: "descriptor-id".into(),
+                    method: crate::RouteMethod::Get,
+                    path: format!("/v2/plugins/{PLUGIN_ID}/socket"),
+                    scope: crate::RouteScope::Workspace,
+                    request_schema: None,
+                    response_schema: None,
+                },
                 handler: Arc::new(WebSocketHandler),
             });
             contributions
         }
-        fn shutdown<'a>(&'a self) -> PluginFuture<'a, ()> { Box::pin(async { Ok(()) }) }
+        fn shutdown<'a>(&'a self) -> PluginFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
     }
 
     #[test]
     fn instance_check_uses_host_route_identity_validation() {
-        let scope = RuntimeScope::Workspace(crate::WorkspaceIdentity { id: "workspace".into(), root: ".".into() });
+        let scope = RuntimeScope::Workspace(crate::WorkspaceIdentity {
+            id: "workspace".into(),
+            root: ".".into(),
+        });
         let mut report = ConformanceReport::default();
-        check_instance(&Factory(Arc::new(AtomicUsize::new(0))).descriptor(), &scope, &MismatchedRouteInstance, &mut report);
-        assert!(report.errors.iter().any(|error| error.contains("metadata and descriptor ids differ")));
+        check_instance(
+            &Factory(Arc::new(AtomicUsize::new(0))).descriptor(),
+            &scope,
+            &MismatchedRouteInstance,
+            &mut report,
+        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("metadata and descriptor ids differ")));
     }
 }

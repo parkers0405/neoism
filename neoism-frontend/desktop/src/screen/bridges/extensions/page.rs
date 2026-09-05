@@ -298,8 +298,14 @@ impl Screen<'_> {
         {
             if let Some(pane) = item.val.neoism_extensions.as_mut() {
                 for entry in &mut entries {
-                    if let Some(current) = pane.entries().iter().find(|old| old.id == entry.id) {
-                        if matches!(current.status, ExtensionStatus::Installing { .. } | ExtensionStatus::Failed { .. }) {
+                    if let Some(current) =
+                        pane.entries().iter().find(|old| old.id == entry.id)
+                    {
+                        if matches!(
+                            current.status,
+                            ExtensionStatus::Installing { .. }
+                                | ExtensionStatus::Failed { .. }
+                        ) {
                             entry.status = current.status.clone();
                         }
                     }
@@ -540,7 +546,9 @@ impl Screen<'_> {
                         if let Some(entry) =
                             p.entries_mut().iter_mut().find(|e| e.id == id)
                         {
-                            entry.status = ExtensionStatus::Failed { message: err.to_string() };
+                            entry.status = ExtensionStatus::Failed {
+                                message: err.to_string(),
+                            };
                         }
                     }
                     self.finalize_install_failure(&id, &source, &err.to_string());
@@ -550,7 +558,9 @@ impl Screen<'_> {
                         if let Some(entry) =
                             p.entries_mut().iter_mut().find(|e| e.id == id)
                         {
-                            entry.status = ExtensionStatus::Failed { message: format!("install task crashed: {join_err}") };
+                            entry.status = ExtensionStatus::Failed {
+                                message: format!("install task crashed: {join_err}"),
+                            };
                         }
                     }
                     self.finalize_install_failure(

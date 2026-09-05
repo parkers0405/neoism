@@ -40,11 +40,16 @@ export interface ClosePtyArgs {
   session_id: string;
 }
 
+export interface AttachPtyArgs {
+  session_id: string;
+}
+
 export type ClientMessage =
   | { CreatePty: CreatePtyArgs }
   | { PtyInput: PtyInputArgs }
   | { Resize: ResizeArgs }
   | { ClosePty: ClosePtyArgs }
+  | { AttachPty: AttachPtyArgs }
   | { Files: FilesEnvelope }
   | { Git: GitEnvelope }
   | { Editor: EditorEnvelope }
@@ -111,8 +116,17 @@ export interface TreeEntry {
   is_dir: boolean;
   depth: number;
 }
+export interface FileLocationDescriptor {
+  kind: "workspace" | "home" | "documents" | "downloads" | "pictures";
+  label: string;
+  path: string;
+}
 
 export type FilesClientMessage =
+  | "ListBrowserLocations"
+  | { BrowserListDir: { path: string } }
+  | { BrowserStat: { path: string } }
+  | { BrowserReadFile: { path: string } }
   | { ListDir: { path: string } }
   | { Stat: { path: string } }
   | { ReadFile: { path: string } }
@@ -125,6 +139,7 @@ export type FilesClientMessage =
   | { ReadShellHistory: { max_entries: number | null } };
 
 export type FilesServerMessage =
+  | { BrowserLocations: { locations: FileLocationDescriptor[] } }
   | { DirListing: { path: string; entries: DirEntry[] } }
   | { Stat: { path: string; entry: DirEntry } }
   | { FileContent: { path: string; bytes: number[] } }
@@ -134,6 +149,7 @@ export type FilesServerMessage =
   | { Renamed: { from: string; to: string } }
   | { Deleted: { path: string; was_dir: boolean } }
   | { ShellHistory: { entries: string[] } }
+  | { Changed: { root: string; paths: string[] } }
   | { Error: { message: string } };
 
 export interface FilesEnvelope {
@@ -836,9 +852,11 @@ export type ConfigClientMessage =
   | "GetConfigDocument"
   | "EnsureConfigDocument"
   | "ListExtensions"
+  | "ListMashupPacks"
   | { SaveConfigDocument: { content: string; expected_revision: string } }
   | { SetSetting: { key: string; value: unknown } }
-  | { SetKeybind: { action: string; key: string; with: string } };
+  | { SetKeybind: { action: string; key: string; with: string } }
+  | { ApplyMashupPack: { id: string | null } };
 
 export interface ConfigDocument {
   content: string;
@@ -910,6 +928,18 @@ export interface ExtensionSummary {
   lsp_source?: string | null;
 }
 
+export interface MashupPackSummary {
+  id: string;
+  name: string;
+  description: string;
+  theme?: string | null;
+  shader_overlay?: string | null;
+  font_family?: string | null;
+  slots?: string[];
+  theme_extends?: string | null;
+  theme_colors?: Record<string, string>;
+}
+
 export type ConfigServerMessage =
   | { Config: { value: unknown } }
   | { ConfigSchema: { descriptors: ConfigDescriptor[] } }
@@ -918,6 +948,8 @@ export type ConfigServerMessage =
   | { SettingWritten: { key: string } }
   | { KeybindWritten: { action: string } }
   | { Extensions: { entries: ExtensionSummary[] } }
+  | { MashupPacks: { entries: MashupPackSummary[] } }
+  | { MashupPackApplied: { id: string | null; config: unknown } }
   | { Error: { message: string } };
 
 export interface ConfigEnvelope {
@@ -1769,6 +1801,7 @@ export type WorkspaceClientMessage =
         client_name?: string | null;
       };
     }
+  | { Ping: { nonce: string } }
   | {
       // F3: fetch the daemon-persisted UI preferences (theme, font
       // size, sidebar widths, last session-layout snapshot) for
@@ -1887,12 +1920,16 @@ export type WorkspaceServerMessage =
       // optionally carries a `peer_identity` string the daemon
       // resolved via `tailscale whois`, suitable for rendering
       // "connected to laptop-A (you@tailnet)" in the chrome.
+      // `connected_host_id` is the stable machine id; unlike the
+      // websocket URL it is unaffected by localhost/LAN/tailnet aliases.
       HelloAck: {
         accepted: boolean;
         reason?: string | null;
         peer_identity?: string | null;
+        connected_host_id?: string | null;
       };
     }
+  | { Pong: { nonce: string } }
   | {
       // F3 reply to `GetWorkplacePreferences`. `prefs` is the
       // daemon's persisted shape; first-run / never-set workspaces
@@ -1914,6 +1951,7 @@ export type WorkspaceServerMessage =
         prefs: WorkplacePreferencesWire;
       };
     }
+  | { HostEnded: { reason: string } }
   | { Error: { message: string } };
 
 export interface WorkspaceEnvelope {

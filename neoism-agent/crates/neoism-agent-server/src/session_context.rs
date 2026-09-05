@@ -14,9 +14,7 @@ use crate::error::ApiError;
 use crate::model_selection::{default_user_model, user_model_from_model_ref};
 use crate::session_loop::wait_for_cancellation;
 use crate::state::{AppState, SessionRun};
-use crate::{
-    ensure_session, message_model, now_millis, use_apply_patch_for_model,
-};
+use crate::{ensure_session, message_model, now_millis, use_apply_patch_for_model};
 
 const DEFAULT_COMPACTION_TAIL_TURNS: usize = 2;
 const MIN_PRESERVE_RECENT_TOKENS: u64 = 2_000;
@@ -86,8 +84,8 @@ pub(crate) async fn compact_session_context(
         crate::session_run::finish_session_run(state, session_id, &run.id).await;
         return Err(ApiError::internal(error.to_string()));
     }
-    if let Err(error) = crate::execution_activity::begin_manual_action(state, session_id, &run.id)
-        .await
+    if let Err(error) =
+        crate::execution_activity::begin_manual_action(state, session_id, &run.id).await
     {
         crate::session_run::finish_session_run(state, session_id, &run.id).await;
         return Err(ApiError::internal(error.to_string()));
@@ -123,11 +121,7 @@ async fn compact_session_context_inner(
     // agent loop (auto-compaction) a run already exists — reuse its cancel flag
     // so aborting the run also stops the summary. Otherwise (manual `/compact`)
     // register a transient run we own and tear down when done.
-    let existing = state
-        .inner
-        .session_coordinator
-        .active_run(session_id)
-        .await;
+    let existing = state.inner.session_coordinator.active_run(session_id).await;
     let (cancel, owned_run_id) = if let Some(run) = existing {
         (run.cancel, None)
     } else {
@@ -177,8 +171,13 @@ async fn run_compaction(
         .map(user_model_from_model_ref)
         .unwrap_or_else(default_user_model);
     let existing_messages = state.inner.store.list_messages(session_id).await?;
-    let tail_start_message_id =
-        protected_tail_start_message_id(state, &model, &existing_messages).await;
+    let tail_start_message_id = protected_tail_start_message_id(
+        state,
+        &info.directory,
+        &model,
+        &existing_messages,
+    )
+    .await;
     let user_message = compaction_user_message(
         &info,
         &model,
@@ -452,7 +451,6 @@ async fn generate_model_compaction_summary(
         return None;
     }
     let model = compaction_model(state, info, model).await;
-    let metadata = state.inner.provider_service.model_metadata(&model).await.unwrap_or_default();
     // Summarize only the head: messages since the last completed compaction,
     // minus the protected tail (the tail stays raw in post-compaction prompts,
     // so replaying it here is wasted context). Older context is carried by the
@@ -464,8 +462,12 @@ async fn generate_model_compaction_summary(
     // context, so an unbounded replay would overflow the very model that is
     // supposed to shrink the session. Drop the oldest head messages until the
     // request fits under the budget; the anchor summary preserves continuity.
-    let budget =
-        crate::session_prompt::compaction_request_token_budget(state, &model).await;
+    let budget = crate::session_prompt::compaction_request_token_budget(
+        state,
+        &info.directory,
+        &model,
+    )
+    .await;
     let prompt = compaction_request_prompt(previous_summary.as_deref());
     let prompt_tokens = crate::session_prompt::estimated_provider_prompt_tokens(&[
         ProviderMessage::text(ProviderRole::User, prompt.clone()),
@@ -487,8 +489,15 @@ async fn generate_model_compaction_summary(
     }
     let mut provider_messages = message_model::compaction_provider_messages(&head);
     provider_messages.push(ProviderMessage::text(ProviderRole::User, prompt));
-    let Ok(runtime) = state.workspace_runtime(&info.directory).await else { return None; };
+    let Ok(runtime) = state.workspace_runtime(&info.directory).await else {
+        return None;
+    };
     let snapshot = runtime.snapshot();
+    let provider = snapshot
+        .provider_services_by_priority()
+        .into_iter()
+        .next()?;
+    let metadata = provider.model_metadata(&model).await.unwrap_or_default();
     let request = ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),
         model_id: model.model_id.clone(),
@@ -508,7 +517,6 @@ async fn generate_model_compaction_summary(
     if cancel.load(Ordering::SeqCst) {
         return None;
     }
-    let provider = snapshot.provider_services_by_priority().into_iter().next()?;
     let activity_segment =
         crate::execution_activity::begin_provider_segment(state, session_id).await;
     let stream = match provider.stream(request).await {
@@ -850,13 +858,15 @@ fn compaction_tail_start_message_id(message: &MessageWithParts) -> Option<String
 
 async fn protected_tail_start_message_id(
     state: &AppState,
+    directory: &str,
     model: &neoism_agent_core::UserModel,
     messages: &[MessageWithParts],
 ) -> Option<String> {
-    let budget =
-        crate::session_prompt::compaction_preserve_recent_token_budget(state, model)
-            .await
-            .clamp(MIN_PRESERVE_RECENT_TOKENS, MAX_PRESERVE_RECENT_TOKENS);
+    let budget = crate::session_prompt::compaction_preserve_recent_token_budget(
+        state, directory, model,
+    )
+    .await
+    .clamp(MIN_PRESERVE_RECENT_TOKENS, MAX_PRESERVE_RECENT_TOKENS);
     let user_starts = messages
         .iter()
         .enumerate()
@@ -1163,13 +1173,11 @@ pub(crate) fn provider_messages_for_session(
 ) -> Vec<ProviderMessage> {
     let host = neoism_agent_plugin_api::PluginHost::default();
     let installed = futures::executor::block_on(host.install(
-            vec![Box::new(
-                neoism_agent_builtins::plugin::SystemPromptPlugin,
-            )],
-            &[],
-            test_plugin_context(&info.directory),
-        ))
-        .expect("test system prompt plugin installs");
+        vec![Box::new(neoism_agent_builtins::plugin::SystemPromptPlugin)],
+        &[],
+        test_plugin_context(&info.directory),
+    ))
+    .expect("test system prompt plugin installs");
     let snapshot = installed.snapshot();
     provider_messages_for_session_with_plugins(
         &snapshot,
@@ -1184,10 +1192,12 @@ pub(crate) fn provider_messages_for_session(
 #[cfg(test)]
 fn test_plugin_context(directory: &str) -> neoism_agent_plugin_api::PluginContext {
     neoism_agent_plugin_api::PluginContext::new(
-        neoism_agent_plugin_api::RuntimeScope::Workspace(neoism_agent_plugin_api::WorkspaceIdentity {
-            id: directory.to_string(),
-            root: directory.into(),
-        }),
+        neoism_agent_plugin_api::RuntimeScope::Workspace(
+            neoism_agent_plugin_api::WorkspaceIdentity {
+                id: directory.to_string(),
+                root: directory.into(),
+            },
+        ),
         neoism_agent_plugin_api::CapabilityGrants::default()
             .allow(neoism_agent_plugin_api::HostCapability::ConfigRead)
             .allow(neoism_agent_plugin_api::HostCapability::WorkspaceRead),
@@ -1203,7 +1213,12 @@ pub(crate) fn provider_messages_for_session_with_plugins(
     goals_enabled: bool,
 ) -> Vec<ProviderMessage> {
     let mut provider_messages = Vec::new();
-    provider_messages.extend(plugin_system_messages(plugins, info, model_id, goals_enabled));
+    provider_messages.extend(plugin_system_messages(
+        plugins,
+        info,
+        model_id,
+        goals_enabled,
+    ));
     if let Some(update) = context_epoch_update_message(info) {
         provider_messages.push(update);
     }
@@ -1272,11 +1287,19 @@ fn plugin_system_messages(
     let mut instructions = Vec::new();
     let mut service_fragments = Vec::new();
     if let Some(epoch) = crate::context_epoch::from_session(info) {
-        if let Some(values) = epoch.snapshot.sources.get("instructions").and_then(Value::as_array) {
-            instructions.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
+        if let Some(values) = epoch
+            .snapshot
+            .sources
+            .get("instructions")
+            .and_then(Value::as_array)
+        {
+            instructions
+                .extend(values.iter().filter_map(Value::as_str).map(str::to_string));
         }
         for (id, value) in &epoch.snapshot.sources {
-            if !id.starts_with("service:") { continue; }
+            if !id.starts_with("service:") {
+                continue;
+            }
             if let Some(fragment) = value.as_str().filter(|value| !value.is_empty()) {
                 service_fragments.push(fragment.to_string());
             }
@@ -1285,13 +1308,26 @@ fn plugin_system_messages(
     let mut options = std::collections::BTreeMap::from([
         (
             "editingTool".to_string(),
-            Value::String(if use_apply_patch_for_model(model_id) { "apply_patch" } else { "edit" }.into()),
+            Value::String(
+                if use_apply_patch_for_model(model_id) {
+                    "apply_patch"
+                } else {
+                    "edit"
+                }
+                .into(),
+            ),
         ),
         ("instructions".to_string(), serde_json::json!(instructions)),
-        ("serviceFragments".to_string(), serde_json::json!(service_fragments)),
+        (
+            "serviceFragments".to_string(),
+            serde_json::json!(service_fragments),
+        ),
     ]);
     if goals_enabled {
-        options.insert("goal".into(), serde_json::to_value(info.goal()).unwrap_or(Value::Null));
+        options.insert(
+            "goal".into(),
+            serde_json::to_value(info.goal()).unwrap_or(Value::Null),
+        );
     }
     let request = neoism_agent_plugin_api::ServiceRequest {
         workspace_id: info.workspace_id.as_ref().map(ToString::to_string),
@@ -1327,28 +1363,31 @@ fn plugin_run_system_message(
             options: Default::default(),
         },
     };
-    plugins.prompt_services_by_priority().into_iter().find_map(|service| {
-        service.render(&request).ok().map(|prompt| {
-            ProviderMessage::text(ProviderRole::System, prompt.content)
+    plugins
+        .prompt_services_by_priority()
+        .into_iter()
+        .find_map(|service| {
+            service
+                .render(&request)
+                .ok()
+                .map(|prompt| ProviderMessage::text(ProviderRole::System, prompt.content))
         })
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn system_prompt_snapshot() -> std::sync::Arc<neoism_agent_plugin_api::RegistrySnapshot> {
+    fn system_prompt_snapshot(
+    ) -> std::sync::Arc<neoism_agent_plugin_api::RegistrySnapshot> {
         let host = neoism_agent_plugin_api::PluginHost::default();
         futures::executor::block_on(host.install(
-                vec![Box::new(
-                    neoism_agent_builtins::plugin::SystemPromptPlugin,
-                )],
-                &[],
-                test_plugin_context("."),
-            ))
-            .expect("install system prompt plugin")
-            .snapshot()
+            vec![Box::new(neoism_agent_builtins::plugin::SystemPromptPlugin)],
+            &[],
+            test_plugin_context("."),
+        ))
+        .expect("install system prompt plugin")
+        .snapshot()
     }
 
     fn workspace_system_message(info: &SessionInfo, model_id: &str) -> ProviderMessage {
@@ -1408,7 +1447,12 @@ mod tests {
             .try_start_run(&session_id, run.clone())
             .await
             .unwrap();
-        state.inner.store.start_run(&run.id, &session_id).await.unwrap();
+        state
+            .inner
+            .store
+            .start_run(&run.id, &session_id)
+            .await
+            .unwrap();
 
         release_owned_compaction_run(&state, &session_id, Some(run.id.clone())).await;
 
@@ -1426,7 +1470,10 @@ mod tests {
             .session_run_statuses(&session_id)
             .await
             .unwrap();
-        assert_eq!(statuses, vec![("owned-compaction-run".to_string(), "completed".to_string())]);
+        assert_eq!(
+            statuses,
+            vec![("owned-compaction-run".to_string(), "completed".to_string())]
+        );
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_file(path);
     }
@@ -1522,12 +1569,7 @@ mod tests {
     fn standard_workspace_prompt_is_product_neutral_and_service_context_is_optional() {
         let mut info = test_session_info();
         let standard = workspace_system_message(&info, "stub").content;
-        for assumption in [
-            "Neoism",
-            "vault",
-            "product documentation",
-            "durable memory",
-        ] {
+        for assumption in ["Neoism", "vault", "product documentation", "durable memory"] {
             assert!(!standard
                 .to_ascii_lowercase()
                 .contains(&assumption.to_ascii_lowercase()));

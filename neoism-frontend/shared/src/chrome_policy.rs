@@ -737,6 +737,25 @@ mod tests {
     }
 
     #[test]
+    fn focused_buffer_tab_owns_a_chrome_rect_cursor() {
+        let state = TrailCursorOverlayState {
+            tab_cursor_available: true,
+            code_cursor_available: true,
+            markdown_cursor_available: true,
+            terminal_block_input_active: true,
+            trail_cursor_enabled: true,
+            ..TrailCursorOverlayState::default()
+        };
+
+        let target = trail_cursor_overlay_target(state);
+        assert_eq!(target, Some(TrailCursorOverlayTarget::Tabs));
+        assert_eq!(
+            target.map(trail_cursor_overlay_draw_kind),
+            Some(TrailCursorOverlayDrawKind::ChromeRect)
+        );
+    }
+
+    #[test]
     fn editor_reserves_full_workspace_chrome() {
         assert_eq!(workspace_chrome_margins(metrics(false)).editor_top, 68.0);
         assert_eq!(workspace_chrome_margins(metrics(true)).editor_top, 68.0);

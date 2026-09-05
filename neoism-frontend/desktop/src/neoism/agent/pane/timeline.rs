@@ -7,7 +7,11 @@ impl NeoismAgentPane {
             .map(|anchor| (anchor.key.clone(), anchor.screen_offset))
     }
 
-    pub fn timeline_view_anchor_matches(&self, source_index: usize, source_len: usize) -> bool {
+    pub fn timeline_view_anchor_matches(
+        &self,
+        source_index: usize,
+        source_len: usize,
+    ) -> bool {
         self.timeline_view_anchor
             .as_ref()
             .is_some_and(|anchor| anchor.key.is_for_source(source_index, source_len))

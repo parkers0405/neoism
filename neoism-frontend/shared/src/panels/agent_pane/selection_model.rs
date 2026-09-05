@@ -57,6 +57,25 @@ impl SelectableLine {
             })
     }
 
+    /// Byte offset of the grapheme painted under `x`. Unlike `caret_at_x`,
+    /// this chooses the interval between adjacent measured caret stops, so a
+    /// hard hold on the right half of a wide glyph still targets that glyph.
+    pub fn text_offset_at_x(&self, x: f32) -> usize {
+        self.caret_stops
+            .windows(2)
+            .find(|pair| x < pair[1].x)
+            .map(|pair| pair[0].byte_offset)
+            .unwrap_or_else(|| self.text.len().saturating_sub(1))
+    }
+
+    pub fn caret_for_offset(&self, offset: usize) -> SelectableCaretStop {
+        self.caret_stops
+            .iter()
+            .copied()
+            .find(|stop| stop.byte_offset == offset)
+            .unwrap_or_else(|| self.caret_at_x(self.rect[0]))
+    }
+
     pub fn slice_between(&self, a: usize, b: usize) -> String {
         let (start, end) = if a <= b { (a, b) } else { (b, a) };
         self.text

@@ -50,7 +50,9 @@ pub(crate) async fn sessions_export(
 ) -> Result<Json<ExportSessionsResponse>, ApiError> {
     if let Some(Extension(claims)) = claims {
         if !crate::caller::allows_directory(&claims, &request.workspace_root) {
-            return Err(ApiError::forbidden("The caller cannot export this workspace"));
+            return Err(ApiError::forbidden(
+                "The caller cannot export this workspace",
+            ));
         }
     }
     let bundles = export_sessions_under_workspace_root(&state, &request.workspace_root)

@@ -1272,7 +1272,9 @@ impl LspClient {
                 // Give the server a bounded opportunity to consume `exit` and
                 // terminate itself before Drop enforces process-group cleanup.
                 let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-                while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+                while child.try_wait().ok().flatten().is_none()
+                    && Instant::now() < deadline
+                {
                     std::thread::sleep(Duration::from_millis(5));
                 }
             }

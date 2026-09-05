@@ -16,9 +16,8 @@ pub struct PtySessionConfig {
     pub args: Vec<String>,
     /// Working directory for the child. `None` keeps the parent's cwd.
     pub cwd: Option<PathBuf>,
-    /// Extra environment variables to set in the child. Pairs of
-    /// `(KEY, VALUE)`. Reserved for future use — the current native
-    /// spawn path inherits env from the parent process.
+    /// Extra environment variables to set in the child. The child still
+    /// inherits the complete parent environment; matching keys are replaced.
     pub env: Vec<(String, String)>,
     /// Initial column count.
     pub cols: u16,

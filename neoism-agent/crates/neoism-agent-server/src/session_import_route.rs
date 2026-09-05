@@ -52,7 +52,9 @@ pub(crate) async fn session_import(
 ) -> Result<Json<ImportSessionResponse>, ApiError> {
     if let Some(Extension(claims)) = claims {
         if !crate::caller::allows_directory(&claims, &request.target_workspace_root) {
-            return Err(ApiError::forbidden("The caller cannot import into this workspace"));
+            return Err(ApiError::forbidden(
+                "The caller cannot import into this workspace",
+            ));
         }
     }
     let session_id =

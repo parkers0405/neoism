@@ -120,7 +120,9 @@ pub(crate) async fn v2_events(
     let session_id = query.session_id;
     let family_root = match session_id.as_deref() {
         Some(requested) => match state.inner.store.get_session(requested).await {
-            Ok(Some(session)) => Some(crate::execution_activity::root_session_id(&state, &session).await),
+            Ok(Some(session)) => {
+                Some(crate::execution_activity::root_session_id(&state, &session).await)
+            }
             _ => Some(requested.to_string()),
         },
         None => None,
@@ -542,7 +544,14 @@ pub(crate) async fn v2_prompt(
         ));
     }
     let prompt = request.into_prompt_request()?;
-    if prompt.no_reply && !state.inner.session_coordinator.active_run(&session_id).await.is_some() {
+    if prompt.no_reply
+        && !state
+            .inner
+            .session_coordinator
+            .active_run(&session_id)
+            .await
+            .is_some()
+    {
         crate::session_prompt::append_prompt(&state, &session_id, prompt, false).await?;
         crate::execution_activity::finish_if_quiescent(&state, &session_id).await;
         return Ok(StatusCode::NO_CONTENT.into_response());

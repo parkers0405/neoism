@@ -191,12 +191,16 @@ fn register_and_place_plain_paragraph(
     let local = visible
         .saturating_sub(line.visible_start)
         .min(stops.len().saturating_sub(1));
-    pane.set_cursor_rect(Some([
+    let rect = [
         x + line.x_offset + stops.get(local).copied().unwrap_or_default(),
         cursor_y_for_text_line(y + row_index as f32 * line_height(opts), opts),
         cursor_cell_width(opts),
         caret_height(opts),
-    ]));
+    ];
+    pane.set_cursor_rect(match opts.clip_rect {
+        Some(clip) => cursor_rect_intersection(rect, clip),
+        None => Some(rect),
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

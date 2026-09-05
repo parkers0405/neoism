@@ -91,6 +91,7 @@ impl<A: Copy> BufferTabs<A> {
         self.layout.clear();
         self.focused_cursor_rect = None;
         self.new_tab_rect = None;
+        self.strip_viewport_width = available_width.max(0.0);
 
         if !self.visible || available_width <= 0.0 {
             return;
@@ -144,13 +145,68 @@ impl<A: Copy> BufferTabs<A> {
         let font_size = consts::FONT_SIZE * scale;
         let tab_pad_x = consts::TAB_PADDING_X * scale;
         let close_size = consts::CLOSE_BTN_SIZE * scale;
-        let close_gap = consts::CLOSE_BTN_GAP * scale;
 
-        let tab_width = Self::tab_width_for(self.tabs.len(), available_width);
+        let attrs = Attributes::default();
+        let tab_geometries: Vec<TabVisualGeometry> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, tab)| {
+                let title_width: f32 = tab
+                    .title
+                    .chars()
+                    .map(|c| sugarloaf.char_advance(c, attrs, font_size))
+                    .sum();
+                let uses_square_icon =
+                    tab.agent_kind.is_some() || tab.neoism_agent_route_id.is_some();
+                let icon_label = tab
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(tab.title.as_str());
+                let icon_glyph = if tab.neoism_agent_route_id.is_some() {
+                    NEOISM_AGENT_ICON
+                } else if let Some(page) = tab.chrome_page {
+                    match page.kind {
+                        ChromePageKind::Extensions => "\u{f12e}",
+                        ChromePageKind::NeoWorld => "\u{f1b0}",
+                    }
+                } else if tab.is_terminal() {
+                    crate::primitives::look::icon_override("tab.terminal")
+                        .and_then(|o| o.glyph)
+                        .unwrap_or(consts::TERMINAL_ICON)
+                } else if let Some(icon) = tab.custom_icon.as_ref() {
+                    icon.as_str()
+                } else {
+                    icon_for_file(icon_label).0
+                };
+                let icon_width = if uses_square_icon {
+                    consts::ICON_FONT_SIZE * scale
+                } else {
+                    let opts = DrawOpts {
+                        font_size: consts::ICON_FONT_SIZE * scale,
+                        ..DrawOpts::default()
+                    };
+                    sugarloaf
+                        .text_mut()
+                        .measure(icon_glyph, &opts)
+                        .max(consts::ICON_FONT_SIZE * scale)
+                };
+                Self::visual_tab_geometry(
+                    title_width,
+                    icon_width,
+                    !self.is_root_terminal_at(ix),
+                    scale,
+                )
+            })
+            .collect();
         let new_tab_btn_w = consts::NEW_TAB_BTN_WIDTH * scale;
+        let tab_widths: Vec<f32> = tab_geometries.iter().map(|g| g.tab_width).collect();
         // The trailing "+" button extends the scrollable content past the
         // last tab so it can scroll fully into view when tabs overflow.
-        let total_w = tab_width * self.tabs.len() as f32 + new_tab_btn_w;
+        let tabs_w: f32 = tab_widths.iter().sum();
+        let total_w = tabs_w + new_tab_btn_w;
         let max_scroll = (total_w - available_width).max(0.0);
 
         if self.pending_ensure_active {
@@ -172,7 +228,11 @@ impl<A: Copy> BufferTabs<A> {
                 } else {
                     self.active
                 };
-                self.ensure_index_visible(reveal_ix, available_width);
+                self.ensure_index_visible_with_widths(
+                    reveal_ix,
+                    available_width,
+                    &tab_widths,
+                );
             }
             self.pending_ensure_active = false;
         }
@@ -200,8 +260,8 @@ impl<A: Copy> BufferTabs<A> {
 
         // Chrome color: the strip (and inactive tabs) sit on `surface`,
         // a shade above the pane `bg`, so the active tab can drop to the
-        // pane color and read as part of the content (Obsidian-style).
-        // The strip's top corners round (matching the tab pills); the
+        // pane color and read as part of the content (editor-tab style).
+        // The strip's top corners round with the outer chrome; the
         // bottom is squared off so it stays flush with the breadcrumbs /
         // content directly below.
         let strip_radius = (6.0 * scale).min(strip_h * 0.5).min(available_width * 0.5);
@@ -269,8 +329,10 @@ impl<A: Copy> BufferTabs<A> {
         } else {
             None
         };
+        let mut slot_offset = 0.0;
         for ix in 0..self.tabs.len() {
-            let slot_tab_x = x_left + ix as f32 * tab_width - scroll_x;
+            let tab_width = tab_widths[ix];
+            let slot_tab_x = x_left + slot_offset - scroll_x;
             let armed_self = drag_render
                 .map(|(d_ix, _, _, _, armed)| d_ix == ix && armed)
                 .unwrap_or(false);
@@ -306,45 +368,29 @@ impl<A: Copy> BufferTabs<A> {
                     )
                 };
             self.layout.push((slot_tab_x, tab_width));
+            slot_offset += tab_width;
             if armed_self {
                 continue;
             }
 
-            let hover_scale = if let Some((t, from, to)) = hover_anim {
+            let hover_strength = if let Some((t, from, to)) = hover_anim {
                 if to == Some(ix) {
-                    1.0 + (consts::TAB_HOVER_SCALE - 1.0) * t
+                    t
                 } else if from == Some(ix) {
-                    1.0 + (consts::TAB_HOVER_SCALE - 1.0) * (1.0 - t)
+                    1.0 - t
                 } else {
-                    1.0
+                    0.0
                 }
             } else if hover_ix == Some(ix) {
-                consts::TAB_HOVER_SCALE
-            } else {
                 1.0
-            };
-            let tab_font_size = font_size * hover_scale;
-            let tab_order = if hover_scale > 1.0 {
-                tab_order.saturating_add(1)
             } else {
-                tab_order
+                0.0
             };
-            let accent_order = if hover_scale > 1.0 {
-                accent_order.saturating_add(1)
-            } else {
-                accent_order
-            };
-            let text_order = if hover_scale > 1.0 {
-                text_order.saturating_add(1)
-            } else {
-                text_order
-            };
-            let scale_dx = tab_width * (hover_scale - 1.0) * 0.5;
-            let scale_dy = strip_h * (hover_scale - 1.0) * 0.5;
-            let paint_x = tab_x - scale_dx;
-            let paint_y = y_top - scale_dy;
-            let paint_w = tab_width * hover_scale;
-            let paint_h = strip_h * hover_scale;
+            let tab_font_size = font_size;
+            let paint_x = tab_x;
+            let paint_y = y_top;
+            let paint_w = tab_width;
+            let paint_h = strip_h;
 
             if paint_x + paint_w <= strip_left || paint_x >= strip_right {
                 continue;
@@ -357,61 +403,58 @@ impl<A: Copy> BufferTabs<A> {
             let is_active = ix == self.active;
             let is_focused =
                 self.focused && ix == self.focused_index.min(self.tabs.len() - 1);
-            // Obsidian-style two-tone: chrome (strip + inactive tabs) sits on
-            // `surface`; the ACTIVE tab drops to the pane `bg` with a rounded
-            // top so it reads as one piece with the content below.
-            let bg = if is_active {
-                theme.f32(theme.bg)
-            } else if is_focused {
-                theme.f32_alpha(theme.accent, 0.10)
+            let surface_state = if is_active {
+                TabSurfaceState::Active
+            } else if hover_strength > 0.0 || is_focused {
+                TabSurfaceState::Hovered
             } else {
-                theme.f32(theme.surface)
+                TabSurfaceState::Inactive
             };
+            let surface = tab_surface_geometry(
+                paint_x,
+                paint_y,
+                paint_w,
+                paint_h,
+                scale,
+                surface_state,
+            );
             if visible_w > 0.0 {
-                if is_active {
-                    let radius = (6.0 * scale).min(paint_h * 0.5).min(visible_w * 0.5);
-                    // Drawn at `accent_order` so it paints over the strip's
-                    // bottom hairline — the active tab merges flush into the
-                    // pane with no separating line.
+                if surface_state != TabSurfaceState::Inactive {
+                    let bg = if is_active {
+                        theme.f32(theme.bg)
+                    } else if is_focused {
+                        theme.f32_alpha(theme.accent, 0.10)
+                    } else {
+                        theme.f32_alpha(theme.hover, 0.72 * hover_strength)
+                    };
+                    let order = if is_active { accent_order } else { tab_order };
+                    // Fill the exact slot and square its bottom edge. Small
+                    // top corners retain editor-tab separation without a
+                    // floating pill silhouette.
                     sugarloaf.rounded_rect(
                         None,
                         visible_left,
-                        paint_y,
+                        surface.y,
                         visible_w,
-                        paint_h,
+                        surface.height,
                         bg,
                         consts::DEPTH,
-                        radius,
-                        accent_order,
+                        surface.top_radius.min(visible_w * 0.5),
+                        order,
                     );
-                    // Square off the bottom so only the top corners round.
-                    sugarloaf.rect(
-                        None,
-                        visible_left,
-                        paint_y + paint_h - radius,
-                        visible_w,
-                        radius,
-                        bg,
-                        consts::DEPTH,
-                        accent_order,
-                    );
-                } else if is_focused {
-                    // Focused (but inactive) tab — accent tint overlay.
-                    sugarloaf.rect(
-                        None,
-                        visible_left,
-                        paint_y,
-                        visible_w,
-                        paint_h,
-                        bg,
-                        consts::DEPTH,
-                        tab_order,
-                    );
+                    if surface.top_radius > 0.0 {
+                        sugarloaf.rect(
+                            None,
+                            visible_left,
+                            surface.y + surface.height - surface.top_radius,
+                            visible_w,
+                            surface.top_radius,
+                            bg,
+                            consts::DEPTH,
+                            order,
+                        );
+                    }
                 }
-                // Plain inactive tabs paint no background: they share the
-                // strip's `surface` color, so a square rect here would
-                // just re-square the strip's rounded top corners. Letting
-                // the rounded strip show through keeps them rounded.
             }
 
             if is_focused && visible_w > 0.0 {
@@ -428,7 +471,7 @@ impl<A: Copy> BufferTabs<A> {
             } else {
                 theme.u8(theme.muted)
             };
-            let icon_size = consts::ICON_FONT_SIZE * scale * hover_scale;
+            let icon_size = consts::ICON_FONT_SIZE * scale;
             let icon_gap = consts::ICON_GAP * scale;
             let is_terminal = tab.is_terminal();
             let agent_for_tab = tab.agent_kind.or_else(|| {
@@ -504,34 +547,10 @@ impl<A: Copy> BufferTabs<A> {
             // visual width, so using the raw measurement left the title
             // bumping right up against the icon. Clamping to `icon_size`
             // gives a consistent icon column + gap for all tab kinds.
-            let icon_w = if agent_for_tab.is_some() || tab.neoism_agent_route_id.is_some()
-            {
-                icon_size
-            } else {
-                sugarloaf
-                    .text_mut()
-                    .measure(icon_glyph, &icon_opts)
-                    .max(icon_size)
-            };
+            let geometry = tab_geometries[ix];
+            let icon_w = geometry.icon_width;
+            let title_max_width = geometry.title_clip_width;
 
-            let close_reserved = if self.is_root_terminal_at(ix) {
-                0.0
-            } else {
-                close_size + close_gap
-            };
-            // A font's visual glyph bounds can extend a few pixels beyond its
-            // measured advance (Monocraft is a common example). Keep that
-            // overhang out of the close button and trailing + slot.
-            let title_overhang_guard = 5.0 * scale;
-            let title_max_width = (tab_width
-                - tab_pad_x * 2.0
-                - close_reserved
-                - icon_w
-                - icon_gap
-                - title_overhang_guard)
-                .max(0.0);
-
-            let attrs = Attributes::default();
             let title = Self::fit_title(&tab.title, title_max_width, |c| {
                 sugarloaf.char_advance(c, attrs, tab_font_size)
             });
@@ -632,7 +651,8 @@ impl<A: Copy> BufferTabs<A> {
                 }
             }
 
-            let close_cx = tab_x + tab_width - tab_pad_x;
+            let close_cx =
+                tab_x + geometry.close_center_x.unwrap_or(tab_width - tab_pad_x);
             if self.is_root_terminal_at(ix) {
                 // Workspace shell tab; no close glyph.
             } else if tab.modified {
@@ -665,7 +685,7 @@ impl<A: Copy> BufferTabs<A> {
                         text_order,
                     );
                 }
-            } else {
+            } else if is_active || hover_ix == Some(ix) {
                 let close_hovered = self.hover == Some(TabHit::Close(ix));
                 let close_font_size = if close_hovered {
                     tab_font_size * 1.16
@@ -706,7 +726,7 @@ impl<A: Copy> BufferTabs<A> {
         // `TabHit::NewTab`.
         {
             let btn_w = consts::NEW_TAB_BTN_WIDTH * scale;
-            let btn_x = x_left + self.tabs.len() as f32 * tab_width - scroll_x;
+            let btn_x = x_left + tabs_w - scroll_x;
 
             let plus_idx = self.tabs.len();
             let is_focused_plus = self.focused && self.focused_index == plus_idx;
@@ -805,7 +825,10 @@ impl<A: Copy> BufferTabs<A> {
             drag_render
         {
             if let Some(tab) = self.tabs.get(dragged_ix) {
-                let float_w = tab_width;
+                let float_w = tab_widths
+                    .get(dragged_ix)
+                    .copied()
+                    .unwrap_or(consts::MIN_TAB_WIDTH * scale);
                 let float_h = strip_h;
                 let float_x = (x_left + current_local_x - grab_offset - scroll_x)
                     .max(strip_left - float_w * 0.5);
@@ -970,14 +993,13 @@ impl<A: Copy> BufferTabs<A> {
             consts::ORDER_TEXT + 9,
         );
 
-        let tab_width = Self::tab_width_for(self.tabs.len().max(1), available_width);
-        let geom = drop_preview_geometry(
+        let widths = self.geometry_widths();
+        let geom = drop_preview_geometry_for_widths(
             x_left,
             available_width,
             mouse_x,
             self.scroll_x,
-            self.tabs.len(),
-            tab_width,
+            &widths,
         );
         sugarloaf.rounded_rect(
             None,

@@ -14,7 +14,6 @@ use neoism_ui::panels::command_palette::{PaletteHostCapabilities, PaletteSurface
 use neoism_ui::panels::finder::{FinderMode, ReferenceRow};
 use neoism_ui::panels::notifications::NotificationLevel;
 use neoism_ui::PanelKey;
-use std::path::Path;
 
 thread_local! {
     /// Last `(pattern, selected row line)` the buffer-search live-drive
@@ -72,12 +71,21 @@ impl ChromeBridge {
         }) else {
             return 0;
         };
+        if self.chrome.file_browser.is_active() {
+            self.chrome.file_browser.pointer_down(x, y, 1);
+            return 2;
+        }
         if self.chrome.command_palette.is_visible() {
             return match self.chrome.command_palette.hit_test(x, y, pw, sf) {
-                Ok(Some(_)) => {
-                    self.chrome.command_palette.hover(x, y, pw, sf);
+                Ok(Some(index)) => {
+                    // Hover is intentionally visual-only so mouse motion does
+                    // not steal keyboard selection. A press must explicitly
+                    // move selection before the common commit path reads it.
+                    self.chrome.command_palette.select_clicked(index);
+                    let persistent_cd = self.chrome.command_palette.is_cd_query()
+                        && self.chrome.command_palette.terminal_directory_target().is_some();
                     self.pick_palette_action();
-                    self.chrome.command_palette.set_enabled(false);
+                    if !persistent_cd { self.chrome.command_palette.set_enabled(false); }
                     self.relayout_chrome();
                     1
                 }
@@ -98,6 +106,24 @@ impl ChromeBridge {
                 Err(()) => 0,
             };
         }
+        if self.chrome.context_menu.is_visible() {
+            return match self.chrome.context_menu.hit_test(x, y) {
+                Ok(Some(_)) => {
+                    self.chrome.context_menu.hover(x, y);
+                    let action = self.chrome.context_menu.selected_action();
+                    self.chrome.context_menu.close();
+                    if let Some(action) = action {
+                        self.apply_web_markdown_menu_action(action);
+                    }
+                    1
+                }
+                Ok(None) => 2,
+                Err(()) => {
+                    self.chrome.context_menu.close();
+                    1
+                }
+            };
+        }
         0
     }
 
@@ -110,6 +136,14 @@ impl ChromeBridge {
         }) else {
             return false;
         };
+        if self.chrome.modal.is_active() {
+            let _ = self.chrome.modal.scroll_at(x, y, pw, sf, delta_pixels);
+            return true;
+        }
+        if self.chrome.file_browser.is_active() {
+            self.chrome.file_browser.scroll_pixels(delta_pixels);
+            return true;
+        }
         if self.chrome.command_palette.is_visible() {
             if let Some(rect) = self.chrome.command_palette.active_rect(pw, sf) {
                 if x >= rect[0]
@@ -117,7 +151,9 @@ impl ChromeBridge {
                     && y >= rect[1]
                     && y <= rect[1] + rect[3]
                 {
-                    self.chrome.command_palette.scroll_pixels(delta_pixels);
+                    // Shared panels use the desktop/winit sign (positive is
+                    // up); this exported API deliberately accepts DOM sign.
+                    self.chrome.command_palette.scroll_pixels(-delta_pixels);
                     return true;
                 }
             }
@@ -126,12 +162,163 @@ impl ChromeBridge {
         if self.chrome.finder.is_visible() {
             if let Some([rx, ry, rw, rh]) = self.chrome.finder.active_rect((pw, ph, sf)) {
                 if x >= rx && x <= rx + rw && y >= ry && y <= ry + rh {
-                    self.chrome.finder.scroll_pixels(delta_pixels);
+                    self.chrome.finder.scroll_pixels(-delta_pixels);
                     return true;
                 }
             }
         }
+        if let Some([rx, ry, rw, rh]) = self.chrome.context_menu.rect() {
+            if x >= rx && x <= rx + rw && y >= ry && y <= ry + rh {
+                self.chrome.context_menu.scroll_pixels(-delta_pixels);
+                return true;
+            }
+        }
         false
+    }
+
+    /// Direct touch variant for center picker lists. The first gesture delta
+    /// is threshold-re-fed by TouchGesturePolicy and remains a non-decaying
+    /// sub-row visual offset.
+    pub fn modal_touch_scroll(&mut self, x: f32, y: f32, finger_delta: f32) -> bool {
+        let Some((pw, ph, sf)) = self.rendered.sugarloaf_mut().map(|s| {
+            let size = s.window_size();
+            (size.width as f32, size.height as f32, s.scale_factor())
+        }) else {
+            return false;
+        };
+        if self.chrome.file_browser.is_active() {
+            self.chrome.file_browser.scroll_pixels(-finger_delta);
+            return true;
+        }
+        if self.chrome.command_palette.is_visible() {
+            if let Some(rect) = self.chrome.command_palette.active_rect(pw, sf) {
+                if x >= rect[0]
+                    && x <= rect[0] + rect[2]
+                    && y >= rect[1]
+                    && y <= rect[1] + rect[3]
+                {
+                    self.chrome
+                        .command_palette
+                        .scroll_touch_pixels(finger_delta);
+                    return true;
+                }
+            }
+            return false;
+        }
+        if self.chrome.finder.is_visible() {
+            if let Some([rx, ry, rw, rh]) = self.chrome.finder.active_rect((pw, ph, sf)) {
+                if x >= rx && x <= rx + rw && y >= ry && y <= ry + rh {
+                    self.chrome.finder.scroll_touch_pixels(finger_delta);
+                    return true;
+                }
+            }
+            return false;
+        }
+        // Context-menu rows have a bounded accumulator and no inertial clock.
+        if let Some([rx, ry, rw, rh]) = self.chrome.context_menu.rect() {
+            if x >= rx && x <= rx + rw && y >= ry && y <= ry + rh {
+                self.chrome.context_menu.scroll_pixels(finger_delta);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Direct finger-delta routing for settings, tree, notes and top tabs.
+    pub fn chrome_touch_scroll_at(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> bool {
+        self.chrome.touch_scroll_at(x, y, dx, dy)
+    }
+
+    /// Wheel ownership for shared side panels and the horizontal tab strip.
+    /// `delta_mode` mirrors DOM WheelEvent (0 pixels, 1 lines, 2 pages).
+    pub fn chrome_wheel_scroll_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+        delta_mode: u32,
+        shift: bool,
+    ) -> bool {
+        let mode = match delta_mode {
+            1 => neoism_ui::event::WheelMode::Line,
+            2 => neoism_ui::event::WheelMode::Page,
+            _ => neoism_ui::event::WheelMode::Pixel,
+        };
+        self.chrome.wheel_scroll_at(x, y, dx, dy, mode, shift)
+    }
+
+    /// Any painted overlay that must own pointer/wheel input before the
+    /// terminal/editor/agent surface. The host uses this only as a z-order
+    /// gate; interaction state remains in the shared Rust panels.
+    pub fn pointer_overlay_active(&self) -> bool {
+        self.chrome.chrome_overlay_active()
+            || self.chrome.active_chrome_page().is_some()
+            || self.chrome.file_browser.is_active()
+            || self.chrome.share_sheet.is_visible()
+            || self.chrome.command_palette.is_visible()
+            || self.chrome.finder.is_visible()
+            || self.chrome.git_diff.is_visible()
+            || self.chrome.context_menu.is_visible()
+    }
+
+    /// Full-window Settings/About layer. Unlike center cards it is routed
+    /// through `Chrome::handle_event`, which owns all of its hit semantics.
+    pub fn chrome_page_overlay_active(&self) -> bool {
+        self.chrome.chrome_overlay_active()
+    }
+
+    pub fn overlay_text_entry_at(&mut self, x: f32, y: f32) -> bool {
+        !self.mobile_text_field_at(x, y).is_empty()
+    }
+
+    /// Central painted-field classifier consumed by the mobile host. Ordering
+    /// mirrors pointer z-order, so an overlay field always beats the Agent
+    /// composer beneath it and a row miss never falls through.
+    pub fn mobile_text_field_at(&mut self, x: f32, y: f32) -> String {
+        if self.chrome.file_browser.text_entry_at(x, y) {
+            return "file-browser".to_string();
+        }
+        if self.chrome.settings_page.text_entry_at(x, y) {
+            return "settings".to_string();
+        }
+        if self.chrome.modal.text_entry_at(x, y) {
+            return "universal-modal".to_string();
+        }
+        if self.chrome.active_chrome_page()
+            == Some(neoism_ui::panels::buffer_tabs::ChromePageKind::Extensions)
+            && self.chrome.extensions_page.text_entry_at(x, y)
+        {
+            return "extensions".to_string();
+        }
+        if self
+            .chrome
+            .agent_pane()
+            .is_some_and(|pane| pane.question_text_entry_at(x, y))
+        {
+            return "agent-question".to_string();
+        }
+        if self.chrome.agent_side_panel_takeover_active()
+            && self
+                .chrome
+                .agent_pane()
+                .is_some_and(|pane| pane.side_panel().session_search_contains(x, y))
+        {
+            return "agent-session-search".to_string();
+        }
+        let Some((pw, ph, sf)) = self.rendered.sugarloaf_mut().map(|s| {
+            let size = s.window_size();
+            (size.width as f32, size.height as f32, s.scale_factor())
+        }) else {
+            return String::new();
+        };
+        if self.chrome.command_palette.text_entry_at(x, y, pw, sf) {
+            return "command-palette".to_string();
+        }
+        if self.chrome.finder.text_entry_at(x, y, (pw, ph, sf)) {
+            return "finder".to_string();
+        }
+        String::new()
     }
 
     /// Drain the file-tree's queue of activated paths (the user
@@ -390,16 +577,28 @@ impl ChromeBridge {
         }
 
         if self.chrome.command_palette.is_cd_query() {
-            let path = self
+            let selected = self
                 .chrome
                 .command_palette
                 .get_selected_cd_directory()
-                .map(|entry| entry.absolute_path)
-                .or_else(|| self.chrome.command_palette.get_typed_cd_target());
-            if let Some(path) = path.filter(|path| !path.trim().is_empty()) {
-                self.pending_palette_intents
-                    .push(PaletteIntent::Directory { path });
-                return true;
+                .map(|entry| entry.absolute_path);
+            let intent = if let Some(path) = selected.clone() {
+                self.chrome.command_palette.change_terminal_directory_intent(path)
+            } else {
+                self.chrome.command_palette.typed_change_terminal_directory_intent()
+            };
+            if let Some(intent) = intent {
+                    self.pending_palette_intents.push(
+                        PaletteIntent::ChangeTerminalDirectory {
+                            route_id: intent.target.route_id,
+                            session_id: intent.target.session_id,
+                            cwd: intent.target.cwd,
+                            shell_kind: intent.target.shell_kind.label().to_string(),
+                            path: intent.destination,
+                            selected: selected.is_some(),
+                        },
+                    );
+                    return true;
             }
             return false;
         }
@@ -418,8 +617,9 @@ impl ChromeBridge {
                     (!typed.is_empty()).then_some(typed)
                 });
             if let Some(command) = command {
+                let plan = web_buffer_ex_plan(&command);
                 self.pending_palette_intents
-                    .push(PaletteIntent::ExCommand { command });
+                    .push(PaletteIntent::ExCommand { command, plan });
                 return true;
             }
             return false;
@@ -457,6 +657,12 @@ impl ChromeBridge {
         if let Some(name) = self.chrome.command_palette.get_selected_theme() {
             self.pending_palette_intents
                 .push(PaletteIntent::Theme { name });
+            return true;
+        }
+
+        if let Some(id) = self.chrome.command_palette.get_selected_mashup() {
+            self.pending_palette_intents
+                .push(PaletteIntent::Mashup { id });
             return true;
         }
 
@@ -532,8 +738,9 @@ impl ChromeBridge {
         // EX_COMMANDS rows into the list) — commit them like ex mode
         // does so Enter on one isn't a dead keystroke.
         if let Some(command) = self.chrome.command_palette.get_selected_ex_command() {
+            let plan = web_buffer_ex_plan(&command);
             self.pending_palette_intents
-                .push(PaletteIntent::ExCommand { command });
+                .push(PaletteIntent::ExCommand { command, plan });
             return true;
         }
 
@@ -600,6 +807,63 @@ impl ChromeBridge {
         self.relayout_chrome();
     }
 
+    /// Install the daemon host's real pack catalog into shared Mashups mode.
+    pub fn enter_palette_mashups_mode(&mut self, entries_json: String) -> bool {
+        use neoism_ui::panels::command_palette::PaletteMashupEntry;
+        #[derive(serde::Deserialize)]
+        struct WireMashup {
+            id: Option<String>,
+            name: String,
+            detail: String,
+            theme: Option<String>,
+            shader_overlay: Option<String>,
+            font_family: Option<String>,
+            #[serde(default)]
+            theme_extends: Option<String>,
+            #[serde(default)]
+            theme_colors: std::collections::BTreeMap<String, String>,
+        }
+        let Ok(rows) = serde_json::from_str::<Vec<WireMashup>>(&entries_json) else {
+            self.chrome.notifications.push(
+                "Could not read the Mash Up Pack catalog".to_string(),
+                NotificationLevel::Error,
+            );
+            return false;
+        };
+        let custom_themes = rows
+            .iter()
+            .filter_map(|row| {
+                let name = row.theme.clone()?;
+                if row.theme_colors.is_empty() {
+                    return None;
+                }
+                let (theme, _) = neoism_ui::primitives::IdeTheme::from_overrides(
+                    row.theme_extends.as_deref().unwrap_or("pastel_dark"),
+                    &row.theme_colors
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<Vec<_>>(),
+                );
+                Some((name, row.detail.clone(), theme))
+            })
+            .collect();
+        neoism_ui::primitives::ide_theme::replace_custom_ide_themes(custom_themes);
+        let entries = rows
+            .into_iter()
+            .map(|row| PaletteMashupEntry {
+                id: row.id,
+                name: row.name,
+                detail: row.detail,
+                theme: row.theme,
+                shader_overlay: row.shader_overlay,
+                font_family: row.font_family,
+            })
+            .collect();
+        self.chrome.command_palette.enter_mashups_mode(entries);
+        self.relayout_chrome();
+        true
+    }
+
     pub fn drain_palette_intents(&mut self) -> JsValue {
         self.sync_palette_host_context();
         let drained: Vec<PaletteIntent> =
@@ -609,6 +873,43 @@ impl ChromeBridge {
             .filter(|intent| !self.execute_palette_intent_chrome_side(intent))
             .collect();
         serde_wasm_bindgen::to_value(&forward).unwrap_or(JsValue::NULL)
+    }
+
+    pub fn open_terminal_directory_palette(
+        &mut self,
+        route_id: u32,
+        session_id: Option<String>,
+        cwd: String,
+        shell: String,
+    ) {
+        self.chrome.command_palette.open_commands_for_terminal(
+            "cd ",
+            neoism_ui::panels::command_palette::TerminalDirectoryTarget {
+                route_id: route_id as usize,
+                session_id,
+                cwd,
+                shell_kind: neoism_ui::TerminalShellKind::detect(&shell),
+            },
+        );
+        self.relayout_chrome();
+    }
+
+    pub fn update_terminal_directory_palette_cwd(&mut self, session_id: String, cwd: String) {
+        if self.chrome.command_palette.update_captured_terminal_cwd(&session_id, &cwd) {
+            self.cd_search_key = None;
+            self.relayout_chrome();
+        }
+    }
+
+    pub fn continue_terminal_directory_palette(&mut self, cwd: String) {
+        self.chrome.command_palette.continue_terminal_directory(cwd);
+        self.cd_search_key = None;
+        self.relayout_chrome();
+    }
+
+    pub fn set_terminal_directory_palette_error(&mut self, error: String) {
+        self.chrome.command_palette.set_cd_error(error);
+        self.relayout_chrome();
     }
 
     /// The full IDE theme catalog for the web pickers/settings —
@@ -843,22 +1144,34 @@ impl ChromeBridge {
         }
         self.cd_search_key = Some(query.clone());
         self.cd_search_pending = None;
-        match self.search.search_directories(Path::new("."), &query) {
+        let base = self.chrome.command_palette.terminal_directory_target()
+            .map(|target| PathBuf::from(&target.cwd))
+            .unwrap_or_else(|| self.workspace_root.clone());
+        self.chrome.command_palette.compose_terminal_directory_choices(
+            None,
+            Some(self.workspace_root.to_string_lossy().into_owned()),
+            Vec::new(),
+        );
+        match self.search.search_directories(&base, &query) {
             Ok(hits) => {
                 let rows = hits
                     .into_iter()
                     .map(|hit| {
-                        let absolute = self.workspace_root.join(&hit.path);
+                        let absolute = base.join(&hit.path);
                         neoism_ui::panels::command_palette::PaletteDirectoryEntry {
                             absolute_path: absolute.to_string_lossy().into_owned(),
                             display: Some(hit.path),
                             detail: Some(
-                                self.workspace_root.to_string_lossy().into_owned(),
+                                base.to_string_lossy().into_owned(),
                             ),
                         }
                     })
                     .collect();
-                self.chrome.command_palette.set_cd_directory_results(rows);
+                self.chrome.command_palette.compose_terminal_directory_choices(
+                    None,
+                    Some(self.workspace_root.to_string_lossy().into_owned()),
+                    rows,
+                );
             }
             Err(IoError::Pending(request_id)) => {
                 self.cd_search_pending = Some((request_id, query));
@@ -996,7 +1309,7 @@ impl ChromeBridge {
             PaletteIntent::Action { action } => {
                 self.execute_palette_action_chrome_side(action)
             }
-            PaletteIntent::ExCommand { command } => {
+            PaletteIntent::ExCommand { command, .. } => {
                 self.execute_ex_command_chrome_side(command)
             }
             _ => false,
@@ -1013,20 +1326,10 @@ impl ChromeBridge {
                 self.relayout_chrome();
                 true
             }
-            // Web has no pack files on disk — fall back to the shared
-            // Themes picker (the same list the top-bar hamburger's
-            // Themes entry opens); a pick flows through the normal
-            // Theme intent into `set_ide_theme`.
             "OpenMashupPacks" => {
-                let themes = neoism_ui::primitives::ide_theme::all_ide_theme_names();
-                self.chrome.command_palette.enter_themes_mode(themes);
-                self.relayout_chrome();
-                self.chrome.notifications.push(
-                    "Mash Up Packs need pack files on disk — showing Themes instead."
-                        .to_string(),
-                    NotificationLevel::Info,
-                );
-                true
+                // The TS host owns the daemon request. Forward this stable
+                // action unchanged; the catalog reply enters Mashups mode.
+                false
             }
             // Desktop `toggle_code_word_wrap` (bridges/code/input.rs).
             "ToggleWordWrap" => {
@@ -1302,6 +1605,62 @@ impl ChromeBridge {
             .finder
             .open_references(self.workspace_root.clone(), rows);
         self.relayout_chrome();
+    }
+}
+
+/// Classify the host-owned portion of Vim's Ex surface through the same
+/// shared parser/tables used by desktop. The browser receives only this
+/// stable protocol tag; it never guesses that `q` means application Quit.
+fn web_buffer_ex_plan(command: &str) -> Option<&'static str> {
+    use neoism_ui::editor::scroll_model::{
+        parse_ex_command, GlobalExCommandPlan, MarkdownExCommandPlan,
+    };
+
+    let (head, tail) = parse_ex_command(command)?;
+    match MarkdownExCommandPlan::classify(&head) {
+        MarkdownExCommandPlan::Save => return Some("write"),
+        MarkdownExCommandPlan::SaveAndCloseFocusedBuffer => return Some("write_close"),
+        _ => {}
+    }
+    match GlobalExCommandPlan::classify(&head, &tail) {
+        GlobalExCommandPlan::CloseFocusedBufferTab { discard: false } => Some("close"),
+        GlobalExCommandPlan::CloseFocusedBufferTab { discard: true } => {
+            Some("close_force")
+        }
+        GlobalExCommandPlan::CloseActiveWorkspace { discard: false } => Some("close_all"),
+        GlobalExCommandPlan::CloseActiveWorkspace { discard: true } => {
+            Some("close_all_force")
+        }
+        GlobalExCommandPlan::WriteAllAndCloseAllBuffers => Some("write_all_close"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod web_ex_tests {
+    use super::web_buffer_ex_plan;
+
+    #[test]
+    fn web_ex_protocol_uses_desktop_buffer_lifecycle_aliases() {
+        for command in ["q", "quit", "close"] {
+            assert_eq!(web_buffer_ex_plan(command), Some("close"));
+        }
+        for command in ["q!", "quit!", "close!"] {
+            assert_eq!(web_buffer_ex_plan(command), Some("close_force"));
+        }
+        for command in ["w", "write", "w!"] {
+            assert_eq!(web_buffer_ex_plan(command), Some("write"));
+        }
+        for command in ["wq", "wq!", "x", "exit"] {
+            assert_eq!(web_buffer_ex_plan(command), Some("write_close"));
+        }
+        for command in ["qa", "qall", "quitall"] {
+            assert_eq!(web_buffer_ex_plan(command), Some("close_all"));
+        }
+        for command in ["qa!", "qall!", "quitall!"] {
+            assert_eq!(web_buffer_ex_plan(command), Some("close_all_force"));
+        }
+        assert_eq!(web_buffer_ex_plan("theme tokyo-night"), None);
     }
 }
 

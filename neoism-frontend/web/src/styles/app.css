@@ -143,7 +143,7 @@ body {
   inset: 0;
   z-index: 10001;
   display: flex;
-  align-items: center;
+  align-items: safe center;
   justify-content: center;
   padding: 18px;
   background: rgba(0, 0, 0, 0.56);
@@ -225,8 +225,15 @@ body {
   flex: 1 1 auto;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  overflow: hidden;
+  padding:
+    max(24px, env(safe-area-inset-top))
+    max(24px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom))
+    max(24px, env(safe-area-inset-left));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   background:
     radial-gradient(circle at 50% 18%, rgba(86, 183, 255, 0.15), transparent 34%),
     radial-gradient(circle at 18% 80%, rgba(126, 87, 194, 0.12), transparent 30%),
@@ -254,11 +261,11 @@ body {
   width: 100%;
   max-width: 430px;
   padding: 22px;
-  background: color-mix(in srgb, var(--neoism-bg-elevated) 84%, transparent);
-  border: 1px solid color-mix(in srgb, var(--neoism-border) 78%, white 22%);
-  border-radius: 16px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  backdrop-filter: blur(18px);
+  /* The gate is page chrome, not a modal: let it float over the Neoism
+   * field/grid treatment instead of enclosing it in a second dark card. */
+  background: transparent;
+  border: 0;
+  box-shadow: none;
 }
 
 .connection-hero {
@@ -303,7 +310,7 @@ body {
   padding: 10px 12px;
   border: 1px solid var(--neoism-border);
   border-radius: 6px;
-  background: var(--neoism-bg);
+  background: var(--neoism-bg-elevated);
   color: var(--neoism-fg);
   font-family: var(--neoism-font-mono);
   font-size: 14px;
@@ -315,6 +322,30 @@ body {
   outline: none;
   border-color: var(--neoism-accent);
   box-shadow: 0 0 0 2px var(--neoism-accent-soft);
+}
+
+.connection-field input:disabled,
+.connection-workspace-select:disabled {
+  opacity: 1;
+  color: var(--neoism-fg-dim);
+  -webkit-text-fill-color: var(--neoism-fg-dim);
+  cursor: not-allowed;
+}
+
+.connection-field input[aria-invalid="true"] {
+  border-color: var(--neoism-error);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--neoism-error) 18%, transparent);
+}
+
+/* Keep browser credential paint from turning these elevated controls back
+ * into black (or Chromium's light autofill blue). */
+.connection-field input:-webkit-autofill,
+.connection-field input:-webkit-autofill:hover,
+.connection-field input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--neoism-fg);
+  caret-color: var(--neoism-fg);
+  box-shadow: 0 0 0 1000px var(--neoism-bg-elevated) inset;
+  transition: background-color 9999s ease-out 0s;
 }
 
 .connection-submit {
@@ -335,6 +366,11 @@ body {
   filter: brightness(1.1);
 }
 
+.connection-submit:focus-visible {
+  outline: 2px solid var(--neoism-fg);
+  outline-offset: 2px;
+}
+
 .connection-submit:disabled {
   opacity: 0.5;
   cursor: progress;
@@ -346,6 +382,10 @@ body {
   color: var(--neoism-fg-dim);
   font-size: 12px;
   word-break: break-word;
+}
+
+.connection-status[data-state="error"] {
+  color: var(--neoism-error);
 }
 
 .connection-workspace-field {
@@ -360,10 +400,16 @@ body {
   width: 100%;
   border: 1px solid var(--neoism-border);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--neoism-bg) 88%, white 4%);
+  background: var(--neoism-bg-elevated);
   color: var(--neoism-fg);
   font-family: var(--neoism-font-mono);
   cursor: pointer;
+  color-scheme: dark;
+}
+
+.connection-workspace-select option {
+  background: var(--neoism-bg-elevated);
+  color: var(--neoism-fg);
 }
 
 .connection-workspace-select {
@@ -375,6 +421,7 @@ body {
 .connection-workspace-select:focus-visible {
   border-color: var(--neoism-accent);
   outline: none;
+  box-shadow: 0 0 0 2px var(--neoism-accent-soft);
 }
 
 .connection-workspace-actions {
@@ -651,7 +698,10 @@ body {
   background: var(--neoism-bg);
   cursor: default;
   outline: none;
-  touch-action: none;
+  /* Keep native one-finger pan semantics, but exclude pinch-zoom. The JS
+     policy takes ownership after movement commits, preserving iOS user
+     activation, long-press selection, and app-owned momentum. */
+  touch-action: pan-x pan-y;
 }
 
 .terminal-canvas:focus {
@@ -669,6 +719,7 @@ body {
   background: var(--neoism-bg);
   font: 14px/1.6 "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace;
   scrollbar-color: var(--neoism-border-strong) transparent;
+  touch-action: pan-x pan-y;
 }
 
 .web-markdown-layer[hidden] {

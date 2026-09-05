@@ -684,6 +684,10 @@ pub struct NeoismAgentSidePanel {
     /// trail cursor renders on the search field and no session row is
     /// highlighted.
     search_focused: bool,
+    /// Exact painted hit rectangle for the home-mode session search field.
+    /// Separate from the row list so mobile never summons the keyboard for a
+    /// session row or a vertical list drag.
+    session_search_rect: Option<[f32; 4]>,
     sessions: Vec<NeoismAgentSessionEntry>,
     session_catalog_state: SessionCatalogState,
     /// Opaque keyset cursor returned by the session catalogue. `None` means
@@ -810,6 +814,7 @@ impl Default for NeoismAgentSidePanel {
             semantic_search_started: None,
             result_wrap_columns: 42,
             search_focused: false,
+            session_search_rect: None,
             session_next_cursor: None,
             session_page_loading: false,
             session_requested_cursor: None,
@@ -1203,7 +1208,8 @@ impl NeoismAgentSidePanel {
         self.session_next_cursor = None;
         self.session_requested_cursor = None;
         self.session_page_loading = false;
-        self.session_request_generation = self.session_request_generation.saturating_add(1);
+        self.session_request_generation =
+            self.session_request_generation.saturating_add(1);
         self.session_refresh_attempts = 0;
         self.session_catalog_state = SessionCatalogState::Initial;
         self.sessions_loading_started = Instant::now();
@@ -1244,27 +1250,23 @@ impl NeoismAgentSidePanel {
         let Some(viewed) = self.viewed_session_id.as_deref() else {
             return;
         };
-        let active = self
-            .branch_activities
-            .get(viewed)
-            .is_some_and(|activity| {
+        let active = self.branch_activities.get(viewed).is_some_and(|activity| {
+            matches!(
+                activity.status,
+                BranchStatus::Active | BranchStatus::WaitingPermission
+            )
+        }) || self
+            .subagents
+            .iter()
+            .find(|entry| entry.id == viewed)
+            .and_then(|entry| entry.runtime_status.as_deref())
+            .and_then(BranchStatus::from_runtime_status)
+            .is_some_and(|status| {
                 matches!(
-                    activity.status,
+                    status,
                     BranchStatus::Active | BranchStatus::WaitingPermission
                 )
-            })
-            || self
-                .subagents
-                .iter()
-                .find(|entry| entry.id == viewed)
-                .and_then(|entry| entry.runtime_status.as_deref())
-                .and_then(BranchStatus::from_runtime_status)
-                .is_some_and(|status| {
-                    matches!(
-                        status,
-                        BranchStatus::Active | BranchStatus::WaitingPermission
-                    )
-                });
+            });
         if active {
             self.retained_viewed_subagent_id = Some(viewed.to_string());
         }
@@ -1504,6 +1506,20 @@ impl NeoismAgentSidePanel {
         self.last_panel_rect = Some(rect);
     }
 
+    pub fn set_session_search_rect(&mut self, rect: [f32; 4]) {
+        self.session_search_rect = Some(rect);
+    }
+
+    pub fn clear_session_search_rect(&mut self) {
+        self.session_search_rect = None;
+    }
+
+    pub fn session_search_contains(&self, x: f32, y: f32) -> bool {
+        self.session_search_rect.is_some_and(|[rx, ry, rw, rh]| {
+            x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+        })
+    }
+
     pub fn set_row_hit_rect(&mut self, rect: [f32; 4], row_height: f32) {
         self.last_row_hit_rect = Some(rect);
         self.last_row_hit_height = row_height.max(1.0);
@@ -1527,6 +1543,7 @@ impl NeoismAgentSidePanel {
 
     pub fn clear_row_hit_rect(&mut self) {
         self.last_row_hit_rect = None;
+        self.session_search_rect = None;
     }
 
     /// Clear the cached rect when the pane has gone too narrow to host
@@ -1629,7 +1646,8 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn next_session_request_generation(&mut self) -> u64 {
-        self.session_request_generation = self.session_request_generation.saturating_add(1);
+        self.session_request_generation =
+            self.session_request_generation.saturating_add(1);
         self.session_request_generation
     }
 
@@ -1644,7 +1662,9 @@ impl NeoismAgentSidePanel {
         if self.session_page_loading
             || !matches!(self.mode, SidePanelMode::Sessions)
             || !self.session_query.trim().is_empty()
-            || self.scroll_top.saturating_add(self.last_panel_height_rows + 4)
+            || self
+                .scroll_top
+                .saturating_add(self.last_panel_height_rows + 4)
                 < self.active_len()
         {
             return None;
@@ -1823,10 +1843,8 @@ impl NeoismAgentSidePanel {
             if let Some(hit) = semantic.get(visible[i].id.as_str()) {
                 let excerpt = compact_excerpt(&hit.excerpt);
                 for line in wrap_excerpt_lines(&excerpt, self.result_wrap_columns, 3) {
-                    let mut row = NeoismAgentSessionEntry::excerpt(
-                        visible[i].id.clone(),
-                        line,
-                    );
+                    let mut row =
+                        NeoismAgentSessionEntry::excerpt(visible[i].id.clone(), line);
                     row.highlights = term_highlight_ranges(&row.title, &terms);
                     out.push(row);
                 }
@@ -1879,27 +1897,26 @@ impl NeoismAgentSidePanel {
             .iter()
             .map(|entry| entry.id.clone())
             .collect::<HashSet<_>>();
-        let missing_active = self
-            .subagents
-            .iter()
-            .enumerate()
-            .filter(|(index, entry)| {
-                *index > 0
-                    && !incoming_ids.contains(&entry.id)
-                    && (self
-                        .branch_activities
-                        .get(&entry.id)
-                        .is_some_and(|activity| {
-                            matches!(
-                                activity.status,
-                                BranchStatus::Active | BranchStatus::WaitingPermission
-                            )
-                        })
-                        || self.retained_viewed_subagent_id.as_deref()
+        let missing_active =
+            self.subagents
+                .iter()
+                .enumerate()
+                .filter(|(index, entry)| {
+                    *index > 0
+                        && !incoming_ids.contains(&entry.id)
+                        && (self.branch_activities.get(&entry.id).is_some_and(
+                            |activity| {
+                                matches!(
+                                    activity.status,
+                                    BranchStatus::Active
+                                        | BranchStatus::WaitingPermission
+                                )
+                            },
+                        ) || self.retained_viewed_subagent_id.as_deref()
                             == Some(entry.id.as_str()))
-            })
-            .map(|(_, entry)| entry.clone())
-            .collect::<Vec<_>>();
+                })
+                .map(|(_, entry)| entry.clone())
+                .collect::<Vec<_>>();
         subagents.extend(missing_active);
         // Capture the id of the row the cursor was on so it survives a
         // re-fetch. The subagent list is rebuilt wholesale on every
@@ -2041,14 +2058,15 @@ impl NeoismAgentSidePanel {
         let Some(last) = self.last_sessions_refresh else {
             return true;
         };
-        let retry_after = if matches!(self.session_catalog_state, SessionCatalogState::Error(_)) {
-            if self.session_refresh_attempts >= 2 {
-                return false;
-            }
-            0.75
-        } else {
-            8.0
-        };
+        let retry_after =
+            if matches!(self.session_catalog_state, SessionCatalogState::Error(_)) {
+                if self.session_refresh_attempts >= 2 {
+                    return false;
+                }
+                0.75
+            } else {
+                8.0
+            };
         Instant::now().saturating_duration_since(last).as_secs_f32() >= retry_after
     }
 
@@ -2186,7 +2204,10 @@ impl NeoismAgentSidePanel {
         status: BranchStatus,
     ) {
         let session_id = session_id.into();
-        if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission) {
+        if matches!(
+            status,
+            BranchStatus::Active | BranchStatus::WaitingPermission
+        ) {
             self.set_branch_activity_status(session_id, status);
             return;
         }
@@ -2211,8 +2232,10 @@ impl NeoismAgentSidePanel {
         transition: BranchStatusTransition,
     ) -> bool {
         let session_id = session_id.into();
-        if matches!(status, BranchStatus::Active | BranchStatus::WaitingPermission)
-            && self.viewed_session_id.as_deref() == Some(session_id.as_str())
+        if matches!(
+            status,
+            BranchStatus::Active | BranchStatus::WaitingPermission
+        ) && self.viewed_session_id.as_deref() == Some(session_id.as_str())
         {
             self.retained_viewed_subagent_id = Some(session_id.clone());
         }
@@ -2744,6 +2767,15 @@ impl NeoismAgentSidePanel {
         self.scroll_px = next;
         self.scroll.set_target(next);
         self.scroll_top = (next / row_h).floor() as usize;
+    }
+
+    /// Direct touch counterpart. Home/session lists snap to the exact bounded
+    /// target; chat content is already a continuous direct viewport.
+    pub fn scroll_touch_pixels(&mut self, delta_pixels: f32, panel_height_rows: usize) {
+        self.scroll_pixels(delta_pixels, panel_height_rows);
+        if !matches!(self.mode, SidePanelMode::Subagents) {
+            self.scroll.set_target_immediate(self.scroll_px);
+        }
     }
 
     /// Advance the home-list scroll spring and return the *absolute*

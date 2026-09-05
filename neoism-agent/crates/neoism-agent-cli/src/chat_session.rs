@@ -444,14 +444,26 @@ pub(crate) async fn fetch_permission_requests(
     client: &reqwest::Client,
     server: &str,
 ) -> anyhow::Result<Value> {
-    response_json(client.get(format!("{server}/v2/interactions/permissions")).send().await?).await
+    response_json(
+        client
+            .get(format!("{server}/v2/interactions/permissions"))
+            .send()
+            .await?,
+    )
+    .await
 }
 
 pub(crate) async fn fetch_question_requests(
     client: &reqwest::Client,
     server: &str,
 ) -> anyhow::Result<Value> {
-    response_json(client.get(format!("{server}/v2/interactions/questions")).send().await?).await
+    response_json(
+        client
+            .get(format!("{server}/v2/interactions/questions"))
+            .send()
+            .await?,
+    )
+    .await
 }
 
 pub(crate) async fn abort_session_if_busy(

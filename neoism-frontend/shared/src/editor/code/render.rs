@@ -35,6 +35,21 @@ const TEXT_PAD_X: f32 = 8.0;
 const SCROLLBAR_W: f32 = 6.0;
 const SCROLLBAR_MIN_THUMB_H: f32 = 28.0;
 
+/// Return the real, positive-area intersection of `rect` and `clip`.
+///
+/// Carets are document anchored.  In particular, a caret outside the
+/// viewport must disappear rather than being clamped onto a viewport edge.
+fn intersect_cursor_rect(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
+    if rect[2] <= 0.0 || rect[3] <= 0.0 || clip[2] <= 0.0 || clip[3] <= 0.0 {
+        return None;
+    }
+    let x0 = rect[0].max(clip[0]);
+    let y0 = rect[1].max(clip[1]);
+    let x1 = (rect[0] + rect[2]).min(clip[0] + clip[2]);
+    let y1 = (rect[1] + rect[3]).min(clip[1] + clip[3]);
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
+}
+
 /// Paint the pane. Returns `true` while the scroll glide is still
 /// animating (the host must schedule another frame).
 pub fn render(
@@ -144,12 +159,18 @@ pub fn render(
     );
     let cursor_vrow = wrap.first_row_of_line(cursor_line) + cursor_seg;
 
+    // Rebase the viewport by the same row displacement as a structural edit
+    // before clamping/caret-follow. This keeps the painted caret and nearby
+    // text stationary through repeated newline deletion.
+    pane.apply_pending_cursor_view_anchor(row_h);
+
     // Content extent + scroll clamp + caret reveal (nvim scrolloff).
     let content_h = total_rows as f32 * row_h;
     pane.content_height = content_h;
     pane.scroll_viewport_height = h_content;
     let max_scroll = (content_h - h_content).max(0.0);
     if pane.buffer.follow_cursor {
+        pane.touch_viewport_detached = false;
         pane.buffer.follow_cursor = false;
         pane.last_keyboard_reveal = Some(Instant::now());
         // nvim-style center-lock in PURE INTEGER ROWS (visual rows —
@@ -935,16 +956,24 @@ pub fn render(
             }
         }
     }
-    let clamp_top = grid_y;
-    let clamp_bottom = (grid_y + h_content - caret_h).max(clamp_top);
-    let clamp_left = x;
-    let clamp_right = (x + w - cell_w).max(clamp_left);
-    pane.cursor_rect = Some([
-        caret_x.clamp(clamp_left, clamp_right),
-        caret_y.clamp(clamp_top, clamp_bottom),
-        cell_w,
-        caret_h,
-    ]);
+    if pane.touch_viewport_detached {
+        let content_clip = [text_x, grid_y, text_view_w, h_content];
+        pane.cursor_rect =
+            intersect_cursor_rect([caret_x, caret_y, cell_w, caret_h], content_clip);
+    } else {
+        // Exact pre-touch behavior: keyboard and wheel scrolling keep the
+        // trail cursor visible while the viewport animates underneath it.
+        let clamp_top = grid_y;
+        let clamp_bottom = (grid_y + h_content - caret_h).max(clamp_top);
+        let clamp_left = x;
+        let clamp_right = (x + w - cell_w).max(clamp_left);
+        pane.cursor_rect = Some([
+            caret_x.clamp(clamp_left, clamp_right),
+            caret_y.clamp(clamp_top, clamp_bottom),
+            cell_w,
+            caret_h,
+        ]);
+    }
 
     // Remote collaborators' carets (colored bar + name flag), mapped
     // through the SAME wrap math as the local caret so a peer's cursor
@@ -1222,6 +1251,39 @@ pub fn render(
         || flash_animating
         || external_flash_animating
         || pane.symbol_trail_pending.is_some()
+}
+
+#[cfg(test)]
+mod cursor_clip_tests {
+    use super::intersect_cursor_rect;
+
+    const CLIP: [f32; 4] = [40.0, 20.0, 100.0, 80.0];
+
+    #[test]
+    fn fully_offscreen_code_caret_has_no_rect_instead_of_edge_clamping() {
+        assert_eq!(intersect_cursor_rect([10.0, 40.0, 8.0, 18.0], CLIP), None);
+        assert_eq!(intersect_cursor_rect([60.0, -20.0, 8.0, 18.0], CLIP), None);
+        assert_eq!(intersect_cursor_rect([150.0, 40.0, 8.0, 18.0], CLIP), None);
+        assert_eq!(intersect_cursor_rect([60.0, 110.0, 8.0, 18.0], CLIP), None);
+    }
+
+    #[test]
+    fn partially_visible_code_caret_is_intersected_with_content() {
+        assert_eq!(
+            intersect_cursor_rect([36.0, 15.0, 8.0, 18.0], CLIP),
+            Some([40.0, 20.0, 4.0, 13.0])
+        );
+        assert_eq!(
+            intersect_cursor_rect([136.0, 95.0, 8.0, 18.0], CLIP),
+            Some([136.0, 95.0, 4.0, 5.0])
+        );
+    }
+
+    #[test]
+    fn visible_code_caret_geometry_is_unchanged() {
+        let caret = [72.0, 48.0, 8.0, 18.0];
+        assert_eq!(intersect_cursor_rect(caret, CLIP), Some(caret));
+    }
 }
 
 fn rects_intersect(a: [f32; 4], b: [f32; 4]) -> bool {

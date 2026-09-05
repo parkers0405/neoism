@@ -96,7 +96,12 @@ pub(crate) async fn artifact_create(
         session_id,
         download_url: format!("/v2/artifacts/{id}/content"),
     };
-    if let Err(error) = state.inner.store.insert_artifact(&artifact, tenant_id).await {
+    if let Err(error) = state
+        .inner
+        .store
+        .insert_artifact(&artifact, tenant_id)
+        .await
+    {
         let _ = tokio::fs::remove_file(path).await;
         return Err(error.into());
     }
@@ -129,7 +134,8 @@ pub(crate) async fn artifact_get(
     Path(id): Path<String>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Json<ArtifactInfo>, ApiError> {
-    authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims)).await?;
+    authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims))
+        .await?;
     let mut artifact = state
         .inner
         .store
@@ -145,7 +151,8 @@ pub(crate) async fn artifact_content(
     Path(id): Path<String>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Response, ApiError> {
-    authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims)).await?;
+    authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims))
+        .await?;
     let artifact = state
         .inner
         .store
@@ -179,7 +186,8 @@ pub(crate) async fn artifact_delete(
     Path(id): Path<String>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<StatusCode, ApiError> {
-    authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims)).await?;
+    authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims))
+        .await?;
     if state.inner.store.get_artifact(&id).await?.is_none() {
         return Err(ApiError::not_found("Artifact not found"));
     }
@@ -236,13 +244,13 @@ async fn scan_artifact(
     }
     let mut command = artifact_scanner_command(services, &program, path)
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    let status = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        command.status(),
-    )
-    .await
-    .map_err(|_| ApiError::bad_request("Artifact scanner timed out"))?
-    .map_err(|error| ApiError::internal(format!("Failed to run artifact scanner: {error}")))?;
+    let status =
+        tokio::time::timeout(std::time::Duration::from_secs(60), command.status())
+            .await
+            .map_err(|_| ApiError::bad_request("Artifact scanner timed out"))?
+            .map_err(|error| {
+                ApiError::internal(format!("Failed to run artifact scanner: {error}"))
+            })?;
     if !status.success() {
         return Err(ApiError::bad_request("Artifact rejected by scanner"));
     }
@@ -257,7 +265,9 @@ fn artifact_scanner_command(
     let program = crate::executable::resolve_command(
         services,
         program,
-        neoism_agent_service_api::ExecutablePurpose::Other("artifact-scanner".to_string()),
+        neoism_agent_service_api::ExecutablePurpose::Other(
+            "artifact-scanner".to_string(),
+        ),
         "artifact scanner",
     )?;
     let mut command = tokio::process::Command::new(program);
@@ -275,15 +285,18 @@ mod executable_tests {
     fn artifact_scanner_honors_injected_path_and_reports_missing_executable() {
         let injected = std::path::PathBuf::from("/injected/scanner");
         let mut services = crate::standard_services();
-        services.executables = Arc::new(FakeExecutableService::with("scanner", &injected));
-        let command = artifact_scanner_command(&services, "scanner", std::path::Path::new("file"))
-            .unwrap();
+        services.executables =
+            Arc::new(FakeExecutableService::with("scanner", &injected));
+        let command =
+            artifact_scanner_command(&services, "scanner", std::path::Path::new("file"))
+                .unwrap();
         assert_eq!(command.as_std().get_program(), injected.as_os_str());
 
         services.executables = Arc::new(FakeExecutableService::default());
-        let error = artifact_scanner_command(&services, "scanner", std::path::Path::new("file"))
-            .unwrap_err()
-            .to_string();
+        let error =
+            artifact_scanner_command(&services, "scanner", std::path::Path::new("file"))
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("artifact scanner executable `scanner` is unavailable"));
         assert!(error.contains("install it"));
     }
@@ -301,7 +314,9 @@ fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
 fn safe_filename(filename: String) -> String {
     filename
         .chars()
-        .filter(|character| !character.is_control() && *character != '/' && *character != '\\')
+        .filter(|character| {
+            !character.is_control() && *character != '/' && *character != '\\'
+        })
         .take(255)
         .collect()
 }

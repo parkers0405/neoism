@@ -97,10 +97,15 @@ async fn fetch_model_options(
     server: &str,
 ) -> anyhow::Result<Vec<(String, String)>> {
     // Returns Vec<(provider/model, description)>
-    let value =
-        response_json(client.get(format!("{server}/v2/providers")).send().await?).await?;
+    let value = response_json(
+        client
+            .get(format!("{server}/v2/providers/configured"))
+            .send()
+            .await?,
+    )
+    .await?;
     let providers = value
-        .get("all")
+        .get("providers")
         .and_then(Value::as_array)
         .context("server did not return provider list")?;
     let mut entries: Vec<(String, String)> = Vec::new();
@@ -304,7 +309,7 @@ pub(crate) async fn fetch_subagent_sessions(
 ) -> anyhow::Result<Vec<SubagentSessionEntry>> {
     let current = response_json(
         client
-                .get(format!("{server}/v2/sessions/{current_session_id}"))
+            .get(format!("{server}/v2/sessions/{current_session_id}"))
             .send()
             .await?,
     )
@@ -320,7 +325,7 @@ pub(crate) async fn fetch_subagent_sessions(
     } else {
         match response_json(
             client
-                    .get(format!("{server}/v2/sessions/{main_id}"))
+                .get(format!("{server}/v2/sessions/{main_id}"))
                 .send()
                 .await?,
         )

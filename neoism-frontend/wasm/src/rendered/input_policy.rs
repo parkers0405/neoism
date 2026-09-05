@@ -109,7 +109,9 @@ enum WireTouchAction {
     EndSelect,
     EndScroll,
     PromoteTapToScroll,
-    OpenContextMenu { x: usize, y: usize },
+    SelectWord { x: usize, y: usize },
+    ExtendWordSelection { x: usize, y: usize },
+    EndWordSelection,
     TwoFingerScroll { dx: f64, dy: f64 },
     SuppressNativeGesture,
 }
@@ -137,9 +139,11 @@ fn wire_touch_action(action: TouchAction) -> JsValue {
         TouchAction::EndSelect => WireTouchAction::EndSelect,
         TouchAction::EndScroll => WireTouchAction::EndScroll,
         TouchAction::PromoteTapToScroll => WireTouchAction::PromoteTapToScroll,
-        TouchAction::OpenContextMenu { x, y } => {
-            WireTouchAction::OpenContextMenu { x, y }
+        TouchAction::SelectWord { x, y } => WireTouchAction::SelectWord { x, y },
+        TouchAction::ExtendWordSelection { x, y } => {
+            WireTouchAction::ExtendWordSelection { x, y }
         }
+        TouchAction::EndWordSelection => WireTouchAction::EndWordSelection,
         TouchAction::TwoFingerScroll { dx, dy } => {
             WireTouchAction::TwoFingerScroll { dx, dy }
         }
@@ -272,7 +276,7 @@ impl TouchGesturePolicy {
     }
 
     /// Drive on a timer/RAF loop with `now_ms = performance.now()`.
-    /// Fires `open-context-menu` exactly once per gesture when the
+    /// Fires `select-word` exactly once per gesture when the
     /// long-press threshold is crossed.
     pub fn tick_long_press(&mut self, now_ms: f64, width: f64, height: f64) -> JsValue {
         wire_touch_action(classify_long_press(
@@ -362,6 +366,11 @@ pub fn mobile_ctrl_chord_byte(text: &str) -> Option<u8> {
         return None;
     }
     touch_policy::mobile_ctrl_chord_byte(first)
+}
+
+#[wasm_bindgen]
+pub fn mobile_direct_insert_mode(coarse_pointer: bool, max_touch_points: u32) -> bool {
+    touch_policy::mobile_direct_insert_mode(coarse_pointer, max_touch_points)
 }
 
 // ---------------------------------------------------------------------------

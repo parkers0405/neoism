@@ -343,6 +343,16 @@ impl NeoismAgentPicker {
         true
     }
 
+    /// Direct touch counterpart: retain the same bounds/sign but snap the
+    /// reusable scroll primitive to the requested pixel position immediately.
+    pub fn scroll_touch_pixels(&mut self, delta_pixels: f32) -> bool {
+        let consumed = self.scroll_pixels(delta_pixels);
+        if consumed {
+            self.list_scroll.set_target_immediate(self.scroll_px);
+        }
+        consumed
+    }
+
     /// Advance the list-scroll spring and return the sub-row residual (in
     /// logical px, `-PICKER_ROW_HEIGHT..=0`) the renderer adds to each
     /// row's Y so the list scrolls pixel-smoothly. Also refreshes

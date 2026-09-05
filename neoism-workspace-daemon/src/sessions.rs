@@ -236,6 +236,7 @@ impl SessionRegistry {
         if !env.iter().any(|(key, _)| key == "TERM") {
             env.push(("TERM".to_string(), "xterm-256color".to_string()));
         }
+        ensure_neoism_pty_env(&mut env);
         let config = PtySessionConfig {
             shell,
             args,
@@ -346,6 +347,26 @@ impl SessionRegistry {
                 message: format!("unknown session {session_id}"),
             }],
         }
+    }
+}
+
+fn ensure_neoism_pty_env(env: &mut Vec<(String, String)>) {
+    if let Some((_, value)) = env.iter_mut().find(|(key, _)| key == "NEOISM") {
+        *value = "1".to_string();
+    } else {
+        env.push(("NEOISM".to_string(), "1".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod pty_env_tests {
+    #[test]
+    fn daemon_pty_environment_preserves_shell_env_and_marks_neoism() {
+        let mut env = vec![("PATH".to_string(), "/bin".to_string()), ("TERM".to_string(), "screen".to_string())];
+        super::ensure_neoism_pty_env(&mut env);
+        assert!(env.contains(&("PATH".into(), "/bin".into())));
+        assert!(env.contains(&("TERM".into(), "screen".into())));
+        assert!(env.contains(&("NEOISM".into(), "1".into())));
     }
 }
 
@@ -470,6 +491,18 @@ fn block_bash_script() -> &'static str {
   . "$HOME/.bashrc"
 fi
 __neoism_hidden_ps1=$'\001\033]133;A\007\002\001\033]133;B\007\002'
+neoism() {
+  if [ "${1:-}" = cd ]; then
+    shift
+    if [ "$#" -gt 1 ]; then printf 'usage: neoism cd [directory]\n' >&2; return 2; fi
+    if [ "$#" -eq 0 ]; then builtin cd
+    elif [ "$1" = - ]; then builtin cd -
+    else builtin cd -- "$1"; fi || return
+    printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD"
+  else
+    command neoism "$@"
+  fi
+}
 __neoism_preexec() {
   [ "${__neoism_in_prompt:-0}" = 1 ] && return
   case "$BASH_COMMAND" in
@@ -524,6 +557,18 @@ fn block_zsh_script(zsh_rc_dir: &PathBuf) -> String {
         r#"if [ -r "$HOME/.zshrc" ]; then
   source "$HOME/.zshrc"
 fi
+neoism() {{
+  if [ "${{1:-}}" = cd ]; then
+    shift
+    if [ "$#" -gt 1 ]; then printf 'usage: neoism cd [directory]\n' >&2; return 2; fi
+    if [ "$#" -eq 0 ]; then builtin cd
+    elif [ "$1" = - ]; then builtin cd -
+    else builtin cd -- "$1"; fi || return
+    printf '\033]7;file://%s%s\007' "$HOST" "$PWD"
+  else
+    command neoism "$@"
+  fi
+}}
 __neoism_precmd() {{
   local __neoism_status=$?
   printf '\033]7;file://%s%s\007' "$HOST" "$PWD"
@@ -686,6 +731,51 @@ mod tests {
         assert!(script.contains("133;C"));
         assert!(script.contains("133;D;%d"));
         assert!(script.contains("133;A\\007\\002\\001\\033]133;B"));
+    }
+
+    #[test]
+    fn integrated_shells_handle_neoism_cd_in_parent_shell() {
+        let bash = block_bash_script();
+        let zsh = block_zsh_script(&PathBuf::from("/tmp/neoism-zsh-test"));
+        for script in [bash.to_string(), zsh] {
+            assert!(script.contains("neoism()"));
+            assert!(script.contains("builtin cd"));
+            assert!(script.contains("command neoism"));
+            assert!(script.contains("033]7;file://"));
+        }
+    }
+
+    #[test]
+    fn bash_wrapper_changes_the_parent_shell_and_preserves_oldpwd() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-cd-wrapper-test-{}-{}",
+            std::process::id(),
+            Uuid::new_v4(),
+        ));
+        let start = root.join("start");
+        let target = root.join("target with spaces");
+        std::fs::create_dir_all(&start).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let rc = root.join("bashrc");
+        std::fs::write(&rc, block_bash_script()).unwrap();
+        let status = std::process::Command::new("bash")
+            .args(["--noprofile", "--norc", "-c"])
+            .arg(r#"set -u
+source "$1"
+builtin cd "$2"
+neoism cd "$3"
+[ "$PWD" = "$3" ]
+neoism cd - >/dev/null
+[ "$PWD" = "$2" ]"#)
+            .arg("neoism-cd-test")
+            .arg(&rc)
+            .arg(&start)
+            .arg(&target)
+            .env("HOME", &root)
+            .status()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(status.success());
     }
 
     #[test]

@@ -12,7 +12,10 @@ pub(crate) struct LoadedInstruction {
 }
 
 #[cfg(test)]
-fn system(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<String> {
+fn system(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &str,
+) -> Vec<String> {
     let config = neoism_agent_builtins::plugin::config::load(services, directory)
         .ok()
         .map(|(config, _)| config)
@@ -39,9 +42,9 @@ pub(crate) fn system_with_config(
     }
 
     for raw in &config.instructions {
-            if let Some(path) = configured_instruction_path(directory, raw) {
-                push_existing(&mut paths, &mut ordered, path);
-            }
+        if let Some(path) = configured_instruction_path(directory, raw) {
+            push_existing(&mut paths, &mut ordered, path);
+        }
     }
 
     ordered
@@ -105,8 +108,14 @@ fn instruction_in_dir(dir: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn global_instruction_candidates(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<PathBuf> {
-    config::roots(services, directory).into_iter().flat_map(|root| INSTRUCTION_FILES.iter().map(move |file| root.join(file))).collect()
+fn global_instruction_candidates(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &str,
+) -> Vec<PathBuf> {
+    config::roots(services, directory)
+        .into_iter()
+        .flat_map(|root| INSTRUCTION_FILES.iter().map(move |file| root.join(file)))
+        .collect()
 }
 
 fn project_instruction_files(directory: &str) -> Vec<PathBuf> {

@@ -41,6 +41,46 @@ pub fn agent_timeline_wheel(delta: &ScrollDelta, line_height: f32) -> AgentTimel
     }
 }
 
+/// Normalize a browser wheel event into the same two device paths desktop gets
+/// from winit. `delta_y` and `legacy_wheel_delta_y` must already use the desktop
+/// sign convention (positive scrolls up); DOM delta modes are 0=pixel, 1=line,
+/// and 2=page.
+///
+/// Chromium commonly exposes both mouse wheels and precision trackpads as
+/// pixel deltas. A mouse notch is only promoted to `Lines` when the legacy
+/// 120-unit signal confirms a coarse, quantized pixel step. Large trackpad
+/// deltas remain pixels rather than being misclassified solely by magnitude.
+pub fn agent_timeline_browser_wheel(
+    delta_y: f32,
+    delta_mode: u32,
+    legacy_wheel_delta_y: Option<f32>,
+    line_height: f32,
+) -> AgentTimelineWheel {
+    let delta = match delta_mode {
+        1 => ScrollDelta::Lines { x: 0.0, y: delta_y },
+        2 => ScrollDelta::Lines {
+            x: 0.0,
+            y: delta_y * 3.0,
+        },
+        _ => {
+            let confirmed_notches = legacy_wheel_delta_y
+                .filter(|legacy| legacy.is_finite())
+                .map(|legacy| legacy / 120.0)
+                .filter(|notches| {
+                    notches.abs() >= 1.0
+                        && (notches - notches.round()).abs() < 0.01
+                        && delta_y.abs() >= 40.0
+                        && notches.signum() == delta_y.signum()
+                });
+            match confirmed_notches {
+                Some(notches) => ScrollDelta::Lines { x: 0.0, y: notches },
+                None => ScrollDelta::Pixels { x: 0.0, y: delta_y },
+            }
+        }
+    };
+    agent_timeline_wheel(&delta, line_height)
+}
+
 /// Diagnostics popup wheel intent: vertical wheel notches scroll the
 /// row list; horizontal wheel notches scroll the focused message
 /// inline. Both axes are returned at once so the host can apply them

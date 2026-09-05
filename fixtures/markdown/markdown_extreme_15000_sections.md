@@ -134,6 +134,7 @@ fn section_6() -> usize {
 
 Paragraph 6: This is a long markdown paragraph with **bold spans**, *italic spans*, `inline code`, wiki links [[Section 6]], tags #virtual-surface, and enough text to wrap across multiple visual lines so trackpad scrolling and cursor-follow behavior get exercised under load.
 
+
 ## Section 7 **bold heading** `code`
 
 - [ ] task item 7 with **bold text**, *italic text*, `inline code`, ~~strike~~, [[Linked Note 7]], #stress-7

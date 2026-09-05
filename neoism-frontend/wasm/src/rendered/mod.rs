@@ -37,8 +37,10 @@ const FONT_GEIST_MONO_ITALIC: &[u8] =
     include_bytes!("../../assets/fonts/GeistMono-Italic.otf");
 const FONT_GEIST_MONO_BOLD_ITALIC: &[u8] =
     include_bytes!("../../assets/fonts/GeistMono-BoldItalic.otf");
+// Use Sugarloaf's canonical bundled face rather than a frontend-local copy.
+// Shared icon draw helpers resolve this exact family/slot on every host.
 const FONT_SYMBOLS_NERD_FONT_MONO: &[u8] =
-    include_bytes!("../../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
+    sugarloaf::font::constants::FONT_SYMBOLS_NERD_FONT_MONO;
 /// Geometric shapes, box/block elements, dingbats, misc symbols and
 /// arrows — the ranges Geist Mono doesn't carry and the Nerd Font only
 /// covers inside the PUA. Without it `\u{2610}`/`\u{2611}` task
@@ -625,10 +627,14 @@ impl RenderedTerminal {
                 ('\u{2B1B}', '\u{2B1D}', emoji_id),
                 ('\u{2B50}', '\u{2B51}', emoji_id),
                 ('\u{2B55}', '\u{2B56}', emoji_id),
-                // Everything else geometric / arrows / box / dingbat text.
-                ('\u{2190}', '\u{2200}', symbols2_id),
+                // Everything else geometric / box / dingbat text. Ordinary
+                // arrows stay in Geist: Noto Symbols 2 does not contain the
+                // U+2190/U+2191 glyphs used by Agent Back and Send controls.
                 ('\u{2300}', '\u{2400}', symbols2_id),
-                ('\u{2500}', '\u{2600}', symbols2_id),
+                // Geist owns box-drawing U+2500..U+259F. Redirecting that
+                // block to Noto Symbols 2 produced tofu for tool connectors
+                // such as "╰─" because that face starts at U+25A0.
+                ('\u{25A0}', '\u{2600}', symbols2_id),
                 ('\u{2600}', '\u{2700}', symbols2_id),
                 ('\u{2700}', '\u{27C0}', symbols2_id),
                 ('\u{2B00}', '\u{2C00}', symbols2_id),
@@ -1708,7 +1714,14 @@ enum PaletteIntent {
     /// Run an ex command (`:Foo` typed in `:` mode or picked from
     /// the suggestion list). `command` is the trimmed command text
     /// without the leading colon.
-    ExCommand { command: String },
+    ExCommand {
+        command: String,
+        /// Shared-Rust classification for host-owned buffer lifecycle
+        /// commands. Keeping this on the wire prevents the JS host from
+        /// maintaining a second, subtly different Vim alias table.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        plan: Option<&'static str>,
+    },
     /// `/`-search commit. `query` is the search term;
     /// `match_location` is `Some((lnum, col))` when the user picked
     /// a live buffer-match row, else `None` for plain history /
@@ -1724,6 +1737,8 @@ enum PaletteIntent {
     /// A selected IDE theme name. JS applies it through the same
     /// `set_ide_theme` bridge path used by settings/theme cycling.
     Theme { name: String },
+    /// A daemon-hosted Mash Up Pack selection. `None` deactivates it.
+    Mashup { id: Option<String> },
     /// A selected shader/filter row. JS applies a browser-side
     /// approximation because the native GPU shader stack is not
     /// present in the web renderer.
@@ -1740,9 +1755,16 @@ enum PaletteIntent {
     /// switches the daemon workspace, mirroring desktop's
     /// `switch_daemon_host_workspace`.
     Workspace { workspace_id: String },
-    /// Alt+P `cd …`: re-point the declared workspace root. The host owns
-    /// the daemon mutation; this never writes shell input into an existing PTY.
-    Directory { path: String },
+    /// Terminal-local Alt+D commit, including the terminal captured when the
+    /// palette opened so a later focus change cannot redirect it.
+    ChangeTerminalDirectory {
+        route_id: usize,
+        session_id: Option<String>,
+        cwd: String,
+        shell_kind: String,
+        path: String,
+        selected: bool,
+    },
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -1807,6 +1829,8 @@ pub struct ChromeBridge {
     /// Last CSS-px viewport height seen by markdown scroll/resize —
     /// feeds Ctrl+U/D half-page math in `markdown_key`.
     last_markdown_viewport_h: f32,
+    /// Sole authority for touch-web direct insertion in code + Markdown.
+    mobile_direct_insert: bool,
     /// Wave 8D web outbound co-editing: the Yrs origin id every
     /// local markdown edit from this browser is stamped with.
     /// Random, non-zero, below 2^53 — same constraints as the
@@ -1934,6 +1958,7 @@ mod chrome_bridge_core;
 mod chrome_pages;
 mod construct;
 mod editor_panes;
+mod file_browser;
 mod file_tree_workspace;
 mod frame;
 mod input_policy;

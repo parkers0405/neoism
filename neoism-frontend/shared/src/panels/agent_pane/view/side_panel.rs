@@ -305,6 +305,24 @@ pub fn carve_panel_rect<P: AgentSidePanelPane>(
     Some((main, panel))
 }
 
+/// Web/mobile responsive variant. In narrow takeover mode the panel owns the
+/// full Agent content rect; the returned zero-width main rect is an explicit
+/// signal that timeline/composer paint must be skipped.
+pub fn carve_panel_rect_responsive<P: AgentSidePanelPane>(
+    pane: &P,
+    rect: [f32; 4],
+    s: f32,
+    narrow_takeover: bool,
+) -> Option<([f32; 4], [f32; 4])> {
+    if pane.side_panel().user_hidden() {
+        return None;
+    }
+    if narrow_takeover {
+        return Some(([rect[0], rect[1], 0.0, rect[3]], rect));
+    }
+    carve_panel_rect(pane, rect, s)
+}
+
 // The side-panel open/close control remains pane-local; the top-bar Agent
 // icon is reserved for opening a new Agent tab.
 
@@ -348,6 +366,7 @@ pub fn render_side_panel_with_icons<P, I>(
     // Every frame starts with no Usage target. Chat-mode rendering registers
     // it again only when real usage is present; home/narrow views stay clear.
     pane.side_panel_mut().clear_usage_rect();
+    pane.side_panel_mut().clear_session_search_rect();
     let [px, py, pw, ph] = panel_rect;
     if pw <= 8.0 || ph <= 8.0 {
         return;

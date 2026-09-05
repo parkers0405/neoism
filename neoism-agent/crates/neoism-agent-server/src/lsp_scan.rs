@@ -289,7 +289,9 @@ pub(super) fn file_query_specs(
             strongest_match
                 .is_some_and(|score| adapter.match_priority(file) == Some(score))
         })
-        .filter(|adapter| adapter.is_valid() && adapter_endpoint_available(runtime, adapter))
+        .filter(|adapter| {
+            adapter.is_valid() && adapter_endpoint_available(runtime, adapter)
+        })
         .take(MAX_LSP_SERVERS_PER_QUERY)
         .collect()
 }
@@ -317,7 +319,9 @@ pub(super) fn file_lifecycle_specs(
             strongest_match
                 .is_some_and(|score| adapter.match_priority(file) == Some(score))
         })
-        .filter(|adapter| adapter.is_valid() && adapter_endpoint_available(runtime, adapter))
+        .filter(|adapter| {
+            adapter.is_valid() && adapter_endpoint_available(runtime, adapter)
+        })
         .take(MAX_LSP_SERVERS_PER_QUERY)
         .collect()
 }
@@ -379,7 +383,14 @@ pub(super) fn server_status_for_file(
     adapter: &LanguageAdapter,
 ) -> LspStatus {
     let project_root = server_root_for_file(runtime, workspace_root, file, adapter);
-    server_status_at(runtime, workspace_root, &project_root, Some(file), scan, adapter)
+    server_status_at(
+        runtime,
+        workspace_root,
+        &project_root,
+        Some(file),
+        scan,
+        adapter,
+    )
 }
 
 fn server_status_at(
@@ -415,11 +426,11 @@ fn server_status_at(
     let usable = adapter.is_valid() && endpoint_available;
     let broken_reason = usable
         .then(|| match file {
-            Some(file) => runtime.service.broken_reason_for_file(
-                workspace_root,
-                file,
-                adapter,
-            ),
+            Some(file) => {
+                runtime
+                    .service
+                    .broken_reason_for_file(workspace_root, file, adapter)
+            }
             None => runtime.service.broken_reason(workspace_root, adapter),
         })
         .flatten();
@@ -461,11 +472,10 @@ fn server_status_at(
         id: adapter.id.clone(),
         name: adapter.name.clone(),
         status: if usable && message.is_none() {
-            if runtime.service.client_connected_at(
-                workspace_root,
-                project_root,
-                adapter,
-            ) {
+            if runtime
+                .service
+                .client_connected_at(workspace_root, project_root, adapter)
+            {
                 LspServerState::Connected
             } else {
                 LspServerState::Available
@@ -672,7 +682,9 @@ mod tests {
         let error = cargo_metadata_command(&services, Path::new("Cargo.toml"))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("Cargo workspace metadata executable `cargo` is unavailable"));
+        assert!(
+            error.contains("Cargo workspace metadata executable `cargo` is unavailable")
+        );
         assert!(error.contains("install it"));
     }
 
@@ -758,9 +770,10 @@ mod tests {
             generation: 1,
             languages: std::sync::Arc::from(vec![rust_capability()]),
         };
-        let services = crate::standard_services().with_language_capabilities(std::sync::Arc::new(
-            neoism_agent_service_api::StaticLanguageCapabilityService::new(snapshot),
-        ));
+        let services =
+            crate::standard_services().with_language_capabilities(std::sync::Arc::new(
+                neoism_agent_service_api::StaticLanguageCapabilityService::new(snapshot),
+            ));
         super::super::LspRuntime::new(services)
     }
 
@@ -917,5 +930,4 @@ mod tests {
         assert_eq!(cache.entries.len(), MAX_CARGO_ROOT_CACHE_ENTRIES);
         assert_eq!(cache.insertion_order.len(), MAX_CARGO_ROOT_CACHE_ENTRIES);
     }
-
 }

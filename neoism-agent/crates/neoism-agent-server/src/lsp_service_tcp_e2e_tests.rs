@@ -12,9 +12,7 @@ use std::{
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::TryRecvError;
 
-use super::super::{
-    path_to_file_uri, subscribe_diagnostics, DiagnosticsEvent,
-};
+use super::super::{path_to_file_uri, subscribe_diagnostics, DiagnosticsEvent};
 
 /// Service-level proof that a TCP adapter follows the same persistent-client,
 /// route, cache, health, and reconnect path as stdio adapters. The listener is
@@ -32,7 +30,9 @@ fn configured_tcp_adapter_reconnects_without_stale_diagnostic_versions() {
     let expected_uri = path_to_file_uri(&file);
     let server = thread::spawn(move || run_reconnecting_server(listener, expected_uri));
 
-    let adapter = workspace.runtime.adapters_for_root(&workspace.path)
+    let adapter = workspace
+        .runtime
+        .adapters_for_root(&workspace.path)
         .into_iter()
         .find(|adapter| adapter.id == "protocol-tcp")
         .expect("configured TCP adapter");

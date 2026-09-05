@@ -128,10 +128,7 @@ impl SessionCoordinator {
             .await
             .iter()
             .filter_map(|(session_id, entry)| {
-                entry
-                    .run
-                    .clone()
-                    .map(|run| (session_id.clone(), run))
+                entry.run.clone().map(|run| (session_id.clone(), run))
             })
             .collect()
     }

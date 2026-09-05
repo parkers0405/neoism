@@ -13,7 +13,13 @@ pub(super) async fn auth(command: AuthCommand) -> anyhow::Result<()> {
             get_and_print(server, "/v2/providers/auth-methods", None, false).await
         }
         AuthCommand::Status { provider, server } => {
-            get_and_print(server, &format!("/v2/providers/{provider}/auth"), None, true).await
+            get_and_print(
+                server,
+                &format!("/v2/providers/{provider}/auth"),
+                None,
+                true,
+            )
+            .await
         }
         AuthCommand::SetApi {
             provider,
@@ -79,7 +85,8 @@ pub(super) async fn auth(command: AuthCommand) -> anyhow::Result<()> {
 pub(super) async fn mcp(command: McpCommand) -> anyhow::Result<()> {
     match command {
         McpCommand::Status { server, dir } => {
-            get_and_print(server, "/v2/plugins/dev.neoism.mcp", dir.as_deref(), false).await
+            get_and_print(server, "/v2/plugins/dev.neoism.mcp", dir.as_deref(), false)
+                .await
         }
         McpCommand::Connect { name, server, dir } => {
             post_and_print(
@@ -100,8 +107,13 @@ pub(super) async fn mcp(command: McpCommand) -> anyhow::Result<()> {
             .await
         }
         McpCommand::Tools { name, server, dir } => {
-            get_and_print(server, &format!("/v2/plugins/dev.neoism.mcp/{name}/tools"), dir.as_deref(), false)
-                .await
+            get_and_print(
+                server,
+                &format!("/v2/plugins/dev.neoism.mcp/{name}/tools"),
+                dir.as_deref(),
+                false,
+            )
+            .await
         }
         McpCommand::Resources { name, server, dir } => {
             get_and_print(
@@ -169,8 +181,13 @@ pub(super) async fn session(command: SessionCommand) -> anyhow::Result<()> {
             session_undo_or_redo(server, &id, true).await
         }
         SessionCommand::Abort { id, server } => {
-            post_and_print(server, &format!("/v2/sessions/{id}/abort"), None, Value::Null)
-                .await
+            post_and_print(
+                server,
+                &format!("/v2/sessions/{id}/abort"),
+                None,
+                Value::Null,
+            )
+            .await
         }
     }
 }

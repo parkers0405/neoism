@@ -126,6 +126,7 @@ impl Terminal {
 #[derive(serde::Serialize)]
 #[serde(tag = "type")]
 enum WasmEffect {
+    PtyWrite { bytes: Vec<u8> },
     Bell,
     SetTitle { title: String },
     ResetTitle,
@@ -136,7 +137,7 @@ enum WasmEffect {
     Exit,
     DesktopNotification { title: String, body: String },
     OpenEditorTab { path: Option<String> },
-    // PtyWrite is intentionally absent — drain via take_pty_writes().
+    ChangeTerminalDirectory { path: String },
     // GraphicsUpdate, callback-bearing OSC requests, and progress
     // reports are skipped: opaque payloads or terminator-state best
     // handled on the Rust side via a later host extension.
@@ -145,6 +146,7 @@ enum WasmEffect {
 impl WasmEffect {
     fn from_core(e: TerminalEffect) -> Option<Self> {
         match e {
+            TerminalEffect::PtyWrite(bytes) => Some(WasmEffect::PtyWrite { bytes }),
             TerminalEffect::Bell => Some(WasmEffect::Bell),
             TerminalEffect::SetTitle(title) => Some(WasmEffect::SetTitle { title }),
             TerminalEffect::ResetTitle => Some(WasmEffect::ResetTitle),
@@ -161,9 +163,13 @@ impl WasmEffect {
             TerminalEffect::OpenEditorTab { path } => Some(WasmEffect::OpenEditorTab {
                 path: path.map(|p| p.to_string_lossy().into_owned()),
             }),
+            TerminalEffect::ChangeTerminalDirectory { path } => {
+                Some(WasmEffect::ChangeTerminalDirectory {
+                    path: path.to_string_lossy().into_owned(),
+                })
+            }
             // Skipped — see WasmEffect doc comment.
-            TerminalEffect::PtyWrite(_)
-            | TerminalEffect::GraphicsUpdate(_)
+            TerminalEffect::GraphicsUpdate(_)
             | TerminalEffect::ClipboardStore { .. }
             | TerminalEffect::ClipboardLoad { .. }
             | TerminalEffect::ColorRequest { .. }

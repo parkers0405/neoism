@@ -13,6 +13,13 @@ impl MarkdownPane {
         self.scroll_last_tick_at = None;
     }
 
+    /// Explicit keyboard/IME input reclaims viewport ownership from a prior
+    /// touch scroll, including no-op Backspace/navigation at document edges.
+    pub fn rearm_caret_follow(&mut self) {
+        self.stop_scroll_momentum();
+        self.follow_cursor = true;
+    }
+
     pub fn restore_scroll_position(&mut self, scroll_y: f32) {
         let scroll_y = scroll_y.max(0.0);
         self.scroll_y = scroll_y;
@@ -113,6 +120,20 @@ impl MarkdownPane {
         let max_scroll = self.max_scroll(viewport_height);
         self.target_scroll_y =
             (self.target_scroll_y + delta_pixels).clamp(0.0, max_scroll);
+    }
+
+    /// Exact touch drag: bounded like every other markdown scroll, but with
+    /// visual and target positions together and all inertial state stopped.
+    pub fn scroll_touch_pixels(
+        &mut self,
+        delta_pixels: f32,
+        viewport_height: f32,
+    ) -> bool {
+        let before = self.scroll_y;
+        self.scroll_by_content_pixels(delta_pixels, viewport_height);
+        self.snap_scroll_to_target();
+        self.follow_cursor = false;
+        (self.scroll_y - before).abs() > f32::EPSILON
     }
 
     pub fn snap_scroll_to_target(&mut self) {
@@ -281,6 +302,15 @@ impl MarkdownPane {
         margin: Option<f32>,
     ) -> bool {
         if !self.follow_cursor {
+            return false;
+        }
+        // A structural edit has invalidated `cursor_rect`, but the virtual
+        // surface applies that splice later in this draw. Do not consume the
+        // one-shot follow request against the previous line's geometry. The
+        // next frame will reveal using the post-edit caret (critical for a
+        // rapid stream of Enter commits at the viewport bottom).
+        if self.pending_line_edit.is_some() {
+            self.stop_scroll_momentum();
             return false;
         }
         // Do this before checking `cursor_rect`: a virtualized caret can be
@@ -485,4 +515,19 @@ impl MarkdownPane {
         }
         true
     }
+}
+
+pub(super) fn preserve_anchor_for_line_edit(
+    edit: Option<MarkdownPendingLineEdit>,
+    replacement: bool,
+    scroll_y: f32,
+) -> bool {
+    let structural = matches!(
+        edit,
+        Some(
+            MarkdownPendingLineEdit::Insert { .. }
+                | MarkdownPendingLineEdit::Delete { .. }
+        )
+    );
+    (replacement || structural) && scroll_y > 0.0
 }

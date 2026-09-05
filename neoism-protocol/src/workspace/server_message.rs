@@ -139,12 +139,21 @@ pub enum WorkspaceServerMessage {
     /// whois`). The client can ignore it; it exists so a paired chrome
     /// can render "connected to laptop-A (you@tailnet)" without making
     /// its own tailscale calls.
+    ///
+    /// `connected_host_id` is the durable id of the daemon machine that
+    /// accepted the connection. Clients must use this (rather than the
+    /// dialled URL, which may have localhost/LAN/tailnet aliases) when
+    /// deciding which entries in a host-workspace tree belong to the
+    /// connected daemon. It is optional for compatibility with older
+    /// serialized acknowledgements.
     HelloAck {
         accepted: bool,
         #[serde(default)]
         reason: Option<String>,
         #[serde(default)]
         peer_identity: Option<String>,
+        #[serde(default)]
+        connected_host_id: Option<String>,
     },
     /// Reply to [`WorkspaceClientMessage::GetWorkplacePreferences`].
     /// `prefs` is the daemon's persisted value (or the default empty
@@ -283,4 +292,7 @@ pub enum WorkspaceServerMessage {
     /// host. `reason` is a human-readable string suitable for a toast
     /// or modal (e.g. "The host ended the session").
     HostEnded { reason: String },
+    /// Exact response to [`WorkspaceClientMessage::Ping`]. The nonce is opaque
+    /// and echoed verbatim so a resumed browser can reject stale generations.
+    Pong { nonce: String },
 }

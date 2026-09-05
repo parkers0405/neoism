@@ -1,5 +1,19 @@
 use super::*;
-use crate::panels::agent_pane::state::side_panel::{GoalStatus, NeoismAgentSemanticMatch, SidePanelMode};
+
+#[test]
+fn narrow_takeover_uses_full_content_rect_and_removes_main_surface() {
+    let pane = TestPane {
+        side_panel: NeoismAgentSidePanel::default(),
+        messages: Vec::new(),
+    };
+    let rect = [0.0, 70.0, 390.0, 740.0];
+    let (main, panel) = carve_panel_rect_responsive(&pane, rect, 1.0, true).unwrap();
+    assert_eq!(main, [0.0, 70.0, 0.0, 740.0]);
+    assert_eq!(panel, rect);
+}
+use crate::panels::agent_pane::state::side_panel::{
+    GoalStatus, NeoismAgentSemanticMatch, SidePanelMode,
+};
 
 struct TestPane {
     side_panel: NeoismAgentSidePanel,
@@ -693,14 +707,18 @@ fn semantic_matches_inject_selectable_excerpt_rows_under_their_session() {
     ]);
     panel.set_session_query("tokenizer".to_string());
     // Title filter alone matches nothing.
-    assert!(panel.sessions().iter().all(|entry| entry.is_header || entry.title != "Unrelated title"));
+    assert!(panel
+        .sessions()
+        .iter()
+        .all(|entry| entry.is_header || entry.title != "Unrelated title"));
 
     panel.set_semantic_results(
         "tokenizer".to_string(),
         vec![NeoismAgentSemanticMatch {
             session_id: "ses-b".to_string(),
             excerpt: "we rewrote the   tokenizer
-to handle unicode boundaries".to_string(),
+to handle unicode boundaries"
+                .to_string(),
             distance: 0.12,
         }],
     );
@@ -714,7 +732,10 @@ to handle unicode boundaries".to_string(),
         .iter()
         .take_while(|entry| entry.is_excerpt)
         .collect();
-    assert!(!excerpt_lines.is_empty(), "excerpt rows render under their session");
+    assert!(
+        !excerpt_lines.is_empty(),
+        "excerpt rows render under their session"
+    );
     assert!(
         excerpt_lines.iter().all(|entry| entry.id == "ses-b"),
         "activating any excerpt line resumes the session"
@@ -725,8 +746,7 @@ to handle unicode boundaries".to_string(),
         .collect::<Vec<_>>()
         .join(" ");
     assert_eq!(
-        joined,
-        "we rewrote the tokenizer to handle unicode boundaries",
+        joined, "we rewrote the tokenizer to handle unicode boundaries",
         "whitespace collapses and the chunk word-wraps across rows"
     );
     assert!(
@@ -744,7 +764,9 @@ to handle unicode boundaries".to_string(),
 #[test]
 fn excerpt_rows_highlight_every_search_term_occurrence_case_insensitively() {
     let mut panel = NeoismAgentSidePanel::default();
-    panel.set_sessions(vec![NeoismAgentSessionEntry::new("ses-a", "Untitled", "1d")]);
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new(
+        "ses-a", "Untitled", "1d",
+    )]);
     panel.set_session_query("Token stream".to_string());
     panel.set_semantic_results(
         "Token stream".to_string(),
@@ -772,14 +794,28 @@ fn excerpt_rows_highlight_every_search_term_occurrence_case_insensitively() {
         .collect();
     // Both terms, all occurrences, regardless of case — including the
     // "token" inside "retokenizes".
-    assert!(highlighted.iter().filter(|hit| hit.contains("token")).count() >= 3);
-    assert!(highlighted.iter().filter(|hit| hit.contains("stream")).count() >= 2);
+    assert!(
+        highlighted
+            .iter()
+            .filter(|hit| hit.contains("token"))
+            .count()
+            >= 3
+    );
+    assert!(
+        highlighted
+            .iter()
+            .filter(|hit| hit.contains("stream"))
+            .count()
+            >= 2
+    );
     // Ranges are sorted, non-overlapping, and on char boundaries.
     for entry in &excerpts {
         let mut previous_end = 0;
         for &(start, end) in &entry.highlights {
             assert!(start >= previous_end && end > start && end <= entry.title.len());
-            assert!(entry.title.is_char_boundary(start) && entry.title.is_char_boundary(end));
+            assert!(
+                entry.title.is_char_boundary(start) && entry.title.is_char_boundary(end)
+            );
             previous_end = end;
         }
     }
@@ -788,7 +824,9 @@ fn excerpt_rows_highlight_every_search_term_occurrence_case_insensitively() {
 #[test]
 fn overlapping_term_matches_merge_into_one_highlight_range() {
     let mut panel = NeoismAgentSidePanel::default();
-    panel.set_sessions(vec![NeoismAgentSessionEntry::new("ses-a", "Untitled", "1d")]);
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new(
+        "ses-a", "Untitled", "1d",
+    )]);
     panel.set_session_query("streams stream".to_string());
     panel.set_semantic_results(
         "streams stream".to_string(),
@@ -872,5 +910,8 @@ fn excerpt_wrap_follows_the_measured_column_budget() {
         .filter(|entry| entry.is_excerpt)
         .map(|entry| entry.title.clone())
         .collect();
-    assert_eq!(wide, vec!["alpha beta gamma delta epsilon zeta".to_string()]);
+    assert_eq!(
+        wide,
+        vec!["alpha beta gamma delta epsilon zeta".to_string()]
+    );
 }

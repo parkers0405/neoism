@@ -36,7 +36,10 @@ pub(crate) fn resolve_command(
     resolve(services, program, purpose, description)
 }
 
-pub(crate) fn in_directory(program: impl AsRef<OsStr>, directory: &std::path::Path) -> std::ffi::OsString {
+pub(crate) fn in_directory(
+    program: impl AsRef<OsStr>,
+    directory: &std::path::Path,
+) -> std::ffi::OsString {
     let program = std::path::Path::new(program.as_ref());
     if !program.is_absolute() && program.components().count() > 1 {
         directory.join(program).into_os_string()
@@ -64,7 +67,10 @@ pub(crate) mod test_support {
     }
 
     impl FakeExecutableService {
-        pub(crate) fn with(program: impl Into<OsString>, path: impl Into<PathBuf>) -> Self {
+        pub(crate) fn with(
+            program: impl Into<OsString>,
+            path: impl Into<PathBuf>,
+        ) -> Self {
             Self {
                 paths: BTreeMap::from([(program.into(), path.into())]),
                 requests: Arc::default(),
@@ -73,7 +79,10 @@ pub(crate) mod test_support {
     }
 
     impl ExecutableService for FakeExecutableService {
-        fn resolve(&self, request: &ExecutableRequest) -> Result<ExecutableResult, ExecutableError> {
+        fn resolve(
+            &self,
+            request: &ExecutableRequest,
+        ) -> Result<ExecutableResult, ExecutableError> {
             self.requests.lock().unwrap().push(request.clone());
             self.paths
                 .get(&request.program)

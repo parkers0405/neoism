@@ -1279,8 +1279,8 @@ fn tree_sitter_capture_kind(capture: &str, lang: Lang) -> SynTok {
         | "keyword.operator"
         | "keyword.repeat"
         | "keyword.return" => SynTok::Keyword,
-        "keyword.type" | "type" | "type.builtin" | "type.definition" | "type.qualifier"
-        | "tag" | "attribute" | "attribute.builtin" => SynTok::Type,
+        "keyword.type" | "type" | "type.builtin" | "type.definition"
+        | "type.qualifier" | "tag" | "attribute" | "attribute.builtin" => SynTok::Type,
         "constructor" => SynTok::Constructor,
         "module" | "module.builtin" | "namespace" => SynTok::Property,
         "annotation" => SynTok::Special,
@@ -1521,7 +1521,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn rust_uses_nvchad_style_contextual_captures() {
-        let source = "use crate::provider::stream_processor::{run_step, ProviderContext};\n\
+        let source =
+            "use crate::provider::stream_processor::{run_step, ProviderContext};\n\
                       fn send(state: &AppState) {\n\
                           let Prompt { message_id, parts: prompt_parts } = request;\n\
                           state.run(prompt_parts);\n\

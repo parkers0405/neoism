@@ -613,8 +613,10 @@ pub fn validate_config_document(content: &str) -> Result<(), String> {
     }
     deserialize_config(content)?;
     if let Some(agent) = value.get("agent") {
-        serde_json::from_value::<neoism_agent_core::api::AgentConfigDocument>(agent.clone())
-            .map_err(|error| format!("agent config: {error}"))?;
+        serde_json::from_value::<neoism_agent_core::api::AgentConfigDocument>(
+            agent.clone(),
+        )
+        .map_err(|error| format!("agent config: {error}"))?;
     }
     Ok(())
 }
@@ -780,17 +782,15 @@ pub fn write_keybind(action: &str, key: &str, with: &str) -> std::io::Result<()>
 /// including keys the terminal `Config` struct doesn't model.
 pub fn load_config_json_value() -> serde_json::Value {
     let path = config_file_path();
-    let fingerprint = std::fs::metadata(&path).ok().map(|metadata| {
-        (
-            metadata.len(),
-            metadata.modified().ok(),
-        )
-    });
-    if let Some(value) = config_json_cache()
-        .lock()
+    let fingerprint = std::fs::metadata(&path)
         .ok()
-        .and_then(|cache| cache.as_ref().filter(|entry| entry.fingerprint == fingerprint).map(|entry| entry.value.clone()))
-    {
+        .map(|metadata| (metadata.len(), metadata.modified().ok()));
+    if let Some(value) = config_json_cache().lock().ok().and_then(|cache| {
+        cache
+            .as_ref()
+            .filter(|entry| entry.fingerprint == fingerprint)
+            .map(|entry| entry.value.clone())
+    }) {
         return value;
     }
     let content = std::fs::read_to_string(&path).unwrap_or_default();

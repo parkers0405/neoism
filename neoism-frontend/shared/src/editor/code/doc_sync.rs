@@ -339,6 +339,8 @@ impl CodeDocBinding {
 /// selection anchor through the edit, and invalidating every cache and
 /// history structure that assumed the old text.
 pub fn apply_remote_delta_to_buffer(buffer: &mut CodeBuffer, delta: &MarkdownTextDelta) {
+    let old_cursor_line = buffer.cursor_line;
+    let old_line_count = buffer.lines.len();
     let caret = transform_doc_byte(
         position_to_doc_byte(&buffer.lines, buffer.cursor_line, buffer.cursor_col),
         delta,
@@ -358,6 +360,9 @@ pub fn apply_remote_delta_to_buffer(buffer: &mut CodeBuffer, delta: &MarkdownTex
     let (line, col) = doc_byte_to_position(&buffer.lines, caret);
     buffer.cursor_line = line;
     buffer.cursor_col = col;
+    if old_line_count != buffer.lines.len() {
+        buffer.pending_cursor_row_delta = Some(line as isize - old_cursor_line as isize);
+    }
     buffer.visual_anchor = anchor.map(|offset| {
         let (line, col) = doc_byte_to_position(&buffer.lines, offset);
         CodePosition { line, col }

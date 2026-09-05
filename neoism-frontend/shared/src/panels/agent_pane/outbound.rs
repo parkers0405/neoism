@@ -328,7 +328,9 @@ pub enum OutboundAgentCommand {
     RefreshConnectProviders {
         directory: Option<String>,
     },
-    RefreshProviderConnections { provider_id: String },
+    RefreshProviderConnections {
+        provider_id: String,
+    },
 
     /// Store an API key (or the Meridian one-click marker) for a provider.
     /// `PUT /auth/{provider_id}` with `{ "type": "api", "key": <key> }`.
@@ -344,8 +346,15 @@ pub enum OutboundAgentCommand {
         provider_id: String,
         connection_id: Option<String>,
     },
-    ConnectRename { provider_id: String, connection_id: String, label: String },
-    ConnectSetDefault { provider_id: String, connection_id: String },
+    ConnectRename {
+        provider_id: String,
+        connection_id: String,
+        label: String,
+    },
+    ConnectSetDefault {
+        provider_id: String,
+        connection_id: String,
+    },
 
     /// Begin an OAuth method: request the authorization URL.
     /// `POST /provider/{provider_id}/oauth/authorize` with

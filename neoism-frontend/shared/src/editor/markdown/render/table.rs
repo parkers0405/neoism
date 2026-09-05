@@ -1186,12 +1186,16 @@ pub(super) fn set_table_cursor_rect(
     let text_h = line_h * wrapped.len().max(1) as f32;
     let text_y = y + ((row_h - text_h) * 0.5).max(7.0);
     let caret_h = caret_height(opts);
-    pane.set_cursor_rect(Some([
+    let rect = [
         content_x + position.x - scroll_x,
         cursor_y_for_text_line(text_y + position.visual_line as f32 * line_h, opts),
         cursor_cell_width(opts),
         caret_h,
-    ]));
+    ];
+    pane.set_cursor_rect(match opts.clip_rect {
+        Some(clip) => super::cursor_rect_intersection(rect, clip),
+        None => Some(rect),
+    });
 }
 
 pub(super) fn table_source_cursor_position(

@@ -70,12 +70,24 @@ pub(crate) struct WorkflowRetryPolicy {
 }
 
 impl Default for WorkflowRetryPolicy {
-    fn default() -> Self { Self { max_attempts: 1, backoff: WorkflowBackoff::Fixed, initial_delay_ms: 0, max_delay_ms: 0, retryable_errors: Vec::new() } }
+    fn default() -> Self {
+        Self {
+            max_attempts: 1,
+            backoff: WorkflowBackoff::Fixed,
+            initial_delay_ms: 0,
+            max_delay_ms: 0,
+            retryable_errors: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum WorkflowBackoff { #[default] Fixed, Exponential }
+pub(crate) enum WorkflowBackoff {
+    #[default]
+    Fixed,
+    Exponential,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -87,21 +99,38 @@ pub(crate) struct WorkflowConcurrencyPolicy {
 }
 
 impl Default for WorkflowConcurrencyPolicy {
-    fn default() -> Self { Self { mode: WorkflowConcurrencyMode::Forbid, max_running: 1 } }
+    fn default() -> Self {
+        Self {
+            mode: WorkflowConcurrencyMode::Forbid,
+            max_running: 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum WorkflowConcurrencyMode { #[default] Forbid, Replace, Allow }
+pub(crate) enum WorkflowConcurrencyMode {
+    #[default]
+    Forbid,
+    Replace,
+    Allow,
+}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkflowDefinitionPatch {
-    id: Option<String>, name: Option<String>, active: Option<bool>, schedule: Option<WorkflowSchedule>,
-    prompt: Option<String>, directory: Option<Option<String>>, skill: Option<Option<String>>,
-    agent: Option<Option<String>>, model: Option<Option<ModelRef>>,
+    id: Option<String>,
+    name: Option<String>,
+    active: Option<bool>,
+    schedule: Option<WorkflowSchedule>,
+    prompt: Option<String>,
+    directory: Option<Option<String>>,
+    skill: Option<Option<String>>,
+    agent: Option<Option<String>>,
+    model: Option<Option<ModelRef>>,
     permissions: Option<Option<BTreeMap<String, WorkflowPermission>>>,
-    retry: Option<WorkflowRetryPolicy>, concurrency: Option<WorkflowConcurrencyPolicy>,
+    retry: Option<WorkflowRetryPolicy>,
+    concurrency: Option<WorkflowConcurrencyPolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -279,11 +308,23 @@ pub(crate) fn spawn_scheduler(state: AppState) {
             };
             let state = AppState { inner };
             if state.inner.workflow_workspaces.read().await.is_empty() {
-                state.inner.workflow_scheduler_started.store(false, std::sync::atomic::Ordering::SeqCst);
+                state
+                    .inner
+                    .workflow_scheduler_started
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 // Close the race where participation was added while the flag
                 // still said the old scheduler was alive.
                 if !state.inner.workflow_workspaces.read().await.is_empty()
-                    && state.inner.workflow_scheduler_started.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok()
+                    && state
+                        .inner
+                        .workflow_scheduler_started
+                        .compare_exchange(
+                            false,
+                            true,
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                        )
+                        .is_ok()
                 {
                     spawn_scheduler(state);
                 }
@@ -300,7 +341,11 @@ pub(crate) fn spawn_scheduler(state: AppState) {
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>();
-            match install_workflow_watches(state.services(), &workspaces, watch_tx.clone()) {
+            match install_workflow_watches(
+                state.services(),
+                &workspaces,
+                watch_tx.clone(),
+            ) {
                 Ok(replacement) => watcher = Some(replacement),
                 Err(error) => {
                     watcher = None;
@@ -362,7 +407,10 @@ fn install_workflow_watches(
     Ok(watcher)
 }
 
-fn workflow_watch_paths(services: &neoism_agent_service_api::AgentServices, workspaces: &[String]) -> BTreeMap<PathBuf, RecursiveMode> {
+fn workflow_watch_paths(
+    services: &neoism_agent_service_api::AgentServices,
+    workspaces: &[String],
+) -> BTreeMap<PathBuf, RecursiveMode> {
     let mut paths = BTreeMap::new();
     for workspace in workspaces {
         let roots = crate::config::roots(services, workspace);
@@ -471,7 +519,9 @@ pub(crate) async fn workflow_get(
 }
 
 fn workflow_source_is_managed(workspace: &str, source: &WorkflowSource) -> bool {
-    let expected = FsPath::new(workspace).join(".agent/workflows").join(format!("{}.md", source.definition.id));
+    let expected = FsPath::new(workspace)
+        .join(".agent/workflows")
+        .join(format!("{}.md", source.definition.id));
     FsPath::new(&source.source_path) == expected.canonicalize().unwrap_or(expected)
 }
 
@@ -548,7 +598,12 @@ pub(crate) async fn workflow_run_now(
     let projection = ensure_projection(&state, workspace, source, false).await?;
     let mut run = new_run(&projection, now_millis(), "manual");
     assign_run_lease(&state, &mut run);
-    if !state.inner.store.claim_workflow_run(&run, &projection.definition.concurrency).await? {
+    if !state
+        .inner
+        .store
+        .claim_workflow_run(&run, &projection.definition.concurrency)
+        .await?
+    {
         return Err(ApiError::conflict(
             "Workflow already has a queued or running run",
         ));
@@ -613,7 +668,11 @@ pub(crate) async fn workflow_run_get(
     Path((workflow_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
-    let run = state.inner.store.get_workflow_run(&run_id).await?
+    let run = state
+        .inner
+        .store
+        .get_workflow_run(&run_id)
+        .await?
         .filter(|run| run.activation_id == activation_id(&workspace, &workflow_id))
         .ok_or_else(|| ApiError::not_found("Workflow run not found"))?;
     Ok(Json(json!(run)))
@@ -628,54 +687,117 @@ pub(crate) async fn workflow_run_retry(
     let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
     track_workspace(&state, &workspace).await;
     let activation = activation_id(&workspace, &workflow_id);
-    let previous = state.inner.store.get_workflow_run(&run_id).await?
+    let previous = state
+        .inner
+        .store
+        .get_workflow_run(&run_id)
+        .await?
         .filter(|run| run.activation_id == activation)
         .ok_or_else(|| ApiError::not_found("Workflow run not found"))?;
-    if !matches!(previous.status.as_str(), "failed" | "interrupted" | "replaced") {
-        return Err(ApiError::conflict("Only failed, interrupted, or replaced workflow runs can be retried"));
+    if !matches!(
+        previous.status.as_str(),
+        "failed" | "interrupted" | "replaced"
+    ) {
+        return Err(ApiError::conflict(
+            "Only failed, interrupted, or replaced workflow runs can be retried",
+        ));
     }
-    let projection = state.inner.store.get_workflow(&activation).await?
+    let projection = state
+        .inner
+        .store
+        .get_workflow(&activation)
+        .await?
         .ok_or_else(|| ApiError::not_found("Workflow activation not found"))?;
     let mut run = new_retry_run(&previous, now_millis(), "manual-retry");
     assign_run_lease(&state, &mut run);
-    if !state.inner.store.claim_workflow_run(&run, &projection.definition.concurrency).await? {
-        return Err(ApiError::conflict("Workflow concurrency limit has been reached"));
+    if !state
+        .inner
+        .store
+        .claim_workflow_run(&run, &projection.definition.concurrency)
+        .await?
+    {
+        return Err(ApiError::conflict(
+            "Workflow concurrency limit has been reached",
+        ));
     }
     publish_run(&state, &run);
     tokio::spawn(execute_run(state.clone(), projection, run.clone()));
     Ok(Json(json!(run)))
 }
 
-fn admin_response(status: u16, body: Value) -> Result<neoism_agent_plugin_api::RouteResponse, neoism_agent_plugin_api::PluginRuntimeError> {
+fn admin_response(
+    status: u16,
+    body: Value,
+) -> Result<
+    neoism_agent_plugin_api::RouteResponse,
+    neoism_agent_plugin_api::PluginRuntimeError,
+> {
     Ok(neoism_agent_plugin_api::RouteResponse::json(status, body))
 }
 
-fn admin_error(status: u16, code: &str, message: impl Into<String>, details: Value) -> Result<neoism_agent_plugin_api::RouteResponse, neoism_agent_plugin_api::PluginRuntimeError> {
-    admin_response(status, json!({ "code": code, "message": message.into(), "retryable": false, "details": details }))
+fn admin_error(
+    status: u16,
+    code: &str,
+    message: impl Into<String>,
+    details: Value,
+) -> Result<
+    neoism_agent_plugin_api::RouteResponse,
+    neoism_agent_plugin_api::PluginRuntimeError,
+> {
+    admin_response(
+        status,
+        json!({ "code": code, "message": message.into(), "retryable": false, "details": details }),
+    )
 }
 
-fn authorize_admin(state: &AppState, actor: Option<&str>) -> Option<Result<neoism_agent_plugin_api::RouteResponse, neoism_agent_plugin_api::PluginRuntimeError>> {
+fn authorize_admin(
+    state: &AppState,
+    actor: Option<&str>,
+) -> Option<
+    Result<
+        neoism_agent_plugin_api::RouteResponse,
+        neoism_agent_plugin_api::PluginRuntimeError,
+    >,
+> {
     if !state.management_enabled() {
-        Some(admin_error(404, "management.disabled", "Management API is disabled", json!({})))
+        Some(admin_error(
+            404,
+            "management.disabled",
+            "Management API is disabled",
+            json!({}),
+        ))
     } else if actor.is_none() {
         Some(admin_error(401, "management.authentication_required", "Workflow definition mutations require authenticated local or daemon credentials", json!({})))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 fn managed_workflow_path(workspace: &FsPath, id: &str) -> anyhow::Result<PathBuf> {
-    if id.is_empty() || id.len() > 80 || !id.as_bytes()[0].is_ascii_lowercase()
-        || !id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.'))
-    { bail!("id must be a 1-80 character lowercase workflow slug"); }
+    if id.is_empty()
+        || id.len() > 80
+        || !id.as_bytes()[0].is_ascii_lowercase()
+        || !id.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.')
+        })
+    {
+        bail!("id must be a 1-80 character lowercase workflow slug");
+    }
     let root = workspace.join(".agent");
     for candidate in [root.as_path(), root.join("workflows").as_path()] {
-        if candidate.exists() && fs::symlink_metadata(candidate)?.file_type().is_symlink() {
+        if candidate.exists() && fs::symlink_metadata(candidate)?.file_type().is_symlink()
+        {
             bail!("managed workflow paths may not contain symlinks");
         }
     }
     Ok(root.join("workflows").join(format!("{id}.md")))
 }
 
-fn workflow_revision(bytes: &[u8]) -> String { format!("sha256:{:x}", Sha256::digest(bytes)) }
+fn workflow_revision(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
 
 fn current_revision(path: &FsPath) -> anyhow::Result<Option<String>> {
     match fs::read(path) {
@@ -686,44 +808,92 @@ fn current_revision(path: &FsPath) -> anyhow::Result<Option<String>> {
 }
 
 fn requested_revision(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
-    query.map(str::to_string).or_else(|| headers.get("if-match").and_then(|value| value.to_str().ok()).map(|value| value.trim_matches('"').to_string()))
+    query.map(str::to_string).or_else(|| {
+        headers
+            .get("if-match")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim_matches('"').to_string())
+    })
 }
 
-fn check_workflow_revision(current: Option<&str>, expected: Option<&str>, creating: bool) -> std::result::Result<(), (u16, Value)> {
+fn check_workflow_revision(
+    current: Option<&str>,
+    expected: Option<&str>,
+    creating: bool,
+) -> std::result::Result<(), (u16, Value)> {
     match (current, expected, creating) {
         (Some(current), _, true) => Err((409, json!({ "currentRevision": current }))),
         (None, _, false) => Err((404, json!({}))),
-        (Some(current), Some(expected), false) if expected != "*" && expected != current => Err((412, json!({ "currentRevision": current }))),
+        (Some(current), Some(expected), false)
+            if expected != "*" && expected != current =>
+        {
+            Err((412, json!({ "currentRevision": current })))
+        }
         _ => Ok(()),
     }
 }
 
 fn workflow_markdown(definition: &WorkflowDefinition) -> anyhow::Result<Vec<u8>> {
     let mut value = serde_json::to_value(definition)?;
-    let prompt = value.as_object_mut().and_then(|map| map.remove("prompt")).and_then(|value| value.as_str().map(str::to_string)).unwrap_or_default();
+    let prompt = value
+        .as_object_mut()
+        .and_then(|map| map.remove("prompt"))
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default();
     let yaml = serde_yaml::to_string(&value)?;
-    Ok(format!("---\n{}---\n{}{}", yaml.trim_start_matches("---\n"), prompt, if prompt.ends_with('\n') { "" } else { "\n" }).into_bytes())
+    Ok(format!(
+        "---\n{}---\n{}{}",
+        yaml.trim_start_matches("---\n"),
+        prompt,
+        if prompt.ends_with('\n') { "" } else { "\n" }
+    )
+    .into_bytes())
 }
 
-fn atomic_workflow_write(workspace: &FsPath, path: &FsPath, bytes: &[u8]) -> anyhow::Result<()> {
+fn atomic_workflow_write(
+    workspace: &FsPath,
+    path: &FsPath,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
     let directory = path.parent().context("workflow path has no parent")?;
     fs::create_dir_all(directory)?;
     for candidate in [workspace.join(".agent"), directory.to_path_buf()] {
         let metadata = fs::symlink_metadata(&candidate)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() { bail!("managed workflow path is not a real directory"); }
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("managed workflow path is not a real directory");
+        }
     }
-    let temp = directory.join(format!(".neoism-workflow-{}-{}.tmp", std::process::id(), now_millis()));
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
-    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) { let _ = fs::remove_file(&temp); return Err(error.into()); }
-    if let Err(error) = fs::rename(&temp, path) { let _ = fs::remove_file(&temp); return Err(error.into()); }
+    let temp = directory.join(format!(
+        ".neoism-workflow-{}-{}.tmp",
+        std::process::id(),
+        now_millis()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&temp);
+        return Err(error.into());
+    }
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error.into());
+    }
     #[cfg(unix)]
     fs::File::open(directory)?.sync_all()?;
     Ok(())
 }
 
-async fn refresh_after_definition_change(state: &AppState, workspace: &str) -> anyhow::Result<()> {
+async fn refresh_after_definition_change(
+    state: &AppState,
+    workspace: &str,
+) -> anyhow::Result<()> {
     track_workspace(state, workspace).await;
-    let runtime = state.workspace_runtime(workspace).await.map_err(anyhow::Error::msg)?;
+    let runtime = state
+        .workspace_runtime(workspace)
+        .await
+        .map_err(anyhow::Error::msg)?;
     let _ = crate::workspace_runtime::refresh_plugins(&runtime, state).await;
     reconcile_workspaces(state).await?;
     state.inner.workflow_notify.notify_waiters();
@@ -739,90 +909,440 @@ fn workflow_view(source: WorkflowSource, active: bool) -> Value {
 }
 
 pub(crate) async fn workflow_create(
-    state: &AppState, workspace: Option<&FsPath>, actor: Option<&str>, headers: &HeaderMap, body: Value,
-) -> Result<neoism_agent_plugin_api::RouteResponse, neoism_agent_plugin_api::PluginRuntimeError> {
-    if let Some(response) = authorize_admin(state, actor) { return response; }
-    let definition: WorkflowDefinition = match serde_json::from_value(body) { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
-    if let Err(error) = validate_definition(&definition) { return admin_error(400, "management.invalid_request", error.to_string(), json!({})); }
-    let Some(workspace) = workspace else { return admin_error(400, "management.invalid_request", "Workspace is required", json!({})); };
-    let workspace = match workspace.canonicalize() { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
-    let path = match managed_workflow_path(&workspace, &definition.id) { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
+    state: &AppState,
+    workspace: Option<&FsPath>,
+    actor: Option<&str>,
+    headers: &HeaderMap,
+    body: Value,
+) -> Result<
+    neoism_agent_plugin_api::RouteResponse,
+    neoism_agent_plugin_api::PluginRuntimeError,
+> {
+    if let Some(response) = authorize_admin(state, actor) {
+        return response;
+    }
+    let definition: WorkflowDefinition = match serde_json::from_value(body) {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                400,
+                "management.invalid_request",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
+    if let Err(error) = validate_definition(&definition) {
+        return admin_error(
+            400,
+            "management.invalid_request",
+            error.to_string(),
+            json!({}),
+        );
+    }
+    let Some(workspace) = workspace else {
+        return admin_error(
+            400,
+            "management.invalid_request",
+            "Workspace is required",
+            json!({}),
+        );
+    };
+    let workspace = match workspace.canonicalize() {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                400,
+                "management.invalid_request",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
+    let path = match managed_workflow_path(&workspace, &definition.id) {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                400,
+                "management.invalid_request",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
     let directory = workspace.to_string_lossy().into_owned();
     let _guard = state.inner.management_lock.lock().await;
     let current = current_revision(&path).ok().flatten();
-    if let Err((status, details)) = check_workflow_revision(current.as_deref(), requested_revision(headers, None).as_deref(), true) {
-        return admin_error(status, "management.revision_conflict", "Workflow revision does not match", details);
+    if let Err((status, details)) = check_workflow_revision(
+        current.as_deref(),
+        requested_revision(headers, None).as_deref(),
+        true,
+    ) {
+        return admin_error(
+            status,
+            "management.revision_conflict",
+            "Workflow revision does not match",
+            details,
+        );
     }
-    if find_source(state.services(), &directory, &definition.id).await.is_ok() {
-        return admin_error(403, "management.read_only", "A built-in or discovered workflow with this id cannot be overwritten", json!({}));
+    if find_source(state.services(), &directory, &definition.id)
+        .await
+        .is_ok()
+    {
+        return admin_error(
+            403,
+            "management.read_only",
+            "A built-in or discovered workflow with this id cannot be overwritten",
+            json!({}),
+        );
     }
-    let bytes = match workflow_markdown(&definition) { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
-    if let Err(error) = atomic_workflow_write(&workspace, &path, &bytes) { return admin_error(500, "management.storage_error", error.to_string(), json!({})); }
+    let bytes = match workflow_markdown(&definition) {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                400,
+                "management.invalid_request",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
+    if let Err(error) = atomic_workflow_write(&workspace, &path, &bytes) {
+        return admin_error(
+            500,
+            "management.storage_error",
+            error.to_string(),
+            json!({}),
+        );
+    }
     drop(_guard);
-    if let Err(error) = refresh_after_definition_change(state, &directory).await { return admin_error(500, "management.storage_error", error.to_string(), json!({})); }
+    if let Err(error) = refresh_after_definition_change(state, &directory).await {
+        return admin_error(
+            500,
+            "management.storage_error",
+            error.to_string(),
+            json!({}),
+        );
+    }
     let source = parse_source(&path).expect("newly validated workflow must parse");
     admin_response(201, workflow_view(source, definition.active))
 }
 
 pub(crate) async fn workflow_update(
-    state: &AppState, workspace: Option<&FsPath>, actor: Option<&str>, headers: &HeaderMap,
-    id: &str, body: Value, patch: bool,
-) -> Result<neoism_agent_plugin_api::RouteResponse, neoism_agent_plugin_api::PluginRuntimeError> {
-    if let Some(response) = authorize_admin(state, actor) { return response; }
-    let Some(workspace) = workspace else { return admin_error(400, "management.invalid_request", "Workspace is required", json!({})); };
-    let workspace = match workspace.canonicalize() { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
-    let path = match managed_workflow_path(&workspace, id) { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
+    state: &AppState,
+    workspace: Option<&FsPath>,
+    actor: Option<&str>,
+    headers: &HeaderMap,
+    id: &str,
+    body: Value,
+    patch: bool,
+) -> Result<
+    neoism_agent_plugin_api::RouteResponse,
+    neoism_agent_plugin_api::PluginRuntimeError,
+> {
+    if let Some(response) = authorize_admin(state, actor) {
+        return response;
+    }
+    let Some(workspace) = workspace else {
+        return admin_error(
+            400,
+            "management.invalid_request",
+            "Workspace is required",
+            json!({}),
+        );
+    };
+    let workspace = match workspace.canonicalize() {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                400,
+                "management.invalid_request",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
+    let path = match managed_workflow_path(&workspace, id) {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                400,
+                "management.invalid_request",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
     let directory = workspace.to_string_lossy().into_owned();
     let _guard = state.inner.management_lock.lock().await;
-    let current = match current_revision(&path) { Ok(value) => value, Err(error) => return admin_error(500, "management.storage_error", error.to_string(), json!({})) };
-    if current.is_none() && find_source(state.services(), &directory, id).await.is_ok() { return admin_error(403, "management.read_only", "Built-in and discovered workflows cannot be overwritten", json!({})); }
-    if let Err((status, details)) = check_workflow_revision(current.as_deref(), requested_revision(headers, None).as_deref(), false) { return admin_error(status, "management.revision_conflict", "Workflow revision does not match", details); }
+    let current = match current_revision(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                500,
+                "management.storage_error",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
+    if current.is_none() && find_source(state.services(), &directory, id).await.is_ok() {
+        return admin_error(
+            403,
+            "management.read_only",
+            "Built-in and discovered workflows cannot be overwritten",
+            json!({}),
+        );
+    }
+    if let Err((status, details)) = check_workflow_revision(
+        current.as_deref(),
+        requested_revision(headers, None).as_deref(),
+        false,
+    ) {
+        return admin_error(
+            status,
+            "management.revision_conflict",
+            "Workflow revision does not match",
+            details,
+        );
+    }
     let definition = if patch {
-        let source = match parse_source(&path) { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
-        let patch: WorkflowDefinitionPatch = match serde_json::from_value(body) { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
+        let source = match parse_source(&path) {
+            Ok(value) => value,
+            Err(error) => {
+                return admin_error(
+                    400,
+                    "management.invalid_request",
+                    error.to_string(),
+                    json!({}),
+                )
+            }
+        };
+        let patch: WorkflowDefinitionPatch = match serde_json::from_value(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return admin_error(
+                    400,
+                    "management.invalid_request",
+                    error.to_string(),
+                    json!({}),
+                )
+            }
+        };
         let mut value = source.definition;
-        if let Some(id) = patch.id { value.id = id; } if let Some(name) = patch.name { value.name = name; }
-        if let Some(active) = patch.active { value.active = active; } if let Some(schedule) = patch.schedule { value.schedule = schedule; }
-        if let Some(prompt) = patch.prompt { value.prompt = prompt; } if let Some(directory) = patch.directory { value.directory = directory; }
-        if let Some(skill) = patch.skill { value.skill = skill; } if let Some(agent) = patch.agent { value.agent = agent; }
-        if let Some(model) = patch.model { value.model = model; } if let Some(permissions) = patch.permissions { value.permissions = permissions; }
-        if let Some(retry) = patch.retry { value.retry = retry; } if let Some(concurrency) = patch.concurrency { value.concurrency = concurrency; }
+        if let Some(id) = patch.id {
+            value.id = id;
+        }
+        if let Some(name) = patch.name {
+            value.name = name;
+        }
+        if let Some(active) = patch.active {
+            value.active = active;
+        }
+        if let Some(schedule) = patch.schedule {
+            value.schedule = schedule;
+        }
+        if let Some(prompt) = patch.prompt {
+            value.prompt = prompt;
+        }
+        if let Some(directory) = patch.directory {
+            value.directory = directory;
+        }
+        if let Some(skill) = patch.skill {
+            value.skill = skill;
+        }
+        if let Some(agent) = patch.agent {
+            value.agent = agent;
+        }
+        if let Some(model) = patch.model {
+            value.model = model;
+        }
+        if let Some(permissions) = patch.permissions {
+            value.permissions = permissions;
+        }
+        if let Some(retry) = patch.retry {
+            value.retry = retry;
+        }
+        if let Some(concurrency) = patch.concurrency {
+            value.concurrency = concurrency;
+        }
         value
-    } else { match serde_json::from_value(body) { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) } };
-    if definition.id != id { return admin_error(400, "management.invalid_request", "Workflow id cannot be changed", json!({})); }
-    if let Err(error) = validate_definition(&definition) { return admin_error(400, "management.invalid_request", error.to_string(), json!({})); }
-    let bytes = match workflow_markdown(&definition) { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
-    if let Err(error) = atomic_workflow_write(&workspace, &path, &bytes) { return admin_error(500, "management.storage_error", error.to_string(), json!({})); }
+    } else {
+        match serde_json::from_value(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return admin_error(
+                    400,
+                    "management.invalid_request",
+                    error.to_string(),
+                    json!({}),
+                )
+            }
+        }
+    };
+    if definition.id != id {
+        return admin_error(
+            400,
+            "management.invalid_request",
+            "Workflow id cannot be changed",
+            json!({}),
+        );
+    }
+    if let Err(error) = validate_definition(&definition) {
+        return admin_error(
+            400,
+            "management.invalid_request",
+            error.to_string(),
+            json!({}),
+        );
+    }
+    let bytes = match workflow_markdown(&definition) {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                400,
+                "management.invalid_request",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
+    if let Err(error) = atomic_workflow_write(&workspace, &path, &bytes) {
+        return admin_error(
+            500,
+            "management.storage_error",
+            error.to_string(),
+            json!({}),
+        );
+    }
     drop(_guard);
-    if let Err(error) = refresh_after_definition_change(state, &directory).await { return admin_error(500, "management.storage_error", error.to_string(), json!({})); }
+    if let Err(error) = refresh_after_definition_change(state, &directory).await {
+        return admin_error(
+            500,
+            "management.storage_error",
+            error.to_string(),
+            json!({}),
+        );
+    }
     let source = parse_source(&path).expect("updated workflow must parse");
     admin_response(200, workflow_view(source, definition.active))
 }
 
 pub(crate) async fn workflow_delete(
-    state: &AppState, workspace: Option<&FsPath>, actor: Option<&str>, headers: &HeaderMap,
-    id: &str, query: &BTreeMap<String, Vec<String>>,
-) -> Result<neoism_agent_plugin_api::RouteResponse, neoism_agent_plugin_api::PluginRuntimeError> {
-    if let Some(response) = authorize_admin(state, actor) { return response; }
-    let Some(workspace) = workspace else { return admin_error(400, "management.invalid_request", "Workspace is required", json!({})); };
-    let workspace = match workspace.canonicalize() { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
-    let path = match managed_workflow_path(&workspace, id) { Ok(value) => value, Err(error) => return admin_error(400, "management.invalid_request", error.to_string(), json!({})) };
+    state: &AppState,
+    workspace: Option<&FsPath>,
+    actor: Option<&str>,
+    headers: &HeaderMap,
+    id: &str,
+    query: &BTreeMap<String, Vec<String>>,
+) -> Result<
+    neoism_agent_plugin_api::RouteResponse,
+    neoism_agent_plugin_api::PluginRuntimeError,
+> {
+    if let Some(response) = authorize_admin(state, actor) {
+        return response;
+    }
+    let Some(workspace) = workspace else {
+        return admin_error(
+            400,
+            "management.invalid_request",
+            "Workspace is required",
+            json!({}),
+        );
+    };
+    let workspace = match workspace.canonicalize() {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                400,
+                "management.invalid_request",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
+    let path = match managed_workflow_path(&workspace, id) {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                400,
+                "management.invalid_request",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
     let directory = workspace.to_string_lossy().into_owned();
     let _guard = state.inner.management_lock.lock().await;
-    let current = match current_revision(&path) { Ok(value) => value, Err(error) => return admin_error(500, "management.storage_error", error.to_string(), json!({})) };
-    if current.is_none() && find_source(state.services(), &directory, id).await.is_ok() { return admin_error(403, "management.read_only", "Built-in and discovered workflows cannot be deleted", json!({})); }
-    let expected = query.get("expectedRevision").and_then(|values| values.first()).map(String::as_str);
-    if let Err((status, details)) = check_workflow_revision(current.as_deref(), requested_revision(headers, expected).as_deref(), false) { return admin_error(status, "management.revision_conflict", "Workflow revision does not match", details); }
-    if let Err(error) = fs::remove_file(&path) { return admin_error(500, "management.storage_error", error.to_string(), json!({})); }
-    #[cfg(unix)] if let Some(parent) = path.parent() { let _ = fs::File::open(parent).and_then(|file| file.sync_all()); }
+    let current = match current_revision(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            return admin_error(
+                500,
+                "management.storage_error",
+                error.to_string(),
+                json!({}),
+            )
+        }
+    };
+    if current.is_none() && find_source(state.services(), &directory, id).await.is_ok() {
+        return admin_error(
+            403,
+            "management.read_only",
+            "Built-in and discovered workflows cannot be deleted",
+            json!({}),
+        );
+    }
+    let expected = query
+        .get("expectedRevision")
+        .and_then(|values| values.first())
+        .map(String::as_str);
+    if let Err((status, details)) = check_workflow_revision(
+        current.as_deref(),
+        requested_revision(headers, expected).as_deref(),
+        false,
+    ) {
+        return admin_error(
+            status,
+            "management.revision_conflict",
+            "Workflow revision does not match",
+            details,
+        );
+    }
+    if let Err(error) = fs::remove_file(&path) {
+        return admin_error(
+            500,
+            "management.storage_error",
+            error.to_string(),
+            json!({}),
+        );
+    }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let _ = fs::File::open(parent).and_then(|file| file.sync_all());
+    }
     let activation = activation_id(&directory, id);
-    let _ = state.inner.store.set_workflow_active(&activation, false, now_millis()).await;
+    let _ = state
+        .inner
+        .store
+        .set_workflow_active(&activation, false, now_millis())
+        .await;
     drop(_guard);
-    if let Err(error) = refresh_after_definition_change(state, &directory).await { return admin_error(500, "management.storage_error", error.to_string(), json!({})); }
+    if let Err(error) = refresh_after_definition_change(state, &directory).await {
+        return admin_error(
+            500,
+            "management.storage_error",
+            error.to_string(),
+            json!({}),
+        );
+    }
     admin_response(204, Value::Null)
 }
 
-async fn discover_async(services: neoism_agent_service_api::AgentServices, workspace: String) -> Result<WorkflowCatalog, ApiError> {
+async fn discover_async(
+    services: neoism_agent_service_api::AgentServices,
+    workspace: String,
+) -> Result<WorkflowCatalog, ApiError> {
     tokio::task::spawn_blocking(move || discover(&services, &workspace))
         .await
         .map_err(|error| {
@@ -833,10 +1353,18 @@ async fn discover_async(services: neoism_agent_service_api::AgentServices, works
 
 async fn track_workspace(state: &AppState, workspace: &str) {
     let snapshot = state.plugin_snapshot(workspace).await;
-    if !snapshot.manifests.iter().any(|plugin| plugin.id == neoism_agent_builtins::plugin::workflows::ID) {
+    if !snapshot
+        .manifests
+        .iter()
+        .any(|plugin| plugin.id == neoism_agent_builtins::plugin::workflows::ID)
+    {
         return;
     }
-    workspace_enabled(state, crate::workspace_runtime::canonical_location(workspace)).await;
+    workspace_enabled(
+        state,
+        crate::workspace_runtime::canonical_location(workspace),
+    )
+    .await;
 }
 
 pub(crate) async fn workspace_enabled(state: &AppState, workspace: PathBuf) {
@@ -848,8 +1376,15 @@ pub(crate) async fn workspace_enabled(state: &AppState, workspace: PathBuf) {
         .await
         .insert(workspace.to_string())
     {
-        if state.inner.workflow_scheduler_started
-            .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+        if state
+            .inner
+            .workflow_scheduler_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
             .is_ok()
         {
             spawn_scheduler(state.clone());
@@ -859,7 +1394,12 @@ pub(crate) async fn workspace_enabled(state: &AppState, workspace: PathBuf) {
 }
 
 pub(crate) async fn workspace_disabled(state: &AppState, workspace: &FsPath) {
-    state.inner.workflow_workspaces.write().await.remove(workspace.to_string_lossy().as_ref());
+    state
+        .inner
+        .workflow_workspaces
+        .write()
+        .await
+        .remove(workspace.to_string_lossy().as_ref());
     state.inner.workflow_notify.notify_waiters();
 }
 
@@ -876,9 +1416,10 @@ async fn reconcile_workspaces(state: &AppState) -> anyhow::Result<()> {
     for workspace in workspaces {
         let scan_workspace = workspace.clone();
         let services = state.services().clone();
-        let catalog = tokio::task::spawn_blocking(move || discover(&services, &scan_workspace))
-            .await
-            .context("workflow discovery task failed")??;
+        let catalog =
+            tokio::task::spawn_blocking(move || discover(&services, &scan_workspace))
+                .await
+                .context("workflow discovery task failed")??;
         for diagnostic in catalog.diagnostics {
             tracing::warn!(
                 source_path = %diagnostic.source_path,
@@ -948,7 +1489,10 @@ async fn find_source(
     })
 }
 
-fn discover(services: &neoism_agent_service_api::AgentServices, workspace: &str) -> anyhow::Result<WorkflowCatalog> {
+fn discover(
+    services: &neoism_agent_service_api::AgentServices,
+    workspace: &str,
+) -> anyhow::Result<WorkflowCatalog> {
     let mut catalog = WorkflowCatalog::default();
     for root in crate::config::roots(services, workspace) {
         for directory in [root.join("workflow"), root.join("workflows")] {
@@ -1111,7 +1655,12 @@ fn validate_definition(definition: &WorkflowDefinition) -> anyhow::Result<()> {
     {
         bail!("retry.maxDelayMs must be greater than or equal to retry.initialDelayMs");
     }
-    if definition.retry.retryable_errors.iter().any(|value| value.trim().is_empty()) {
+    if definition
+        .retry
+        .retryable_errors
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
         bail!("retry.retryableErrors must not contain empty values");
     }
     if definition.concurrency.max_running == 0 {
@@ -1524,7 +2073,11 @@ async fn schedule_due_workflows(state: &AppState) -> anyhow::Result<()> {
         }
         let mut run = new_run(&projection, slot, "scheduled");
         assign_run_lease(state, &mut run);
-        let claimed = state.inner.store.claim_scheduled_workflow_run(&run, &projection.definition.concurrency).await?;
+        let claimed = state
+            .inner
+            .store
+            .claim_scheduled_workflow_run(&run, &projection.definition.concurrency)
+            .await?;
         if claimed {
             publish_run(state, &run);
             tokio::spawn(execute_run(state.clone(), projection, run));
@@ -1536,12 +2089,25 @@ async fn schedule_due_workflows(state: &AppState) -> anyhow::Result<()> {
 async fn schedule_due_retries(state: &AppState) -> anyhow::Result<()> {
     let now = now_millis();
     for mut run in state.inner.store.list_due_workflow_retries(now).await? {
-        let Some(projection) = state.inner.store.get_workflow(&run.activation_id).await? else { continue; };
-        if !projection.active { continue; }
+        let Some(projection) = state.inner.store.get_workflow(&run.activation_id).await?
+        else {
+            continue;
+        };
+        if !projection.active {
+            continue;
+        }
         let lease_expires_at = now.saturating_add(5 * 60 * 1000);
-        if state.inner.store.claim_workflow_retry(
-            &run, &projection.definition.concurrency, &state.inner.execution_owner_id, lease_expires_at,
-        ).await? {
+        if state
+            .inner
+            .store
+            .claim_workflow_retry(
+                &run,
+                &projection.definition.concurrency,
+                &state.inner.execution_owner_id,
+                lease_expires_at,
+            )
+            .await?
+        {
             run.status = "queued".into();
             run.next_attempt_at = None;
             run.lease_owner = Some(state.inner.execution_owner_id.clone());
@@ -1549,7 +2115,11 @@ async fn schedule_due_retries(state: &AppState) -> anyhow::Result<()> {
             publish_run(state, &run);
             tokio::spawn(execute_run(state.clone(), projection, run));
         } else {
-            state.inner.store.defer_workflow_retry(&run.id, now.saturating_add(1_000)).await?;
+            state
+                .inner
+                .store
+                .defer_workflow_retry(&run.id, now.saturating_add(1_000))
+                .await?;
         }
     }
     Ok(())
@@ -1667,14 +2237,25 @@ fn new_retry_run(previous: &WorkflowRun, _due: u64, trigger: &str) -> WorkflowRu
 fn retry_delay(policy: &WorkflowRetryPolicy, attempt: u32) -> u64 {
     let multiplier = match policy.backoff {
         WorkflowBackoff::Fixed => 1,
-        WorkflowBackoff::Exponential => 1u64.checked_shl(attempt.saturating_sub(2).min(62)).unwrap_or(u64::MAX),
+        WorkflowBackoff::Exponential => 1u64
+            .checked_shl(attempt.saturating_sub(2).min(62))
+            .unwrap_or(u64::MAX),
     };
     let delay = policy.initial_delay_ms.saturating_mul(multiplier);
-    if policy.max_delay_ms == 0 { delay } else { delay.min(policy.max_delay_ms) }
+    if policy.max_delay_ms == 0 {
+        delay
+    } else {
+        delay.min(policy.max_delay_ms)
+    }
 }
 
 fn error_is_retryable(policy: &WorkflowRetryPolicy, message: &str) -> bool {
-    policy.retryable_errors.is_empty() || policy.retryable_errors.iter().any(|candidate| message.to_ascii_lowercase().contains(&candidate.to_ascii_lowercase()))
+    policy.retryable_errors.is_empty()
+        || policy.retryable_errors.iter().any(|candidate| {
+            message
+                .to_ascii_lowercase()
+                .contains(&candidate.to_ascii_lowercase())
+        })
 }
 
 fn assign_run_lease(state: &AppState, run: &mut WorkflowRun) {
@@ -1703,9 +2284,12 @@ async fn execute_run(
                     None,
                     true,
                 )
-                .await {
+                .await
+            {
                 Ok(updated) => publish_terminal = updated,
-                Err(error) => tracing::error!(%error, run_id = %run.id, "failed to finish workflow run"),
+                Err(error) => {
+                    tracing::error!(%error, run_id = %run.id, "failed to finish workflow run")
+                }
             }
         }
         Err(error) => {
@@ -1713,25 +2297,58 @@ async fn execute_run(
             run.status = "failed".to_string();
             run.error = Some(message.clone());
             run.finished_at = Some(now_millis());
-            if run.attempt < projection.definition.retry.max_attempts && error_is_retryable(&projection.definition.retry, &message) {
-                let due = now_millis().saturating_add(retry_delay(&projection.definition.retry, run.attempt.saturating_add(1)));
+            if run.attempt < projection.definition.retry.max_attempts
+                && error_is_retryable(&projection.definition.retry, &message)
+            {
+                let due = now_millis().saturating_add(retry_delay(
+                    &projection.definition.retry,
+                    run.attempt.saturating_add(1),
+                ));
                 let mut retry = new_retry_run(&run, due, "automatic-retry");
                 retry.status = "retry_waiting".into();
                 retry.next_attempt_at = Some(due);
-                match state.inner.store.schedule_workflow_retry(&run, &retry).await {
-                    Ok(true) => { publish_run(&state, &retry); state.inner.workflow_notify.notify_one(); }
-                    Ok(false) => { publish_terminal = false; tracing::warn!(run_id = %run.id, "workflow failure was already finalized"); }
-                    Err(store_error) => tracing::error!(error = %store_error, run_id = %run.id, "failed to schedule workflow retry"),
+                match state
+                    .inner
+                    .store
+                    .schedule_workflow_retry(&run, &retry)
+                    .await
+                {
+                    Ok(true) => {
+                        publish_run(&state, &retry);
+                        state.inner.workflow_notify.notify_one();
+                    }
+                    Ok(false) => {
+                        publish_terminal = false;
+                        tracing::warn!(run_id = %run.id, "workflow failure was already finalized");
+                    }
+                    Err(store_error) => {
+                        tracing::error!(error = %store_error, run_id = %run.id, "failed to schedule workflow retry")
+                    }
                 }
             } else {
-                match state.inner.store.update_workflow_run(&run.id, "failed", run.session_id.as_deref(), Some(&message), true).await {
+                match state
+                    .inner
+                    .store
+                    .update_workflow_run(
+                        &run.id,
+                        "failed",
+                        run.session_id.as_deref(),
+                        Some(&message),
+                        true,
+                    )
+                    .await
+                {
                     Ok(updated) => publish_terminal = updated,
-                    Err(store_error) => tracing::error!(error = %store_error, run_id = %run.id, "failed to record workflow failure"),
+                    Err(store_error) => {
+                        tracing::error!(error = %store_error, run_id = %run.id, "failed to record workflow failure")
+                    }
                 }
             }
         }
     }
-    if publish_terminal { publish_run(&state, &run); }
+    if publish_terminal {
+        publish_run(&state, &run);
+    }
 }
 
 async fn execute_run_inner(
@@ -1747,12 +2364,10 @@ async fn execute_run_inner(
             &projection.workspace_root,
             skill_name,
         )
-            .await?
-            .ok_or_else(|| {
-                ApiError::bad_request(format!(
-                    "workflow skill `{skill_name}` was not found"
-                ))
-            })?;
+        .await?
+        .ok_or_else(|| {
+            ApiError::bad_request(format!("workflow skill `{skill_name}` was not found"))
+        })?;
         prompt = format!("{}\n\n{}", skill.content.trim(), prompt);
     }
     let mut extra = BTreeMap::new();
@@ -1788,7 +2403,11 @@ async fn execute_run_inner(
         .store
         .update_workflow_run(&run.id, "running", Some(session.id.as_str()), None, false)
         .await?;
-    if !started { return Err(ApiError::conflict("Workflow run was replaced before execution began")); }
+    if !started {
+        return Err(ApiError::conflict(
+            "Workflow run was replaced before execution began",
+        ));
+    }
     run.status = "running".to_string();
     run.started_at = Some(now_millis());
     run.session_id = Some(session.id.to_string());
@@ -1828,17 +2447,33 @@ async fn recover_unfinished_runs(state: &AppState) -> anyhow::Result<()> {
             run.attempt < projection.definition.retry.max_attempts
                 && error_is_retryable(&projection.definition.retry, &message)
         }) {
-            let due = now_millis().saturating_add(retry_delay(&projection.definition.retry, run.attempt.saturating_add(1)));
+            let due = now_millis().saturating_add(retry_delay(
+                &projection.definition.retry,
+                run.attempt.saturating_add(1),
+            ));
             let mut retry = new_retry_run(&run, due, "recovery-retry");
             retry.status = "retry_waiting".into();
             retry.next_attempt_at = Some(due);
-            if state.inner.store.schedule_workflow_retry(&run, &retry).await? {
+            if state
+                .inner
+                .store
+                .schedule_workflow_retry(&run, &retry)
+                .await?
+            {
                 publish_run(state, &retry);
             }
         } else {
-            state.inner.store.update_workflow_run(
-                &run.id, "interrupted", run.session_id.as_deref(), run.error.as_deref(), true,
-            ).await?;
+            state
+                .inner
+                .store
+                .update_workflow_run(
+                    &run.id,
+                    "interrupted",
+                    run.session_id.as_deref(),
+                    run.error.as_deref(),
+                    true,
+                )
+                .await?;
         }
         publish_run(state, &run);
     }
@@ -1864,7 +2499,11 @@ fn workflow_execution_directory(
     services: &neoism_agent_service_api::AgentServices,
     projection: &WorkflowProjection,
 ) -> Result<String, ApiError> {
-    let default_directory = if workflow_source_is_global(services, &projection.workspace_root, &projection.source_path) {
+    let default_directory = if workflow_source_is_global(
+        services,
+        &projection.workspace_root,
+        &projection.source_path,
+    ) {
         dirs::home_dir()
             .ok_or_else(|| ApiError::bad_request("home directory is unavailable"))?
     } else {
@@ -1912,10 +2551,16 @@ fn workflow_execution_directory(
     Ok(candidate.display().to_string())
 }
 
-fn workflow_source_is_global(services: &neoism_agent_service_api::AgentServices, workspace: &str, source_path: &str) -> bool {
+fn workflow_source_is_global(
+    services: &neoism_agent_service_api::AgentServices,
+    workspace: &str,
+    source_path: &str,
+) -> bool {
     let source = FsPath::new(source_path);
     let workspace = PathBuf::from(workspace);
-    crate::config::roots(services, workspace.to_string_lossy().as_ref()).into_iter().any(|root| !root.starts_with(&workspace) && source.starts_with(root))
+    crate::config::roots(services, workspace.to_string_lossy().as_ref())
+        .into_iter()
+        .any(|root| !root.starts_with(&workspace) && source.starts_with(root))
 }
 
 fn activation_id(workspace: &str, workflow_id: &str) -> String {
@@ -2139,7 +2784,8 @@ mod tests {
             updated: 0,
         };
         assert_eq!(
-            workflow_execution_directory(&crate::standard_services(), &projection).unwrap(),
+            workflow_execution_directory(&crate::standard_services(), &projection)
+                .unwrap(),
             nested.canonicalize().unwrap().display().to_string()
         );
         let external = std::env::temp_dir().join(format!(
@@ -2149,7 +2795,8 @@ mod tests {
         std::fs::create_dir_all(&external).unwrap();
         projection.definition.directory = Some(external.display().to_string());
         assert_eq!(
-            workflow_execution_directory(&crate::standard_services(), &projection).unwrap(),
+            workflow_execution_directory(&crate::standard_services(), &projection)
+                .unwrap(),
             external.canonicalize().unwrap().display().to_string()
         );
         let _ = std::fs::remove_dir_all(root);
@@ -2160,7 +2807,11 @@ mod tests {
     fn global_workflow_defaults_to_os_home_directory() {
         let home = dirs::home_dir().expect("home directory");
         let services = crate::standard_services();
-        let global_root = crate::config::roots(&services, std::env::temp_dir().to_string_lossy().as_ref()).remove(0);
+        let global_root = crate::config::roots(
+            &services,
+            std::env::temp_dir().to_string_lossy().as_ref(),
+        )
+        .remove(0);
         let projection = WorkflowProjection {
             activation_id: "activation".to_string(),
             workflow_id: "global".to_string(),
@@ -2279,7 +2930,10 @@ mod tests {
         let store = SessionStore::open(path.clone()).await.unwrap();
         store.upsert_workflow(&projection).await.unwrap();
         let first = new_run(&projection, slot, "scheduled");
-        assert!(store.claim_scheduled_workflow_run(&first, &projection.definition.concurrency).await.unwrap());
+        assert!(store
+            .claim_scheduled_workflow_run(&first, &projection.definition.concurrency)
+            .await
+            .unwrap());
 
         // Simulate a crash immediately after claiming, before execution can
         // move the queued run forward, then perform startup recovery.
@@ -2309,7 +2963,10 @@ mod tests {
             .unwrap();
 
         let retry = new_run(&projection, slot, "scheduled");
-        assert!(!store.claim_scheduled_workflow_run(&retry, &projection.definition.concurrency).await.unwrap());
+        assert!(!store
+            .claim_scheduled_workflow_run(&retry, &projection.definition.concurrency)
+            .await
+            .unwrap());
         let history = store
             .list_workflow_runs(&projection.activation_id, 10)
             .await
@@ -2335,7 +2992,10 @@ mod tests {
         let workflow_root = root.join(".agent/workflows");
         std::fs::create_dir_all(&workflow_root).unwrap();
         let workspace = root.display().to_string();
-        let paths = workflow_watch_paths(&crate::standard_services(), std::slice::from_ref(&workspace));
+        let paths = workflow_watch_paths(
+            &crate::standard_services(),
+            std::slice::from_ref(&workspace),
+        );
         assert_eq!(
             paths.get(&workflow_root.canonicalize().unwrap()),
             Some(&RecursiveMode::Recursive)
@@ -2356,8 +3016,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("neoism-workflow-event-{unique}"));
         std::fs::create_dir_all(root.join(".agent")).unwrap();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let watcher =
-            install_workflow_watches(&crate::standard_services(), &[root.display().to_string()], event_tx).unwrap();
+        let watcher = install_workflow_watches(
+            &crate::standard_services(),
+            &[root.display().to_string()],
+            event_tx,
+        )
+        .unwrap();
 
         std::fs::create_dir(root.join(".agent/workflows")).unwrap();
         tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
@@ -2371,19 +3035,42 @@ mod tests {
 
     #[tokio::test]
     async fn managed_definition_crud_is_revisioned_and_file_backed() {
-        let root = std::env::temp_dir().join(format!("neoism-workflow-admin-{}", Id::ascending(IdKind::Event)));
+        let root = std::env::temp_dir().join(format!(
+            "neoism-workflow-admin-{}",
+            Id::ascending(IdKind::Event)
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let state = AppState::open_database_with_services_and_management(
-            root.join("state.sqlite3"), crate::standard_services(), crate::ManagementPolicy::enabled(),
-        ).await.unwrap();
+            root.join("state.sqlite3"),
+            crate::standard_services(),
+            crate::ManagementPolicy::enabled(),
+        )
+        .await
+        .unwrap();
         let definition = json!({
             "id": "managed-daily", "name": "Managed daily", "active": false,
             "schedule": { "frequency": "daily", "time": "09:00" },
             "prompt": "Review the workspace."
         });
-        let unauthenticated = workflow_create(&state, Some(&root), None, &HeaderMap::new(), definition.clone()).await.unwrap();
+        let unauthenticated = workflow_create(
+            &state,
+            Some(&root),
+            None,
+            &HeaderMap::new(),
+            definition.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(unauthenticated.status, 401);
-        let response = workflow_create(&state, Some(&root), Some("local-test"), &HeaderMap::new(), definition).await.unwrap();
+        let response = workflow_create(
+            &state,
+            Some(&root),
+            Some("local-test"),
+            &HeaderMap::new(),
+            definition,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.status, 201);
         let revision = response.body["revision"].as_str().unwrap().to_string();
         let path = root.join(".agent/workflows/managed-daily.md");
@@ -2393,28 +3080,65 @@ mod tests {
 
         let mut stale = HeaderMap::new();
         stale.insert("if-match", "sha256:stale".parse().unwrap());
-        let response = workflow_update(&state, Some(&root), Some("local-test"), &stale, "managed-daily", json!({ "name": "Changed" }), true).await.unwrap();
+        let response = workflow_update(
+            &state,
+            Some(&root),
+            Some("local-test"),
+            &stale,
+            "managed-daily",
+            json!({ "name": "Changed" }),
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.status, 412);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
 
         let mut matching = HeaderMap::new();
         matching.insert("if-match", revision.parse().unwrap());
-        let response = workflow_update(&state, Some(&root), Some("local-test"), &matching, "managed-daily", json!({ "name": "Changed" }), true).await.unwrap();
+        let response = workflow_update(
+            &state,
+            Some(&root),
+            Some("local-test"),
+            &matching,
+            "managed-daily",
+            json!({ "name": "Changed" }),
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.status, 200);
         let next_revision = response.body["revision"].as_str().unwrap().to_string();
         let mut query = BTreeMap::new();
         query.insert("expectedRevision".to_string(), vec![next_revision]);
-        let response = workflow_delete(&state, Some(&root), Some("local-test"), &HeaderMap::new(), "managed-daily", &query).await.unwrap();
+        let response = workflow_delete(
+            &state,
+            Some(&root),
+            Some("local-test"),
+            &HeaderMap::new(),
+            "managed-daily",
+            &query,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.status, 204);
         assert!(!path.exists());
 
         let discovered = root.join(".agent/workflow");
         std::fs::create_dir_all(&discovered).unwrap();
         std::fs::write(discovered.join("readonly.md"), "---\nid: readonly\nname: Read only\nschedule:\n  frequency: daily\n---\nDo not overwrite.\n").unwrap();
-        let response = workflow_create(&state, Some(&root), Some("local-test"), &HeaderMap::new(), json!({
-            "id": "readonly", "name": "Replacement", "active": false,
-            "schedule": { "frequency": "daily" }, "prompt": "Replace."
-        })).await.unwrap();
+        let response = workflow_create(
+            &state,
+            Some(&root),
+            Some("local-test"),
+            &HeaderMap::new(),
+            json!({
+                "id": "readonly", "name": "Replacement", "active": false,
+                "schedule": { "frequency": "daily" }, "prompt": "Replace."
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(response.status, 403);
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(root);
@@ -2422,44 +3146,114 @@ mod tests {
 
     #[tokio::test]
     async fn durable_concurrency_and_retry_lineage_survive_reopen() {
-        let path = std::env::temp_dir().join(format!("neoism-workflow-policy-{}.turso.db", Id::ascending(IdKind::Event)));
+        let path = std::env::temp_dir().join(format!(
+            "neoism-workflow-policy-{}.turso.db",
+            Id::ascending(IdKind::Event)
+        ));
         let mut definition = WorkflowDefinition {
-            id: "policy".into(), name: "Policy".into(), active: true, schedule: schedule("daily"), prompt: "Run".into(),
-            directory: None, skill: None, agent: None, model: None, permissions: None,
-            retry: WorkflowRetryPolicy { max_attempts: 3, initial_delay_ms: 10, ..Default::default() },
-            concurrency: WorkflowConcurrencyPolicy { mode: WorkflowConcurrencyMode::Allow, max_running: 2 },
+            id: "policy".into(),
+            name: "Policy".into(),
+            active: true,
+            schedule: schedule("daily"),
+            prompt: "Run".into(),
+            directory: None,
+            skill: None,
+            agent: None,
+            model: None,
+            permissions: None,
+            retry: WorkflowRetryPolicy {
+                max_attempts: 3,
+                initial_delay_ms: 10,
+                ..Default::default()
+            },
+            concurrency: WorkflowConcurrencyPolicy {
+                mode: WorkflowConcurrencyMode::Allow,
+                max_running: 2,
+            },
         };
         let projection = WorkflowProjection {
-            activation_id: "policy-activation".into(), workflow_id: "policy".into(), workspace_root: std::env::temp_dir().display().to_string(),
-            source_path: "policy.md".into(), source_hash: "hash".into(), definition: definition.clone(), active: true,
-            activated_at: 1, last_scheduled_at: None, updated: 1,
+            activation_id: "policy-activation".into(),
+            workflow_id: "policy".into(),
+            workspace_root: std::env::temp_dir().display().to_string(),
+            source_path: "policy.md".into(),
+            source_hash: "hash".into(),
+            definition: definition.clone(),
+            active: true,
+            activated_at: 1,
+            last_scheduled_at: None,
+            updated: 1,
         };
         let store = SessionStore::open(path.clone()).await.unwrap();
         store.upsert_workflow(&projection).await.unwrap();
         let first = new_run(&projection, 10, "manual");
         let second = new_run(&projection, 11, "manual");
         let third = new_run(&projection, 12, "manual");
-        assert!(store.claim_workflow_run(&first, &definition.concurrency).await.unwrap());
-        assert!(store.claim_workflow_run(&second, &definition.concurrency).await.unwrap());
-        assert!(!store.claim_workflow_run(&third, &definition.concurrency).await.unwrap());
+        assert!(store
+            .claim_workflow_run(&first, &definition.concurrency)
+            .await
+            .unwrap());
+        assert!(store
+            .claim_workflow_run(&second, &definition.concurrency)
+            .await
+            .unwrap());
+        assert!(!store
+            .claim_workflow_run(&third, &definition.concurrency)
+            .await
+            .unwrap());
 
-        definition.concurrency = WorkflowConcurrencyPolicy { mode: WorkflowConcurrencyMode::Replace, max_running: 1 };
+        definition.concurrency = WorkflowConcurrencyPolicy {
+            mode: WorkflowConcurrencyMode::Replace,
+            max_running: 1,
+        };
         let replacement = new_run(&projection, 13, "manual");
-        assert!(store.claim_workflow_run(&replacement, &definition.concurrency).await.unwrap());
-        let history = store.list_workflow_runs(&projection.activation_id, 10).await.unwrap();
-        assert_eq!(history.iter().filter(|run| run.status == "queued").count(), 1);
-        assert_eq!(history.iter().filter(|run| run.status == "replaced").count(), 2);
+        assert!(store
+            .claim_workflow_run(&replacement, &definition.concurrency)
+            .await
+            .unwrap());
+        let history = store
+            .list_workflow_runs(&projection.activation_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            history.iter().filter(|run| run.status == "queued").count(),
+            1
+        );
+        assert_eq!(
+            history
+                .iter()
+                .filter(|run| run.status == "replaced")
+                .count(),
+            2
+        );
         let mut collision = new_run(&projection, 13, "manual");
         collision.id = format!("{}-collision", replacement.id);
-        assert!(!store.claim_workflow_run(&collision, &definition.concurrency).await.unwrap());
-        assert_eq!(store.get_workflow_run(&replacement.id).await.unwrap().unwrap().status, "queued");
+        assert!(!store
+            .claim_workflow_run(&collision, &definition.concurrency)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .get_workflow_run(&replacement.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued"
+        );
 
         let mut failed = replacement.clone();
-        failed.status = "failed".into(); failed.error = Some("transient".into()); failed.finished_at = Some(20);
+        failed.status = "failed".into();
+        failed.error = Some("transient".into());
+        failed.finished_at = Some(20);
         let mut retry = new_retry_run(&failed, 30, "automatic-retry");
-        retry.status = "retry_waiting".into(); retry.next_attempt_at = Some(30);
-        assert!(store.schedule_workflow_retry(&failed, &retry).await.unwrap());
-        store.close().await; drop(store);
+        retry.status = "retry_waiting".into();
+        retry.next_attempt_at = Some(30);
+        assert!(store
+            .schedule_workflow_retry(&failed, &retry)
+            .await
+            .unwrap());
+        store.close().await;
+        drop(store);
         let store = SessionStore::open(path.clone()).await.unwrap();
         let due = store.list_due_workflow_retries(30).await.unwrap();
         assert_eq!(due.len(), 1);
@@ -2467,6 +3261,12 @@ mod tests {
         assert_eq!(due[0].retry_of.as_deref(), Some(replacement.id.as_str()));
         assert_eq!(due[0].root_run_id, replacement.root_run_id);
         store.close().await;
-        for candidate in [path.clone(), PathBuf::from(format!("{}-wal", path.display())), PathBuf::from(format!("{}-shm", path.display()))] { let _ = std::fs::remove_file(candidate); }
+        for candidate in [
+            path.clone(),
+            PathBuf::from(format!("{}-wal", path.display())),
+            PathBuf::from(format!("{}-shm", path.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 }

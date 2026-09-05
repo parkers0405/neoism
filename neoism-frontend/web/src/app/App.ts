@@ -1,7 +1,12 @@
 import { ProtocolClient, ProtocolStatus } from "../workspace/ProtocolClient";
+import type { ConnectionState } from "../workspace/ProtocolClient";
 import { ConnectionScreen } from "./ConnectionScreen";
 import type { ConnectionScreenOptions } from "./ConnectionScreen";
 import { TerminalPanel } from "../terminal/TerminalPanel";
+import {
+  normalizeNotesVaultRoot,
+  synchronizeNotesVault,
+} from "../terminal/notesRefresh";
 import {
   workspaceChromeActionsForVisibility,
   type WorkspaceChromeActionKind,
@@ -41,6 +46,10 @@ import {
   resolveDaemonTarget,
   viteInjectedDaemonUrl,
 } from "./daemonTarget";
+import {
+  classifyWorkspaceHost,
+  notesVaultForWorkspace,
+} from "./workspaceHostIdentity";
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 const WEB_CONTROLLER_HOST_ID = "web-controller";
@@ -127,6 +136,11 @@ export class App {
   // hard-coded `ACTIVE_EDITOR_ROUTE_ID = 1` that assumed a single
   // editor surface per web client.
   private readonly surfaceRouteIds = new Map<string, number>();
+  /** Workspace selected by a share QR. Applied once its tree entry arrives. */
+  private requestedWorkspaceId: string | null = null;
+  private hydrationGeneration = 0;
+  private hydrationNeeds = new Set<"tree" | "sessions" | "surfaces">();
+  private pendingWorkplaceCanvasSwap = false;
 
   constructor(private readonly root: HTMLElement) {
     this.root.classList.add("app-root");
@@ -144,6 +158,7 @@ export class App {
       this.terminalPanel?.applyWorkplacePreferences(event.prefs);
     });
     const target = this.bootDaemonTarget();
+    this.requestedWorkspaceId = target.workspaceId ?? null;
     if (target.autoConnect) {
       this.connectManual(target.url, target.token ?? "");
       return;
@@ -254,15 +269,21 @@ export class App {
     // `showConnectionScreen()` because that would reset the form's
     // default URL — instead we mount it ourselves below so the URL
     // input shows the picked workplace's URL.
-    this.clearTerminal();
+    const changingWorkplace =
+      this.terminalPanel !== null &&
+      this.workplaceService.getActiveId() !== id;
+    this.pendingWorkplaceCanvasSwap = changingWorkplace;
+    if (!changingWorkplace) this.clearTerminal();
 
     const url = this.workplaceService.listWorkplaces().find((e) => e.id === id)
       ?.url;
-    this.connectionScreen = new ConnectionScreen(
-      this.connectionScreenOptions(url ?? this.defaultConnectionUrl()),
-    );
-    this.connectionScreen.setBusy(true);
-    this.connectionScreen.setStatus("Opening WebSocket...");
+    if (!changingWorkplace) {
+      this.connectionScreen = new ConnectionScreen(
+        this.connectionScreenOptions(url ?? this.defaultConnectionUrl()),
+      );
+      this.connectionScreen.setBusy(true);
+      this.connectionScreen.setStatus("Opening WebSocket...");
+    }
 
     // Wave 4B: let the service auto-re-dial with our handler bundle when
     // the active workspace is re-homed. Installed before `connect` so a
@@ -273,8 +294,8 @@ export class App {
     try {
       client = this.workplaceService.connect(id, this.buildClientHandlers());
     } catch (err) {
-      this.connectionScreen.setBusy(false);
-      this.connectionScreen.setStatus(
+      this.connectionScreen?.setBusy(false);
+      this.connectionScreen?.setStatus(
         `Connect failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return;
@@ -310,6 +331,29 @@ export class App {
     return {
       onStatus: (status: ProtocolStatus, detail?: string) =>
         this.handleStatus(status, detail),
+      onConnectionState: (state: ConnectionState) =>
+        this.handleConnectionState(state),
+      onDisconnect: (error: Error, intentional: boolean) => {
+        if (intentional) return;
+        this.searchService?.rejectPending(error);
+        this.terminalPanel?.connectionInterrupted(error.message);
+      },
+      onAuthenticatedResume: (generation: number) => {
+        this.rehydrateAfterLifecycleResume(generation);
+      },
+      onHelloAck: (accepted: boolean) => {
+        if (accepted) {
+          // Two-phase canvas switch: preserve the current editor/panels while
+          // the target authenticates; only HelloAck commits the destructive
+          // surface swap. An auth failure therefore leaves useful context
+          // visible beneath the connection gate.
+          if (this.pendingWorkplaceCanvasSwap) {
+            this.pendingWorkplaceCanvasSwap = false;
+            this.clearTerminalCanvasForSwitch();
+          }
+          this.beginHydration();
+        }
+      },
       // PTY frames are funnelled through `PtyService` so the wire
       // stays in one place and future multi-pane web frontends can
       // route by `session_id`. App registers its own listener below
@@ -370,6 +414,7 @@ export class App {
         // workspace summaries into the re-home watcher so the client
         // follows the active workspace if it was promoted to a new host.
         this.observeWorkspaceHoming(payload);
+        this.observeHydration(payload);
       },
       onDiagnosticsReply: (payload: unknown) => {
         if (!this.workspaceGateSatisfied) return;
@@ -402,41 +447,118 @@ export class App {
       const suffix = detail ? ` (${detail})` : "";
       this.connectionScreen.setStatus(`Socket ${status}${suffix}`);
     }
-    if (status === "open" && this.client) {
-      // Fresh connection, fresh recovery budget — the persisted tree
-      // can hand us the same stale session id again.
+    if (status === "closed" || status === "errored") {
+      this.connectionScreen?.setBusy(false);
+    }
+  }
+
+  private beginHydration(): void {
+    const client = this.client;
+    const workspace = this.workspaceService;
+    if (!client || !workspace) return;
+    const preservingCanvas = this.terminalPanel !== null && this.workspaceGateSatisfied;
+    this.hydrationGeneration = client.getGeneration();
+    this.hydrationNeeds = new Set(["tree"]);
+    if (preservingCanvas) {
+      this.hydrationNeeds.add("sessions");
+      this.hydrationNeeds.add("surfaces");
+    } else {
       this.staleSessionRecovery.clear();
       this.initialWorkspaceResolved = false;
       this.workspaceGateSatisfied = false;
-      this.workspaceService?.requestFullSnapshot();
-      this.workspaceService?.requestHostWorkspaceTree();
-      this.connectionScreen?.showWorkspaces(this.workspaceService?.getHostWorkspaceTree() ?? null);
-      this.connectionScreen?.setStatus("Choose a workspace to continue...");
-      // Diagnostics subscriptions are no longer keyed by a static
-      // route id. Each `EditorSurfaceChanged` / `EditorSurfaceList`
-      // frame from the daemon carries a fresh `route_id`; we wire the
-      // subscription up in `routeDiagnosticsFromWorkspace` below as
-      // surfaces arrive. The daemon backfills the inventory in
-      // response to the `ListEditorSurfaces` call right below, so we
-      // don't miss the first diagnostics frame for surfaces opened by
-      // another client before this connection.
-      //
-      // Phone-control parity: ask the daemon for its current session
-      // / editor-surface inventory so panes opened by other clients
-      // (e.g. neoism-agent on a paired phone) before we connected
-      // materialise in the local chrome.
       this.surfaceRouteIds.clear();
-      // Drive the daemon's inventory rebroadcast through the
-      // `WorkplaceService` helper so the same code path runs whether
-      // we're booting a fresh connection or rehydrating after a
-      // `switchTo()` swap. The helper sends `ListSessions` +
-      // `ListEditorSurfaces` against the active `ProtocolClient`; the
-      // daemon's push-style `SessionList` / `EditorSurfaceList`
-      // replies land in `routeDiagnosticsFromWorkspace` below and
-      // wire up per-surface diagnostics subscriptions.
-      // Do not request pane/session restore until the user picks a workspace.
-    } else if (status === "closed" || status === "errored") {
-      this.connectionScreen?.setBusy(false);
+    }
+
+    // Ordered barrier: workspace identity/tree first, active workspace next,
+    // then pane inventories. Everything here is an idempotent read/select;
+    // user input, file writes, PTY bytes and CRDT mutations are never replayed.
+    workspace.requestFullSnapshot();
+    workspace.requestHostWorkspaceTree();
+    if (preservingCanvas && this.activeHostWorkspaceId) {
+      workspace.switchHostWorkspace(this.activeHostWorkspaceId);
+      workspace.listWorkspaceTabs(this.activeHostWorkspaceId);
+    }
+    if (preservingCanvas) this.workplaceService.requestPaneSnapshot();
+    this.connectionScreen?.showWorkspaces(workspace.getHostWorkspaceTree());
+    this.connectionScreen?.setStatus("Restoring workspace...");
+  }
+
+  /** A Pong proved that the pre-suspension generation is still alive. Refresh
+   * authoritative read-side state without replacing the stable client/canvas. */
+  private rehydrateAfterLifecycleResume(generation: number): void {
+    const client = this.client;
+    const workspace = this.workspaceService;
+    if (
+      !client ||
+      !workspace ||
+      generation !== client.getGeneration() ||
+      client.getConnectionState().phase !== "connected"
+    ) return;
+    this.terminalPanel?.hideConnectionGate();
+    workspace.requestFullSnapshot();
+    workspace.requestHostWorkspaceTree();
+    if (this.activeHostWorkspaceId) {
+      workspace.switchHostWorkspace(this.activeHostWorkspaceId);
+      workspace.listWorkspaceTabs(this.activeHostWorkspaceId);
+    }
+    this.workplaceService.requestPaneSnapshot();
+    this.replayActiveWorkspaceNotesVault();
+    this.terminalPanel?.rehydrateConnection();
+    for (const routeId of this.diagnosticsService?.activeRoutes() ?? []) {
+      client.subscribeDiagnostics(routeId);
+    }
+  }
+
+  private observeHydration(payload: WorkspaceServerMessage): void {
+    if (!this.client || this.hydrationGeneration !== this.client.getGeneration()) return;
+    if ("HostWorkspaceTree" in payload) this.hydrationNeeds.delete("tree");
+    if ("SessionList" in payload) this.hydrationNeeds.delete("sessions");
+    if ("EditorSurfaceList" in payload) this.hydrationNeeds.delete("surfaces");
+    if (this.hydrationNeeds.size !== 0) return;
+
+    this.replayActiveWorkspaceNotesVault();
+    this.terminalPanel?.rehydrateConnection();
+    for (const routeId of this.diagnosticsService?.activeRoutes() ?? []) {
+      this.client.subscribeDiagnostics(routeId);
+    }
+    if (!this.client.markHydrated(this.hydrationGeneration)) return;
+    this.terminalPanel?.hideConnectionGate();
+    this.connectionScreen?.showWorkspaces(this.workspaceService?.getHostWorkspaceTree() ?? null);
+    this.connectionScreen?.setStatus("");
+  }
+
+  private handleConnectionState(state: ConnectionState): void {
+    if (state.phase === "connected") {
+      this.terminalPanel?.hideConnectionGate();
+      return;
+    }
+    if (state.intentional && state.phase !== "host-ended") return;
+    const interrupted =
+      state.phase === "waiting" ||
+      state.phase === "offline" ||
+      state.phase === "auth-rejected";
+    const reconnecting =
+      interrupted ||
+      state.phase === "connecting" ||
+      state.phase === "authenticating" ||
+      state.phase === "hydrating";
+    if (interrupted) {
+      this.terminalPanel?.connectionInterrupted(state.reason ?? "Connection lost");
+    }
+    if (reconnecting && (state.gateVisible || state.phase === "auth-rejected")) {
+      this.terminalPanel?.showConnectionGate(
+        state,
+        () => this.client?.retryNow(),
+        () => this.showWorkplaceSwitcherOverlay(),
+      );
+    }
+    if (state.phase === "host-ended") {
+      this.terminalPanel?.connectionInterrupted(state.reason ?? "The host ended the session");
+      this.terminalPanel?.showConnectionGate(
+        { ...state, gateVisible: true },
+        () => this.client?.connect(),
+        () => this.showWorkplaceSwitcherOverlay(),
+      );
     }
   }
 
@@ -515,6 +637,7 @@ export class App {
     }
     if (this.terminalPanel) {
       this.terminalPanel.ptyCreated(sessionId);
+      if (workspaceRoot) this.terminalPanel.setTerminalCwd(sessionId, workspaceRoot);
       return;
     }
     // `workspaceRoot` is whatever the caller knew: for a daemon
@@ -536,6 +659,8 @@ export class App {
       client: this.client,
       pty: this.ptyService ?? undefined,
       workspaceRoot: effectiveRoot,
+      notesVaultRoot: this.activeWorkspaceVaultPath,
+      activeWorkspaceId: this.activeHostWorkspaceId,
       sessionId,
       mount: this.root,
       onBridgeReady: (bridge) => {
@@ -604,6 +729,7 @@ export class App {
         this.rememberCurrentStrip();
       },
     });
+    if (effectiveRoot) this.terminalPanel.setTerminalCwd(sessionId, effectiveRoot);
     // Replay git-status pushes that landed while the boot picker /
     // connection screen was still up.
     if (this.pendingStatusPushes.length > 0) {
@@ -663,6 +789,7 @@ export class App {
       kind: string;
       path: string | null;
       sessionId: string | null;
+      identity: string;
       active: boolean;
     }>,
   ): void {
@@ -671,7 +798,7 @@ export class App {
     if (!workspaceId || !service) return;
     const now = Math.floor(Date.now() / 1000);
     const root = this.activeWorkspaceRootPath;
-    const summaries: WorkspaceTabSummary[] = tabs.map((tab, index) => {
+    const summaries: WorkspaceTabSummary[] = tabs.map((tab) => {
       let cwd = tab.path;
       if (cwd && !cwd.startsWith("/") && root) {
         cwd = `${root.replace(/\/$/, "")}/${cwd}`;
@@ -683,7 +810,7 @@ export class App {
             : "editor"
           : tab.kind;
       return {
-        id: `${workspaceId}-web-${index}`,
+        id: `${workspaceId}-web-${encodeURIComponent(tab.identity)}`,
         workspace_id: workspaceId,
         title: tab.title,
         kind,
@@ -714,6 +841,7 @@ export class App {
         );
         return;
       }
+      this.acceptRequestedWorkspaceIfAvailable();
       if ("HostWorkspaceUpserted" in msg) {
         const workspaceId = msg.HostWorkspaceUpserted.workspace.id;
         if (this.pendingCreateWorkspaceId === workspaceId) {
@@ -766,6 +894,17 @@ export class App {
     this.scheduleFallbackPtySpawn();
   }
 
+  private acceptRequestedWorkspaceIfAvailable(): void {
+    const requested = this.requestedWorkspaceId;
+    if (!requested || this.workspaceGateSatisfied) return;
+    const workspace = this.workspaceService
+      ?.getHostWorkspaceTree()
+      .workspaces.find((candidate) => candidate.id === requested);
+    if (!workspace) return;
+    this.requestedWorkspaceId = null;
+    this.acceptWorkspaceGate(workspace);
+  }
+
   /**
    * Build the wasm Workspaces-modal payload from the latest
    * `HostWorkspaceTree`. Returns `null` only when there is no
@@ -776,9 +915,8 @@ export class App {
    *
    * Mirrors desktop's `open_daemon_workspaces_picker`: kick a tree
    * refresh for next time, then render the last-known snapshot now.
-   * The "local" host is resolved by matching each host's advertised
-   * `daemon_url` against the workplace we're currently dialed into —
-   * the web client's moral equivalent of the desktop's own machine.
+   * The "local" host is resolved from the durable machine id returned by
+   * HelloAck. URL aliases are addresses, not identity.
    */
   private buildWorkspacesModalPayload(): WorkspacesModalPayload | null {
     const service = this.workspaceService;
@@ -786,10 +924,10 @@ export class App {
     service.requestHostWorkspaceTree();
     const tree = service.getHostWorkspaceTree();
 
-    const activeHost = wsUrlHost(this.workplaceService.getActiveUrl());
+    const activeUrl = this.workplaceService.getActiveUrl();
+    const activeHost = activeUrl ? friendlyLabelFromUrl(activeUrl) : null;
     const hostIndex = new Map(tree.hosts.map((host) => [host.id, host]));
-    const isLocalHost = (hostId: string): boolean =>
-      this.isOwnHostWorkspace(hostId);
+    const isLocalHost = (hostId: string): boolean => this.isOwnHostWorkspace(hostId);
 
     const workspaces: WorkspacesModalWorkspace[] = tree.workspaces.map(
       (workspace) => {
@@ -892,10 +1030,7 @@ export class App {
       this.handlePtyCreated(tab.session_id, tab.cwd ?? workspace.root_dir ?? null);
       this.activeSessionId = tab.session_id;
     }
-    // A workspace IS its directory. Root the Explorer at the daemon-owned
-    // root_dir; the main terminal can move that root, but web learns it from
-    // the daemon workspace broadcast instead of guessing from arbitrary PTY
-    // cwd pushes (secondary terminals stay local).
+    // Root the Explorer at the daemon-declared root. PTY cwd never mutates it.
     const newRoot = workspace.root_dir ?? null;
     if (newRoot && newRoot.startsWith("/")) {
       this.activeWorkspaceRootPath = newRoot;
@@ -930,10 +1065,7 @@ export class App {
     }
   }
 
-  /** Re-root the Explorer when the daemon broadcasts that the workspace
-   *  we're in changed its directory (its main terminal cd'd, or it was
-   *  re-pointed). The workspace's daemon-owned `root_dir` is the single
-   *  source of truth — same value desktop and every other client see. */
+  /** Re-root only after an explicit daemon workspace-root operation. */
   private maybeReRootActiveWorkspace(): void {
     const id = this.activeHostWorkspaceId;
     if (!id) return;
@@ -950,30 +1082,27 @@ export class App {
     this.applyNotesVault(summary);
   }
 
-  /** True when `hostId` is the daemon we are directly connected to -
-   *  i.e. this workspace belongs to OUR host, not a peer's. Compares the
-   *  host's advertised daemon URL against the active connection. */
   /** True only when we can PROVE `hostId` is a different daemon than the
-   *  one we're connected to. Anything unknown (no host tree yet, host
-   *  advertises no url) answers false — "assume ours", which is the safe
-   *  default for notes: the worst case is showing your own vault. */
+   *  one we're connected to. Older daemons omit the stable id; their
+   *  connected tree is conservatively treated as own for Notes compatibility.
+   *  A dialled URL is deliberately never used as machine identity. */
   private isForeignHostWorkspace(hostId: string): boolean {
     const tree = this.workspaceService?.getHostWorkspaceTree();
     if (!tree) return false;
-    const activeHost = wsUrlHost(this.workplaceService.getActiveUrl());
-    const url = tree.hosts.find((host) => host.id === hostId)?.daemon_url;
-    const host = wsUrlHost(url ?? null);
-    if (host === null || activeHost === null) return false;
-    return host !== activeHost;
+    const host = tree.hosts.find((candidate) => candidate.id === hostId);
+    return classifyWorkspaceHost(
+      {
+        hostId: this.workplaceService.getConnectedHostId(),
+        url: this.workplaceService.getActiveUrl(),
+      },
+      { hostId, url: host?.daemon_url ?? null },
+    ) === "foreign";
   }
 
   private isOwnHostWorkspace(hostId: string): boolean {
     const tree = this.workspaceService?.getHostWorkspaceTree();
     if (!tree) return false;
-    const activeHost = wsUrlHost(this.workplaceService.getActiveUrl());
-    const url = tree.hosts.find((host) => host.id === hostId)?.daemon_url;
-    const host = wsUrlHost(url ?? null);
-    return host !== null && activeHost !== null && host === activeHost;
+    return !this.isForeignHostWorkspace(hostId);
   }
 
   /** Push the notes vault for `workspace` down to the notes sidebar.
@@ -995,33 +1124,50 @@ export class App {
 
   private applyNotesVault(workspace: WorkspaceSummary | undefined): void {
     // Default to OUR host's full resolution and only fall back to the
-    // guest-safe `linked_vault_dir` when we can POSITIVELY tell this
-    // workspace belongs to a different daemon. `isOwnHostWorkspace` also
-    // answers false when the host tree hasn't arrived yet or the host
-    // advertises no `daemon_url` - treating that "unknown" as a guest is
-    // what left the sidebar empty on a plain local browser session even
-    // though the Default vault was right there.
-    const foreign = workspace
-      ? this.isForeignHostWorkspace(workspace.host_id)
-      : false;
-    const vault = foreign
-      ? (workspace?.linked_vault_dir ?? null)
-      : (workspace?.notes_vault_dir ?? workspace?.linked_vault_dir ?? null);
-    const next = vault && vault.startsWith("/") ? vault : null;
-    if (next === this.activeWorkspaceVaultPath) return;
-    this.activeWorkspaceVaultPath = next;
-    this.terminalPanel?.setNotesVaultRoot(next);
+    // guest-safe `linked_vault_dir` when stable host ids POSITIVELY identify
+    // a different daemon. A missing id means an older daemon, whose connected
+    // tree stays on the own-host path so a URL alias cannot blank Notes.
+    const host = workspace
+      ? this.workspaceService?.getHostWorkspaceTree().hosts.find(
+          (candidate) => candidate.id === workspace.host_id,
+        )
+      : undefined;
+    const vault = notesVaultForWorkspace(
+      workspace,
+      {
+        hostId: this.workplaceService.getConnectedHostId(),
+        url: this.workplaceService.getActiveUrl(),
+      },
+      host?.daemon_url ?? null,
+    );
+    const next = vault && vault.startsWith("/")
+      ? normalizeNotesVaultRoot(vault)
+      : null;
+    this.activeWorkspaceVaultPath = synchronizeNotesVault(next, this.terminalPanel);
   }
 
-  /** Daemon-pushed live cwd for a PTY session (the shell `cd`'d, or it
-   *  just reported its initial directory). The daemon/desktop main-terminal
-   *  path owns workspace root changes; web only caches per-terminal cwd and
-   *  follows daemon workspace broadcasts for Explorer re-rooting. */
+  /** Reconnect ordering barrier: replay the active workspace's vault before
+   * TerminalPanel starts its generation-bound Notes refresh. */
+  private replayActiveWorkspaceNotesVault(): void {
+    const id = this.activeHostWorkspaceId;
+    const workspace = id
+      ? this.workspaceService?.getHostWorkspaceTree().workspaces.find(
+          (candidate) => candidate.id === id,
+        )
+      : undefined;
+    // A reconnect can complete transport auth before the replacement tree is
+    // populated. Never turn a missing lookup into a synthetic null vault;
+    // preserve the last resolved desired state until the tree arrives.
+    if (workspace) this.applyNotesVault(workspace);
+  }
+
+  /** Daemon-pushed live cwd is per-terminal completion/spawn metadata only. */
   private handleSessionCwd(sessionId: string, cwd: string): void {
     if (!cwd || !cwd.startsWith("/")) {
       return;
     }
     this.sessionCwds.set(sessionId, cwd);
+    this.terminalPanel?.setTerminalCwd(sessionId, cwd);
   }
 
   private renderWorkspaceChrome(): void {
@@ -1343,7 +1489,43 @@ export class App {
     this.searchService = null;
     this.workspaceService = null;
     this.diagnosticsService = null;
+    this.serviceRegistry = null;
     this.surfaceRouteIds.clear();
+    this.sessionCwds.clear();
+    this.pendingStatusPushes = [];
+    this.pendingCreateWorkspaceId = null;
+    this.client = null;
+    this.activeSessionId = null;
+    this.activeHostWorkspaceId = null;
+    this.activeWorkspaceRootPath = null;
+    this.activeWorkspaceVaultPath = null;
+    this.activeWorkspaceId = null;
+    this.initialWorkspaceResolved = false;
+    this.workspaceGateSatisfied = false;
+  }
+
+  /** Dispose only the old visual/session state after a replacement daemon has
+   * authenticated. The newly-created ProtocolClient and service registry must
+   * survive this commit point. */
+  private clearTerminalCanvasForSwitch(): void {
+    if (this.fallbackSpawnTimer !== null) {
+      window.clearTimeout(this.fallbackSpawnTimer);
+      this.fallbackSpawnTimer = null;
+    }
+    this.hideWorkplaceSwitcherOverlay();
+    this.terminalPanel?.dispose();
+    this.terminalPanel = null;
+    this.connectionScreen?.dispose();
+    this.connectionScreen = null;
+    this.searchService = null;
+    this.surfaceRouteIds.clear();
+    this.sessionCwds.clear();
+    this.pendingStatusPushes = [];
+    this.pendingCreateWorkspaceId = null;
+    this.activeSessionId = null;
+    this.activeHostWorkspaceId = null;
+    this.activeWorkspaceRootPath = null;
+    this.activeWorkspaceVaultPath = null;
     this.activeWorkspaceId = null;
     this.initialWorkspaceResolved = false;
     this.workspaceGateSatisfied = false;
@@ -1414,7 +1596,10 @@ export class App {
     // exactly like a manual `switchTo`.
     const client = this.workplaceService.getActiveClient();
     if (!client) return;
-    this.clearTerminal();
+    // Preserve the old canvas until the destination authenticates. The
+    // HelloAck handler commits the visual swap only after acceptance.
+    this.pendingWorkplaceCanvasSwap = this.terminalPanel !== null;
+    this.requestedWorkspaceId = event.workspaceId;
     this.client = client;
     this.serviceRegistry = defaultServiceRegistry(client);
     this.ptyService = this.serviceRegistry.pty;
@@ -1429,13 +1614,15 @@ export class App {
     this.workspaceService = this.serviceRegistry.workspace;
     this.installWorkspaceTreeSubscription();
     this.diagnosticsService = this.serviceRegistry.diagnostics;
-    this.connectionScreen = new ConnectionScreen(
-      this.connectionScreenOptions(event.targetUrl ?? this.defaultConnectionUrl()),
-    );
-    this.connectionScreen.setBusy(true);
-    this.connectionScreen.setStatus(
-      `Workspace moved — following to ${event.targetUrl ?? event.newHostId}...`,
-    );
+    if (!this.pendingWorkplaceCanvasSwap) {
+      this.connectionScreen = new ConnectionScreen(
+        this.connectionScreenOptions(event.targetUrl ?? this.defaultConnectionUrl()),
+      );
+      this.connectionScreen.setBusy(true);
+      this.connectionScreen.setStatus(
+        `Workspace moved — following to ${event.targetUrl ?? event.newHostId}...`,
+      );
+    }
     client.connect();
   }
 
@@ -1728,19 +1915,6 @@ function hostsFromMessage(
     return payload.HostWorkspaceTree.hosts;
   }
   return [];
-}
-
-/** `host:port` of a ws(s) daemon URL, lowercased for comparison, or
- *  `null` when absent/unparseable. Used to decide which tree host is
- *  "local" (= the daemon this client is currently dialed into). */
-function wsUrlHost(url: string | null): string | null {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    return parsed.host ? parsed.host.toLowerCase() : null;
-  } catch {
-    return null;
-  }
 }
 
 /** Best-effort short label for a daemon URL. Strips the path and

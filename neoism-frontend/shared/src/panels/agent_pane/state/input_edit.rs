@@ -338,6 +338,17 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Activate the painted composer control. Unlike Escape, a stop-button
+    /// click never clears a draft before interrupting the active run.
+    pub fn activate_composer_control(&mut self) -> bool {
+        if self.interruptible_run_active() {
+            self.abort_session();
+            true
+        } else {
+            self.submit()
+        }
+    }
+
     pub fn move_input_up_or_history(&mut self) {
         if self.picker.is_some() {
             let _ = self.move_picker_selection(-1);

@@ -2,7 +2,9 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
 
-pub(crate) async fn canonical_openapi_doc(State(state): State<crate::state::AppState>) -> Json<Value> {
+pub(crate) async fn canonical_openapi_doc(
+    State(state): State<crate::state::AppState>,
+) -> Json<Value> {
     let mut document = canonical_openapi();
     if !state.management_enabled() {
         strip_management_contract(&mut document);
@@ -13,11 +15,19 @@ pub(crate) async fn canonical_openapi_doc(State(state): State<crate::state::AppS
 fn strip_management_contract(document: &mut Value) {
     if let Some(paths) = document["paths"].as_object_mut() {
         paths.retain(|path, _| !path.starts_with("/v2/management/"));
-        if let Some(collection) = paths.get_mut("/v2/plugins/dev.neoism.workflows").and_then(Value::as_object_mut) {
+        if let Some(collection) = paths
+            .get_mut("/v2/plugins/dev.neoism.workflows")
+            .and_then(Value::as_object_mut)
+        {
             collection.remove("post");
         }
-        if let Some(item) = paths.get_mut("/v2/plugins/dev.neoism.workflows/{workflow_id}").and_then(Value::as_object_mut) {
-            for method in ["put", "patch", "delete"] { item.remove(method); }
+        if let Some(item) = paths
+            .get_mut("/v2/plugins/dev.neoism.workflows/{workflow_id}")
+            .and_then(Value::as_object_mut)
+        {
+            for method in ["put", "patch", "delete"] {
+                item.remove(method);
+            }
         }
     }
     if let Some(tags) = document["tags"].as_array_mut() {
@@ -25,10 +35,20 @@ fn strip_management_contract(document: &mut Value) {
     }
     if let Some(schemas) = document["components"]["schemas"].as_object_mut() {
         for name in [
-            "ManagedResource", "MarkdownWriteRequest", "ResourceScope", "SkillInstallRequest",
-            "SkillVersion", "SkillWriteRequest", "ManagedWorkspace", "ManagedRepository",
-            "ManagedRepositoryMetadata", "WorkspaceCreateRequest", "WorkspaceUpdateRequest",
-            "RepositoryCreateRequest", "RepositoryExistingRequest", "RepositoryCloneRequest",
+            "ManagedResource",
+            "MarkdownWriteRequest",
+            "ResourceScope",
+            "SkillInstallRequest",
+            "SkillVersion",
+            "SkillWriteRequest",
+            "ManagedWorkspace",
+            "ManagedRepository",
+            "ManagedRepositoryMetadata",
+            "WorkspaceCreateRequest",
+            "WorkspaceUpdateRequest",
+            "RepositoryCreateRequest",
+            "RepositoryExistingRequest",
+            "RepositoryCloneRequest",
             "RepositoryUpdateRequest",
         ] {
             schemas.remove(name);
@@ -37,9 +57,7 @@ fn strip_management_contract(document: &mut Value) {
 }
 
 pub fn canonical_openapi() -> Value {
-    let json_response = |description: &str, schema: Value| {
-        json!({ "description": description, "content": { "application/json": { "schema": schema } } })
-    };
+    let json_response = |description: &str, schema: Value| json!({ "description": description, "content": { "application/json": { "schema": schema } } });
     let errors = || {
         json!({
             "400": { "$ref": "#/components/responses/BadRequest" },
@@ -118,69 +136,301 @@ pub fn canonical_openapi() -> Value {
             "responses": merge_responses(json!({ "200": json_response("Plugin manifest", json!({ "$ref": "#/components/schemas/PluginManifest" })) }), errors()) }
     }));
     for (path, method, operation_id) in [
-        ("/v2/plugins/dev.neoism.goals/{session_id}", "get", "v2.plugins.goals.get"),
-        ("/v2/plugins/dev.neoism.goals/{session_id}", "post", "v2.plugins.goals.set"),
-        ("/v2/plugins/dev.neoism.goals/{session_id}", "delete", "v2.plugins.goals.clear"),
-        ("/v2/plugins/dev.neoism.goals/{session_id}/research", "post", "v2.plugins.goals.research"),
-        ("/v2/plugins/dev.neoism.semantic/search", "get", "v2.plugins.semantic.search"),
-        ("/v2/plugins/dev.neoism.workflows", "get", "v2.plugins.workflows.list"),
-        ("/v2/plugins/dev.neoism.workflows", "post", "v2.plugins.workflows.create"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}", "get", "v2.plugins.workflows.get"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}", "put", "v2.plugins.workflows.update"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}", "patch", "v2.plugins.workflows.patch"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}", "delete", "v2.plugins.workflows.delete"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}/activate", "post", "v2.plugins.workflows.activate"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}/pause", "post", "v2.plugins.workflows.pause"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}/run", "post", "v2.plugins.workflows.run"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}/preview", "get", "v2.plugins.workflows.preview"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs", "get", "v2.plugins.workflows.history"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}", "get", "v2.plugins.workflows.runs.get"),
-        ("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}/retry", "post", "v2.plugins.workflows.runs.retry"),
+        (
+            "/v2/plugins/dev.neoism.goals/{session_id}",
+            "get",
+            "v2.plugins.goals.get",
+        ),
+        (
+            "/v2/plugins/dev.neoism.goals/{session_id}",
+            "post",
+            "v2.plugins.goals.set",
+        ),
+        (
+            "/v2/plugins/dev.neoism.goals/{session_id}",
+            "delete",
+            "v2.plugins.goals.clear",
+        ),
+        (
+            "/v2/plugins/dev.neoism.goals/{session_id}/research",
+            "post",
+            "v2.plugins.goals.research",
+        ),
+        (
+            "/v2/plugins/dev.neoism.semantic/search",
+            "get",
+            "v2.plugins.semantic.search",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows",
+            "get",
+            "v2.plugins.workflows.list",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows",
+            "post",
+            "v2.plugins.workflows.create",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}",
+            "get",
+            "v2.plugins.workflows.get",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}",
+            "put",
+            "v2.plugins.workflows.update",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}",
+            "patch",
+            "v2.plugins.workflows.patch",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}",
+            "delete",
+            "v2.plugins.workflows.delete",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}/activate",
+            "post",
+            "v2.plugins.workflows.activate",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}/pause",
+            "post",
+            "v2.plugins.workflows.pause",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}/run",
+            "post",
+            "v2.plugins.workflows.run",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}/preview",
+            "get",
+            "v2.plugins.workflows.preview",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}/runs",
+            "get",
+            "v2.plugins.workflows.history",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}",
+            "get",
+            "v2.plugins.workflows.runs.get",
+        ),
+        (
+            "/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}/retry",
+            "post",
+            "v2.plugins.workflows.runs.retry",
+        ),
         ("/v2/plugins/dev.neoism.lsp", "get", "v2.plugins.lsp.status"),
-        ("/v2/plugins/dev.neoism.lsp/hover", "get", "v2.plugins.lsp.hover"),
-        ("/v2/plugins/dev.neoism.lsp/signature-help", "get", "v2.plugins.lsp.signatureHelp"),
-        ("/v2/plugins/dev.neoism.lsp/inlay-hints", "get", "v2.plugins.lsp.inlayHints"),
-        ("/v2/plugins/dev.neoism.lsp/document-highlights", "get", "v2.plugins.lsp.documentHighlights"),
-        ("/v2/plugins/dev.neoism.lsp/definition", "get", "v2.plugins.lsp.definition"),
-        ("/v2/plugins/dev.neoism.lsp/references", "get", "v2.plugins.lsp.references"),
-        ("/v2/plugins/dev.neoism.lsp/implementation", "get", "v2.plugins.lsp.implementation"),
-        ("/v2/plugins/dev.neoism.lsp/prepare-call-hierarchy", "get", "v2.plugins.lsp.prepareCallHierarchy"),
-        ("/v2/plugins/dev.neoism.lsp/incoming-calls", "get", "v2.plugins.lsp.incomingCalls"),
-        ("/v2/plugins/dev.neoism.lsp/outgoing-calls", "get", "v2.plugins.lsp.outgoingCalls"),
-        ("/v2/plugins/dev.neoism.lsp/diagnostics", "get", "v2.plugins.lsp.diagnostics"),
-        ("/v2/plugins/dev.neoism.lsp/document-symbols", "get", "v2.plugins.lsp.documentSymbols"),
-        ("/v2/plugins/dev.neoism.lsp/formatting", "get", "v2.plugins.lsp.formatting"),
-        ("/v2/plugins/dev.neoism.lsp/code-actions", "get", "v2.plugins.lsp.codeActions"),
-        ("/v2/plugins/dev.neoism.lsp/touch", "post", "v2.plugins.lsp.touch"),
-        ("/v2/plugins/dev.neoism.lsp/shutdown", "post", "v2.plugins.lsp.shutdown"),
+        (
+            "/v2/plugins/dev.neoism.lsp/hover",
+            "get",
+            "v2.plugins.lsp.hover",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/signature-help",
+            "get",
+            "v2.plugins.lsp.signatureHelp",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/inlay-hints",
+            "get",
+            "v2.plugins.lsp.inlayHints",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/document-highlights",
+            "get",
+            "v2.plugins.lsp.documentHighlights",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/definition",
+            "get",
+            "v2.plugins.lsp.definition",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/references",
+            "get",
+            "v2.plugins.lsp.references",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/implementation",
+            "get",
+            "v2.plugins.lsp.implementation",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/prepare-call-hierarchy",
+            "get",
+            "v2.plugins.lsp.prepareCallHierarchy",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/incoming-calls",
+            "get",
+            "v2.plugins.lsp.incomingCalls",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/outgoing-calls",
+            "get",
+            "v2.plugins.lsp.outgoingCalls",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/diagnostics",
+            "get",
+            "v2.plugins.lsp.diagnostics",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/document-symbols",
+            "get",
+            "v2.plugins.lsp.documentSymbols",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/formatting",
+            "get",
+            "v2.plugins.lsp.formatting",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/code-actions",
+            "get",
+            "v2.plugins.lsp.codeActions",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/touch",
+            "post",
+            "v2.plugins.lsp.touch",
+        ),
+        (
+            "/v2/plugins/dev.neoism.lsp/shutdown",
+            "post",
+            "v2.plugins.lsp.shutdown",
+        ),
         ("/v2/plugins/dev.neoism.mcp", "get", "v2.plugins.mcp.status"),
         ("/v2/plugins/dev.neoism.mcp", "post", "v2.plugins.mcp.add"),
-        ("/v2/plugins/dev.neoism.mcp/catalog", "get", "v2.plugins.mcp.catalog"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/auth", "post", "v2.plugins.mcp.auth.start"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/auth", "delete", "v2.plugins.mcp.auth.remove"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/auth/callback", "get", "v2.plugins.mcp.auth.callback.get"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/auth/callback", "post", "v2.plugins.mcp.auth.callback.post"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/auth/authenticate", "post", "v2.plugins.mcp.auth.authenticate"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/connect", "post", "v2.plugins.mcp.connect"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/disconnect", "post", "v2.plugins.mcp.disconnect"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/config", "patch", "v2.plugins.mcp.config"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/tools", "get", "v2.plugins.mcp.tools"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/tools/{tool_name}", "post", "v2.plugins.mcp.tools.call"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/resources", "get", "v2.plugins.mcp.resources"),
-        ("/v2/plugins/dev.neoism.mcp/{name}/prompts", "get", "v2.plugins.mcp.prompts"),
+        (
+            "/v2/plugins/dev.neoism.mcp/catalog",
+            "get",
+            "v2.plugins.mcp.catalog",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/auth",
+            "post",
+            "v2.plugins.mcp.auth.start",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/auth",
+            "delete",
+            "v2.plugins.mcp.auth.remove",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/auth/callback",
+            "get",
+            "v2.plugins.mcp.auth.callback.get",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/auth/callback",
+            "post",
+            "v2.plugins.mcp.auth.callback.post",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/auth/authenticate",
+            "post",
+            "v2.plugins.mcp.auth.authenticate",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/connect",
+            "post",
+            "v2.plugins.mcp.connect",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/disconnect",
+            "post",
+            "v2.plugins.mcp.disconnect",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/config",
+            "patch",
+            "v2.plugins.mcp.config",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/tools",
+            "get",
+            "v2.plugins.mcp.tools",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/tools/{tool_name}",
+            "post",
+            "v2.plugins.mcp.tools.call",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/resources",
+            "get",
+            "v2.plugins.mcp.resources",
+        ),
+        (
+            "/v2/plugins/dev.neoism.mcp/{name}/prompts",
+            "get",
+            "v2.plugins.mcp.prompts",
+        ),
         ("/v2/plugins/dev.neoism.vcs", "get", "v2.plugins.vcs.get"),
-        ("/v2/plugins/dev.neoism.vcs/diff", "get", "v2.plugins.vcs.diff"),
-        ("/v2/plugins/dev.neoism.vcs/status", "get", "v2.plugins.vcs.status"),
-        ("/v2/plugins/dev.neoism.vcs/diff/raw", "get", "v2.plugins.vcs.diff.raw"),
-        ("/v2/plugins/dev.neoism.vcs/apply", "post", "v2.plugins.vcs.apply"),
-        ("/v2/plugins/dev.neoism.pty/shells", "get", "v2.plugins.pty.shells"),
+        (
+            "/v2/plugins/dev.neoism.vcs/diff",
+            "get",
+            "v2.plugins.vcs.diff",
+        ),
+        (
+            "/v2/plugins/dev.neoism.vcs/status",
+            "get",
+            "v2.plugins.vcs.status",
+        ),
+        (
+            "/v2/plugins/dev.neoism.vcs/diff/raw",
+            "get",
+            "v2.plugins.vcs.diff.raw",
+        ),
+        (
+            "/v2/plugins/dev.neoism.vcs/apply",
+            "post",
+            "v2.plugins.vcs.apply",
+        ),
+        (
+            "/v2/plugins/dev.neoism.pty/shells",
+            "get",
+            "v2.plugins.pty.shells",
+        ),
         ("/v2/plugins/dev.neoism.pty", "get", "v2.plugins.pty.list"),
-        ("/v2/plugins/dev.neoism.pty", "post", "v2.plugins.pty.create"),
-        ("/v2/plugins/dev.neoism.pty/{pty_id}", "get", "v2.plugins.pty.get"),
-        ("/v2/plugins/dev.neoism.pty/{pty_id}", "put", "v2.plugins.pty.update"),
-        ("/v2/plugins/dev.neoism.pty/{pty_id}", "delete", "v2.plugins.pty.remove"),
-        ("/v2/plugins/dev.neoism.pty/{pty_id}/connect-token", "post", "v2.plugins.pty.connectToken"),
-        ("/v2/plugins/dev.neoism.pty/{pty_id}/connect", "get", "v2.plugins.pty.connect"),
+        (
+            "/v2/plugins/dev.neoism.pty",
+            "post",
+            "v2.plugins.pty.create",
+        ),
+        (
+            "/v2/plugins/dev.neoism.pty/{pty_id}",
+            "get",
+            "v2.plugins.pty.get",
+        ),
+        (
+            "/v2/plugins/dev.neoism.pty/{pty_id}",
+            "put",
+            "v2.plugins.pty.update",
+        ),
+        (
+            "/v2/plugins/dev.neoism.pty/{pty_id}",
+            "delete",
+            "v2.plugins.pty.remove",
+        ),
+        (
+            "/v2/plugins/dev.neoism.pty/{pty_id}/connect-token",
+            "post",
+            "v2.plugins.pty.connectToken",
+        ),
+        (
+            "/v2/plugins/dev.neoism.pty/{pty_id}/connect",
+            "get",
+            "v2.plugins.pty.connect",
+        ),
     ] {
         paths.entry(path).or_insert_with(|| json!({}))[method] = json!({
             "tags": ["plugins"],
@@ -196,18 +446,58 @@ pub fn canonical_openapi() -> Value {
         ("/v2/config/validate", "get", "v2.config.validate"),
         ("/v2/sessions/import", "post", "v2.sessions.import"),
         ("/v2/sessions/export", "post", "v2.sessions.export"),
-        ("/v2/sessions/{session_id}/messages/{message_id}", "get", "v2.sessions.messages.get"),
-        ("/v2/sessions/{session_id}/messages/{message_id}", "delete", "v2.sessions.messages.delete"),
-        ("/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}", "patch", "v2.sessions.parts.update"),
-        ("/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}", "delete", "v2.sessions.parts.delete"),
-        ("/v2/sessions/{session_id}/directory-options", "get", "v2.sessions.directoryOptions"),
-        ("/v2/sessions/{session_id}/todos", "get", "v2.sessions.todos"),
+        (
+            "/v2/sessions/{session_id}/messages/{message_id}",
+            "get",
+            "v2.sessions.messages.get",
+        ),
+        (
+            "/v2/sessions/{session_id}/messages/{message_id}",
+            "delete",
+            "v2.sessions.messages.delete",
+        ),
+        (
+            "/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}",
+            "patch",
+            "v2.sessions.parts.update",
+        ),
+        (
+            "/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}",
+            "delete",
+            "v2.sessions.parts.delete",
+        ),
+        (
+            "/v2/sessions/{session_id}/directory-options",
+            "get",
+            "v2.sessions.directoryOptions",
+        ),
+        (
+            "/v2/sessions/{session_id}/todos",
+            "get",
+            "v2.sessions.todos",
+        ),
         ("/v2/sessions/{session_id}/fork", "post", "v2.sessions.fork"),
         ("/v2/sessions/{session_id}/diff", "get", "v2.sessions.diff"),
-        ("/v2/sessions/{session_id}/undo-tree", "get", "v2.sessions.undoTree"),
-        ("/v2/sessions/{session_id}/shell", "post", "v2.sessions.shell"),
-        ("/v2/sessions/{session_id}/revert", "post", "v2.sessions.revert"),
-        ("/v2/sessions/{session_id}/unrevert", "post", "v2.sessions.unrevert"),
+        (
+            "/v2/sessions/{session_id}/undo-tree",
+            "get",
+            "v2.sessions.undoTree",
+        ),
+        (
+            "/v2/sessions/{session_id}/shell",
+            "post",
+            "v2.sessions.shell",
+        ),
+        (
+            "/v2/sessions/{session_id}/revert",
+            "post",
+            "v2.sessions.revert",
+        ),
+        (
+            "/v2/sessions/{session_id}/unrevert",
+            "post",
+            "v2.sessions.unrevert",
+        ),
     ] {
         paths.entry(path).or_insert_with(|| json!({}))[method] = json!({
             "tags": ["sessions"],
@@ -267,7 +557,8 @@ pub fn canonical_openapi() -> Value {
         let mut operation = json!({ "tags": ["interactions"], "operationId": operation,
             "responses": { "200": json_response("Resolution accepted", json!({ "type": "boolean" })) } });
         if with_body {
-            operation["requestBody"] = json_body(true, "#/components/schemas/QuestionReply");
+            operation["requestBody"] =
+                json_body(true, "#/components/schemas/QuestionReply");
         }
         paths.insert(format!("/v2/interactions/questions/{{request_id}}/{suffix}"), json!({
             "parameters": [{ "$ref": "#/components/parameters/RequestId" }], "post": operation
@@ -277,8 +568,16 @@ pub fn canonical_openapi() -> Value {
         ("/v2/agents", "v2.agents.list", "AgentList"),
         ("/v2/commands", "v2.commands.list", "CommandList"),
         ("/v2/providers", "v2.providers.list", "UnknownObject"),
-        ("/v2/providers/configured", "v2.providers.configured", "ProviderList"),
-        ("/v2/providers/auth-methods", "v2.providers.authMethods", "UnknownObject"),
+        (
+            "/v2/providers/configured",
+            "v2.providers.configured",
+            "ProviderList",
+        ),
+        (
+            "/v2/providers/auth-methods",
+            "v2.providers.authMethods",
+            "UnknownObject",
+        ),
         ("/v2/skills", "v2.skills.list", "SkillList"),
         ("/v2/tools", "v2.tools.list", "ToolList"),
     ] {
@@ -345,7 +644,8 @@ pub fn canonical_openapi() -> Value {
         }));
     }
     for (suffix, operation) in [
-        ("prompt", "v2.sessions.prompt"), ("prompt-async", "v2.sessions.promptAsync")
+        ("prompt", "v2.sessions.prompt"),
+        ("prompt-async", "v2.sessions.promptAsync"),
     ] {
         paths.insert(format!("/v2/sessions/{{session_id}}/{suffix}"), json!({
             "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
@@ -356,7 +656,7 @@ pub fn canonical_openapi() -> Value {
     for (suffix, operation, description) in [
         ("abort", "v2.sessions.abort", "Run aborted"),
         ("compact", "v2.sessions.compact", "Context compacted"),
-        ("wait", "v2.sessions.wait", "Session exists")
+        ("wait", "v2.sessions.wait", "Session exists"),
     ] {
         paths.insert(format!("/v2/sessions/{{session_id}}/{suffix}"), json!({
             "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
@@ -404,258 +704,2053 @@ fn apply_authoritative_contract(document: &mut Value) {
         paths.entry(path.to_string()).or_insert_with(|| json!({}))[method] = value;
     };
     let r = |name: &str| json!({ "$ref": format!("#/components/schemas/{name}") });
-    let p = |name: &str, location: &str, required: bool, schema: Value| json!({
-        "name": name, "in": location, "required": required, "schema": schema
-    });
+    let p = |name: &str, location: &str, required: bool, schema: Value| {
+        json!({
+            "name": name, "in": location, "required": required, "schema": schema
+        })
+    };
     let path = |name: &str| p(name, "path", true, json!({ "type": "string" }));
-    let query = |name: &str, required: bool, schema: Value| p(name, "query", required, schema);
-    let header = |name: &str, required: bool, schema: Value| p(name, "header", required, schema);
+    let query =
+        |name: &str, required: bool, schema: Value| p(name, "query", required, schema);
+    let header =
+        |name: &str, required: bool, schema: Value| p(name, "header", required, schema);
     let directory = || query("directory", false, json!({ "type": "string" }));
-    let credential_workspace = || query("workspaceId", false, json!({ "type": "string" }));
-    let json_request = |required: bool, schema: Value| json!({
-        "required": required, "content": { "application/json": { "schema": schema } }
-    });
-    let success = |status: &str, description: &str, schema: Value| json!({
-        (status): { "description": description, "content": { "application/json": { "schema": schema } } }
-    });
+    let credential_workspace =
+        || query("workspaceId", false, json!({ "type": "string" }));
+    let json_request = |required: bool, schema: Value| {
+        json!({
+            "required": required, "content": { "application/json": { "schema": schema } }
+        })
+    };
+    let success = |status: &str, description: &str, schema: Value| {
+        json!({
+            (status): { "description": description, "content": { "application/json": { "schema": schema } } }
+        })
+    };
     let empty = |status: &str, description: &str| json!({ (status): { "description": description } });
-    let op = |id: &str, tag: &str, parameters: Value, request: Option<Value>, responses: Value| {
+    let op = |id: &str,
+              tag: &str,
+              parameters: Value,
+              request: Option<Value>,
+              responses: Value| {
         let mut value = json!({
             "tags": [tag], "operationId": id, "parameters": parameters,
             "responses": merge_responses(responses, canonical_errors())
         });
-        if let Some(request) = request { value["requestBody"] = request; }
+        if let Some(request) = request {
+            value["requestBody"] = request;
+        }
         value
     };
 
-    let mut health = op("v2.health", "system", json!([]), None, success("200", "Health", r("HealthResponse")));
+    let mut health = op(
+        "v2.health",
+        "system",
+        json!([]),
+        None,
+        success("200", "Health", r("HealthResponse")),
+    );
     health["security"] = json!([]);
     add("/v2/health", "get", health);
-    add("/v2/meta", "get", op("v2.meta.get", "system", json!([]), None, success("200", "Protocol metadata", r("ApiMeta"))));
-    add("/v2/openapi.json", "get", op("v2.openapi.get", "system", json!([]), None, success("200", "OpenAPI 3.1 document", r("OpenApiDocument"))));
-    add("/v2/audit", "get", op("v2.audit.list", "system", json!([
-        query("limit", false, json!({ "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 }))
-    ]), None, success("200", "Audit entries", json!({ "type": "array", "items": r("AuditEntry") }))));
-    add("/v2/config/defaults", "get", op("v2.config.defaults", "system", json!([directory()]), None, success("200", "Safe effective agent selections", r("ConfigDefaults"))));
-    add("/v2/config", "get", op("v2.config.get", "system", json!([directory()]), None, success("200", "Effective agent configuration", r("ConfigDocument"))));
-    add("/v2/config", "patch", op("v2.config.update", "system", json!([directory()]), Some(json_request(true, r("ConfigDocument"))), success("200", "Updated configuration", r("ConfigDocument"))));
-    add("/v2/config/validate", "get", op("v2.config.validate", "system", json!([directory()]), None, success("200", "Configuration validation", r("ConfigValidation"))));
-    add("/v2/capabilities", "get", op("v2.capabilities.list", "plugins", json!([directory()]), None, success("200", "Capabilities", json!({ "type": "array", "items": r("Capability") }))));
-    add("/v2/plugins", "get", op("v2.plugins.list", "plugins", json!([directory()]), None, success("200", "Plugin manifests", json!({ "type": "array", "items": r("PluginManifest") }))));
-    add("/v2/plugins/{plugin_id}/manifest", "get", op("v2.plugins.get", "plugins", json!([path("plugin_id"), directory()]), None, success("200", "Plugin manifest", r("PluginManifest"))));
-    add("/v2/events", "get", op("v2.events.subscribe", "events", json!([
-        header("Last-Event-ID", false, json!({ "type": "integer", "minimum": 0 })),
-        query("since", false, json!({ "type": "integer", "minimum": 0 })),
-        query("tail", false, json!({ "type": "boolean", "default": false })),
-        query("limit", false, json!({ "type": "integer", "minimum": 1, "maximum": 5000, "default": 1000 })),
-        query("sessionId", false, json!({ "type": "string" }))
-    ]), None, json!({ "200": { "description": "Resumable durable event stream", "content": {
+    add(
+        "/v2/meta",
+        "get",
+        op(
+            "v2.meta.get",
+            "system",
+            json!([]),
+            None,
+            success("200", "Protocol metadata", r("ApiMeta")),
+        ),
+    );
+    add(
+        "/v2/openapi.json",
+        "get",
+        op(
+            "v2.openapi.get",
+            "system",
+            json!([]),
+            None,
+            success("200", "OpenAPI 3.1 document", r("OpenApiDocument")),
+        ),
+    );
+    add(
+        "/v2/audit",
+        "get",
+        op(
+            "v2.audit.list",
+            "system",
+            json!([query(
+                "limit",
+                false,
+                json!({ "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 })
+            )]),
+            None,
+            success(
+                "200",
+                "Audit entries",
+                json!({ "type": "array", "items": r("AuditEntry") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/config/defaults",
+        "get",
+        op(
+            "v2.config.defaults",
+            "system",
+            json!([directory()]),
+            None,
+            success(
+                "200",
+                "Safe effective agent selections",
+                r("ConfigDefaults"),
+            ),
+        ),
+    );
+    add(
+        "/v2/config",
+        "get",
+        op(
+            "v2.config.get",
+            "system",
+            json!([directory()]),
+            None,
+            success("200", "Effective agent configuration", r("ConfigDocument")),
+        ),
+    );
+    add(
+        "/v2/config",
+        "patch",
+        op(
+            "v2.config.update",
+            "system",
+            json!([directory()]),
+            Some(json_request(true, r("ConfigDocument"))),
+            success("200", "Updated configuration", r("ConfigDocument")),
+        ),
+    );
+    add(
+        "/v2/config/validate",
+        "get",
+        op(
+            "v2.config.validate",
+            "system",
+            json!([directory()]),
+            None,
+            success("200", "Configuration validation", r("ConfigValidation")),
+        ),
+    );
+    add(
+        "/v2/capabilities",
+        "get",
+        op(
+            "v2.capabilities.list",
+            "plugins",
+            json!([directory()]),
+            None,
+            success(
+                "200",
+                "Capabilities",
+                json!({ "type": "array", "items": r("Capability") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/plugins",
+        "get",
+        op(
+            "v2.plugins.list",
+            "plugins",
+            json!([directory()]),
+            None,
+            success(
+                "200",
+                "Plugin manifests",
+                json!({ "type": "array", "items": r("PluginManifest") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/plugins/{plugin_id}/manifest",
+        "get",
+        op(
+            "v2.plugins.get",
+            "plugins",
+            json!([path("plugin_id"), directory()]),
+            None,
+            success("200", "Plugin manifest", r("PluginManifest")),
+        ),
+    );
+    add(
+        "/v2/events",
+        "get",
+        op(
+            "v2.events.subscribe",
+            "events",
+            json!([
+                header(
+                    "Last-Event-ID",
+                    false,
+                    json!({ "type": "integer", "minimum": 0 })
+                ),
+                query("since", false, json!({ "type": "integer", "minimum": 0 })),
+                query(
+                    "tail",
+                    false,
+                    json!({ "type": "boolean", "default": false })
+                ),
+                query(
+                    "limit",
+                    false,
+                    json!({ "type": "integer", "minimum": 1, "maximum": 5000, "default": 1000 })
+                ),
+                query("sessionId", false, json!({ "type": "string" }))
+            ]),
+            None,
+            json!({ "200": { "description": "Resumable durable event stream", "content": {
         "text/event-stream": { "schema": { "type": "string", "description": "SSE records whose data field is an Event (the typed, type-discriminated union in components/schemas/Event)" } }
-    } } })));
+    } } }),
+        ),
+    );
 
-    add("/v2/artifacts", "get", op("v2.artifacts.list", "artifacts", json!([
-        query("sessionId", false, json!({ "type": "string" }))
-    ]), None, success("200", "Artifacts", json!({ "type": "array", "items": r("Artifact") }))));
-    add("/v2/artifacts", "post", op("v2.artifacts.create", "artifacts", json!([
-        header("Content-Type", false, json!({ "type": "string", "default": "application/octet-stream" })),
-        header("X-Neoism-Filename", false, json!({ "type": "string" })),
-        header("X-Neoism-Session-Id", false, json!({ "type": "string" }))
-    ]), Some(json!({ "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary", "maxLength": 26214400 } } } })), success("201", "Created artifact", r("Artifact"))));
-    add("/v2/artifacts/{artifact_id}", "get", op("v2.artifacts.get", "artifacts", json!([path("artifact_id")]), None, success("200", "Artifact metadata", r("Artifact"))));
-    add("/v2/artifacts/{artifact_id}", "delete", op("v2.artifacts.delete", "artifacts", json!([path("artifact_id")]), None, empty("204", "Artifact deleted")));
-    add("/v2/artifacts/{artifact_id}/content", "get", op("v2.artifacts.content", "artifacts", json!([path("artifact_id")]), None, json!({
-        "200": { "description": "Artifact bytes", "headers": {
-            "Content-Type": { "schema": { "type": "string" } }, "Content-Disposition": { "schema": { "type": "string" } }, "ETag": { "schema": { "type": "string" } }
-        }, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } }
-    })));
+    add(
+        "/v2/artifacts",
+        "get",
+        op(
+            "v2.artifacts.list",
+            "artifacts",
+            json!([query("sessionId", false, json!({ "type": "string" }))]),
+            None,
+            success(
+                "200",
+                "Artifacts",
+                json!({ "type": "array", "items": r("Artifact") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/artifacts",
+        "post",
+        op(
+            "v2.artifacts.create",
+            "artifacts",
+            json!([
+                header(
+                    "Content-Type",
+                    false,
+                    json!({ "type": "string", "default": "application/octet-stream" })
+                ),
+                header("X-Neoism-Filename", false, json!({ "type": "string" })),
+                header("X-Neoism-Session-Id", false, json!({ "type": "string" }))
+            ]),
+            Some(
+                json!({ "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary", "maxLength": 26214400 } } } }),
+            ),
+            success("201", "Created artifact", r("Artifact")),
+        ),
+    );
+    add(
+        "/v2/artifacts/{artifact_id}",
+        "get",
+        op(
+            "v2.artifacts.get",
+            "artifacts",
+            json!([path("artifact_id")]),
+            None,
+            success("200", "Artifact metadata", r("Artifact")),
+        ),
+    );
+    add(
+        "/v2/artifacts/{artifact_id}",
+        "delete",
+        op(
+            "v2.artifacts.delete",
+            "artifacts",
+            json!([path("artifact_id")]),
+            None,
+            empty("204", "Artifact deleted"),
+        ),
+    );
+    add(
+        "/v2/artifacts/{artifact_id}/content",
+        "get",
+        op(
+            "v2.artifacts.content",
+            "artifacts",
+            json!([path("artifact_id")]),
+            None,
+            json!({
+                "200": { "description": "Artifact bytes", "headers": {
+                    "Content-Type": { "schema": { "type": "string" } }, "Content-Disposition": { "schema": { "type": "string" } }, "ETag": { "schema": { "type": "string" } }
+                }, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } }
+            }),
+        ),
+    );
 
-    add("/v2/interactions/permissions", "get", op("v2.interactions.permissions.list", "interactions", json!([query("sessionId", false, json!({ "type": "string" }))]), None, success("200", "Pending permissions", json!({ "type": "array", "items": r("PermissionRequest") }))));
-    add("/v2/interactions/permissions/{request_id}/reply", "post", op("v2.interactions.permissions.reply", "interactions", json!([path("request_id")]), Some(json_request(true, r("PermissionReply"))), success("200", "Reply accepted", json!({ "type": "boolean" }))));
-    add("/v2/interactions/questions", "get", op("v2.interactions.questions.list", "interactions", json!([query("sessionId", false, json!({ "type": "string" }))]), None, success("200", "Pending questions", json!({ "type": "array", "items": r("QuestionRequest") }))));
-    add("/v2/interactions/questions/{request_id}/reply", "post", op("v2.interactions.questions.reply", "interactions", json!([path("request_id")]), Some(json_request(true, r("QuestionReply"))), success("200", "Reply accepted", json!({ "type": "boolean" }))));
-    add("/v2/interactions/questions/{request_id}/reject", "post", op("v2.interactions.questions.reject", "interactions", json!([path("request_id")]), None, success("200", "Rejection accepted", json!({ "type": "boolean" }))));
+    add(
+        "/v2/interactions/permissions",
+        "get",
+        op(
+            "v2.interactions.permissions.list",
+            "interactions",
+            json!([query("sessionId", false, json!({ "type": "string" }))]),
+            None,
+            success(
+                "200",
+                "Pending permissions",
+                json!({ "type": "array", "items": r("PermissionRequest") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/interactions/permissions/{request_id}/reply",
+        "post",
+        op(
+            "v2.interactions.permissions.reply",
+            "interactions",
+            json!([path("request_id")]),
+            Some(json_request(true, r("PermissionReply"))),
+            success("200", "Reply accepted", json!({ "type": "boolean" })),
+        ),
+    );
+    add(
+        "/v2/interactions/questions",
+        "get",
+        op(
+            "v2.interactions.questions.list",
+            "interactions",
+            json!([query("sessionId", false, json!({ "type": "string" }))]),
+            None,
+            success(
+                "200",
+                "Pending questions",
+                json!({ "type": "array", "items": r("QuestionRequest") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/interactions/questions/{request_id}/reply",
+        "post",
+        op(
+            "v2.interactions.questions.reply",
+            "interactions",
+            json!([path("request_id")]),
+            Some(json_request(true, r("QuestionReply"))),
+            success("200", "Reply accepted", json!({ "type": "boolean" })),
+        ),
+    );
+    add(
+        "/v2/interactions/questions/{request_id}/reject",
+        "post",
+        op(
+            "v2.interactions.questions.reject",
+            "interactions",
+            json!([path("request_id")]),
+            None,
+            success("200", "Rejection accepted", json!({ "type": "boolean" })),
+        ),
+    );
 
     for (route, id, schema) in [
-        ("/v2/agents", "v2.agents.list", "AgentList"), ("/v2/commands", "v2.commands.list", "CommandList"),
-        ("/v2/providers", "v2.providers.list", "ProviderListResult"), ("/v2/providers/configured", "v2.providers.configured", "ConfigProvidersResult"),
-        ("/v2/providers/auth-methods", "v2.providers.authMethods", "ProviderAuthMethods"), ("/v2/skills", "v2.skills.list", "SkillList"),
-        ("/v2/tools", "v2.tools.list", "ToolList")
-    ] { add(route, "get", op(id, "catalog", json!([directory()]), None, success("200", "Catalog result", r(schema)))); }
-    add("/v2/agents/{name}", "get", op("v2.agents.get", "catalog", json!([path("name"), directory()]), None, success("200", "Agent", r("Agent"))));
-    let revision_parameters = || json!([query("expectedRevision", false, json!({ "type": "string" })), header("If-Match", false, json!({ "type": "string" }))]);
-    add("/v2/management/workspaces", "get", op("v2.management.workspaces.list", "management", json!([]), None, success("200", "Managed workspaces", json!({ "type": "array", "items": r("ManagedWorkspace") }))));
-    add("/v2/management/workspaces", "post", op("v2.management.workspaces.create", "management", json!([]), Some(json_request(true, r("WorkspaceCreateRequest"))), success("201", "Registered workspace", r("ManagedWorkspace"))));
-    add("/v2/management/workspaces/{id}", "get", op("v2.management.workspaces.get", "management", json!([path("id")]), None, success("200", "Managed workspace", r("ManagedWorkspace"))));
-    add("/v2/management/workspaces/{id}", "put", op("v2.management.workspaces.update", "management", json!([path("id"), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("WorkspaceUpdateRequest"))), success("200", "Updated workspace", r("ManagedWorkspace"))));
-    add("/v2/management/workspaces/{id}", "delete", op("v2.management.workspaces.delete", "management", { let mut parameters = vec![path("id")]; parameters.extend(revision_parameters().as_array().cloned().unwrap_or_default()); Value::Array(parameters) }, None, empty("204", "Workspace unregistered; files are retained")));
-    add("/v2/management/repositories", "get", op("v2.management.repositories.list", "management", json!([]), None, success("200", "Managed repositories", json!({ "type": "array", "items": r("ManagedRepository") }))));
-    add("/v2/management/repositories", "post", op("v2.management.repositories.create", "management", json!([]), Some(json_request(true, r("RepositoryCreateRequest"))), success("201", "Registered or cloned repository", r("ManagedRepository"))));
-    add("/v2/management/repositories/{id}", "get", op("v2.management.repositories.get", "management", json!([path("id")]), None, success("200", "Managed repository", r("ManagedRepository"))));
-    add("/v2/management/repositories/{id}", "put", op("v2.management.repositories.update", "management", json!([path("id"), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("RepositoryUpdateRequest"))), success("200", "Updated repository registration", r("ManagedRepository"))));
-    add("/v2/management/repositories/{id}", "delete", op("v2.management.repositories.delete", "management", { let mut parameters = vec![path("id")]; parameters.extend(revision_parameters().as_array().cloned().unwrap_or_default()); Value::Array(parameters) }, None, empty("204", "Repository unregistered; working tree is retained")));
-    let management_parameters = || json!([directory(), query("scope", false, json!({ "type": "string", "enum": ["installation", "workspace"] }))]);
-    let management_item_parameters = || json!([path("id"), directory(), query("scope", false, json!({ "type": "string", "enum": ["installation", "workspace"] })), header("If-Match", false, json!({ "type": "string" }))]);
-    for (kind, write_schema) in [("agents", "MarkdownWriteRequest"), ("commands", "MarkdownWriteRequest"), ("skills", "SkillWriteRequest")] {
-        add(&format!("/v2/management/{kind}"), "get", op(&format!("v2.management.{kind}.list"), "management", management_parameters(), None, success("200", "Managed resource catalog", json!({ "type": "array", "items": r("ManagedResource") }))));
-        add(&format!("/v2/management/{kind}/{{id}}"), "get", op(&format!("v2.management.{kind}.get"), "management", management_item_parameters(), None, success("200", "Managed resource", r("ManagedResource"))));
-        add(&format!("/v2/management/{kind}/{{id}}"), "post", op(&format!("v2.management.{kind}.create"), "management", management_item_parameters(), Some(json_request(true, r(write_schema))), success("201", "Created managed resource", r("ManagedResource"))));
-        add(&format!("/v2/management/{kind}/{{id}}"), "put", op(&format!("v2.management.{kind}.update"), "management", management_item_parameters(), Some(json_request(true, r(write_schema))), success("200", "Updated managed resource", r("ManagedResource"))));
-        add(&format!("/v2/management/{kind}/{{id}}"), "delete", op(&format!("v2.management.{kind}.delete"), "management", management_item_parameters(), None, empty("204", "Managed resource deleted")));
+        ("/v2/agents", "v2.agents.list", "AgentList"),
+        ("/v2/commands", "v2.commands.list", "CommandList"),
+        ("/v2/providers", "v2.providers.list", "ProviderListResult"),
+        (
+            "/v2/providers/configured",
+            "v2.providers.configured",
+            "ConfigProvidersResult",
+        ),
+        (
+            "/v2/providers/auth-methods",
+            "v2.providers.authMethods",
+            "ProviderAuthMethods",
+        ),
+        ("/v2/skills", "v2.skills.list", "SkillList"),
+        ("/v2/tools", "v2.tools.list", "ToolList"),
+    ] {
+        add(
+            route,
+            "get",
+            op(
+                id,
+                "catalog",
+                json!([directory()]),
+                None,
+                success("200", "Catalog result", r(schema)),
+            ),
+        );
     }
-    add("/v2/management/skills/install", "post", op("v2.management.skills.install", "management", json!([directory(), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("SkillInstallRequest"))), success("201", "Installed skill bundle", r("ManagedResource"))));
-    add("/v2/management/skills/{id}/versions", "get", op("v2.management.skills.versions.list", "management", json!([path("id"), directory()]), None, success("200", "Immutable skill versions", json!({ "type": "array", "items": r("SkillVersion") }))));
-    add("/v2/management/skills/{id}/versions/{version}", "get", op("v2.management.skills.versions.get", "management", json!([path("id"), path("version")]), None, success("200", "Immutable skill version", r("SkillVersion"))));
-    add("/v2/management/skills/{id}/versions/{version}/restore", "post", op("v2.management.skills.versions.restore", "management", json!([path("id"), path("version"), directory(), query("expectedRevision", false, json!({ "type": "string" })), header("If-Match", false, json!({ "type": "string" }))]), None, success("200", "Restored skill", r("ManagedResource"))));
-    add("/v2/providers/{provider_id}/auth", "get", op("v2.providers.auth.get", "catalog", json!([path("provider_id"), credential_workspace()]), None, success("200", "Whether a scoped connection is available", json!({ "type": "boolean" }))));
-    add("/v2/providers/{provider_id}/auth", "put", op("v2.providers.auth.set", "catalog", json!([path("provider_id"), credential_workspace()]), Some(json_request(true, r("AuthInfo"))), success("200", "Authentication updated", json!({ "type": "boolean" }))));
-    add("/v2/providers/{provider_id}/auth", "delete", op("v2.providers.auth.delete", "catalog", json!([path("provider_id"), credential_workspace()]), None, success("200", "Authentication removed", json!({ "type": "boolean" }))));
-    add("/v2/providers/{provider_id}/oauth/authorize", "post", op("v2.providers.oauth.authorize", "catalog", json!([path("provider_id"), credential_workspace()]), Some(json_request(true, r("ProviderAuthorizeRequest"))), success("200", "OAuth authorization", json!({ "anyOf": [r("ProviderAuthAuthorization"), { "type": "null" }] }))));
-    add("/v2/providers/{provider_id}/oauth/callback", "post", op("v2.providers.oauth.callback", "catalog", json!([path("provider_id"), credential_workspace()]), Some(json_request(true, r("ProviderCallbackRequest"))), success("200", "OAuth callback accepted", json!({ "type": "boolean" }))));
-    add("/v2/providers/{provider_id}/connections", "get", op("v2.providers.connections.list", "catalog", json!([path("provider_id"), credential_workspace()]), None, success("200", "Secret-free provider connections", json!({ "type": "array", "items": r("ProviderConnectionSummary") }))));
-    add("/v2/providers/{provider_id}/connections", "post", op("v2.providers.connections.create", "catalog", json!([path("provider_id"), credential_workspace()]), Some(json_request(true, r("ProviderConnectionCreateRequest"))), success("200", "Created provider connection", r("ProviderConnectionSummary"))));
-    add("/v2/providers/{provider_id}/connections/{connection_id}", "patch", op("v2.providers.connections.rename", "catalog", json!([path("provider_id"), path("connection_id"), credential_workspace()]), Some(json_request(true, r("ProviderConnectionRenameRequest"))), success("200", "Renamed provider connection", r("ProviderConnectionSummary"))));
-    add("/v2/providers/{provider_id}/connections/{connection_id}", "delete", op("v2.providers.connections.delete", "catalog", json!([path("provider_id"), path("connection_id"), credential_workspace()]), None, success("200", "Provider connection deleted", json!({ "type": "boolean" }))));
-    add("/v2/providers/{provider_id}/connections/{connection_id}/default", "post", op("v2.providers.connections.setDefault", "catalog", json!([path("provider_id"), path("connection_id"), credential_workspace()]), None, success("200", "Scoped default provider connection", r("ProviderConnectionSummary"))));
+    add(
+        "/v2/agents/{name}",
+        "get",
+        op(
+            "v2.agents.get",
+            "catalog",
+            json!([path("name"), directory()]),
+            None,
+            success("200", "Agent", r("Agent")),
+        ),
+    );
+    let revision_parameters = || {
+        json!([
+            query("expectedRevision", false, json!({ "type": "string" })),
+            header("If-Match", false, json!({ "type": "string" }))
+        ])
+    };
+    add(
+        "/v2/management/workspaces",
+        "get",
+        op(
+            "v2.management.workspaces.list",
+            "management",
+            json!([]),
+            None,
+            success(
+                "200",
+                "Managed workspaces",
+                json!({ "type": "array", "items": r("ManagedWorkspace") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/management/workspaces",
+        "post",
+        op(
+            "v2.management.workspaces.create",
+            "management",
+            json!([]),
+            Some(json_request(true, r("WorkspaceCreateRequest"))),
+            success("201", "Registered workspace", r("ManagedWorkspace")),
+        ),
+    );
+    add(
+        "/v2/management/workspaces/{id}",
+        "get",
+        op(
+            "v2.management.workspaces.get",
+            "management",
+            json!([path("id")]),
+            None,
+            success("200", "Managed workspace", r("ManagedWorkspace")),
+        ),
+    );
+    add(
+        "/v2/management/workspaces/{id}",
+        "put",
+        op(
+            "v2.management.workspaces.update",
+            "management",
+            json!([
+                path("id"),
+                header("If-Match", false, json!({ "type": "string" }))
+            ]),
+            Some(json_request(true, r("WorkspaceUpdateRequest"))),
+            success("200", "Updated workspace", r("ManagedWorkspace")),
+        ),
+    );
+    add(
+        "/v2/management/workspaces/{id}",
+        "delete",
+        op(
+            "v2.management.workspaces.delete",
+            "management",
+            {
+                let mut parameters = vec![path("id")];
+                parameters.extend(
+                    revision_parameters()
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                Value::Array(parameters)
+            },
+            None,
+            empty("204", "Workspace unregistered; files are retained"),
+        ),
+    );
+    add(
+        "/v2/management/repositories",
+        "get",
+        op(
+            "v2.management.repositories.list",
+            "management",
+            json!([]),
+            None,
+            success(
+                "200",
+                "Managed repositories",
+                json!({ "type": "array", "items": r("ManagedRepository") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/management/repositories",
+        "post",
+        op(
+            "v2.management.repositories.create",
+            "management",
+            json!([]),
+            Some(json_request(true, r("RepositoryCreateRequest"))),
+            success(
+                "201",
+                "Registered or cloned repository",
+                r("ManagedRepository"),
+            ),
+        ),
+    );
+    add(
+        "/v2/management/repositories/{id}",
+        "get",
+        op(
+            "v2.management.repositories.get",
+            "management",
+            json!([path("id")]),
+            None,
+            success("200", "Managed repository", r("ManagedRepository")),
+        ),
+    );
+    add(
+        "/v2/management/repositories/{id}",
+        "put",
+        op(
+            "v2.management.repositories.update",
+            "management",
+            json!([
+                path("id"),
+                header("If-Match", false, json!({ "type": "string" }))
+            ]),
+            Some(json_request(true, r("RepositoryUpdateRequest"))),
+            success(
+                "200",
+                "Updated repository registration",
+                r("ManagedRepository"),
+            ),
+        ),
+    );
+    add(
+        "/v2/management/repositories/{id}",
+        "delete",
+        op(
+            "v2.management.repositories.delete",
+            "management",
+            {
+                let mut parameters = vec![path("id")];
+                parameters.extend(
+                    revision_parameters()
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                Value::Array(parameters)
+            },
+            None,
+            empty("204", "Repository unregistered; working tree is retained"),
+        ),
+    );
+    let management_parameters = || {
+        json!([
+            directory(),
+            query(
+                "scope",
+                false,
+                json!({ "type": "string", "enum": ["installation", "workspace"] })
+            )
+        ])
+    };
+    let management_item_parameters = || {
+        json!([
+            path("id"),
+            directory(),
+            query(
+                "scope",
+                false,
+                json!({ "type": "string", "enum": ["installation", "workspace"] })
+            ),
+            header("If-Match", false, json!({ "type": "string" }))
+        ])
+    };
+    for (kind, write_schema) in [
+        ("agents", "MarkdownWriteRequest"),
+        ("commands", "MarkdownWriteRequest"),
+        ("skills", "SkillWriteRequest"),
+    ] {
+        add(
+            &format!("/v2/management/{kind}"),
+            "get",
+            op(
+                &format!("v2.management.{kind}.list"),
+                "management",
+                management_parameters(),
+                None,
+                success(
+                    "200",
+                    "Managed resource catalog",
+                    json!({ "type": "array", "items": r("ManagedResource") }),
+                ),
+            ),
+        );
+        add(
+            &format!("/v2/management/{kind}/{{id}}"),
+            "get",
+            op(
+                &format!("v2.management.{kind}.get"),
+                "management",
+                management_item_parameters(),
+                None,
+                success("200", "Managed resource", r("ManagedResource")),
+            ),
+        );
+        add(
+            &format!("/v2/management/{kind}/{{id}}"),
+            "post",
+            op(
+                &format!("v2.management.{kind}.create"),
+                "management",
+                management_item_parameters(),
+                Some(json_request(true, r(write_schema))),
+                success("201", "Created managed resource", r("ManagedResource")),
+            ),
+        );
+        add(
+            &format!("/v2/management/{kind}/{{id}}"),
+            "put",
+            op(
+                &format!("v2.management.{kind}.update"),
+                "management",
+                management_item_parameters(),
+                Some(json_request(true, r(write_schema))),
+                success("200", "Updated managed resource", r("ManagedResource")),
+            ),
+        );
+        add(
+            &format!("/v2/management/{kind}/{{id}}"),
+            "delete",
+            op(
+                &format!("v2.management.{kind}.delete"),
+                "management",
+                management_item_parameters(),
+                None,
+                empty("204", "Managed resource deleted"),
+            ),
+        );
+    }
+    add(
+        "/v2/management/skills/install",
+        "post",
+        op(
+            "v2.management.skills.install",
+            "management",
+            json!([
+                directory(),
+                header("If-Match", false, json!({ "type": "string" }))
+            ]),
+            Some(json_request(true, r("SkillInstallRequest"))),
+            success("201", "Installed skill bundle", r("ManagedResource")),
+        ),
+    );
+    add(
+        "/v2/management/skills/{id}/versions",
+        "get",
+        op(
+            "v2.management.skills.versions.list",
+            "management",
+            json!([path("id"), directory()]),
+            None,
+            success(
+                "200",
+                "Immutable skill versions",
+                json!({ "type": "array", "items": r("SkillVersion") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/management/skills/{id}/versions/{version}",
+        "get",
+        op(
+            "v2.management.skills.versions.get",
+            "management",
+            json!([path("id"), path("version")]),
+            None,
+            success("200", "Immutable skill version", r("SkillVersion")),
+        ),
+    );
+    add(
+        "/v2/management/skills/{id}/versions/{version}/restore",
+        "post",
+        op(
+            "v2.management.skills.versions.restore",
+            "management",
+            json!([
+                path("id"),
+                path("version"),
+                directory(),
+                query("expectedRevision", false, json!({ "type": "string" })),
+                header("If-Match", false, json!({ "type": "string" }))
+            ]),
+            None,
+            success("200", "Restored skill", r("ManagedResource")),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/auth",
+        "get",
+        op(
+            "v2.providers.auth.get",
+            "catalog",
+            json!([path("provider_id"), credential_workspace()]),
+            None,
+            success(
+                "200",
+                "Whether a scoped connection is available",
+                json!({ "type": "boolean" }),
+            ),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/auth",
+        "put",
+        op(
+            "v2.providers.auth.set",
+            "catalog",
+            json!([path("provider_id"), credential_workspace()]),
+            Some(json_request(true, r("AuthInfo"))),
+            success(
+                "200",
+                "Authentication updated",
+                json!({ "type": "boolean" }),
+            ),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/auth",
+        "delete",
+        op(
+            "v2.providers.auth.delete",
+            "catalog",
+            json!([path("provider_id"), credential_workspace()]),
+            None,
+            success(
+                "200",
+                "Authentication removed",
+                json!({ "type": "boolean" }),
+            ),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/oauth/authorize",
+        "post",
+        op(
+            "v2.providers.oauth.authorize",
+            "catalog",
+            json!([path("provider_id"), credential_workspace()]),
+            Some(json_request(true, r("ProviderAuthorizeRequest"))),
+            success(
+                "200",
+                "OAuth authorization",
+                json!({ "anyOf": [r("ProviderAuthAuthorization"), { "type": "null" }] }),
+            ),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/oauth/callback",
+        "post",
+        op(
+            "v2.providers.oauth.callback",
+            "catalog",
+            json!([path("provider_id"), credential_workspace()]),
+            Some(json_request(true, r("ProviderCallbackRequest"))),
+            success(
+                "200",
+                "OAuth callback accepted",
+                json!({ "type": "boolean" }),
+            ),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/connections",
+        "get",
+        op(
+            "v2.providers.connections.list",
+            "catalog",
+            json!([path("provider_id"), credential_workspace()]),
+            None,
+            success(
+                "200",
+                "Secret-free provider connections",
+                json!({ "type": "array", "items": r("ProviderConnectionSummary") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/connections",
+        "post",
+        op(
+            "v2.providers.connections.create",
+            "catalog",
+            json!([path("provider_id"), credential_workspace()]),
+            Some(json_request(true, r("ProviderConnectionCreateRequest"))),
+            success(
+                "200",
+                "Created provider connection",
+                r("ProviderConnectionSummary"),
+            ),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/connections/{connection_id}",
+        "patch",
+        op(
+            "v2.providers.connections.rename",
+            "catalog",
+            json!([
+                path("provider_id"),
+                path("connection_id"),
+                credential_workspace()
+            ]),
+            Some(json_request(true, r("ProviderConnectionRenameRequest"))),
+            success(
+                "200",
+                "Renamed provider connection",
+                r("ProviderConnectionSummary"),
+            ),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/connections/{connection_id}",
+        "delete",
+        op(
+            "v2.providers.connections.delete",
+            "catalog",
+            json!([
+                path("provider_id"),
+                path("connection_id"),
+                credential_workspace()
+            ]),
+            None,
+            success(
+                "200",
+                "Provider connection deleted",
+                json!({ "type": "boolean" }),
+            ),
+        ),
+    );
+    add(
+        "/v2/providers/{provider_id}/connections/{connection_id}/default",
+        "post",
+        op(
+            "v2.providers.connections.setDefault",
+            "catalog",
+            json!([
+                path("provider_id"),
+                path("connection_id"),
+                credential_workspace()
+            ]),
+            None,
+            success(
+                "200",
+                "Scoped default provider connection",
+                r("ProviderConnectionSummary"),
+            ),
+        ),
+    );
 
     let session_id = || path("session_id");
-    add("/v2/sessions", "get", op("v2.sessions.list", "sessions", json!([
-        directory(), query("path", false, json!({ "type": "string" })), query("roots", false, json!({ "type": "string" })),
-        query("start", false, json!({ "type": "integer", "minimum": 0 })), query("search", false, json!({ "type": "string" })),
-        query("limit", false, json!({ "type": "integer", "minimum": 1, "maximum": 200 })),
-        query("cursor", false, json!({ "type": "string" }))
-    ]), None, success("200", "Session page", r("SessionPage"))));
-    add("/v2/sessions", "post", op("v2.sessions.create", "sessions", json!([directory()]), Some(json_request(false, r("CreateSessionRequest"))), success("200", "Created session", r("Session"))));
-    add("/v2/sessions/status", "get", op("v2.sessions.status", "sessions", json!([]), None, success("200", "Session status map", r("SessionStatusMap"))));
-    add("/v2/sessions/import", "post", op("v2.sessions.import", "sessions", json!([]), Some(json_request(true, r("ImportSessionRequest"))), success("200", "Imported session", r("ImportSessionResponse"))));
-    add("/v2/sessions/export", "post", op("v2.sessions.export", "sessions", json!([]), Some(json_request(true, r("ExportSessionsRequest"))), success("200", "Exported sessions", r("ExportSessionsResponse"))));
-    add("/v2/sessions/{session_id}", "get", op("v2.sessions.get", "sessions", json!([session_id()]), None, success("200", "Session", r("Session"))));
-    add("/v2/sessions/{session_id}", "patch", op("v2.sessions.update", "sessions", json!([session_id()]), Some(json_request(true, r("UpdateSessionRequest"))), success("200", "Updated session", r("Session"))));
-    add("/v2/sessions/{session_id}", "delete", op("v2.sessions.delete", "sessions", json!([session_id()]), None, success("200", "Session deleted", json!({ "type": "boolean" }))));
-    add("/v2/sessions/{session_id}/messages", "get", op("v2.sessions.messages", "sessions", json!([
-        session_id(), query("limit", false, json!({ "type": "integer", "minimum": 1 })), query("order", false, json!({ "type": "string", "enum": ["asc", "desc"] })),
-        query("slim", false, json!({ "type": "boolean" })), query("cursor", false, json!({ "type": "string" }))
-    ]), None, success("200", "Message page", r("MessagePage"))));
-    add("/v2/sessions/{session_id}/messages/{message_id}", "get", op("v2.sessions.messages.get", "sessions", json!([session_id(), path("message_id")]), None, success("200", "Message", r("Message"))));
-    add("/v2/sessions/{session_id}/messages/{message_id}", "delete", op("v2.sessions.messages.delete", "sessions", json!([session_id(), path("message_id")]), None, success("200", "Message deleted", json!({ "type": "boolean" }))));
-    add("/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}", "patch", op("v2.sessions.parts.update", "sessions", json!([session_id(), path("message_id"), path("part_id")]), Some(json_request(true, r("Part"))), success("200", "Updated part", r("Part"))));
-    add("/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}", "delete", op("v2.sessions.parts.delete", "sessions", json!([session_id(), path("message_id"), path("part_id")]), None, success("200", "Part deleted", json!({ "type": "boolean" }))));
-    add("/v2/sessions/{session_id}/children", "get", op("v2.sessions.children", "sessions", json!([session_id()]), None, success("200", "Child sessions", r("SessionPage"))));
-    add("/v2/sessions/{session_id}/runtime", "get", op("v2.sessions.runtime", "sessions", json!([session_id()]), None, success("200", "Authoritative family runtime lifecycle and execution activity", r("SessionRuntimeSnapshot"))));
-    add("/v2/sessions/{session_id}/directory-options", "get", op("v2.sessions.directoryOptions", "sessions", json!([session_id(), query("query", false, json!({ "type": "string" })), query("limit", false, json!({ "type": "integer", "minimum": 1, "maximum": 1000 }))]), None, success("200", "Directory options", json!({ "type": "array", "items": { "type": "string" } }))));
-    add("/v2/sessions/{session_id}/todos", "get", op("v2.sessions.todos", "sessions", json!([session_id()]), None, success("200", "Session todos", json!({ "type": "array", "items": r("Todo") }))));
-    add("/v2/sessions/{session_id}/fork", "post", op("v2.sessions.fork", "sessions", json!([session_id()]), Some(json_request(false, r("ForkSessionRequest"))), success("200", "Forked session", r("Session"))));
-    add("/v2/sessions/{session_id}/diff", "get", op("v2.sessions.diff", "sessions", json!([session_id()]), None, success("200", "Session diff", json!({ "type": "array", "items": r("VcsFileDiff") }))));
-    add("/v2/sessions/{session_id}/undo-tree", "get", op("v2.sessions.undoTree", "sessions", json!([session_id()]), None, success("200", "Undo tree", r("SessionUndoTree"))));
-    for (suffix, id) in [("prompt", "v2.sessions.prompt"), ("prompt-async", "v2.sessions.promptAsync")] {
-        add(&format!("/v2/sessions/{{session_id}}/{suffix}"), "post", op(id, "sessions", json!([session_id()]), Some(json_request(true, r("PromptRequest"))), empty("204", "Prompt accepted")));
+    add(
+        "/v2/sessions",
+        "get",
+        op(
+            "v2.sessions.list",
+            "sessions",
+            json!([
+                directory(),
+                query("path", false, json!({ "type": "string" })),
+                query("roots", false, json!({ "type": "string" })),
+                query("start", false, json!({ "type": "integer", "minimum": 0 })),
+                query("search", false, json!({ "type": "string" })),
+                query(
+                    "limit",
+                    false,
+                    json!({ "type": "integer", "minimum": 1, "maximum": 200 })
+                ),
+                query("cursor", false, json!({ "type": "string" }))
+            ]),
+            None,
+            success("200", "Session page", r("SessionPage")),
+        ),
+    );
+    add(
+        "/v2/sessions",
+        "post",
+        op(
+            "v2.sessions.create",
+            "sessions",
+            json!([directory()]),
+            Some(json_request(false, r("CreateSessionRequest"))),
+            success("200", "Created session", r("Session")),
+        ),
+    );
+    add(
+        "/v2/sessions/status",
+        "get",
+        op(
+            "v2.sessions.status",
+            "sessions",
+            json!([]),
+            None,
+            success("200", "Session status map", r("SessionStatusMap")),
+        ),
+    );
+    add(
+        "/v2/sessions/import",
+        "post",
+        op(
+            "v2.sessions.import",
+            "sessions",
+            json!([]),
+            Some(json_request(true, r("ImportSessionRequest"))),
+            success("200", "Imported session", r("ImportSessionResponse")),
+        ),
+    );
+    add(
+        "/v2/sessions/export",
+        "post",
+        op(
+            "v2.sessions.export",
+            "sessions",
+            json!([]),
+            Some(json_request(true, r("ExportSessionsRequest"))),
+            success("200", "Exported sessions", r("ExportSessionsResponse")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}",
+        "get",
+        op(
+            "v2.sessions.get",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success("200", "Session", r("Session")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}",
+        "patch",
+        op(
+            "v2.sessions.update",
+            "sessions",
+            json!([session_id()]),
+            Some(json_request(true, r("UpdateSessionRequest"))),
+            success("200", "Updated session", r("Session")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}",
+        "delete",
+        op(
+            "v2.sessions.delete",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success("200", "Session deleted", json!({ "type": "boolean" })),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/messages",
+        "get",
+        op(
+            "v2.sessions.messages",
+            "sessions",
+            json!([
+                session_id(),
+                query("limit", false, json!({ "type": "integer", "minimum": 1 })),
+                query(
+                    "order",
+                    false,
+                    json!({ "type": "string", "enum": ["asc", "desc"] })
+                ),
+                query("slim", false, json!({ "type": "boolean" })),
+                query("cursor", false, json!({ "type": "string" }))
+            ]),
+            None,
+            success("200", "Message page", r("MessagePage")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/messages/{message_id}",
+        "get",
+        op(
+            "v2.sessions.messages.get",
+            "sessions",
+            json!([session_id(), path("message_id")]),
+            None,
+            success("200", "Message", r("Message")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/messages/{message_id}",
+        "delete",
+        op(
+            "v2.sessions.messages.delete",
+            "sessions",
+            json!([session_id(), path("message_id")]),
+            None,
+            success("200", "Message deleted", json!({ "type": "boolean" })),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}",
+        "patch",
+        op(
+            "v2.sessions.parts.update",
+            "sessions",
+            json!([session_id(), path("message_id"), path("part_id")]),
+            Some(json_request(true, r("Part"))),
+            success("200", "Updated part", r("Part")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}",
+        "delete",
+        op(
+            "v2.sessions.parts.delete",
+            "sessions",
+            json!([session_id(), path("message_id"), path("part_id")]),
+            None,
+            success("200", "Part deleted", json!({ "type": "boolean" })),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/children",
+        "get",
+        op(
+            "v2.sessions.children",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success("200", "Child sessions", r("SessionPage")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/runtime",
+        "get",
+        op(
+            "v2.sessions.runtime",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success(
+                "200",
+                "Authoritative family runtime lifecycle and execution activity",
+                r("SessionRuntimeSnapshot"),
+            ),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/directory-options",
+        "get",
+        op(
+            "v2.sessions.directoryOptions",
+            "sessions",
+            json!([
+                session_id(),
+                query("query", false, json!({ "type": "string" })),
+                query(
+                    "limit",
+                    false,
+                    json!({ "type": "integer", "minimum": 1, "maximum": 1000 })
+                )
+            ]),
+            None,
+            success(
+                "200",
+                "Directory options",
+                json!({ "type": "array", "items": { "type": "string" } }),
+            ),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/todos",
+        "get",
+        op(
+            "v2.sessions.todos",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success(
+                "200",
+                "Session todos",
+                json!({ "type": "array", "items": r("Todo") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/fork",
+        "post",
+        op(
+            "v2.sessions.fork",
+            "sessions",
+            json!([session_id()]),
+            Some(json_request(false, r("ForkSessionRequest"))),
+            success("200", "Forked session", r("Session")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/diff",
+        "get",
+        op(
+            "v2.sessions.diff",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success(
+                "200",
+                "Session diff",
+                json!({ "type": "array", "items": r("VcsFileDiff") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/undo-tree",
+        "get",
+        op(
+            "v2.sessions.undoTree",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success("200", "Undo tree", r("SessionUndoTree")),
+        ),
+    );
+    for (suffix, id) in [
+        ("prompt", "v2.sessions.prompt"),
+        ("prompt-async", "v2.sessions.promptAsync"),
+    ] {
+        add(
+            &format!("/v2/sessions/{{session_id}}/{suffix}"),
+            "post",
+            op(
+                id,
+                "sessions",
+                json!([session_id()]),
+                Some(json_request(true, r("PromptRequest"))),
+                empty("204", "Prompt accepted"),
+            ),
+        );
     }
-    add("/v2/sessions/{session_id}/abort", "post", op("v2.sessions.abort", "sessions", json!([session_id()]), None, success("200", "Whether a run was aborted", json!({ "type": "boolean" }))));
-    for (suffix, id, description) in [("compact", "v2.sessions.compact", "Context compacted"), ("wait", "v2.sessions.wait", "Session exists")] {
-        add(&format!("/v2/sessions/{{session_id}}/{suffix}"), "post", op(id, "sessions", json!([session_id()]), None, empty("204", description)));
+    add(
+        "/v2/sessions/{session_id}/abort",
+        "post",
+        op(
+            "v2.sessions.abort",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success(
+                "200",
+                "Whether a run was aborted",
+                json!({ "type": "boolean" }),
+            ),
+        ),
+    );
+    for (suffix, id, description) in [
+        ("compact", "v2.sessions.compact", "Context compacted"),
+        ("wait", "v2.sessions.wait", "Session exists"),
+    ] {
+        add(
+            &format!("/v2/sessions/{{session_id}}/{suffix}"),
+            "post",
+            op(
+                id,
+                "sessions",
+                json!([session_id()]),
+                None,
+                empty("204", description),
+            ),
+        );
     }
-    add("/v2/sessions/{session_id}/context", "get", op("v2.sessions.context", "sessions", json!([session_id()]), None, success("200", "Context messages", r("MessageList"))));
-    add("/v2/sessions/{session_id}/queue", "get", op("v2.sessions.queue.list", "sessions", json!([session_id()]), None, success("200", "Prompt queue", r("SessionQueueInfo"))));
-    add("/v2/sessions/{session_id}/queue", "delete", op("v2.sessions.queue.clear", "sessions", json!([session_id()]), None, success("200", "Queue mutation", r("SessionQueueMutation"))));
-    add("/v2/sessions/{session_id}/queue/pop", "post", op("v2.sessions.queue.pop", "sessions", json!([session_id()]), None, success("200", "Queue mutation", r("SessionQueueMutation"))));
-    add("/v2/sessions/{session_id}/commands", "post", op("v2.sessions.commands.execute", "sessions", json!([session_id()]), Some(json_request(true, r("SessionCommandRequest"))), success("200", "Command message", r("Message"))));
-    add("/v2/sessions/{session_id}/shell", "post", op("v2.sessions.shell", "sessions", json!([session_id()]), Some(json_request(true, r("SessionShellRequest"))), success("200", "Shell message", r("Message"))));
-    add("/v2/sessions/{session_id}/revert", "post", op("v2.sessions.revert", "sessions", json!([session_id()]), Some(json_request(true, r("RevertRequest"))), success("200", "Reverted session", r("Session"))));
-    add("/v2/sessions/{session_id}/unrevert", "post", op("v2.sessions.unrevert", "sessions", json!([session_id()]), None, success("200", "Restored session", r("Session"))));
+    add(
+        "/v2/sessions/{session_id}/context",
+        "get",
+        op(
+            "v2.sessions.context",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success("200", "Context messages", r("MessageList")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/queue",
+        "get",
+        op(
+            "v2.sessions.queue.list",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success("200", "Prompt queue", r("SessionQueueInfo")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/queue",
+        "delete",
+        op(
+            "v2.sessions.queue.clear",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success("200", "Queue mutation", r("SessionQueueMutation")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/queue/pop",
+        "post",
+        op(
+            "v2.sessions.queue.pop",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success("200", "Queue mutation", r("SessionQueueMutation")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/commands",
+        "post",
+        op(
+            "v2.sessions.commands.execute",
+            "sessions",
+            json!([session_id()]),
+            Some(json_request(true, r("SessionCommandRequest"))),
+            success("200", "Command message", r("Message")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/shell",
+        "post",
+        op(
+            "v2.sessions.shell",
+            "sessions",
+            json!([session_id()]),
+            Some(json_request(true, r("SessionShellRequest"))),
+            success("200", "Shell message", r("Message")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/revert",
+        "post",
+        op(
+            "v2.sessions.revert",
+            "sessions",
+            json!([session_id()]),
+            Some(json_request(true, r("RevertRequest"))),
+            success("200", "Reverted session", r("Session")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/unrevert",
+        "post",
+        op(
+            "v2.sessions.unrevert",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success("200", "Restored session", r("Session")),
+        ),
+    );
     for (suffix, id) in [("undo", "v2.sessions.undo"), ("redo", "v2.sessions.redo")] {
-        add(&format!("/v2/sessions/{{session_id}}/{suffix}"), "post", op(id, "sessions", json!([session_id()]), Some(json_request(false, r("RevertRequest"))), success("200", "Updated session", r("Session"))));
+        add(
+            &format!("/v2/sessions/{{session_id}}/{suffix}"),
+            "post",
+            op(
+                id,
+                "sessions",
+                json!([session_id()]),
+                Some(json_request(false, r("RevertRequest"))),
+                success("200", "Updated session", r("Session")),
+            ),
+        );
     }
-    add("/v2/sessions/{session_id}/summarize", "post", op("v2.sessions.summarize", "sessions", json!([session_id()]), Some(json_request(true, r("EmptyObject"))), success("200", "Session summarized", json!({ "type": "boolean" }))));
-    add("/v2/sessions/{session_id}/pin", "post", op("v2.sessions.pin", "sessions", json!([session_id()]), Some(json_request(false, r("SetPinRequest"))), success("200", "Updated session", r("Session"))));
-    add("/v2/sessions/{session_id}/jobs/{job_id}", "delete", op("v2.sessions.jobs.cancel", "sessions", json!([session_id(), path("job_id")]), None, success("200", "Job stopping", r("BackgroundJobStopResponse"))));
+    add(
+        "/v2/sessions/{session_id}/summarize",
+        "post",
+        op(
+            "v2.sessions.summarize",
+            "sessions",
+            json!([session_id()]),
+            Some(json_request(true, r("EmptyObject"))),
+            success("200", "Session summarized", json!({ "type": "boolean" })),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/pin",
+        "post",
+        op(
+            "v2.sessions.pin",
+            "sessions",
+            json!([session_id()]),
+            Some(json_request(false, r("SetPinRequest"))),
+            success("200", "Updated session", r("Session")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/jobs/{job_id}",
+        "delete",
+        op(
+            "v2.sessions.jobs.cancel",
+            "sessions",
+            json!([session_id(), path("job_id")]),
+            None,
+            success("200", "Job stopping", r("BackgroundJobStopResponse")),
+        ),
+    );
 
     // Built-in goals and semantic plugins.
-    for (method, id, body) in [("get", "v2.plugins.goals.get", None), ("post", "v2.plugins.goals.set", Some(r("SetGoalRequest"))), ("delete", "v2.plugins.goals.clear", None)] {
-        add("/v2/plugins/dev.neoism.goals/{session_id}", method, op(id, "plugins", json!([session_id()]), body.map(|schema| json_request(false, schema)), success("200", "Goal state", r("GoalResponse"))));
+    for (method, id, body) in [
+        ("get", "v2.plugins.goals.get", None),
+        ("post", "v2.plugins.goals.set", Some(r("SetGoalRequest"))),
+        ("delete", "v2.plugins.goals.clear", None),
+    ] {
+        add(
+            "/v2/plugins/dev.neoism.goals/{session_id}",
+            method,
+            op(
+                id,
+                "plugins",
+                json!([session_id()]),
+                body.map(|schema| json_request(false, schema)),
+                success("200", "Goal state", r("GoalResponse")),
+            ),
+        );
     }
-    add("/v2/plugins/dev.neoism.goals/{session_id}/research", "post", op("v2.plugins.goals.research", "plugins", json!([session_id()]), Some(json_request(true, r("GoalResearchRequest"))), success("200", "Goal state", r("GoalResponse"))));
-    add("/v2/plugins/dev.neoism.semantic/search", "get", op("v2.plugins.semantic.search", "plugins", json!([
-        query("q", true, json!({ "type": "string" })), query("limit", false, json!({ "type": "integer", "minimum": 1 })), query("sessionId", false, json!({ "type": "string" }))
-    ]), None, success("200", "Semantic search results", r("SemanticSearchResponse"))));
+    add(
+        "/v2/plugins/dev.neoism.goals/{session_id}/research",
+        "post",
+        op(
+            "v2.plugins.goals.research",
+            "plugins",
+            json!([session_id()]),
+            Some(json_request(true, r("GoalResearchRequest"))),
+            success("200", "Goal state", r("GoalResponse")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.semantic/search",
+        "get",
+        op(
+            "v2.plugins.semantic.search",
+            "plugins",
+            json!([
+                query("q", true, json!({ "type": "string" })),
+                query("limit", false, json!({ "type": "integer", "minimum": 1 })),
+                query("sessionId", false, json!({ "type": "string" }))
+            ]),
+            None,
+            success(
+                "200",
+                "Semantic search results",
+                r("SemanticSearchResponse"),
+            ),
+        ),
+    );
 
     let workflow_params = || json!([directory()]);
     let workflow_id_params = || json!([path("workflow_id"), directory()]);
-    add("/v2/plugins/dev.neoism.workflows", "get", op("v2.plugins.workflows.list", "plugins", workflow_params(), None, success("200", "Workflow catalog", r("WorkflowCatalog"))));
-    add("/v2/plugins/dev.neoism.workflows", "post", op("v2.plugins.workflows.create", "plugins", workflow_params(), Some(json_request(true, r("WorkflowDefinition"))), success("201", "Created workflow definition", r("WorkflowView"))));
-    add("/v2/plugins/dev.neoism.workflows/{workflow_id}", "get", op("v2.plugins.workflows.get", "plugins", workflow_id_params(), None, success("200", "Workflow", r("WorkflowView"))));
-    add("/v2/plugins/dev.neoism.workflows/{workflow_id}", "put", op("v2.plugins.workflows.update", "plugins", json!([path("workflow_id"), directory(), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("WorkflowDefinition"))), success("200", "Updated workflow definition", r("WorkflowView"))));
-    add("/v2/plugins/dev.neoism.workflows/{workflow_id}", "patch", op("v2.plugins.workflows.patch", "plugins", json!([path("workflow_id"), directory(), header("If-Match", false, json!({ "type": "string" }))]), Some(json_request(true, r("WorkflowDefinitionPatch"))), success("200", "Patched workflow definition", r("WorkflowView"))));
-    add("/v2/plugins/dev.neoism.workflows/{workflow_id}", "delete", op("v2.plugins.workflows.delete", "plugins", json!([path("workflow_id"), directory(), query("expectedRevision", false, json!({ "type": "string" })), header("If-Match", false, json!({ "type": "string" }))]), None, empty("204", "Workflow definition deleted")));
-    for (suffix, id, schema) in [("activate", "v2.plugins.workflows.activate", "WorkflowProjection"), ("pause", "v2.plugins.workflows.pause", "WorkflowProjection"), ("run", "v2.plugins.workflows.run", "WorkflowRun")] {
-        add(&format!("/v2/plugins/dev.neoism.workflows/{{workflow_id}}/{suffix}"), "post", op(id, "plugins", workflow_id_params(), None, success("200", "Workflow result", r(schema))));
-    }
-    add("/v2/plugins/dev.neoism.workflows/{workflow_id}/preview", "get", op("v2.plugins.workflows.preview", "plugins", workflow_id_params(), None, success("200", "Workflow preview", r("WorkflowPreview"))));
-    add("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs", "get", op("v2.plugins.workflows.history", "plugins", json!([path("workflow_id"), directory(), query("limit", false, json!({ "type": "integer", "minimum": 1 }))]), None, success("200", "Workflow runs", r("WorkflowHistory"))));
-    add("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}", "get", op("v2.plugins.workflows.runs.get", "plugins", json!([path("workflow_id"), path("run_id"), directory()]), None, success("200", "Workflow run", r("WorkflowRun"))));
-    add("/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}/retry", "post", op("v2.plugins.workflows.runs.retry", "plugins", json!([path("workflow_id"), path("run_id"), directory()]), None, success("200", "Retried workflow run", r("WorkflowRun"))));
-
-    let lsp_position = || json!([directory(), query("file", true, json!({ "type": "string" })), query("line", true, json!({ "type": "integer", "minimum": 0 })), query("character", true, json!({ "type": "integer", "minimum": 0 }))]);
-    let lsp_document = || json!([directory(), query("file", true, json!({ "type": "string" }))]);
-    add("/v2/plugins/dev.neoism.lsp", "get", op("v2.plugins.lsp.status", "plugins", json!([directory()]), None, success("200", "LSP status", json!({ "type": "array", "items": r("LspStatus") }))));
+    add(
+        "/v2/plugins/dev.neoism.workflows",
+        "get",
+        op(
+            "v2.plugins.workflows.list",
+            "plugins",
+            workflow_params(),
+            None,
+            success("200", "Workflow catalog", r("WorkflowCatalog")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.workflows",
+        "post",
+        op(
+            "v2.plugins.workflows.create",
+            "plugins",
+            workflow_params(),
+            Some(json_request(true, r("WorkflowDefinition"))),
+            success("201", "Created workflow definition", r("WorkflowView")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.workflows/{workflow_id}",
+        "get",
+        op(
+            "v2.plugins.workflows.get",
+            "plugins",
+            workflow_id_params(),
+            None,
+            success("200", "Workflow", r("WorkflowView")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.workflows/{workflow_id}",
+        "put",
+        op(
+            "v2.plugins.workflows.update",
+            "plugins",
+            json!([
+                path("workflow_id"),
+                directory(),
+                header("If-Match", false, json!({ "type": "string" }))
+            ]),
+            Some(json_request(true, r("WorkflowDefinition"))),
+            success("200", "Updated workflow definition", r("WorkflowView")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.workflows/{workflow_id}",
+        "patch",
+        op(
+            "v2.plugins.workflows.patch",
+            "plugins",
+            json!([
+                path("workflow_id"),
+                directory(),
+                header("If-Match", false, json!({ "type": "string" }))
+            ]),
+            Some(json_request(true, r("WorkflowDefinitionPatch"))),
+            success("200", "Patched workflow definition", r("WorkflowView")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.workflows/{workflow_id}",
+        "delete",
+        op(
+            "v2.plugins.workflows.delete",
+            "plugins",
+            json!([
+                path("workflow_id"),
+                directory(),
+                query("expectedRevision", false, json!({ "type": "string" })),
+                header("If-Match", false, json!({ "type": "string" }))
+            ]),
+            None,
+            empty("204", "Workflow definition deleted"),
+        ),
+    );
     for (suffix, id, schema) in [
-        ("hover", "v2.plugins.lsp.hover", "LspHover"), ("signature-help", "v2.plugins.lsp.signatureHelp", "LspSignatureHelp"),
-        ("document-highlights", "v2.plugins.lsp.documentHighlights", "LspDocumentHighlight"), ("definition", "v2.plugins.lsp.definition", "LspLocation"),
-        ("references", "v2.plugins.lsp.references", "LspLocation"), ("implementation", "v2.plugins.lsp.implementation", "LspLocation"),
-        ("prepare-call-hierarchy", "v2.plugins.lsp.prepareCallHierarchy", "LspCallHierarchyItem"), ("incoming-calls", "v2.plugins.lsp.incomingCalls", "LspCallHierarchyCall"),
-        ("outgoing-calls", "v2.plugins.lsp.outgoingCalls", "LspCallHierarchyCall"), ("code-actions", "v2.plugins.lsp.codeActions", "UnknownValue")
-    ] { add(&format!("/v2/plugins/dev.neoism.lsp/{suffix}"), "get", op(id, "plugins", lsp_position(), None, success("200", "LSP result", json!({ "type": "array", "items": r(schema) })))); }
-    add("/v2/plugins/dev.neoism.lsp/inlay-hints", "get", op("v2.plugins.lsp.inlayHints", "plugins", json!([directory(), query("file", true, json!({ "type": "string" })), query("start_line", true, json!({ "type": "integer", "minimum": 0 })), query("end_line", true, json!({ "type": "integer", "minimum": 0 }))]), None, success("200", "Inlay hints", json!({ "type": "array", "items": r("LspInlayHint") }))));
-    for (suffix, id, schema) in [("diagnostics", "v2.plugins.lsp.diagnostics", "LspDiagnostic"), ("document-symbols", "v2.plugins.lsp.documentSymbols", "LspDocumentSymbol"), ("formatting", "v2.plugins.lsp.formatting", "UnknownValue")] {
-        add(&format!("/v2/plugins/dev.neoism.lsp/{suffix}"), "get", op(id, "plugins", lsp_document(), None, success("200", "LSP result", json!({ "type": "array", "items": r(schema) }))));
+        (
+            "activate",
+            "v2.plugins.workflows.activate",
+            "WorkflowProjection",
+        ),
+        ("pause", "v2.plugins.workflows.pause", "WorkflowProjection"),
+        ("run", "v2.plugins.workflows.run", "WorkflowRun"),
+    ] {
+        add(
+            &format!("/v2/plugins/dev.neoism.workflows/{{workflow_id}}/{suffix}"),
+            "post",
+            op(
+                id,
+                "plugins",
+                workflow_id_params(),
+                None,
+                success("200", "Workflow result", r(schema)),
+            ),
+        );
     }
-    add("/v2/plugins/dev.neoism.lsp/touch", "post", op("v2.plugins.lsp.touch", "plugins", json!([]), Some(json_request(true, r("LspTouchRequest"))), success("200", "Published LSP notifications", json!({ "type": "array", "items": r("UnknownValue") }))));
-    add("/v2/plugins/dev.neoism.lsp/shutdown", "post", op("v2.plugins.lsp.shutdown", "plugins", json!([]), None, success("200", "LSP shutdown result", r("LspShutdownResponse"))));
+    add(
+        "/v2/plugins/dev.neoism.workflows/{workflow_id}/preview",
+        "get",
+        op(
+            "v2.plugins.workflows.preview",
+            "plugins",
+            workflow_id_params(),
+            None,
+            success("200", "Workflow preview", r("WorkflowPreview")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.workflows/{workflow_id}/runs",
+        "get",
+        op(
+            "v2.plugins.workflows.history",
+            "plugins",
+            json!([
+                path("workflow_id"),
+                directory(),
+                query("limit", false, json!({ "type": "integer", "minimum": 1 }))
+            ]),
+            None,
+            success("200", "Workflow runs", r("WorkflowHistory")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}",
+        "get",
+        op(
+            "v2.plugins.workflows.runs.get",
+            "plugins",
+            json!([path("workflow_id"), path("run_id"), directory()]),
+            None,
+            success("200", "Workflow run", r("WorkflowRun")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.workflows/{workflow_id}/runs/{run_id}/retry",
+        "post",
+        op(
+            "v2.plugins.workflows.runs.retry",
+            "plugins",
+            json!([path("workflow_id"), path("run_id"), directory()]),
+            None,
+            success("200", "Retried workflow run", r("WorkflowRun")),
+        ),
+    );
+
+    let lsp_position = || {
+        json!([
+            directory(),
+            query("file", true, json!({ "type": "string" })),
+            query("line", true, json!({ "type": "integer", "minimum": 0 })),
+            query(
+                "character",
+                true,
+                json!({ "type": "integer", "minimum": 0 })
+            )
+        ])
+    };
+    let lsp_document = || {
+        json!([
+            directory(),
+            query("file", true, json!({ "type": "string" }))
+        ])
+    };
+    add(
+        "/v2/plugins/dev.neoism.lsp",
+        "get",
+        op(
+            "v2.plugins.lsp.status",
+            "plugins",
+            json!([directory()]),
+            None,
+            success(
+                "200",
+                "LSP status",
+                json!({ "type": "array", "items": r("LspStatus") }),
+            ),
+        ),
+    );
+    for (suffix, id, schema) in [
+        ("hover", "v2.plugins.lsp.hover", "LspHover"),
+        (
+            "signature-help",
+            "v2.plugins.lsp.signatureHelp",
+            "LspSignatureHelp",
+        ),
+        (
+            "document-highlights",
+            "v2.plugins.lsp.documentHighlights",
+            "LspDocumentHighlight",
+        ),
+        ("definition", "v2.plugins.lsp.definition", "LspLocation"),
+        ("references", "v2.plugins.lsp.references", "LspLocation"),
+        (
+            "implementation",
+            "v2.plugins.lsp.implementation",
+            "LspLocation",
+        ),
+        (
+            "prepare-call-hierarchy",
+            "v2.plugins.lsp.prepareCallHierarchy",
+            "LspCallHierarchyItem",
+        ),
+        (
+            "incoming-calls",
+            "v2.plugins.lsp.incomingCalls",
+            "LspCallHierarchyCall",
+        ),
+        (
+            "outgoing-calls",
+            "v2.plugins.lsp.outgoingCalls",
+            "LspCallHierarchyCall",
+        ),
+        ("code-actions", "v2.plugins.lsp.codeActions", "UnknownValue"),
+    ] {
+        add(
+            &format!("/v2/plugins/dev.neoism.lsp/{suffix}"),
+            "get",
+            op(
+                id,
+                "plugins",
+                lsp_position(),
+                None,
+                success(
+                    "200",
+                    "LSP result",
+                    json!({ "type": "array", "items": r(schema) }),
+                ),
+            ),
+        );
+    }
+    add(
+        "/v2/plugins/dev.neoism.lsp/inlay-hints",
+        "get",
+        op(
+            "v2.plugins.lsp.inlayHints",
+            "plugins",
+            json!([
+                directory(),
+                query("file", true, json!({ "type": "string" })),
+                query(
+                    "start_line",
+                    true,
+                    json!({ "type": "integer", "minimum": 0 })
+                ),
+                query("end_line", true, json!({ "type": "integer", "minimum": 0 }))
+            ]),
+            None,
+            success(
+                "200",
+                "Inlay hints",
+                json!({ "type": "array", "items": r("LspInlayHint") }),
+            ),
+        ),
+    );
+    for (suffix, id, schema) in [
+        ("diagnostics", "v2.plugins.lsp.diagnostics", "LspDiagnostic"),
+        (
+            "document-symbols",
+            "v2.plugins.lsp.documentSymbols",
+            "LspDocumentSymbol",
+        ),
+        ("formatting", "v2.plugins.lsp.formatting", "UnknownValue"),
+    ] {
+        add(
+            &format!("/v2/plugins/dev.neoism.lsp/{suffix}"),
+            "get",
+            op(
+                id,
+                "plugins",
+                lsp_document(),
+                None,
+                success(
+                    "200",
+                    "LSP result",
+                    json!({ "type": "array", "items": r(schema) }),
+                ),
+            ),
+        );
+    }
+    add(
+        "/v2/plugins/dev.neoism.lsp/touch",
+        "post",
+        op(
+            "v2.plugins.lsp.touch",
+            "plugins",
+            json!([]),
+            Some(json_request(true, r("LspTouchRequest"))),
+            success(
+                "200",
+                "Published LSP notifications",
+                json!({ "type": "array", "items": r("UnknownValue") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.lsp/shutdown",
+        "post",
+        op(
+            "v2.plugins.lsp.shutdown",
+            "plugins",
+            json!([]),
+            None,
+            success("200", "LSP shutdown result", r("LspShutdownResponse")),
+        ),
+    );
 
     let mcp_named = || json!([path("name"), directory()]);
-    add("/v2/plugins/dev.neoism.mcp", "get", op("v2.plugins.mcp.status", "plugins", json!([directory()]), None, success("200", "MCP status", r("McpStatusMap"))));
-    add("/v2/plugins/dev.neoism.mcp", "post", op("v2.plugins.mcp.add", "plugins", json!([]), Some(json_request(true, r("McpAddRequest"))), success("200", "MCP status", r("McpStatusMap"))));
-    add("/v2/plugins/dev.neoism.mcp/catalog", "get", op("v2.plugins.mcp.catalog", "plugins", json!([directory()]), None, success("200", "MCP catalog", r("McpCatalog"))));
-    add("/v2/plugins/dev.neoism.mcp/{name}/auth", "post", op("v2.plugins.mcp.auth.start", "plugins", mcp_named(), None, success("200", "MCP authorization", r("McpAuthStartResponse"))));
-    add("/v2/plugins/dev.neoism.mcp/{name}/auth", "delete", op("v2.plugins.mcp.auth.remove", "plugins", mcp_named(), None, success("200", "MCP credentials removed", r("McpAuthRemoveResponse"))));
-    add("/v2/plugins/dev.neoism.mcp/{name}/auth/callback", "get", op("v2.plugins.mcp.auth.callback.get", "plugins", json!([path("name"), query("code", true, json!({ "type": "string" })), query("state", false, json!({ "type": "string" })), directory()]), None, json!({ "200": { "description": "OAuth completion page", "content": { "text/html": { "schema": { "type": "string" } } } } })));
-    add("/v2/plugins/dev.neoism.mcp/{name}/auth/callback", "post", op("v2.plugins.mcp.auth.callback.post", "plugins", mcp_named(), Some(json_request(true, r("CodeRequest"))), success("200", "MCP status", r("McpStatus"))));
-    add("/v2/plugins/dev.neoism.mcp/{name}/auth/authenticate", "post", op("v2.plugins.mcp.auth.authenticate", "plugins", mcp_named(), None, success("200", "MCP status", r("McpStatus"))));
-    for (suffix, id) in [("connect", "v2.plugins.mcp.connect"), ("disconnect", "v2.plugins.mcp.disconnect")] {
-        add(&format!("/v2/plugins/dev.neoism.mcp/{{name}}/{suffix}"), "post", op(id, "plugins", mcp_named(), None, success("200", "Connection changed", json!({ "type": "boolean" }))));
+    add(
+        "/v2/plugins/dev.neoism.mcp",
+        "get",
+        op(
+            "v2.plugins.mcp.status",
+            "plugins",
+            json!([directory()]),
+            None,
+            success("200", "MCP status", r("McpStatusMap")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp",
+        "post",
+        op(
+            "v2.plugins.mcp.add",
+            "plugins",
+            json!([]),
+            Some(json_request(true, r("McpAddRequest"))),
+            success("200", "MCP status", r("McpStatusMap")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/catalog",
+        "get",
+        op(
+            "v2.plugins.mcp.catalog",
+            "plugins",
+            json!([directory()]),
+            None,
+            success("200", "MCP catalog", r("McpCatalog")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/auth",
+        "post",
+        op(
+            "v2.plugins.mcp.auth.start",
+            "plugins",
+            mcp_named(),
+            None,
+            success("200", "MCP authorization", r("McpAuthStartResponse")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/auth",
+        "delete",
+        op(
+            "v2.plugins.mcp.auth.remove",
+            "plugins",
+            mcp_named(),
+            None,
+            success("200", "MCP credentials removed", r("McpAuthRemoveResponse")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/auth/callback",
+        "get",
+        op(
+            "v2.plugins.mcp.auth.callback.get",
+            "plugins",
+            json!([
+                path("name"),
+                query("code", true, json!({ "type": "string" })),
+                query("state", false, json!({ "type": "string" })),
+                directory()
+            ]),
+            None,
+            json!({ "200": { "description": "OAuth completion page", "content": { "text/html": { "schema": { "type": "string" } } } } }),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/auth/callback",
+        "post",
+        op(
+            "v2.plugins.mcp.auth.callback.post",
+            "plugins",
+            mcp_named(),
+            Some(json_request(true, r("CodeRequest"))),
+            success("200", "MCP status", r("McpStatus")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/auth/authenticate",
+        "post",
+        op(
+            "v2.plugins.mcp.auth.authenticate",
+            "plugins",
+            mcp_named(),
+            None,
+            success("200", "MCP status", r("McpStatus")),
+        ),
+    );
+    for (suffix, id) in [
+        ("connect", "v2.plugins.mcp.connect"),
+        ("disconnect", "v2.plugins.mcp.disconnect"),
+    ] {
+        add(
+            &format!("/v2/plugins/dev.neoism.mcp/{{name}}/{suffix}"),
+            "post",
+            op(
+                id,
+                "plugins",
+                mcp_named(),
+                None,
+                success("200", "Connection changed", json!({ "type": "boolean" })),
+            ),
+        );
     }
-    add("/v2/plugins/dev.neoism.mcp/{name}/config", "patch", op("v2.plugins.mcp.config", "plugins", mcp_named(), Some(json_request(true, r("McpConfigPatch"))), success("200", "MCP catalog entry", r("McpCatalogEntry"))));
-    add("/v2/plugins/dev.neoism.mcp/{name}/tools", "get", op("v2.plugins.mcp.tools", "plugins", mcp_named(), None, success("200", "MCP tools", json!({ "type": "array", "items": r("McpTool") }))));
-    add("/v2/plugins/dev.neoism.mcp/{name}/tools/{tool_name}", "post", op("v2.plugins.mcp.tools.call", "plugins", json!([path("name"), path("tool_name"), directory()]), Some(json_request(true, r("UnknownValue"))), success("200", "MCP tool result", r("McpToolCallResult"))));
-    add("/v2/plugins/dev.neoism.mcp/{name}/resources", "get", op("v2.plugins.mcp.resources", "plugins", mcp_named(), None, success("200", "MCP resources", json!({ "type": "array", "items": r("McpResource") }))));
-    add("/v2/plugins/dev.neoism.mcp/{name}/prompts", "get", op("v2.plugins.mcp.prompts", "plugins", mcp_named(), None, success("200", "MCP prompts", json!({ "type": "array", "items": r("McpPrompt") }))));
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/config",
+        "patch",
+        op(
+            "v2.plugins.mcp.config",
+            "plugins",
+            mcp_named(),
+            Some(json_request(true, r("McpConfigPatch"))),
+            success("200", "MCP catalog entry", r("McpCatalogEntry")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/tools",
+        "get",
+        op(
+            "v2.plugins.mcp.tools",
+            "plugins",
+            mcp_named(),
+            None,
+            success(
+                "200",
+                "MCP tools",
+                json!({ "type": "array", "items": r("McpTool") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/tools/{tool_name}",
+        "post",
+        op(
+            "v2.plugins.mcp.tools.call",
+            "plugins",
+            json!([path("name"), path("tool_name"), directory()]),
+            Some(json_request(true, r("UnknownValue"))),
+            success("200", "MCP tool result", r("McpToolCallResult")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/resources",
+        "get",
+        op(
+            "v2.plugins.mcp.resources",
+            "plugins",
+            mcp_named(),
+            None,
+            success(
+                "200",
+                "MCP resources",
+                json!({ "type": "array", "items": r("McpResource") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.mcp/{name}/prompts",
+        "get",
+        op(
+            "v2.plugins.mcp.prompts",
+            "plugins",
+            mcp_named(),
+            None,
+            success(
+                "200",
+                "MCP prompts",
+                json!({ "type": "array", "items": r("McpPrompt") }),
+            ),
+        ),
+    );
 
     for (route, id, schema) in [
-        ("/v2/plugins/dev.neoism.vcs", "v2.plugins.vcs.get", "VcsInfo"), ("/v2/plugins/dev.neoism.vcs/status", "v2.plugins.vcs.status", "VcsStatusList"),
-        ("/v2/plugins/dev.neoism.vcs/diff", "v2.plugins.vcs.diff", "VcsDiffList")
-    ] { add(route, "get", op(id, "plugins", json!([directory()]), None, success("200", "VCS result", r(schema)))); }
-    add("/v2/plugins/dev.neoism.vcs/diff/raw", "get", op("v2.plugins.vcs.diff.raw", "plugins", json!([directory()]), None, json!({ "200": { "description": "Unified diff", "content": { "text/x-diff": { "schema": { "type": "string" } } } } })));
-    add("/v2/plugins/dev.neoism.vcs/apply", "post", op("v2.plugins.vcs.apply", "plugins", json!([]), Some(json_request(true, r("VcsApplyRequest"))), success("200", "Patch result", r("VcsApplyResult"))));
+        (
+            "/v2/plugins/dev.neoism.vcs",
+            "v2.plugins.vcs.get",
+            "VcsInfo",
+        ),
+        (
+            "/v2/plugins/dev.neoism.vcs/status",
+            "v2.plugins.vcs.status",
+            "VcsStatusList",
+        ),
+        (
+            "/v2/plugins/dev.neoism.vcs/diff",
+            "v2.plugins.vcs.diff",
+            "VcsDiffList",
+        ),
+    ] {
+        add(
+            route,
+            "get",
+            op(
+                id,
+                "plugins",
+                json!([directory()]),
+                None,
+                success("200", "VCS result", r(schema)),
+            ),
+        );
+    }
+    add(
+        "/v2/plugins/dev.neoism.vcs/diff/raw",
+        "get",
+        op(
+            "v2.plugins.vcs.diff.raw",
+            "plugins",
+            json!([directory()]),
+            None,
+            json!({ "200": { "description": "Unified diff", "content": { "text/x-diff": { "schema": { "type": "string" } } } } }),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.vcs/apply",
+        "post",
+        op(
+            "v2.plugins.vcs.apply",
+            "plugins",
+            json!([]),
+            Some(json_request(true, r("VcsApplyRequest"))),
+            success("200", "Patch result", r("VcsApplyResult")),
+        ),
+    );
 
-    add("/v2/plugins/dev.neoism.pty/shells", "get", op("v2.plugins.pty.shells", "plugins", json!([]), None, success("200", "Available shells", json!({ "type": "array", "items": r("Shell") }))));
-    add("/v2/plugins/dev.neoism.pty", "get", op("v2.plugins.pty.list", "plugins", json!([]), None, success("200", "PTY sessions", json!({ "type": "array", "items": r("Pty") }))));
-    add("/v2/plugins/dev.neoism.pty", "post", op("v2.plugins.pty.create", "plugins", json!([directory()]), Some(json_request(true, r("PtyCreateRequest"))), success("200", "Created PTY", r("Pty"))));
-    add("/v2/plugins/dev.neoism.pty/{pty_id}", "get", op("v2.plugins.pty.get", "plugins", json!([path("pty_id")]), None, success("200", "PTY", r("Pty"))));
-    add("/v2/plugins/dev.neoism.pty/{pty_id}", "put", op("v2.plugins.pty.update", "plugins", json!([path("pty_id")]), Some(json_request(true, r("PtyUpdateRequest"))), success("200", "Updated PTY", r("Pty"))));
-    add("/v2/plugins/dev.neoism.pty/{pty_id}", "delete", op("v2.plugins.pty.remove", "plugins", json!([path("pty_id")]), None, success("200", "PTY removed", json!({ "type": "boolean" }))));
-    add("/v2/plugins/dev.neoism.pty/{pty_id}/connect-token", "post", op("v2.plugins.pty.connectToken", "plugins", json!([path("pty_id"), header("X-OpenCode-Ticket", true, json!({ "type": "string", "const": "1" }))]), None, success("200", "Single-use connect ticket", r("PtyConnectToken"))));
-    let mut websocket = op("v2.plugins.pty.connect", "plugins", json!([path("pty_id"), query("ticket", true, json!({ "type": "string" })), query("cursor", false, json!({ "type": "integer" }))]), None, json!({ "101": { "description": "WebSocket terminal byte stream" } }));
+    add(
+        "/v2/plugins/dev.neoism.pty/shells",
+        "get",
+        op(
+            "v2.plugins.pty.shells",
+            "plugins",
+            json!([]),
+            None,
+            success(
+                "200",
+                "Available shells",
+                json!({ "type": "array", "items": r("Shell") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.pty",
+        "get",
+        op(
+            "v2.plugins.pty.list",
+            "plugins",
+            json!([]),
+            None,
+            success(
+                "200",
+                "PTY sessions",
+                json!({ "type": "array", "items": r("Pty") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.pty",
+        "post",
+        op(
+            "v2.plugins.pty.create",
+            "plugins",
+            json!([directory()]),
+            Some(json_request(true, r("PtyCreateRequest"))),
+            success("200", "Created PTY", r("Pty")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.pty/{pty_id}",
+        "get",
+        op(
+            "v2.plugins.pty.get",
+            "plugins",
+            json!([path("pty_id")]),
+            None,
+            success("200", "PTY", r("Pty")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.pty/{pty_id}",
+        "put",
+        op(
+            "v2.plugins.pty.update",
+            "plugins",
+            json!([path("pty_id")]),
+            Some(json_request(true, r("PtyUpdateRequest"))),
+            success("200", "Updated PTY", r("Pty")),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.pty/{pty_id}",
+        "delete",
+        op(
+            "v2.plugins.pty.remove",
+            "plugins",
+            json!([path("pty_id")]),
+            None,
+            success("200", "PTY removed", json!({ "type": "boolean" })),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.pty/{pty_id}/connect-token",
+        "post",
+        op(
+            "v2.plugins.pty.connectToken",
+            "plugins",
+            json!([
+                path("pty_id"),
+                header(
+                    "X-OpenCode-Ticket",
+                    true,
+                    json!({ "type": "string", "const": "1" })
+                )
+            ]),
+            None,
+            success("200", "Single-use connect ticket", r("PtyConnectToken")),
+        ),
+    );
+    let mut websocket = op(
+        "v2.plugins.pty.connect",
+        "plugins",
+        json!([
+            path("pty_id"),
+            query("ticket", true, json!({ "type": "string" })),
+            query("cursor", false, json!({ "type": "integer" }))
+        ]),
+        None,
+        json!({ "101": { "description": "WebSocket terminal byte stream" } }),
+    );
     websocket["x-neoism-transport"] = json!("websocket");
-    add("/v2/plugins/dev.neoism.pty/{pty_id}/connect", "get", websocket);
+    add(
+        "/v2/plugins/dev.neoism.pty/{pty_id}/connect",
+        "get",
+        websocket,
+    );
 
-    add("/v2/plugins/dev.neoism.subagents/sessions/{session_id}/tasks", "get", op("v2.subagents.tasks.list", "subagents", json!([session_id()]), None, success("200", "Subagent tasks", json!({ "type": "array", "items": r("SubagentTask") }))));
-    add("/v2/plugins/dev.neoism.subagents/sessions/{session_id}/stop", "post", op("v2.subagents.tasks.stop", "subagents", json!([session_id()]), Some(json_request(true, r("StopSubagentsRequest"))), success("200", "Stopped subagents", r("StopSubagentsResult"))));
+    add(
+        "/v2/plugins/dev.neoism.subagents/sessions/{session_id}/tasks",
+        "get",
+        op(
+            "v2.subagents.tasks.list",
+            "subagents",
+            json!([session_id()]),
+            None,
+            success(
+                "200",
+                "Subagent tasks",
+                json!({ "type": "array", "items": r("SubagentTask") }),
+            ),
+        ),
+    );
+    add(
+        "/v2/plugins/dev.neoism.subagents/sessions/{session_id}/stop",
+        "post",
+        op(
+            "v2.subagents.tasks.stop",
+            "subagents",
+            json!([session_id()]),
+            Some(json_request(true, r("StopSubagentsRequest"))),
+            success("200", "Stopped subagents", r("StopSubagentsResult")),
+        ),
+    );
 
     for item in paths.values_mut() {
-        let Some(item) = item.as_object_mut() else { continue };
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
         for method in ["get", "post", "put", "patch", "delete"] {
-            let Some(operation) = item.get_mut(method) else { continue };
-            let Some(parameters) = operation["parameters"].as_array_mut() else { continue };
-            if parameters.iter().any(|parameter| parameter["in"] == "query" && parameter["name"] == "directory") {
-                parameters.push(header("X-Neoism-Directory", false, json!({ "type": "string" })));
+            let Some(operation) = item.get_mut(method) else {
+                continue;
+            };
+            let Some(parameters) = operation["parameters"].as_array_mut() else {
+                continue;
+            };
+            if parameters.iter().any(|parameter| {
+                parameter["in"] == "query" && parameter["name"] == "directory"
+            }) {
+                parameters.push(header(
+                    "X-Neoism-Directory",
+                    false,
+                    json!({ "type": "string" }),
+                ));
             }
         }
     }
@@ -678,7 +2773,10 @@ fn canonical_errors() -> Value {
 }
 
 fn merge_responses(mut success: Value, errors: Value) -> Value {
-    success.as_object_mut().unwrap().extend(errors.as_object().unwrap().clone());
+    success
+        .as_object_mut()
+        .unwrap()
+        .extend(errors.as_object().unwrap().clone());
     success
 }
 
@@ -687,7 +2785,10 @@ fn json_body(required: bool, schema_ref: &str) -> Value {
 }
 
 fn session_response(description: &str, errors: Value) -> Value {
-    merge_responses(json!({ "200": { "description": description, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } } }), errors)
+    merge_responses(
+        json!({ "200": { "description": description, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } } }),
+        errors,
+    )
 }
 
 fn session_list_parameters() -> Value {
@@ -801,13 +2902,22 @@ fn canonical_schemas() -> Value {
         "StopSubagentsResult": { "type": "object", "additionalProperties": false, "required": ["stopped", "clearedPrompts"], "properties": { "stopped": { "type": "array", "items": { "type": "string" } }, "clearedPrompts": { "type": "integer", "minimum": 0 } } }
     });
     schemas.as_object_mut().expect("schema object").extend(
-        authoritative_schemas().as_object().expect("authoritative schema object").clone()
+        authoritative_schemas()
+            .as_object()
+            .expect("authoritative schema object")
+            .clone(),
     );
     schemas.as_object_mut().expect("schema object").extend(
-        typed_event_schemas().as_object().expect("typed event schema object").clone()
+        typed_event_schemas()
+            .as_object()
+            .expect("typed event schema object")
+            .clone(),
     );
     schemas.as_object_mut().expect("schema object").extend(
-        typed_part_schemas().as_object().expect("typed part schema object").clone()
+        typed_part_schemas()
+            .as_object()
+            .expect("typed part schema object")
+            .clone(),
     );
     schemas
 }
@@ -828,7 +2938,12 @@ fn typed_part_schemas() -> Value {
         for (key, value) in properties.as_object().expect("part properties").clone() {
             props.insert(key, value);
         }
-        let mut req = vec![json!("type"), json!("id"), json!("sessionId"), json!("messageId")];
+        let mut req = vec![
+            json!("type"),
+            json!("id"),
+            json!("sessionId"),
+            json!("messageId"),
+        ];
         req.extend(required.as_array().expect("part required").clone());
         json!({ "type": "object", "additionalProperties": true, "required": req, "properties": props })
     };
@@ -965,141 +3080,206 @@ fn event_data_schema(event_type: &str) -> Value {
         "role": { "type": "string" }, "id": { "type": "string" }, "sessionId": { "type": "string" }
     }});
     match event_type {
-        _ if event_type == et::MESSAGE_PART_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "part", "time"], "properties": {
-            "sessionID": { "type": "string" }, "part": part, "time": { "type": "integer" }
-        }}),
-        _ if event_type == et::MESSAGE_PART_REMOVED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "partID"], "properties": {
-            "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "partID": { "type": "string" }
-        }}),
-        _ if event_type == et::MESSAGE_PART_DELTA => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "partID", "partType", "field", "delta"], "properties": {
-            "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "partID": { "type": "string" },
-            "partType": { "type": "string" }, "field": { "type": "string" }, "delta": { "type": "string" }
-        }}),
-        _ if event_type == et::MESSAGE_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info"], "properties": {
-            "sessionID": { "type": "string" }, "info": message_info
-        }}),
-        _ if event_type == et::MESSAGE_REMOVED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID"], "properties": {
-            "sessionID": { "type": "string" }, "messageID": { "type": "string" }
-        }}),
-        _ if event_type == et::MCP_TOOLS_CHANGED => json!({ "type": "object", "additionalProperties": false, "required": ["server", "directory"], "properties": {
-            "server": { "type": "string" }, "directory": { "type": "string" }
-        }}),
-        _ if event_type == et::LSP_UPDATED => json!({ "type": "object", "additionalProperties": false }),
-        _ if event_type == et::PERMISSION_ASKED => json!({ "type": "object", "additionalProperties": true, "required": ["id", "sessionId", "messageId", "title", "permission", "patterns", "always"], "properties": {
-            "id": { "type": "string" }, "sessionId": { "type": "string" }, "messageId": { "type": "string" },
-            "title": { "type": "string" }, "permission": { "type": "string" },
-            "patterns": { "type": "array", "items": { "type": "string" } },
-            "always": { "type": "array", "items": { "type": "string" } },
-            "tool": { "type": "object", "additionalProperties": true },
-            "metadata": nullable(json!({ "type": "object", "additionalProperties": true })),
-            "sourceSessionID": { "type": "string" }, "sourceTitle": { "type": "string" },
-            "sourceAgent": { "type": "string" }, "parentSessionID": { "type": "string" }
-        }}),
-        _ if event_type == et::PERMISSION_REPLIED => json!({ "type": "object", "additionalProperties": true, "required": ["requestID", "reply"], "properties": {
-            "requestID": { "type": "string" }, "reply": { "type": "string" },
-            "info": nullable(r("PermissionRequest"))
-        }}),
+        _ if event_type == et::MESSAGE_PART_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "part", "time"], "properties": {
+                "sessionID": { "type": "string" }, "part": part, "time": { "type": "integer" }
+            }})
+        }
+        _ if event_type == et::MESSAGE_PART_REMOVED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "partID"], "properties": {
+                "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "partID": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::MESSAGE_PART_DELTA => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "partID", "partType", "field", "delta"], "properties": {
+                "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "partID": { "type": "string" },
+                "partType": { "type": "string" }, "field": { "type": "string" }, "delta": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::MESSAGE_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info"], "properties": {
+                "sessionID": { "type": "string" }, "info": message_info
+            }})
+        }
+        _ if event_type == et::MESSAGE_REMOVED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID"], "properties": {
+                "sessionID": { "type": "string" }, "messageID": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::MCP_TOOLS_CHANGED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["server", "directory"], "properties": {
+                "server": { "type": "string" }, "directory": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::LSP_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false })
+        }
+        _ if event_type == et::PERMISSION_ASKED => {
+            json!({ "type": "object", "additionalProperties": true, "required": ["id", "sessionId", "messageId", "title", "permission", "patterns", "always"], "properties": {
+                "id": { "type": "string" }, "sessionId": { "type": "string" }, "messageId": { "type": "string" },
+                "title": { "type": "string" }, "permission": { "type": "string" },
+                "patterns": { "type": "array", "items": { "type": "string" } },
+                "always": { "type": "array", "items": { "type": "string" } },
+                "tool": { "type": "object", "additionalProperties": true },
+                "metadata": nullable(json!({ "type": "object", "additionalProperties": true })),
+                "sourceSessionID": { "type": "string" }, "sourceTitle": { "type": "string" },
+                "sourceAgent": { "type": "string" }, "parentSessionID": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::PERMISSION_REPLIED => {
+            json!({ "type": "object", "additionalProperties": true, "required": ["requestID", "reply"], "properties": {
+                "requestID": { "type": "string" }, "reply": { "type": "string" },
+                "info": nullable(r("PermissionRequest"))
+            }})
+        }
         _ if event_type == et::QUESTION_ASKED => r("QuestionRequest"),
-        _ if event_type == et::QUESTION_REJECTED => json!({ "type": "object", "additionalProperties": false, "required": ["requestID"], "properties": {
-            "requestID": { "type": "string" }, "reason": { "type": "string" },
-            "info": nullable(r("QuestionRequest"))
-        }}),
-        _ if event_type == et::QUESTION_REPLIED => json!({ "type": "object", "additionalProperties": false, "required": ["requestID", "reply"], "properties": {
-            "requestID": { "type": "string" },
-            "reply": { "type": "object", "additionalProperties": false, "required": ["answers"], "properties": {
-                "answers": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } }
-            }},
-            "info": nullable(r("QuestionRequest"))
-        }}),
-        _ if event_type == et::PTY_CREATED || event_type == et::PTY_UPDATED || event_type == et::PTY_DELETED => json!({ "type": "object", "additionalProperties": false, "required": ["id", "ptyID", "info"], "properties": {
-            "id": { "type": "string" }, "ptyID": { "type": "string" }, "info": r("Pty")
-        }}),
-        _ if event_type == et::PTY_EXITED => json!({ "type": "object", "additionalProperties": false, "required": ["id", "ptyID", "exitStatus"], "properties": {
-            "id": { "type": "string" }, "ptyID": { "type": "string" },
-            "exitStatus": nullable(json!({ "type": "integer" }))
-        }}),
-        _ if event_type == et::SESSION_COMPACTION_STARTED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "timestamp", "reason"], "properties": {
-            "sessionID": { "type": "string" }, "messageID": { "type": "string" },
-            "timestamp": { "type": "integer" }, "reason": { "type": "string" }
-        }}),
-        _ if event_type == et::SESSION_COMPACTION_DELTA => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "text"], "properties": {
-            "sessionID": { "type": "string" }, "text": { "type": "string" }
-        }}),
-        _ if event_type == et::SESSION_COMPACTION_ENDED => json!({ "type": "object", "additionalProperties": true, "required": ["sessionID"], "properties": {
-            "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "timestamp": { "type": "integer" },
-            "text": { "type": "string" }, "kind": { "type": "string" }, "status": { "type": "string" },
-            "summary": { "type": "object", "additionalProperties": true },
-            "error": { "type": "object", "additionalProperties": true }
-        }}),
-        _ if event_type == et::SESSION_COMPACTED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info", "summary"], "properties": {
-            "sessionID": { "type": "string" }, "info": r("Session"),
-            "summary": { "type": "object", "additionalProperties": false, "required": ["text", "messageID", "throughMessageID", "updated", "kind"], "properties": {
-                "text": { "type": "string" }, "messageID": { "type": "string" }, "throughMessageID": { "type": "string" },
-                "updated": { "type": "integer" }, "kind": { "type": "string" }
-            }}
-        }}),
-        _ if event_type == et::SESSION_CONTEXT_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "epoch"], "properties": {
-            "sessionID": { "type": "string" }, "epoch": { "type": "object", "additionalProperties": true }
-        }}),
-        _ if event_type == et::SESSION_CREATED || event_type == et::SESSION_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info"], "properties": {
-            "sessionID": { "type": "string" }, "info": r("Session")
-        }}),
-        _ if event_type == et::SESSION_DELETED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID"], "properties": {
-            "sessionID": { "type": "string" }
-        }}),
-        _ if event_type == et::SESSION_ERROR => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "error"], "properties": {
-            "sessionID": { "type": "string" }, "error": r("ApiError")
-        }}),
-        _ if event_type == et::SESSION_EXECUTION_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "snapshot", "runtime"], "properties": {
-            "sessionID": { "type": "string" },
-            "snapshot": r("ExecutionActivitySnapshot"), "runtime": r("SessionRuntimeSnapshot")
-        }}),
-        _ if event_type == et::SESSION_BACKGROUND_TASKS_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "backgroundJobsEpoch", "backgroundJobsRevision", "runningBackgroundTasks"], "properties": {
-            "sessionID": { "type": "string" }, "backgroundJobsEpoch": { "type": "string" },
-            "backgroundJobsRevision": { "type": "integer", "minimum": 0 },
-            "runningBackgroundTasks": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["jobID", "sessionID", "startedAt"], "properties": {
-                "jobID": { "type": "string" }, "sessionID": { "type": "string" }, "startedAt": { "type": "integer", "minimum": 0 }
-            }} }
-        }}),
-        _ if event_type == et::SESSION_BACKGROUND_TASK_COMPLETED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "parentSessionID", "jobID", "taskID", "status", "title", "command", "cwd", "exitCode", "result"], "properties": {
-            "sessionID": { "type": "string" }, "parentSessionID": { "type": "string" },
-            "jobID": { "type": "string" }, "taskID": { "type": "string" },
-            "status": { "type": "string" }, "title": { "type": "string" },
-            "command": { "type": "string" }, "cwd": { "type": "string" },
-            "exitCode": nullable(json!({ "type": "integer" })), "result": { "type": "string" }
-        }}),
-        _ if event_type == et::SESSION_QUEUE_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "action", "removed", "queue"], "properties": {
-            "sessionID": { "type": "string" }, "action": { "type": "string" }, "removed": { "type": "integer" },
-            "queue": r("SessionQueueInfo"), "request": r("PromptRequest"),
-            "messageID": { "type": "string" }, "delivery": { "type": "string" }
-        }}),
-        _ if event_type == et::SESSION_PROMPT_ADMITTED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "delivery", "request"], "properties": {
-            "sessionID": { "type": "string" }, "delivery": { "type": "string" }, "request": r("PromptRequest")
-        }}),
-        _ if event_type == et::SESSION_STATUS => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "status"], "properties": {
-            "sessionID": { "type": "string" }, "status": r("SessionStatus"),
-            "runID": { "type": "string" }, "startedAt": { "type": "integer" }, "queue": { "type": "integer" },
-            "parentSessionID": { "type": "string" }, "sourceSessionID": { "type": "string" },
-            "sourceTitle": { "type": "string" }, "sourceAgent": { "type": "string" }
-        }}),
-        _ if event_type == et::SESSION_SUBTASK_COMPLETED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "parentSessionID", "childSessionID", "taskID", "status", "title", "result"], "properties": {
-            "sessionID": { "type": "string" }, "parentSessionID": { "type": "string" },
-            "childSessionID": { "type": "string" }, "taskID": { "type": "string" },
-            "status": { "type": "string" }, "title": { "type": "string" }, "result": { "type": "string" },
-            "agent": { "type": "string" }, "sourceAgent": { "type": "string" },
-            "rootSessionID": { "type": "string" }, "executionID": { "type": "string" },
-            "familyRevision": { "type": "integer" }
-        }}),
-        _ if event_type == et::TODO_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "todos"], "properties": {
-            "sessionID": { "type": "string" }, "todos": { "type": "array", "items": r("Todo") }
-        }}),
-        _ if event_type == et::WORKFLOW_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["aggregateID"], "properties": {
-            "aggregateID": { "type": "string" }, "workflow": r("WorkflowProjection"),
-            "workflowID": { "type": "string" }, "active": { "type": "boolean" }, "error": { "type": "string" }
-        }}),
-        _ if event_type == et::WORKFLOW_RUN_UPDATED => json!({ "type": "object", "additionalProperties": false, "required": ["aggregateID", "run"], "properties": {
-            "aggregateID": { "type": "string" }, "run": r("WorkflowRun")
-        }}),
+        _ if event_type == et::QUESTION_REJECTED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["requestID"], "properties": {
+                "requestID": { "type": "string" }, "reason": { "type": "string" },
+                "info": nullable(r("QuestionRequest"))
+            }})
+        }
+        _ if event_type == et::QUESTION_REPLIED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["requestID", "reply"], "properties": {
+                "requestID": { "type": "string" },
+                "reply": { "type": "object", "additionalProperties": false, "required": ["answers"], "properties": {
+                    "answers": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } }
+                }},
+                "info": nullable(r("QuestionRequest"))
+            }})
+        }
+        _ if event_type == et::PTY_CREATED
+            || event_type == et::PTY_UPDATED
+            || event_type == et::PTY_DELETED =>
+        {
+            json!({ "type": "object", "additionalProperties": false, "required": ["id", "ptyID", "info"], "properties": {
+                "id": { "type": "string" }, "ptyID": { "type": "string" }, "info": r("Pty")
+            }})
+        }
+        _ if event_type == et::PTY_EXITED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["id", "ptyID", "exitStatus"], "properties": {
+                "id": { "type": "string" }, "ptyID": { "type": "string" },
+                "exitStatus": nullable(json!({ "type": "integer" }))
+            }})
+        }
+        _ if event_type == et::SESSION_COMPACTION_STARTED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "timestamp", "reason"], "properties": {
+                "sessionID": { "type": "string" }, "messageID": { "type": "string" },
+                "timestamp": { "type": "integer" }, "reason": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::SESSION_COMPACTION_DELTA => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "text"], "properties": {
+                "sessionID": { "type": "string" }, "text": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::SESSION_COMPACTION_ENDED => {
+            json!({ "type": "object", "additionalProperties": true, "required": ["sessionID"], "properties": {
+                "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "timestamp": { "type": "integer" },
+                "text": { "type": "string" }, "kind": { "type": "string" }, "status": { "type": "string" },
+                "summary": { "type": "object", "additionalProperties": true },
+                "error": { "type": "object", "additionalProperties": true }
+            }})
+        }
+        _ if event_type == et::SESSION_COMPACTED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info", "summary"], "properties": {
+                "sessionID": { "type": "string" }, "info": r("Session"),
+                "summary": { "type": "object", "additionalProperties": false, "required": ["text", "messageID", "throughMessageID", "updated", "kind"], "properties": {
+                    "text": { "type": "string" }, "messageID": { "type": "string" }, "throughMessageID": { "type": "string" },
+                    "updated": { "type": "integer" }, "kind": { "type": "string" }
+                }}
+            }})
+        }
+        _ if event_type == et::SESSION_CONTEXT_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "epoch"], "properties": {
+                "sessionID": { "type": "string" }, "epoch": { "type": "object", "additionalProperties": true }
+            }})
+        }
+        _ if event_type == et::SESSION_CREATED || event_type == et::SESSION_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info"], "properties": {
+                "sessionID": { "type": "string" }, "info": r("Session")
+            }})
+        }
+        _ if event_type == et::SESSION_DELETED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID"], "properties": {
+                "sessionID": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::SESSION_ERROR => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "error"], "properties": {
+                "sessionID": { "type": "string" }, "error": r("ApiError")
+            }})
+        }
+        _ if event_type == et::SESSION_EXECUTION_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "snapshot", "runtime"], "properties": {
+                "sessionID": { "type": "string" },
+                "snapshot": r("ExecutionActivitySnapshot"), "runtime": r("SessionRuntimeSnapshot")
+            }})
+        }
+        _ if event_type == et::SESSION_BACKGROUND_TASKS_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "backgroundJobsEpoch", "backgroundJobsRevision", "runningBackgroundTasks"], "properties": {
+                "sessionID": { "type": "string" }, "backgroundJobsEpoch": { "type": "string" },
+                "backgroundJobsRevision": { "type": "integer", "minimum": 0 },
+                "runningBackgroundTasks": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["jobID", "sessionID", "startedAt"], "properties": {
+                    "jobID": { "type": "string" }, "sessionID": { "type": "string" }, "startedAt": { "type": "integer", "minimum": 0 }
+                }} }
+            }})
+        }
+        _ if event_type == et::SESSION_BACKGROUND_TASK_COMPLETED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "parentSessionID", "jobID", "taskID", "status", "title", "command", "cwd", "exitCode", "result"], "properties": {
+                "sessionID": { "type": "string" }, "parentSessionID": { "type": "string" },
+                "jobID": { "type": "string" }, "taskID": { "type": "string" },
+                "status": { "type": "string" }, "title": { "type": "string" },
+                "command": { "type": "string" }, "cwd": { "type": "string" },
+                "exitCode": nullable(json!({ "type": "integer" })), "result": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::SESSION_QUEUE_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "action", "removed", "queue"], "properties": {
+                "sessionID": { "type": "string" }, "action": { "type": "string" }, "removed": { "type": "integer" },
+                "queue": r("SessionQueueInfo"), "request": r("PromptRequest"),
+                "messageID": { "type": "string" }, "delivery": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::SESSION_PROMPT_ADMITTED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "delivery", "request"], "properties": {
+                "sessionID": { "type": "string" }, "delivery": { "type": "string" }, "request": r("PromptRequest")
+            }})
+        }
+        _ if event_type == et::SESSION_STATUS => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "status"], "properties": {
+                "sessionID": { "type": "string" }, "status": r("SessionStatus"),
+                "runID": { "type": "string" }, "startedAt": { "type": "integer" }, "queue": { "type": "integer" },
+                "parentSessionID": { "type": "string" }, "sourceSessionID": { "type": "string" },
+                "sourceTitle": { "type": "string" }, "sourceAgent": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::SESSION_SUBTASK_COMPLETED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "parentSessionID", "childSessionID", "taskID", "status", "title", "result"], "properties": {
+                "sessionID": { "type": "string" }, "parentSessionID": { "type": "string" },
+                "childSessionID": { "type": "string" }, "taskID": { "type": "string" },
+                "status": { "type": "string" }, "title": { "type": "string" }, "result": { "type": "string" },
+                "agent": { "type": "string" }, "sourceAgent": { "type": "string" },
+                "rootSessionID": { "type": "string" }, "executionID": { "type": "string" },
+                "familyRevision": { "type": "integer" }
+            }})
+        }
+        _ if event_type == et::TODO_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "todos"], "properties": {
+                "sessionID": { "type": "string" }, "todos": { "type": "array", "items": r("Todo") }
+            }})
+        }
+        _ if event_type == et::WORKFLOW_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["aggregateID"], "properties": {
+                "aggregateID": { "type": "string" }, "workflow": r("WorkflowProjection"),
+                "workflowID": { "type": "string" }, "active": { "type": "boolean" }, "error": { "type": "string" }
+            }})
+        }
+        _ if event_type == et::WORKFLOW_RUN_UPDATED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["aggregateID", "run"], "properties": {
+                "aggregateID": { "type": "string" }, "run": r("WorkflowRun")
+            }})
+        }
         other => panic!("event type {other} has no payload schema; add one here"),
     }
 }
@@ -1375,14 +3555,23 @@ mod tests {
                 }
             }
         }
-        assert_eq!(router, spec, "the /v2 router and OpenAPI operations drifted");
+        assert_eq!(
+            router, spec,
+            "the /v2 router and OpenAPI operations drifted"
+        );
     }
 
     fn plugin_owned_path(path: &str) -> bool {
         path.starts_with("/v2/plugins/dev.neoism.")
-            || ["/v2/agents", "/v2/commands", "/v2/config", "/v2/providers", "/v2/skills"]
-                .iter()
-                .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+            || [
+                "/v2/agents",
+                "/v2/commands",
+                "/v2/config",
+                "/v2/providers",
+                "/v2/skills",
+            ]
+            .iter()
+            .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
     }
 
     /// The other half of the parity contract: every route a production plugin
@@ -1400,9 +3589,7 @@ mod tests {
         let state = crate::state::AppState::open_database(root.join("state.sqlite3"))
             .await
             .unwrap();
-        let snapshot = state
-            .plugin_snapshot(&root.to_string_lossy())
-            .await;
+        let snapshot = state.plugin_snapshot(&root.to_string_lossy()).await;
 
         let mut descriptors = BTreeSet::new();
         for registered in snapshot.runtime_routes.values() {
@@ -1447,18 +3634,25 @@ mod tests {
     #[test]
     fn every_part_variant_has_a_typed_schema_and_samples_validate() {
         use neoism_agent_core::{
-            AgentPart, CacheUsage, CompactionPart, FilePart, Part, PartTime, ReasoningPart,
-            StepFinishPart, StepStartPart, SubtaskPart, TextPart, TokenUsage, ToolPart,
-            ToolState,
+            AgentPart, CacheUsage, CompactionPart, FilePart, Part, PartTime,
+            ReasoningPart, StepFinishPart, StepStartPart, SubtaskPart, TextPart,
+            TokenUsage, ToolPart, ToolState,
         };
         let id = || neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Part);
         let sid = neoism_agent_core::new_session_id();
         let mid = neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Message);
-        let time = PartTime { start: 1, end: Some(2) };
+        let time = PartTime {
+            start: 1,
+            end: Some(2),
+        };
         let tool = |state: ToolState| {
             Part::Tool(ToolPart {
-                id: id(), session_id: sid.clone(), message_id: mid.clone(),
-                tool: "bash".into(), call_id: "call".into(), state,
+                id: id(),
+                session_id: sid.clone(),
+                message_id: mid.clone(),
+                tool: "bash".into(),
+                call_id: "call".into(),
+                state,
                 metadata: Some(serde_json::json!({"x": 1})),
             })
         };
@@ -1466,25 +3660,109 @@ mod tests {
         // variant to the core enum without extending this list is a compile
         // error via the match below.
         let samples = vec![
-            Part::Text(TextPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), text: "t".into(), synthetic: Some(true), time: Some(time.clone()) }),
-            Part::Compaction(CompactionPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), reason: "auto".into(), summary: true, tail_start_message_id: Some(mid.clone()) }),
-            Part::Agent(AgentPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), name: "build".into(), source: None }),
-            Part::Subtask(SubtaskPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), prompt: "p".into(), description: "d".into(), agent: "general".into(), model: None, command: None }),
-            Part::Reasoning(ReasoningPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), text: "r".into(), time: time.clone(), metadata: None }),
-            tool(ToolState::Pending { input: serde_json::json!({}), raw: String::new() }),
-            tool(ToolState::Running { input: serde_json::json!({}), time: time.clone() }),
-            tool(ToolState::Completed { input: serde_json::json!({}), output: "ok".into(), metadata: serde_json::json!({}), title: "Bash".into(), time: time.clone() }),
-            tool(ToolState::Error { input: serde_json::json!({}), error: "boom".into(), time: time.clone() }),
-            Part::StepStart(StepStartPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), snapshot: None }),
-            Part::StepFinish(StepFinishPart { id: id(), session_id: sid.clone(), message_id: mid.clone(), reason: "stop".into(), tokens: TokenUsage { total: Some(3), input: 1, output: 1, reasoning: 1, cache: CacheUsage { read: 0, write: 0 } }, cost: 0.01, snapshot: None }),
-            Part::File(FilePart { id: id(), session_id: sid.clone(), message_id: mid.clone(), mime: "text/plain".into(), url: "artifact://a".into(), filename: None }),
+            Part::Text(TextPart {
+                id: id(),
+                session_id: sid.clone(),
+                message_id: mid.clone(),
+                text: "t".into(),
+                synthetic: Some(true),
+                time: Some(time.clone()),
+            }),
+            Part::Compaction(CompactionPart {
+                id: id(),
+                session_id: sid.clone(),
+                message_id: mid.clone(),
+                reason: "auto".into(),
+                summary: true,
+                tail_start_message_id: Some(mid.clone()),
+            }),
+            Part::Agent(AgentPart {
+                id: id(),
+                session_id: sid.clone(),
+                message_id: mid.clone(),
+                name: "build".into(),
+                source: None,
+            }),
+            Part::Subtask(SubtaskPart {
+                id: id(),
+                session_id: sid.clone(),
+                message_id: mid.clone(),
+                prompt: "p".into(),
+                description: "d".into(),
+                agent: "general".into(),
+                model: None,
+                command: None,
+            }),
+            Part::Reasoning(ReasoningPart {
+                id: id(),
+                session_id: sid.clone(),
+                message_id: mid.clone(),
+                text: "r".into(),
+                time: time.clone(),
+                metadata: None,
+            }),
+            tool(ToolState::Pending {
+                input: serde_json::json!({}),
+                raw: String::new(),
+            }),
+            tool(ToolState::Running {
+                input: serde_json::json!({}),
+                time: time.clone(),
+            }),
+            tool(ToolState::Completed {
+                input: serde_json::json!({}),
+                output: "ok".into(),
+                metadata: serde_json::json!({}),
+                title: "Bash".into(),
+                time: time.clone(),
+            }),
+            tool(ToolState::Error {
+                input: serde_json::json!({}),
+                error: "boom".into(),
+                time: time.clone(),
+            }),
+            Part::StepStart(StepStartPart {
+                id: id(),
+                session_id: sid.clone(),
+                message_id: mid.clone(),
+                snapshot: None,
+            }),
+            Part::StepFinish(StepFinishPart {
+                id: id(),
+                session_id: sid.clone(),
+                message_id: mid.clone(),
+                reason: "stop".into(),
+                tokens: TokenUsage {
+                    total: Some(3),
+                    input: 1,
+                    output: 1,
+                    reasoning: 1,
+                    cache: CacheUsage { read: 0, write: 0 },
+                },
+                cost: 0.01,
+                snapshot: None,
+            }),
+            Part::File(FilePart {
+                id: id(),
+                session_id: sid.clone(),
+                message_id: mid.clone(),
+                mime: "text/plain".into(),
+                url: "artifact://a".into(),
+                filename: None,
+            }),
         ];
         // Exhaustiveness: the compiler forces this match to grow with the enum.
         for part in &samples {
             match part {
-                Part::Text(_) | Part::Compaction(_) | Part::Agent(_) | Part::Subtask(_)
-                | Part::Reasoning(_) | Part::Tool(_) | Part::StepStart(_)
-                | Part::StepFinish(_) | Part::File(_) => {}
+                Part::Text(_)
+                | Part::Compaction(_)
+                | Part::Agent(_)
+                | Part::Subtask(_)
+                | Part::Reasoning(_)
+                | Part::Tool(_)
+                | Part::StepStart(_)
+                | Part::StepFinish(_)
+                | Part::File(_) => {}
             }
         }
 
@@ -1494,8 +3772,16 @@ mod tests {
             .unwrap()
             .iter()
             .map(|variant| {
-                let name = variant["$ref"].as_str().unwrap().rsplit('/').next().unwrap();
-                schemas[name]["properties"]["type"]["const"].as_str().unwrap().to_string()
+                let name = variant["$ref"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap();
+                schemas[name]["properties"]["type"]["const"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
             })
             .collect();
         assert_eq!(union_tags.len(), 9, "one union variant per Part variant");
@@ -1504,8 +3790,17 @@ mod tests {
             let value = serde_json::to_value(part).unwrap();
             let tag = value["type"].as_str().unwrap();
             let schema_name = schemas["Part"]["oneOf"]
-                .as_array().unwrap().iter()
-                .map(|variant| variant["$ref"].as_str().unwrap().rsplit('/').next().unwrap())
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|variant| {
+                    variant["$ref"]
+                        .as_str()
+                        .unwrap()
+                        .rsplit('/')
+                        .next()
+                        .unwrap()
+                })
                 .find(|name| schemas[name]["properties"]["type"]["const"] == tag)
                 .unwrap_or_else(|| panic!("no schema variant for serialized tag {tag}"));
             let schema = &schemas[schema_name];
@@ -1528,11 +3823,21 @@ mod tests {
                 let state = &value["state"];
                 let status = state["status"].as_str().unwrap();
                 let state_schema_name = schemas["ToolState"]["oneOf"]
-                    .as_array().unwrap().iter()
-                    .map(|variant| variant["$ref"].as_str().unwrap().rsplit('/').next().unwrap())
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|variant| {
+                        variant["$ref"]
+                            .as_str()
+                            .unwrap()
+                            .rsplit('/')
+                            .next()
+                            .unwrap()
+                    })
                     .find(|name| schemas[name]["properties"]["status"]["const"] == status)
                     .unwrap_or_else(|| panic!("no ToolState schema for status {status}"));
-                for required in schemas[state_schema_name]["required"].as_array().unwrap() {
+                for required in schemas[state_schema_name]["required"].as_array().unwrap()
+                {
                     let field = required.as_str().unwrap();
                     assert!(
                         state.get(field).is_some(),
@@ -1594,21 +3899,53 @@ mod tests {
     fn disabled_management_contract_preserves_the_existing_surface() {
         let mut document = canonical_openapi();
         strip_management_contract(&mut document);
-        assert!(document["paths"].as_object().unwrap().keys().all(|path| !path.starts_with("/v2/management/")));
-        assert!(document["tags"].as_array().unwrap().iter().all(|tag| tag["name"] != "management"));
-        assert!(document["components"]["schemas"].get("ManagedResource").is_none());
-        assert!(document["components"]["schemas"].get("ManagedWorkspace").is_none());
-        assert!(document["components"]["schemas"].get("RepositoryCreateRequest").is_none());
+        assert!(document["paths"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|path| !path.starts_with("/v2/management/")));
+        assert!(document["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tag| tag["name"] != "management"));
+        assert!(document["components"]["schemas"]
+            .get("ManagedResource")
+            .is_none());
+        assert!(document["components"]["schemas"]
+            .get("ManagedWorkspace")
+            .is_none());
+        assert!(document["components"]["schemas"]
+            .get("RepositoryCreateRequest")
+            .is_none());
     }
 
     #[test]
     fn workspace_and_repository_management_contract_is_discriminated_and_safe() {
         let document = canonical_openapi();
-        assert_eq!(document["paths"]["/v2/management/workspaces"]["post"]["operationId"], "v2.management.workspaces.create");
-        assert_eq!(document["paths"]["/v2/management/repositories"]["post"]["operationId"], "v2.management.repositories.create");
-        assert_eq!(document["components"]["schemas"]["RepositoryCreateRequest"]["discriminator"]["propertyName"], "kind");
-        assert_eq!(document["components"]["schemas"]["RepositoryCloneRequest"]["properties"]["depth"]["maximum"], 10_000);
-        assert!(document["paths"]["/v2/management/repositories/{id}"]["delete"]["responses"].get("204").is_some());
+        assert_eq!(
+            document["paths"]["/v2/management/workspaces"]["post"]["operationId"],
+            "v2.management.workspaces.create"
+        );
+        assert_eq!(
+            document["paths"]["/v2/management/repositories"]["post"]["operationId"],
+            "v2.management.repositories.create"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["RepositoryCreateRequest"]["discriminator"]
+                ["propertyName"],
+            "kind"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["RepositoryCloneRequest"]["properties"]
+                ["depth"]["maximum"],
+            10_000
+        );
+        assert!(
+            document["paths"]["/v2/management/repositories/{id}"]["delete"]["responses"]
+                .get("204")
+                .is_some()
+        );
     }
 
     #[test]
@@ -1617,17 +3954,21 @@ mod tests {
         let mut ids = BTreeSet::new();
         for (path, item) in document["paths"].as_object().unwrap() {
             for method in ["get", "post", "put", "patch", "delete"] {
-                let Some(operation) = item.get(method) else { continue };
-                let id = operation["operationId"].as_str().unwrap_or_else(|| {
-                    panic!("{method} {path} is missing operationId")
-                });
+                let Some(operation) = item.get(method) else {
+                    continue;
+                };
+                let id = operation["operationId"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{method} {path} is missing operationId"));
                 assert!(ids.insert(id), "duplicate operationId {id}");
-                let responses = operation["responses"].as_object().unwrap_or_else(|| {
-                    panic!("{method} {path} is missing responses")
-                });
-                assert!(responses.keys().any(|status| status.starts_with('2'))
-                    || operation["x-neoism-transport"] == "websocket",
-                    "{method} {path} is missing a successful response");
+                let responses = operation["responses"]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{method} {path} is missing responses"));
+                assert!(
+                    responses.keys().any(|status| status.starts_with('2'))
+                        || operation["x-neoism-transport"] == "websocket",
+                    "{method} {path} is missing a successful response"
+                );
             }
         }
     }
@@ -1637,14 +3978,21 @@ mod tests {
         let document = canonical_openapi();
         for (path, item) in document["paths"].as_object().unwrap() {
             for method in ["get", "post", "put", "patch", "delete"] {
-                let Some(operation) = item.get(method) else { continue };
+                let Some(operation) = item.get(method) else {
+                    continue;
+                };
                 let parameters = operation["parameters"].as_array().unwrap();
-                for segment in path.split('/').filter(|segment| segment.starts_with('{')) {
+                for segment in path.split('/').filter(|segment| segment.starts_with('{'))
+                {
                     let name = segment.trim_start_matches('{').trim_end_matches('}');
-                    assert!(parameters.iter().any(|parameter| {
-                        parameter["in"] == "path" && parameter["name"] == name
-                            && parameter["required"] == true
-                    }), "{method} {path} does not declare path parameter {name}");
+                    assert!(
+                        parameters.iter().any(|parameter| {
+                            parameter["in"] == "path"
+                                && parameter["name"] == name
+                                && parameter["required"] == true
+                        }),
+                        "{method} {path} does not declare path parameter {name}"
+                    );
                 }
             }
         }
@@ -1663,12 +4011,19 @@ mod tests {
                     let pointer = reference.strip_prefix('#').unwrap_or_else(|| {
                         panic!("non-local reference {reference} is not canonical")
                     });
-                    assert!(document.pointer(pointer).is_some(), "unresolved reference {reference}");
+                    assert!(
+                        document.pointer(pointer).is_some(),
+                        "unresolved reference {reference}"
+                    );
                 }
-                for child in object.values() { visit_references(child, document); }
+                for child in object.values() {
+                    visit_references(child, document);
+                }
             }
             Value::Array(array) => {
-                for child in array { visit_references(child, document); }
+                for child in array {
+                    visit_references(child, document);
+                }
             }
             _ => {}
         }
@@ -1679,7 +4034,9 @@ mod tests {
         let mut offset = 0;
         while let Some(relative) = source[offset..].find(".route(") {
             let start = offset + relative + ".route(".len();
-            let Some(end) = matching_paren(source, start) else { break };
+            let Some(end) = matching_paren(source, start) else {
+                break;
+            };
             let invocation = &source[start..end];
             let Some(path) = first_string_literal(invocation) else {
                 offset = end + 1;
@@ -1687,8 +4044,11 @@ mod tests {
             };
             if path.starts_with("/v2/") {
                 for (needle, method) in [
-                    ("get(", "GET"), ("post(", "POST"), ("put(", "PUT"),
-                    ("patch(", "PATCH"), ("delete(", "DELETE"),
+                    ("get(", "GET"),
+                    ("post(", "POST"),
+                    ("put(", "PUT"),
+                    ("patch(", "PATCH"),
+                    ("delete(", "DELETE"),
                 ] {
                     if invocation.contains(needle) {
                         operations.insert((method.to_string(), normalize_path(path)));
@@ -1706,9 +4066,13 @@ mod tests {
         let mut escaped = false;
         for (relative, character) in source[start..].char_indices() {
             if quoted {
-                if escaped { escaped = false; }
-                else if character == '\\' { escaped = true; }
-                else if character == '"' { quoted = false; }
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    quoted = false;
+                }
                 continue;
             }
             match character {
@@ -1716,7 +4080,9 @@ mod tests {
                 '(' => depth += 1,
                 ')' => {
                     depth -= 1;
-                    if depth == 0 { return Some(start + relative); }
+                    if depth == 0 {
+                        return Some(start + relative);
+                    }
                 }
                 _ => {}
             }

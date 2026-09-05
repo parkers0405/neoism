@@ -1,7 +1,18 @@
 use super::*;
 
-async fn submit_prompt_and_wait(app: &axum::Router, state: &AppState, session_id: &str, text: &str) {
-    let previous_count = state.inner.store.list_messages(session_id).await.unwrap().len();
+async fn submit_prompt_and_wait(
+    app: &axum::Router,
+    state: &AppState,
+    session_id: &str,
+    text: &str,
+) {
+    let previous_count = state
+        .inner
+        .store
+        .list_messages(session_id)
+        .await
+        .unwrap()
+        .len();
     let response = app
         .clone()
         .oneshot(request(
@@ -16,13 +27,27 @@ async fn submit_prompt_and_wait(app: &axum::Router, state: &AppState, session_id
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        panic!("prompt returned {status}: {}", String::from_utf8_lossy(&body));
+        panic!(
+            "prompt returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
     }
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let count = state.inner.store.list_messages(session_id).await.unwrap().len();
+            let count = state
+                .inner
+                .store
+                .list_messages(session_id)
+                .await
+                .unwrap()
+                .len();
             if count >= previous_count + 1
-                && !state.inner.session_coordinator.active_run(session_id).await.is_some()
+                && !state
+                    .inner
+                    .session_coordinator
+                    .active_run(session_id)
+                    .await
+                    .is_some()
             {
                 break;
             }

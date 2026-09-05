@@ -29,6 +29,16 @@ impl Application<'_> {
             }
         }
 
+        if route.window.screen.renderer.file_browser.is_active() {
+            let dy = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => lines * 34.0,
+                MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+            };
+            route.window.screen.renderer.file_browser.scroll_pixels(-dy);
+            route.request_redraw();
+            return;
+        }
+
         // The full-screen settings panel scrolls its own list.
         if route.window.screen.renderer.settings.is_active() {
             let dy = match delta {

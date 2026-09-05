@@ -114,6 +114,79 @@ impl NeoismAgentPane {
         true
     }
 
+    /// iOS/Android hard-hold selection: select exactly the Unicode word, or
+    /// one emoji/punctuation grapheme, under the finger. This intentionally
+    /// requires an actual selectable text row so chrome labels never become
+    /// selectable through the timeline's nearest-line fallback.
+    pub fn select_word_at(&mut self, x: f32, y: f32) -> bool {
+        let Some(index) = self.selectable_line_at(x, y) else {
+            return false;
+        };
+        let line = &self.selectable_lines[index];
+        let Some((start, end)) =
+            crate::editor::text_selection::unicode_word_or_grapheme_span(
+                &line.text,
+                line.text_offset_at_x(x),
+            )
+        else {
+            return false;
+        };
+        let start_caret = line.caret_for_offset(start);
+        let end_caret = line.caret_for_offset(end);
+        self.selection_anchor = Some(SelectionPoint {
+            content_y: line.content_y,
+            row_x: line.rect[0],
+            byte_offset: start,
+            x: start_caret.x,
+        });
+        self.selection_focus = Some(SelectionPoint {
+            content_y: line.content_y,
+            row_x: line.rect[0],
+            byte_offset: end,
+            x: end_caret.x,
+        });
+        self.touch_word_edges = self.selection_anchor.zip(self.selection_focus);
+        true
+    }
+
+    pub fn extend_touch_word_selection_to(&mut self, x: f32, y: f32) -> bool {
+        let Some((start, end)) = self.touch_word_edges else {
+            return false;
+        };
+        let Some(line) = self
+            .selectable_line_at(x, y)
+            .or_else(|| self.nearest_selectable_line(x, y))
+            .map(|ix| &self.selectable_lines[ix])
+        else {
+            return false;
+        };
+        let caret = line.caret_at_x(x);
+        let target = SelectionPoint {
+            content_y: line.content_y,
+            row_x: line.rect[0],
+            byte_offset: caret.byte_offset,
+            x: caret.x,
+        };
+        let before = |a: SelectionPoint, b: SelectionPoint| {
+            a.content_y < b.content_y
+                || (a.content_y == b.content_y && a.byte_offset < b.byte_offset)
+        };
+        let (anchor, focus) = if before(target, start) {
+            (end, target)
+        } else if before(end, target) {
+            (start, target)
+        } else {
+            (start, end)
+        };
+        self.selection_anchor = Some(anchor);
+        self.selection_focus = Some(focus);
+        true
+    }
+
+    pub fn end_touch_word_selection(&mut self) -> bool {
+        self.touch_word_edges.take().is_some()
+    }
+
     pub fn drag_selection_to(&mut self, x: f32, y: f32) -> bool {
         if self.selection_anchor.is_none() {
             return false;

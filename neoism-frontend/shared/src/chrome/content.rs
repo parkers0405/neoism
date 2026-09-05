@@ -196,6 +196,39 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.layout.terminal
     }
 
+    /// One source of truth for host-routed pointer/touch surfaces. A sidebar
+    /// takeover resolves to an empty content rect, making the underlying
+    /// terminal/editor/Markdown/Agent surface non-interactive as well as
+    /// invisible.
+    pub fn content_surface_contains(&self, x: f32, y: f32) -> bool {
+        let rect = self.focused_content_rect();
+        self.content_surface_available() && rect.contains(x, y)
+    }
+
+    pub fn content_surface_available(&self) -> bool {
+        let rect = self.focused_content_rect();
+        rect.w > 0.0 && rect.h > 0.0 && !self.agent_side_panel_takeover_active()
+    }
+
+    /// True only for the web/mobile narrow policy while an Agent tab's real
+    /// pane-owned side panel is explicitly open.
+    pub fn agent_side_panel_takeover_active(&self) -> bool {
+        self.mobile_agent_narrow
+            && self.is_neoism_agent_tab_active()
+            && self
+                .agent_pane
+                .as_ref()
+                .is_some_and(|pane| !pane.side_panel().user_hidden())
+    }
+
+    /// Agent panel input remains live during takeover, while generic content
+    /// routes (timeline/composer/editor/terminal) see no available surface.
+    pub fn agent_interaction_surface_contains(&self, x: f32, y: f32) -> bool {
+        let rect = self.focused_content_rect();
+        (self.content_surface_available() || self.agent_side_panel_takeover_active())
+            && rect.contains(x, y)
+    }
+
     /// Content rect (after per-pane chrome reservations) of the pane
     /// bound to `external_id`, while the grid is split.
     pub fn pane_content_rect(&self, external_id: u64) -> Option<crate::layout::Rect> {

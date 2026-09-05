@@ -649,6 +649,14 @@ impl ChromeBridge {
         self.chrome.modal.is_active()
     }
 
+    pub fn show_connection_gate(&mut self, body: String, meta: String) {
+        self.chrome.show_connection_gate(body, meta);
+    }
+
+    pub fn hide_connection_gate(&mut self) {
+        self.chrome.hide_connection_gate();
+    }
+
     /// Open the "New File" prompt for `dir` (desktop
     /// `open_file_tree_new_file_prompt` spec). `dir` is the absolute
     /// path the host's tree row carries; it is echoed back verbatim in

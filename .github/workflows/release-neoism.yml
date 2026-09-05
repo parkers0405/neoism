@@ -129,7 +129,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }},wasm32-unknown-unknown
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: neoism-frontend/web/package-lock.json
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -157,6 +168,13 @@ jobs:
           # anyway so the retry (always a new commit after a version
           # bump) starts warm instead of rebuilding every dependency.
           cache-on-failure: true
+
+      - name: Build the production web UI
+        shell: bash
+        run: |
+          npm --prefix neoism-frontend/web ci
+          npm --prefix neoism-frontend/web run build
+          test -f neoism-frontend/web/dist/index.html
 
       - name: Build the stack (release)
         # Unset CI: `fff-search`'s build script demands Zig when CI is set,
@@ -204,9 +222,11 @@ jobs:
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object { $_.name -eq "neoism" }).version
           $bin = (Resolve-Path "target/${{ matrix.target }}/release").Path
+          Copy-Item neoism-frontend/web/dist (Join-Path $bin "web") -Recurse
           $fixtureBin = Join-Path $env:RUNNER_TEMP "neoism-upgrade-fixture"
           New-Item -ItemType Directory -Force $fixtureBin | Out-Null
           Copy-Item "$bin\neoism.exe", "$bin\neoism-workspace-daemon.exe", "$bin\neoism-agent.exe" $fixtureBin
+          Copy-Item (Join-Path $bin "web") (Join-Path $fixtureBin "web") -Recurse
           [IO.File]::AppendAllText((Join-Path $fixtureBin "neoism.exe"), "neoism-upgrade-fixture")
           wix build misc/windows/neoism.wxs `
             -arch x64 `
@@ -279,6 +299,7 @@ jobs:
           foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe")) {
             if (-not (Test-Path (Join-Path $installDir $binary))) { throw "$binary was not installed" }
           }
+          if (-not (Test-Path (Join-Path $installDir "web\index.html"))) { throw "web UI was not installed" }
           $version = (& (Join-Path $installDir "neoism.exe") --version | Out-String).Trim()
           if ($version -notmatch "neoism") { throw "installed executable did not report its version" }
           $appPath = (Get-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\neoism.exe").GetValue('')
@@ -330,6 +351,8 @@ jobs:
           mkdir -p "stage/$OUT"
           BIN="target/${{ matrix.target }}/release"
           cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "stage/$OUT/"
+          cp -a neoism-frontend/web/dist "stage/$OUT/web"
+          test -f "stage/$OUT/web/index.html"
           if [[ "${{ matrix.goos }}" == "darwin" ]]; then
             # Neoism.app: double-clickable + Finder "Open With" candidate for
             # code/markdown/json (CFBundleDocumentTypes in misc/macos/Info.plist).
@@ -339,6 +362,7 @@ jobs:
             mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
             cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$APP/Contents/MacOS/"
             cp misc/macos/neoism.icns "$APP/Contents/Resources/neoism.icns"
+            cp -a neoism-frontend/web/dist "$APP/Contents/Resources/web"
             VERSION="${GITHUB_REF_NAME#v}"
             case "$VERSION" in
               [0-9]*.[0-9]*) ;; # tag push: vX.Y.Z
@@ -481,6 +505,7 @@ jobs:
           for bin in neoism neoism-workspace-daemon neoism-agent; do
             test -x "$VERIFY_MOUNT/Neoism.app/Contents/MacOS/$bin"
           done
+          test -f "$VERIFY_MOUNT/Neoism.app/Contents/Resources/web/index.html"
           hdiutil detach "$VERIFY_MOUNT"
           DMG_MOUNTED=false
           trap - EXIT

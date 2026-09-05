@@ -71,7 +71,9 @@ impl ExternalRuntime {
                 )?;
                 if std::env::var_os("CLAUDE_CODE_EXECUTABLE").is_none() {
                     if let Some(path) = resolve_runtime_path(services, "claude") {
-                        config.env.push(("CLAUDE_CODE_EXECUTABLE".to_string(), path));
+                        config
+                            .env
+                            .push(("CLAUDE_CODE_EXECUTABLE".to_string(), path));
                     }
                 }
                 config
@@ -91,9 +93,13 @@ fn package_acp_config(
     package: &'static str,
     cwd: &str,
 ) -> Result<AcpServerConfig, String> {
-    Ok(AcpServerConfig::new(id, name, resolve_runtime(services, "npx")?, PathBuf::from(cwd))
-        .args(["--yes", package])
+    Ok(AcpServerConfig::new(
+        id,
+        name,
+        resolve_runtime(services, "npx")?,
+        PathBuf::from(cwd),
     )
+    .args(["--yes", package]))
 }
 
 fn resolve_runtime(

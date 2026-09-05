@@ -1,7 +1,107 @@
 use super::*;
 use crate::panels::agent_pane::outbound::OutboundAgentCommand;
-use crate::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry;
+use crate::panels::agent_pane::state::side_panel::{
+    NeoismAgentSemanticMatch, NeoismAgentSessionEntry, SidePanelMode,
+};
 use crate::panels::agent_pane::state::side_panel::STATUS_LABEL_GRACE;
+
+#[test]
+fn ordered_live_parts_promote_neutral_busy_state_by_semantic_evidence() {
+    let mut pane = NeoismAgentPane::default();
+    let started_at = unix_millis().saturating_sub(5_000);
+
+    pane.apply_queue(1, Some("queued".to_string()), Some(started_at));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    assert!(pane.streaming_elapsed_seconds().unwrap_or_default() >= 4.0);
+
+    pane.ingest_live_part_message(NeoismAgentMessage::assistant("answer"));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    pane.ingest_live_part_message(NeoismAgentMessage::reasoning("because"));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Thinking);
+    pane.apply_queue(1, Some("queued".to_string()), Some(started_at));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Thinking);
+    pane.ingest_live_part_message(NeoismAgentMessage::tool(
+        "Search",
+        "",
+        "running",
+        "grep",
+        NeoismAgentOutputKind::Text,
+        "",
+        Vec::new(),
+    ));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Working);
+    pane.apply_queue(1, Some("queued".to_string()), Some(started_at));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Working);
+    pane.ingest_live_part_message(NeoismAgentMessage::assistant("done"));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+}
+
+#[test]
+fn authoritative_provider_snapshot_clears_stale_session_choices() {
+    let mut pane = NeoismAgentPane::default();
+    pane.connection_id = Some("old-connection".to_string());
+    pane.thinking = Some("high".to_string());
+
+    pane.apply_authoritative_provider_state(
+        Some("anthropic/sonnet".to_string()),
+        None,
+        Some("build".to_string()),
+        None,
+        Some(200_000),
+    );
+
+    assert_eq!(pane.model(), "anthropic/sonnet");
+    assert_eq!(pane.connection_id(), None);
+    assert_eq!(pane.thinking, None);
+    assert_eq!(pane.model_context_limit, Some(200_000));
+}
+
+#[test]
+fn cached_provider_snapshot_is_isolated_from_active_session() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("chat-a".to_string()));
+    pane.model = "openai/gpt-a".to_string();
+    pane.connection_id = Some("conn-a".to_string());
+
+    pane.cache_apply_authoritative_provider_state(
+        "chat-b",
+        Some("anthropic/sonnet".to_string()),
+        Some("conn-b".to_string()),
+        Some("plan".to_string()),
+        Some("high".to_string()),
+        None,
+    );
+
+    assert_eq!(pane.model(), "openai/gpt-a");
+    assert_eq!(pane.connection_id(), Some("conn-a"));
+    let cached = pane.session_cache.get("chat-b").expect("chat-b cache");
+    assert_eq!(cached.state.model.as_deref(), Some("anthropic/sonnet"));
+    assert_eq!(cached.state.connection_id.as_deref(), Some("conn-b"));
+    assert_eq!(cached.state.thinking.as_deref(), Some("high"));
+}
+
+#[test]
+fn history_pages_prepend_and_terminate_cursor_pagination() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_history_page(
+        vec![NeoismAgentMessage::user("new").with_id("new")],
+        Some("older-cursor".to_string()),
+    );
+    assert!(pane.timeline_history.has_older);
+    assert_eq!(pane.messages[0].id, "new");
+
+    pane.timeline_history.loading_older = true;
+    pane.apply_history_page(vec![NeoismAgentMessage::user("old").with_id("old")], None);
+    assert_eq!(
+        pane.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["old", "new"]
+    );
+    assert!(!pane.timeline_history.loading_older);
+    assert!(!pane.timeline_history.has_older);
+}
 
 #[test]
 fn markdown_cache_bounds_streaming_snapshot_volume() {
@@ -207,6 +307,47 @@ fn branch_count_is_unique_union_and_terminal_decrements_once() {
 }
 
 #[test]
+fn composer_control_routes_idle_draft_to_send() {
+    let mut pane = NeoismAgentPane::default();
+    pane.insert_text("ship it");
+
+    assert!(pane.activate_composer_control());
+    let outbound = pane.drain_pending_outbound();
+    assert!(outbound
+        .iter()
+        .any(|command| matches!(command, OutboundAgentCommand::EnsureSession)));
+    assert!(outbound
+        .iter()
+        .any(|command| matches!(command, OutboundAgentCommand::SendPrompt { .. })));
+}
+
+#[test]
+fn composer_control_routes_root_and_active_subagent_to_interrupt() {
+    let mut root = NeoismAgentPane::default();
+    root.session_id = Some("root".into());
+    root.note_streaming(NeoismAgentStreamingState::Generating, None);
+    root.insert_text("preserve queued draft");
+    assert!(root.interruptible_run_active());
+    assert!(root.activate_composer_control());
+    assert_eq!(root.input(), "preserve queued draft");
+    assert!(root
+        .drain_pending_outbound()
+        .iter()
+        .any(|command| matches!(command, OutboundAgentCommand::AbortSession)));
+
+    let mut parent = NeoismAgentPane::default();
+    parent.session_id = Some("root".into());
+    parent.note_subagent_runtime("child".into(), BranchStatus::Active, Some(10));
+    assert!(!parent.is_streaming());
+    assert!(parent.interruptible_run_active());
+    assert!(parent.activate_composer_control());
+    assert!(parent
+        .drain_pending_outbound()
+        .iter()
+        .any(|command| matches!(command, OutboundAgentCommand::AbortSession)));
+}
+
+#[test]
 fn busy_idle_busy_run_edges_do_not_flicker_outstanding_branch_count() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".into());
@@ -233,7 +374,10 @@ fn stale_idle_tree_refresh_cannot_terminalize_authoritative_outstanding_branch()
             .with_runtime_status(Some("idle".into())),
     ]);
     assert_eq!(pane.active_subagent_count(), 1);
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::WaitingSubagents);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
     assert!(pane.apply_branch_lifecycle_snapshot(
         "root".into(),
         2,
@@ -273,6 +417,89 @@ fn reconnect_snapshot_restores_outstanding_branch_and_stale_revision_cannot_rewi
         7,
         [("child".into(), "outstanding".into(), Some(10))],
     ));
+    assert_eq!(pane.active_subagent_count(), 0);
+}
+
+#[test]
+fn equal_revision_empty_snapshot_clears_locally_resurrected_children() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        8,
+        std::iter::empty::<(String, String, Option<u64>)>(),
+    ));
+
+    for child in ["child-a", "child-b"] {
+        pane.note_subagent_event(
+            child.to_string(),
+            BranchStatus::Active,
+            Some(child.to_string()),
+            Some("explore".into()),
+            None,
+            Some(1),
+        );
+    }
+    assert_eq!(pane.active_subagent_count(), 2);
+
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        8,
+        std::iter::empty::<(String, String, Option<u64>)>(),
+    ));
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(!pane.has_status_activity());
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| !entry.id.starts_with("child-")));
+}
+
+#[test]
+fn subagent_metadata_updates_only_an_existing_row_without_changing_lifecycle() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.note_subagent_event(
+        "child".into(),
+        BranchStatus::Active,
+        Some("Old title".into()),
+        Some("explore".into()),
+        Some("Search".into()),
+        Some(10),
+    );
+
+    assert!(pane.note_subagent_metadata(
+        "child",
+        Some("Renamed child".into()),
+        Some("build".into()),
+    ));
+    let child = pane
+        .side_panel
+        .subagents()
+        .iter()
+        .find(|entry| entry.id == "child")
+        .expect("tracked child");
+    assert_eq!(child.title, "Renamed child");
+    assert_eq!(child.time_label, "build");
+    assert_eq!(
+        pane.side_panel
+            .branch_activity("child")
+            .map(|activity| activity.status),
+        Some(BranchStatus::Active)
+    );
+
+    assert!(pane.apply_branch_lifecycle_snapshot(
+        "root".into(),
+        9,
+        [("child".into(), "completed".into(), Some(10))],
+    ));
+    assert!(!pane.note_subagent_metadata("child", Some("Late rename".into()), None));
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "child"));
     assert_eq!(pane.active_subagent_count(), 0);
 }
 
@@ -317,6 +544,274 @@ fn terminal_runtime_snapshot_settles_shared_task_footer_and_viewed_child() {
 }
 
 #[test]
+fn final_subagent_completion_clears_stale_crafting_only_after_last_child() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 1,
+            finished: false,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        1,
+        [
+            ("child-a".to_string(), "outstanding".to_string(), Some(10)),
+            ("child-b".to_string(), "outstanding".to_string(), Some(20)),
+        ],
+    ));
+
+    pane.note_subagent_event(
+        "child-a".to_string(),
+        BranchStatus::Completed,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(pane.streaming_label(), "Crafting");
+
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 2,
+            finished: true,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        3,
+        [
+            ("child-a".to_string(), "completed".to_string(), Some(10)),
+            ("child-b".to_string(), "completed".to_string(), Some(20)),
+        ],
+    ));
+    // The terminal runtime is emitted before SubagentCompleted. A stale
+    // stream-state edge queued between them must still be cleared by the
+    // final child completion.
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.note_subagent_event(
+        "child-b".to_string(),
+        BranchStatus::Completed,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(!pane.is_streaming());
+    assert_eq!(pane.streaming_label(), "");
+    assert!(!pane.has_status_activity());
+}
+
+#[test]
+fn single_subagent_terminal_runtime_clears_tool_only_activity() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    pane.note_subagent_event(
+        "child".to_string(),
+        BranchStatus::Active,
+        None,
+        None,
+        Some("Search source".to_string()),
+        Some(10),
+    );
+    pane.note_streaming(
+        NeoismAgentStreamingState::Working,
+        Some("Search source".to_string()),
+    );
+
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 2,
+            finished: true,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        2,
+        [("child".to_string(), "completed".to_string(), Some(10))],
+    ));
+
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(!pane.is_streaming());
+    assert_eq!(pane.streaming_label(), "");
+}
+
+#[test]
+fn terminal_family_snapshot_clears_reconnect_and_parked_tab_streaming_residue() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.cache_note_streaming(
+        "child",
+        NeoismAgentStreamingState::Working,
+        Some("grep".to_string()),
+    );
+
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 7,
+            finished: true,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        9,
+        [("child".to_string(), "completed".to_string(), Some(10))],
+    ));
+
+    assert!(!pane.is_streaming());
+    assert!(!pane.session_cache["child"].runtime.is_streaming());
+    assert_eq!(pane.streaming_label(), "");
+}
+
+#[test]
+fn authoritative_empty_branch_set_clears_waiting_hint_without_hiding_parent_run() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    pane.note_subagent_runtime("child".to_string(), BranchStatus::Active, Some(10));
+    pane.note_streaming(NeoismAgentStreamingState::WaitingSubagents, None);
+    assert_eq!(pane.streaming_label(), "Sub-agents working");
+
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 2,
+            finished: false,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        2,
+        [("child".to_string(), "completed".to_string(), Some(10))],
+    ));
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert_eq!(pane.streaming_label(), "");
+
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(ExecutionActivityState {
+            execution_id: "execution-a".to_string(),
+            root_session_id: "root".to_string(),
+            revision: 3,
+            finished: false,
+            ..Default::default()
+        }),
+        "root".to_string(),
+        3,
+        [("child".to_string(), "completed".to_string(), Some(10))],
+    ));
+    assert_eq!(pane.streaming_label(), "Crafting");
+}
+
+#[test]
+fn waiting_hint_never_creates_activity_without_a_tracked_active_child() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    pane.note_streaming(NeoismAgentStreamingState::WaitingSubagents, None);
+
+    pane.note_waiting_subagents_hint();
+
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert!(!pane.has_status_activity());
+}
+
+#[test]
+fn duplicate_authoritative_snapshot_repairs_late_local_activity_residue() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    let terminal = ExecutionActivityState {
+        execution_id: "execution-a".to_string(),
+        root_session_id: "root".to_string(),
+        revision: 2,
+        finished: true,
+        ..Default::default()
+    };
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(terminal.clone()),
+        "root".to_string(),
+        4,
+        [("child".to_string(), "completed".to_string(), Some(10))],
+    ));
+
+    // Model a late local/runtime tag that escaped without family revision.
+    // Reconnect can legitimately hydrate the same durable revision, and that
+    // equal snapshot must still converge derived UI state.
+    pane.note_subagent_runtime("child".to_string(), BranchStatus::Active, Some(10));
+    pane.note_streaming(NeoismAgentStreamingState::WaitingSubagents, None);
+    assert_eq!(pane.streaming_label(), "Sub-agents working");
+
+    assert!(pane.apply_runtime_lifecycle_snapshot(
+        Some(terminal),
+        "root".to_string(),
+        4,
+        [("child".to_string(), "completed".to_string(), Some(10))],
+    ));
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert_eq!(pane.streaming_label(), "");
+    assert!(!pane.has_status_activity());
+}
+
+#[test]
+fn terminal_child_event_settles_parked_runtime_without_finishing_sibling() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    pane.note_subagent_event(
+        "child-a".to_string(),
+        BranchStatus::Active,
+        None,
+        None,
+        None,
+        Some(10),
+    );
+    pane.note_subagent_event(
+        "child-b".to_string(),
+        BranchStatus::Active,
+        None,
+        None,
+        None,
+        Some(20),
+    );
+    pane.cache_note_streaming(
+        "child-a",
+        NeoismAgentStreamingState::Working,
+        Some("read".to_string()),
+    );
+    pane.cache_note_streaming("child-b", NeoismAgentStreamingState::Generating, None);
+
+    pane.note_subagent_event(
+        "child-b".to_string(),
+        BranchStatus::Completed,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(pane.active_subagent_count(), 1);
+    assert!(pane.session_cache["child-a"].runtime.is_streaming());
+    assert!(!pane.session_cache["child-b"].runtime.is_streaming());
+    assert_eq!(pane.streaming_label(), "Sub-agents working");
+
+    pane.note_subagent_event(
+        "child-a".to_string(),
+        BranchStatus::Completed,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(!pane.session_cache["child-a"].runtime.is_streaming());
+    assert_eq!(pane.streaming_label(), "");
+}
+
+#[test]
 fn rejected_execution_snapshot_cannot_resurrect_terminal_branch() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".to_string());
@@ -347,7 +842,64 @@ fn rejected_execution_snapshot_cannot_resurrect_terminal_branch() {
     ));
     assert_eq!(pane.active_subagent_count(), 0);
     assert!(!pane.has_status_activity());
-    assert!(pane.side_panel.subagents().iter().all(|entry| entry.id != "child-1"));
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "child-1"));
+}
+
+#[test]
+fn authoritative_snapshot_establishes_cold_child_family_and_rejects_unrelated_root() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".into());
+
+    assert!(pane.apply_authoritative_family_runtime_snapshot(
+        "root",
+        None,
+        "root".into(),
+        1,
+        [(
+            "child".into(),
+            "root".into(),
+            "outstanding".into(),
+            Some(10)
+        )],
+    ));
+    assert_eq!(pane.parent_session_id.as_deref(), Some("root"));
+    assert!(pane.session_family_contains("root"));
+    assert!(pane.session_family_contains("child"));
+
+    assert!(!pane.apply_authoritative_family_runtime_snapshot(
+        "other-root",
+        None,
+        "other-root".into(),
+        1,
+        [(
+            "other-child".into(),
+            "other-root".into(),
+            "outstanding".into(),
+            None
+        )],
+    ));
+    assert_eq!(pane.parent_session_id.as_deref(), Some("root"));
+    assert!(!pane.session_family_contains("other-root"));
+}
+
+#[test]
+fn authoritative_snapshot_envelope_can_establish_requested_child_before_branch_roster() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".into());
+
+    assert!(pane.apply_authoritative_family_runtime_snapshot(
+        "child",
+        None,
+        "root".into(),
+        1,
+        std::iter::empty(),
+    ));
+    assert_eq!(pane.parent_session_id.as_deref(), Some("root"));
+    assert!(pane.session_family_contains("root"));
 }
 
 #[test]
@@ -1164,6 +1716,121 @@ fn switch_session_queues_switch_session_command() {
 }
 
 #[test]
+fn mobile_side_panel_session_navigation_switches_and_dismisses_takeover() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("current".to_string()));
+    pane.side_panel_mut().set_user_hidden(false);
+    pane.side_panel_mut().set_sessions(vec![NeoismAgentSessionEntry::new(
+        "target", "Target chat", "now",
+    )]);
+    pane.side_panel_mut().set_selected(0);
+
+    assert!(pane.activate_side_panel_row(true, true));
+    assert_eq!(pane.session_id_str(), Some("target"));
+    assert!(pane.side_panel().user_hidden());
+    assert!(pane.drain_pending_outbound().iter().any(|command| matches!(
+        command,
+        OutboundAgentCommand::SwitchSession { session_id } if session_id == "target"
+    )));
+}
+
+#[test]
+fn wide_side_panel_session_navigation_keeps_panel_open() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("current".to_string()));
+    pane.side_panel_mut().set_user_hidden(false);
+    pane.side_panel_mut().set_sessions(vec![NeoismAgentSessionEntry::new(
+        "target", "Target chat", "now",
+    )]);
+    pane.side_panel_mut().set_selected(0);
+
+    assert!(pane.activate_side_panel_row(true, false));
+    assert_eq!(pane.session_id_str(), Some("target"));
+    assert!(!pane.side_panel().user_hidden());
+}
+
+#[test]
+fn mobile_semantic_search_result_navigation_dismisses_takeover() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("current".to_string()));
+    pane.side_panel_mut().set_sessions(vec![NeoismAgentSessionEntry::new(
+        "result", "Unrelated title", "now",
+    )]);
+    pane.side_panel_mut().set_session_query("needle".to_string());
+    pane.side_panel_mut().set_semantic_results(
+        "needle".to_string(),
+        vec![NeoismAgentSemanticMatch {
+            session_id: "result".to_string(),
+            excerpt: "A semantic needle match".to_string(),
+            distance: 0.1,
+        }],
+    );
+    let excerpt = pane
+        .side_panel()
+        .sessions()
+        .iter()
+        .position(|entry| entry.is_excerpt)
+        .expect("semantic excerpt row");
+    pane.side_panel_mut().set_selected(excerpt);
+
+    assert!(pane.activate_side_panel_row(true, true));
+    assert_eq!(pane.session_id_str(), Some("result"));
+    assert!(pane.side_panel().user_hidden());
+}
+
+#[test]
+fn mobile_non_navigation_side_panel_action_does_not_dismiss() {
+    let mut pane = NeoismAgentPane::default();
+    pane.side_panel_mut().set_user_hidden(false);
+    pane.side_panel_mut().set_sessions(vec![NeoismAgentSessionEntry::new(
+        "target", "Target chat", "now",
+    )]);
+    pane.side_panel_mut().focus_search();
+
+    assert!(!pane.activate_side_panel_row(true, true));
+    assert!(!pane.side_panel().user_hidden());
+    assert!(pane.drain_pending_outbound().is_empty());
+}
+
+#[test]
+fn session_search_typing_route_owns_only_the_painted_field() {
+    let mut pane = NeoismAgentPane::default();
+    pane.side_panel_mut()
+        .set_session_search_rect([12.0, 20.0, 240.0, 36.0]);
+    assert!(pane.side_panel().session_search_contains(24.0, 32.0));
+    assert!(!pane.side_panel().session_search_contains(24.0, 80.0));
+
+    pane.side_panel_mut().set_focused(true);
+    pane.side_panel_mut().focus_search();
+    pane.side_panel_mut().push_session_query("notes");
+    assert_eq!(pane.side_panel().session_query(), "notes");
+    assert!(pane.input().is_empty(), "the hidden composer is untouched");
+
+    pane.side_panel_mut().set_focused(false);
+    assert!(!pane.side_panel().search_focused());
+}
+
+#[test]
+fn mobile_child_and_root_navigation_both_dismiss_takeover() {
+    for (current, selected_row, expected) in [("root", 1, "child"), ("child", 0, "root")] {
+        let mut pane = NeoismAgentPane::default();
+        pane.set_session_id(Some(current.to_string()));
+        pane.side_panel_mut().set_mode(SidePanelMode::Subagents);
+        pane.side_panel_mut().set_subagents(vec![
+            NeoismAgentSessionEntry::new("root", "Root", "main")
+                .with_runtime_status(Some("running".to_string())),
+            NeoismAgentSessionEntry::new("child", "Child", "explore")
+                .with_runtime_status(Some("running".to_string())),
+        ]);
+        pane.side_panel_mut().set_selected(selected_row);
+
+        assert!(pane.activate_side_panel_row(false, true));
+        assert_eq!(pane.session_id_str(), Some(expected));
+        assert!(pane.side_panel().user_hidden());
+    }
+}
+
+#[test]
 fn with_directory_queues_apply_config_defaults() {
     let mut pane = NeoismAgentPane::with_directory(Some("/tmp/wd".to_string()));
     let drained = pane.drain_pending_outbound();
@@ -1606,7 +2273,8 @@ fn session_skeleton_animates_only_during_a_real_request() {
     assert!(!pane.side_panel.is_animating());
     pane.side_panel.mark_refresh_kicked();
     assert!(pane.side_panel.is_animating());
-    pane.side_panel.set_sessions_error("temporarily unavailable");
+    pane.side_panel
+        .set_sessions_error("temporarily unavailable");
     assert!(matches!(
         pane.side_panel.session_catalog_state(),
         super::side_panel::SessionCatalogState::Error(_)
@@ -1622,10 +2290,7 @@ fn timeline_interaction_settle_owns_the_final_hit_geometry_frame() {
     pane.messages.push(NeoismAgentMessage::assistant("settled"));
     pane.timeline_last_scroll_at = Some(Instant::now());
 
-    assert_eq!(
-        pane.animation_reason(),
-        Some("timeline_interaction_settle")
-    );
+    assert_eq!(pane.animation_reason(), Some("timeline_interaction_settle"));
 }
 
 #[test]
@@ -1642,13 +2307,15 @@ fn invalidating_session_catalog_rejects_an_in_flight_generation() {
 #[test]
 fn session_catalog_refresh_failure_preserves_stale_rows_without_loader() {
     let mut pane = NeoismAgentPane::default();
-    pane.side_panel.set_sessions(vec![NeoismAgentSessionEntry::new(
-        "ses-1",
-        "Previous session",
-        "1m",
-    )]);
+    pane.side_panel
+        .set_sessions(vec![NeoismAgentSessionEntry::new(
+            "ses-1",
+            "Previous session",
+            "1m",
+        )]);
 
-    pane.side_panel.set_sessions_error("temporarily unavailable");
+    pane.side_panel
+        .set_sessions_error("temporarily unavailable");
 
     assert!(matches!(
         pane.side_panel.session_catalog_state(),
@@ -1993,6 +2660,39 @@ fn part_activity_hydrates_missing_row_but_terminal_straggler_does_not() {
         .subagents()
         .iter()
         .any(|entry| entry.id == "child-1"));
+}
+
+#[test]
+fn late_child_metadata_does_not_recreate_pruned_terminal_branch() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.side_panel.ensure_subagent_main_entry("root");
+    pane.side_panel
+        .upsert_subagent("child", "Old title", "explore");
+    pane.note_subagent_runtime("child".into(), BranchStatus::Completed, None);
+    pane.side_panel
+        .set_subagents(vec![NeoismAgentSessionEntry::new("root", "main", "return")]);
+
+    pane.note_subagent_event(
+        "child".into(),
+        BranchStatus::Active,
+        Some("Late rename".into()),
+        Some("build".into()),
+        None,
+        None,
+    );
+
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "child"));
+    assert_eq!(
+        pane.side_panel
+            .branch_activity("child")
+            .map(|activity| activity.status),
+        Some(BranchStatus::Completed)
+    );
 }
 
 #[test]
@@ -2366,11 +3066,7 @@ fn historical_unmatched_background_task_is_not_live_activity() {
 #[test]
 fn background_runtime_rejects_stale_revision_and_accepts_new_server_epoch() {
     let mut pane = NeoismAgentPane::default();
-    assert!(pane.apply_running_background_tasks(
-        "server-a",
-        2,
-        &[("job-1".into(), 100)],
-    ));
+    assert!(pane.apply_running_background_tasks("server-a", 2, &[("job-1".into(), 100)],));
     assert_eq!(pane.running_background_task_count(), 1);
     assert!(!pane.apply_running_background_tasks("server-a", 1, &[]));
     assert_eq!(pane.running_background_task_count(), 1);
@@ -2831,7 +3527,10 @@ fn recovery_completed_status_cannot_clear_authoritative_active_set() {
     pane.sync_subagent_waiting_clock();
 
     assert_eq!(pane.active_subagent_count(), 1);
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::WaitingSubagents);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
     assert!(pane.has_status_activity());
 }
 
@@ -4007,6 +4706,31 @@ fn trackpad_pixels_keep_the_direct_response_path() {
 }
 
 #[test]
+fn touch_drag_is_one_to_one_and_never_arms_inertia() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+    assert!(pane.drag_timeline_pixels(23.0));
+    assert_eq!(pane.timeline_scroll_offset(), 23.0);
+    assert_eq!(pane.timeline_velocity_px_s, 0.0);
+    assert!(pane.timeline_wheel_target_px.is_none());
+    assert!(!pane.timeline_is_inertial());
+}
+
+#[test]
+fn trackpad_inertia_stops_at_threshold_without_a_low_speed_tail() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+
+    // 7px * the trackpad path's 7x injection = 49px/s, just below the
+    // intentional 50px/s cutoff.
+    assert!(pane.scroll_timeline_pixels(7.0));
+    let settled_at = pane.timeline_scroll_offset();
+    assert!(!pane.timeline_is_inertial());
+    assert!(!pane.tick_timeline_scroll());
+    assert_eq!(pane.timeline_scroll_offset(), settled_at);
+}
+
+#[test]
 fn timeline_growth_keeps_following_stream_at_bottom() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
@@ -4150,15 +4874,26 @@ fn connect_api_key_path_queues_store_command() {
     pane.apply_provider_connections("anthropic".to_string(), Vec::new());
     let picker = pane.picker().expect("account picker opens");
     assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAccount);
-    assert_eq!(picker.selected_option().map(|option| option.title.as_str()), Some("Add account"));
+    assert_eq!(
+        picker.selected_option().map(|option| option.title.as_str()),
+        Some("Add account")
+    );
     assert!(pane.commit_picker());
-    assert_eq!(pane.picker().map(|picker| picker.kind), Some(NeoismAgentPickerKind::ConnectLabel));
+    assert_eq!(
+        pane.picker().map(|picker| picker.kind),
+        Some(NeoismAgentPickerKind::ConnectLabel)
+    );
     pane.insert_text("Personal");
     assert!(pane.commit_picker());
-    let picker = pane.picker().expect("auth-method picker opens after labeling the account");
+    let picker = pane
+        .picker()
+        .expect("auth-method picker opens after labeling the account");
     assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAuth);
     // Adding another account must not offer to disconnect an existing one.
-    assert_ne!(picker.selected_option().map(|option| option.value.as_str()), Some(connect::DISCONNECT_VALUE));
+    assert_ne!(
+        picker.selected_option().map(|option| option.value.as_str()),
+        Some(connect::DISCONNECT_VALUE)
+    );
     assert!(pane.commit_picker());
     let picker = pane.picker().expect("secret entry opens");
     assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectSecret);
@@ -4205,22 +4940,24 @@ fn connect_secret_paste_fills_the_secret_field_not_the_composer() {
 #[test]
 fn pending_question_paste_fills_the_typed_answer_not_the_composer() {
     let mut pane = NeoismAgentPane::default();
-    let question = crate::panels::agent_pane::question_policy::question_request_from_event(
-        &serde_json::json!({
-            "id": "question-email",
-            "sessionId": "session-1",
-            "questions": [{
-                "question": "Who should receive the recording?",
-                "options": []
-            }]
-        }),
-    );
+    let question =
+        crate::panels::agent_pane::question_policy::question_request_from_event(
+            &serde_json::json!({
+                "id": "question-email",
+                "sessionId": "session-1",
+                "questions": [{
+                    "question": "Who should receive the recording?",
+                    "options": []
+                }]
+            }),
+        );
     pane.enqueue_pending_question(question);
 
     pane.insert_paste("dusty@elevatedintx.com");
 
     assert_eq!(
-        pane.pending_question().map(|question| question.typed.as_str()),
+        pane.pending_question()
+            .map(|question| question.typed.as_str()),
         Some("dusty@elevatedintx.com")
     );
     assert!(pane.input().is_empty(), "paste must not enter the composer");
@@ -4292,12 +5029,20 @@ fn connect_provider_always_opens_account_manager_with_add_first() {
         vec![provider_connection("conn_work", "Work", "oauth", true)],
     );
 
-    let picker = pane.picker().expect("account manager opens even for one account");
+    let picker = pane
+        .picker()
+        .expect("account manager opens even for one account");
     assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAccount);
     assert_eq!(picker.title, "Anthropic");
     assert_eq!(picker.options()[0].title, "Add account");
-    assert!(picker.options().iter().any(|option| option.is_header && option.title == "Connected accounts"));
-    assert!(picker.options().iter().any(|option| option.value == "conn_work" && option.title == "Work"));
+    assert!(picker
+        .options()
+        .iter()
+        .any(|option| option.is_header && option.title == "Connected accounts"));
+    assert!(picker
+        .options()
+        .iter()
+        .any(|option| option.value == "conn_work" && option.title == "Work"));
 }
 
 #[test]
@@ -4336,10 +5081,58 @@ fn multiple_accounts_open_inline_picker_without_encoding_labels_in_model() {
     assert!(picker.options().iter().any(|option| option.title == "Work"
         && option.description == "oauth"
         && option.footer == "default"));
-    assert!(picker
-        .options()
-        .iter()
-        .all(|option| !option.value.contains("Personal") && !option.value.contains("Work")));
+    assert!(picker.options().iter().all(
+        |option| !option.value.contains("Personal") && !option.value.contains("Work")
+    ));
+}
+
+#[test]
+fn fresh_chats_reuse_provider_connection_without_leaking_session_defaults() {
+    let mut pane = NeoismAgentPane::default();
+    let connections = vec![
+        provider_connection("conn_api", "API", "api", false),
+        provider_connection("conn_oauth", "OAuth", "oauth", true),
+    ];
+
+    pane.apply_model_with_connection(
+        "anthropic/claude-sonnet".to_string(),
+        Some("conn_oauth".to_string()),
+    );
+    pane.set_session_id(Some("session-one".to_string()));
+    pane.thinking = Some("high".to_string());
+    pane.messages.push(NeoismAgentMessage::user("session one"));
+    pane.cache_current_session();
+
+    for _ in 0..2 {
+        pane.start_new_conversation_with_defaults(
+            Some("anthropic/claude-haiku".to_string()),
+            Some("build".to_string()),
+            None,
+        );
+        assert_eq!(pane.connection_id(), Some("conn_oauth"));
+        assert_eq!(pane.model(), "anthropic/claude-haiku");
+        assert_eq!(pane.thinking, None);
+        assert!(pane.messages().is_empty());
+
+        pane.apply_model("anthropic/claude-haiku".to_string());
+        pane.apply_provider_connections("anthropic".to_string(), connections.clone());
+        assert!(
+            pane.picker().is_none(),
+            "remembered connection must skip picker"
+        );
+        assert_eq!(pane.connection_id(), Some("conn_oauth"));
+    }
+
+    let cached = pane
+        .session_cache
+        .get("session-one")
+        .expect("first session cached");
+    assert_eq!(
+        cached.state.model.as_deref(),
+        Some("anthropic/claude-sonnet")
+    );
+    assert_eq!(cached.state.thinking.as_deref(), Some("high"));
+    assert_eq!(cached.messages[0].text, "session one");
 }
 
 #[test]
@@ -4348,7 +5141,12 @@ fn explicitly_missing_connection_errors_instead_of_falling_back() {
     pane.apply_model("anthropic/claude-sonnet".to_string());
     pane.apply_provider_connections(
         "anthropic".to_string(),
-        vec![provider_connection("conn_deleted", "Deleted soon", "api", true)],
+        vec![provider_connection(
+            "conn_deleted",
+            "Deleted soon",
+            "api",
+            true,
+        )],
     );
     pane.apply_model("anthropic/claude-sonnet".to_string());
     pane.apply_provider_connections(

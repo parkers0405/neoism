@@ -345,7 +345,9 @@ fn self_hosted_adopted_workspace_is_collaborative_on_peer_link() {
     assert!(!context_manager.current_workspace_is_remote_joined());
     assert!(context_manager.current_workspace_is_collaborative());
     assert_eq!(
-        context_manager.agent_server_override_for_current().as_deref(),
+        context_manager
+            .agent_server_override_for_current()
+            .as_deref(),
         Some("http://127.0.0.1:9877/agent/workspaces/host-workspace")
     );
 }
@@ -418,8 +420,10 @@ fn stale_workspace_switch_ack_does_not_change_the_selected_grid() {
     let mut context_manager =
         ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
     context_manager.add_context(false, 0);
-    let workspace_a = context_manager.workspace_id_for_grid(&context_manager.contexts[0], 0);
-    let workspace_b = context_manager.workspace_id_for_grid(&context_manager.contexts[1], 1);
+    let workspace_a =
+        context_manager.workspace_id_for_grid(&context_manager.contexts[0], 0);
+    let workspace_b =
+        context_manager.workspace_id_for_grid(&context_manager.contexts[1], 1);
 
     // The UI has completed A -> B -> A, but the independently queued B
     // acknowledgement arrives last.

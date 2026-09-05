@@ -38,43 +38,44 @@ impl Screen<'_> {
         let scale = self.sugarloaf.scale_factor();
         let mx = self.mouse.x as f32 / scale;
         let my = self.mouse.y as f32 / scale;
-        if let Some(idx) = self.renderer.splash_overlay.menu_hit(mx, my) {
+        if let Some(action) = self.renderer.splash_overlay.menu_hit(mx, my) {
             self.renderer.splash_overlay.pop_click(mx, my);
-            // Order mirrors the shared `splash_overlay::MENU` literal
-            // in `neoism-ui/src/panels/splash_overlay.rs`:
-            //   0 = Open file tree
-            //   1 = Notes (notes sidebar → default vault + Welcome docs)
-            //   2 = Neoism Agent
-            //   3 = Search
-            //   4 = Command palette
-            match idx {
-                0 => {
+            use neoism_ui::panels::splash_overlay::SplashMenuAction;
+            match action {
+                SplashMenuAction::OpenFileTree => {
                     // File tree is a side panel, not a modal — it can
                     // co-exist visually. Still dismiss any open modal so
                     // the click doesn't leave a stale palette floating.
                     self.dismiss_other_modals(SplashModalKind::None);
                     self.toggle_file_tree();
                 }
-                1 => {
+                SplashMenuAction::OpenNotes => {
                     // Notes sidebar is a side panel like the file tree —
                     // opens onto the default vault, where the bundled
                     // `Welcome/` getting-started docs live.
                     self.dismiss_other_modals(SplashModalKind::None);
                     self.open_neoism_notes_sidebar();
                 }
-                2 => {
+                SplashMenuAction::OpenAgent => {
                     self.dismiss_other_modals(SplashModalKind::None);
                     self.open_neoism_agent_tab();
                 }
-                3 => {
+                SplashMenuAction::Search => {
                     self.dismiss_other_modals(SplashModalKind::Finder);
                     self.open_finder_files();
                 }
-                4 => {
+                SplashMenuAction::OpenCommandPalette => {
                     self.dismiss_other_modals(SplashModalKind::CommandPalette);
                     self.open_command_palette();
                 }
-                _ => {}
+                SplashMenuAction::NewTerminal => {
+                    self.dismiss_other_modals(SplashModalKind::None);
+                    self.create_focused_terminal_tab();
+                }
+                SplashMenuAction::ChangeDirectory => {
+                    self.dismiss_other_modals(SplashModalKind::CommandPalette);
+                    self.open_terminal_directory_palette();
+                }
             }
             self.mark_dirty();
             return true;

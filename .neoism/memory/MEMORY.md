@@ -159,7 +159,6 @@
 - [Orphaned subagent runtime reconciliation](bug_orphaned_subagent_runtime_reconciliation.md) - Killed historical subagents no longer resurrect from stale runtime ledger
 - [MCP OAuth callback HTTP 404 — FIXED](bug_mcp_oauth_callback_404.md) - MCP OAuth generated a stale legacy callback path, causing localhost HTTP 404; fixed and released in v0.7.70
 - [V2 agent GUI permission menu fixed](bug_v2_agent_gui_permission_menu_fixed.md) - Shared/web v2 permission GUI now receives, hydrates, acknowledges, and retries permission interactions correctly.
-- [Agent run spacing and lower tab ghost drag](bug_agent_run_spacing_and_lower_tab_ghost_drag.md) - Styled run spacing hardened and lower tabs cannot ghost-drag
 - [Background shutdown and MCP status reconciliation](bug_background_shutdown_and_mcp_status_reconciliation.md) - Shutdown settles background jobs and MCP hot reload refreshes visible status
 - [Subagent completion split-brain correction](bug_subagent_completion_split_brain_correction.md) - Subagent completion split brain fixed; generic quiescence cannot kill outstanding branches
 - [Subagent queued working GUI settlement](bug_subagent_queued_working_gui_settlement.md) - All GUI and server subagent completion surfaces now converge terminal
@@ -186,3 +185,29 @@
 - [Viewed subagent disappears on completion — FIXED](bug_viewed_subagent_disappears_on_completion.md) - Live viewed subagent retained through completion until navigation; historical dead sessions remain filtered
 - [Mac→Linux joined workspace 8 FPS — FIXED](bug_macos_linux_join_8fps.md) - Linux watcher access-event feedback loop starved macOS joined guest; mutation filter restored
 - [Rust Analyzer warm-up UI slowdown — FIXED](bug_rust_analyzer_warmup_ui_slow.md) - Zed-style document-scoped diagnostics, sticky anchors, and background git analysis fix RA warm-up frame starvation
+- [Local models via compatible providers](feature_local_models.md) - OpenCode-style local GGUF runtime providers
+- [Web fresh chats credential picker — FIXED](bug_web_agent_connection_picker_fresh_chat.md) - Provider-scoped connection preference survives web fresh tabs while session model/thinking/history remain isolated.
+- [iOS web UI zoomed out / visualViewport scale](bug_ios_web_ui_zoomed_out.md) - iOS hidden editable auto-zoom + raw visualViewport height conflated pinch with keyboard; fixed with CSS-pixel viewport contract and normalized keyboard observation
+- [Mobile touch momentum + caret-follow suppression](feature_mobile_touch_momentum.md) - Shared iOS-like mobile web momentum and touch caret-follow suppression
+- [Mobile web touch focus/selection/viewport — FIXED](bug_mobile_web_touch_focus_selection_anchor.md) - Mobile web provisional focus, touch selection drag, momentum sampling, and viewport anchoring
+- [Web Vim Ex commands quit app — FIXED](bug_web_vim_ex_quit_app.md) - Web Vim Ex q accidentally selected PaletteAction::Quit; fixed with real Ex mode, shared plan protocol, dirty/save-ack BufferTabs lifecycle
+- [Shared BufferTabs long title + hover pill — FIXED](bug_buffer_tabs_long_title_hover.md) - Single geometry budget and stable editor-tab hover fix for shared BufferTabs
+- [Web side-panel wheel ownership — FIXED](bug_web_side_panel_wheel_ownership.md) - Web wheel ownership for shared side panels and no boundary chaining
+- [Web BufferTabs pointer ownership](bug_web_buffer_tabs_pointer_ownership.md) - Tab-strip gestures are exclusively chrome-owned through up/cancel so activation cannot click newly active content
+- [Mobile/web pinch zoom disabled](feature_mobile_pinch_zoom_disabled.md) - Shared+web policy suppresses divergent pinch while preserving two-finger pan and keyboard viewport behavior
+- [Sugarloaf file browser + Agent image attachment](feature_file_browser_agent_image.md) - Alt+E/file-tree density and optical text centering pass
+- [Agent semantic token spacing and lower tab ghost drag](bug_agent_run_spacing_and_lower_tab_ghost_drag.md) - Semantic Agent colors no longer switch font weight; lower tabs cannot ghost-drag
+- [Agent mobile chunk scrolling — FIXED](bug_agent_mobile_chunk_scroll_ownership.md) - Fixed mobile Agent full-finger scrolling with sticky gesture owner and diff-bound wheel bubbling
+- [Windows terminal + agent startup failures — FIXED](bug_windows_terminal_and_agent_startup.md) - Windows ConPTY stale-build command stall and daemon/agent startup race fixed; includes root causes, files, and validation
+- [Desktop/web Agent activity-state parity](feature_agent_activity_state_parity.md) - Root busy/hydration carries QueueUpdate metadata; shared atomic part ingestion drives Crafting/Pondering/Tinkering only from semantic evidence.
+- [web-notes-refresh-races](bug_web_notes_refresh_races.md) - Robust web Notes vault binding and generation-guarded all-or-nothing recursive refresh
+- [Web connected-daemon stable host identity — FIXED](bug_web_connected_daemon_host_identity.md) - HelloAck stable connected_host_id replaces URL alias host classification in web Notes/modal
+- [Mobile keyboard flash, overlay fields, and Enter follow — FIXED](bug_mobile_keyboard_overlay_and_enter_follow.md) - Deferred iOS editor/overlay focus, exact overlay text-field classifier, and post-scroll repeated Enter caret-follow repair
+- [Web Agent footer activity residue](bug_web_agent_footer_activity_residue.md) - Web no longer treats waiting_subagents as a standalone streaming verb; authoritative family snapshots and terminal Task results clear aggregate and parked child residue.
+- [mobile agent side-panel toggle](feature_mobile_agent_side_panel_toggle.md) - Shared Rust mobile-only Agent side-panel toggle, takeover, and close-on-chat-navigation behavior
+- [Mobile Agent session-search keyboard ownership — FIXED](bug_mobile_agent_session_search_keyboard.md) - Exact field hit intent, deferred clean-tap focus, scroll cancellation, routing and blur lifecycle for iOS Agent side-panel session search
+- [Web connection supervisor](feature_web_connection_supervisor.md) - Stable web ProtocolClient reconnect state machine, hydration barrier, preserved-canvas Sugarloaf gate, safe PTY/CRDT/service recovery
+- [Web suspend/resume reconnect — FIXED](bug_web_suspend_resume_reconnect.md) - Fix Safari/bfcache OPEN-but-dead sockets and lifecycle resume with authenticated Ping/Pong validation
+- [neoism cd and persistent wrapped directory palette](feature_neoism_cd_persistent_palette.md) - Global deterministic Alt+D, dynamic animated directory rows, parent-shell cd, exact source-session echo suppression
+- [Web/mobile closed tabs reappearing — fixed](bug_web_tabs_reappear_after_close.md) - Web/mobile tab closes now tombstone all daemon authorities and reject stale hydration until ack or explicit reopen
+- [Web overlay/splash/Notes sync fixes](fix_web_overlay_splash_notes_sync.md) - Unified composer overlay ownership, typed mobile splash intents, and durable generation-bound Notes sync

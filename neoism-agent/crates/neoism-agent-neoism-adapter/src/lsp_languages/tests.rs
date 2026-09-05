@@ -89,9 +89,7 @@ fn representative_catalog_contracts_match_executable_argv_and_routes() {
         let command = stdio_command(adapter).expect("stdio adapter");
         assert!(command[0].eq_ignore_ascii_case(executable));
         assert_eq!(&command[1..], args);
-
     }
-
 }
 
 #[test]

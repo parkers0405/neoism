@@ -1296,6 +1296,22 @@ impl GitDiffPanel {
         true
     }
 
+    /// Finger-direct scroll with no spring tail. The panel retains ownership
+    /// at its bounds so a covered editor never starts moving mid-gesture.
+    pub fn scroll_touch_at(&mut self, mx: f32, my: f32, finger_delta: f32) -> bool {
+        if !self.visible || !self.panel_rect.contains(mx, my) {
+            return false;
+        }
+        if self.diff_card_rect.contains(mx, my) {
+            self.scroll_diff_pixels(finger_delta);
+            self.diff_scroll_spring.reset();
+        } else if self.files_card_rect.contains(mx, my) {
+            self.scroll_files_pixels(finger_delta);
+            self.file_scroll_spring.reset();
+        }
+        true
+    }
+
     /// Pixel-precise wheel/trackpad scroll for the file list. Applies
     /// the raw pixel delta straight to `file_scroll` — no whole-row
     /// quantization or sub-row dead-zone — then feeds the critically

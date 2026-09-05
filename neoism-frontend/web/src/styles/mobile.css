@@ -11,6 +11,12 @@
   html,
   body {
     font-size: 13px;
+    /* Keep iOS orientation changes from applying an additional text-only
+     * autoscale. Canvas and DOM chrome both stay in the viewport meta tag's
+     * one-CSS-pixel coordinate space. Pinch zoom is disabled by the viewport
+     * contract and touch-action on interactive surfaces. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
     height: 100dvh;
     min-height: 100dvh;
     overflow: hidden;
@@ -27,22 +33,27 @@
   }
 
   .connection-screen {
-    /* Stretch the card edge-to-edge with consistent breathing room. */
-    padding: 16px;
+    /* Stretch the floating gate edge-to-edge without crossing a notch or
+     * home-indicator inset. */
+    padding:
+      max(16px, env(safe-area-inset-top))
+      max(16px, env(safe-area-inset-right))
+      max(16px, env(safe-area-inset-bottom))
+      max(16px, env(safe-area-inset-left));
   }
 
   .connection-form {
     max-width: 100%;
     padding: 16px;
     gap: 10px;
-    border-radius: 6px;
   }
 
   .connection-title {
     font-size: 18px;
   }
 
-  .connection-field input {
+  .connection-field input,
+  .connection-workspace-select {
     /* iOS Safari zooms text inputs below 16px; keep at 16px to suppress. */
     font-size: 16px;
     padding: 12px;
@@ -80,12 +91,16 @@
     bottom: var(--mobile-keyboard-inset-bottom, 0px);
     width: 100%;
     height: 1px;
+    /* iOS auto-zooms focused editable controls whose computed font is below
+     * 16px. The capture is invisible, but it still participates in that
+     * heuristic; pinning its input font prevents browser-created zoom while
+     * leaving the rendered UI/chrome scale untouched. */
+    font-size: 16px;
     opacity: 0;
     /* Disable iOS's blue tap highlight on the capture div. */
     -webkit-tap-highlight-color: transparent;
-    /* Prevent the contenteditable from intercepting browser-native
-     * gesture handling for pinch-zoom / two-finger scroll. */
-    touch-action: manipulation;
+    /* Preserve panning while excluding browser pinch zoom. */
+    touch-action: pan-x pan-y;
   }
 
   .mobile-keyboard-toolbar {
@@ -122,7 +137,7 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
       "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace;
     -webkit-tap-highlight-color: transparent;
-    touch-action: manipulation;
+    touch-action: pan-x pan-y;
     user-select: none;
   }
 
@@ -147,7 +162,11 @@
  * connection form into a single line. */
 @media (max-width: 900px) and (orientation: landscape) and (max-height: 480px) {
   .connection-screen {
-    padding: 8px;
+    padding:
+      max(8px, env(safe-area-inset-top))
+      max(8px, env(safe-area-inset-right))
+      max(8px, env(safe-area-inset-bottom))
+      max(8px, env(safe-area-inset-left));
   }
 
   .connection-form {

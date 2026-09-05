@@ -93,6 +93,15 @@ for b in "${BINARIES[@]}"; do
   printf '   %s\n' "$BIN_DIR/$b"
 done
 
+web_index="$(find "$tmp" -type f -path '*/web/index.html' | head -1)"
+[ -n "$web_index" ] || err "web/index.html not found in $asset"
+web_src="$(dirname "$web_index")"
+rm -rf "$BIN_DIR/.web.new"
+cp -R "$web_src" "$BIN_DIR/.web.new"
+rm -rf "$BIN_DIR/web"
+mv "$BIN_DIR/.web.new" "$BIN_DIR/web"
+printf '   %s\n' "$BIN_DIR/web"
+
 say "Done. Neoism ${VERSION} installed."
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

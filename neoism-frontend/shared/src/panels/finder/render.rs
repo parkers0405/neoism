@@ -60,7 +60,7 @@ impl Finder {
     pub(super) fn tick_list_scroll(&mut self) -> f32 {
         if self.list_scroll_spring.position == 0.0 {
             self.last_list_scroll_frame = Instant::now();
-            return 0.0;
+            return self.touch_scroll_offset;
         }
         let now = Instant::now();
         let dt = now
@@ -70,7 +70,7 @@ impl Finder {
         self.last_list_scroll_frame = now;
         self.list_scroll_spring
             .update(dt, LIST_SCROLL_ANIMATION_LENGTH);
-        self.list_scroll_spring.position
+        self.list_scroll_spring.position + self.touch_scroll_offset
     }
 
     pub(super) fn tick_cursor(&mut self) -> f32 {
@@ -190,11 +190,12 @@ impl Finder {
             body_h
         };
         let height = pad * 2.0 + input_h + SEPARATOR_HEIGHT + body_with_preview_min;
-        let mut height = height.min(logical_h - 96.0);
-        let base_width = (self.overlay_width() * scale).min(logical_w - 32.0);
+        let available_h = (logical_h - 16.0).max(1.0);
+        let mut height = height.min(available_h).max(1.0);
+        let base_width = (self.overlay_width() * scale).min((logical_w - 16.0).max(1.0));
         let mut width = base_width;
         let final_x = (logical_w - width) / 2.0;
-        let final_y = self.top_anchor;
+        let final_y = self.top_anchor.min((logical_h - height - 8.0).max(8.0));
         let (pop_scale, pop_offset_y) = self.open_pop_transform(scale);
         width *= pop_scale;
         height *= pop_scale;

@@ -190,3 +190,20 @@ impl TerminalScroll {
             .map(|sources| sources.get(visual_row).copied().unwrap_or(None))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_pixels_preserve_subrow_displacement_without_a_tick_or_tail() {
+        let mut scroll = TerminalScroll::new();
+        assert_eq!(scroll.add_wheel_delta(1, 7.0, 20.0), 0);
+        assert_eq!(scroll.current_offset(1), 7.0);
+        assert_eq!(scroll.add_wheel_delta(1, 16.0, 20.0), 1);
+        assert_eq!(scroll.current_offset(1), 3.0);
+        // TerminalScroll deliberately has no animation/tick API: this value is
+        // stable until the next physical finger delta or a hard-edge reset.
+        assert_eq!(scroll.current_offset(1), 3.0);
+    }
+}

@@ -325,6 +325,9 @@ pub enum SessionEventUpdate {
     SessionMetadataUpdated {
         agent: Option<String>,
         model: Option<String>,
+        /// Outer `Some` means a model object was present; inner `None`
+        /// authoritatively clears a previously selected connection.
+        connection_id: Option<Option<String>>,
         thinking: Option<Option<String>>,
     },
     ExecutionUpdated(Value),
@@ -377,11 +380,12 @@ pub fn classify_session_event(
                     // active resurrected completed children and made the
                     // aggregate footer blink. A newly-created child is active
                     // by definition until its explicit status edge arrives.
-                    let status = if event_type == neoism_agent_core::event_type::SESSION_CREATED {
-                        Some(session_runtime_status(info))
-                    } else {
-                        explicit_session_runtime_status(info)
-                    };
+                    let status =
+                        if event_type == neoism_agent_core::event_type::SESSION_CREATED {
+                            Some(session_runtime_status(info))
+                        } else {
+                            explicit_session_runtime_status(info)
+                        };
                     let title = info
                         .get("title")
                         .and_then(Value::as_str)
@@ -412,8 +416,11 @@ pub fn classify_session_event(
                 let model_metadata = session_model_metadata(info);
                 out.push(SessionEventUpdate::SessionMetadataUpdated {
                     agent: session_agent_label(info),
-                    model: model_metadata.as_ref().map(|(model, _)| model.clone()),
-                    thinking: model_metadata.map(|(_, thinking)| thinking),
+                    model: model_metadata.as_ref().map(|(model, _, _)| model.clone()),
+                    connection_id: model_metadata
+                        .as_ref()
+                        .map(|(_, connection_id, _)| connection_id.clone()),
+                    thinking: model_metadata.map(|(_, _, thinking)| thinking),
                 });
                 // Main session updated — surface its persistent goal so the
                 // side panel's Goal section reflects set / change / pause /
@@ -860,9 +867,7 @@ pub fn classify_session_event(
                     .or_else(|| properties.get("executionId"))
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                family_revision: properties
-                    .get("familyRevision")
-                    .and_then(Value::as_u64),
+                family_revision: properties.get("familyRevision").and_then(Value::as_u64),
             }]
         }
         event_type::SESSION_EXECUTION_UPDATED => {
@@ -1286,7 +1291,9 @@ pub fn session_agent_label(info: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn session_model_metadata(info: &Value) -> Option<(String, Option<String>)> {
+fn session_model_metadata(
+    info: &Value,
+) -> Option<(String, Option<String>, Option<String>)> {
     let model = info.get("model")?;
     let provider = model
         .get("providerId")
@@ -1304,7 +1311,13 @@ fn session_model_metadata(info: &Value) -> Option<(String, Option<String>)> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    Some((format!("{provider}/{id}"), thinking))
+    let connection_id = model
+        .get("connectionId")
+        .or_else(|| model.get("connection_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Some((format!("{provider}/{id}"), connection_id, thinking))
 }
 
 fn find_crlf(bytes: &[u8]) -> Option<usize> {
@@ -1334,7 +1347,10 @@ mod tests {
             &mut SessionEventUpdateState::default(),
         );
         assert_eq!(updates.len(), 2);
-        assert!(matches!(updates[0], SessionEventUpdate::ExecutionUpdated(_)));
+        assert!(matches!(
+            updates[0],
+            SessionEventUpdate::ExecutionUpdated(_)
+        ));
         assert!(matches!(updates[1], SessionEventUpdate::RuntimeUpdated(_)));
     }
 
@@ -1940,6 +1956,7 @@ mod tests {
                         "model": {
                             "providerId": "openai",
                             "id": "gpt-5.6",
+                            "connectionId": "conn-work",
                             "variant": "high"
                         },
                         "time": { "updated": 1_000 }
@@ -1952,9 +1969,10 @@ mod tests {
 
         assert!(updates.iter().any(|update| matches!(
             update,
-            SessionEventUpdate::SessionMetadataUpdated { agent, model, thinking }
+            SessionEventUpdate::SessionMetadataUpdated { agent, model, connection_id, thinking }
                 if agent.as_deref() == Some("plan")
                     && model.as_deref() == Some("openai/gpt-5.6")
+                    && connection_id.as_ref().and_then(|value| value.as_deref()) == Some("conn-work")
                     && thinking.as_ref().and_then(|value| value.as_deref()) == Some("high")
         )));
 

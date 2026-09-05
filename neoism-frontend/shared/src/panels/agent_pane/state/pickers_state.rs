@@ -58,7 +58,10 @@ impl NeoismAgentPane {
         let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) else {
             return;
         };
-        if !matches!(kind, NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions) {
+        if !matches!(
+            kind,
+            NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
+        ) {
             return;
         }
         self.open_mcp_picker();
@@ -250,25 +253,61 @@ impl NeoismAgentPane {
         if let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) {
             match kind {
                 NeoismAgentPickerKind::ConnectSecret => {
-                    if self.connect.as_ref().and_then(|flow| flow.provider_id()).is_some() { self.open_connect_auth_methods(); return; }
+                    if self
+                        .connect
+                        .as_ref()
+                        .and_then(|flow| flow.provider_id())
+                        .is_some()
+                    {
+                        self.open_connect_auth_methods();
+                        return;
+                    }
                     self.close_connect();
                     return;
                 }
-                NeoismAgentPickerKind::ConnectLabel | NeoismAgentPickerKind::ConnectAccountActions | NeoismAgentPickerKind::ConnectConfirm => {
-                    if let Some((provider_id, connections)) = self.connect.as_ref().and_then(|flow| flow.provider_id().map(|id| (id, flow.connections.clone()))) {
-                        self.open_account_picker(NeoismAgentPickerKind::ConnectAccount, &provider_id, &connections);
+                NeoismAgentPickerKind::ConnectLabel
+                | NeoismAgentPickerKind::ConnectAccountActions
+                | NeoismAgentPickerKind::ConnectConfirm => {
+                    if let Some((provider_id, connections)) =
+                        self.connect.as_ref().and_then(|flow| {
+                            flow.provider_id().map(|id| (id, flow.connections.clone()))
+                        })
+                    {
+                        self.open_account_picker(
+                            NeoismAgentPickerKind::ConnectAccount,
+                            &provider_id,
+                            &connections,
+                        );
                         return;
                     }
                 }
-                NeoismAgentPickerKind::ConnectAccount => { self.reopen_connect_provider_picker(); return; }
-                NeoismAgentPickerKind::ModelAccount => { self.close_connect(); self.pending_account_model = None; return; }
+                NeoismAgentPickerKind::ConnectAccount => {
+                    self.reopen_connect_provider_picker();
+                    return;
+                }
+                NeoismAgentPickerKind::ModelAccount => {
+                    self.close_connect();
+                    self.pending_account_model = None;
+                    return;
+                }
                 NeoismAgentPickerKind::ConnectAuth => {
-                    if let Some((provider_id, connections)) = self.connect.as_ref().and_then(|flow| flow.provider_id().map(|id| (id, flow.connections.clone()))) {
-                        if let Some(flow) = self.connect.as_mut() { flow.reset_account_addition(); }
-                        self.open_account_picker(NeoismAgentPickerKind::ConnectAccount, &provider_id, &connections);
+                    if let Some((provider_id, connections)) =
+                        self.connect.as_ref().and_then(|flow| {
+                            flow.provider_id().map(|id| (id, flow.connections.clone()))
+                        })
+                    {
+                        if let Some(flow) = self.connect.as_mut() {
+                            flow.reset_account_addition();
+                        }
+                        self.open_account_picker(
+                            NeoismAgentPickerKind::ConnectAccount,
+                            &provider_id,
+                            &connections,
+                        );
                         return;
                     }
-                    self.reopen_connect_provider_picker(); return;
+                    self.reopen_connect_provider_picker();
+                    return;
                 }
                 NeoismAgentPickerKind::Connect => {
                     self.close_connect();
@@ -395,6 +434,12 @@ impl NeoismAgentPane {
         self.picker
             .as_mut()
             .is_some_and(|picker| picker.scroll_pixels(delta_pixels))
+    }
+
+    pub fn scroll_picker_touch_pixels(&mut self, delta_pixels: f32) -> bool {
+        self.picker
+            .as_mut()
+            .is_some_and(|picker| picker.scroll_touch_pixels(delta_pixels))
     }
 
     pub fn picker_contains_point(&self, x: f32, y: f32) -> bool {

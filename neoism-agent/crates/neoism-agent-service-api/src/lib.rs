@@ -5,10 +5,10 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::future::Future;
-use std::pin::Pin;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -56,7 +56,10 @@ pub struct WorkspaceSearchRequestControl {
 
 impl Default for WorkspaceSearchRequestControl {
     fn default() -> Self {
-        Self { timeout_ms: 45_000, cancel: None }
+        Self {
+            timeout_ms: 45_000,
+            cancel: None,
+        }
     }
 }
 
@@ -168,9 +171,18 @@ pub trait WorkspaceSearchRootPin: Send + Sync {
 /// contains no concrete index, query-parser, watcher, or transport types.
 pub trait WorkspaceSearchService: Send + Sync {
     fn warm(&self, root: &Path) -> Result<(), ServiceError>;
-    fn pin_root(&self, root: &Path) -> Result<Arc<dyn WorkspaceSearchRootPin>, ServiceError>;
-    fn find_files(&self, request: &FindFilesRequest) -> Result<FindFilesResult, ServiceError>;
-    fn grep(&self, request: &GrepWorkspaceRequest) -> Result<GrepWorkspaceResult, ServiceError>;
+    fn pin_root(
+        &self,
+        root: &Path,
+    ) -> Result<Arc<dyn WorkspaceSearchRootPin>, ServiceError>;
+    fn find_files(
+        &self,
+        request: &FindFilesRequest,
+    ) -> Result<FindFilesResult, ServiceError>;
+    fn grep(
+        &self,
+        request: &GrepWorkspaceRequest,
+    ) -> Result<GrepWorkspaceResult, ServiceError>;
     fn search_directories(
         &self,
         request: &DirectorySearchRequest,
@@ -185,7 +197,9 @@ pub struct ConfigSnapshotRequest {
 
 impl ConfigSnapshotRequest {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
-        Self { workspace: workspace.into() }
+        Self {
+            workspace: workspace.into(),
+        }
     }
 }
 
@@ -246,7 +260,10 @@ pub struct ConfigUpdateRequest {
 /// by synchronous LSP/tool paths; writes use the crate's boxed-future service
 /// convention so remote/deployment-backed sources remain possible.
 pub trait ConfigSourceService: Send + Sync {
-    fn snapshot(&self, request: &ConfigSnapshotRequest) -> Result<ConfigSnapshot, ServiceError>;
+    fn snapshot(
+        &self,
+        request: &ConfigSnapshotRequest,
+    ) -> Result<ConfigSnapshot, ServiceError>;
     fn update<'a>(
         &'a self,
         request: &'a ConfigUpdateRequest,
@@ -324,7 +341,11 @@ impl fmt::Display for ExecutableError {
         match self {
             Self::EmptyProgram => formatter.write_str("executable program is empty"),
             Self::NotFound { program } => {
-                write!(formatter, "executable `{}` was not found", program.to_string_lossy())
+                write!(
+                    formatter,
+                    "executable `{}` was not found",
+                    program.to_string_lossy()
+                )
             }
         }
     }
@@ -333,7 +354,10 @@ impl fmt::Display for ExecutableError {
 impl Error for ExecutableError {}
 
 pub trait ExecutableService: Send + Sync {
-    fn resolve(&self, request: &ExecutableRequest) -> Result<ExecutableResult, ExecutableError>;
+    fn resolve(
+        &self,
+        request: &ExecutableRequest,
+    ) -> Result<ExecutableResult, ExecutableError>;
 }
 
 /// Immutable host-owned language-server capability registry. Product adapters
@@ -351,7 +375,10 @@ pub struct LanguageCapabilitySnapshot {
 
 impl LanguageCapabilitySnapshot {
     pub fn empty() -> Self {
-        Self { generation: 0, languages: Arc::from([]) }
+        Self {
+            generation: 0,
+            languages: Arc::from([]),
+        }
     }
 }
 
@@ -375,7 +402,9 @@ pub struct LanguageCatalogPackage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LanguageServerTransport {
-    Stdio { command: Vec<String> },
+    Stdio {
+        command: Vec<String>,
+    },
     Tcp {
         default_host: String,
         default_port: u16,
@@ -421,7 +450,9 @@ pub struct StaticLanguageCapabilityService {
 
 impl StaticLanguageCapabilityService {
     pub fn new(snapshot: LanguageCapabilitySnapshot) -> Self {
-        Self { snapshot: Arc::new(snapshot) }
+        Self {
+            snapshot: Arc::new(snapshot),
+        }
     }
 
     pub fn empty() -> Self {
@@ -430,11 +461,15 @@ impl StaticLanguageCapabilityService {
 }
 
 impl Default for StaticLanguageCapabilityService {
-    fn default() -> Self { Self::empty() }
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 impl LanguageCapabilityService for StaticLanguageCapabilityService {
-    fn snapshot(&self) -> Arc<LanguageCapabilitySnapshot> { self.snapshot.clone() }
+    fn snapshot(&self) -> Arc<LanguageCapabilitySnapshot> {
+        self.snapshot.clone()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -534,8 +569,14 @@ pub struct BuiltinMcpPrompt {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BuiltinMcpContent {
-    Text { text: String, annotations: Option<Value> },
-    Resource { resource: Value, annotations: Option<Value> },
+    Text {
+        text: String,
+        annotations: Option<Value>,
+    },
+    Resource {
+        resource: Value,
+        annotations: Option<Value>,
+    },
     ResourceLink {
         uri: String,
         name: String,
@@ -593,7 +634,10 @@ pub struct MemoryRequest {
 
 impl MemoryRequest {
     pub fn new(working_directory: impl Into<PathBuf>) -> Self {
-        Self { working_directory: working_directory.into(), scope_id: None }
+        Self {
+            working_directory: working_directory.into(),
+            scope_id: None,
+        }
     }
 
     pub fn with_scope(mut self, scope_id: impl Into<String>) -> Self {
@@ -647,11 +691,32 @@ pub struct SemanticMemoryHit {
 pub trait SemanticMemoryIndex: Send + Sync {
     fn available(&self) -> bool;
     fn model(&self) -> Option<String>;
-    fn embed<'a>(&'a self, inputs: &'a [String]) -> ServiceFuture<'a, Result<Vec<Vec<f32>>, ServiceError>>;
-    fn hashes<'a>(&'a self, root_key: &'a str, model: &'a str) -> ServiceFuture<'a, Result<Vec<(String, String)>, ServiceError>>;
-    fn upsert<'a>(&'a self, key: &'a str, root_key: &'a str, content_hash: &'a str, model: &'a str, updated: i64, vector: &'a [f32]) -> ServiceFuture<'a, Result<(), ServiceError>>;
+    fn embed<'a>(
+        &'a self,
+        inputs: &'a [String],
+    ) -> ServiceFuture<'a, Result<Vec<Vec<f32>>, ServiceError>>;
+    fn hashes<'a>(
+        &'a self,
+        root_key: &'a str,
+        model: &'a str,
+    ) -> ServiceFuture<'a, Result<Vec<(String, String)>, ServiceError>>;
+    fn upsert<'a>(
+        &'a self,
+        key: &'a str,
+        root_key: &'a str,
+        content_hash: &'a str,
+        model: &'a str,
+        updated: i64,
+        vector: &'a [f32],
+    ) -> ServiceFuture<'a, Result<(), ServiceError>>;
     fn delete<'a>(&'a self, key: &'a str) -> ServiceFuture<'a, Result<(), ServiceError>>;
-    fn search<'a>(&'a self, root_keys: &'a [String], query_vector: &'a [f32], model: &'a str, limit: usize) -> ServiceFuture<'a, Result<Vec<SemanticMemoryHit>, ServiceError>>;
+    fn search<'a>(
+        &'a self,
+        root_keys: &'a [String],
+        query_vector: &'a [f32],
+        model: &'a str,
+        limit: usize,
+    ) -> ServiceFuture<'a, Result<Vec<SemanticMemoryHit>, ServiceError>>;
 }
 
 /// Optional durable-memory capability. Generic Agent deployments inject none;
@@ -660,11 +725,29 @@ pub trait MemoryService: Send + Sync {
     fn scope_choices(&self) -> Vec<ScopeChoice>;
     fn default_scope_id(&self) -> &str;
     fn init(&self, request: &MemoryRequest) -> Result<Vec<MemoryLocation>, ServiceError>;
-    fn list(&self, request: &MemoryRequest, limit: usize) -> Result<Vec<MemoryEntry>, ServiceError>;
-    fn read(&self, request: &MemoryRequest, path: &str) -> Result<MemoryEntry, ServiceError>;
+    fn list(
+        &self,
+        request: &MemoryRequest,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, ServiceError>;
+    fn read(
+        &self,
+        request: &MemoryRequest,
+        path: &str,
+    ) -> Result<MemoryEntry, ServiceError>;
     fn write(&self, request: &MemoryWriteRequest) -> Result<MemoryEntry, ServiceError>;
-    fn search(&self, request: &MemoryRequest, query: &str, limit: usize) -> Result<Vec<MemoryEntry>, ServiceError>;
-    fn recall<'a>(&'a self, request: &'a MemoryRequest, query: &'a str, limit: usize) -> ServiceFuture<'a, Result<Vec<MemoryEntry>, ServiceError>>;
+    fn search(
+        &self,
+        request: &MemoryRequest,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, ServiceError>;
+    fn recall<'a>(
+        &'a self,
+        request: &'a MemoryRequest,
+        query: &'a str,
+        limit: usize,
+    ) -> ServiceFuture<'a, Result<Vec<MemoryEntry>, ServiceError>>;
     fn context_fragments(&self, working_directory: &Path) -> Vec<SystemContextFragment>;
     fn set_semantic_index(&self, index: Option<Arc<dyn SemanticMemoryIndex>>);
 }
@@ -689,8 +772,10 @@ impl AgentServices {
         workspace_search: Arc<dyn WorkspaceSearchService>,
     ) -> Self {
         let config = Arc::new(StandardConfigSourceService::from_environment());
-        let workspace_management = Arc::new(StandaloneWorkspaceManagementService::from_environment());
-        let provider_credentials = Arc::new(LocalProviderCredentialStore::from_environment());
+        let workspace_management =
+            Arc::new(StandaloneWorkspaceManagementService::from_environment());
+        let provider_credentials =
+            Arc::new(LocalProviderCredentialStore::from_environment());
         let mcp_credentials = Arc::new(LocalMcpCredentialStore::from_environment());
         Self {
             executables,
@@ -762,7 +847,10 @@ impl AgentServices {
         self
     }
 
-    pub fn context_fragments(&self, working_directory: &Path) -> Vec<SystemContextFragment> {
+    pub fn context_fragments(
+        &self,
+        working_directory: &Path,
+    ) -> Vec<SystemContextFragment> {
         self.memory
             .as_ref()
             .map(|memory| memory.context_fragments(working_directory))
@@ -785,7 +873,6 @@ impl AgentServices {
             .iter()
             .map(|(id, service)| (id.as_str(), service))
     }
-
 }
 
 pub const STANDARD_AGENT_CONFIG_FILENAME: &str = "agent.json";
@@ -801,13 +888,18 @@ pub struct StandardConfigSourceService {
 
 impl StandardConfigSourceService {
     pub fn new(user_root: impl Into<PathBuf>) -> Self {
-        Self { user_root: user_root.into(), memory_layers: Vec::new() }
+        Self {
+            user_root: user_root.into(),
+            memory_layers: Vec::new(),
+        }
     }
 
     pub fn from_environment() -> Self {
         let root = env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .or_else(|| {
+                env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+            })
             .unwrap_or_else(|| PathBuf::from(".config"))
             .join("agent");
         Self::new(root)
@@ -815,7 +907,11 @@ impl StandardConfigSourceService {
 
     /// Deployment callers can inject explicit read-only layers without any
     /// process-global environment behavior in the Agent server.
-    pub fn with_memory_layer(mut self, source_id: impl Into<String>, document: Value) -> Self {
+    pub fn with_memory_layer(
+        mut self,
+        source_id: impl Into<String>,
+        document: Value,
+    ) -> Self {
         self.memory_layers.push((source_id.into(), document));
         self
     }
@@ -827,7 +923,10 @@ impl StandardConfigSourceService {
     fn source_path(&self, workspace: &Path, source_id: &str) -> Option<PathBuf> {
         match source_id {
             "standard:user" => Some(self.user_root.join(STANDARD_AGENT_CONFIG_FILENAME)),
-            "standard:project" => Some(self.project_root(workspace).join(STANDARD_AGENT_CONFIG_FILENAME)),
+            "standard:project" => Some(
+                self.project_root(workspace)
+                    .join(STANDARD_AGENT_CONFIG_FILENAME),
+            ),
             _ => None,
         }
     }
@@ -838,21 +937,41 @@ impl StandardConfigSourceService {
         }
         let content = fs::read_to_string(path)?;
         serde_json::from_str(&content).map_err(|error| {
-            ServiceError::new(format!("failed to parse JSON config {}: {error}", path.display()))
+            ServiceError::new(format!(
+                "failed to parse JSON config {}: {error}",
+                path.display()
+            ))
         })
     }
 }
 
 impl ConfigSourceService for StandardConfigSourceService {
-    fn snapshot(&self, request: &ConfigSnapshotRequest) -> Result<ConfigSnapshot, ServiceError> {
+    fn snapshot(
+        &self,
+        request: &ConfigSnapshotRequest,
+    ) -> Result<ConfigSnapshot, ServiceError> {
         let workspace = absolute_workspace(&request.workspace);
         let project_root = self.project_root(&workspace);
         let mut layers = vec![
-            ConfigLayer { source_id: "standard:user".into(), document: Self::read_layer(&self.user_root.join(STANDARD_AGENT_CONFIG_FILENAME))?, writable: true },
-            ConfigLayer { source_id: "standard:project".into(), document: Self::read_layer(&project_root.join(STANDARD_AGENT_CONFIG_FILENAME))?, writable: true },
+            ConfigLayer {
+                source_id: "standard:user".into(),
+                document: Self::read_layer(
+                    &self.user_root.join(STANDARD_AGENT_CONFIG_FILENAME),
+                )?,
+                writable: true,
+            },
+            ConfigLayer {
+                source_id: "standard:project".into(),
+                document: Self::read_layer(
+                    &project_root.join(STANDARD_AGENT_CONFIG_FILENAME),
+                )?,
+                writable: true,
+            },
         ];
         layers.extend(self.memory_layers.iter().map(|(id, document)| ConfigLayer {
-            source_id: id.clone(), document: document.clone(), writable: false,
+            source_id: id.clone(),
+            document: document.clone(),
+            writable: false,
         }));
         let identity = snapshot_identity(&layers);
         Ok(ConfigSnapshot {
@@ -860,23 +979,50 @@ impl ConfigSourceService for StandardConfigSourceService {
             workspace,
             layers,
             discovery_roots: vec![
-                ConfigDiscoveryRoot { source_id: "standard:user-root".into(), path: self.user_root.clone() },
-                ConfigDiscoveryRoot { source_id: "standard:project-root".into(), path: project_root },
+                ConfigDiscoveryRoot {
+                    source_id: "standard:user-root".into(),
+                    path: self.user_root.clone(),
+                },
+                ConfigDiscoveryRoot {
+                    source_id: "standard:project-root".into(),
+                    path: project_root,
+                },
             ],
-            writable_target: ConfigWritableTarget { source_id: "standard:project".into(), label: "workspace Agent config".into() },
+            writable_target: ConfigWritableTarget {
+                source_id: "standard:project".into(),
+                label: "workspace Agent config".into(),
+            },
         })
     }
 
-    fn update<'a>(&'a self, request: &'a ConfigUpdateRequest) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+    fn update<'a>(
+        &'a self,
+        request: &'a ConfigUpdateRequest,
+    ) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
         Box::pin(async move {
             let workspace = absolute_workspace(&request.workspace);
-            let path = self.source_path(&workspace, &request.source_id)
-                .ok_or_else(|| ServiceError::new(format!("config source `{}` is not writable", request.source_id)))?;
+            let path = self
+                .source_path(&workspace, &request.source_id)
+                .ok_or_else(|| {
+                    ServiceError::new(format!(
+                        "config source `{}` is not writable",
+                        request.source_id
+                    ))
+                })?;
             let mut document = Self::read_layer(&path)?;
             apply_config_update(&mut document, &request.update)?;
-            if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
             let temp = path.with_extension("tmp");
-            fs::write(&temp, format!("{}\n", serde_json::to_string_pretty(&document).map_err(|error| ServiceError::new(error.to_string()))?))?;
+            fs::write(
+                &temp,
+                format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&document)
+                        .map_err(|error| ServiceError::new(error.to_string()))?
+                ),
+            )?;
             fs::rename(&temp, &path)?;
             self.snapshot(&ConfigSnapshotRequest::new(workspace))
         })
@@ -884,27 +1030,54 @@ impl ConfigSourceService for StandardConfigSourceService {
 }
 
 fn absolute_workspace(path: &Path) -> PathBuf {
-    if path.is_absolute() { path.to_path_buf() } else {
-        env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
     }
 }
 
 fn snapshot_identity(layers: &[ConfigLayer]) -> String {
-    layers.iter().map(|layer| format!("{}\0{}", layer.source_id, layer.document)).collect::<Vec<_>>().join("\0")
+    layers
+        .iter()
+        .map(|layer| format!("{}\0{}", layer.source_id, layer.document))
+        .collect::<Vec<_>>()
+        .join("\0")
 }
 
-fn apply_config_update(document: &mut Value, update: &ConfigUpdate) -> Result<(), ServiceError> {
+fn apply_config_update(
+    document: &mut Value,
+    update: &ConfigUpdate,
+) -> Result<(), ServiceError> {
     match update {
-        ConfigUpdate::ReplaceDocument { document: replacement } => *document = replacement.clone(),
+        ConfigUpdate::ReplaceDocument {
+            document: replacement,
+        } => *document = replacement.clone(),
         ConfigUpdate::SetValue { path, value } => {
-            if path.is_empty() { *document = value.clone(); return Ok(()); }
+            if path.is_empty() {
+                *document = value.clone();
+                return Ok(());
+            }
             let mut current = document;
             for component in &path[..path.len() - 1] {
-                if !current.is_object() { *current = Value::Object(Default::default()); }
-                current = current.as_object_mut().expect("object initialized").entry(component.clone()).or_insert_with(|| Value::Object(Default::default()));
+                if !current.is_object() {
+                    *current = Value::Object(Default::default());
+                }
+                current = current
+                    .as_object_mut()
+                    .expect("object initialized")
+                    .entry(component.clone())
+                    .or_insert_with(|| Value::Object(Default::default()));
             }
-            if !current.is_object() { *current = Value::Object(Default::default()); }
-            current.as_object_mut().expect("object initialized").insert(path.last().expect("non-empty").clone(), value.clone());
+            if !current.is_object() {
+                *current = Value::Object(Default::default());
+            }
+            current
+                .as_object_mut()
+                .expect("object initialized")
+                .insert(path.last().expect("non-empty").clone(), value.clone());
         }
     }
     Ok(())
@@ -916,28 +1089,49 @@ mod config_tests {
 
     #[test]
     fn standalone_uses_one_json_filename_and_project_root() {
-        let root = env::temp_dir().join(format!("agent-source-api-{}", std::process::id()));
+        let root =
+            env::temp_dir().join(format!("agent-source-api-{}", std::process::id()));
         let user = root.join("user");
         let workspace = root.join("workspace");
         fs::create_dir_all(workspace.join(STANDARD_AGENT_PROJECT_DIRECTORY)).unwrap();
-        fs::write(workspace.join(STANDARD_AGENT_PROJECT_DIRECTORY).join(STANDARD_AGENT_CONFIG_FILENAME), r#"{"model":"provider/project"}"#).unwrap();
+        fs::write(
+            workspace
+                .join(STANDARD_AGENT_PROJECT_DIRECTORY)
+                .join(STANDARD_AGENT_CONFIG_FILENAME),
+            r#"{"model":"provider/project"}"#,
+        )
+        .unwrap();
         fs::write(workspace.join("config.json"), r#"{"model":"ignored/gui"}"#).unwrap();
         let source = StandardConfigSourceService::new(&user);
-        let snapshot = source.snapshot(&ConfigSnapshotRequest::new(&workspace)).unwrap();
+        let snapshot = source
+            .snapshot(&ConfigSnapshotRequest::new(&workspace))
+            .unwrap();
         assert_eq!(snapshot.layers[1].document["model"], "provider/project");
-        assert_eq!(snapshot.discovery_roots[1].path, workspace.join(STANDARD_AGENT_PROJECT_DIRECTORY));
+        assert_eq!(
+            snapshot.discovery_roots[1].path,
+            workspace.join(STANDARD_AGENT_PROJECT_DIRECTORY)
+        );
         assert_eq!(snapshot.writable_target.source_id, "standard:project");
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn standalone_rejects_jsonc() {
-        let root = env::temp_dir().join(format!("agent-source-json-{}", std::process::id()));
+        let root =
+            env::temp_dir().join(format!("agent-source-json-{}", std::process::id()));
         let workspace = root.join("workspace");
         fs::create_dir_all(workspace.join(STANDARD_AGENT_PROJECT_DIRECTORY)).unwrap();
-        fs::write(workspace.join(STANDARD_AGENT_PROJECT_DIRECTORY).join(STANDARD_AGENT_CONFIG_FILENAME), "{ // no JSONC\n }").unwrap();
+        fs::write(
+            workspace
+                .join(STANDARD_AGENT_PROJECT_DIRECTORY)
+                .join(STANDARD_AGENT_CONFIG_FILENAME),
+            "{ // no JSONC\n }",
+        )
+        .unwrap();
         let source = StandardConfigSourceService::new(root.join("user"));
-        assert!(source.snapshot(&ConfigSnapshotRequest::new(&workspace)).is_err());
+        assert!(source
+            .snapshot(&ConfigSnapshotRequest::new(&workspace))
+            .is_err());
         let _ = fs::remove_dir_all(root);
     }
 }
@@ -946,7 +1140,10 @@ mod config_tests {
 pub struct StandardExecutableService;
 
 impl ExecutableService for StandardExecutableService {
-    fn resolve(&self, request: &ExecutableRequest) -> Result<ExecutableResult, ExecutableError> {
+    fn resolve(
+        &self,
+        request: &ExecutableRequest,
+    ) -> Result<ExecutableResult, ExecutableError> {
         if request.program.is_empty() {
             return Err(ExecutableError::EmptyProgram);
         }
@@ -971,7 +1168,8 @@ impl ExecutableService for StandardExecutableService {
             }
         }
         if let Some(path) = env::var_os("PATH").and_then(|value| {
-            env::split_paths(&value).find_map(|directory| resolve_candidate(directory.join(program)))
+            env::split_paths(&value)
+                .find_map(|directory| resolve_candidate(directory.join(program)))
         }) {
             return Ok(ExecutableResult {
                 path,
@@ -1053,7 +1251,10 @@ mod tests {
         let root = env::temp_dir().join(format!(
             "neoism-agent-executable-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join(name);
@@ -1070,7 +1271,10 @@ mod tests {
     fn resolves_explicit_executable() {
         let path = executable("server");
         let result = StandardExecutableService
-            .resolve(&ExecutableRequest::new(&path, ExecutablePurpose::LanguageServer))
+            .resolve(&ExecutableRequest::new(
+                &path,
+                ExecutablePurpose::LanguageServer,
+            ))
             .unwrap();
         assert_eq!(result.path, path);
         assert_eq!(result.source, ExecutableSource::ExplicitPath);

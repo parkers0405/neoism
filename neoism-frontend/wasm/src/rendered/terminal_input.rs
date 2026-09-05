@@ -54,6 +54,12 @@ const SCROLL_DIVIDER: f64 = 1.0;
 
 #[wasm_bindgen]
 impl ChromeBridge {
+    pub fn terminal_change_directory_payload(&self, path: &str, shell: &str) -> Vec<u8> {
+        neoism_ui::TerminalShellKind::detect(shell)
+            .change_directory_payload(path)
+            .unwrap_or_default()
+    }
+
     pub fn set_terminal_input(&mut self, text: &str) {
         self.replace_terminal_block_input(text);
         self.sync_terminal_input_snapshot();
@@ -69,7 +75,7 @@ impl ChromeBridge {
     }
 
     pub fn terminal_command_composer_visible(&self) -> bool {
-        self.chrome.command_composer.is_visible()
+        self.chrome.terminal_composer_eligible()
     }
 
     /// Whether the next printable keystroke belongs to the composer
@@ -83,6 +89,7 @@ impl ChromeBridge {
     pub fn terminal_should_capture_input(&self) -> bool {
         if !self.chrome.is_terminal_tab_active()
             || self.chrome.is_neoism_agent_tab_active()
+            || self.chrome.generic_keyboard_overlay_active()
         {
             return false;
         }
@@ -403,7 +410,7 @@ impl ChromeBridge {
         // destined for the foreground process, not a new shell command.
         // Recording in those states creates a spurious Running block
         // and shows the rainbow spinner inside htop / codex / claude.
-        if !self.chrome.command_composer.is_visible() {
+        if !self.chrome.terminal_composer_eligible() {
             return;
         }
         self.replace_terminal_block_input(command);
@@ -584,25 +591,51 @@ impl ChromeBridge {
     /// splash overlay's menu buttons. Returns `true` when a menu
     /// action fired so the JS host can swallow the click.
     pub fn splash_click(&mut self, x: f32, y: f32) -> bool {
-        let Some(idx) = self.chrome.splash_overlay.menu_hit(x, y) else {
+        let Some(action) = self.chrome.splash_overlay.menu_hit(x, y) else {
             return false;
         };
-        match idx {
-            0 => {
+        use neoism_ui::panels::splash_overlay::SplashMenuAction;
+        match action {
+            SplashMenuAction::OpenFileTree => {
                 self.chrome.show_file_tree();
             }
-            1 => {
+            SplashMenuAction::OpenNotes => {
                 self.chrome.toggle_notes_sidebar();
             }
-            2 => {
+            SplashMenuAction::OpenAgent => {
                 self.queue_agent_tab_open();
             }
-            3 => self.chrome.finder.set_enabled(true),
-            4 => self.chrome.command_palette.set_enabled(true),
-            _ => return false,
+            SplashMenuAction::Search => self.chrome.finder.set_enabled(true),
+            SplashMenuAction::OpenCommandPalette => {
+                self.chrome.command_palette.set_enabled(true)
+            }
+            SplashMenuAction::NewTerminal => {
+                self.pending_palette_intents.push(PaletteIntent::Action {
+                    action: "TabCreate",
+                })
+            }
+            SplashMenuAction::ChangeDirectory => {
+                self.pending_palette_intents.push(PaletteIntent::Action {
+                    action: "OpenTerminalDirectoryPalette",
+                })
+            }
         }
         self.relayout_chrome();
         true
+    }
+
+    /// Typed splash hit query for mobile intent classification. Empty means
+    /// the point is background/gap/below rows (and is deliberately inert).
+    pub fn splash_action_at(&self, x: f32, y: f32) -> String {
+        self.chrome
+            .splash_overlay
+            .menu_hit(x, y)
+            .map(|action| action.as_str().to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn splash_active(&self) -> bool {
+        self.chrome.splash_overlay.is_active()
     }
 
     /// Update the splash overlay's hover cursor for paint-time
@@ -800,6 +833,26 @@ impl ChromeBridge {
         TERM_INPUT_HANDLED
     }
 
+    /// Direct touch form of terminal wheel routing. The desktop wheel
+    /// multiplier is intentionally cancelled so one CSS-pixel finger motion
+    /// becomes one terminal visual pixel; TerminalScroll retains the bounded
+    /// sub-row residual without any animation clock.
+    pub fn terminal_touch_scroll(
+        &mut self,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> u32 {
+        self.terminal_wheel(
+            x,
+            y,
+            delta_x / SCROLL_MULTIPLIER as f32,
+            delta_y / SCROLL_MULTIPLIER as f32,
+            false,
+        )
+    }
+
     /// Shift+PageUp / Shift+PageDown scrollback paging
     /// (defaults.rs:37-38, `~BindingMode::ALT_SCREEN`). Returns false
     /// on the alt screen so the host falls back to the PTY escape.
@@ -934,6 +987,43 @@ impl ChromeBridge {
         }
         self.rendered.pointer.selecting = true;
         TERM_INPUT_HANDLED | TERM_INPUT_SELECTING
+    }
+
+    /// Mobile hard hold selects a semantic terminal word even while a TUI has
+    /// mouse reporting enabled. This bypasses link activation and paints via
+    /// the existing absolute-Line terminal selection range.
+    pub fn terminal_select_word_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.terminal_surface_active() || !self.terminal_rect_contains(x, y) {
+            return false;
+        }
+        let Some((pos, side)) = self.terminal_grid_pos_at(x, y, false) else {
+            return false;
+        };
+        self.terminal_clear_selection_state();
+        self.terminal_start_selection(SelectionType::Semantic, pos, side);
+        self.rendered.pointer.selecting = true;
+        self.rendered.pointer.left_pressed = true;
+        self.rendered.selection_range.is_some()
+    }
+
+    pub fn terminal_extend_word_selection_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.rendered.pointer.selecting || !self.terminal_surface_active() {
+            return false;
+        }
+        let Some((pos, side)) = self.terminal_grid_pos_at(x, y, true) else {
+            return false;
+        };
+        self.rendered.pointer.last_x = x;
+        self.rendered.pointer.last_y = y;
+        self.terminal_update_selection_at(pos, side);
+        true
+    }
+
+    pub fn terminal_end_word_selection(&mut self) -> bool {
+        let active = self.rendered.pointer.selecting;
+        self.rendered.pointer.selecting = false;
+        self.rendered.pointer.left_pressed = false;
+        active
     }
 
     /// Pointer move. Drives the in-progress selection drag (clamped

@@ -19,10 +19,17 @@ fn auth_store(
     state: &AppState,
     claims: Option<&crate::caller::CallerClaims>,
 ) -> Result<mcp_auth::McpAuthStore, ApiError> {
-    let (scope, hosted) = claims.map(|claims| (
-        neoism_agent_service_api::CredentialScope { tenant_id: claims.tenant_id.clone(), workspace_id: claims.workspace_id.clone() },
-        claims.hosted,
-    )).unwrap_or_else(|| (neoism_agent_service_api::CredentialScope::local(), false));
+    let (scope, hosted) = claims
+        .map(|claims| {
+            (
+                neoism_agent_service_api::CredentialScope {
+                    tenant_id: claims.tenant_id.clone(),
+                    workspace_id: claims.workspace_id.clone(),
+                },
+                claims.hosted,
+            )
+        })
+        .unwrap_or_else(|| (neoism_agent_service_api::CredentialScope::local(), false));
     mcp_auth::McpAuthStore::from_services(state.services(), scope, hosted)
         .map_err(|error| ApiError::forbidden(error.to_string()))
 }
@@ -59,12 +66,9 @@ pub(crate) async fn mcp_status(
     let directory = resolve_directory(query.directory, &headers);
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
-    Ok(Json(mcp::status_with_snapshot(
-        &directory,
-        &store,
-        &state,
-        &plugins,
-    ).await))
+    Ok(Json(
+        mcp::status_with_snapshot(&directory, &store, &state, &plugins).await,
+    ))
 }
 
 pub(crate) async fn mcp_catalog(
@@ -76,12 +80,9 @@ pub(crate) async fn mcp_catalog(
     let directory = resolve_directory(query.directory, &headers);
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
-    Ok(Json(mcp::catalog_with_snapshot(
-        &directory,
-        &store,
-        &state,
-        &plugins,
-    ).await))
+    Ok(Json(
+        mcp::catalog_with_snapshot(&directory, &store, &state, &plugins).await,
+    ))
 }
 
 pub(crate) async fn mcp_add(
@@ -91,11 +92,8 @@ pub(crate) async fn mcp_add(
 ) -> Result<Json<BTreeMap<String, McpStatus>>, ApiError> {
     let mut status = BTreeMap::new();
     let store = auth_store(&state, claims.as_deref())?;
-    let entry_status = mcp::status_for_entry(
-        &request.name,
-        &request.config,
-        &store,
-    ).await;
+    let entry_status =
+        mcp::status_for_entry(&request.name, &request.config, &store).await;
     status.insert(request.name, entry_status);
     Ok(Json(status))
 }
@@ -109,22 +107,26 @@ pub(crate) async fn mcp_config_patch(
     Json(request): Json<McpConfigPatch>,
 ) -> Result<Json<McpCatalogEntry>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    let builtin_default = state.services().builtin_mcp(&name)
+    let builtin_default = state
+        .services()
+        .builtin_mcp(&name)
         .map(|_| crate::config::builtin_mcp_config(&name));
-    crate::config::set_mcp_enabled_with_default(state.services(), &directory, &name, request.enabled, builtin_default)
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    crate::config::set_mcp_enabled_with_default(
+        state.services(),
+        &directory,
+        &name,
+        request.enabled,
+        builtin_default,
+    )
+    .await
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if !request.enabled {
         let _ = mcp::disconnect(&state, &directory, &name).await;
     }
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
-    mcp::catalog_with_snapshot(
-        &directory,
-        &store,
-        &state,
-        &plugins,
-    ).await
+    mcp::catalog_with_snapshot(&directory, &store, &state, &plugins)
+        .await
         .remove(&name)
         .map(Json)
         .ok_or_else(|| {
@@ -143,12 +145,7 @@ pub(crate) async fn mcp_auth_start(
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
-        mcp::auth_start_with_config(
-            &plugins.config().mcp,
-            &directory,
-            &name,
-            &store,
-        )
+        mcp::auth_start_with_config(&plugins.config().mcp, &directory, &name, &store)
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
@@ -187,13 +184,25 @@ pub(crate) async fn mcp_auth_callback_get(
     _headers: HeaderMap,
 ) -> Result<Html<String>, ApiError> {
     let request_store = auth_store(&state, claims.as_deref())?;
-    let callback_state = query.state.as_deref().ok_or_else(|| ApiError::bad_request("MCP OAuth callback state is required"))?;
+    let callback_state = query
+        .state
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("MCP OAuth callback state is required"))?;
     let attempt = if claims.is_some() {
         request_store.consume_attempt(callback_state, true).await?
     } else {
-        request_store.consume_unscoped_attempt(callback_state).await?
-    }.ok_or_else(|| ApiError::bad_request("MCP OAuth flow expired, was already used, or belongs to another scope"))?;
-    let auth_store = request_store.for_attempt(&attempt).map_err(|error| ApiError::forbidden(error.to_string()))?;
+        request_store
+            .consume_unscoped_attempt(callback_state)
+            .await?
+    }
+    .ok_or_else(|| {
+        ApiError::bad_request(
+            "MCP OAuth flow expired, was already used, or belongs to another scope",
+        )
+    })?;
+    let auth_store = request_store
+        .for_attempt(&attempt)
+        .map_err(|error| ApiError::forbidden(error.to_string()))?;
     let directory = query.directory.unwrap_or_else(|| attempt.directory.clone());
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     mcp::auth_callback_with_attempt(
@@ -221,11 +230,7 @@ pub(crate) async fn mcp_auth_authenticate(
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
-        mcp::authenticate_status_with_config(
-            &plugins.config().mcp,
-            &name,
-            &store,
-        )
+        mcp::authenticate_status_with_config(&plugins.config().mcp, &name, &store)
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
@@ -240,10 +245,20 @@ pub(crate) async fn mcp_auth_remove(
 ) -> Result<Json<McpAuthRemoveResponse>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
-    let remote = plugins.config().mcp.get(&name).ok_or_else(|| ApiError::bad_request(format!("MCP server {name} is not configured")))?;
-    let McpConfig::Remote { url, .. } = remote else { return Err(ApiError::bad_request(format!("MCP server {name} is not remote"))); };
-    auth_store(&state, claims.as_deref())?.remove_for_url(&name, url).await?;
-    let disconnected = mcp::disconnect(&state, &directory, &name).await.unwrap_or(false);
+    let remote = plugins.config().mcp.get(&name).ok_or_else(|| {
+        ApiError::bad_request(format!("MCP server {name} is not configured"))
+    })?;
+    let McpConfig::Remote { url, .. } = remote else {
+        return Err(ApiError::bad_request(format!(
+            "MCP server {name} is not remote"
+        )));
+    };
+    auth_store(&state, claims.as_deref())?
+        .remove_for_url(&name, url)
+        .await?;
+    let disconnected = mcp::disconnect(&state, &directory, &name)
+        .await
+        .unwrap_or(false);
     tracing::info!(
         mcp = %name,
         directory = %directory,
@@ -262,14 +277,9 @@ pub(crate) async fn mcp_connect(
 ) -> Result<Json<bool>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     let store = auth_store(&state, claims.as_deref())?;
-    let status = mcp::connect_with_state(
-        &directory,
-        &name,
-        &store,
-        state,
-    )
-    .await
-    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let status = mcp::connect_with_state(&directory, &name, &store, state)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     Ok(Json(matches!(status, McpStatus::Connected)))
 }
 
@@ -293,14 +303,9 @@ pub(crate) async fn mcp_tools(
     let directory = resolve_directory(query.directory, &headers);
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
-        mcp::tools_with_state(
-            &directory,
-            &name,
-            &store,
-            state,
-        )
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?,
+        mcp::tools_with_state(&directory, &name, &store, state)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
 }
 
@@ -316,12 +321,7 @@ pub(crate) async fn mcp_tool_call(
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
         mcp::call_tool_with_state(
-            &directory,
-            &name,
-            &tool_name,
-            arguments,
-            &store,
-            state,
+            &directory, &name, &tool_name, arguments, &store, state,
         )
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?,
@@ -338,14 +338,9 @@ pub(crate) async fn mcp_resources(
     let directory = resolve_directory(query.directory, &headers);
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
-        mcp::resources_with_state(
-            &directory,
-            &name,
-            &store,
-            state,
-        )
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?,
+        mcp::resources_with_state(&directory, &name, &store, state)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
 }
 
@@ -359,13 +354,8 @@ pub(crate) async fn mcp_prompts(
     let directory = resolve_directory(query.directory, &headers);
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
-        mcp::prompts_with_state(
-            &directory,
-            &name,
-            &store,
-            state,
-        )
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?,
+        mcp::prompts_with_state(&directory, &name, &store, state)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
 }

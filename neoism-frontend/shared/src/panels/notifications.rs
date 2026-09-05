@@ -10,6 +10,7 @@
 // unconditionally each frame from `Renderer::run` so `is_active()` only
 // governs whether we ask for redraws.
 
+use unicode_segmentation::UnicodeSegmentation;
 use web_time::Duration;
 use web_time::Instant;
 
@@ -67,6 +68,7 @@ struct Toast {
     created: Instant,
     paused_for: Duration,
     hover_started: Option<Instant>,
+    wrapped_lines: Vec<String>,
 }
 
 pub struct Notifications {
@@ -85,7 +87,13 @@ impl Notifications {
     }
 
     pub fn set_scale(&mut self, scale: f32) {
-        self.scale = scale.clamp(0.5, 3.0);
+        let scale = scale.clamp(0.5, 3.0);
+        if self.scale != scale {
+            self.scale = scale;
+            for toast in &mut self.toasts {
+                toast.wrapped_lines.clear();
+            }
+        }
     }
 
     /// Push a fresh toast. Older toasts past MAX_VISIBLE are dropped
@@ -119,6 +127,7 @@ impl Notifications {
             created: now,
             paused_for: Duration::ZERO,
             hover_started: None,
+            wrapped_lines: Vec::new(),
         });
         if self.toasts.len() > MAX_VISIBLE {
             let drop = self.toasts.len() - MAX_VISIBLE;
@@ -213,8 +222,15 @@ impl Notifications {
         for (idx, toast) in self.toasts.iter().enumerate() {
             // Height varies per toast now that long messages wrap — use the
             // same wrap the renderer does so hover/hit-testing lines up.
-            let lines = wrap_message(&toast.message, available_text_w, font_size);
-            let toast_h = toast_height(lines.len(), font_size, pad_y);
+            let line_count = if toast.wrapped_lines.is_empty() {
+                wrap_message_measured(&toast.message, available_text_w, |text| {
+                    text.graphemes(true).count() as f32 * font_size * 0.6
+                })
+                .len()
+            } else {
+                toast.wrapped_lines.len()
+            };
+            let toast_h = toast_height(line_count, font_size, pad_y);
             // Fully-faded toasts are skipped WITHOUT advancing `y`, matching
             // the renderer (which `continue`s on alpha<=0 before its `y +=`),
             // so hit-testing stays aligned with what's actually drawn.
@@ -267,17 +283,24 @@ impl Notifications {
         // calls inside the loop alongside the per-toast field reads.
         let now = Instant::now();
         let available_text_w = toast_w - ACCENT_WIDTH * self.scale - pad_x * 2.0;
-        let snapshot: Vec<(Vec<String>, NotificationLevel, u128)> = self
-            .toasts
-            .iter()
-            .map(|t| {
-                (
-                    wrap_message(&t.message, available_text_w, font_size),
-                    t.level,
-                    visible_age(t, now),
-                )
-            })
-            .collect();
+        let measure_opts = DrawOpts {
+            font_size,
+            ..DrawOpts::default()
+        };
+        let snapshot: Vec<(Vec<String>, NotificationLevel, u128)> = {
+            let ui = sugarloaf.overlay_text_mut();
+            self.toasts
+                .iter_mut()
+                .map(|toast| {
+                    let lines =
+                        wrap_message_measured(&toast.message, available_text_w, |text| {
+                            ui.measure(text, &measure_opts)
+                        });
+                    toast.wrapped_lines.clone_from(&lines);
+                    (lines, toast.level, visible_age(toast, now))
+                })
+                .collect()
+        };
 
         for (lines, level, age) in snapshot {
             // Linear fade once we cross LIFETIME_MS — clamps so that
@@ -363,6 +386,12 @@ impl Notifications {
             let opts = DrawOpts {
                 font_size,
                 color: text_color,
+                clip_rect: Some([
+                    x + ACCENT_WIDTH * self.scale + pad_x,
+                    y,
+                    available_text_w,
+                    toast_h,
+                ]),
                 ..DrawOpts::default()
             };
 
@@ -394,16 +423,6 @@ fn visible_age(toast: &Toast, now: Instant) -> u128 {
         .as_millis()
 }
 
-fn approx_char_width(font_size: f32) -> f32 {
-    (font_size * 0.56).max(1.0)
-}
-
-fn visible_char_count(available_width: f32, font_size: f32) -> usize {
-    (available_width / approx_char_width(font_size))
-        .floor()
-        .max(4.0) as usize
-}
-
 /// Vertical advance between wrapped lines.
 fn line_height(font_size: f32) -> f32 {
     font_size * 1.35
@@ -421,11 +440,14 @@ fn toast_height(line_count: usize, font_size: f32, pad_y: f32) -> f32 {
 /// single URL/path can't overflow the card. Replaces the old single-line
 /// truncate-with-… + hover-scroll so long install/LSP errors are fully
 /// readable.
-fn wrap_message(message: &str, available_width: f32, font_size: f32) -> Vec<String> {
-    let max_chars = visible_char_count(available_width, font_size).max(1);
+fn wrap_message_measured(
+    message: &str,
+    available_width: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for raw_line in message.split('\n') {
-        wrap_one_line(raw_line, max_chars, &mut lines);
+        wrap_one_line_measured(raw_line, available_width, &mut measure, &mut lines);
     }
     if lines.is_empty() {
         lines.push(String::new());
@@ -433,49 +455,63 @@ fn wrap_message(message: &str, available_width: f32, font_size: f32) -> Vec<Stri
     if lines.len() > MAX_TOAST_LINES {
         lines.truncate(MAX_TOAST_LINES);
         if let Some(last) = lines.last_mut() {
-            let mut chars: Vec<char> = last.chars().collect();
-            while chars.len() >= max_chars && !chars.is_empty() {
-                chars.pop();
+            while !last.is_empty() {
+                let candidate = format!("{last}…");
+                if measure(&candidate) <= available_width {
+                    break;
+                }
+                let Some((index, _)) = last.grapheme_indices(true).next_back() else {
+                    break;
+                };
+                last.truncate(index);
             }
-            *last = chars.into_iter().collect::<String>();
             last.push('…');
         }
     }
     lines
 }
 
-fn wrap_one_line(raw_line: &str, max_chars: usize, out: &mut Vec<String>) {
+fn wrap_one_line_measured(
+    raw_line: &str,
+    available_width: f32,
+    measure: &mut impl FnMut(&str) -> f32,
+    out: &mut Vec<String>,
+) {
     if raw_line.trim().is_empty() {
         out.push(String::new());
         return;
     }
     let mut current = String::new();
     for word in raw_line.split_whitespace() {
-        // A single word longer than a line is hard-split into chunks.
-        if word.chars().count() > max_chars {
-            if !current.is_empty() {
-                out.push(std::mem::take(&mut current));
-            }
-            let mut chunk = String::new();
-            for ch in word.chars() {
-                if chunk.chars().count() >= max_chars {
-                    out.push(std::mem::take(&mut chunk));
-                }
-                chunk.push(ch);
-            }
-            current = chunk;
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if measure(&candidate) <= available_width {
+            current = candidate;
             continue;
         }
-        let sep = usize::from(!current.is_empty());
-        if current.chars().count() + sep + word.chars().count() > max_chars {
+
+        if !current.is_empty() {
             out.push(std::mem::take(&mut current));
-            current.push_str(word);
-        } else {
-            if sep == 1 {
-                current.push(' ');
-            }
-            current.push_str(word);
         }
+        if measure(word) <= available_width {
+            current.push_str(word);
+            continue;
+        }
+
+        // Keep combining characters and emoji ZWJ sequences intact when a
+        // path or URL has to be split without whitespace.
+        let mut chunk = String::new();
+        for grapheme in word.graphemes(true) {
+            let candidate = format!("{chunk}{grapheme}");
+            if !chunk.is_empty() && measure(&candidate) > available_width {
+                out.push(std::mem::take(&mut chunk));
+            }
+            chunk.push_str(grapheme);
+        }
+        current = chunk;
     }
     if !current.is_empty() {
         out.push(current);
@@ -485,5 +521,35 @@ fn wrap_one_line(raw_line: &str, max_chars: usize, out: &mut Vec<String>) {
 impl Default for Notifications {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn measured_wrap_keeps_the_regression_line_inside_the_card() {
+        let width = TOAST_WIDTH - ACCENT_WIDTH - TOAST_PADDING_X * 2.0;
+        let measure =
+            |text: &str| text.graphemes(true).count() as f32 * FONT_SIZE * 0.5859375;
+        let lines = wrap_message_measured(
+            "Neoism web UI is not installed. Rebuild with the web assets or set NEOISM_WEB_ROOT.",
+            width,
+            measure,
+        );
+
+        assert!(lines.iter().all(|line| measure(line) <= width));
+        assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn hard_wrap_does_not_split_graphemes() {
+        let family = "👨‍👩‍👧‍👦";
+        let lines = wrap_message_measured(&family.repeat(3), 10.0, |text| {
+            text.graphemes(true).count() as f32 * 10.0
+        });
+
+        assert_eq!(lines, vec![family, family, family]);
     }
 }

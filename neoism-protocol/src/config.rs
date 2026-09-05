@@ -183,6 +183,10 @@ pub enum ConfigClientMessage {
     /// MCP registry + installed index, engine language-server
     /// adapters with live status, kernels, and compiled-in grammars.
     ListExtensions,
+    /// List Mash Up Packs installed on the daemon host.
+    ListMashupPacks,
+    /// Apply an installed pack, or deactivate it with `None`.
+    ApplyMashupPack { id: Option<String> },
 }
 
 /// Outbound config-plane replies.
@@ -213,9 +217,37 @@ pub enum ConfigServerMessage {
     Extensions {
         entries: Vec<ExtensionSummary>,
     },
+    MashupPacks {
+        entries: Vec<MashupPackSummary>,
+    },
+    MashupPackApplied {
+        id: Option<String>,
+        config: serde_json::Value,
+    },
     Error {
         message: String,
     },
+}
+
+/// Host-resolved Mash Up Pack row. Asset paths are deliberately opaque to
+/// clients; web only uses the shader id/path for its existing visual filter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MashupPackSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub shader_overlay: Option<String>,
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default)]
+    pub slots: Vec<String>,
+    #[serde(default)]
+    pub theme_extends: Option<String>,
+    #[serde(default)]
+    pub theme_colors: std::collections::BTreeMap<String, String>,
 }
 
 /// Lifecycle state of one extension row, as the daemon host sees it.
@@ -289,6 +321,8 @@ mod tests {
                 with: "alt".into(),
             },
             ConfigClientMessage::ListExtensions,
+            ConfigClientMessage::ListMashupPacks,
+            ConfigClientMessage::ApplyMashupPack { id: Some("phosphor".into()) },
         ];
         for msg in msgs {
             let json = serde_json::to_string(&msg).unwrap();
@@ -363,5 +397,24 @@ mod tests {
         let json = serde_json::to_string(&reply).unwrap();
         let back: ConfigServerMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back, reply);
+    }
+
+    #[test]
+    fn mashup_messages_roundtrip() {
+        let reply = ConfigServerMessage::MashupPacks {
+            entries: vec![MashupPackSummary {
+                id: "phosphor".into(),
+                name: "Phosphor".into(),
+                description: "CRT green".into(),
+                theme: Some("phosphor".into()),
+                shader_overlay: Some("builtin:crt".into()),
+                font_family: None,
+                slots: vec!["theme".into(), "shader".into()],
+                theme_extends: Some("pastel_dark".into()),
+                theme_colors: [("fg".into(), "#33ff66".into())].into(),
+            }],
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(serde_json::from_str::<ConfigServerMessage>(&json).unwrap(), reply);
     }
 }

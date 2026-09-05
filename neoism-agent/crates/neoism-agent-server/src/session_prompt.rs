@@ -101,7 +101,14 @@ pub(crate) async fn append_prompt(
     }
     let plugin_snapshot = workspace.snapshot.clone();
     let _workspace_lease = workspace;
-    if create_stub_reply && state.inner.session_coordinator.active_run(&session_id_text).await.is_some() {
+    if create_stub_reply
+        && state
+            .inner
+            .session_coordinator
+            .active_run(&session_id_text)
+            .await
+            .is_some()
+    {
         return Err(ApiError::conflict(SESSION_RUNNING_CONFLICT));
     }
     let PromptRequest {
@@ -144,10 +151,8 @@ pub(crate) async fn append_prompt(
     let reply_model = model.clone();
     info.model = Some(model_ref_from_user_model(&reply_model));
     let request_system = system.filter(|system| !system.trim().is_empty());
-    let starts_top_level_execution = request_may_start_execution(
-        info.parent_id.is_none(),
-        request_system.as_deref(),
-    );
+    let starts_top_level_execution =
+        request_may_start_execution(info.parent_id.is_none(), request_system.as_deref());
     // Runtime notifications (background-job / subagent completions) are
     // injected as user-role turns so the model sees the captured output, but
     // they must NOT render as user bubbles. The live part broadcast below
@@ -472,8 +477,12 @@ pub(crate) async fn append_prompt(
             MAX_STEPS_REMINDER,
         ));
     }
-    plugin::chat_messages_transform(&plugin_snapshot, &chat_hook_ctx, &mut provider_messages)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    plugin::chat_messages_transform(
+        &plugin_snapshot,
+        &chat_hook_ctx,
+        &mut provider_messages,
+    )
+    .map_err(|error| ApiError::internal(error.to_string()))?;
     let started = start_assistant_step(
         state,
         &session_id,
@@ -529,6 +538,7 @@ pub(crate) async fn append_prompt(
         },
         build_provider_generation_request(
             state,
+            &provider_service,
             &reply_model,
             Some(&session_id_text),
             provider_messages,
@@ -620,16 +630,19 @@ pub(crate) async fn append_prompt(
                 CONTINUE_AFTER_LENGTH_MESSAGE,
             ));
         } else if matches!(followup, FollowupReason::ActiveGoal) {
-            if let Some(content) = render_plugin_prompt(
-                &plugin_snapshot,
-                "active-goal-continuation",
-                &info,
-            ) {
-                provider_messages.push(ProviderMessage::text(ProviderRole::User, content));
+            if let Some(content) =
+                render_plugin_prompt(&plugin_snapshot, "active-goal-continuation", &info)
+            {
+                provider_messages
+                    .push(ProviderMessage::text(ProviderRole::User, content));
             }
         }
-        plugin::chat_messages_transform(&plugin_snapshot, &chat_hook_ctx, &mut provider_messages)
-            .map_err(|error| ApiError::internal(error.to_string()))?;
+        plugin::chat_messages_transform(
+            &plugin_snapshot,
+            &chat_hook_ctx,
+            &mut provider_messages,
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
         final_assistant_message = run_followup_assistant_step(
             &provider_service,
             state,
@@ -900,7 +913,9 @@ fn followup_reason(
     if finish_requires_text_continuation(message) {
         return Some(FollowupReason::TextContinuation);
     }
-    if goals_enabled && active_goal_should_continue(info, message, step_number, step_limit) {
+    if goals_enabled
+        && active_goal_should_continue(info, message, step_number, step_limit)
+    {
         return Some(FollowupReason::ActiveGoal);
     }
     None
@@ -1376,17 +1391,27 @@ async fn auto_compaction_threshold_for_model(
     let model = UserModel {
         provider_id: assistant.provider_id.clone(),
         model_id: assistant.model_id.clone(),
-        connection_id: info.model.as_ref().and_then(|model| model.connection_id.clone()),
+        connection_id: info
+            .model
+            .as_ref()
+            .and_then(|model| model.connection_id.clone()),
         variant,
     };
-    auto_compaction_threshold_for_user_model(state, &model).await
+    auto_compaction_threshold_for_user_model(state, &info.directory, &model).await
 }
 
 async fn auto_compaction_threshold_for_user_model(
     state: &AppState,
+    directory: &str,
     model: &UserModel,
 ) -> Option<u64> {
-    let metadata = state.inner.provider_service.model_metadata(model).await.ok()?;
+    let runtime = state.workspace_runtime(directory).await.ok()?;
+    let snapshot = runtime.snapshot();
+    let provider = snapshot
+        .provider_services_by_priority()
+        .into_iter()
+        .next()?;
+    let metadata = provider.model_metadata(model).await.ok()?;
     let limit = metadata.limit?;
     let usable = usable_context_tokens(&limit);
     (usable > 0).then_some(usable)
@@ -1394,10 +1419,14 @@ async fn auto_compaction_threshold_for_user_model(
 
 /// Resolves the auto-compaction threshold for a model, honoring the env
 /// override and falling back to [`FALLBACK_AUTO_COMPACTION_THRESHOLD`].
-async fn resolved_auto_compaction_threshold(state: &AppState, model: &UserModel) -> u64 {
+async fn resolved_auto_compaction_threshold(
+    state: &AppState,
+    directory: &str,
+    model: &UserModel,
+) -> u64 {
     match auto_compaction_threshold_override() {
         Some(threshold) => threshold,
-        None => auto_compaction_threshold_for_user_model(state, model)
+        None => auto_compaction_threshold_for_user_model(state, directory, model)
             .await
             .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD),
     }
@@ -1414,9 +1443,10 @@ fn estimated_prompt_compaction_threshold(usable_context: u64) -> u64 {
 /// estimation error. This safety estimate does not trigger compaction.
 pub(crate) async fn compaction_request_token_budget(
     state: &AppState,
+    directory: &str,
     model: &UserModel,
 ) -> u64 {
-    let usable = auto_compaction_threshold_for_user_model(state, model)
+    let usable = auto_compaction_threshold_for_user_model(state, directory, model)
         .await
         .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD);
     estimated_prompt_compaction_threshold(usable)
@@ -1424,9 +1454,10 @@ pub(crate) async fn compaction_request_token_budget(
 
 pub(crate) async fn compaction_preserve_recent_token_budget(
     state: &AppState,
+    directory: &str,
     model: &UserModel,
 ) -> u64 {
-    auto_compaction_threshold_for_user_model(state, model)
+    auto_compaction_threshold_for_user_model(state, directory, model)
         .await
         .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD)
         / 4
@@ -1543,7 +1574,8 @@ async fn maybe_auto_compact_before_step(
     if token_total == 0 {
         return Ok((info, false));
     }
-    let threshold = resolved_auto_compaction_threshold(state, model).await;
+    let threshold =
+        resolved_auto_compaction_threshold(state, &info.directory, model).await;
     if threshold == 0 || token_total < threshold {
         return Ok((info, false));
     }
@@ -1662,10 +1694,18 @@ async fn generate_model_title(
         };
     let Ok(provider_runtime) = state
         .workspace_runtime(directory.as_deref().unwrap_or_default())
-        .await else { return; };
+        .await
+    else {
+        return;
+    };
     let snapshot = provider_runtime.snapshot();
+    let Some(provider) = snapshot.provider_services_by_priority().into_iter().next()
+    else {
+        return;
+    };
     let request = build_provider_generation_request(
         &state,
+        provider,
         &model,
         Some(&session_id),
         vec![
@@ -1680,9 +1720,6 @@ async fn generate_model_title(
         None,
     )
     .await;
-    let Some(provider) = snapshot.provider_services_by_priority().into_iter().next() else {
-        return;
-    };
     let Ok(stream) = provider.stream(request).await else {
         crate::execution_activity::end_provider_segment(activity_segment).await;
         return;
@@ -1776,7 +1813,8 @@ mod tests {
     #[test]
     fn turn_tool_policy_only_narrows_configured_permissions() {
         let mut permissions = vec![PermissionRule {
-            permission: "memory".into(), pattern: "*".into(),
+            permission: "memory".into(),
+            pattern: "*".into(),
             action: neoism_agent_core::PermissionAction::Deny,
         }];
         let tools = std::collections::BTreeMap::from([
@@ -1785,8 +1823,14 @@ mod tests {
         ]);
         apply_turn_tool_restrictions(&mut permissions, Some(&tools));
 
-        assert_eq!(permission::evaluate("memory", "*", &permissions).action, neoism_agent_core::PermissionAction::Deny);
-        assert_eq!(permission::evaluate("bash", "*", &permissions).action, neoism_agent_core::PermissionAction::Deny);
+        assert_eq!(
+            permission::evaluate("memory", "*", &permissions).action,
+            neoism_agent_core::PermissionAction::Deny
+        );
+        assert_eq!(
+            permission::evaluate("bash", "*", &permissions).action,
+            neoism_agent_core::PermissionAction::Deny
+        );
     }
 
     #[tokio::test]
@@ -1797,14 +1841,20 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(root.join(".agent")).unwrap();
-        std::fs::write(root.join(".agent/agent.json"), r#"{ "textVerbosity": "high" }"#)
-            .unwrap();
+        std::fs::write(
+            root.join(".agent/agent.json"),
+            r#"{ "textVerbosity": "high" }"#,
+        )
+        .unwrap();
 
         let state = crate::state::AppState::open_database(root.join("state.sqlite3"))
             .await
             .unwrap();
         let snapshot = state.plugin_snapshot(root.to_string_lossy().as_ref()).await;
-        assert_eq!(snapshot.config().text_verbosity, Some(neoism_agent_core::TextVerbosity::High));
+        assert_eq!(
+            snapshot.config().text_verbosity,
+            Some(neoism_agent_core::TextVerbosity::High)
+        );
         drop(snapshot);
         drop(state);
         let _ = std::fs::remove_dir_all(root);
@@ -1840,13 +1890,13 @@ mod tests {
     #[test]
     fn runtime_retry_ignores_changed_resolved_connection_metadata() {
         let session_id = Id::ascending(IdKind::Session);
-        let mut existing = user_message(session_id, "Subagent finished.\ntask_id: ses_child");
+        let mut existing =
+            user_message(session_id, "Subagent finished.\ntask_id: ses_child");
         let MessageInfo::User(existing_info) = &mut existing.info else {
             unreachable!();
         };
-        existing_info.system = Some(
-            "runtime notification: background subagent completion.".to_string(),
-        );
+        existing_info.system =
+            Some("runtime notification: background subagent completion.".to_string());
         let mut proposed = existing.clone();
         let MessageInfo::User(proposed_info) = &mut proposed.info else {
             unreachable!();
@@ -2006,7 +2056,13 @@ mod tests {
         assert_eq!(followup_reason(&info, &message, 1, 8, true), None);
 
         assert_eq!(
-            followup_reason(&test_session_info(Some("finish all tasks")), &message, 1, 8, false),
+            followup_reason(
+                &test_session_info(Some("finish all tasks")),
+                &message,
+                1,
+                8,
+                false
+            ),
             None,
             "disabled goals must not trigger autonomous follow-up",
         );
@@ -2096,10 +2152,8 @@ mod tests {
     fn host_created_shared_workspace_session_uses_host_provider_credentials() {
         let mut info = test_session_info(None);
         info.workspace_id = Some("workspace-a".into());
-        info.extra.insert(
-            crate::caller::TENANT_EXTRA_KEY.to_string(),
-            json!("local"),
-        );
+        info.extra
+            .insert(crate::caller::TENANT_EXTRA_KEY.to_string(), json!("local"));
 
         assert_eq!(
             provider_credential_scope(Some(&info)),
@@ -2333,7 +2387,10 @@ mod tests {
             provider_messages[0].content,
             CONTINUE_AFTER_COMPACTION_MESSAGE
         );
-        assert!(!provider_messages[0].content.to_ascii_lowercase().contains("memory"));
+        assert!(!provider_messages[0]
+            .content
+            .to_ascii_lowercase()
+            .contains("memory"));
     }
 
     fn user_message(session_id: Id, text: &str) -> MessageWithParts {
@@ -2482,6 +2539,7 @@ async fn run_followup_assistant_step(
         },
         build_provider_generation_request(
             state,
+            provider,
             reply_model,
             Some(session_id_text),
             provider_messages,
@@ -2497,6 +2555,7 @@ async fn run_followup_assistant_step(
 
 async fn build_provider_generation_request(
     state: &AppState,
+    provider: &Arc<dyn neoism_agent_plugin_api::ProviderService>,
     model: &UserModel,
     scope_session_id: Option<&str>,
     messages: Vec<ProviderMessage>,
@@ -2505,10 +2564,16 @@ async fn build_provider_generation_request(
     hook_ctx: Option<&plugin::ChatHookContext>,
 ) -> ProviderGenerationRequest {
     let scope_session = match scope_session_id {
-        Some(session_id) => state.inner.store.get_session(session_id).await.ok().flatten(),
+        Some(session_id) => state
+            .inner
+            .store
+            .get_session(session_id)
+            .await
+            .ok()
+            .flatten(),
         None => None,
     };
-    let metadata = provider_generation_metadata(state, model).await;
+    let metadata = provider.model_metadata(model).await.unwrap_or_default();
     let mut options = metadata.options;
     let mut headers = metadata.headers;
     if let Some(hook_ctx) = hook_ctx {
@@ -2526,8 +2591,7 @@ async fn build_provider_generation_request(
         workspace_id,
         session_id: hook_ctx.map(|ctx| ctx.session_id.clone()),
         variant: model.variant.clone(),
-        text_verbosity: workspace
-            .and_then(|snapshot| snapshot.config().text_verbosity),
+        text_verbosity: workspace.and_then(|snapshot| snapshot.config().text_verbosity),
         api: metadata.api,
         auth_env: metadata.auth_env,
         messages,
@@ -2555,13 +2619,6 @@ fn provider_credential_scope(
     } else {
         (Some(tenant_id.to_string()), workspace_id)
     }
-}
-
-async fn provider_generation_metadata(
-    state: &AppState,
-    model: &UserModel,
-) -> neoism_agent_plugin_api::ProviderModelMetadata {
-    state.inner.provider_service.model_metadata(model).await.unwrap_or_default()
 }
 
 async fn run_provider_stream_step_with_retry(
@@ -2637,7 +2694,8 @@ async fn run_provider_stream_step_with_retry(
                     .map(|event| event.map_err(anyhow::Error::new)),
             ),
         };
-        let stream_result = run_provider_stream_step(ctx, provider_stream, cancellation).await;
+        let stream_result =
+            run_provider_stream_step(ctx, provider_stream, cancellation).await;
         crate::execution_activity::end_provider_segment(activity_segment).await;
         match stream_result {
             Ok(message) => return Ok(message),

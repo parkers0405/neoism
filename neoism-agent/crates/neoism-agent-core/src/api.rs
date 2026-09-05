@@ -19,6 +19,10 @@ pub struct AgentConfigDocument {
     pub disabled_providers: Vec<String>,
     #[serde(default)]
     pub enabled_providers: Option<Vec<String>>,
+    /// OpenAI-compatible providers declared by the user. This intentionally
+    /// mirrors OpenCode's singular `provider` config key.
+    #[serde(default)]
+    pub provider: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -71,6 +75,77 @@ pub struct AgentConfigDocument {
     pub instructions: Vec<String>,
     #[serde(default)]
     pub experimental: ExperimentalConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub auth: Option<ProviderAuthMode>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub options: ProviderConfigOptions,
+    #[serde(default)]
+    pub discover_models: bool,
+    #[serde(default)]
+    pub compatibility: ProviderCompatibilityConfig,
+    #[serde(default)]
+    pub models: BTreeMap<String, ProviderModelConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCompatibilityConfig {
+    #[serde(default)]
+    pub stream_usage: bool,
+    #[serde(default)]
+    pub reasoning_effort: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfigOptions {
+    #[serde(default, rename = "baseURL")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelConfig {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub family: Option<String>,
+    #[serde(default)]
+    pub attachment: Option<bool>,
+    #[serde(default)]
+    pub reasoning: Option<bool>,
+    #[serde(default)]
+    pub temperature: Option<bool>,
+    #[serde(default)]
+    pub tool_call: Option<bool>,
+    #[serde(default)]
+    pub limit: Option<ModelLimit>,
+    #[serde(default)]
+    pub options: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderAuthMode {
+    None,
+    Optional,
+    #[default]
+    Required,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -325,12 +400,20 @@ pub struct ModelInfo {
     pub variants: Option<BTreeMap<String, BTreeMap<String, Value>>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderApiInfo {
     pub id: String,
     pub url: String,
     pub npm: String,
+    #[serde(default)]
+    pub auth: ProviderAuthMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_usage: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -427,13 +510,18 @@ mod tests {
         assert_eq!(string_form.shell.as_deref(), Some("fish"));
         assert!(serde_json::from_value::<AgentConfigDocument>(json!({
             "shell": { "program": "/bin/zsh", "args": ["--login"] }
-        })).is_err());
+        }))
+        .is_err());
 
         let product_group: AgentConfigDocument = serde_json::from_value(json!({
             "terminal": { "shell": "fish" }
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(product_group.shell.is_none());
-        assert!(serde_json::to_value(product_group).unwrap().get("terminal").is_none());
+        assert!(serde_json::to_value(product_group)
+            .unwrap()
+            .get("terminal")
+            .is_none());
     }
 
     #[test]
@@ -445,7 +533,8 @@ mod tests {
             "defaultAgent": "build",
             "textVerbosity": "high",
             "dangerouslySkipPermissions": true
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(canonical.disabled_providers, ["legacy"]);
         assert_eq!(canonical.enabled_providers.unwrap(), ["openai"]);
         assert_eq!(canonical.small_model.as_deref(), Some("openai/small"));
@@ -458,35 +547,87 @@ mod tests {
             "enabled_providers": ["openai"],
             "small_model": "openai/small",
             "default_agent": "build"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(legacy.disabled_providers.is_empty());
         assert!(legacy.enabled_providers.is_none());
         assert!(legacy.small_model.is_none());
         assert!(legacy.default_agent.is_none());
 
-        for key in ["dangerously-skip-permissions", "dangerously_skip_permissions"] {
-            let config: AgentConfigDocument = serde_json::from_value(json!({ key: true })).unwrap();
-            assert!(!config.dangerously_skip_permissions, "legacy key {key} must be ignored");
+        for key in [
+            "dangerously-skip-permissions",
+            "dangerously_skip_permissions",
+        ] {
+            let config: AgentConfigDocument =
+                serde_json::from_value(json!({ key: true })).unwrap();
+            assert!(
+                !config.dangerously_skip_permissions,
+                "legacy key {key} must be ignored"
+            );
         }
     }
 
     #[test]
+    fn local_provider_config_uses_opencode_compatible_shape() {
+        let config: AgentConfigDocument = serde_json::from_value(json!({
+            "provider": {
+                "llama.cpp": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "auth": "none",
+                    "options": { "baseURL": "http://127.0.0.1:8080/v1" },
+                    "discoverModels": true,
+                    "compatibility": { "streamUsage": false, "reasoningEffort": false },
+                    "models": {
+                        "qwen.gguf": {
+                            "name": "Qwen local",
+                            "toolCall": true,
+                            "limit": { "context": 65536, "output": 8192 }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let provider = &config.provider["llama.cpp"];
+        assert_eq!(provider.auth, Some(ProviderAuthMode::None));
+        assert_eq!(
+            provider.options.base_url.as_deref(),
+            Some("http://127.0.0.1:8080/v1")
+        );
+        assert!(provider.discover_models);
+        assert_eq!(provider.models["qwen.gguf"].tool_call, Some(true));
+    }
+
+    #[test]
     fn reasoning_and_thinking_compatibility_keys_are_ignored() {
-        for key in ["reasoning-effort", "reasoning_effort", "reasoningEffort", "reasoning", "thinking"] {
-            let config: AgentConfigDocument = serde_json::from_value(json!({ key: "medium" })).unwrap();
+        for key in [
+            "reasoning-effort",
+            "reasoning_effort",
+            "reasoningEffort",
+            "reasoning",
+            "thinking",
+        ] {
+            let config: AgentConfigDocument =
+                serde_json::from_value(json!({ key: "medium" })).unwrap();
             assert!(config.variant.is_none(), "legacy key {key} must be ignored");
         }
-        let canonical: AgentConfigDocument = serde_json::from_value(json!({ "variant": "medium" })).unwrap();
+        let canonical: AgentConfigDocument =
+            serde_json::from_value(json!({ "variant": "medium" })).unwrap();
         assert_eq!(canonical.variant.as_deref(), Some("medium"));
     }
 
     #[test]
     fn text_verbosity_accepts_only_canonical_spelling() {
-        let canonical: AgentConfigDocument = serde_json::from_value(json!({ "textVerbosity": "high" })).unwrap();
+        let canonical: AgentConfigDocument =
+            serde_json::from_value(json!({ "textVerbosity": "high" })).unwrap();
         assert_eq!(canonical.text_verbosity, Some(TextVerbosity::High));
         for key in ["text-verbosity", "text_verbosity", "verbosity"] {
-            let config: AgentConfigDocument = serde_json::from_value(json!({ key: "high" })).unwrap();
-            assert!(config.text_verbosity.is_none(), "legacy key {key} must be ignored");
+            let config: AgentConfigDocument =
+                serde_json::from_value(json!({ key: "high" })).unwrap();
+            assert!(
+                config.text_verbosity.is_none(),
+                "legacy key {key} must be ignored"
+            );
         }
         assert!(serde_json::from_value::<AgentConfigDocument>(json!({
             "textVerbosity": "maximum"
@@ -509,8 +650,14 @@ mod tests {
         .expect("plugin config should decode");
 
         assert!(!config.plugins["dev.example.disabled"].enabled);
-        assert_eq!(config.plugins["dev.example.disabled"].scope, Some(PluginScope::Project));
-        assert_eq!(config.plugins["dev.example.disabled"].options["level"], "all");
+        assert_eq!(
+            config.plugins["dev.example.disabled"].scope,
+            Some(PluginScope::Project)
+        );
+        assert_eq!(
+            config.plugins["dev.example.disabled"].options["level"],
+            "all"
+        );
     }
 
     #[test]

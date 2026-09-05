@@ -5,13 +5,15 @@ pub use crate::lsp::{
     LspAdapterMetadata, LspAdapterOrigin, LspAdapterTransport, LspCatalogPackageMetadata,
     LspCommandSource, LspCompletionItem, LspDiagnostic, LspDocumentHighlight,
     LspDocumentSymbol, LspHover, LspInlayHint, LspLanguageRouteMetadata, LspLocation,
-    LspParameterInfo, LspPosition, LspRange, LspServerState, LspSignatureHelp,
-    LspSignatureInfo, LspStatus, LspRuntime, WorkspaceSymbol,
+    LspParameterInfo, LspPosition, LspRange, LspRuntime, LspServerState,
+    LspSignatureHelp, LspSignatureInfo, LspStatus, WorkspaceSymbol,
 };
 
 /// Subscribe to real-time `publishDiagnostics` pushes (event-driven — the
 /// daemon drains this instead of polling).
-pub fn subscribe_diagnostics(runtime: &LspRuntime) -> tokio::sync::broadcast::Receiver<DiagnosticsEvent> {
+pub fn subscribe_diagnostics(
+    runtime: &LspRuntime,
+) -> tokio::sync::broadcast::Receiver<DiagnosticsEvent> {
     crate::lsp::subscribe_diagnostics(runtime)
 }
 
@@ -27,7 +29,11 @@ pub fn sync_document(
 }
 
 /// Notify every owning adapter that the synchronized live document was saved.
-pub fn save_document(runtime: &LspRuntime, directory: impl AsRef<Path>, file: impl AsRef<Path>) -> Vec<String> {
+pub fn save_document(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+) -> Vec<String> {
     crate::lsp::save_document(runtime, directory, file)
 }
 
@@ -51,7 +57,11 @@ pub fn cached_diagnostics(
 }
 
 /// Return the Neoism-owned LSP runtime status for a workspace.
-pub fn status(runtime: &LspRuntime, directory: impl AsRef<Path>, _file: Option<&Path>) -> Vec<LspStatus> {
+pub fn status(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    _file: Option<&Path>,
+) -> Vec<LspStatus> {
     match _file {
         Some(file) => crate::lsp::status_for_file(runtime, directory, file),
         None => crate::lsp::status(runtime, directory),
@@ -59,7 +69,10 @@ pub fn status(runtime: &LspRuntime, directory: impl AsRef<Path>, _file: Option<&
 }
 
 /// The built-in language id whose server handles `file`'s extension.
-pub fn language_id_for_path(runtime: &LspRuntime, file: impl AsRef<Path>) -> Option<String> {
+pub fn language_id_for_path(
+    runtime: &LspRuntime,
+    file: impl AsRef<Path>,
+) -> Option<String> {
     crate::lsp::language_id_for_path(runtime, file)
 }
 
@@ -85,7 +98,10 @@ pub fn supports_language_server_package(
 }
 
 /// Language ids with a live (connected) LSP client under `directory`.
-pub fn live_languages(runtime: &LspRuntime, directory: impl AsRef<Path>) -> std::collections::BTreeSet<String> {
+pub fn live_languages(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+) -> std::collections::BTreeSet<String> {
     crate::lsp::live_languages(runtime, directory)
 }
 
@@ -93,7 +109,11 @@ pub fn live_languages(runtime: &LspRuntime, directory: impl AsRef<Path>) -> std:
 /// adapter-managed, config path, `$PATH`, or missing.
 /// Lets the Extensions page badge each language-server row with the same
 /// source the engine will actually use at runtime.
-pub fn command_source(runtime: &LspRuntime, id: &str, command: Vec<String>) -> LspCommandSource {
+pub fn command_source(
+    runtime: &LspRuntime,
+    id: &str,
+    command: Vec<String>,
+) -> LspCommandSource {
     runtime.resolve_lsp_command(id, command).1
 }
 
@@ -181,7 +201,8 @@ pub fn completion_with_trigger(
     trigger_character: Option<&str>,
 ) -> Vec<LspCompletionItem> {
     crate::lsp::completion_with_trigger(
-        runtime, directory,
+        runtime,
+        directory,
         file,
         line,
         character,

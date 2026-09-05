@@ -701,6 +701,97 @@ fn wheel_drag_along_tracks_center_visual_row() {
 }
 
 #[test]
+fn touch_scroll_keeps_caret_fixed_and_navigation_rearms_follow() {
+    use std::path::PathBuf;
+    let text = (0..30)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut pane = CodePane::new(PathBuf::from("touch.rs"), &text);
+    pane.geometry.row_h = 20.0;
+    pane.content_height = 600.0;
+    pane.buffer.follow_cursor = true;
+    let caret = (pane.buffer.cursor_line, pane.buffer.cursor_col);
+
+    assert!(pane.scroll_touch_pixels(-75.0, 200.0));
+    assert_eq!((pane.buffer.cursor_line, pane.buffer.cursor_col), caret);
+    assert_eq!(pane.scroll_y, 75.0);
+    assert!(!pane.buffer.follow_cursor);
+    assert!(pane.scroll_touch_pixels(10_000.0, 200.0));
+    assert!(!pane.scroll_touch_pixels(10_000.0, 200.0));
+
+    pane.buffer.apply_motion(CodeMotion::Down, false);
+    assert!(
+        pane.buffer.follow_cursor,
+        "explicit navigation rearms caret follow"
+    );
+}
+
+#[test]
+fn touch_scroll_then_repeated_newline_rearms_follow_and_keeps_anchor_live() {
+    use std::path::PathBuf;
+    let text = (0..30)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut pane = CodePane::new(PathBuf::from("mobile-enter.rs"), &text);
+    pane.geometry.row_h = 20.0;
+    pane.content_height = 600.0;
+    pane.buffer.cursor_line = 29;
+    pane.buffer.cursor_col = pane.buffer.lines[29].len();
+    assert!(pane.scroll_touch_pixels(-200.0, 200.0));
+    assert!(!pane.buffer.follow_cursor);
+
+    for _ in 0..12 {
+        pane.buffer.insert_newline();
+        assert!(
+            pane.buffer.follow_cursor,
+            "every explicit Enter rearms follow"
+        );
+        assert_eq!(
+            pane.buffer.pending_cursor_row_delta, None,
+            "local newlines use smooth caret reveal, not row-by-row anchoring"
+        );
+        // Stand in for the render pass consuming this one-shot request.
+        pane.buffer.follow_cursor = false;
+    }
+    pane.rearm_caret_follow();
+    assert!(pane.buffer.follow_cursor);
+}
+
+#[test]
+fn structural_line_delete_rebases_scroll_to_preserve_visual_anchor() {
+    use std::path::PathBuf;
+    let mut pane = CodePane::new(PathBuf::from("anchor.rs"), "a\nb\nc\nd\ne");
+    pane.scroll_y = 60.0;
+    pane.target_scroll_y = 60.0;
+    pane.target_scroll_raw = 60.0;
+    pane.buffer.cursor_line = 3;
+    // A real document splice removes the first line and transforms the caret
+    // from source row 3 to row 2.
+    crate::editor::code::doc_sync::apply_remote_delta_to_buffer(
+        &mut pane.buffer,
+        &crate::editor::markdown::doc_sync::MarkdownTextDelta {
+            byte_start: 0,
+            byte_removed: 2,
+            utf16_index: 0,
+            utf16_removed: 2,
+            inserted: String::new(),
+        },
+    );
+    assert_eq!(pane.buffer.cursor_line, 2);
+    pane.apply_pending_cursor_view_anchor(20.0);
+    assert_eq!(pane.scroll_y, 40.0);
+    assert_eq!(pane.target_scroll_y, 40.0);
+    assert_eq!(pane.target_scroll_raw, 40.0);
+
+    // At the top clamp, preserving an anchor must never create negative scroll.
+    pane.buffer.pending_cursor_row_delta = Some(-4);
+    pane.apply_pending_cursor_view_anchor(20.0);
+    assert_eq!(pane.scroll_y, 0.0);
+}
+
+#[test]
 fn indent_detection() {
     let tabs = CodeBuffer::from_text("fn x() {\n\tbody\n}\n");
     assert!(tabs.indent.use_tabs);

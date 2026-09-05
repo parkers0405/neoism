@@ -174,6 +174,9 @@ pub struct CodeBuffer {
     /// Set by edits and cursor motion; the host's render pass drains it
     /// to scroll the caret into view.
     pub follow_cursor: bool,
+    /// Structural edit's cursor-row displacement, consumed before reveal so
+    /// insert/delete above or through the caret preserves its screen anchor.
+    pub(super) pending_cursor_row_delta: Option<isize>,
     pub indent: CodeIndent,
     pub(super) line_ending: CodeLineEnding,
     /// The file on disk ended with a trailing newline (restored on save).
@@ -289,6 +292,68 @@ impl CodePaneGeometry {
 }
 
 impl CodePane {
+    pub fn select_touch_word_at(&mut self, x: f32, y: f32) -> bool {
+        let (line, col) = self.geometry.hit_position(&self.buffer.lines, x, y);
+        let Some((start, end)) =
+            crate::editor::text_selection::unicode_word_or_grapheme_span(
+                &self.buffer.lines[line],
+                col,
+            )
+        else {
+            return false;
+        };
+        let start = CodePosition { line, col: start };
+        let end = CodePosition { line, col: end };
+        self.buffer
+            .set_cursor_position(start.line, start.col, false);
+        self.buffer.set_cursor_position(end.line, end.col, true);
+        self.touch_word_edges = Some((start, end));
+        self.mouse_selecting = false;
+        true
+    }
+
+    pub fn extend_touch_word_selection_at(&mut self, x: f32, y: f32) -> bool {
+        let Some((start, end)) = self.touch_word_edges else {
+            return false;
+        };
+        let (line, col) = self.geometry.hit_position(&self.buffer.lines, x, y);
+        let target = CodePosition { line, col };
+        let (anchor, focus) =
+            crate::editor::text_selection::anchored_word_selection(start, end, target);
+        self.buffer
+            .set_cursor_position(anchor.line, anchor.col, false);
+        self.buffer.set_cursor_position(focus.line, focus.col, true);
+        let [_, top, _, height] = self.geometry.rect;
+        let edge = 28.0;
+        let dy = if y < top + edge {
+            (top + edge - y).min(18.0)
+        } else if y > top + height - edge {
+            -(y - (top + height - edge)).min(18.0)
+        } else {
+            0.0
+        };
+        if dy != 0.0 {
+            self.scroll_touch_pixels(dy, height);
+        }
+        self.buffer.follow_cursor = false;
+        true
+    }
+
+    pub fn end_touch_word_selection(&mut self) -> bool {
+        self.touch_word_edges.take().is_some()
+    }
+
+    pub(crate) fn apply_pending_cursor_view_anchor(&mut self, row_h: f32) {
+        let Some(rows) = self.buffer.pending_cursor_row_delta.take() else {
+            return;
+        };
+        let delta = rows as f32 * row_h.max(1.0);
+        self.scroll_y = (self.scroll_y + delta).max(0.0);
+        self.target_scroll_y = (self.target_scroll_y + delta).max(0.0);
+        self.target_scroll_raw = (self.target_scroll_raw + delta).max(0.0);
+        self.scroll_velocity_px_s = 0.0;
+    }
+
     /// Wrap-aware vertical step: moves one VISUAL row (nvim `gj`/`gk`
     /// as the default), so wrapped continuations are real lines under
     /// j/k/arrows. Returns false when wrap is off or the index is
@@ -431,6 +496,7 @@ impl CodePane {
     /// At the buffer-edge clamps the cursor keeps moving half a page
     /// toward the first/last line.
     pub fn half_page_scroll(&mut self, down: bool, extend: bool) -> bool {
+        self.touch_viewport_detached = false;
         let row_h = self.geometry.row_h;
         if row_h <= 1.0 {
             return false;
@@ -564,6 +630,13 @@ pub struct CodePane {
     pub geometry: CodePaneGeometry,
     /// A left-button drag selection is in progress (host mouse state).
     pub mouse_selecting: bool,
+    /// Original inclusive word edges for an iOS long-hold drag. Keeping both
+    /// edges lets the finger cross the word without collapsing it: dragging
+    /// left anchors at the end, dragging right anchors at the start.
+    pub(super) touch_word_edges: Option<(CodePosition, CodePosition)>,
+    /// Direct touch scrolling detaches the document caret from the viewport.
+    /// Keyboard and mouse scrolling retain the original clamped cursor glide.
+    pub(super) touch_viewport_detached: bool,
     /// Whole-buffer syntax cache, refreshed by the painter per revision.
     pub highlight: super::highlight::CodeHighlightCache,
     /// Diagnostics by zero-based source line, fed by the host's local LSP
@@ -667,6 +740,8 @@ impl CodePane {
             remote_content_pending: false,
             geometry: CodePaneGeometry::default(),
             mouse_selecting: false,
+            touch_word_edges: None,
+            touch_viewport_detached: false,
             highlight: super::highlight::CodeHighlightCache::default(),
             diagnostics: std::collections::HashMap::new(),
             diagnostic_summaries: Vec::new(),
@@ -743,6 +818,7 @@ impl CodePane {
     /// raw accumulator keeps sub-row deltas; the exposed target snaps
     /// to whole rows (Neovide-style line steps, glided by the painter).
     pub fn scroll_pixels(&mut self, delta_pixels: f32, viewport_height: f32) {
+        self.touch_viewport_detached = false;
         let content_delta = -delta_pixels;
         // Inertia guard: sub-row wheel deltas within a beat of a
         // keyboard reveal are trackpad tail, not intent — swallowing
@@ -797,6 +873,39 @@ impl CodePane {
             }
         }
         self.buffer.follow_cursor = false;
+    }
+
+    /// Direct-manipulation scroll used by touch hosts. Unlike desktop wheel
+    /// scrolling, this deliberately does NOT move the caret with the viewport:
+    /// iOS Notes leaves the insertion point where it was until the next
+    /// explicit tap/navigation/edit. Release momentum calls this same method,
+    /// keeping caret-follow suspended for the entire gesture.
+    pub fn scroll_touch_pixels(
+        &mut self,
+        delta_pixels: f32,
+        viewport_height: f32,
+    ) -> bool {
+        self.scroll_viewport_height = viewport_height;
+        let before = self.scroll_y;
+        let max_scroll = (self.content_height - viewport_height).max(0.0);
+        let next = (self.scroll_y - delta_pixels).clamp(0.0, max_scroll);
+        self.scroll_y = next;
+        self.target_scroll_y = next;
+        self.target_scroll_raw = next;
+        self.scroll_velocity_px_s = 0.0;
+        self.scroll_last_tick_at = None;
+        self.touch_viewport_detached = true;
+        self.buffer.follow_cursor = false;
+        (next - before).abs() > f32::EPSILON
+    }
+
+    /// Explicit keyboard/IME input reclaims viewport ownership from a prior
+    /// touch scroll, even when the key is a boundary no-op.
+    pub fn rearm_caret_follow(&mut self) {
+        self.touch_viewport_detached = false;
+        self.buffer.follow_cursor = true;
+        self.scroll_velocity_px_s = 0.0;
+        self.scroll_last_tick_at = None;
     }
 
     pub fn is_dirty(&self) -> bool {

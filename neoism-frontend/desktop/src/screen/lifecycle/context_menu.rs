@@ -466,8 +466,8 @@ impl Screen<'_> {
         self.open_buffer_tab_context_menu(ix, cross_window)
     }
 
-    /// Open the buffer-tab right-click menu for the tab at `ix`. Always
-    /// offers "Rename" (except the workspace root terminal); additionally
+    /// Open the buffer-tab right-click menu for the tab at `ix`. Terminal
+    /// and agent tabs can be relabelled; additionally
     /// offers "Move to Workspace …" for non-terminal, path-backed tabs
     /// (nvim / markdown / file) and movable terminal tabs when another
     /// workspace exists. Returns `false` (opening nothing) for the root
@@ -488,8 +488,13 @@ impl Screen<'_> {
             return false;
         }
         let movable_terminal = self.renderer.buffer_tabs.terminal_route_at(ix).is_some();
-        let (label, has_path) = match self.renderer.buffer_tabs.tabs().get(ix) {
-            Some(tab) => (tab.title.clone(), tab.path.is_some()),
+        let (label, has_path, renameable) = match self.renderer.buffer_tabs.tabs().get(ix)
+        {
+            Some(tab) => (
+                tab.title.clone(),
+                tab.path.is_some(),
+                tab.terminal_route_id.is_some() || tab.neoism_agent_route_id.is_some(),
+            ),
             None => return false,
         };
         // Only path-backed (nvim / markdown / file) and movable terminal
@@ -500,14 +505,15 @@ impl Screen<'_> {
         let num_ws = self.context_manager.len();
         let current = self.context_manager.current_index();
         let mut items = Vec::new();
-        // Rename is available on every non-root tab kind.
-        items.push(ContextMenuItem::new(
-            "Rename",
-            "r",
-            ContextMenuAction::Workspace(WorkspaceContextAction::RenameBufferTab {
-                tab_index: ix,
-            }),
-        ));
+        if renameable {
+            items.push(ContextMenuItem::new(
+                "Rename",
+                "r",
+                ContextMenuAction::Workspace(WorkspaceContextAction::RenameBufferTab {
+                    tab_index: ix,
+                }),
+            ));
+        }
         // Workspaces in THIS window.
         for ws in (0..num_ws).filter(|_| movable) {
             if ws == current {
@@ -572,9 +578,7 @@ impl Screen<'_> {
 
     /// Open the "Rename" modal pre-filled with the tab's current title.
     /// On submit the modal emits [`ModalAction::RenameTab`], carrying the
-    /// agent session id (if any) so `execute_modal_action` can both
-    /// relabel the tab locally and publish the rename at the daemon level
-    /// for agent tabs.
+    /// index so `execute_modal_action` only relabels the tab locally.
     pub(crate) fn open_buffer_tab_rename_prompt(&mut self, ix: usize) {
         use neoism_ui::widgets::modal::{
             ModalAction, ModalButton, ModalInputSpec, ModalSpec,
@@ -588,15 +592,10 @@ impl Screen<'_> {
         else {
             return;
         };
-        let agent_session_id = self.renderer.buffer_tabs.agent_session_id_at(ix);
         self.renderer.modal.open(ModalSpec {
             title: "Rename Tab".to_string(),
             body: format!("Rename `{title}`."),
-            meta: if agent_session_id.is_some() {
-                "Publishes the new title to the agent session.".to_string()
-            } else {
-                "Renames this tab's label.".to_string()
-            },
+            meta: "Renames this tab's label.".to_string(),
             input: Some(ModalInputSpec {
                 value: title,
                 placeholder: "new title".to_string(),
@@ -607,7 +606,7 @@ impl Screen<'_> {
                     "Enter",
                     ModalAction::RenameTab {
                         index: ix,
-                        agent_session_id,
+                        agent_session_id: None,
                         name: String::new(),
                     },
                 ),

@@ -173,7 +173,13 @@ jobs:
         shell: bash
         run: |
           npm --prefix neoism-frontend/web ci
-          npm --prefix neoism-frontend/web run build
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # sccache cannot spawn web-sys when its feature-heavy rustc
+            # command exceeds the Windows command-line length limit.
+            env -u RUSTC_WRAPPER npm --prefix neoism-frontend/web run build
+          else
+            npm --prefix neoism-frontend/web run build
+          fi
           test -f neoism-frontend/web/dist/index.html
 
       - name: Build the stack (release)

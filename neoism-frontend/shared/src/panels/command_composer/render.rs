@@ -212,7 +212,7 @@ impl CommandComposer {
         let line_step = composer_line_height(cell_h, font_size, s);
         let caret_h = line_step;
         let control_font_size = (caret_h - 2.0 * s).max(font_size * 1.18);
-        let chevron_font_size = control_font_size * 1.10;
+        let chevron_font_size = font_size;
         let estimated_lines =
             self.estimated_input_line_count(chassis_w, cell_w.max(1.0), raw_text);
         let body_rows_h = estimated_lines as f32 * line_step;
@@ -237,17 +237,8 @@ impl CommandComposer {
         let inner_right = chassis_x + chassis_w - CHIP_PAD_X * s - inset;
         let control_chip_pad_x = 10.0 * s;
 
-        // ── cwd chip (commented out per user request) ───────────────
-        // let cwd_text = cwd_label.unwrap_or("~");
-        // let cwd_opts = DrawOpts {
-        //     font_size: control_font_size,
-        //     color: theme.u8(theme.fg),
-        //     bold: true,
-        //     ..DrawOpts::default()
-        // };
-        // let cwd_text_w = sugarloaf.text_mut().measure(cwd_text, &cwd_opts);
-        // let cwd_chip_w = cwd_text_w + control_chip_pad_x * 2.0;
-        let _ = cwd_label;
+        // The cwd is part of the shell prompt, not a separate chip. Keep the
+        // old chip offset at zero and account for the prompt text below.
         let cwd_chip_w: f32 = 0.0;
         let chip_h = caret_h.max(control_font_size + 2.0 * s);
         let chip_y = group_top + (line_step - chip_h) / 2.0 + inset;
@@ -429,21 +420,28 @@ impl CommandComposer {
         // position is known.
         let burst = input.prompt_burst_elapsed_ms();
         let prompt_x = inner_left + cwd_chip_w + CHIP_GAP * s;
-        let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
-        let prompt_label_font_size = if pixel_font.is_some() {
-            13.0 * s
-        } else {
-            chevron_font_size
-        };
+        let prompt_label_font_size = font_size;
         // Explicit and fallback faces use the same centered line-box contract.
         let prompt_label_y = row_center_y - prompt_label_font_size * CAP_CENTER_RATIO;
         let prompt_label_opts = DrawOpts {
             font_size: prompt_label_font_size,
             color: theme.u8(theme.blue),
             bold: true,
-            font_id: pixel_font,
             ..DrawOpts::default()
         };
+        let cwd_label = cwd_label.map(|cwd| {
+            let budget = (width * 0.32).min(320.0 * s).max(80.0 * s);
+            crate::panels::status_line::compact_path_label(cwd, budget, |candidate| {
+                sugarloaf.text_mut().measure(candidate, &prompt_label_opts)
+            })
+        });
+        let combined_prompt_label = match (prompt_label, cwd_label.as_deref()) {
+            (Some(prefix), Some(cwd)) => Some(format!("{prefix} · {cwd}")),
+            (Some(prefix), None) => Some(prefix.to_string()),
+            (None, Some(cwd)) => Some(cwd.to_string()),
+            (None, None) => None,
+        };
+        let prompt_label = combined_prompt_label.as_deref();
         let prompt_label_advance = prompt_label
             .map(|label| {
                 sugarloaf.text_mut().measure(label, &prompt_label_opts) + 7.0 * s

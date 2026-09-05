@@ -55,6 +55,10 @@ const DEFAULT_ROWS = 24;
 const WEB_CONTROLLER_HOST_ID = "web-controller";
 const WORKSPACE_SUBSCRIPTIONS_STORAGE_KEY = "neoism.workspace-subscriptions.v1";
 
+function isAbsoluteWorkspacePath(path: string): boolean {
+  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
+}
+
 type WorkspaceStripSnapshot = Array<{
   title: string;
   kind: string;
@@ -88,6 +92,7 @@ export class App {
   /** Set by the Alt+W create-workspace flow; the daemon upsert ack is
    *  followed by an explicit active-workspace switch. */
   private pendingCreateWorkspaceId: string | null = null;
+  private pendingWorkspaceRootId: string | null = null;
   /** The daemon host-workspace this panel currently lives in — the
    *  target for tab publishes. Set on switch/adopt/create. */
   private activeHostWorkspaceId: string | null = null;
@@ -716,9 +721,11 @@ export class App {
       getWorkspacesModalPayload: () => this.buildWorkspacesModalPayload(),
       onWorkspaceSelected: (workspaceId) =>
         this.switchToWorkspaceById(workspaceId),
-      onWorkspaceRootRequested: (path) => {
-        if (this.activeWorkspaceId) {
-          this.workspaceService?.setWorkspaceRoot(this.activeWorkspaceId, path);
+      onWorkspaceRootRequested: (path, capturedWorkspaceId) => {
+        const workspaceId = capturedWorkspaceId ?? this.activeHostWorkspaceId;
+        if (workspaceId) {
+          this.pendingWorkspaceRootId = workspaceId;
+          this.workspaceService?.setWorkspaceRoot(workspaceId, path);
         }
       },
       onWorkspaceIslandIntent: (intent) => this.handleWorkspaceIslandIntent(intent),
@@ -844,6 +851,9 @@ export class App {
       this.acceptRequestedWorkspaceIfAvailable();
       if ("HostWorkspaceUpserted" in msg) {
         const workspaceId = msg.HostWorkspaceUpserted.workspace.id;
+        if (this.pendingWorkspaceRootId === workspaceId) {
+          this.pendingWorkspaceRootId = null;
+        }
         if (this.pendingCreateWorkspaceId === workspaceId) {
           this.pendingCreateWorkspaceId = null;
           this.workspaceGateSatisfied = true;
@@ -857,6 +867,10 @@ export class App {
           this.scheduleFallbackPtySpawn();
         }
       }
+      if ("Error" in msg && this.pendingWorkspaceRootId) {
+        this.pendingWorkspaceRootId = null;
+        this.terminalPanel?.setWorkspaceDirectoryError(msg.Error.message);
+      }
       if ("HostWorkspaceUpserted" in msg) {
         this.maybeReRootActiveWorkspace();
       }
@@ -868,8 +882,7 @@ export class App {
         this.renderWorkspaceChrome();
         this.terminalPanel?.refreshWorkspacesModal();
         this.connectionScreen?.showWorkspaces(this.workspaceService!.getHostWorkspaceTree());
-        // The daemon re-points a workspace's root_dir when its terminal
-        // cd's; if that's the workspace we're in, follow it live.
+        // Follow authoritative app-level root changes for the active workspace.
         this.maybeReRootActiveWorkspace();
       }
       if ("InitialWorkspaceResolved" in msg) {
@@ -1032,7 +1045,7 @@ export class App {
     }
     // Root the Explorer at the daemon-declared root. PTY cwd never mutates it.
     const newRoot = workspace.root_dir ?? null;
-    if (newRoot && newRoot.startsWith("/")) {
+    if (newRoot && isAbsoluteWorkspacePath(newRoot)) {
       this.activeWorkspaceRootPath = newRoot;
       this.terminalPanel?.setWorkspaceRoot(newRoot);
     }
@@ -1073,7 +1086,7 @@ export class App {
       ?.getHostWorkspaceTree()
       .workspaces.find((w) => w.id === id);
     const root = summary?.root_dir ?? null;
-    if (root && root.startsWith("/") && root !== this.activeWorkspaceRootPath) {
+    if (root && isAbsoluteWorkspacePath(root) && root !== this.activeWorkspaceRootPath) {
       this.activeWorkspaceRootPath = root;
       this.terminalPanel?.setWorkspaceRoot(root);
     }
@@ -1163,7 +1176,7 @@ export class App {
 
   /** Daemon-pushed live cwd is per-terminal completion/spawn metadata only. */
   private handleSessionCwd(sessionId: string, cwd: string): void {
-    if (!cwd || !cwd.startsWith("/")) {
+    if (!cwd || !isAbsoluteWorkspacePath(cwd)) {
       return;
     }
     this.sessionCwds.set(sessionId, cwd);
@@ -1494,6 +1507,7 @@ export class App {
     this.sessionCwds.clear();
     this.pendingStatusPushes = [];
     this.pendingCreateWorkspaceId = null;
+    this.pendingWorkspaceRootId = null;
     this.client = null;
     this.activeSessionId = null;
     this.activeHostWorkspaceId = null;
@@ -1522,6 +1536,7 @@ export class App {
     this.sessionCwds.clear();
     this.pendingStatusPushes = [];
     this.pendingCreateWorkspaceId = null;
+    this.pendingWorkspaceRootId = null;
     this.activeSessionId = null;
     this.activeHostWorkspaceId = null;
     this.activeWorkspaceRootPath = null;

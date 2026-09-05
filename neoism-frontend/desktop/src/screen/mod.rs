@@ -755,14 +755,9 @@ pub struct Screen<'screen> {
     /// edits the pane that launched it instead of whichever split is
     /// currently first in the grid map.
     finder_target_route: Option<usize>,
-    /// Active workspace root for Rust-owned IDE chrome. Terminal panes
-    /// update this from OSC 7 cwd; the file tree mirrors this root when
-    /// visible.
+    /// Active workspace root for Rust-owned IDE chrome. The primary terminal
+    /// and app-level directory palette may update it; the file tree mirrors it.
     active_workspace_root: Option<PathBuf>,
-    /// Directory-only fff index used by Alt+P `cd …`. Kept per window so
-    /// successive keystrokes reuse the same bounded picker registry.
-    cd_directory_search:
-        std::sync::Arc<neoism_agent_workspace_search_fff::FffWorkspaceSearchService>,
     /// A Workspaces-modal pick of a workspace that lives on a tailnet
     /// PEER's daemon: `(workspace_id, daemon_url)`. The app layer
     /// drains this each pump, re-dials the daemon connection to the
@@ -1796,9 +1791,6 @@ impl Screen<'_> {
                 .map(PathBuf::from)
                 .or_else(Self::initial_process_workspace_root)
                 .map(Self::normalize_workspace_root),
-            cd_directory_search: std::sync::Arc::new(
-                neoism_agent_workspace_search_fff::FffWorkspaceSearchService::new(),
-            ),
             pending_peer_workspace_join: None,
             pending_daemon_go_home: false,
             pending_server_connect: None,

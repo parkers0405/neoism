@@ -81,11 +81,6 @@ import {
 } from "./agentTouchScrollOwnership";
 import { routeEditorTouchTap } from "./editorTouchTap";
 import {
-  ExactSyntheticEchoFilter,
-  resolveTerminalDirectoryTarget,
-  terminalDirectoryPlan,
-} from "./terminalDirectory";
-import {
   NotesRefreshCoordinator,
   collectNotesSnapshot,
   notesChangedTouchesActiveVault,
@@ -194,7 +189,6 @@ interface PendingTerminalTabSpawn {
   command?: string;
   /** Pane the freshly spawned shell should bind to (terminal split). */
   paneExternalId?: number;
-  openDirectoryPalette?: boolean;
 }
 
 interface WebPaneState {
@@ -401,7 +395,7 @@ export interface TerminalPanelOptions {
    *  switcher overlay used). */
   onWorkspaceSelected?: (workspaceId: string) => void;
   /** Alt+P `cd …` requested a new declared workspace root. */
-  onWorkspaceRootRequested?: (path: string) => void;
+  onWorkspaceRootRequested?: (path: string, workspaceId?: string | null) => void;
   onWorkspaceIslandIntent?: (intent: {
     kind: "activate" | "context_menu" | "open_workspaces";
     workspace_id?: string | null;
@@ -480,8 +474,6 @@ export class TerminalPanel {
   private lastGitChanges: { added: number; deleted: number } | null = null;
   private terminalInitError: string | null = null;
   private terminalSessionCwds = new Map<string, string>();
-  private syntheticCdEchoes = new Map<string, ExactSyntheticEchoFilter>();
-  private lastActiveTerminalSessionId: string | null = null;
   private workspaceClipboardPayload: ClipboardPayload | null = null;
   // Correlation table for outstanding `MaterializeClipboardImage`
   // requests: `request_id -> originating pane id`. The daemon round-trip
@@ -682,6 +674,7 @@ export class TerminalPanel {
           if (this.options.workspaceRoot) {
             adapter.setWorkspaceRoot?.(this.options.workspaceRoot);
           }
+          adapter.setActiveWorkspaceId?.(this.options.activeWorkspaceId ?? null);
           // Same replay reason as the workspace root above: a vault
           // that arrived while wasm was still loading only updated
           // `options.notesVaultRoot`.
@@ -896,12 +889,6 @@ export class TerminalPanel {
 
   /** Feed bytes from one daemon PTY session into the owning web tab. */
   ingestPty(sessionId: string, bytes: Uint8Array): void {
-    const echoFilter = this.syntheticCdEchoes.get(sessionId);
-    if (echoFilter) {
-      bytes = echoFilter.filter(bytes);
-      if (!echoFilter.active) this.syntheticCdEchoes.delete(sessionId);
-      if (bytes.length === 0) return;
-    }
     // Buffer EVERY session's stream (bounded per session by
     // MAX_REPLAY_BYTES_PER_PTY) — not just sessions we already have a
     // tab for. The daemon replays each live session's backlog right
@@ -964,9 +951,6 @@ export class TerminalPanel {
     }
     this.replayBufferTabs();
     this.activatePtySession(sessionId);
-    if (pending?.openDirectoryPalette) {
-      this.openTerminalDirectoryPaletteFor(sessionId);
-    }
   }
 
   /**
@@ -3201,21 +3185,9 @@ export class TerminalPanel {
   }
 
   private async seedCompletionDir(dir: string): Promise<void> {
-    const root = this.options.workspaceRoot?.replace(/\/+$/, "");
-    if (!root) return;
-    // The daemon's Files surface is workspace-relative; skip dirs
-    // outside the root (completion falls back to builtins there).
-    let rel: string;
-    if (dir === root) {
-      rel = ".";
-    } else if (dir.startsWith(`${root}/`)) {
-      rel = dir.slice(root.length + 1);
-    } else {
-      return;
-    }
     try {
       const reply = await this.options.client.requestFiles(
-        { ListDir: { path: rel } },
+        { BrowserListDir: { path: dir } },
         this.options.workspaceRoot ?? null,
       );
       if (!reply || typeof reply !== "object" || !("DirListing" in reply)) {
@@ -3530,8 +3502,8 @@ export class TerminalPanel {
     for (const intent of intents) {
       switch (intent.kind) {
         case "action":
-          if (intent.action === "OpenTerminalDirectoryPalette") {
-            this.openTerminalDirectoryPalette();
+          if (intent.action === "OpenWorkspaceDirectoryPalette") {
+            this.openWorkspaceDirectoryPalette();
           } else {
             this.dispatchPaletteAction(intent.action);
           }
@@ -3563,46 +3535,14 @@ export class TerminalPanel {
         case "workspace":
           this.options.onWorkspaceSelected?.(intent.workspace_id);
           break;
-        case "change_terminal_directory": {
-          const plan = terminalDirectoryPlan(
-            intent.cwd,
-            intent.path,
-            intent.selected,
-            intent.shell_kind,
-            (path, shell) => adapter.terminalChangeDirectoryPayload?.(path, shell) ?? new Uint8Array(),
-          );
-          const submit = () => {
-            if (plan.payload.length === 0 || !intent.session_id) return;
-            let filter = this.syntheticCdEchoes.get(intent.session_id);
-            if (!filter) {
-              filter = new ExactSyntheticEchoFilter();
-              this.syntheticCdEchoes.set(intent.session_id, filter);
-            }
-            filter.expect(plan.payload);
-            if (this.options.pty) this.options.pty.sendInput(intent.session_id, plan.payload);
-            else this.options.client.sendInput(intent.session_id, plan.payload);
-            const nextCwd = plan.optimisticCwd ?? intent.cwd;
-            if (plan.optimisticCwd) this.terminalSessionCwds.set(intent.session_id, plan.optimisticCwd);
-            adapter.continueTerminalDirectoryPalette?.(nextCwd);
-          };
-          if (plan.optimisticCwd) {
-            // Validate on the PTY's daemon, not in the browser filesystem.
-            // Keeping the captured session in the closure prevents focus
-            // changes while this request is in flight from redirecting it.
-            void new DaemonFilesService(this.options.client)
-              .browserStat(plan.optimisticCwd)
-              .then((entry) => {
-                if (!entry.is_dir) throw new Error(`Not a directory: ${plan.optimisticCwd}`);
-                submit();
-              })
-              .catch((error) => {
-                const concise = String(error).replace(/^Error:\s*(files service error:\s*)?/, "");
-                adapter.setTerminalDirectoryPaletteError?.(concise);
-                this.scheduleDraw();
-              });
-          } else {
-            submit();
+        case "change_workspace_directory": {
+          if (intent.workspace_id !== (this.options.activeWorkspaceId ?? null)) {
+            adapter.setWorkspaceDirectoryPaletteError?.(
+              "Workspace changed while the directory palette was open",
+            );
+            break;
           }
+          this.options.onWorkspaceRootRequested?.(intent.path, intent.workspace_id);
           break;
         }
         case "server":
@@ -3672,7 +3612,13 @@ export class TerminalPanel {
     if (!workspaceRoot || workspaceRoot.length === 0) return;
     this.options.workspaceRoot = workspaceRoot;
     this.wasmAdapter?.setWorkspaceRoot?.(workspaceRoot);
+    this.wasmAdapter?.continueWorkspaceDirectoryPalette?.(workspaceRoot);
     this.wasmAdapter?.refreshFileTree?.();
+    this.scheduleDraw();
+  }
+
+  setWorkspaceDirectoryError(message: string): void {
+    this.wasmAdapter?.setWorkspaceDirectoryPaletteError?.(message);
     this.scheduleDraw();
   }
 
@@ -3684,6 +3630,7 @@ export class TerminalPanel {
   /** The workspace the share QR should deep-link to. */
   setShareWorkspaceId(id: string | null): void {
     this.options.activeWorkspaceId = id;
+    this.wasmAdapter?.setActiveWorkspaceId?.(id);
     this.ensureNotesSidebarSnapshot(false);
   }
 
@@ -3725,33 +3672,27 @@ export class TerminalPanel {
   setTerminalCwd(sessionId: string, cwd: string): void {
     if (sessionId && cwd) {
       this.terminalSessionCwds.set(sessionId, cwd);
-      this.wasmAdapter?.updateTerminalDirectoryPaletteCwd?.(sessionId, cwd);
+      const firstTerminal = this.bufferTabs.find(
+        (tab) => tab.kind === "terminal" && !!tab.sessionId,
+      )?.sessionId ?? this.options.sessionId;
+      if (sessionId === firstTerminal && cwd !== this.options.workspaceRoot) {
+        this.options.onWorkspaceRootRequested?.(
+          cwd,
+          this.options.activeWorkspaceId ?? null,
+        );
+      }
+      if (sessionId === this.activePtySessionId()) {
+        this.wasmAdapter?.setActiveTerminalCwd?.(cwd);
+        this.scheduleDraw();
+      }
     }
   }
 
-  private openTerminalDirectoryPalette(): void {
-    const paneId = this.activePaneExternalId();
-    const associated = paneId === null ? null : this.paneSessionIds.get(paneId) ?? null;
-    const sessionId = resolveTerminalDirectoryTarget({
-      associated,
-      active: this.activePtySessionId(),
-      recent: this.lastActiveTerminalSessionId,
-      tabSessions: this.bufferTabs
-        .filter((tab) => tab.kind === "terminal")
-        .map((tab) => tab.sessionId),
-      isLive: (candidate) => this.knowsPtySession(candidate),
-    });
-    if (!sessionId) {
-      this.spawnTerminalTab({ openDirectoryPalette: true, paneExternalId: paneId ?? undefined });
-      return;
-    }
-    this.openTerminalDirectoryPaletteFor(sessionId);
-  }
-
-  private openTerminalDirectoryPaletteFor(sessionId: string): void {
-    const cwd = this.terminalSessionCwds.get(sessionId) ?? this.options.workspaceRoot ?? ".";
-    const routeId = this.activePaneExternalId() ?? this.activeTabIndex;
-    this.wasmAdapter?.openTerminalDirectoryPalette?.(routeId, sessionId, cwd, "zsh");
+  private openWorkspaceDirectoryPalette(): void {
+    this.wasmAdapter?.openWorkspaceDirectoryPalette?.(
+      this.options.activeWorkspaceId ?? null,
+      this.options.workspaceRoot ?? ".",
+    );
     this.scheduleDraw();
   }
 
@@ -6301,7 +6242,6 @@ export class TerminalPanel {
   }
 
   private activatePtySession(sessionId: string): void {
-    this.lastActiveTerminalSessionId = sessionId;
     const index = this.bufferTabs.findIndex(
       (tab) => tab.kind === "terminal" && tab.sessionId === sessionId,
     );
@@ -6669,7 +6609,10 @@ export class TerminalPanel {
     }
     if (tab.kind === "terminal") {
       this.setMarkdownLayerVisible(false);
-      this.replayPtySession(tab.sessionId ?? this.options.sessionId);
+      const sessionId = tab.sessionId ?? this.options.sessionId;
+      this.replayPtySession(sessionId);
+      const cwd = this.terminalSessionCwds.get(sessionId);
+      if (cwd) this.wasmAdapter?.setActiveTerminalCwd?.(cwd);
       this.scheduleDraw();
       return;
     }
@@ -7219,7 +7162,7 @@ export class TerminalPanel {
         return true;
       }
       if (matchesKey(event, "KeyD", "d")) {
-        this.openTerminalDirectoryPalette();
+        this.openWorkspaceDirectoryPalette();
         return true;
       }
       // Alt+S -> finder / file search.
@@ -8257,13 +8200,14 @@ export class TerminalPanel {
           else this.options.client.sendInput(sourceSessionId, bytes);
         }
       } else if (effect.type === "ChangeTerminalDirectory" && effect.path) {
-        const payload = this.wasmAdapter?.terminalChangeDirectoryPayload?.(
-          effect.path,
-          "zsh",
-        ) ?? new Uint8Array();
-        if (payload.length > 0) {
-          if (this.options.pty) this.options.pty.sendInput(sourceSessionId, payload);
-          else this.options.client.sendInput(sourceSessionId, payload);
+        const firstTerminal = this.bufferTabs.find(
+          (tab) => tab.kind === "terminal" && !!tab.sessionId,
+        )?.sessionId ?? this.options.sessionId;
+        if (sourceSessionId === firstTerminal) {
+          this.options.onWorkspaceRootRequested?.(
+            effect.path,
+            this.options.activeWorkspaceId ?? null,
+          );
         }
       } else if (effect.type === "OpenEditorTab" && effect.path) {
         this.openFileTabContent(effect.path);
@@ -8885,6 +8829,9 @@ export class TerminalPanel {
     if (!intent) return false;
 
     switch (intent.kind) {
+      case "open_directory_palette":
+        this.openWorkspaceDirectoryPalette();
+        break;
       case "toggle_git_diff":
         this.toggleGitSidePanel();
         break;
@@ -9996,6 +9943,9 @@ export class TerminalPanel {
           return;
         }
         if (this.statusLineClickAt(action.x, action.y)) {
+          // Suppress the compatibility mouse press, which would otherwise
+          // immediately dismiss a palette opened by this touch.
+          this.agentTapConsumed = true;
           return;
         }
         this.forwardChromeEvent({

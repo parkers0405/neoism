@@ -74,6 +74,10 @@ impl ChromeBridge {
         self.relayout_chrome();
     }
 
+    pub fn set_active_workspace_id(&mut self, workspace_id: Option<String>) {
+        self.active_workspace_id = workspace_id;
+    }
+
     /// Replace the file-tree contents with a pre-computed listing
     /// rather than running a fresh filesystem scan. JS pushes a
     /// JSON array shaped like:

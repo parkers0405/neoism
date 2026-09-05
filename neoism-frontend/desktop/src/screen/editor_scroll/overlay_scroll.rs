@@ -331,6 +331,11 @@ impl Screen<'_> {
             }
         }
 
+        if self.renderer.status_line.cwd_at(mouse_x, mouse_y) {
+            self.open_workspace_directory_palette();
+            return true;
+        }
+
         if self.renderer.status_line.git_branch_at(mouse_x, mouse_y) {
             self.toggle_git_diff_panel();
             return true;

@@ -89,6 +89,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             git_diff_panel: GitDiffPanel::new(),
             notes_sidebar: NotesSidebar::default(),
             command_composer: CommandComposer::new(),
+            terminal_cwd_label: None,
             pane_grid: PaneGrid::new(crate::session_layout::SessionLeafKind::Terminal, 0),
             pane_surfaces: Vec::new(),
             pane_tabs: std::collections::HashMap::new(),

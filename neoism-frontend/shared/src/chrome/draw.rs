@@ -199,6 +199,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         None => SplashInjection::default(),
                     };
                     let ide_theme = self.ide_theme;
+                    let chrome_scale = self.chrome_scale;
                     self.splash_overlay.render(
                         sugarloaf,
                         &injection,
@@ -207,7 +208,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         cell_w,
                         cell_h,
                         &ide_theme,
-                        1.0,
+                        chrome_scale,
                         true,
                         &active_text_occlusions,
                     );
@@ -491,7 +492,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 rect.h,
                 &theme,
                 &self.terminal_input,
-                None,
+                self.terminal_cwd_label.as_deref(),
                 None,
                 self.animation_phase,
                 true,

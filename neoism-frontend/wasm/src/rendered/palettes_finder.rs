@@ -83,7 +83,7 @@ impl ChromeBridge {
                     // move selection before the common commit path reads it.
                     self.chrome.command_palette.select_clicked(index);
                     let persistent_cd = self.chrome.command_palette.is_cd_query()
-                        && self.chrome.command_palette.terminal_directory_target().is_some();
+                        && self.chrome.command_palette.workspace_directory_target().is_some();
                     self.pick_palette_action();
                     if !persistent_cd { self.chrome.command_palette.set_enabled(false); }
                     self.relayout_chrome();
@@ -583,17 +583,15 @@ impl ChromeBridge {
                 .get_selected_cd_directory()
                 .map(|entry| entry.absolute_path);
             let intent = if let Some(path) = selected.clone() {
-                self.chrome.command_palette.change_terminal_directory_intent(path)
+                self.chrome.command_palette.change_workspace_directory_intent(path)
             } else {
-                self.chrome.command_palette.typed_change_terminal_directory_intent()
+                self.chrome.command_palette.typed_change_workspace_directory_intent()
             };
             if let Some(intent) = intent {
                     self.pending_palette_intents.push(
-                        PaletteIntent::ChangeTerminalDirectory {
-                            route_id: intent.target.route_id,
-                            session_id: intent.target.session_id,
-                            cwd: intent.target.cwd,
-                            shell_kind: intent.target.shell_kind.label().to_string(),
+                        PaletteIntent::ChangeWorkspaceDirectory {
+                            workspace_id: intent.target.workspace_id,
+                            root: intent.target.root,
                             path: intent.destination,
                             selected: selected.is_some(),
                         },
@@ -875,39 +873,28 @@ impl ChromeBridge {
         serde_wasm_bindgen::to_value(&forward).unwrap_or(JsValue::NULL)
     }
 
-    pub fn open_terminal_directory_palette(
+    pub fn open_workspace_directory_palette(
         &mut self,
-        route_id: u32,
-        session_id: Option<String>,
-        cwd: String,
-        shell: String,
+        workspace_id: Option<String>,
+        root: String,
     ) {
-        self.chrome.command_palette.open_commands_for_terminal(
+        self.chrome.command_palette.open_commands_for_workspace(
             "cd ",
-            neoism_ui::panels::command_palette::TerminalDirectoryTarget {
-                route_id: route_id as usize,
-                session_id,
-                cwd,
-                shell_kind: neoism_ui::TerminalShellKind::detect(&shell),
+            neoism_ui::panels::command_palette::WorkspaceDirectoryTarget {
+                workspace_id,
+                root,
             },
         );
         self.relayout_chrome();
     }
 
-    pub fn update_terminal_directory_palette_cwd(&mut self, session_id: String, cwd: String) {
-        if self.chrome.command_palette.update_captured_terminal_cwd(&session_id, &cwd) {
-            self.cd_search_key = None;
-            self.relayout_chrome();
-        }
-    }
-
-    pub fn continue_terminal_directory_palette(&mut self, cwd: String) {
-        self.chrome.command_palette.continue_terminal_directory(cwd);
+    pub fn continue_workspace_directory_palette(&mut self, root: String) {
+        self.chrome.command_palette.continue_workspace_directory(root);
         self.cd_search_key = None;
         self.relayout_chrome();
     }
 
-    pub fn set_terminal_directory_palette_error(&mut self, error: String) {
+    pub fn set_workspace_directory_palette_error(&mut self, error: String) {
         self.chrome.command_palette.set_cd_error(error);
         self.relayout_chrome();
     }
@@ -1127,8 +1114,6 @@ impl ChromeBridge {
     }
 
     fn sync_palette_cd_search(&mut self) {
-        use neoism_ui::services::{IoError, SearchService as _};
-
         let Some(query) = self
             .chrome
             .command_palette
@@ -1139,45 +1124,53 @@ impl ChromeBridge {
             self.cd_search_pending = None;
             return;
         };
-        if self.cd_search_key.as_deref() == Some(query.as_str()) {
+        if self
+            .chrome
+            .command_palette
+            .workspace_directory_target()
+            .is_none()
+        {
+            self.chrome
+                .command_palette
+                .capture_workspace_directory_target(
+                    neoism_ui::panels::command_palette::WorkspaceDirectoryTarget {
+                        workspace_id: self.active_workspace_id.clone(),
+                        root: self.workspace_root.to_string_lossy().into_owned(),
+                    },
+                );
+        }
+        let target = self.chrome.command_palette.workspace_directory_target();
+        let workspace_id = target.and_then(|target| target.workspace_id.clone());
+        let base = target
+            .map(|target| PathBuf::from(&target.root))
+            .unwrap_or_else(|| self.workspace_root.clone());
+        let key = (
+            workspace_id,
+            base.to_string_lossy().into_owned(),
+            query.clone(),
+        );
+        if self.cd_search_key.as_ref() == Some(&key) {
             return;
         }
-        self.cd_search_key = Some(query.clone());
+        self.cd_search_key = Some(key);
         self.cd_search_pending = None;
-        let base = self.chrome.command_palette.terminal_directory_target()
-            .map(|target| PathBuf::from(&target.cwd))
-            .unwrap_or_else(|| self.workspace_root.clone());
-        self.chrome.command_palette.compose_terminal_directory_choices(
-            None,
-            Some(self.workspace_root.to_string_lossy().into_owned()),
-            Vec::new(),
-        );
-        match self.search.search_directories(&base, &query) {
-            Ok(hits) => {
-                let rows = hits
-                    .into_iter()
-                    .map(|hit| {
-                        let absolute = base.join(&hit.path);
-                        neoism_ui::panels::command_palette::PaletteDirectoryEntry {
-                            absolute_path: absolute.to_string_lossy().into_owned(),
-                            display: Some(hit.path),
-                            detail: Some(
-                                base.to_string_lossy().into_owned(),
-                            ),
-                        }
-                    })
-                    .collect();
-                self.chrome.command_palette.compose_terminal_directory_choices(
-                    None,
-                    Some(self.workspace_root.to_string_lossy().into_owned()),
-                    rows,
-                );
-            }
-            Err(IoError::Pending(request_id)) => {
-                self.cd_search_pending = Some((request_id, query));
-            }
-            Err(_) => {}
-        }
+        let rows = neoism_ui::terminal_blocks::completion::completion_candidates(
+            &query,
+            "cd ",
+            false,
+            true,
+            Some(&base),
+        )
+        .into_iter()
+        .map(|candidate| neoism_ui::panels::command_palette::PaletteDirectoryEntry {
+            absolute_path: candidate.replacement,
+            display: Some(candidate.label),
+            detail: candidate.detail,
+        })
+        .collect();
+        self.chrome
+            .command_palette
+            .compose_workspace_directory_choices(None, None, rows);
     }
 
     /// Live-drive for the finder's BufferLines / BufferReplace modes —
@@ -1606,6 +1599,18 @@ impl ChromeBridge {
             .open_references(self.workspace_root.clone(), rows);
         self.relayout_chrome();
     }
+}
+
+pub(super) fn join_workspace_path(base: &std::path::Path, child: &str) -> PathBuf {
+    let base_text = base.to_string_lossy();
+    if base_text.starts_with("\\\\") || base_text.as_bytes().get(1) == Some(&b':') {
+        return PathBuf::from(format!(
+            "{}\\{}",
+            base_text.trim_end_matches(['/', '\\']),
+            child.replace('/', "\\")
+        ));
+    }
+    base.join(child)
 }
 
 /// Classify the host-owned portion of Vim's Ex surface through the same

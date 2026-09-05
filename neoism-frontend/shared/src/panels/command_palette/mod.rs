@@ -42,11 +42,11 @@ mod tests;
 
 pub use actions::{
     mashup_packs_modal_spec, parse_cd_operand, shaders_modal_spec, theme_picker_modal_spec,
-    ChangeTerminalDirectoryIntent, HostKind, PaletteAction, PaletteBufferEntry,
+    ChangeWorkspaceDirectoryIntent, HostKind, PaletteAction, PaletteBufferEntry,
     PaletteBufferTarget, PaletteDirectoryEntry, PaletteHostCapabilities,
     PaletteHostEntry, PaletteMashupEntry, PaletteServerEntry, PaletteShaderEntry,
     PaletteSurface, PaletteWorkspaceEntry, PaletteWorkspaceTarget,
-    TerminalDirectoryTarget, WorkspaceHostKind, WorkspaceVisibility,
+    WorkspaceDirectoryTarget, WorkspaceHostKind, WorkspaceVisibility,
     WORKSPACE_ROOT_DETAIL_PREFIX,
 };
 pub use state::{CommandPalette, WorkspaceMovePhase, WorkspaceMoveStatus};

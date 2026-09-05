@@ -262,12 +262,17 @@ impl CommandPalette {
     /// Note: `set_query` resets selection / scroll, so the user lands
     /// on the (still-matching) first row of the now-narrowed list.
     pub fn tab_complete(&mut self) -> bool {
-        let completion = match self.filtered_rows().get(self.selected_index).map(
+        let completion = if self.is_cd_query() {
+            self.selected_cd_completion_query()
+        } else {
+            self.filtered_rows().get(self.selected_index).map(
             |(_, row)| match row {
                 PaletteRow::Directory { entry } => format!("cd {}", entry.absolute_path),
                 _ => row.title().to_owned(),
             },
-        ) {
+        )
+        };
+        let completion = match completion {
             Some(t) => t,
             None => return false,
         };
@@ -276,6 +281,77 @@ impl CommandPalette {
         }
         self.set_query(completion);
         true
+    }
+
+    pub fn cd_completion_query(&self) -> Option<String> {
+        let typed = self.cd_query_suffix()?;
+        if typed.is_empty() || self.query_cursor != self.query.len() {
+            return None;
+        }
+        let completion = self.selected_cd_completion_query()?;
+        completion
+            .get(..self.query.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&self.query))
+            .then_some(completion)
+    }
+
+    fn selected_cd_completion_query(&self) -> Option<String> {
+        self.cd_query_suffix()?;
+        if self.query_cursor != self.query.len() {
+            return None;
+        }
+        let entry = self.filtered_rows().get(self.selected_index).and_then(|(_, row)| {
+            match row {
+                PaletteRow::Directory { entry } => Some(*entry),
+                _ => None,
+            }
+        })?;
+        let root = self.workspace_directory_target().map(|target| target.root.as_str());
+        let entry_is_absolute = std::path::Path::new(&entry.absolute_path).is_absolute()
+            || entry.absolute_path.starts_with("\\\\")
+            || (entry.absolute_path.as_bytes().get(1) == Some(&b':')
+                && entry.absolute_path.as_bytes().get(2).is_some_and(|byte| matches!(byte, b'/' | b'\\')));
+        let mut insertion = if !entry_is_absolute {
+            entry.absolute_path.clone()
+        } else if {
+            let typed = self.cd_query_suffix()?;
+            std::path::Path::new(typed).is_absolute()
+                || typed.starts_with("\\\\")
+                || (typed.as_bytes().get(1) == Some(&b':')
+                    && typed.as_bytes().get(2).is_some_and(|byte| matches!(byte, b'/' | b'\\')))
+        } {
+            entry.absolute_path.clone()
+        } else if let Some(relative) = root.and_then(|root| {
+            let path = entry.absolute_path.replace('\\', "/");
+            let root = root.replace('\\', "/");
+            let root = root.trim_end_matches('/');
+            let prefix = format!("{root}/");
+            if path
+                .get(..prefix.len())
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&prefix))
+            {
+                Some(path[prefix.len()..].to_owned())
+            } else {
+                None
+            }
+        }) {
+            relative
+        } else {
+            entry.absolute_path.clone()
+        };
+        if !insertion.ends_with('/') && !insertion.ends_with('\\') {
+            insertion.push(if entry.absolute_path.contains('\\') { '\\' } else { '/' });
+        }
+        if entry_is_absolute && insertion.contains(char::is_whitespace) {
+            insertion = format!("\"{}\"", insertion.replace('"', "\\\""));
+        }
+        Some(format!("cd {insertion}"))
+    }
+
+    pub fn cd_ghost_suffix(&self) -> Option<String> {
+        self.cd_completion_query()
+            .and_then(|completion| completion.get(self.query.len()..).map(str::to_owned))
+            .filter(|suffix| !suffix.is_empty())
     }
 
     pub fn get_selected_action(&self) -> Option<PaletteAction> {

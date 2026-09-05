@@ -509,11 +509,24 @@ impl<A> BufferTabs<A> {
             + ICON_GAP * scale
             + TITLE_OVERHANG_GUARD * scale
             + close_reserved;
-        let tab_width = (fixed + title_width.max(0.0))
-            .clamp(MIN_TAB_WIDTH * scale, INTRINSIC_TAB_MAX_WIDTH * scale);
+        let title_width = title_width.max(0.0);
+        let intrinsic_max = INTRINSIC_TAB_MAX_WIDTH * scale;
+        let natural_tab_width = fixed + title_width;
+        let tab_width = natural_tab_width.clamp(MIN_TAB_WIDTH * scale, intrinsic_max);
+        // Preserve the measured width verbatim while the natural tab fits.
+        // Reconstructing it as `tab_width - fixed` loses a few f32 ULPs for
+        // ordinary fractional glyph advances. The strict fit check then sees
+        // a short title as microscopically too wide and replaces its final
+        // characters with an ellipsis (for example `Neoism` -> `Neoi…` at
+        // SF Mono 20pt), even though the slot was sized from that same title.
+        let title_clip_width = if natural_tab_width <= intrinsic_max {
+            title_width
+        } else {
+            (intrinsic_max - fixed).max(0.0)
+        };
         TabVisualGeometry {
             tab_width,
-            title_clip_width: (tab_width - fixed).max(0.0),
+            title_clip_width,
             icon_width: icon_width.max(0.0),
             close_reserved,
             close_center_x: close_affordance.then_some(tab_width - pad),

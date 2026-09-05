@@ -200,10 +200,32 @@ impl Screen<'_> {
                 .map(Self::normalize_workspace_root);
         }
 
-        // Terminal process cwd remains per-terminal completion state. It must
-        // never replace the workspace's declared Explorer root.
-        self.active_workspace_root
-            .clone()
+        // Split terminals remain local helpers. Only the grid's root terminal
+        // owns cwd-driven workspace and Explorer updates.
+        let grid = self.context_manager.current_grid();
+        if grid.root != Some(grid.current) {
+            return self
+                .active_workspace_root
+                .clone()
+                .or_else(|| {
+                    self.context_manager
+                        .config
+                        .working_dir
+                        .clone()
+                        .map(PathBuf::from)
+                })
+                .or_else(|| std::env::current_dir().ok())
+                .and_then(|root| self.normalize_workspace_dir_for_current(root));
+        }
+
+        self.active_terminal_process_cwd()
+            .or_else(|| {
+                current
+                    .terminal
+                    .try_lock_unfair()
+                    .and_then(|terminal| terminal.current_directory.clone())
+            })
+            .or_else(|| self.active_workspace_root.clone())
             .or_else(|| {
                 self.context_manager
                     .config
@@ -320,7 +342,16 @@ impl Screen<'_> {
 
     pub(crate) fn sync_workspace_root_from_active_pane(&mut self) -> bool {
         self.active_pane_workspace_root()
-            .map(|root| self.set_active_workspace_root(root, false))
+            .map(|root| {
+                let publish = {
+                    let current = self.context_manager.current();
+                    !current.has_non_terminal_surface()
+                        && self.context_manager.current_grid().root
+                            == Some(self.context_manager.current_grid().current)
+                        && self.active_workspace_root.as_deref() != Some(root.as_path())
+                };
+                self.set_active_workspace_root(root, publish)
+            })
             .unwrap_or(false)
     }
 

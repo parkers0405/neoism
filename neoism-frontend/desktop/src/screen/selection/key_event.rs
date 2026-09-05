@@ -59,7 +59,7 @@ impl Screen<'_> {
                     if new_terminal {
                         self.create_focused_terminal_tab();
                     } else {
-                        self.open_terminal_directory_palette();
+                        self.open_workspace_directory_palette();
                     }
                 }
                 return;

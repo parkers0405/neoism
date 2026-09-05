@@ -6,7 +6,6 @@
 //! Palette actions and surface-aware visibility filtering.
 
 use crate::widgets::modal::{ModalAction, ModalButton, ModalSpec};
-use crate::TerminalShellKind;
 
 /// Actions that can be triggered from the command palette.
 ///
@@ -191,20 +190,18 @@ pub struct PaletteDirectoryEntry {
     pub detail: Option<String>,
 }
 
-/// Terminal captured when `Change Directory` opens. Keeping this in shared
-/// palette state makes Enter/click deterministic even if another pane takes
-/// focus before the user commits.
+/// Workspace captured when `Change Directory` opens. Keeping this in shared
+/// palette state makes Enter/click deterministic even if the active workspace
+/// changes before the user commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalDirectoryTarget {
-    pub route_id: usize,
-    pub session_id: Option<String>,
-    pub cwd: String,
-    pub shell_kind: TerminalShellKind,
+pub struct WorkspaceDirectoryTarget {
+    pub workspace_id: Option<String>,
+    pub root: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChangeTerminalDirectoryIntent {
-    pub target: TerminalDirectoryTarget,
+pub struct ChangeWorkspaceDirectoryIntent {
+    pub target: WorkspaceDirectoryTarget,
     pub destination: String,
 }
 

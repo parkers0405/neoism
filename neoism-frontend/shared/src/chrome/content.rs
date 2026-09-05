@@ -359,6 +359,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.terminal_input.text()
     }
 
+    pub fn set_terminal_cwd_label(&mut self, cwd: Option<String>) {
+        self.terminal_cwd_label = cwd;
+    }
+
     pub fn dismiss_terminal_splash(&mut self) {
         self.terminal_splash_dismissed = true;
     }

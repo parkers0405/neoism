@@ -249,6 +249,7 @@ pub enum DiagnosticPill {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StatusLineClickAction {
+    OpenDirectoryPalette,
     ToggleSplit,
     ToggleGitDiff,
     Diagnostics { pill: DiagnosticPill },
@@ -696,6 +697,7 @@ pub struct StatusLine {
     /// plus the not-yet-committed candidate and when it first appeared.
     cwd_label_display: Option<String>,
     cwd_label_candidate: Option<(Option<String>, Instant)>,
+    cwd_rect: PillRect,
     error_pill_rect: PillRect,
     warn_pill_rect: PillRect,
     branch_rect: PillRect,
@@ -722,6 +724,7 @@ impl StatusLine {
                 - Duration::from_millis(TRANSITION_MS as u64 + 1),
             cwd_label_display: None,
             cwd_label_candidate: None,
+            cwd_rect: PillRect::default(),
             error_pill_rect: PillRect::default(),
             warn_pill_rect: PillRect::default(),
             branch_rect: PillRect::default(),
@@ -784,6 +787,10 @@ impl StatusLine {
             && self.branch_rect.contains(mx, my)
     }
 
+    pub fn cwd_at(&self, mx: f32, my: f32) -> bool {
+        self.cwd_label_display.is_some() && self.cwd_rect.contains(mx, my)
+    }
+
     pub fn git_branch_hovered(&self) -> bool {
         self.branch_hovered
     }
@@ -829,6 +836,9 @@ impl StatusLine {
     }
 
     pub fn click_action_at(&self, mx: f32, my: f32) -> Option<StatusLineClickAction> {
+        if self.cwd_at(mx, my) {
+            return Some(StatusLineClickAction::OpenDirectoryPalette);
+        }
         if self.split_toggle_at(mx, my) {
             return Some(StatusLineClickAction::ToggleSplit);
         }
@@ -997,6 +1007,7 @@ impl StatusLine {
             self.error_pill_rect = PillRect::default();
             self.warn_pill_rect = PillRect::default();
             self.branch_rect = PillRect::default();
+            self.cwd_rect = PillRect::default();
             self.split_toggle_rect = PillRect::default();
             self.lsp_pill_rect = PillRect::default();
             return;
@@ -1100,8 +1111,15 @@ impl StatusLine {
             };
         let cwd_x = mode_x + mode_pill_w - tail_overlap;
         self.branch_rect = PillRect::default();
+        self.cwd_rect = PillRect::default();
 
         if let Some(label) = cwd_label {
+            self.cwd_rect = PillRect {
+                x: cwd_x,
+                y: pill_y,
+                w: cwd_pill_w,
+                h: pill_h,
+            };
             let icon_opts = DrawOpts {
                 font_size,
                 color: palette.u8(palette.black),
@@ -1906,7 +1924,7 @@ impl StatusLine {
 /// Collapse a path to its root plus the longest trailing component sequence
 /// that fits the supplied pixel budget. The measurer keeps this independent
 /// of any particular font metrics and makes the policy directly testable.
-fn compact_path_label(
+pub(crate) fn compact_path_label(
     label: &str,
     max_width: f32,
     mut measure: impl FnMut(&str) -> f32,
@@ -2026,7 +2044,26 @@ impl Panel for StatusLine {
 
 #[cfg(test)]
 mod tests {
-    use super::{centered_text_box_y, compact_path_label};
+    use super::{
+        centered_text_box_y, compact_path_label, PillRect, StatusLine,
+        StatusLineClickAction,
+    };
+
+    #[test]
+    fn cwd_pill_opens_the_directory_palette() {
+        let mut status = StatusLine::new();
+        status.cwd_label_display = Some("~/project".into());
+        status.cwd_rect = PillRect {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 24.0,
+        };
+        assert_eq!(
+            status.click_action_at(40.0, 30.0),
+            Some(StatusLineClickAction::OpenDirectoryPalette)
+        );
+    }
 
     #[test]
     fn status_text_box_is_geometrically_centered_in_the_pill() {

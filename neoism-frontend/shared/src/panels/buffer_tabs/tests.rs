@@ -193,6 +193,30 @@ fn render_geometry_uses_measured_icon_and_reserves_close_exactly_once() {
 }
 
 #[test]
+fn fractional_title_width_round_trip_does_not_ellipsize_short_label() {
+    // Regression: at the user's 20pt chrome scale, SF Mono's 1266/2048-em
+    // advance makes `fixed + title_width - fixed` a few f32 ULPs narrower
+    // than `title_width`. That microscopic loss used to turn `Neoism` into
+    // `Neoi…`, while the slightly longer `Neoism 2` happened to round exactly.
+    let scale = 20.0 / 14.0;
+    let glyph_advance = 1266.0 * (FONT_SIZE * scale) / 2048.0;
+    let title = "Neoism";
+    let title_width = title.chars().map(|_| glyph_advance).sum::<f32>();
+    let geometry = BufferTabs::<()>::visual_tab_geometry(
+        title_width,
+        ICON_FONT_SIZE * scale,
+        true,
+        scale,
+    );
+
+    assert_eq!(geometry.title_clip_width, title_width);
+    assert_eq!(
+        BufferTabs::<()>::fit_title(title, geometry.title_clip_width, |_| glyph_advance),
+        title
+    );
+}
+
+#[test]
 fn appending_tabs_past_overflow_never_resizes_existing_tabs() {
     let viewport = 430.0;
     let mut tabs = BufferTabs::<()>::new();

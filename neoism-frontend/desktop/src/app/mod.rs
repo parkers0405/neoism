@@ -2564,15 +2564,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             RioEventType::Rio(RioEvent::ChangeTerminalDirectory { route_id, path }) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
-                    if let Some(context) =
-                        route.window.screen.ctx_mut().get_by_route_id(route_id)
-                    {
-                        let shell = context.context().terminal_shell_kind;
-                        if let Ok(bytes) =
-                            shell.change_directory_payload(&path.to_string_lossy())
-                        {
-                            context.context_mut().messenger.send_bytes(bytes);
-                        }
+                    if route.window.screen.is_primary_terminal_route(route_id) {
+                        route.window.screen.set_active_workspace_root(path, true);
+                        route.request_redraw();
                     }
                 }
             }

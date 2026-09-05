@@ -103,7 +103,15 @@ impl ChromeBridge {
     }
 
     pub(crate) fn sync_terminal_command_composer_visibility(&mut self) {
-        let terminal = self.rendered.terminal_ref();
+        let focused_pane = self
+            .chrome
+            .pane_grid
+            .is_split()
+            .then(|| self.chrome.pane_grid.focused_external_id())
+            .flatten();
+        let terminal = focused_pane
+            .and_then(|id| self.pane_terminals.get(&id))
+            .unwrap_or_else(|| self.rendered.terminal_ref());
         let state = terminal.inner.shell_prompt_state();
         let terminal_alt_screen = terminal
             .inner
@@ -124,11 +132,11 @@ impl ChromeBridge {
             .collect();
         let _ = terminal;
 
-        if self.chrome.is_terminal_tab_active()
-            && !self.chrome.is_neoism_agent_tab_active()
-        {
-            self.sync_terminal_status_cwd(terminal_cwd.as_deref());
-        }
+        let cwd_label = terminal_cwd
+            .as_deref()
+            .map(display_path)
+            .or_else(|| Some(display_path(&self.workspace_root)));
+        self.chrome.set_terminal_cwd_label(cwd_label);
         self.terminal_blocks.sync_shell_state(state);
         self.terminal_blocks
             .finish_unintegrated_remote_command_at_prompt(

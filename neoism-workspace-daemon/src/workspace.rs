@@ -191,6 +191,7 @@ pub struct PaneLayoutBroadcast {
 struct ManagerInner {
     hosts: HashMap<String, HostSummary>,
     host_workspaces: HashMap<String, WorkspaceSummary>,
+    previous_workspace_roots: HashMap<String, PathBuf>,
     workspace_tabs: HashMap<String, WorkspaceTabSummary>,
     active_workspace_by_host: HashMap<String, String>,
     workspaces: HashMap<String, ProjectRootSummary>,

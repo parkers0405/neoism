@@ -278,6 +278,7 @@ impl ChromeBridge {
             PathBuf::from(dir),
             entries,
         );
+        self.cd_search_key = None;
     }
 
     /// Directories Tab completion wanted but had no cached listing
@@ -616,7 +617,7 @@ impl ChromeBridge {
             }
             SplashMenuAction::ChangeDirectory => {
                 self.pending_palette_intents.push(PaletteIntent::Action {
-                    action: "OpenTerminalDirectoryPalette",
+                    action: "OpenWorkspaceDirectoryPalette",
                 })
             }
         }

@@ -388,6 +388,9 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// from daemon listings (`set_entries_from_host`) on web.
     pub notes_sidebar: NotesSidebar,
     pub command_composer: CommandComposer,
+    /// Cwd of the terminal owning the visible composer. This remains
+    /// terminal-local even though the status-line cwd is workspace-global.
+    terminal_cwd_label: Option<String>,
     /// Golden-standard split/pane controller. Owns the canonical
     /// [`crate::session_layout::tree::SessionTree`] and turns pointer /
     /// keyboard interactions into tree mutations + host actions (Zed/VS

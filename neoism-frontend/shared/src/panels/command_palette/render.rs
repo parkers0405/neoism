@@ -652,6 +652,20 @@ impl CommandPalette {
                 &input_opts,
             );
         }
+        if visible_display_rows.len() == 1 {
+            if let Some(ghost) = self.cd_ghost_suffix() {
+                let ghost_opts = DrawOpts {
+                    color: theme.u8_alpha(theme.muted, 0.72),
+                    ..input_opts
+                };
+                sugarloaf.overlay_text_mut().draw(
+                    text_x + input_rendered_width,
+                    text_y,
+                    &ghost,
+                    &ghost_opts,
+                );
+            }
+        }
         if let Some(error) = self.cd_error.as_deref() {
             let error_opts = DrawOpts { color: theme.u8(theme.red), ..input_opts };
             sugarloaf.overlay_text_mut().draw(

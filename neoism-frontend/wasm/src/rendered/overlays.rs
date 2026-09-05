@@ -487,6 +487,9 @@ impl ChromeBridge {
         };
 
         let intent = match action {
+            StatusLineClickAction::OpenDirectoryPalette => {
+                StatusLineClickIntent::OpenDirectoryPalette
+            }
             StatusLineClickAction::ToggleSplit => StatusLineClickIntent::ToggleSplit,
             StatusLineClickAction::ToggleGitDiff => StatusLineClickIntent::ToggleGitDiff,
             StatusLineClickAction::ToggleLspPopup => {

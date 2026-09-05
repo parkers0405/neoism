@@ -45,60 +45,17 @@ fn expand_cd_target(base: &Path, target: &str) -> Option<PathBuf> {
     })
 }
 
-fn ordered_terminal_route_candidates(
-    focused: Option<usize>,
-    active: Option<usize>,
-    recent: Option<usize>,
-    workspace_routes: impl IntoIterator<Item = usize>,
-) -> Vec<usize> {
-    let mut routes = Vec::new();
-    for route in focused.into_iter().chain(active).chain(recent).chain(workspace_routes) {
-        if !routes.contains(&route) { routes.push(route); }
-    }
-    routes
-}
-
-fn resolve_live_terminal_route(
-    candidates: &[usize],
-    mut is_live: impl FnMut(usize) -> bool,
-) -> Option<usize> {
-    candidates.iter().copied().find(|route| is_live(*route))
-}
-
-fn remote_home_relative_payload(
-    shell: neoism_ui::TerminalShellKind,
-    relative: &str,
-) -> Result<Vec<u8>, &'static str> {
-    if relative.chars().any(|ch| ch == '\0' || ch == '\r' || ch == '\n' || ch.is_control()) {
-        return Err("directory contains a control character");
-    }
-    let command = match shell {
-        neoism_ui::TerminalShellKind::PowerShell => format!(
-            "Set-Location -LiteralPath (Join-Path $HOME '{}')",
-            relative.replace('\'', "''"),
-        ),
-        neoism_ui::TerminalShellKind::Cmd => {
-            if relative.contains('"') { return Err("directory contains an unsupported quote"); }
-            format!("cd /d \"%USERPROFILE%\\{}\"", relative.replace('/', "\\"))
-        }
-        _ => format!(
-            "cd -- \"$HOME\"/'{}'",
-            relative.replace('\'', "'\\''"),
-        ),
-    };
-    Ok(shell.command_payload(&command, false))
-}
-
 impl Screen<'_> {
+    pub(crate) fn is_primary_terminal_route(&self, route_id: usize) -> bool {
+        let grid = self.context_manager.current_grid();
+        grid.root == Some(grid.current) && self.context_manager.current_route() == route_id
+    }
+
     /// Refresh the directory rows for a normal command-palette query beginning
     /// with `cd`. fff owns recursive discovery/ranking; direct path resolution
     /// is kept here so `~`, `..`, quoted paths, and an exact directory work
     /// even before (or without) an index hit.
     pub(crate) fn refresh_cd_palette_results(&mut self) {
-        use neoism_agent_service_api::{
-            DirectorySearchRequest, WorkspaceSearchRequestControl,
-            WorkspaceSearchService as _,
-        };
         use neoism_ui::panels::command_palette::PaletteDirectoryEntry;
 
         let Some(suffix) = self
@@ -109,23 +66,26 @@ impl Screen<'_> {
         else {
             return;
         };
-        if let Some(session_id) = self
+        if self
             .renderer
             .command_palette
-            .terminal_directory_target()
-            .and_then(|target| target.session_id.clone())
+            .workspace_directory_target()
+            .is_none()
         {
-            if let Some(cwd) = self
-                .context_manager
-                .daemon_cache()
-                .remote_session_cwds
-                .get(&session_id)
-                .cloned()
-            {
-                self.renderer
-                    .command_palette
-                    .update_captured_terminal_cwd(&session_id, &cwd);
-            }
+            let root = self
+                .active_workspace_root
+                .clone()
+                .or_else(|| self.workspace_root_for_new_shell())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            self.renderer
+                .command_palette
+                .capture_workspace_directory_target(
+                    neoism_ui::panels::command_palette::WorkspaceDirectoryTarget {
+                        workspace_id: self.current_workspace_id(),
+                        root: root.to_string_lossy().into_owned(),
+                    },
+                );
         }
         // A joined workspace's path belongs to the host. Its search is routed
         // over the daemon by the web/shared service path; never inspect that
@@ -133,7 +93,7 @@ impl Screen<'_> {
         if self.context_manager.current_workspace_is_remote_joined() {
             self.renderer
                 .command_palette
-                .compose_terminal_directory_choices(
+                .compose_workspace_directory_choices(
                     None,
                     self.active_workspace_root.as_ref().map(|path| path.to_string_lossy().into_owned()),
                     Vec::new(),
@@ -143,8 +103,8 @@ impl Screen<'_> {
         let Some(base) = self
             .renderer
             .command_palette
-            .terminal_directory_target()
-            .map(|target| PathBuf::from(&target.cwd))
+            .workspace_directory_target()
+            .map(|target| PathBuf::from(&target.root))
             .or_else(|| self.active_workspace_root.clone())
             .or_else(|| std::env::current_dir().ok())
         else {
@@ -152,65 +112,29 @@ impl Screen<'_> {
         };
 
         let typed = unquote_cd_target(&suffix);
-        let expanded = expand_cd_target(&base, typed);
-        let mut search_root = expanded.clone().unwrap_or_else(|| base.clone());
-        let mut exact = None;
-        if search_root.is_dir() {
-            exact = std::fs::canonicalize(&search_root).ok();
-        } else {
-            while !search_root.is_dir() {
-                let Some(parent) = search_root.parent() else {
-                    search_root = base.clone();
-                    break;
-                };
-                search_root = parent.to_path_buf();
-            }
-        }
-        let query = expanded
-            .as_deref()
-            .and_then(|path| path.strip_prefix(&search_root).ok())
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(|| typed.to_owned());
-
-        let mut rows = Vec::new();
-        if let Some(path) = exact {
-            rows.push(PaletteDirectoryEntry::new(path.to_string_lossy()));
-        }
-        if let Ok(result) =
-            self.cd_directory_search
-                .search_directories(&DirectorySearchRequest {
-                    root: search_root.clone(),
-                    query,
-                    offset: 0,
-                    limit: 128,
-                    control: WorkspaceSearchRequestControl {
-                        timeout_ms: 2_000,
-                        cancel: None,
-                    },
-                })
-        {
-            for relative in result.paths {
-                let path = search_root.join(&relative);
-                let absolute = path.to_string_lossy().into_owned();
-                if rows.iter().any(|row| row.absolute_path == absolute) {
-                    continue;
-                }
-                rows.push(PaletteDirectoryEntry {
-                    absolute_path: absolute,
-                    display: Some(relative),
-                    detail: Some(search_root.to_string_lossy().into_owned()),
-                });
-            }
-        }
-        self.renderer.command_palette.compose_terminal_directory_choices(
+        let rows = neoism_ui::terminal_blocks::completion::completion_candidates(
+            typed,
+            "cd ",
+            false,
+            true,
+            Some(&base),
+        )
+        .into_iter()
+        .map(|candidate| PaletteDirectoryEntry {
+            absolute_path: candidate.replacement,
+            display: Some(candidate.label),
+            detail: candidate.detail,
+        })
+        .collect();
+        self.renderer.command_palette.compose_workspace_directory_choices(
             dirs::home_dir().map(|path| path.to_string_lossy().into_owned()),
             self.active_workspace_root.as_ref().map(|path| path.to_string_lossy().into_owned()),
             rows,
         );
     }
 
-    /// Send a literal directory change to the terminal captured by Alt+D.
-    /// The route is stable even if focus moves while the palette is open.
+    /// Re-point the workspace captured by Alt+D. Shell cwd remains local to
+    /// each terminal; this command changes the app's declared directory.
     pub(crate) fn commit_palette_cd(&mut self, target: &str) -> bool {
         let parsed = match neoism_ui::panels::command_palette::parse_cd_operand(target) {
             Ok(parsed) => parsed,
@@ -222,80 +146,54 @@ impl Screen<'_> {
         let Some(intent) = self
             .renderer
             .command_palette
-            .change_terminal_directory_intent(parsed)
+            .change_workspace_directory_intent(parsed)
         else {
             return false;
         };
-        let remote_home_child = intent.target.session_id.as_ref().and_then(|_| {
-            intent.destination.strip_prefix("~/")
-                .or_else(|| intent.destination.strip_prefix("~\\"))
-        });
-        let shell_resolved_payload = if intent.destination.is_empty()
-            || intent.destination == "~"
-            || intent.destination == "-"
-        {
-            let command = if intent.destination == "-" { "cd -" } else { "cd" };
-            Some(Ok(intent.target.shell_kind.command_payload(command, false)))
-        } else {
-            remote_home_child.map(|relative| {
-                remote_home_relative_payload(intent.target.shell_kind, relative)
-            })
-        };
-        if let Some(payload) = shell_resolved_payload {
-            let Ok(payload) = payload else {
-                self.renderer.command_palette.set_cd_error("Directory contains unsafe control characters");
-                return false;
-            };
-            let Some(context) = self.context_manager.get_by_route_id(intent.target.route_id)
-            else {
-                self.renderer.command_palette.set_cd_error("The originating terminal is no longer open");
-                return false;
-            };
-            context.context_mut().terminal.lock().expect_synthetic_command_echo(&payload);
-            context.context_mut().messenger.send_bytes(payload);
-            self.renderer.command_palette.continue_terminal_directory_pending();
-            self.refresh_cd_palette_results();
+        if intent.target.workspace_id != self.current_workspace_id() {
+            self.renderer
+                .command_palette
+                .set_cd_error("Workspace changed while the directory palette was open");
+            self.mark_dirty();
             return true;
         }
-        let base = PathBuf::from(&intent.target.cwd);
-        let Some(path) = expand_cd_target(&base, &intent.destination) else {
+        if self.context_manager.current_workspace_is_remote_joined() {
+            let Some(workspace_id) = intent.target.workspace_id else {
+                self.renderer.command_palette.set_cd_error("No active workspace");
+                return false;
+            };
+            self.context_manager.set_daemon_workspace_root(
+                workspace_id,
+                PathBuf::from(intent.destination),
+            );
+            self.renderer.command_palette.continue_workspace_directory_pending();
+            return true;
+        }
+        let base = PathBuf::from(&intent.target.root);
+        let expanded = if intent.destination == "-" {
+            self.renderer
+                .command_palette
+                .previous_workspace_directory(&intent.target.root)
+                .map(PathBuf::from)
+        } else {
+            expand_cd_target(&base, &intent.destination)
+        };
+        let Some(path) = expanded else {
             self.renderer.command_palette.set_cd_error(
-                "Unsupported directory: use ~ or ~/path; ~user expansion is not supported.",
+                "No previous directory (use ~ or ~/path; ~user is not supported).",
             );
             return false;
         };
-        let path = if intent.target.session_id.is_none() {
-            let Ok(path) = std::fs::canonicalize(&path) else {
-                self.renderer.command_palette.set_cd_error(format!("Directory not found: {}", path.display()));
-                return false;
-            };
-            if !path.is_dir() {
-                self.renderer.command_palette.set_cd_error(format!("Not a directory: {}", path.display()));
-                return false;
-            }
-            path
-        } else {
-            path
-        };
-        let Ok(payload) = intent
-            .target
-            .shell_kind
-            .change_directory_payload(&path.to_string_lossy())
-        else {
-            self.renderer.command_palette.set_cd_error("Directory contains unsafe control characters");
+        let Ok(path) = std::fs::canonicalize(&path) else {
+            self.renderer.command_palette.set_cd_error(format!("Directory not found: {}", path.display()));
             return false;
         };
-        let Some(context) = self.context_manager.get_by_route_id(intent.target.route_id)
-        else {
-            self.renderer.command_palette.set_cd_error("The originating terminal is no longer open");
+        if !path.is_dir() {
+            self.renderer.command_palette.set_cd_error(format!("Not a directory: {}", path.display()));
             return false;
-        };
-        {
-            let terminal = context.context_mut().terminal.clone();
-            terminal.lock().expect_synthetic_command_echo(&payload);
         }
-        context.context_mut().messenger.send_bytes(payload);
-        self.renderer.command_palette.continue_terminal_directory(path.to_string_lossy());
+        self.set_active_workspace_root(path.clone(), true);
+        self.renderer.command_palette.continue_workspace_directory(path.to_string_lossy());
         self.refresh_cd_palette_results();
         true
     }
@@ -569,74 +467,23 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    pub(crate) fn open_terminal_directory_palette(&mut self) {
-        use neoism_ui::panels::command_palette::TerminalDirectoryTarget;
+    pub(crate) fn open_workspace_directory_palette(&mut self) {
+        use neoism_ui::panels::command_palette::WorkspaceDirectoryTarget;
 
-        let current = self.context_manager.current();
-        let current_live = (current.shell_pid != 0 || current.remote_pty.is_some())
-            .then_some(current.route_id);
-        let focused_pane = self.active_pane_strip_route().and_then(|pane_route| {
-            let tabs = self.renderer.pane_tabs.get(&pane_route)?;
-            tabs.terminal_route_at(tabs.active())
-        });
-        let focused = current_live.or(focused_pane);
-        let active = self.renderer.buffer_tabs.active();
-        let active = self.renderer.buffer_tabs.terminal_route_at(active);
-        let mut workspace_terminal_routes = self
-            .renderer
-            .buffer_tabs
-            .tabs
-            .iter()
-            .filter_map(|tab| tab.terminal_route_id)
-            .collect::<Vec<_>>();
-        workspace_terminal_routes.extend(
-            self.renderer.pane_tabs.values().flat_map(|tabs| {
-                tabs.tabs.iter().filter_map(|tab| tab.terminal_route_id)
-            }),
-        );
-        let recent = self
-            .last_active_terminal_route
-            .filter(|recent| workspace_terminal_routes.contains(recent));
-        let candidates = ordered_terminal_route_candidates(
-            focused,
-            active,
-            recent,
-            workspace_terminal_routes.into_iter().rev(),
-        );
-        let mut route_id = resolve_live_terminal_route(&candidates, |candidate| {
-            self.context_manager.get_by_route_id(candidate).is_some_and(|item| {
-                item.val.shell_pid != 0 || item.val.remote_pty.is_some()
-            })
-        });
-        if route_id.is_none() {
-            route_id = self.create_focused_terminal_tab();
-        }
-        let Some(route_id) = route_id else { return; };
-        let Some(current) = self.context_manager.get_by_route_id(route_id) else { return; };
-        let shell_kind = current.val.terminal_shell_kind;
-        let session_id = current.val.remote_pty.as_ref().and_then(|binding| {
-            binding
-                .shared
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .session_id
-                .clone()
-        });
-        let reported_cwd = current.val.terminal.try_lock_unfair()
-            .and_then(|terminal| terminal.current_directory.clone());
-        let cwd = reported_cwd
-            .or_else(|| self.active_workspace_root.clone())
+        let root = self.active_workspace_root.clone()
+            .or_else(|| self.workspace_root_for_new_shell())
             .unwrap_or_else(|| PathBuf::from("."));
         self.renderer
             .command_palette
+            .record_workspace_directory(root.to_string_lossy().into_owned());
+        self.renderer
+            .command_palette
             .set_surface(neoism_ui::panels::command_palette::PaletteSurface::Terminal);
-        self.renderer.command_palette.open_commands_for_terminal(
+        self.renderer.command_palette.open_commands_for_workspace(
             "cd ",
-            TerminalDirectoryTarget {
-                route_id,
-                session_id,
-                cwd: cwd.to_string_lossy().into_owned(),
-                shell_kind,
+            WorkspaceDirectoryTarget {
+                workspace_id: self.current_workspace_id(),
+                root: root.to_string_lossy().into_owned(),
             },
         );
         self.refresh_cd_palette_results();
@@ -1943,34 +1790,4 @@ pub(crate) fn read_hosted_sidecar(
         .join(url.port()?.to_string())
         .join(HOSTED_SIDECAR_FILE);
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
-}
-
-#[cfg(test)]
-mod terminal_target_tests {
-    use super::{
-        ordered_terminal_route_candidates, remote_home_relative_payload,
-        resolve_live_terminal_route,
-    };
-
-    #[test]
-    fn global_terminal_target_is_ordered_deduped_and_skips_dead_routes() {
-        let candidates = ordered_terminal_route_candidates(
-            Some(10), Some(20), Some(30), [20, 40, 10],
-        );
-        assert_eq!(candidates, vec![10, 20, 30, 40]);
-        assert_eq!(resolve_live_terminal_route(&candidates, |route| route == 30), Some(30));
-        assert_eq!(resolve_live_terminal_route(&candidates, |_| false), None);
-    }
-
-    #[test]
-    fn remote_home_child_is_shell_quoted_without_using_the_local_home() {
-        let payload = remote_home_relative_payload(
-            neoism_ui::TerminalShellKind::Zsh,
-            "a b'; touch nope",
-        ).unwrap();
-        assert_eq!(
-            String::from_utf8(payload).unwrap(),
-            "cd -- \"$HOME\"/'a b'\\''; touch nope'\n",
-        );
-    }
 }

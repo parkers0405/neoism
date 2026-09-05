@@ -67,6 +67,7 @@ export interface TerminalAdapter {
      *  when the user invokes the menu without targeting a row. */
     fileTreeWorkspaceRoot?(): string | null;
     setWorkspaceRoot?(workspaceRoot: string): void;
+    setActiveWorkspaceId?(workspaceId: string | null): void;
     /** True when the file tree currently owns chrome focus. Gates the
      *  F2 / Delete keyboard shortcuts so they don't fire from other
      *  surfaces (terminal, editor, palette). */
@@ -129,6 +130,7 @@ export interface TerminalAdapter {
     /** Feed one split pane terminal's PTY stream (creates + seeds the
      *  pane-sized grid on first feed). */
     feedPaneTerminal?(externalId: number, bytes: Uint8Array): unknown[];
+    setActiveTerminalCwd?(cwd: string): void;
     paneTerminalExists?(externalId: number): boolean;
     removePaneTerminal?(externalId: number): void;
     /** Retain only the pane terminals listed in `keepJson` (id array). */
@@ -278,11 +280,9 @@ export interface TerminalAdapter {
     showFileTree?(): void;
     hideFileTree?(): void;
     showCommandPalette?(): void;
-    openTerminalDirectoryPalette?(routeId: number, sessionId: string | null, cwd: string, shell: string): void;
-    updateTerminalDirectoryPaletteCwd?(sessionId: string, cwd: string): void;
-    continueTerminalDirectoryPalette?(cwd: string): void;
-    setTerminalDirectoryPaletteError?(error: string): void;
-    terminalChangeDirectoryPayload?(path: string, shell: string): Uint8Array;
+    openWorkspaceDirectoryPalette?(workspaceId: string | null, root: string): void;
+    continueWorkspaceDirectoryPalette?(root: string): void;
+    setWorkspaceDirectoryPaletteError?(error: string): void;
     setCommandPaletteWorkspaceVisibility?(visibility: string): void;
     setWorkspaceIslandTabs?(payloadJson: string): void;
     workspaceIslandClick?(x: number, y: number): boolean;
@@ -880,6 +880,7 @@ export interface FileTreeContextTarget {
 }
 
 export type StatusLineClickIntent =
+    | { kind: "open_directory_palette" }
     | { kind: "toggle_split" }
     | { kind: "toggle_git_diff" }
     | { kind: "diagnostics_opened" }
@@ -925,7 +926,7 @@ export type PaletteIntent =
     | { kind: "shader"; title: string; filter: string | null }
     | { kind: "buffer"; target: PaletteBufferTarget }
     | { kind: "workspace"; workspace_id: string }
-    | { kind: "change_terminal_directory"; route_id: number; session_id: string | null; cwd: string; shell_kind: string; path: string; selected: boolean }
+    | { kind: "change_workspace_directory"; workspace_id: string | null; root: string; path: string; selected: boolean }
     | { kind: "server"; action: string; id: string };
 
 export type PaletteBufferTarget =
@@ -1333,6 +1334,7 @@ interface ChromeBridgeInstance {
      *  default "New File / New Folder" target when no row is selected. */
     file_tree_workspace_root?(): unknown;
     set_workspace_root?(workspaceRoot: string): void;
+    set_active_workspace_id?(workspaceId: string | null): void;
     set_notes_vault_root?(vault: string | undefined): void;
     open_servers_palette?(entriesJson: string): void;
     share_sheet_show?(url: string, hint: string | undefined): void;
@@ -1392,11 +1394,10 @@ interface ChromeBridgeInstance {
     draw_pane_grid_host_surfaces?(): void;
     set_pane_surfaces?(json: string): void;
     feed_pane_terminal?(externalId: number, bytes: Uint8Array): unknown;
-    open_terminal_directory_palette?(routeId: number, sessionId: string | undefined, cwd: string, shell: string): void;
-    update_terminal_directory_palette_cwd?(sessionId: string, cwd: string): void;
-    continue_terminal_directory_palette?(cwd: string): void;
-    set_terminal_directory_palette_error?(error: string): void;
-    terminal_change_directory_payload?(path: string, shell: string): Uint8Array;
+    set_active_terminal_cwd?(cwd: string): void;
+    open_workspace_directory_palette?(workspaceId: string | undefined, root: string): void;
+    continue_workspace_directory_palette?(root: string): void;
+    set_workspace_directory_palette_error?(error: string): void;
     pane_terminal_exists?(externalId: number): boolean;
     remove_pane_terminal?(externalId: number): void;
     prune_pane_terminals?(keepJson: string): void;
@@ -2166,6 +2167,9 @@ class ChromeAdapter implements TerminalAdapter {
     setWorkspaceRoot(workspaceRoot: string) {
         this.inner.set_workspace_root?.(workspaceRoot);
     }
+    setActiveWorkspaceId(workspaceId: string | null) {
+        this.inner.set_active_workspace_id?.(workspaceId);
+    }
     /** Wave 7-web: remote collaborator carets for the wasm markdown
      *  pane — `[{name, color:[r,g,b], line, col_utf16}]`. */
     setMarkdownRemoteCursors(peers: unknown) {
@@ -2570,6 +2574,9 @@ class ChromeAdapter implements TerminalAdapter {
         const out = this.inner.feed_pane_terminal?.(externalId, bytes);
         return Array.isArray(out) ? out : [];
     }
+    setActiveTerminalCwd(cwd: string): void {
+        this.inner.set_active_terminal_cwd?.(cwd);
+    }
     paneTerminalExists(externalId: number): boolean {
         return this.inner.pane_terminal_exists?.(externalId) === true;
     }
@@ -2799,20 +2806,14 @@ class ChromeAdapter implements TerminalAdapter {
     showCommandPalette() {
         this.inner.show_command_palette();
     }
-    openTerminalDirectoryPalette(routeId: number, sessionId: string | null, cwd: string, shell: string) {
-        this.inner.open_terminal_directory_palette?.(routeId, sessionId ?? undefined, cwd, shell);
+    openWorkspaceDirectoryPalette(workspaceId: string | null, root: string) {
+        this.inner.open_workspace_directory_palette?.(workspaceId ?? undefined, root);
     }
-    updateTerminalDirectoryPaletteCwd(sessionId: string, cwd: string) {
-        this.inner.update_terminal_directory_palette_cwd?.(sessionId, cwd);
+    continueWorkspaceDirectoryPalette(root: string) {
+        this.inner.continue_workspace_directory_palette?.(root);
     }
-    continueTerminalDirectoryPalette(cwd: string) {
-        this.inner.continue_terminal_directory_palette?.(cwd);
-    }
-    setTerminalDirectoryPaletteError(error: string) {
-        this.inner.set_terminal_directory_palette_error?.(error);
-    }
-    terminalChangeDirectoryPayload(path: string, shell: string) {
-        return this.inner.terminal_change_directory_payload?.(path, shell) ?? new Uint8Array();
+    setWorkspaceDirectoryPaletteError(error: string) {
+        this.inner.set_workspace_directory_palette_error?.(error);
     }
     setCommandPaletteWorkspaceVisibility(visibility: string) {
         this.inner.set_command_palette_workspace_visibility?.(visibility);

@@ -82,7 +82,11 @@ impl CommandPalette {
                     }
                     LogicalKey::Named(NamedKey::Tab) => {
                         if self.is_cd_query() {
-                            self.cycle_cd_selection(key.modifiers.contains(crate::event::Modifiers::SHIFT));
+                            if key.modifiers.contains(crate::event::Modifiers::SHIFT) {
+                                self.cycle_cd_selection(true);
+                            } else if !self.tab_complete() {
+                                self.cycle_cd_selection(false);
+                            }
                         } else if !self.tab_complete() {
                             self.move_selection_down();
                         }
@@ -93,7 +97,7 @@ impl CommandPalette {
                         // TODO(wave6-cutover): native commits via
                         // ex/search/font/buffer/action paths. Bridge
                         // resolves the selection; until then, close.
-                        if !(self.terminal_directory_target().is_some() && self.is_cd_query()) {
+                        if !(self.workspace_directory_target().is_some() && self.is_cd_query()) {
                             self.set_enabled(false);
                         }
                     }

@@ -284,17 +284,13 @@ impl Screen<'_> {
                     )
                 };
 
-            // Cwd pill (left side, between mode and branch) — populated
-            // for every active-pane kind so the dir is always visible
-            // and tracks whichever page the user is on. Document panes
-            // use the active file's parent dir; terminal panes use the
-            // shell's live cwd (which moves with `cd`). Path is
+            // Cwd pill (left side, between mode and branch) tracks the
+            // app-level workspace directory regardless of focused pane. Path is
             // rendered zsh-style: `$HOME` collapses to `~`, and any
             // tail is kept (`~/projects/neoism`); paths outside `$HOME`
             // show verbatim.
-            let cwd_label = active_path
+            let cwd_label = self.active_workspace_root
                 .as_deref()
-                .and_then(|p| p.parent())
                 .or(active_cwd.as_deref())
                 .map(|p| {
                     if let Some(home) = std::env::var_os("HOME") {

@@ -211,3 +211,4 @@
 - [neoism cd and persistent wrapped directory palette](feature_neoism_cd_persistent_palette.md) - Global deterministic Alt+D, dynamic animated directory rows, parent-shell cd, exact source-session echo suppression
 - [Web/mobile closed tabs reappearing — fixed](bug_web_tabs_reappear_after_close.md) - Web/mobile tab closes now tombstone all daemon authorities and reject stale hydration until ack or explicit reopen
 - [Web overlay/splash/Notes sync fixes](fix_web_overlay_splash_notes_sync.md) - Unified composer overlay ownership, typed mobile splash intents, and durable generation-bound Notes sync
+- [App-wide workspace cd palette](feature_app_workspace_cd_palette.md) - App-wide cwd palette and terminal-local prompt implementation, review fixes, verification

@@ -1755,13 +1755,11 @@ enum PaletteIntent {
     /// switches the daemon workspace, mirroring desktop's
     /// `switch_daemon_host_workspace`.
     Workspace { workspace_id: String },
-    /// Terminal-local Alt+D commit, including the terminal captured when the
-    /// palette opened so a later focus change cannot redirect it.
-    ChangeTerminalDirectory {
-        route_id: usize,
-        session_id: Option<String>,
-        cwd: String,
-        shell_kind: String,
+    /// App-level Alt+D commit, including the workspace captured when the
+    /// palette opened so a later workspace switch cannot redirect it.
+    ChangeWorkspaceDirectory {
+        workspace_id: Option<String>,
+        root: String,
         path: String,
         selected: bool,
     },
@@ -1777,6 +1775,7 @@ enum PaletteBufferIntent {
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum StatusLineClickIntent {
+    OpenDirectoryPalette,
     ToggleSplit,
     ToggleGitDiff,
     DiagnosticsOpened,
@@ -1891,11 +1890,12 @@ pub struct ChromeBridge {
     /// onto a host-side handler (toggle panel, run ex command,
     /// etc.).
     pending_palette_intents: Vec<PaletteIntent>,
+    active_workspace_id: Option<String>,
     /// Last web `cd` suffix dispatched through SearchService, plus its pending
     /// request id. This suppresses duplicate requests from the per-frame host
     /// sync while still rejecting stale replies after another keystroke.
-    cd_search_key: Option<String>,
-    cd_search_pending: Option<(u64, String)>,
+    cd_search_key: Option<(Option<String>, String, String)>,
+    cd_search_pending: Option<(u64, (Option<String>, String, String))>,
     /// Agent pane state — composer input, history, timeline,
     /// streaming flag, pending permission, JS send callback.
     /// Lives on the bridge so the web frontend can drive an

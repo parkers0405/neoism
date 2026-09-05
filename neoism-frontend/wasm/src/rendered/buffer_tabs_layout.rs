@@ -780,6 +780,20 @@ impl ChromeBridge {
         self.pane_terminals.contains_key(&(external_id as u64))
     }
 
+    /// Apply daemon-authoritative cwd metadata to the terminal currently
+    /// owning the composer. OSC 7 may not be present in replayed PTY bytes.
+    pub fn set_active_terminal_cwd(&mut self, cwd: String) {
+        let path = std::path::PathBuf::from(cwd);
+        self.rendered.terminal.inner.current_directory = Some(path.clone());
+        if self.chrome.pane_grid.is_split() {
+            if let Some(id) = self.chrome.pane_grid.focused_external_id() {
+                if let Some(terminal) = self.pane_terminals.get_mut(&id) {
+                    terminal.inner.current_directory = Some(path);
+                }
+            }
+        }
+    }
+
     /// Drop one pane terminal (its pane closed or its session took
     /// over the main grid).
     pub fn remove_pane_terminal(&mut self, external_id: u32) {

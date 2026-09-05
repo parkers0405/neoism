@@ -17,7 +17,7 @@ use crate::animation::CriticallyDampedSpring;
 use super::actions::{
     PaletteBufferEntry, PaletteDirectoryEntry, PaletteHostCapabilities, PaletteHostEntry,
     PaletteServerEntry, PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry,
-    TerminalDirectoryTarget,
+    WorkspaceDirectoryTarget,
 };
 use super::modes::PaletteMode;
 use super::MAX_RECENT_SEARCHES;
@@ -87,8 +87,8 @@ pub struct CommandPalette {
     /// Host-owned directory snapshot for the current Commands-mode `cd`
     /// query. The shared palette never touches the filesystem itself.
     pub(super) cd_directory_results: Vec<PaletteDirectoryEntry>,
-    terminal_directory_recents: Vec<String>,
-    terminal_directory_target: Option<TerminalDirectoryTarget>,
+    workspace_directory_recents: Vec<String>,
+    workspace_directory_target: Option<WorkspaceDirectoryTarget>,
     pub(super) cd_error: Option<String>,
     /// UTF-8 byte insertion point in `query`.
     pub(super) query_cursor: usize,
@@ -179,8 +179,8 @@ impl Default for CommandPalette {
             recent_searches: Vec::new(),
             buffer_matches: Vec::new(),
             cd_directory_results: Vec::new(),
-            terminal_directory_recents: Vec::new(),
-            terminal_directory_target: None,
+            workspace_directory_recents: Vec::new(),
+            workspace_directory_target: None,
             cd_error: None,
             query_cursor: 0,
             input_band_height: super::INPUT_HEIGHT,
@@ -251,7 +251,7 @@ impl CommandPalette {
         if enabled {
             self.query.clear();
             self.cd_directory_results.clear();
-            self.terminal_directory_target = None;
+            self.workspace_directory_target = None;
             self.cd_error = None;
             self.query_cursor = 0;
             self.input_band_height = super::INPUT_HEIGHT * self.scale;
@@ -283,33 +283,39 @@ impl CommandPalette {
         self.set_query(query.into());
     }
 
-    pub fn open_commands_for_terminal(
+    pub fn open_commands_for_workspace(
         &mut self,
         query: impl Into<String>,
-        target: TerminalDirectoryTarget,
+        target: WorkspaceDirectoryTarget,
     ) {
         self.open_commands_with_query(query);
-        self.terminal_directory_target = Some(target);
+        self.workspace_directory_target = Some(target);
     }
 
-    pub fn change_terminal_directory_intent(
+    pub fn capture_workspace_directory_target(&mut self, target: WorkspaceDirectoryTarget) {
+        if self.workspace_directory_target.is_none() {
+            self.workspace_directory_target = Some(target);
+        }
+    }
+
+    pub fn change_workspace_directory_intent(
         &self,
         destination: impl Into<String>,
-    ) -> Option<super::actions::ChangeTerminalDirectoryIntent> {
-        Some(super::actions::ChangeTerminalDirectoryIntent {
-            target: self.terminal_directory_target.clone()?,
+    ) -> Option<super::actions::ChangeWorkspaceDirectoryIntent> {
+        Some(super::actions::ChangeWorkspaceDirectoryIntent {
+            target: self.workspace_directory_target.clone()?,
             destination: destination.into(),
         })
     }
 
-    pub fn typed_change_terminal_directory_intent(
+    pub fn typed_change_workspace_directory_intent(
         &mut self,
-    ) -> Option<super::actions::ChangeTerminalDirectoryIntent> {
+    ) -> Option<super::actions::ChangeWorkspaceDirectoryIntent> {
         let suffix = self.cd_query_suffix()?.to_owned();
         match super::actions::parse_cd_operand(&suffix) {
             Ok(destination) => {
                 self.cd_error = None;
-                self.change_terminal_directory_intent(destination)
+                self.change_workspace_directory_intent(destination)
             }
             Err(error) => { self.cd_error = Some(error); None }
         }
@@ -320,61 +326,50 @@ impl CommandPalette {
         self.cd_error = Some(error.into());
     }
 
-    /// Keep captured terminal mode alive after a successful dispatch and use
+    /// Keep captured workspace mode alive after a successful dispatch and use
     /// the optimistic canonical destination as the base for the next command.
-    pub fn continue_terminal_directory(&mut self, cwd: impl Into<String>) {
-        let cwd = cwd.into();
-        if let Some(target) = self.terminal_directory_target.as_mut() {
-            target.cwd = cwd.clone();
+    pub fn continue_workspace_directory(&mut self, root: impl Into<String>) {
+        let root = root.into();
+        if let Some(target) = self.workspace_directory_target.as_mut() {
+            target.root = root.clone();
         }
-        self.record_terminal_directory(cwd);
+        self.record_workspace_directory(root);
         self.mode = PaletteMode::Commands;
         self.cd_error = None;
         self.set_query("cd ".into());
     }
 
-    /// Keep the captured target after a shell-resolved transition (`cd` or
-    /// `cd -`). Its resulting cwd is unknown until the terminal reports OSC 7.
-    pub fn continue_terminal_directory_pending(&mut self) {
+    /// Keep the captured target while the daemon resolves and broadcasts a
+    /// relative, home, or previous-directory transition.
+    pub fn continue_workspace_directory_pending(&mut self) {
         self.mode = PaletteMode::Commands;
         self.cd_error = None;
         self.set_query("cd ".into());
     }
 
-    pub fn record_terminal_directory(&mut self, cwd: impl Into<String>) {
-        let cwd = cwd.into();
-        if cwd.is_empty() { return; }
-        self.terminal_directory_recents.retain(|entry| entry != &cwd);
-        self.terminal_directory_recents.insert(0, cwd);
-        self.terminal_directory_recents.truncate(8);
+    pub fn record_workspace_directory(&mut self, root: impl Into<String>) {
+        let root = root.into();
+        if root.is_empty() { return; }
+        self.workspace_directory_recents.retain(|entry| entry != &root);
+        self.workspace_directory_recents.insert(0, root);
+        self.workspace_directory_recents.truncate(8);
     }
 
-    pub fn compose_terminal_directory_choices(
+    pub fn previous_workspace_directory(&self, current: &str) -> Option<&str> {
+        self.workspace_directory_recents
+            .iter()
+            .find(|path| path.as_str() != current)
+            .map(String::as_str)
+    }
+
+    pub fn compose_workspace_directory_choices(
         &mut self,
-        home: Option<String>,
-        workspace_root: Option<String>,
+        _home: Option<String>,
+        _workspace_root: Option<String>,
         completions: Vec<PaletteDirectoryEntry>,
     ) {
-        let Some(target) = self.terminal_directory_target.as_ref() else { return; };
-        let cwd = target.cwd.clone();
-        let parent = std::path::Path::new(&cwd).parent()
-            .map(|path| path.to_string_lossy().into_owned());
-        let mut rows = Vec::new();
-        let mut push = |path: String, label: &str, detail: &str| {
-            if path.is_empty() || rows.iter().any(|row: &PaletteDirectoryEntry| row.absolute_path == path) { return; }
-            rows.push(PaletteDirectoryEntry {
-                absolute_path: path,
-                display: Some(label.to_owned()),
-                detail: Some(detail.to_owned()),
-            });
-        };
-        push(cwd, "Current directory", "Terminal cwd");
-        if let Some(parent) = parent { push(parent, "Parent directory", ".."); }
-        push(home.unwrap_or_else(|| "~".into()), "Home", "~");
-        if let Some(root) = workspace_root { push(root, "Workspace root", "Declared root"); }
-        for recent in self.terminal_directory_recents.clone() {
-            push(recent.clone(), "Recent", &recent);
-        }
+        if self.workspace_directory_target.is_none() { return; }
+        let mut rows: Vec<PaletteDirectoryEntry> = Vec::new();
         for completion in completions {
             if rows.iter().any(|row| row.absolute_path == completion.absolute_path) { continue; }
             rows.push(completion);
@@ -382,18 +377,8 @@ impl CommandPalette {
         self.set_cd_directory_results(rows);
     }
 
-    /// Apply a later authoritative daemon/PTY cwd report only to the captured
-    /// session; focus changes cannot retarget the sheet.
-    pub fn update_captured_terminal_cwd(&mut self, session_id: &str, cwd: &str) -> bool {
-        let Some(target) = self.terminal_directory_target.as_mut() else { return false; };
-        if target.session_id.as_deref() != Some(session_id) { return false; }
-        target.cwd = cwd.to_owned();
-        self.record_terminal_directory(cwd);
-        true
-    }
-
-    pub fn terminal_directory_target(&self) -> Option<&TerminalDirectoryTarget> {
-        self.terminal_directory_target.as_ref()
+    pub fn workspace_directory_target(&self) -> Option<&WorkspaceDirectoryTarget> {
+        self.workspace_directory_target.as_ref()
     }
 
     pub(super) fn start_open_pop(&mut self) {

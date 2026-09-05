@@ -454,13 +454,22 @@ impl SplashOverlay {
 
         // Compute the reserved bands (in logical pixels) from
         // the cell row anchor. Sizes come from the injection,
-        // not from constants — the adaptive layout shrinks
-        // these bands proportionally on small panes so the
-        // splash never refuses to render.
+        // not from constants — the adaptive layout shrinks or grows these
+        // bands proportionally with the pane.
         let band_top = pane_origin.1 + injection.wordmark_row as f32 * cell_h;
         let wordmark_h = injection.wordmark_cells_h as f32 * cell_h;
         let gap_h = injection.gap_cells_h as f32 * cell_h;
         let menu_top = band_top + wordmark_h + gap_h;
+        // `adapt_layout` scales all three reserved bands together. Reuse that
+        // exact body ratio for the pixel-based menu dimensions so the logo,
+        // gap, typography, row height, and row spacing remain one balanced
+        // composition as the pane grows or shrinks.
+        let layout_scale = (injection.wordmark_cells_h
+            + injection.gap_cells_h
+            + injection.menu_cells_h) as f32
+            / crate::panels::terminal_splash::SPLASH_BODY_ROWS as f32;
+        let layout_scale =
+            layout_scale.clamp(0.20, crate::panels::terminal_splash::MAX_SPLASH_SCALE);
 
         // Wordmark sized to fill the wordmark band's height,
         // capped at ~50% of pane width so it reads as a logo
@@ -608,17 +617,15 @@ impl SplashOverlay {
         }
         let _ = click_alpha_extra;
 
-        // Menu buttons — every dimension scaled by chrome_scale
-        // so Ctrl + / Ctrl - zoom grows / shrinks the splash
-        // alongside the rest of the IDE shell. Width is still
-        // computed from each row's measured text plus padding
-        // so the bg always covers the labels exactly.
+        // Menu buttons — every dimension follows both chrome zoom and the
+        // responsive splash scale. Width is still computed from each row's
+        // measured text plus padding so the bg always covers the labels.
         let menu_band_h = injection.menu_cells_h as f32 * cell_h;
         let menu_side_pad =
             (24.0 * chrome_scale.max(0.1)).min((pane_size.0 * 0.08).max(0.0));
         let max_menu_w = (pane_size.0 - menu_side_pad * 2.0).max(1.0);
 
-        let mut s = chrome_scale.max(0.1);
+        let mut s = chrome_scale.max(0.1) * layout_scale;
         let mut menu_label_font = MENU_LABEL_FONT * s;
         let mut menu_key_font = MENU_KEY_FONT * s;
         let mut menu_icon_font = MENU_ICON_FONT * s;

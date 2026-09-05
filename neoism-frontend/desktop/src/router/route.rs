@@ -1095,9 +1095,18 @@ impl Route<'_> {
                     }
                     Key::Named(NamedKey::Tab) => {
                         if self.window.screen.renderer.command_palette.is_cd_query() {
-                            self.window.screen.renderer.command_palette.cycle_cd_selection(
-                                self.window.screen.modifiers.state().shift_key(),
-                            );
+                            let reverse = self.window.screen.modifiers.state().shift_key();
+                            let completed = if reverse {
+                                false
+                            } else {
+                                self.window.screen.renderer.command_palette.tab_complete()
+                            };
+                            if reverse || !completed {
+                                self.window.screen.renderer.command_palette.cycle_cd_selection(reverse);
+                            }
+                            if completed {
+                                self.window.screen.refresh_cd_palette_results();
+                            }
                             self.request_overlay_redraw();
                             return true;
                         }

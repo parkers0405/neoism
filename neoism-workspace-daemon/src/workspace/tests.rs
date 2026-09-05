@@ -31,6 +31,7 @@ fn make_manager(td: &TempDir) -> WorkspaceManager {
         inner: Arc::new(Mutex::new(ManagerInner {
             hosts: HashMap::new(),
             host_workspaces: HashMap::new(),
+            previous_workspace_roots: HashMap::new(),
             workspace_tabs: HashMap::new(),
             active_workspace_by_host: HashMap::new(),
             workspaces: HashMap::new(),
@@ -627,13 +628,18 @@ fn workspace_root_change_resolves_relative_path_and_rejects_missing_directory() 
         "local".into(),
         Some("workspace-cd".into()),
         None,
-        Some(original),
+        Some(original.clone()),
     );
 
     let updated = mgr
         .set_host_workspace_root("workspace-cd", PathBuf::from("'../two with spaces'"))
         .expect("existing relative directory accepted");
     assert_eq!(updated.root_dir.as_deref(), Some(target.as_path()));
+
+    let previous = mgr
+        .set_host_workspace_root("workspace-cd", PathBuf::from("-"))
+        .expect("cd - returns to the previous workspace root");
+    assert_eq!(previous.root_dir.as_deref(), Some(original.as_path()));
 
     let missing = td.path().join("projects").join("missing");
     assert!(mgr
@@ -734,6 +740,7 @@ fn registry_persists_across_managers() {
         inner: Arc::new(Mutex::new(ManagerInner {
             hosts: HashMap::new(),
             host_workspaces: HashMap::new(),
+            previous_workspace_roots: HashMap::new(),
             workspace_tabs: HashMap::new(),
             active_workspace_by_host: HashMap::new(),
             workspaces: HashMap::new(),
@@ -1121,6 +1128,7 @@ fn preferences_round_trip_through_disk() {
         inner: Arc::new(Mutex::new(ManagerInner {
             hosts: HashMap::new(),
             host_workspaces: HashMap::new(),
+            previous_workspace_roots: HashMap::new(),
             workspace_tabs: HashMap::new(),
             active_workspace_by_host: HashMap::new(),
             workspaces: HashMap::new(),

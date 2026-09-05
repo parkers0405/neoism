@@ -84,9 +84,8 @@ impl ChromeBridge {
         if self
             .cd_search_pending
             .as_ref()
-            .is_some_and(|(pending_id, query)| {
-                *pending_id == request_id
-                    && self.cd_search_key.as_deref() == Some(query.as_str())
+            .is_some_and(|(pending_id, key)| {
+                *pending_id == request_id && self.cd_search_key.as_ref() == Some(key)
             })
         {
             if let Ok(
@@ -99,10 +98,12 @@ impl ChromeBridge {
                 let rows = hits
                     .into_iter()
                     .map(|hit| {
-                        let base = self.chrome.command_palette.terminal_directory_target()
-                            .map(|target| PathBuf::from(&target.cwd))
+                        let base = self
+                            .cd_search_pending
+                            .as_ref()
+                            .map(|(_, (_, root, _))| PathBuf::from(root))
                             .unwrap_or_else(|| self.workspace_root.clone());
-                        let absolute = base.join(&hit.path);
+                        let absolute = super::palettes_finder::join_workspace_path(&base, &hit.path);
                         neoism_ui::panels::command_palette::PaletteDirectoryEntry {
                             absolute_path: absolute.to_string_lossy().into_owned(),
                             display: Some(hit.path),
@@ -112,7 +113,7 @@ impl ChromeBridge {
                         }
                     })
                     .collect();
-                self.chrome.command_palette.compose_terminal_directory_choices(
+                self.chrome.command_palette.compose_workspace_directory_choices(
                     None,
                     Some(self.workspace_root.to_string_lossy().into_owned()),
                     rows,

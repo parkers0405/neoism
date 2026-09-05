@@ -32,6 +32,7 @@ impl WorkspaceManager {
             inner: Arc::new(Mutex::new(ManagerInner {
                 hosts: bootstrap_hosts(),
                 host_workspaces: HashMap::new(),
+                previous_workspace_roots: HashMap::new(),
                 workspace_tabs: HashMap::new(),
                 active_workspace_by_host: HashMap::new(),
                 workspaces,
@@ -662,8 +663,14 @@ impl WorkspaceManager {
         } else {
             raw
         };
-        let candidate = if raw == "~" {
+        let candidate = if raw.is_empty() || raw == "~" {
             dirs::home_dir()?
+        } else if raw == "-" {
+            self.inner
+                .lock()
+                .previous_workspace_roots
+                .get(workspace_id)
+                .cloned()?
         } else if let Some(rest) =
             raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"))
         {
@@ -688,6 +695,11 @@ impl WorkspaceManager {
         let notes_vault_dir = Some(resolve_notes_vault_dir(&dir));
         let mut inner = self.inner.lock();
         let mut workspace = inner.host_workspaces.get(workspace_id)?.clone();
+        if workspace.root_dir.as_deref() != Some(dir.as_path()) {
+            inner
+                .previous_workspace_roots
+                .insert(workspace_id.to_string(), current_root);
+        }
         workspace.root_dir = Some(dir);
         workspace.linked_vault_dir = linked_vault_dir;
         workspace.notes_vault_dir = notes_vault_dir;

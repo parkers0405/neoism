@@ -74,7 +74,7 @@ impl Screen<'_> {
                 }
                 SplashMenuAction::ChangeDirectory => {
                     self.dismiss_other_modals(SplashModalKind::CommandPalette);
-                    self.open_terminal_directory_palette();
+                    self.open_workspace_directory_palette();
                 }
             }
             self.mark_dirty();

@@ -331,6 +331,9 @@ pub enum MarkdownDocHistoryRequest {
 
 #[derive(Clone, Debug)]
 pub(super) struct MarkdownVirtualRenderState {
+    /// Full caret geometry before viewport clipping, with its source position
+    /// and render-time scroll. Overlay visibility must not gate keyboard follow.
+    pub(super) cursor_geometry: Option<(MarkdownPosition, f32, [f32; 4])>,
     pub(super) adapter: VirtualMarkdownAdapter,
     pub(super) surface: VirtualSurface,
     pub(super) source_id: String,
@@ -382,6 +385,7 @@ pub(super) struct MarkdownVirtualRenderState {
 impl Default for MarkdownVirtualRenderState {
     fn default() -> Self {
         Self {
+            cursor_geometry: None,
             adapter: VirtualMarkdownAdapter::new("neoism-markdown-pane"),
             surface: VirtualSurface::default(),
             source_id: String::new(),

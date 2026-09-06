@@ -905,14 +905,15 @@ impl Screen<'_> {
                         .terminal_input
                         .submit_with_context(cwd.as_deref(), output_start_row)
                 };
-                // `clear` is special: it wipes the cell grid AND
-                // should wipe the block-card history so the next
-                // command anchors at the actual top of a clean
-                // viewport. Match the bare command (with optional
-                // trailing whitespace) — `clear -x` is too rare to
-                // bother handling.
+                // Standalone shell-specific screen-clear commands also wipe
+                // block chrome (clear/cls/Clear-Host); compound commands don't.
                 let command_trimmed = command.trim();
-                if command_trimmed == "clear" || command_trimmed.starts_with("clear ") {
+                if self
+                    .context_manager
+                    .current()
+                    .terminal_shell_kind
+                    .is_clear_command(command_trimmed)
+                {
                     self.context_manager
                         .current_mut()
                         .terminal_input
@@ -943,7 +944,9 @@ impl Screen<'_> {
                     let detected = crate::terminal::blocks::detect_foreground_shell(
                         current.shell_pid,
                     );
-                    if let Some(shell_kind) = detected {
+                    if let Some(shell_kind) =
+                        detected.filter(|_| current.remote_pty.is_none())
+                    {
                         if current.terminal_shell_kind != shell_kind {
                             current
                                 .terminal_input

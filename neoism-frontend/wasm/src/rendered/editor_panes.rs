@@ -277,8 +277,8 @@ pub(crate) fn route_markdown_pane_key(
 ) -> bool {
     if ctrl {
         match key {
-            "d" => pane.scroll_cursor_by_content_pixels(viewport * 0.5, viewport),
-            "u" => pane.scroll_cursor_by_content_pixels(-(viewport * 0.5), viewport),
+            "d" => pane.page_cursor(1, viewport),
+            "u" => pane.page_cursor(-1, viewport),
             "e" => pane.scroll_cursor_by_lines(1, viewport),
             "y" => pane.scroll_cursor_by_lines(-1, viewport),
             _ => return false,

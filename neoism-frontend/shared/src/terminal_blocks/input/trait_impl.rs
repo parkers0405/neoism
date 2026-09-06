@@ -56,8 +56,7 @@ impl crate::input::InputBuffer for TerminalInputBuffer {
         TerminalInputBuffer::is_prompt_animating(self)
     }
 
-    // `shell_kind` is fed to the shared composer through a separate
-    // argument at the call site (`ctx.terminal_shell_kind`), so the
-    // input buffer itself doesn't carry one. Default trait impl returns
-    // `TerminalShellKind::Unknown`.
+    fn shell_kind(&self) -> crate::input::TerminalShellKind {
+        TerminalInputBuffer::shell_kind(self)
+    }
 }

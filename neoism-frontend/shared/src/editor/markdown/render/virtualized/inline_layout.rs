@@ -197,10 +197,10 @@ fn register_and_place_plain_paragraph(
         cursor_cell_width(opts),
         caret_height(opts),
     ];
-    pane.set_cursor_rect(match opts.clip_rect {
-        Some(clip) => cursor_rect_intersection(rect, clip),
-        None => Some(rect),
-    });
+    match opts.clip_rect {
+        Some(clip) => publish_cursor_rect(pane, rect, clip),
+        None => pane.set_cursor_rect(Some(rect)),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -495,14 +495,7 @@ fn measured_stops_for_text(
     text: &str,
     opts: &DrawOpts,
 ) -> Vec<f32> {
-    let mut stops = Vec::with_capacity(text.chars().count().saturating_add(1));
-    let mut prefix = String::new();
-    stops.push(0.0);
-    for ch in text.chars() {
-        prefix.push(ch);
-        stops.push(sugarloaf.text_mut().measure(&prefix, opts));
-    }
-    stops
+    sugarloaf.text_mut().measure_char_prefixes(text, opts)
 }
 
 #[allow(clippy::too_many_arguments)]

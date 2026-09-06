@@ -336,6 +336,7 @@ function parseSessionLayoutPolicyResult(value: unknown): WebSessionLayoutPolicyR
 export interface TerminalPanelOptions {
   client: ProtocolClient;
   sessionId: string;
+  shell?: string | null;
   mount: HTMLElement;
   /**
    * Optional formal PTY backend handle. When provided, `sendInput` /
@@ -462,6 +463,7 @@ export class TerminalPanel {
   // available, sugarloaf via RenderedTerminal).
   private stubTerminal: WasmTerminalStub;
   private wasmAdapter: TerminalAdapter | null = null;
+  private readonly terminalSessionShells = new Map<string, string>();
   private readonly notesRefresh = new NotesRefreshCoordinator<TerminalAdapter>();
   private notesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   /** Set only after App's workspace hydration barrier has replayed the active
@@ -656,6 +658,12 @@ export class TerminalPanel {
       this.terminalInitError = null;
       if (adapter.isReal()) {
         this.wasmAdapter = adapter;
+        this.setTerminalShell(
+          this.options.sessionId,
+          this.terminalSessionShells.get(this.options.sessionId) ?? this.options.shell ?? null,
+        );
+        const activeShellSession = this.activePtySessionId() ?? this.options.sessionId;
+        this.setTerminalShell(activeShellSession, this.terminalSessionShells.get(activeShellSession) ?? null);
         if (adapter.isChrome()) {
           this.installChromeCallbacks(adapter);
           this.ensureSessionLayoutState();
@@ -922,8 +930,22 @@ export class TerminalPanel {
     }
   }
 
-  /** Register a newly-created daemon PTY as a real terminal tab. */
-  ptyCreated(sessionId: string): void {
+  /** Cache daemon identity even when metadata arrives before wasm is ready. */
+  setTerminalShell(sessionId: string, shell: string | null): void {
+    if (shell !== null) this.terminalSessionShells.set(sessionId, shell);
+    const active = this.activePtySessionId();
+    if (active === sessionId || (!active && sessionId === this.options.sessionId)) {
+      this.wasmAdapter?.setTerminalShell?.(this.terminalSessionShells.get(sessionId) ?? "");
+    }
+  }
+
+  /** Register a fresh PTY, or update metadata for a reattached terminal tab. */
+  ptyCreated(sessionId: string, shell: string | null = null): void {
+    this.setTerminalShell(sessionId, shell);
+    // Attach/reconnect repeats metadata for an existing tab, not a new spawn.
+    if (this.bufferTabs.some(tab => tab.kind === "terminal" && tab.sessionId === sessionId)) {
+      return;
+    }
     const pending = this.pendingTerminalTabSpawns.shift();
     const hasTerminal = this.bufferTabs.some(
       (tab) => tab.kind === "terminal" && !!tab.sessionId,
@@ -946,7 +968,9 @@ export class TerminalPanel {
     if (pending?.command) {
       this.options.pty?.sendInput(
         sessionId,
-        new TextEncoder().encode(`${pending.command}\n`),
+        this.wasmAdapter?.shellCommandPayload?.(
+          this.terminalSessionShells.get(sessionId) ?? "", pending.command,
+        ) ?? new TextEncoder().encode(`${pending.command}\r`),
       );
     }
     this.replayBufferTabs();
@@ -1210,6 +1234,7 @@ export class TerminalPanel {
       (tab) => tab.kind === "terminal" && tab.sessionId === sessionId,
     );
     this.ptyReplayBuffers.delete(sessionId);
+    this.terminalSessionShells.delete(sessionId);
     if (closingIndex >= 0) {
       this.bufferTabs.splice(closingIndex, 1);
       if (this.bufferTabs.length === 0) {
@@ -6610,6 +6635,7 @@ export class TerminalPanel {
     if (tab.kind === "terminal") {
       this.setMarkdownLayerVisible(false);
       const sessionId = tab.sessionId ?? this.options.sessionId;
+      this.wasmAdapter?.setTerminalShell?.(this.terminalSessionShells.get(sessionId) ?? "");
       this.replayPtySession(sessionId);
       const cwd = this.terminalSessionCwds.get(sessionId);
       if (cwd) this.wasmAdapter?.setActiveTerminalCwd?.(cwd);
@@ -10886,7 +10912,7 @@ export class TerminalPanel {
       if (key === "Enter") {
         const command = adapter.terminalInput?.() ?? this.terminalInput;
         const payload = adapter.terminalSubmitPayload?.() ?? new Uint8Array();
-        if (isClearCommand(command)) {
+        if (this.wasmAdapter?.terminalIsClearCommand?.(command) === true) {
           adapter.resetTerminalSplash?.();
         } else {
           adapter.dismissTerminalSplash?.();
@@ -10954,7 +10980,7 @@ export class TerminalPanel {
       if (prefix) adapter.terminalInputInsert?.(prefix);
       const command = adapter.terminalInput?.() ?? this.terminalInput;
       const payload = adapter.terminalSubmitPayload?.() ?? new Uint8Array();
-      if (isClearCommand(command)) {
+      if (this.wasmAdapter?.terminalIsClearCommand?.(command) === true) {
         adapter.resetTerminalSplash?.();
       } else {
         adapter.dismissTerminalSplash?.();
@@ -10975,7 +11001,7 @@ export class TerminalPanel {
       if (byte === 0x0d) {
         const command = this.terminalInput;
         this.wasmAdapter?.recordTerminalSubmit?.(command);
-        if (isClearCommand(command)) {
+        if (this.wasmAdapter?.terminalIsClearCommand?.(command) === true) {
           this.wasmAdapter?.resetTerminalSplash?.();
         } else {
           this.wasmAdapter?.dismissTerminalSplash?.();
@@ -11008,7 +11034,7 @@ export class TerminalPanel {
     if (newline >= 0) {
       const command = `${this.terminalInput}${normalized.slice(0, newline)}`;
       this.wasmAdapter?.recordTerminalSubmit?.(command);
-      if (isClearCommand(command)) {
+      if (this.wasmAdapter?.terminalIsClearCommand?.(command) === true) {
         this.wasmAdapter?.resetTerminalSplash?.();
       } else {
         this.wasmAdapter?.dismissTerminalSplash?.();
@@ -11193,10 +11219,7 @@ function matchesCommandColon(event: KeyboardEvent): boolean {
   return event.code === "Semicolon" || event.key === ":" || event.key === ";";
 }
 
-function isClearCommand(command: string): boolean {
-  const trimmed = command.trim();
-  return trimmed === "clear" || trimmed.startsWith("clear ");
-}
+
 
 interface ChromeDiffLine {
   Context?: string;

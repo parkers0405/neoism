@@ -13,8 +13,6 @@ use crate::event::sync::FairMutex;
 use crate::layout::ContextDimension;
 use crate::neoism::agent::NeoismAgentPane;
 use crate::workspace::tags_view::NeoismTagsPane;
-#[cfg(target_os = "windows")]
-use base64::Engine as _;
 use neoism_backend::config::Shell;
 use neoism_backend::event::WindowId;
 use neoism_terminal_core::crosswords::Crosswords;
@@ -521,96 +519,10 @@ pub(super) fn neoism_block_shell_for_spawn(
     shell: &Shell,
     _route_id: usize,
 ) -> Option<Shell> {
-    let name = std::path::Path::new(&shell.program)
-        .file_name()
-        .and_then(|name| name.to_str())?
-        .to_ascii_lowercase();
-    if !matches!(
-        name.as_str(),
-        "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe"
-    ) {
-        return None;
-    }
-    let profile_script = r##"# Neoism block-shell integration for PowerShell. Run via
-# `-NoExit -EncodedCommand` AFTER the user's own $PROFILE ran, mirroring the
-# unix zsh/bash/fish rc wrappers: every prompt is framed with OSC 133
-# marks so the block UI can segment command output, and OSC 7 reports
-# the cwd for tab-cwd / workspace re-rooting.
-$Global:__NeoismOriginalPrompt = $function:prompt
-$Global:__NeoismExecutable = (Get-Command neoism -CommandType Application -ErrorAction Ignore).Source
-function Global:neoism {
-    if (($args.Count -gt 0) -and ($args[0] -eq 'cd')) {
-        if ($args.Count -gt 2) { Write-Error 'usage: neoism cd [directory]'; return }
-        try {
-            if ($args.Count -eq 1) { Set-Location $HOME -ErrorAction Stop }
-            elseif ($args[1] -eq '-') { Set-Location -Path '-' -ErrorAction Stop }
-            else { Set-Location -LiteralPath $args[1] -ErrorAction Stop }
-        } catch { Write-Error $_; return }
-        $__neoism_cwd = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath.Replace('\', '/').Replace(' ', '%20')
-        [Console]::Write("$([char]27)]7;file:///$__neoism_cwd$([char]7)")
-    } elseif ($Global:__NeoismExecutable) {
-        & $Global:__NeoismExecutable @args
-    }
-}
-
-function Global:prompt {
-    # $? / $LASTEXITCODE describe the command that just finished; read
-    # them before anything in this function can clobber them.
-    $__neoism_exit = if ($Global:?) {
-        0
-    } elseif (($null -ne $Global:LASTEXITCODE) -and ($Global:LASTEXITCODE -ne 0)) {
-        $Global:LASTEXITCODE
-    } else {
-        1
-    }
-    # OSC 7 cwd: file:///C:/... with forward slashes and
-    # percent-encoded spaces. Skipped on non-filesystem providers
-    # (a registry drive has no cwd a terminal could re-root to).
-    $__neoism_out = ''
-    $__neoism_loc = $ExecutionContext.SessionState.Path.CurrentLocation
-    if ($__neoism_loc.Provider.Name -eq 'FileSystem') {
-        $__neoism_cwd = $__neoism_loc.ProviderPath.Replace('\', '/').Replace(' ', '%20')
-        $__neoism_out += "$([char]27)]7;file:///$__neoism_cwd$([char]7)"
-    }
-    # D;<exit> closes the PREVIOUS command's block, then A <prompt
-    # text> B frame this prompt (B doubles as command start).
-    $__neoism_out += "$([char]27)]133;D;$__neoism_exit$([char]7)"
-    $__neoism_out += "$([char]27)]133;A$([char]7)"
-    $__neoism_out += if ($null -ne $Global:__NeoismOriginalPrompt) {
-        $Global:__NeoismOriginalPrompt.Invoke()
-    } else {
-        "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
-    }
-    $__neoism_out += "$([char]27)]133;B$([char]7)"
-    $__neoism_out
-}
-
-# C (command pre-exec) needs a command-accepted hook, which only
-# PSReadLine's PSConsoleHostReadLine provides. Wrap it when present;
-# without PSReadLine the C mark is skipped and D/A/B still frame the
-# blocks.
-if ($null -ne (Get-Command PSConsoleHostReadLine -ErrorAction Ignore)) {
-    $Global:__NeoismOriginalReadLine = $function:PSConsoleHostReadLine
-    function Global:PSConsoleHostReadLine {
-        $__neoism_line = & $Global:__NeoismOriginalReadLine
-        [Console]::Write("$([char]27)]133;C$([char]7)")
-        $__neoism_line
-    }
-}
-"##;
-
-    // PowerShell's encoded commands are UTF-16LE. Keeping the integration
-    // inline avoids execution-policy checks on a generated .ps1 file.
-    let encoded_profile = base64::engine::general_purpose::STANDARD.encode(
-        profile_script
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>(),
-    );
-    let mut args = shell.args.clone();
-    args.push("-NoExit".to_string());
-    args.push("-EncodedCommand".to_string());
-    args.push(encoded_profile);
+    let args = neoism_terminal_pty::shell_integration::powershell_args(
+        &shell.program,
+        &shell.args,
+    )?;
     Some(Shell {
         program: shell.program.clone(),
         args,

@@ -61,7 +61,9 @@ fn cursor_rect_intersection(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> 
 }
 
 fn publish_cursor_rect(pane: &mut MarkdownPane, rect: [f32; 4], clip: [f32; 4]) {
-    pane.set_cursor_rect(cursor_rect_intersection(rect, clip));
+    // Keep layout geometry even when the overlay is fully outside the viewport.
+    pane.set_cursor_rect(Some(rect));
+    pane.cursor_rect = cursor_rect_intersection(rect, clip);
 }
 
 pub fn render(
@@ -1651,7 +1653,91 @@ pub fn render(
 
 #[cfg(test)]
 mod cursor_clip_tests {
-    use super::cursor_rect_intersection;
+    use super::{cursor_rect_intersection, publish_cursor_rect, MarkdownPane};
+
+    fn follow_pane() -> MarkdownPane {
+        let source = (0..200).map(|i| format!("row {i}\n")).collect::<String>();
+        let mut pane = MarkdownPane::from_source("follow.md".into(), &source);
+        pane.set_content_height(8000.0, 400.0);
+        pane.restore_scroll_position(2000.0);
+        pane.cursor_line = 60;
+        pane
+    }
+
+    #[test]
+    fn held_arrows_follow_full_current_geometry_even_outside_clip() {
+        let mut pane = follow_pane();
+        let clip = [0.0, 30.0, 500.0, 400.0];
+        // A repeat stream can outrun the viewport spring in either direction.
+        // Use real navigation + the painter's publication, not a hand-written
+        // visible cursor_rect (which hid this failure in the old scroll tests).
+        for down in [true, true, false, false] {
+            for _ in 0..16 {
+                if down {
+                    pane.move_down();
+                } else {
+                    pane.move_up();
+                }
+            }
+            // Before a draw, the old frame must not consume this request.
+            assert!(!pane.scroll_cursor_into_view(clip[1], clip[3]));
+            assert!(pane.follow_cursor);
+            pane.set_cursor_rect(None);
+            let document_y = pane.cursor_line as f32 * 40.0;
+            let caret = [50.0, clip[1] + document_y - pane.scroll_y, 2.0, 20.0];
+            publish_cursor_rect(&mut pane, caret, clip);
+            assert!(pane.has_current_cursor_geometry());
+            assert_eq!(pane.cursor_rect, cursor_rect_intersection(caret, clip));
+            assert!(pane.scroll_cursor_into_view(clip[1], clip[3]));
+            assert_eq!(pane.target_scroll_y, document_y + 10.0 - 200.0);
+            assert!(!pane.follow_cursor);
+        }
+    }
+
+    #[test]
+    fn partially_clipped_caret_centers_full_row_not_visible_slice() {
+        let mut pane = follow_pane();
+        pane.rearm_caret_follow();
+        publish_cursor_rect(
+            &mut pane,
+            [50.0, 390.0, 2.0, 40.0],
+            [0.0, 0.0, 500.0, 400.0],
+        );
+        assert_eq!(pane.cursor_rect, Some([50.0, 390.0, 2.0, 10.0]));
+        assert!(pane.scroll_cursor_into_view(0.0, 400.0));
+        assert_eq!(pane.target_scroll_y, 2210.0);
+    }
+
+    #[test]
+    fn caret_geometry_keeps_render_scroll_when_animation_ticks_between_consumers() {
+        let mut pane = follow_pane();
+        publish_cursor_rect(
+            &mut pane,
+            [50.0, 300.0, 2.0, 20.0],
+            [0.0, 0.0, 500.0, 400.0],
+        );
+        pane.scroll_y += 80.0; // desktop overlay animation tick, after drawing
+        pane.rearm_caret_follow();
+        assert!(pane.scroll_cursor_into_view(0.0, 400.0));
+        assert_eq!(pane.target_scroll_y, 2110.0);
+    }
+
+    #[test]
+    fn touch_viewport_stays_detached_even_with_offscreen_layout_geometry() {
+        let mut pane = follow_pane();
+        let position = pane.cursor_position();
+        pane.scroll_touch_pixels(300.0, 400.0);
+        let scroll = pane.target_scroll_y;
+        publish_cursor_rect(
+            &mut pane,
+            [50.0, -600.0, 2.0, 20.0],
+            [0.0, 0.0, 500.0, 400.0],
+        );
+        assert!(pane.cursor_rect.is_none());
+        assert!(!pane.scroll_cursor_into_view(0.0, 400.0));
+        assert_eq!(pane.target_scroll_y, scroll);
+        assert_eq!(pane.cursor_position(), position);
+    }
 
     const CLIP: [f32; 4] = [30.0, 40.0, 120.0, 90.0];
 

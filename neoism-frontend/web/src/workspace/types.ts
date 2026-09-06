@@ -63,6 +63,7 @@ export type ClientMessage =
 
 export interface PtyCreatedArgs {
   session_id: string;
+  shell?: string | null;
   workspace_root?: string | null;
 }
 

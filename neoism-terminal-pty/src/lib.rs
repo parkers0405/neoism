@@ -21,6 +21,7 @@
 pub mod local;
 pub mod remote;
 pub mod session;
+pub mod shell_integration;
 
 pub use remote::{RemotePtyFeed, RemotePtyOp};
 pub use session::{PtySession, PtySessionConfig, PtySessionError};

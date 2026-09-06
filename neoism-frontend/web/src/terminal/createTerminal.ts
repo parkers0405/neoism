@@ -156,6 +156,9 @@ export interface TerminalAdapter {
     setTabContent?(idx: number, text: string, path: string): void;
     setTerminalInput?(text: string): void;
     clearTerminalInput?(): void;
+    shellCommandPayload?(program: string, command: string): Uint8Array | undefined;
+    setTerminalShell?(program: string): void;
+    terminalIsClearCommand?(command: string): boolean;
     terminalInput?(): string;
     terminalCommandComposerVisible?(): boolean;
     terminalShouldCaptureInput?(): boolean;
@@ -1423,6 +1426,9 @@ interface ChromeBridgeInstance {
     terminal_paste_payload?(text: string): Uint8Array;
     terminal_toggle_favorite_command?(command: string): boolean | undefined;
     terminal_input_key?(key: string): boolean;
+    shell_command_payload?(program: string, command: string): Uint8Array;
+    set_terminal_shell?(program: string): void;
+    terminal_is_clear_command?(command: string): boolean;
     terminal_submit_payload?(): Uint8Array;
     record_terminal_submit?(command: string): void;
     terminal_wheel?(
@@ -2621,6 +2627,15 @@ class ChromeAdapter implements TerminalAdapter {
     }
     clearTerminalInput() {
         this.inner.clear_terminal_input();
+    }
+    shellCommandPayload(program: string, command: string): Uint8Array | undefined {
+        return this.inner.shell_command_payload?.(program, command);
+    }
+    setTerminalShell(program: string): void {
+        this.inner.set_terminal_shell?.(program);
+    }
+    terminalIsClearCommand(command: string): boolean {
+        return this.inner.terminal_is_clear_command?.(command) ?? false;
     }
     terminalInput(): string {
         return this.inner.terminal_input();

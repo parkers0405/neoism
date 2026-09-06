@@ -1328,3 +1328,164 @@ fn submitted_command_matches_displayed_buffer_exactly() {
         b"echo hello world\n"
     );
 }
+
+#[test]
+fn integrated_sleep_never_finishes_from_blank_or_prompt_shaped_output() {
+    let mut input = TerminalInputBuffer::default();
+    input.set_shell_kind(TerminalShellKind::PowerShell);
+    input.sync_shell_state(shell_state(true, false));
+    input.insert_str("Write-Output ''; Start-Sleep 30");
+    input.submit_with_context(None, Some(10));
+    input.sync_shell_state(shell_state(false, true));
+    for _ in 0..4 {
+        assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(12)));
+        assert!(!input.finish_unintegrated_remote_command_at_prompt("PS C:\\>", Some(12)));
+        assert!(!input.finish_unintegrated_local_command_at_prompt("PS C:\\>", Some(12)));
+    }
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+    input.sync_shell_state(shell_state(true, false));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Ok
+    );
+}
+
+#[test]
+fn old_prompt_cannot_finish_submission_delayed_longer_than_150ms() {
+    let mut input = TerminalInputBuffer::default();
+    let old_prompt = shell_state(true, false);
+    input.sync_shell_state(old_prompt);
+    input.insert_str("Start-Sleep 30");
+    input.submit_with_context(None, Some(10));
+    input.command_blocks.last_mut().unwrap().submitted_at =
+        Instant::now() - std::time::Duration::from_secs(2);
+    input.sync_shell_state(old_prompt);
+    assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(12)));
+    assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(12)));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+}
+
+#[test]
+fn clear_aliases_are_shell_aware_and_never_match_compound_commands() {
+    use TerminalShellKind::*;
+    for (shell, command, expected) in [
+        (PowerShell, " cLs ", true),
+        (PowerShell, "CLEAR-HOST", true),
+        (PowerShell, "Clear", true),
+        (Cmd, "CLS", true),
+        (Cmd, "clear", false),
+        (Bash, "cls", false),
+        (Zsh, "Clear-Host", false),
+        (Bash, "clear -x", true),
+        (Bash, "Clear", false),
+        (PowerShell, "cls; Start-Sleep 30", false),
+        (Cmd, "cls & timeout 30", false),
+        (Bash, "clear && sleep 30", false),
+        (Bash, "clear\nsleep 30", false),
+        (Bash, "clearance", false),
+    ] {
+        assert_eq!(
+            shell.is_clear_command(command),
+            expected,
+            "{shell:?}: {command}"
+        );
+    }
+    for alias in ["cls", "Clear-Host", "CLEAR"] {
+        let mut input = TerminalInputBuffer::default();
+        input.set_shell_kind(PowerShell);
+        input.sync_shell_state(shell_state(true, false));
+        input.insert_str(alias);
+        input.submit_with_context(None, Some(10));
+        input.sync_shell_state(shell_state(false, true));
+        assert!(input.sync_shell_state(shell_state(true, false)));
+        assert_eq!(input.command_block_count(), 0);
+    }
+}
+
+#[test]
+fn daemon_program_identity_selects_the_submit_terminator() {
+    assert_eq!(
+        TerminalShellKind::Unknown.command_payload("echo ok", false),
+        b"echo ok\r"
+    );
+    for (program, expected) in [
+        (r"C:\Program Files\PowerShell\7\pwsh.exe", &b"echo ok\r"[..]),
+        (r"C:\Windows\System32\cmd.exe", &b"echo ok\r"[..]),
+        ("/usr/bin/zsh", &b"echo ok\n"[..]),
+        ("/bin/bash", &b"echo ok\n"[..]),
+        ("/usr/bin/fish", &b"echo ok \x08\n"[..]),
+    ] {
+        let mut input = TerminalInputBuffer::default();
+        input.set_shell_kind(TerminalShellKind::detect(program));
+        assert_eq!(
+            input.shell_kind().command_payload("echo ok", false),
+            expected
+        );
+    }
+}
+
+#[test]
+fn d_only_integration_disables_blank_prompt_guessing() {
+    let mut input = TerminalInputBuffer::default();
+    input.sync_shell_state(ShellPromptState {
+        command_finished_generation: 1,
+        ..shell_state(false, false)
+    });
+    input.insert_str("sleep 30");
+    input.submit_with_context(None, Some(10));
+    for _ in 0..3 {
+        assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(12)));
+    }
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+}
+
+#[test]
+fn cmd_d_only_prompt_does_not_finish_long_output_until_next_generation() {
+    let mut input = TerminalInputBuffer::default();
+    input.set_shell_kind(TerminalShellKind::Cmd);
+    let mut state = ShellPromptState {
+        command_finished_generation: 5,
+        ..shell_state(true, false)
+    };
+    input.sync_shell_state(state);
+    input.insert_str("computed-output-and-delay.exe");
+    input.submit_with_context(None, Some(10));
+    input.command_blocks.last_mut().unwrap().submitted_at =
+        Instant::now() - std::time::Duration::from_secs(5);
+    for row in 11..400 {
+        input.sync_shell_state(state); // cmd cannot emit C; old B remains true.
+        assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(row)));
+        assert!(!input.finish_unintegrated_remote_command_at_prompt("C:\\>", Some(row)));
+    }
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+    state.command_finished_generation += 1;
+    input.sync_shell_state(state);
+    assert!(matches!(
+        input.command_blocks[0].status,
+        TerminalCommandBlockStatus::Finished { exit_code: None }
+    ));
+    input.insert_str("cLs");
+    input.submit_with_context(None, Some(400));
+    assert_eq!(input.command_block_count(), 1);
+    input.sync_shell_state(state);
+    assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(0)));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+    state.command_finished_generation += 1;
+    input.sync_shell_state(state);
+    assert_eq!(input.command_block_count(), 0);
+}

@@ -8,7 +8,7 @@ fn set_cursor_for_item(
     marker_len: usize,
     opts: &DrawOpts,
 ) {
-    if pane.cursor_rect.is_some() {
+    if pane.has_current_cursor_geometry() {
         return;
     }
     let cursor_line = pane.cursor_line;
@@ -87,7 +87,7 @@ fn set_cursor_for_code_line(
     y: f32,
     opts: &DrawOpts,
 ) {
-    if pane.cursor_rect.is_some() || pane.cursor_line != line_ix {
+    if pane.has_current_cursor_geometry() || pane.cursor_line != line_ix {
         return;
     }
     if pane.cursor_line < item.first_line
@@ -158,7 +158,7 @@ fn set_cursor_for_source_line(
     hang_px: f32,
     opts: &DrawOpts,
 ) {
-    if pane.cursor_rect.is_some() || pane.cursor_line != line_ix {
+    if pane.has_current_cursor_geometry() || pane.cursor_line != line_ix {
         return;
     }
     if pane.cursor_line < item.first_line
@@ -218,7 +218,7 @@ fn set_cursor_for_source_line(
 }
 
 fn ensure_virtual_cursor_visible(pane: &mut MarkdownPane, clip: [f32; 4]) {
-    if pane.cursor_rect.is_some() {
+    if pane.has_current_cursor_geometry() {
         return;
     }
     let Some(block) = pane
@@ -285,7 +285,7 @@ fn set_cursor_rect_clipped(
         pane.set_cursor_rect(Some(rect));
         return;
     };
-    pane.set_cursor_rect(cursor_rect_intersection(rect, clip));
+    publish_cursor_rect(pane, rect, clip);
 }
 
 /// Caret for the cursor on trailing blank lines. Markdown nodes never
@@ -299,7 +299,7 @@ fn set_cursor_for_trailing_empty_lines(
     font_scale: f32,
     clip: [f32; 4],
 ) {
-    if pane.cursor_rect.is_some() {
+    if pane.has_current_cursor_geometry() {
         return;
     }
     let Some((end_line, bottom_y)) = tail_anchor else {
@@ -345,7 +345,7 @@ fn set_fallback_cursor_for_empty_virtual_markdown(
     font_scale: f32,
     clip: [f32; 4],
 ) {
-    if pane.cursor_rect.is_some()
+    if pane.has_current_cursor_geometry()
         || !(pane.lines.is_empty()
             || pane.lines.iter().all(|line| line.trim().is_empty()))
     {

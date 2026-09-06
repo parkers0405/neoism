@@ -1166,6 +1166,7 @@ mod tests {
                     PtyServerMessage::PtyCreated {
                         session_id,
                         workspace_root,
+                        ..
                     },
             } => {
                 assert_eq!(request_id, 0);

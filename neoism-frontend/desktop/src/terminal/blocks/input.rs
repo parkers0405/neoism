@@ -44,6 +44,7 @@ impl TerminalInputBufferHostExt for TerminalInputBuffer {
     }
 
     fn enable_persistent_history_for_shell(&mut self, shell_kind: TerminalShellKind) {
+        self.set_shell_kind(shell_kind);
         if shell_kind == TerminalShellKind::Zsh {
             if let Some(path) = default_zsh_history_path() {
                 self.enable_zsh_history(path.clone());

@@ -483,3 +483,23 @@ test("lifecycle wake never restarts intentional, rejected, or host-ended clients
     assert.equal(runtime.sockets.length, 1, terminalState);
   }
 });
+test("PTY create and attach metadata preserve the daemon's actual shell", () => {
+  const received: Array<[string, string | null, string | null]> = [];
+  const client = new ProtocolClient({ url: "ws://host/session", runtime: new FakeRuntime() }, {
+    onPtyCreated: (id, root, shell) => received.push([id, root, shell]),
+  });
+  const receiver = client as unknown as RawMessageReceiver;
+  receiver.handleRawMessage(JSON.stringify({ WorkspaceReply: { request_id: 1,
+    message: { HelloAck: { accepted: true } },
+  } }));
+  const shell = String.raw`C:\Program Files\PowerShell\7\pwsh.exe`;
+  // Web create, explicit attach and reconnect's registry snapshot all use
+  // this raw PTY frame; desktop additionally accepts PtyReply envelopes.
+  for (let i = 0; i < 3; ++i) {
+    receiver.handleRawMessage(JSON.stringify({ PtyCreated: { session_id: "s", shell } }));
+  }
+  receiver.handleRawMessage(JSON.stringify({ PtyCreated: { session_id: "legacy" } }));
+  assert.deepEqual(received, [
+    ["s", null, shell], ["s", null, shell], ["s", null, shell], ["legacy", null, null],
+  ]);
+});

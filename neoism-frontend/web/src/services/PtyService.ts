@@ -35,7 +35,7 @@ export type { CreatePtyArgs };
  * sites readable.
  */
 export interface PtyListener {
-  onCreated?(sessionId: string, workspaceRoot: string | null): void;
+  onCreated?(sessionId: string, workspaceRoot: string | null, shell: string | null): void;
   onOutput?(sessionId: string, bytes: Uint8Array): void;
   onClosed?(sessionId: string, exitCode: number | null): void;
   /// Daemon `Error` frames (no session id — these are protocol-level,
@@ -67,10 +67,10 @@ export class PtyService {
 
   // -- ingest hooks (wired into ProtocolClientHandlers) ----------------
 
-  ingestCreated(sessionId: string, workspaceRoot: string | null = null): void {
+  ingestCreated(sessionId: string, workspaceRoot: string | null = null, shell: string | null = null): void {
     for (const l of this.listeners) {
       try {
-        l.onCreated?.(sessionId, workspaceRoot);
+        l.onCreated?.(sessionId, workspaceRoot, shell);
       } catch (err) {
         if (typeof console !== "undefined") {
           console.warn("[pty] onCreated listener threw", err);

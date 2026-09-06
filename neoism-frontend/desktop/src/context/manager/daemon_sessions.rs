@@ -854,8 +854,8 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         } else {
             // The block-shell wrapper injects rc shims that emit the
             // OSC 133 prompt marks — zsh/bash/fish on unix, a
-            // PowerShell profile on Windows; shells without a shim
-            // (e.g. cmd) spawn as configured.
+            // PowerShell profile on Windows. cmd's PROMPT environment is
+            // framed at the shared native PTY spawn boundary below.
             let spawn_shell = neoism_block_shell_for_spawn(&config.shell, route_id)
                 .unwrap_or_else(|| config.shell.clone());
             tracing::info!("rio -> neoism_terminal_pty: PtySession::spawn");
@@ -899,8 +899,12 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let messenger = Messenger::new(channel);
 
         let mut terminal_input = crate::terminal::blocks::TerminalInputBuffer::default();
-        let terminal_shell_kind =
-            crate::terminal::blocks::TerminalShellKind::detect(&config.shell.program);
+        let terminal_shell_kind = if remote_binding.is_some() {
+            // The local profile does not describe a shell on another host.
+            crate::terminal::blocks::TerminalShellKind::Unknown
+        } else {
+            crate::terminal::blocks::TerminalShellKind::detect(&config.shell.program)
+        };
         terminal_input.enable_persistent_history_for_shell(terminal_shell_kind);
         terminal_input.enable_persistent_favorites_default();
 

@@ -25,12 +25,10 @@ pub enum ClientMessage {
     ClosePty {
         session_id: String,
     },
-    /// 8C adopt: ask for a one-shot replay of `session_id`'s retained
-    /// output backlog, delivered as a `PtyOutput` REPLY on this
-    /// connection only. Clients that bind to an already-running
-    /// session mid-stream (a desktop adopting a web workspace, a web
-    /// tab adopting a desktop one) use this so the terminal carries
-    /// its scrollback instead of starting blank.
+    /// Attach to a live session: returns `PtyCreated` with actual shell
+    /// metadata even if scrollback is empty, followed by retained output as
+    /// a `PtyOutput` reply on this connection only. Used for adoption and
+    /// reconnect so the terminal need not wait for fresh output.
     AttachPty {
         session_id: String,
     },
@@ -45,6 +43,9 @@ pub enum ServerMessage {
     Ack,
     PtyCreated {
         session_id: String,
+        /// Actual spawned program, replayed on attach. Never infer from the client OS.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<String>,
         /// Absolute daemon workspace root for this PTY. Older daemons
         /// omitted this, so clients must treat `None` as unknown.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,10 +148,12 @@ mod tests {
     #[test]
     fn server_pty_created_roundtrip() {
         roundtrip_server(&ServerMessage::PtyCreated {
+            shell: Some("pwsh.exe".into()),
             session_id: "s-1".into(),
             workspace_root: None,
         });
         roundtrip_server(&ServerMessage::PtyCreated {
+            shell: Some("pwsh.exe".into()),
             session_id: "s-2".into(),
             workspace_root: Some("/work".into()),
         });

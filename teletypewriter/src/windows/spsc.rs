@@ -3,8 +3,8 @@
 use std::cell::UnsafeCell;
 use std::io::{self, Read, Write};
 use std::mem;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 struct SpscBuffer {
     buf: UnsafeCell<Box<[u8]>>,
@@ -39,7 +39,7 @@ impl SpscBuffer {
 /// Consumer of the ringbuffer.
 pub struct SpscBufferReader {
     start: usize,
-    buffer: Rc<SpscBuffer>,
+    buffer: Arc<SpscBuffer>,
 }
 
 impl SpscBufferReader {
@@ -102,7 +102,7 @@ unsafe impl Send for SpscBufferReader {}
 /// Producer for the ringbuffer
 pub struct SpscBufferWriter {
     end: usize,
-    buffer: Rc<SpscBuffer>,
+    buffer: Arc<SpscBuffer>,
 }
 
 impl SpscBufferWriter {
@@ -177,7 +177,9 @@ impl Write for SpscBufferWriter {
 ///
 /// See the mio-anonymous-pipes crate for example usage.
 pub fn spsc_buffer(size: usize) -> (SpscBufferWriter, SpscBufferReader) {
-    let buffer = Rc::new(SpscBuffer::new(size));
+    // The endpoints are dropped on different threads (including cancelled pipe
+    // workers). Reference counting must be atomic, independently of queue access.
+    let buffer = Arc::new(SpscBuffer::new(size));
 
     let producer = SpscBufferWriter {
         end: 0,

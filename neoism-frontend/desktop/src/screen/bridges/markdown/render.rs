@@ -11,6 +11,10 @@ impl Screen<'_> {
     }
 
     pub(crate) fn render_markdown_panels(&mut self) -> bool {
+        // Opt-in CPU timing; excludes GPU submit/present. Compare this with
+        // full-frame timing before blaming the Windows presentation backend.
+        let perf_started = tracing::enabled!(target: "neoism::markdown_perf", tracing::Level::DEBUG)
+            .then(std::time::Instant::now);
         let scale = self.sugarloaf.scale_factor();
         let theme = self.renderer.theme;
         let markdown_font_scale = self.renderer.chrome_scale();
@@ -53,11 +57,15 @@ impl Screen<'_> {
         // Wave 7C: snapshot remote collaborator carets per visible pane
         // path BEFORE the mutable grid borrow below (presence store and
         // grid are both fields of `self`).
+        // Resolving a CRDT id canonicalizes the path (a file-handle query on
+        // Windows). Solo redraws need neither filesystem access nor ids. Keep
+        // the empty map below so departing peers still clear the pane's carets.
+        let has_remote_peers = self.remote_presence.has_any_peers();
         let pane_buffers: Vec<(std::path::PathBuf, String)> = {
             let grid = self.context_manager.current_grid();
             grid.contexts()
                 .iter()
-                .filter(|(key, _)| visible_nodes.contains(key))
+                .filter(|(key, _)| has_remote_peers && visible_nodes.contains(key))
                 .filter_map(|(_, item)| {
                     item.val
                         .markdown
@@ -294,6 +302,15 @@ impl Screen<'_> {
                     render_scene(&mut self.sugarloaf, scene, &cam, rect, 0.0, 12);
                 }
             }
+        }
+        if let Some(started) = perf_started {
+            tracing::debug!(
+                target: "neoism::markdown_perf",
+                cpu_us = started.elapsed().as_micros() as u64,
+                needs_redraw = markdown_needs_redraw,
+                remote_peers = has_remote_peers,
+                "markdown panels recorded"
+            );
         }
         markdown_needs_redraw
     }

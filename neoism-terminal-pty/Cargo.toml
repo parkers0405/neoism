@@ -9,6 +9,7 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+base64 = { workspace = true }
 teletypewriter = { workspace = true }
 corcovado = { workspace = true }
 parking_lot = { workspace = true }

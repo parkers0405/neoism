@@ -294,13 +294,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         // roster). The legacy draw_markdown_blocks painter
                         // showed raw markup and no cursor.
                         let _ = effective_offset; // pane owns its own scroll
-                                                  // Follow-cursor, like the desktop's per-frame call:
-                                                  // arrowing off-screen scrolls the doc to keep the
-                                                  // caret visible (uses last frame's caret rect; the
-                                                  // host's animation pump keeps frames flowing until
-                                                  // the eased scroll settles).
-                        pane.scroll_cursor_into_view(content_rect.y, content_rect.h);
-                        pane.tick_scroll();
                         let chrome_scale = self.chrome_scale;
                         crate::editor::markdown::render::render(
                             sugarloaf,
@@ -317,6 +310,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             chrome_scale,
                             self.animation_phase,
                         );
+                        // Desktop ordering: publish current layout, follow it,
+                        // then tick so virtual reveal also owns an animation frame.
+                        let follow =
+                            pane.scroll_cursor_into_view(content_rect.y, content_rect.h);
+                        let ticking = pane.tick_scroll();
+                        self.editor_pane_animating |= follow || ticking;
                     }
                 } else if let Some(kind) = self.active_editor_pane_kind() {
                     // Hosted native editor pane (code / notebook /
@@ -356,11 +355,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             let animation_phase = self.animation_phase;
                             if let Some(pane) = self.notebook_pane.as_mut() {
                                 let markdown = &mut pane.markdown;
-                                let follow = markdown.scroll_cursor_into_view(
-                                    content_rect.y,
-                                    content_rect.h,
-                                );
-                                let ticking = markdown.tick_scroll();
                                 crate::editor::markdown::render::render(
                                     sugarloaf,
                                     markdown,
@@ -371,6 +365,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                                     chrome_scale,
                                     animation_phase,
                                 );
+                                let follow = markdown.scroll_cursor_into_view(
+                                    content_rect.y,
+                                    content_rect.h,
+                                );
+                                let ticking = markdown.tick_scroll();
                                 self.editor_pane_animating |= follow || ticking;
                             }
                         }

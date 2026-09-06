@@ -314,8 +314,8 @@ export class App {
     this.serviceRegistry = defaultServiceRegistry(client);
     this.ptyService = this.serviceRegistry.pty;
     this.ptyService.subscribe({
-      onCreated: (sessionId, workspaceRoot) =>
-        this.handlePtyCreated(sessionId, workspaceRoot),
+      onCreated: (sessionId, workspaceRoot, shell) =>
+        this.handlePtyCreated(sessionId, workspaceRoot, shell),
       onOutput: (sessionId, bytes) => this.handlePtyOutput(sessionId, bytes),
       onClosed: (sessionId, exitCode) =>
         this.handlePtyClosed(sessionId, exitCode),
@@ -363,9 +363,9 @@ export class App {
       // stays in one place and future multi-pane web frontends can
       // route by `session_id`. App registers its own listener below
       // for the spawn→panel handoff and lifecycle bookkeeping.
-      onPtyCreated: (sessionId: string, workspaceRoot: string | null) => {
+      onPtyCreated: (sessionId: string, workspaceRoot: string | null, shell: string | null) => {
         if (!this.workspaceGateSatisfied) return;
-        this.ptyService?.ingestCreated(sessionId, workspaceRoot);
+        this.ptyService?.ingestCreated(sessionId, workspaceRoot, shell);
       },
       onPtyOutput: (sessionId: string, bytes: Uint8Array) => {
         if (!this.workspaceGateSatisfied) return;
@@ -636,12 +636,13 @@ export class App {
   private handlePtyCreated(
     sessionId: string,
     workspaceRoot: string | null = null,
+    shell: string | null = null,
   ): void {
     if (!this.client) {
       return;
     }
     if (this.terminalPanel) {
-      this.terminalPanel.ptyCreated(sessionId);
+      this.terminalPanel.ptyCreated(sessionId, shell);
       if (workspaceRoot) this.terminalPanel.setTerminalCwd(sessionId, workspaceRoot);
       return;
     }
@@ -667,6 +668,7 @@ export class App {
       notesVaultRoot: this.activeWorkspaceVaultPath,
       activeWorkspaceId: this.activeHostWorkspaceId,
       sessionId,
+      shell,
       mount: this.root,
       onBridgeReady: (bridge) => {
         // Bridge is ready — bind the search service to it. Search
@@ -1619,8 +1621,8 @@ export class App {
     this.serviceRegistry = defaultServiceRegistry(client);
     this.ptyService = this.serviceRegistry.pty;
     this.ptyService.subscribe({
-      onCreated: (sessionId, workspaceRoot) =>
-        this.handlePtyCreated(sessionId, workspaceRoot),
+      onCreated: (sessionId, workspaceRoot, shell) =>
+        this.handlePtyCreated(sessionId, workspaceRoot, shell),
       onOutput: (sessionId, bytes) => this.handlePtyOutput(sessionId, bytes),
       onClosed: (sessionId, exitCode) =>
         this.handlePtyClosed(sessionId, exitCode),

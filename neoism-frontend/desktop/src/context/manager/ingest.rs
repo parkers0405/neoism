@@ -247,10 +247,27 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     ) -> bool {
         match message {
             PtyServerMessage::Ack => false,
-            PtyServerMessage::PtyCreated { session_id, .. } => {
-                if let Some(route_id) =
-                    self.daemon.cache.pending_pty_routes.remove(&request_id)
+            PtyServerMessage::PtyCreated {
+                session_id, shell, ..
+            } => {
+                if let Some(route_id) = self
+                    .daemon
+                    .cache
+                    .pending_pty_routes
+                    .remove(&request_id)
+                    .or_else(|| {
+                        self.daemon.cache.session_routes.get(&session_id).copied()
+                    })
                 {
+                    if let Some(shell) = shell.as_deref() {
+                        if let Some(item) = self.get_by_route_id(route_id) {
+                            let context = item.context_mut();
+                            let kind =
+                                crate::terminal::blocks::TerminalShellKind::detect(shell);
+                            context.terminal_shell_kind = kind;
+                            context.terminal_input.set_shell_kind(kind);
+                        }
+                    }
                     self.daemon
                         .cache
                         .route_sessions

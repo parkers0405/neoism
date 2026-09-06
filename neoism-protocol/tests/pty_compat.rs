@@ -38,6 +38,7 @@ fn absent_optional_pty_fields_stay_off_the_wire() {
     );
 
     let created = serde_json::to_string(&ServerMessage::PtyCreated {
+        shell: None,
         session_id: "session-1".into(),
         workspace_root: None,
     })
@@ -56,6 +57,7 @@ fn legacy_pty_created_without_workspace_root_still_decodes() {
 
     match message {
         ServerMessage::PtyCreated {
+            shell: None,
             session_id,
             workspace_root,
         } => {
@@ -83,4 +85,24 @@ fn attach_and_session_cwd_keep_their_wire_shape() {
         cwd,
         r#"{"SessionCwd":{"session_id":"session-2","cwd":"/workspace/neoism"}}"#
     );
+}
+
+#[test]
+fn actual_windows_shell_survives_wire_roundtrip() {
+    let message: ServerMessage = serde_json::from_str(
+        r#"{"PtyCreated":{"session_id":"s","shell":"C:\\Program Files\\PowerShell\\7\\pwsh.exe"}}"#,
+    ).unwrap();
+    let ServerMessage::PtyCreated {
+        shell,
+        workspace_root,
+        ..
+    } = message
+    else {
+        panic!()
+    };
+    assert_eq!(
+        shell.as_deref(),
+        Some(r"C:\Program Files\PowerShell\7\pwsh.exe")
+    );
+    assert!(workspace_root.is_none());
 }

@@ -56,7 +56,6 @@
 - [Inline diag lens vanishes on scroll](bug_inline_diag_lens_scroll.md) — chips gone after Ctrl-D/U; lens double-counted spring residual; fix = row=source_y; has_non_terminal_surface() gates composer
 - [Agent timeline pagination perf](perf_agent_pagination.md) — "load older" slow: runaway cascade, blocking fetch, full-rebuild-per-prepend; incremental prepend + scroll-gated; viewport-only TODO
 - [edit replaceAll infinite loop — FIXED](bug_edit_replace_all_infinite_loop.md) — replaceAll hung agent; cause = re-fuzzy-finding just-inserted `new` from pos 0; fix = opencode parity (one span + str::replace)
-- [Agent edit/patch LSP freeze](bug_agent_edit_lsp_freeze.md) — post-edit LSP diags blocking (2s); must run in spawn_blocking; opencode-parity report block + bounded scan
 - [/undo /redo HTTP 415](bug_undo_redo_415.md) — empty-body POST rejected by Json extractor; fix = Bytes handlers computing revert target like opencode; IDs sort chronologically
 - [Per-window servers WIP](feature_per_window_servers.md) — blank-tree/stale-tabs/window-N profiles/daemon --workspace/docker join:7980; open: agent routing, rehome tests
 - [Codex-vs-API limit split — FIXED](bug_codex_limit_drift_compaction.md) — codex OAuth ~372k vs 1.05M API; auth-aware clamp in provider_catalog; limits follow request's auth path
@@ -212,3 +211,9 @@
 - [Web/mobile closed tabs reappearing — fixed](bug_web_tabs_reappear_after_close.md) - Web/mobile tab closes now tombstone all daemon authorities and reject stale hydration until ack or explicit reopen
 - [Web overlay/splash/Notes sync fixes](fix_web_overlay_splash_notes_sync.md) - Unified composer overlay ownership, typed mobile splash intents, and durable generation-bound Notes sync
 - [App-wide workspace cd palette](feature_app_workspace_cd_palette.md) - App-wide cwd palette and terminal-local prompt implementation, review fixes, verification
+- [RAM overload — measured RA indexing plus Cargo-check fanout](bug_ram_ra_cargo_capture.md) - Live capture: one daemon-owned RA + its all-target Cargo children reached 12.70GiB PSS; real swap/PSI. Earlier test fanout also exists, not sole culprit.
+- [Agent post-edit LSP touch versus genuine saves](bug_agent_edit_lsp_freeze.md) - Corrected OpenCode comparison: diagnostic touch uses open/change, not save; disk sync fixed, real editor didSave retained, cache freshness explicit
+- [Windows markdown redraw: exact prefix geometry cache](perf_windows_markdown_prefix_geometry.md) - Markdown warm redraw rebuilt quadratic prefix hit-test geometry; bounded exact cache + solo presence no-canonicalize; CPU microbenchmark 18.23ms→.022ms (not Windows FPS)
+- [Windows terminal shell identity + lifecycle fixes](bug_windows_terminal_shell_identity.md) - Shared PowerShell startup hook; actual shell through create/attach/reconnect→desktop/web/wasm; CR pre-metadata; OSC completion guards and shell-aware clear aliases. Checks/tests pass, existing Windows test cfg blockers.
+- [cmd lifecycle PROMPT hook and replay-safe marker row](bug_cmd_prompt_lifecycle_repaint.md) - Actual cmd PROMPT D/A/B shared native integration; critical Wine-verified $_ prefix row prevents false D on line-editor repaint. Computed-output/sleep/cls interactive test passes.
+- [Windows ConPTY lost wakeups and shutdown](bug_windows_conpty_lost_wakeups.md) - ConPTY lost wakeups fixed; bounded pipe shutdown, EOF/readiness, Wine regression coverage; related shell and markdown fixes

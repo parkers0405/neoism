@@ -96,6 +96,113 @@ impl MarkdownPane {
         self.follow_cursor = false;
     }
 
+    /// Markdown keyboard paging moves the caret, not the viewport. Measure
+    /// travel through rendered rows (including wrapping and block spacing),
+    /// then let the next render's caret-follow pass center the exact new caret.
+    /// Reader paging deliberately retains `scroll_cursor_by_content_pixels`.
+    pub fn page_cursor(&mut self, direction: i8, viewport_height: f32) {
+        self.scroll_viewport_height = viewport_height;
+        self.rearm_caret_follow();
+        if direction == 0 || self.lines.is_empty() {
+            return;
+        }
+        let down = direction > 0;
+        let distance = viewport_height.max(1.0) * 0.5;
+        let mut travelled = 0.0;
+        while travelled < distance {
+            let before = self.cursor_position();
+            let geometry = self.paging_cursor_geometry();
+            // `move_down` can append a line below a document-final code
+            // fence. Paging is navigation only, never a document edit.
+            if down && self.cursor_line + 1 >= self.lines.len() {
+                let has_next_row = self
+                    .visual_metrics_for_line(self.cursor_line)
+                    .is_some_and(|metrics| {
+                        self.cursor_visual_position(self.cursor_line, metrics).0 + 1
+                            < self.visual_line_count(self.cursor_line, metrics)
+                    });
+                if !has_next_row {
+                    break;
+                }
+            }
+            if down {
+                self.move_down();
+            } else {
+                self.move_up();
+            }
+            if self.cursor_position() == before {
+                break;
+            }
+            let next_geometry = self.paging_cursor_geometry();
+            let step = match (geometry, next_geometry) {
+                (Some((y, _)), Some((next_y, _))) => {
+                    // Adjacent rows include actual heading/block padding.
+                    // Coincident hidden rows must still make progress.
+                    (next_y - y).abs().max(1.0)
+                }
+                (Some((_, height)), None) | (None, Some((_, height))) => height,
+                (None, None) => {
+                    // Outside the painted window, use the virtual node's
+                    // measured/estimated height per source line. Exact wrap
+                    // positions become available when that node is rendered.
+                    let surface = &self.virtual_render.surface;
+                    surface
+                        .nodes()
+                        .iter()
+                        .zip(surface.layouts())
+                        .find_map(|(node, layout)| {
+                            let content = node.content.as_ref()?;
+                            let line = before.line as u64;
+                            (line >= content.line_start && line < content.line_end())
+                                .then(|| {
+                                    layout.bounds.height
+                                        / content.line_count.max(1) as f32
+                                })
+                        })
+                        .unwrap_or(SCROLL_CURSOR_LINE_HEIGHT)
+                }
+            };
+            travelled += step.max(1.0);
+        }
+        // Do not reuse a pre-navigation caret rectangle. The renderer also
+        // reveals an offscreen caret before publishing its exact geometry.
+        self.set_cursor_rect(None);
+        self.rearm_caret_follow();
+    }
+
+    /// Coordinates from the same rendered frame, so scroll/pane origin
+    /// cancel when taking differences. Never consult the pointer or the old
+    /// caret rectangle (key repeats may arrive before another render).
+    fn paging_cursor_geometry(&self) -> Option<(f32, f32)> {
+        for block in &self.block_rects {
+            if let Some(map) = self.paragraph_hit_maps.get(&block.line) {
+                if let Some(offset) = map.positions.iter().position(|position| {
+                    position.line == self.cursor_line && position.col >= self.cursor_col
+                }) {
+                    let rows = self.block_wrap_rows.get(&block.line)?;
+                    let row = rows.iter().rposition(|row| row.start <= offset)?;
+                    return Some((
+                        block.text_y + (row as f32 + 0.5) * block.line_height,
+                        block.line_height,
+                    ));
+                }
+            }
+            if block.line == self.cursor_line {
+                let row = self
+                    .visual_metrics_for_line(self.cursor_line)
+                    .map(|metrics| {
+                        self.cursor_visual_position(self.cursor_line, metrics).0
+                    })
+                    .unwrap_or(0);
+                return Some((
+                    block.text_y + (row as f32 + 0.5) * block.line_height,
+                    block.line_height,
+                ));
+            }
+        }
+        None
+    }
+
     pub fn scroll_cursor_by_lines(&mut self, lines: i32, viewport_height: f32) {
         self.scroll_cursor_by_content_pixels(
             lines as f32 * SCROLL_CURSOR_LINE_HEIGHT,
@@ -317,42 +424,42 @@ impl MarkdownPane {
         // outside the current draw set on this frame, but keyboard navigation
         // has still taken viewport ownership back from the trackpad.
         self.stop_scroll_momentum();
-        let Some([_, y, _, h]) = self.cursor_rect else {
+        let Some((position, rendered_scroll_y, [_, y, _, h])) =
+            self.virtual_render.cursor_geometry
+        else {
             return false;
         };
+        // Key repeats can arrive between draws. Never consume the new request
+        // using the previous source position's caret (even if it was visible).
+        if position != self.cursor_position() {
+            return false;
+        }
         self.follow_cursor = false;
         let before = self.target_scroll_y;
-        // `cursor_rect.y` is the caret's on-screen position relative to the
-        // *animated* `scroll_y`, but we steer `target_scroll_y` (the settle
-        // chases it at 0.24/frame). On a single keypress those are equal, so
-        // it's accurate. Holding the arrow repeats faster than the settle
-        // converges, so `scroll_y` lags the target — the caret renders lower
-        // than where it's heading, the nudge below over-shoots, and the error
-        // accumulates into a jerk that snaps back on release. Re-base the caret
-        // to where it will sit once the settle catches up so the nudge lands
-        // exactly, hold or not.
-        let pending = self.target_scroll_y - self.scroll_y;
+        // Rebase onto the destination, not the lagging animated viewport, so
+        // held-arrow repeats cannot accumulate scroll overshoot.
+        let pending = self.target_scroll_y - rendered_scroll_y;
         let y = y - pending;
-        // nvim-style scrolloff: keep the caret near the vertical middle by
-        // scrolling once it drifts past ~38% of the viewport from an edge, so
-        // the view scrolls well before the caret reaches the bottom. The band
-        // is capped so it never collapses on short viewports. The max-scroll
-        // clamp below still lets the caret reach the very bottom on the
-        // document's last page (when there's nothing left to scroll).
-        let scrolloff = margin.unwrap_or_else(|| {
-            (viewport_height * 0.38)
-                .min((viewport_height - 64.0) * 0.5)
-                .max(0.0)
-        });
-        let top_limit = viewport_top + scrolloff;
-        let bottom_limit = viewport_top + viewport_height - scrolloff;
-        if y < top_limit {
-            self.target_scroll_y = (self.target_scroll_y - (top_limit - y)).max(0.0);
-        } else if y + h > bottom_limit {
-            self.target_scroll_y += y + h - bottom_limit;
-            self.target_scroll_y = self
-                .target_scroll_y
-                .clamp(0.0, self.max_scroll(viewport_height));
+        let max_scroll = self.max_scroll(viewport_height);
+        let centered =
+            self.target_scroll_y + y - viewport_top + h * 0.5 - viewport_height * 0.5;
+        if margin.is_none() && (0.0..=max_scroll).contains(&centered) {
+            if (centered - before).abs() > 0.5 {
+                self.target_scroll_y = centered;
+            }
+        } else {
+            // Like code panes, use minimal edge scrolling when center-lock
+            // would hit a document boundary. Reader selection keeps its margin.
+            let scrolloff = margin
+                .unwrap_or_else(|| (h * 4.0).min(((viewport_height - h) * 0.5).max(0.0)));
+            let top_limit = viewport_top + scrolloff;
+            let bottom_limit = viewport_top + viewport_height - scrolloff;
+            if y < top_limit {
+                self.target_scroll_y -= top_limit - y;
+            } else if y + h > bottom_limit {
+                self.target_scroll_y += y + h - bottom_limit;
+            }
+            self.target_scroll_y = self.target_scroll_y.clamp(0.0, max_scroll);
         }
         (self.target_scroll_y - before).abs() > 0.01
     }

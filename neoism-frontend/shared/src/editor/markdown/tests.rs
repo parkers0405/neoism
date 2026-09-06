@@ -668,6 +668,47 @@ mod tests {
     }
 
     #[test]
+    fn caret_center_follow_does_not_accumulate_animation_lag() {
+        let mut pane = pane_for_test();
+        pane.set_content_height(4000.0, 400.0);
+        pane.scroll_y = 500.0;
+        pane.target_scroll_y = 600.0;
+        for document_y in [820.0, 840.0, 860.0, 840.0, 820.0] {
+            pane.rearm_caret_follow();
+            pane.set_cursor_rect(Some([
+                0.0,
+                30.0 + document_y - pane.scroll_y,
+                2.0,
+                20.0,
+            ]));
+            pane.scroll_cursor_into_view(30.0, 400.0);
+            assert_eq!(pane.target_scroll_y, document_y + 10.0 - 200.0);
+        }
+        pane.rearm_caret_follow();
+        assert!(!pane.scroll_cursor_into_view(30.0, 400.0));
+    }
+
+    #[test]
+    fn caret_center_follow_uses_minimal_scroll_at_document_edges() {
+        let mut pane = pane_for_test();
+        pane.set_content_height(2000.0, 400.0);
+        pane.restore_scroll_position(50.0);
+        pane.rearm_caret_follow();
+        pane.set_cursor_rect(Some([0.0, 100.0, 2.0, 20.0]));
+        assert!(!pane.scroll_cursor_into_view(0.0, 400.0));
+        assert_eq!(pane.target_scroll_y, 50.0);
+
+        pane.restore_scroll_position(1550.0);
+        pane.rearm_caret_follow();
+        pane.set_cursor_rect(Some([0.0, 300.0, 2.0, 20.0]));
+        assert!(!pane.scroll_cursor_into_view(0.0, 400.0));
+        pane.rearm_caret_follow();
+        pane.set_cursor_rect(Some([0.0, 430.0, 2.0, 20.0]));
+        assert!(pane.scroll_cursor_into_view(0.0, 400.0));
+        assert_eq!(pane.target_scroll_y, 1600.0);
+    }
+
+    #[test]
     fn mouse_scroll_moves_view_without_cursor_follow_snap() {
         let mut pane = pane_for_test();
         pane.lines = (0..8).map(|line| format!("line {line}")).collect();
@@ -734,7 +775,7 @@ mod tests {
         for _ in 0..12 {
             pane.insert_newline();
             assert!(pane.follow_cursor, "every explicit Enter rearms follow");
-            pane.cursor_rect = Some([0.0, 100.0, 2.0, 20.0]);
+            pane.set_cursor_rect(Some([0.0, 100.0, 2.0, 20.0]));
             assert!(!pane.scroll_cursor_into_view(0.0, 200.0));
             assert!(
                 pane.follow_cursor,
@@ -744,7 +785,7 @@ mod tests {
             // and publishing the new caret rectangle.
             pane.pending_line_edit = None;
             pane.set_content_height(pane.content_height + 20.0, 200.0);
-            pane.cursor_rect = Some([0.0, 201.0, 2.0, 20.0]);
+            pane.set_cursor_rect(Some([0.0, 201.0, 2.0, 20.0]));
             assert!(pane.scroll_cursor_into_view(0.0, 200.0));
             assert!(pane.target_scroll_y > previous_target);
             previous_target = pane.target_scroll_y;
@@ -796,8 +837,124 @@ mod tests {
         assert!(pane.scroll_last_tick_at.is_none());
     }
 
+    fn register_paging_row(pane: &mut MarkdownPane, line: usize, y: f32, height: f32) {
+        pane.register_block_rect(
+            line,
+            [0.0, y, 200.0, height],
+            [-30.0, y, 20.0, height],
+            0.0,
+            y,
+            0,
+            10.0,
+            height,
+            200.0,
+            None,
+        );
+        pane.register_block_wrap_row_spans(
+            line,
+            vec![MarkdownWrapRow {
+                start: 0,
+                len: pane.lines[line].len(),
+            }],
+        );
+    }
+
     #[test]
-    fn ctrl_scroll_moves_cursor_without_follow_snap() {
+    fn markdown_paging_measures_variable_blocks_and_rearms_follow() {
+        let mut pane = pane_for_test();
+        pane.lines = (0..6).map(|line| format!("line {line}")).collect();
+        // Half of 200px reaches row 2, not two fixed 42px line steps
+        // or five uniform 20px rows: the heading and its spacing count.
+        for (line, y, height) in [
+            (0, 0.0, 20.0),
+            (1, 40.0, 40.0),
+            (2, 100.0, 20.0),
+            (3, 120.0, 20.0),
+            (4, 140.0, 20.0),
+            (5, 160.0, 20.0),
+        ] {
+            register_paging_row(&mut pane, line, y, height);
+        }
+        pane.scroll_pixels(-20.0, 200.0);
+        pane.cursor_rect = Some([900.0, 900.0, 2.0, 20.0]);
+        pane.page_cursor(1, 200.0);
+        assert_eq!(pane.cursor_line, 2);
+        assert!(pane.follow_cursor);
+        assert_eq!(pane.scroll_velocity_px_s, 0.0);
+        assert!(pane.cursor_rect.is_none());
+        // Repeat without rendering: use the new source position, not the
+        // previous frame's cursor rectangle or an animated scroll target.
+        pane.page_cursor(-1, 200.0);
+        assert_eq!(pane.cursor_line, 0);
+    }
+
+    #[test]
+    fn markdown_paging_moves_through_wraps_at_viewport_boundaries() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["abcdefghijklmnopqrst".to_string()];
+        register_paging_row(&mut pane, 0, 0.0, 20.0);
+        pane.register_block_wrap_row_spans(
+            0,
+            vec![
+                MarkdownWrapRow { start: 0, len: 5 },
+                MarkdownWrapRow { start: 5, len: 5 },
+                MarkdownWrapRow { start: 10, len: 5 },
+                MarkdownWrapRow { start: 15, len: 5 },
+            ],
+        );
+        pane.set_content_height(80.0, 80.0); // viewport cannot scroll at all
+        pane.page_cursor(1, 80.0);
+        assert_eq!(
+            pane.cursor_position(),
+            MarkdownPosition { line: 0, col: 10 }
+        );
+        pane.page_cursor(1, 80.0);
+        assert_eq!(
+            pane.cursor_position(),
+            MarkdownPosition { line: 0, col: 15 }
+        );
+        pane.page_cursor(-1, 80.0);
+        assert_eq!(pane.cursor_position(), MarkdownPosition { line: 0, col: 5 });
+        assert_eq!(pane.target_scroll_y, 0.0);
+        assert!(pane.follow_cursor);
+    }
+
+    #[test]
+    fn markdown_paging_is_independent_of_pointer_and_scroll_position() {
+        let mut pane = pane_for_test();
+        pane.lines = (0..20).map(|line| format!("line {line}")).collect();
+        pane.set_content_height(1200.0, 200.0);
+        for line in 0..20 {
+            register_paging_row(&mut pane, line, line as f32 * 20.0, 20.0);
+        }
+        pane.cursor_line = 4;
+        let mut other = pane.clone();
+        other.restore_scroll_position(1000.0);
+        other.drag_mouse_y = 9999.0;
+        other.mouse_select_anchor = Some(MarkdownPosition { line: 18, col: 1 });
+        other.virtual_render.outline_panel_rect = Some([0.0, 0.0, 200.0, 200.0]);
+        other.cursor_scroll_remainder = -0.9;
+        pane.page_cursor(1, 200.0);
+        other.page_cursor(1, 200.0);
+        assert_eq!(pane.cursor_line, 9);
+        assert_eq!(pane.cursor_position(), other.cursor_position());
+        assert!(other.follow_cursor);
+    }
+
+    #[test]
+    fn markdown_paging_at_final_fence_does_not_edit_document() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["```".to_string(), "code".to_string(), "```".to_string()];
+        pane.cursor_line = 2;
+        let before = pane.lines.clone();
+        pane.page_cursor(1, 400.0);
+        assert_eq!(pane.lines, before);
+        assert_eq!(pane.cursor_line, 2);
+        assert!(pane.follow_cursor);
+    }
+
+    #[test]
+    fn reader_cursor_scroll_moves_cursor_without_follow_snap() {
         let mut pane = pane_for_test();
         pane.lines = (0..20).map(|line| format!("line {line}")).collect();
         pane.set_content_height(1200.0, 400.0);

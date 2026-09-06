@@ -32,7 +32,6 @@ use crate::widgets::mermaid::{mermaid_scene, parse_mermaid_diagram};
 
 use super::bullet_align;
 use super::callout_accent;
-use super::cursor_rect_intersection;
 use super::draw::{
     caret_height, cursor_cell_width, cursor_position_for_text_prefix,
     cursor_y_for_text_line, draw_block_actions, draw_copy_button, draw_drag_ghost,
@@ -48,6 +47,7 @@ use super::illuminated::{
 use super::inline::{
     clean_inline_with_active_link, draw_spellcheck_squiggle_visible, markdown_link_label,
 };
+use super::publish_cursor_rect;
 use super::scrollbar::draw_markdown_scrollbar;
 use super::table::{measure_table, parse_table, render_table_with_source_base};
 use super::types::{

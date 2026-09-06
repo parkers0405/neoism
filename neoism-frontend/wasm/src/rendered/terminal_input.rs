@@ -356,19 +356,25 @@ impl ChromeBridge {
         }
     }
 
-    /// The shell kind used to frame submitted command bytes.
-    ///
-    /// GAP (desktop parity): desktop detects the live foreground
-    /// shell per submit (`detect_foreground_shell` over the PTY
-    /// fd / pid, block_overlay.rs:917-938). The web/daemon protocol
-    /// exposes no shell identity today — `CreatePty` carries an
-    /// optional client-CHOSEN shell (the web sends none, so the
-    /// daemon falls back to `$SHELL`), and neither `PtyCreated` nor
-    /// `ShellHistory` echoes what was actually launched. Until the
-    /// protocol carries it, assume zsh — the same assumption the
-    /// daemon's history reader makes (`~/.zsh_history` first).
+    /// Updated by the host from daemon metadata on creation and each attach.
+    pub fn set_terminal_shell(&mut self, program: &str) {
+        let kind = TerminalShellKind::detect(program);
+        self.terminal_blocks.set_shell_kind(kind);
+        self.chrome.set_terminal_shell_kind(kind);
+    }
+
+    /// Commands queued while a new pane is spawning must use that pane's
+    /// shell, not whichever pane currently owns the composer.
+    pub fn shell_command_payload(&self, program: &str, command: &str) -> Vec<u8> {
+        TerminalShellKind::detect(program).command_payload(command, false)
+    }
+
+    pub fn terminal_is_clear_command(&self, command: &str) -> bool {
+        self.submit_shell_kind().is_clear_command(command)
+    }
+
     fn submit_shell_kind(&self) -> TerminalShellKind {
-        TerminalShellKind::Zsh
+        self.terminal_blocks.shell_kind()
     }
 
     pub fn terminal_submit_payload(&mut self) -> Vec<u8> {

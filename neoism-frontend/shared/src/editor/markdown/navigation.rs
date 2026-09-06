@@ -166,7 +166,15 @@ impl MarkdownPane {
     }
 
     pub fn set_cursor_rect(&mut self, rect: Option<[f32; 4]>) {
+        self.virtual_render.cursor_geometry =
+            rect.map(|rect| (self.cursor_position(), self.scroll_y, rect));
         self.cursor_rect = rect;
+    }
+
+    pub(crate) fn has_current_cursor_geometry(&self) -> bool {
+        self.virtual_render
+            .cursor_geometry
+            .is_some_and(|(position, _, _)| position == self.cursor_position())
     }
 
     pub(crate) fn move_visual_vertical(&mut self, down: bool, goal_col: usize) -> bool {

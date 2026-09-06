@@ -341,6 +341,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.terminal_input.set_text(text);
     }
 
+    pub fn set_terminal_shell_kind(&mut self, kind: crate::input::TerminalShellKind) {
+        self.terminal_input.set_shell_kind(kind);
+    }
+
     pub fn set_terminal_input_snapshot(
         &mut self,
         text: String,

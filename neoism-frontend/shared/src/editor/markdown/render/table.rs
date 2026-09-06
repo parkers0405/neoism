@@ -1192,10 +1192,10 @@ pub(super) fn set_table_cursor_rect(
         cursor_cell_width(opts),
         caret_h,
     ];
-    pane.set_cursor_rect(match opts.clip_rect {
-        Some(clip) => super::cursor_rect_intersection(rect, clip),
-        None => Some(rect),
-    });
+    match opts.clip_rect {
+        Some(clip) => super::publish_cursor_rect(pane, rect, clip),
+        None => pane.set_cursor_rect(Some(rect)),
+    }
 }
 
 pub(super) fn table_source_cursor_position(

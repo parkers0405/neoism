@@ -254,6 +254,21 @@ struct TextVulkanState {
 
 //  Text — the immediate-mode recorder owned by Sugarloaf
 
+// Exact keys: hit-testing must not reuse another line's geometry on a hash collision.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PrefixMeasureKey {
+    text: String,
+    font_size: u32,
+    scale: u32,
+    font_id: Option<usize>,
+    bold: bool,
+    italic: bool,
+}
+
+// Bound both entry count and line length (at most ~2.5 MiB of text/stops).
+const PREFIX_MEASURE_CACHE_ENTRIES: usize = 512;
+const PREFIX_MEASURE_MAX_BYTES: usize = 1024;
+
 pub struct Text {
     /// Per-frame GPU instances, assembled inside `draw()` and drawn
     /// by the render-pass hook.
@@ -284,6 +299,10 @@ pub struct Text {
     /// Position-independent shape cache. Hash of
     /// `(font_id, size_bucket, style_flags, text)` → shaped run.
     shape_cache: FxHashMap<u64, ShapedRun>,
+
+    /// Markdown caret/hit-test geometry. Unlike the shape cache this avoids
+    /// walking, hashing and cloning every successive prefix on each redraw.
+    prefix_measure_cache: lru::LruCache<PrefixMeasureKey, Vec<f32>>,
 
     #[cfg(target_os = "macos")]
     handle_cache: FxHashMap<u32, crate::font::macos::FontHandle>,
@@ -318,6 +337,9 @@ impl Text {
             synthesis_cache: FxHashMap::default(),
             baseline_cache: FxHashMap::default(),
             shape_cache: FxHashMap::default(),
+            prefix_measure_cache: lru::LruCache::new(
+                std::num::NonZeroUsize::new(PREFIX_MEASURE_CACHE_ENTRIES).unwrap(),
+            ),
             #[cfg(target_os = "macos")]
             handle_cache: FxHashMap::default(),
             #[cfg(target_os = "macos")]
@@ -377,6 +399,7 @@ impl Text {
     pub fn clear_glyph_cache(&mut self) {
         self.instances.clear();
         self.shape_cache.clear();
+        self.prefix_measure_cache.clear();
         self.baseline_cache.clear();
 
         #[cfg(target_os = "macos")]
@@ -515,6 +538,36 @@ impl Text {
         self.shape_for(text, opts)
             .map(|runs| shaped_text_width(&runs) / self.scale_factor)
             .unwrap_or(0.0)
+    }
+
+    /// Exact logical advances for every Unicode-scalar prefix, including the
+    /// empty prefix. Markdown uses these for source-accurate hit testing.
+    /// Keep the existing prefix-shaping semantics: summing isolated character
+    /// widths would change kerning, ligatures and fallback-font geometry.
+    pub fn measure_char_prefixes(&mut self, text: &str, opts: &DrawOpts) -> Vec<f32> {
+        let key = (text.len() <= PREFIX_MEASURE_MAX_BYTES).then(|| PrefixMeasureKey {
+            text: text.to_owned(),
+            font_size: opts.font_size.to_bits(),
+            scale: self.scale_factor.to_bits(),
+            font_id: opts.font_id,
+            bold: opts.bold,
+            italic: opts.italic,
+        });
+        if let Some(stops) = key
+            .as_ref()
+            .and_then(|key| self.prefix_measure_cache.get(key))
+        {
+            return stops.clone();
+        }
+        let mut stops = Vec::with_capacity(text.chars().count() + 1);
+        stops.push(0.0);
+        for (offset, ch) in text.char_indices() {
+            stops.push(self.measure(&text[..offset + ch.len_utf8()], opts));
+        }
+        if let Some(key) = key {
+            self.prefix_measure_cache.put(key, stops.clone());
+        }
+        stops
     }
 
     //  Shape pipeline — shared cache + cfg-gated backend call
@@ -2450,7 +2503,7 @@ fn cpu_clip_bounds(clip_rect: [f32; 4], buf_w: i32, buf_h: i32) -> (i32, i32, i3
 mod tests {
     use super::{
         centered_line_box_baseline_px, instances_ink_bounds_px, DrawOpts, Text,
-        TextInstance,
+        TextInstance, PREFIX_MEASURE_CACHE_ENTRIES, PREFIX_MEASURE_MAX_BYTES,
     };
     use crate::font::{fonts::SugarloafFonts, FontLibrary};
     use std::sync::Arc;
@@ -2530,6 +2583,115 @@ mod tests {
         assert_ne!(
             runs[0].font_id, runs[1].font_id,
             "icon and ASCII label should resolve to different font runs"
+        );
+    }
+
+    #[test]
+    fn markdown_prefix_measurements_preserve_exact_geometry_and_skip_reshaping() {
+        let (library, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&library);
+        for source in [
+            "",
+            "AV office ffi",
+            "café e\u{301} 日本語",
+            "\u{f07b} Neoism 🦀",
+        ] {
+            for opts in [
+                DrawOpts::default(),
+                DrawOpts {
+                    bold: true,
+                    italic: true,
+                    ..DrawOpts::default()
+                },
+                DrawOpts {
+                    font_size: 21.25,
+                    font_id: Some(0),
+                    ..DrawOpts::default()
+                },
+            ] {
+                for scale in [1.0, 1.5, 2.0] {
+                    text.set_scale_factor(scale);
+                    let expected: Vec<f32> = std::iter::once(0.0)
+                        .chain(source.char_indices().map(|(offset, ch)| {
+                            text.measure(&source[..offset + ch.len_utf8()], &opts)
+                        }))
+                        .collect();
+                    assert_eq!(text.measure_char_prefixes(source, &opts), expected);
+                    // A warm geometry hit must not even consult/populate shaping.
+                    text.shape_cache.clear();
+                    let painted = DrawOpts {
+                        color: [10, 20, 30, 255],
+                        clip_rect: Some([0.0, 10.0, 300.0, 200.0]),
+                        ..opts
+                    };
+                    assert_eq!(text.measure_char_prefixes(source, &painted), expected);
+                    assert!(text.shape_cache.is_empty());
+                }
+            }
+        }
+        assert!(!text.prefix_measure_cache.is_empty());
+        text.clear_glyph_cache();
+        assert!(text.prefix_measure_cache.is_empty());
+    }
+
+    #[test]
+    fn markdown_prefix_cache_is_bounded_and_bypasses_oversized_lines() {
+        let (library, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&library);
+        let opts = DrawOpts::default();
+        for index in 0..PREFIX_MEASURE_CACHE_ENTRIES + 8 {
+            text.measure_char_prefixes(&format!("line {index}"), &opts);
+        }
+        assert_eq!(
+            text.prefix_measure_cache.len(),
+            PREFIX_MEASURE_CACHE_ENTRIES
+        );
+        let long = "x".repeat(PREFIX_MEASURE_MAX_BYTES + 1);
+        assert_eq!(
+            text.measure_char_prefixes(&long, &opts).len(),
+            long.len() + 1
+        );
+        assert!(text
+            .prefix_measure_cache
+            .iter()
+            .all(|(key, _)| key.text != long));
+        // Font replacement must also invalidate cached logical advances.
+        text.set_font_library(&library);
+        assert!(text.prefix_measure_cache.is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual CPU-only markdown hit-test microbenchmark"]
+    fn markdown_prefix_measurement_benchmark() {
+        let (library, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&library);
+        let opts = DrawOpts::default();
+        let lines: Vec<_> = (0..48).map(|i| {
+            format!("Line {i}: Markdown redraw retains exact kerning and Unicode café hit-test geometry.")
+        }).collect();
+        for line in &lines {
+            text.measure_char_prefixes(line, &opts);
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            for line in &lines {
+                for (offset, ch) in line.char_indices() {
+                    std::hint::black_box(
+                        text.measure(&line[..offset + ch.len_utf8()], &opts),
+                    );
+                }
+            }
+        }
+        let previous = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            for line in &lines {
+                std::hint::black_box(text.measure_char_prefixes(line, &opts));
+            }
+        }
+        eprintln!(
+            "48 lines x 100 warm frames: prefix loop {previous:?}, cached {:?}",
+            start.elapsed()
         );
     }
 

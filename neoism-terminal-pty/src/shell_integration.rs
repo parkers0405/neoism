@@ -92,6 +92,10 @@ pub fn powershell_args(program: &str, args: &[String]) -> Option<Vec<String>> {
 # unix zsh/bash/fish rc wrappers: every prompt is framed with OSC 133
 # marks so the block UI can segment command output, and OSC 7 reports
 # the cwd for tab-cwd / workspace re-rooting.
+# Terminate OSC with ST (ESC backslash), not BEL. The Windows console
+# transport can consume BEL as a bell rather than forward it, leaving
+# unterminated OSC 133 on the PTY (reproduced with pwsh 7.4 under Wine).
+# This affects both returned prompt strings and [Console]::Write.
 $Global:__NeoismOriginalPrompt = $function:prompt
 $Global:__NeoismExecutable = (Get-Command neoism -CommandType Application -ErrorAction Ignore).Source
 function Global:neoism {
@@ -103,7 +107,7 @@ function Global:neoism {
             else { Set-Location -LiteralPath $args[1] -ErrorAction Stop }
         } catch { Write-Error $_; return }
         $__neoism_cwd = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath.Replace('\', '/').Replace(' ', '%20')
-        [Console]::Write("$([char]27)]7;file:///$__neoism_cwd$([char]7)")
+        [Console]::Write("$([char]27)]7;file:///$__neoism_cwd$([char]27)\")
     } elseif ($Global:__NeoismExecutable) {
         & $Global:__NeoismExecutable @args
     }
@@ -126,18 +130,18 @@ function Global:prompt {
     $__neoism_loc = $ExecutionContext.SessionState.Path.CurrentLocation
     if ($__neoism_loc.Provider.Name -eq 'FileSystem') {
         $__neoism_cwd = $__neoism_loc.ProviderPath.Replace('\', '/').Replace(' ', '%20')
-        $__neoism_out += "$([char]27)]7;file:///$__neoism_cwd$([char]7)"
+        $__neoism_out += "$([char]27)]7;file:///$__neoism_cwd$([char]27)\"
     }
     # D;<exit> closes the PREVIOUS command's block, then A <prompt
     # text> B frame the new prompt; C marks command acceptance.
-    $__neoism_out += "$([char]27)]133;D;$__neoism_exit$([char]7)"
-    $__neoism_out += "$([char]27)]133;A$([char]7)"
+    $__neoism_out += "$([char]27)]133;D;$__neoism_exit$([char]27)\"
+    $__neoism_out += "$([char]27)]133;A$([char]27)\"
     $__neoism_out += if ($null -ne $Global:__NeoismOriginalPrompt) {
         $Global:__NeoismOriginalPrompt.Invoke()
     } else {
         "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
     }
-    $__neoism_out += "$([char]27)]133;B$([char]7)"
+    $__neoism_out += "$([char]27)]133;B$([char]27)\"
     $__neoism_out
 }
 
@@ -149,7 +153,7 @@ if ($null -ne (Get-Command PSConsoleHostReadLine -ErrorAction Ignore)) {
     $Global:__NeoismOriginalReadLine = $function:PSConsoleHostReadLine
     function Global:PSConsoleHostReadLine {
         $__neoism_line = & $Global:__NeoismOriginalReadLine
-        [Console]::Write("$([char]27)]133;C$([char]7)")
+        [Console]::Write("$([char]27)]133;C$([char]27)\")
         $__neoism_line
     }
 }
@@ -247,6 +251,11 @@ mod tests {
                 assert!(script.contains(marker), "missing {marker}");
             }
             assert!(script.contains("$function:prompt"));
+            assert!(
+                !script.contains("$([char]7)"),
+                "BEL is consumed by some console transports"
+            );
+            assert_eq!(script.matches("$([char]27)\\\"").count(), 6);
             assert!(script.contains("$function:PSConsoleHostReadLine"));
         }
     }

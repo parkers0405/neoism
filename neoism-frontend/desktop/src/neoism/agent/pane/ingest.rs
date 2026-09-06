@@ -240,7 +240,7 @@ impl NeoismAgentPane {
                         continue;
                     }
                     let decision = status_policy::queue_status_decision(
-                        count,
+                        self.status_timing.queue_count(count, started_at),
                         preview,
                         started_at,
                         self.is_streaming(),
@@ -257,7 +257,9 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                     if let Some(started_at) = decision.started_at {
-                        let started = instant_from_epoch_millis(started_at);
+                        let started = self
+                            .status_timing
+                            .started_at(self.streaming_started_at, started_at);
                         self.streaming_started_at = Some(started);
                         if self.streaming_state_changed_at.is_none() {
                             self.streaming_state_changed_at = Some(started);
@@ -280,7 +282,9 @@ impl NeoismAgentPane {
                             .session_cache
                             .entry(stream_session_id.clone())
                             .or_insert_with(CachedAgentSession::live_only);
-                        cached.runtime.consume_dequeued_prompt(&text);
+                        if !cached.runtime.status_timing.dequeue(message_id.as_deref()) {
+                            cached.runtime.consume_dequeued_prompt(&text);
+                        }
                         let message_id = message_id.unwrap_or_default();
                         let existing_index = cached
                             .messages
@@ -2287,7 +2291,8 @@ impl NeoismAgentPane {
         if text.is_empty() {
             return false;
         }
-        let mut changed = self.consume_dequeued_prompt_preview(&text);
+        let admitted = self.status_timing.dequeue(message_id.as_deref());
+        let mut changed = admitted || self.consume_dequeued_prompt_preview(&text);
         let current_turn_start = self
             .messages
             .iter()
@@ -2442,6 +2447,7 @@ impl NeoismAgentPane {
 
     pub(crate) fn take_session_runtime_ui(&mut self) -> CachedAgentRuntime {
         CachedAgentRuntime {
+            status_timing: std::mem::take(&mut self.status_timing),
             queued_prompt_count: std::mem::take(&mut self.queued_prompt_count),
             queued_prompt_preview: self.queued_prompt_preview.take(),
             streaming_state: std::mem::replace(
@@ -2463,6 +2469,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn restore_session_runtime_ui(&mut self, runtime: CachedAgentRuntime) {
+        self.status_timing = runtime.status_timing;
         self.queued_prompt_count = runtime.queued_prompt_count;
         self.queued_prompt_preview = runtime.queued_prompt_preview;
         self.streaming_state = runtime.streaming_state;

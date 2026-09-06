@@ -16,7 +16,7 @@ pub mod move_workspace;
 pub mod remote_files;
 pub mod tailnet_peers;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -59,6 +59,8 @@ pub enum DaemonClientError {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("remote PTY delivery rejected")]
+    PtyDeliveryRejected,
     #[error("daemon client channel closed")]
     ChannelClosed,
 }
@@ -204,6 +206,8 @@ pub enum DaemonClientStatus {
 pub struct DaemonClientHandle {
     tx: mpsc::Sender<OutboundServiceMessage>,
     next_request_id: Arc<AtomicU64>,
+    status: watch::Receiver<DaemonClientStatus>,
+    failures: mpsc::Sender<DaemonServerMessage>,
 }
 
 impl DaemonClientHandle {
@@ -254,6 +258,9 @@ impl DaemonClientHandle {
         &self,
         message: PtyClientMessage,
     ) -> std::result::Result<u64, PtyClientMessage> {
+        if pty_requires_open_connection(&message, *self.status.borrow()) {
+            return Err(message);
+        }
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         match self.tx.try_send(OutboundServiceMessage::Pty {
             request_id,
@@ -280,13 +287,57 @@ impl DaemonClientHandle {
         request_id: u64,
         message: PtyClientMessage,
     ) -> Result<()> {
-        self.tx
-            .send(OutboundServiceMessage::Pty {
-                request_id,
-                message,
-            })
-            .await
-            .map_err(|_| DaemonClientError::ChannelClosed)
+        let reject = pty_requires_open_connection(&message, *self.status.borrow());
+        let outbound = OutboundServiceMessage::Pty {
+            request_id,
+            message,
+        };
+        if reject {
+            if let Some(failure) = pty_delivery_failure(
+                &outbound,
+                "not delivered: daemon connection is not open",
+            ) {
+                self.failures
+                    .send(failure)
+                    .await
+                    .map_err(|_| DaemonClientError::ChannelClosed)?;
+            }
+            return Err(DaemonClientError::PtyDeliveryRejected);
+        }
+        if let Err(error) = self.tx.try_send(outbound) {
+            if let Some(failure) = pty_delivery_failure(
+                &error.into_inner(),
+                "not delivered: daemon queue is full or closed",
+            ) {
+                self.failures
+                    .send(failure)
+                    .await
+                    .map_err(|_| DaemonClientError::ChannelClosed)?;
+            }
+            return Err(DaemonClientError::ChannelClosed);
+        }
+        Ok(())
+    }
+
+    /// The synchronous sink already rejected this op. Never re-check the
+    /// connection later and turn that rejection into a delayed execution.
+    pub async fn reject_pty(&self, message: PtyClientMessage) {
+        self.reject_pty_with_reason(
+            message,
+            "not delivered: daemon disconnected or outbound queue unavailable",
+        )
+        .await;
+    }
+
+    pub async fn reject_pty_with_reason(&self, message: PtyClientMessage, reason: &str) {
+        let request_id = self.allocate_request_id();
+        let outbound = OutboundServiceMessage::Pty {
+            request_id,
+            message,
+        };
+        if let Some(failure) = pty_delivery_failure(&outbound, reason) {
+            let _ = self.failures.send(failure).await;
+        }
     }
 
     /// Wave 7A: CRDT/presence envelope. Used by the presence publisher
@@ -408,7 +459,7 @@ impl DaemonClient {
         let runner = ClientRunner {
             options,
             out_rx,
-            in_tx,
+            in_tx: in_tx.clone(),
             status_tx,
         };
         tokio::spawn(runner.run());
@@ -417,6 +468,8 @@ impl DaemonClient {
             handle: DaemonClientHandle {
                 tx: out_tx,
                 next_request_id,
+                status: status_rx.clone(),
+                failures: in_tx,
             },
             rx: in_rx,
             status_rx,
@@ -464,6 +517,13 @@ impl DaemonClient {
 
 #[derive(Debug, Clone)]
 pub enum DaemonServerMessage {
+    /// Desktop-only delivery/PTY failure, never a wire message. No input bytes
+    /// are retained, logged, or replayed. An Ack means delivery, not execution.
+    PtyFailure {
+        request_id: u64,
+        session_id: Option<String>,
+        message: String,
+    },
     Workspace {
         request_id: u64,
         message: WorkspaceServerMessage,
@@ -507,7 +567,8 @@ pub enum DaemonServerMessage {
 impl DaemonServerMessage {
     fn request_id(&self) -> u64 {
         match self {
-            Self::Workspace { request_id, .. }
+            Self::PtyFailure { request_id, .. }
+            | Self::Workspace { request_id, .. }
             | Self::Editor { request_id, .. }
             | Self::Crdt { request_id, .. }
             | Self::Files { request_id, .. }
@@ -575,9 +636,43 @@ impl ClientRunner {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        self.send_connect_handshake(&mut ws).await?;
+        let mut pty_inflight = HashMap::new();
+        let result = self
+            .run_socket_inner(&mut ws, pending, &mut pty_inflight)
+            .await;
+        let _ = self.status_tx.send(DaemonClientStatus::BackingOff);
+        for (request_id, session_id) in pty_inflight {
+            let _ = self.in_tx.send(DaemonServerMessage::PtyFailure {
+                request_id, session_id,
+                message: "connection lost before PTY acknowledgment; execution unknown; input was not replayed".into(),
+            }).await;
+        }
+        // Commands queued on the old connection must never cross into the next
+        // one. In particular, CreatePty is not idempotent either.
+        while let Ok(outbound) = self.out_rx.try_recv() {
+            if let Some(failure) =
+                pty_delivery_failure(&outbound, "not delivered: daemon connection lost")
+            {
+                let _ = self.in_tx.send(failure).await;
+            } else if outbound_is_replayable(&outbound) {
+                pending.push_back(outbound);
+            }
+        }
+        result
+    }
+
+    async fn run_socket_inner<S>(
+        &mut self,
+        ws: &mut WebSocketStream<S>,
+        pending: &mut VecDeque<OutboundServiceMessage>,
+        pty_inflight: &mut HashMap<u64, Option<String>>,
+    ) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        self.send_connect_handshake(ws).await?;
         for queued in pending.iter() {
-            send_workspace_envelope(&mut ws, queued).await?;
+            send_workspace_envelope(ws, queued).await?;
         }
         let _ = self.status_tx.send(DaemonClientStatus::Open);
 
@@ -590,7 +685,10 @@ impl ClientRunner {
                     if outbound_is_replayable(&outbound) {
                         pending.push_back(outbound.clone());
                     }
-                    send_workspace_envelope(&mut ws, &outbound).await?;
+                    if let Some((request_id, session_id)) = pty_request_target(&outbound) {
+                        pty_inflight.insert(request_id, session_id);
+                    }
+                    send_workspace_envelope(ws, &outbound).await?;
                 }
                 frame = ws.next() => {
                     let Some(frame) = frame else {
@@ -613,6 +711,18 @@ impl ClientRunner {
                             );
                             return Err(err);
                         }
+                    };
+                    let target = pty_inflight.remove(&reply.request_id());
+                    let reply = match reply {
+                        DaemonServerMessage::Pty { request_id, message: PtyServerMessage::Error { message } } => {
+                            if let Some(session_id) = target {
+                                DaemonServerMessage::PtyFailure { request_id, session_id, message }
+                            } else {
+                                tracing::warn!(target: "neoism::remote_pty", request_id, %message, "unmatched daemon PTY error");
+                                DaemonServerMessage::Pty { request_id, message: PtyServerMessage::Error { message } }
+                            }
+                        }
+                        reply => reply,
                     };
                     ack_pending(pending, reply.request_id());
                     if let DaemonServerMessage::Workspace { message: WorkspaceServerMessage::FullSnapshot { client_id, pty_offsets, .. }, .. } = &reply {
@@ -665,7 +775,9 @@ impl ClientRunner {
                     let Some(outbound) = outbound else {
                         return true;
                     };
-                    if outbound_is_replayable(&outbound) {
+                    if let Some(failure) = pty_delivery_failure(&outbound, "not delivered: daemon reconnecting") {
+                        let _ = self.in_tx.send(failure).await;
+                    } else if outbound_is_replayable(&outbound) {
                         pending.push_back(outbound);
                     }
                 }
@@ -862,18 +974,59 @@ fn serialize_outbound_service_message(
     Ok(serde_json::to_string(&envelope)?)
 }
 
-/// Presence frames and PTY input are ephemeral. Replaying a cursor is wrong;
-/// replaying terminal bytes can execute a command twice. Create/attach/resize
-/// and close remain replayable control operations and receive correlated
-/// acknowledgments from current daemons.
+/// Initial attach/create may wait for the first handshake: they have never
+/// been sent. Input, however, must not be delayed across a connection boundary.
+fn pty_requires_open_connection(
+    message: &PtyClientMessage,
+    status: DaemonClientStatus,
+) -> bool {
+    match status {
+        DaemonClientStatus::Open => false,
+        DaemonClientStatus::Connecting => {
+            matches!(message, PtyClientMessage::PtyInput { .. })
+        }
+        DaemonClientStatus::BackingOff | DaemonClientStatus::Closed => true,
+    }
+}
+
+fn pty_request_target(message: &OutboundServiceMessage) -> Option<(u64, Option<String>)> {
+    let OutboundServiceMessage::Pty {
+        request_id,
+        message,
+    } = message
+    else {
+        return None;
+    };
+    let session_id = match message {
+        // Create/attach are resolved by their exact pending route request in
+        // the manager, never by a session fallback that could hit a newer view.
+        PtyClientMessage::CreatePty { .. } | PtyClientMessage::AttachPty { .. } => None,
+        PtyClientMessage::PtyInput { session_id, .. }
+        | PtyClientMessage::Resize { session_id, .. }
+        | PtyClientMessage::ClosePty { session_id } => Some(session_id.clone()),
+    };
+    Some((*request_id, session_id))
+}
+
+fn pty_delivery_failure(
+    outbound: &OutboundServiceMessage,
+    reason: &str,
+) -> Option<DaemonServerMessage> {
+    let (request_id, session_id) = pty_request_target(outbound)?;
+    tracing::warn!(target: "neoism::remote_pty", request_id, ?session_id, reason, "remote PTY delivery failed; no replay");
+    Some(DaemonServerMessage::PtyFailure {
+        request_id,
+        session_id,
+        message: reason.into(),
+    })
+}
+
+/// PTY operations are never replayed: input may execute twice and CreatePty
+/// may spawn a duplicate shell. Recovery requires an explicit fresh attach.
 fn outbound_is_replayable(message: &OutboundServiceMessage) -> bool {
     !matches!(
         message,
-        OutboundServiceMessage::Crdt { .. }
-            | OutboundServiceMessage::Pty {
-                message: PtyClientMessage::PtyInput { .. },
-                ..
-            }
+        OutboundServiceMessage::Crdt { .. } | OutboundServiceMessage::Pty { .. }
     )
 }
 
@@ -1144,7 +1297,308 @@ mod tests {
         };
 
         assert!(!outbound_is_replayable(&input));
-        assert!(outbound_is_replayable(&resize));
+        assert!(!outbound_is_replayable(&resize));
+    }
+
+    fn delivery_test_client(
+        status: DaemonClientStatus,
+    ) -> (
+        ClientRunner,
+        DaemonClientHandle,
+        mpsc::Receiver<DaemonServerMessage>,
+    ) {
+        let (tx, out_rx) = mpsc::channel(8);
+        let (in_tx, in_rx) = mpsc::channel(16);
+        let (status_tx, status_rx) = watch::channel(status);
+        let options =
+            DaemonClientOptions::new(DaemonEndpoint::parse("ws://127.0.0.1:1").unwrap());
+        let handle = DaemonClientHandle {
+            tx,
+            next_request_id: Arc::new(AtomicU64::new(1)),
+            status: status_rx,
+            failures: in_tx.clone(),
+        };
+        (
+            ClientRunner {
+                options,
+                out_rx,
+                in_tx,
+                status_tx,
+            },
+            handle,
+            in_rx,
+        )
+    }
+
+    fn test_input() -> PtyClientMessage {
+        PtyClientMessage::PtyInput {
+            session_id: "shell-1".into(),
+            bytes: b"ls\n".to_vec(),
+        }
+    }
+
+    #[test]
+    fn attach_failure_never_falls_back_to_a_newer_session_binding() {
+        let attach = OutboundServiceMessage::Pty {
+            request_id: 42,
+            message: PtyClientMessage::AttachPty {
+                session_id: "old".into(),
+            },
+        };
+        assert!(matches!(
+            pty_delivery_failure(&attach, "unknown session"),
+            Some(DaemonServerMessage::PtyFailure {
+                request_id: 42,
+                session_id: None,
+                ..
+            })
+        ));
+        assert!(!outbound_is_replayable(&attach));
+    }
+
+    #[tokio::test]
+    async fn initial_attach_can_wait_for_handshake_without_enabling_input() {
+        let (mut runner, handle, _) =
+            delivery_test_client(DaemonClientStatus::Connecting);
+        handle
+            .send_pty(PtyClientMessage::AttachPty {
+                session_id: "existing".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            runner.out_rx.try_recv(),
+            Ok(OutboundServiceMessage::Pty {
+                message: PtyClientMessage::AttachPty { .. },
+                ..
+            })
+        ));
+        assert!(handle.try_send_pty(test_input()).is_err());
+    }
+
+    fn remote_test_pane(
+        handle: DaemonClientHandle,
+    ) -> (
+        neoism_terminal_pty::PtySession,
+        crate::context::remote_pty::RemotePtyBinding,
+    ) {
+        let prepared = crate::context::remote_pty::prepare(
+            handle,
+            tokio::runtime::Handle::current(),
+        );
+        let (pty, feed) = neoism_terminal_pty::PtySession::remote(prepared.sink);
+        (
+            pty,
+            crate::context::remote_pty::RemotePtyBinding {
+                feed,
+                shared: prepared.shared,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn remote_initial_create_still_delivers_intentionally_queued_input() {
+        use crate::context::remote_pty;
+        let (mut runner, handle, _) = delivery_test_client(DaemonClientStatus::Open);
+        let (mut pty, binding) = remote_test_pane(handle.clone());
+        pty.write(b"startup\n").unwrap();
+        assert_eq!(binding.shared.lock().unwrap().queued.len(), 1);
+        assert!(runner.out_rx.try_recv().is_err());
+        remote_pty::bind_session(
+            &binding,
+            "created",
+            handle,
+            tokio::runtime::Handle::current(),
+        );
+        assert!(
+            matches!(runner.out_rx.try_recv(), Ok(OutboundServiceMessage::Pty {
+            message: PtyClientMessage::PtyInput { session_id, bytes }, ..
+        }) if session_id == "created" && bytes == b"startup\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_awaiting_attach_rejects_input_even_if_validation_races_ahead() {
+        use crate::context::remote_pty;
+        for previously_bound in [false, true] {
+            let (mut runner, handle, mut replies) =
+                delivery_test_client(DaemonClientStatus::Open);
+            let (mut pty, binding) = remote_test_pane(handle.clone());
+            let runtime = tokio::runtime::Handle::current();
+            if previously_bound {
+                remote_pty::bind_session(
+                    &binding,
+                    "existing",
+                    handle.clone(),
+                    runtime.clone(),
+                );
+            }
+            remote_pty::await_attach(
+                &binding,
+                "existing",
+                handle.clone(),
+                runtime.clone(),
+            );
+            pty.write(b"must-not-run\n").unwrap();
+            assert!(binding.shared.lock().unwrap().queued.is_empty());
+            // Simulate a PtyCreated arriving before the failure is processed.
+            remote_pty::bind_session(&binding, "existing", handle, runtime);
+            assert!(binding.shared.lock().unwrap().session_id.is_none());
+            assert!(runner.out_rx.try_recv().is_err());
+            let failure = tokio::time::timeout(Duration::from_secs(1), replies.recv())
+                .await
+                .unwrap();
+            assert!(matches!(failure, Some(DaemonServerMessage::PtyFailure {
+                session_id: Some(id), message, ..
+            }) if id == "existing" && message.contains("not delivered") && message.contains("awaiting attach")));
+            remote_pty::invalidate(&binding);
+            pty.close();
+            assert!(runner.out_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_attach_discards_and_discloses_stale_pending_input() {
+        use crate::context::remote_pty;
+        let (mut runner, handle, mut replies) =
+            delivery_test_client(DaemonClientStatus::Open);
+        let (mut pty, binding) = remote_test_pane(handle.clone());
+        pty.write(b"stale-before-adoption\n").unwrap();
+        pty.resize(100, 30).unwrap();
+        let runtime = tokio::runtime::Handle::current();
+        remote_pty::await_attach(&binding, "existing", handle.clone(), runtime.clone());
+        assert!(binding.shared.lock().unwrap().queued.is_empty());
+        remote_pty::bind_session(&binding, "existing", handle, runtime);
+        assert!(binding.shared.lock().unwrap().session_id.is_none());
+        assert!(runner.out_rx.try_recv().is_err());
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(1), replies.recv()).await.unwrap(),
+            Some(DaemonServerMessage::PtyFailure { session_id: Some(id), .. }) if id == "existing")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_attach_allows_safe_geometry_and_fresh_input_after_validation() {
+        use crate::context::remote_pty;
+        let (mut runner, handle, _) = delivery_test_client(DaemonClientStatus::Open);
+        let (mut pty, binding) = remote_test_pane(handle.clone());
+        let runtime = tokio::runtime::Handle::current();
+        pty.resize(80, 24).unwrap();
+        remote_pty::await_attach(&binding, "existing", handle.clone(), runtime.clone());
+        assert!(binding.shared.lock().unwrap().queued.is_empty());
+        pty.resize(100, 30).unwrap();
+        assert!(runner.out_rx.try_recv().is_err());
+        remote_pty::bind_session(&binding, "existing", handle, runtime);
+        assert!(matches!(
+            runner.out_rx.try_recv(),
+            Ok(OutboundServiceMessage::Pty {
+                message: PtyClientMessage::Resize {
+                    cols: 100,
+                    rows: 30,
+                    ..
+                },
+                ..
+            })
+        ));
+        pty.write(b"fresh\n").unwrap();
+        assert!(
+            matches!(runner.out_rx.try_recv(), Ok(OutboundServiceMessage::Pty {
+            message: PtyClientMessage::PtyInput { bytes, .. }, ..
+        }) if bytes == b"fresh\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_input_is_rejected_not_queued() {
+        for status in [
+            DaemonClientStatus::Connecting,
+            DaemonClientStatus::BackingOff,
+            DaemonClientStatus::Closed,
+        ] {
+            let (mut runner, handle, mut replies) = delivery_test_client(status);
+            assert!(handle.send_pty(test_input()).await.is_err());
+            assert!(runner.out_rx.try_recv().is_err());
+            assert!(
+                matches!(replies.recv().await, Some(DaemonServerMessage::PtyFailure {
+                session_id: Some(id), message, ..
+            }) if id == "shell-1" && message.contains("not delivered"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_sink_input_cannot_execute_after_connection_recovers() {
+        let (mut runner, handle, mut replies) =
+            delivery_test_client(DaemonClientStatus::BackingOff);
+        let rejected = handle.try_send_pty(test_input()).unwrap_err();
+        runner.status_tx.send(DaemonClientStatus::Open).unwrap();
+        handle.reject_pty(rejected).await;
+        assert!(runner.out_rx.try_recv().is_err());
+        assert!(matches!(
+            replies.recv().await,
+            Some(DaemonServerMessage::PtyFailure { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn backoff_discloses_dropped_input_and_never_replays_create() {
+        let (mut runner, handle, mut replies) =
+            delivery_test_client(DaemonClientStatus::Open);
+        handle.send_pty(test_input()).await.unwrap();
+        handle
+            .send_pty(PtyClientMessage::CreatePty {
+                cwd: None,
+                cols: 80,
+                rows: 24,
+                shell: None,
+            })
+            .await
+            .unwrap();
+        let mut pending = VecDeque::new();
+        runner
+            .collect_during_backoff(Duration::from_millis(5), &mut pending)
+            .await;
+        assert!(pending.is_empty());
+        for _ in 0..2 {
+            assert!(
+                matches!(replies.recv().await, Some(DaemonServerMessage::PtyFailure { message, .. }) if message.contains("not delivered"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn socket_failure_preserves_correlation_without_replay() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        for server_error in [true, false] {
+            let (mut runner, handle, mut replies) =
+                delivery_test_client(DaemonClientStatus::Open);
+            let request_id = handle.send_pty(test_input()).await.unwrap();
+            let (a, b) = tokio::io::duplex(8192);
+            let client = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
+            let mut server =
+                WebSocketStream::from_raw_socket(b, Role::Server, None).await;
+            let mut pending = VecDeque::new();
+            let serve = async {
+                // Hello, snapshot request, then the command.
+                for _ in 0..3 {
+                    server.next().await.unwrap().unwrap();
+                }
+                if server_error {
+                    server.send(Message::Text(serde_json::json!({
+                        "PtyReply": { "request_id": request_id, "message": { "Error": { "message": "unknown session shell-1" } } }
+                    }).to_string())).await.unwrap();
+                }
+                drop(server);
+            };
+            let _ = tokio::join!(runner.run_socket(client, &mut pending), serve);
+            assert!(pending.is_empty());
+            assert!(
+                matches!(replies.recv().await, Some(DaemonServerMessage::PtyFailure {
+                request_id: id, session_id: Some(session), message,
+            }) if id == request_id && session == "shell-1"
+                && message.contains(if server_error { "unknown session" } else { "execution unknown" }))
+            );
+        }
     }
 
     #[test]

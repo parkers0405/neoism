@@ -382,6 +382,30 @@ impl Application<'_> {
                             }
                         }
                     }
+                    DaemonServerMessage::PtyFailure {
+                        request_id,
+                        session_id,
+                        message,
+                    } => {
+                        if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            if route
+                                .window
+                                .screen
+                                .context_manager
+                                .apply_remote_pty_failure(
+                                    request_id,
+                                    session_id.as_deref(),
+                                    &message,
+                                )
+                            {
+                                route.window.screen.renderer.notifications.push(
+                                    format!("Remote terminal detached: {message}. Nothing was replayed. Reopen/reattach the terminal and check its state before retrying a command."),
+                                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                                );
+                                route.request_redraw();
+                            }
+                        }
+                    }
                     DaemonServerMessage::Pty {
                         request_id,
                         message,
@@ -1772,6 +1796,14 @@ impl Application<'_> {
         message: neoism_protocol::pty::ServerMessage,
     ) {
         if let Some(route) = self.router.routes.get_mut(&window_id) {
+            if let neoism_protocol::pty::ServerMessage::Error { message } = &message {
+                route.window.screen.renderer.notifications.push(
+                    format!("Remote PTY error: {message}. Command execution is not confirmed; nothing was replayed."),
+                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                );
+                route.request_redraw();
+            }
+
             if route
                 .window
                 .screen

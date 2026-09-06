@@ -72,3 +72,6 @@ wasm-bindgen = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(windows)'.dev-dependencies]
+neoism-terminal-pty = { workspace = true }

@@ -1289,6 +1289,7 @@ fn prepare_surface(
                     .is_ok();
         }
         if apply_tail_inline_append(pane, &source_id, content_w, viewport_y, viewport_h) {
+            pane.pending_line_edit = None;
             return true;
         }
         let source = source_from_lines(&pane.lines);
@@ -1363,6 +1364,9 @@ fn prepare_surface(
         state.source_revision = revision;
         state.source = source;
         state.line_starts = line_starts;
+        // The splice is now reflected in layout; allow current caret geometry
+        // to satisfy follow requests again, just as the large-document path does.
+        pane.pending_line_edit = None;
         if preserve_scroll_anchor {
             let restored_scroll_y = state.surface.scroll().scroll_y;
             pane.scroll_y = restored_scroll_y;
@@ -1385,6 +1389,65 @@ fn prepare_surface(
                 velocity_y: pane.scroll_velocity_px_s,
             }))
             .is_ok()
+}
+
+#[cfg(test)]
+mod caret_follow_after_edit_tests {
+    use super::*;
+    use crate::editor::markdown::MarkdownMode;
+
+    #[test]
+    fn rendered_edit_releases_follow_for_normal_and_insert_navigation() {
+        let source = (0..100)
+            .map(|line| format!("line {line}\n\n"))
+            .collect::<String>();
+        for mode in [MarkdownMode::Normal, MarkdownMode::Insert] {
+            let mut pane = MarkdownPane::from_source("follow.md".into(), &source);
+            assert!(prepare_surface(&mut pane, 600.0, 0.0, 400.0));
+            pane.set_source_preserving_view(&format!("changed\n\n{source}"));
+            pane.mode = mode;
+            assert!(pane.pending_line_edit.is_some());
+            assert!(prepare_surface(&mut pane, 600.0, 0.0, 400.0));
+            assert!(pane.pending_line_edit.is_none());
+            assert!(
+                !pane.follow_cursor,
+                "external edits must not steal scrolling"
+            );
+            pane.set_content_height(6000.0, 400.0);
+
+            for step in 0..30 {
+                pane.set_cursor_rect(Some([0.0, 200.0, 2.0, 20.0]));
+                pane.move_down();
+                assert!(pane.follow_cursor);
+                assert!(!pane.scroll_cursor_into_view(0.0, 400.0));
+                assert!(pane.follow_cursor, "stale geometry must not consume follow");
+                let document_y = 500.0 + step as f32 * 20.0;
+                pane.set_cursor_rect(Some([0.0, document_y - pane.scroll_y, 2.0, 20.0]));
+                // The renderer may retain exact geometry but clip the overlay.
+                pane.cursor_rect = None;
+                assert!(pane.scroll_cursor_into_view(0.0, 400.0));
+                assert_eq!(pane.target_scroll_y, document_y + 10.0 - 200.0);
+                pane.snap_scroll_to_target();
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_newline_releases_pending_splice_without_disabling_follow() {
+        let mut pane = MarkdownPane::from_source("follow.md".into(), "first\n\nlast");
+        assert!(prepare_surface(&mut pane, 600.0, 0.0, 400.0));
+        pane.cursor_line = 0;
+        pane.cursor_col = 2;
+        pane.insert_newline();
+        assert!(pane.pending_line_edit.is_some());
+        assert!(prepare_surface(&mut pane, 600.0, 0.0, 400.0));
+        assert!(pane.pending_line_edit.is_none());
+        assert!(pane.follow_cursor);
+        pane.set_content_height(2000.0, 400.0);
+        pane.set_cursor_rect(Some([0.0, 500.0, 2.0, 20.0]));
+        assert!(pane.scroll_cursor_into_view(0.0, 400.0));
+        assert_eq!(pane.target_scroll_y, 310.0);
+    }
 }
 
 fn prepare_large_line_surface(

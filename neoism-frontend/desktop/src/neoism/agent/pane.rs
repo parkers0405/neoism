@@ -288,6 +288,7 @@ impl CachedAgentSession {
 }
 
 pub(crate) struct CachedAgentRuntime {
+    status_timing: status_timing::DesktopStatusTiming,
     queued_prompt_count: usize,
     queued_prompt_preview: Option<String>,
     streaming_state: NeoismAgentStreamingState,
@@ -305,6 +306,7 @@ pub(crate) struct CachedAgentRuntime {
 impl Default for CachedAgentRuntime {
     fn default() -> Self {
         Self {
+            status_timing: Default::default(),
             queued_prompt_count: 0,
             queued_prompt_preview: None,
             streaming_state: NeoismAgentStreamingState::Idle,
@@ -333,6 +335,7 @@ impl CachedAgentRuntime {
         tool: Option<String>,
     ) {
         if state == NeoismAgentStreamingState::Idle {
+            self.status_timing.settle();
             self.streaming_state = state;
             self.streaming_started_at = None;
             self.streaming_state_changed_at = None;
@@ -382,7 +385,7 @@ impl CachedAgentRuntime {
         started_at: Option<u64>,
     ) {
         let decision = status_policy::queue_status_decision(
-            count,
+            self.status_timing.queue_count(count, started_at),
             preview,
             started_at,
             self.is_streaming(),
@@ -393,7 +396,9 @@ impl CachedAgentRuntime {
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
         if let Some(started_at) = decision.started_at {
-            let started = instant_from_epoch_millis(started_at);
+            let started = self
+                .status_timing
+                .started_at(self.streaming_started_at, started_at);
             self.streaming_started_at = Some(started);
             self.streaming_state_changed_at.get_or_insert(started);
         }
@@ -916,6 +921,7 @@ pub struct NeoismAgentPane {
     /// attachments: the server echoes the expanded text back, the
     /// transcript shows the compact `[pasted N lines]` form.
     pub(super) prompt_echo_aliases: Vec<(String, String)>,
+    status_timing: status_timing::DesktopStatusTiming,
     queued_prompt_count: usize,
     queued_prompt_preview: Option<String>,
     sent_history: Vec<String>,
@@ -1178,6 +1184,7 @@ impl Default for NeoismAgentPane {
             ui_events: Vec::new(),
             pending_user_prompts: Vec::new(),
             prompt_echo_aliases: Vec::new(),
+            status_timing: Default::default(),
             queued_prompt_count: 0,
             queued_prompt_preview: None,
             sent_history: Vec::new(),
@@ -1285,6 +1292,7 @@ mod questions;
 mod render_state;
 mod selection;
 mod session;
+mod status_timing;
 mod submit;
 mod timeline;
 

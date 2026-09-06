@@ -93,8 +93,9 @@ impl PtySession {
 
     /// Write `bytes` to the PTY master (or forward them to the daemon).
     ///
-    /// Returns the number of bytes accepted by the underlying writer
-    /// (which may be less than `bytes.len()` for non-blocking modes).
+    /// Local writes acknowledge queueing, not PTY-writer acceptance or shell
+    /// execution. Later worker failures are exposed by [`Self::worker_error`]
+    /// and channel disconnection. Remote writes acknowledge forwarding.
     pub fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         match &mut self.inner {
             PtyInner::Local(pty) => pty.write(bytes),
@@ -121,10 +122,10 @@ impl PtySession {
 
     /// Pull bytes that the background reader thread has buffered.
     ///
-    /// Returns `Ok(0)` together with [`std::io::ErrorKind::WouldBlock`]
-    /// semantics when no bytes are currently available — except that
-    /// the `Ok(0)` case here means "no bytes, try again," not "EOF".
-    /// A clean EOF on the PTY surfaces via [`PtySession::exit_code`].
+    /// Returns `WouldBlock` when no bytes are currently buffered, `Ok(0)`
+    /// after a confirmed child exit (or for an empty destination), and the
+    /// worker's I/O error after a failed worker disconnects. Buffered output
+    /// is drained before reporting EOF or failure.
     /// Remote sessions never support synchronous reads — their byte
     /// stream only exists on the channel taken by
     /// [`Self::take_byte_receiver`].
@@ -147,8 +148,18 @@ impl PtySession {
         }
     }
 
-    /// `Some(status)` if the child has exited, `None` while it is
-    /// still running.
+    /// The local worker's original I/O failure, independent of child exit.
+    /// Published before its output/event channels disconnect. No exit code is
+    /// synthesized on failure; callers must retire the unusable session.
+    pub fn worker_error(&self) -> Option<std::io::Error> {
+        match &self.inner {
+            PtyInner::Local(pty) => pty.worker_error(),
+            PtyInner::Remote(_) => None,
+        }
+    }
+
+    /// `Some(status)` if the child exit status is known, otherwise `None`.
+    /// `None` does not prove the worker or child is still alive.
     pub fn exit_code(&self) -> Option<i32> {
         match &self.inner {
             PtyInner::Local(pty) => pty.exit_code(),

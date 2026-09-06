@@ -93,6 +93,14 @@ pub struct Pty {
     token: corcovado::Token,
     signals_token: corcovado::Token,
     signals: Signals,
+    // next_child_event reaps the process; preserve its actual wait status.
+    child_exit_status: Option<i32>,
+}
+
+impl Pty {
+    pub fn child_exit_status(&self) -> Option<i32> {
+        self.child_exit_status
+    }
 }
 
 impl Deref for Pty {
@@ -607,6 +615,7 @@ pub fn create_pty_with_spawn_env(
             };
 
             Ok(Pty {
+                child_exit_status: None,
                 child: child_unix,
                 file: unsafe { File::from_raw_fd(main) },
                 token: corcovado::Token::from(0),
@@ -718,6 +727,7 @@ pub fn create_pty_with_fork_with_working_dir(
             let signals = Signals::new([sigconsts::SIGCHLD])
                 .expect("error preparing signal handling");
             Ok(Pty {
+                child_exit_status: None,
                 child,
                 signals,
                 file: unsafe { File::from_raw_fd(main) },
@@ -889,7 +899,10 @@ impl EventedPty for Pty {
                     None
                 }
                 Ok(None) => None,
-                Ok(Some(..)) => Some(ChildEvent::Exited),
+                Ok(Some(status)) => {
+                    self.child_exit_status = Some(status);
+                    Some(ChildEvent::Exited)
+                }
             }
         })
     }

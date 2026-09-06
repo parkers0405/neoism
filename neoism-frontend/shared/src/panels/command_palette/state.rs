@@ -505,6 +505,9 @@ impl CommandPalette {
         self.enabled = true;
         self.mode = PaletteMode::Themes(themes);
         self.query.clear();
+        // The picker can open from a typed command or a previous session.
+        // Its byte cursor must belong to the cleared query, not that old text.
+        self.query_cursor = 0;
         self.selected_index = 0;
         self.scroll_offset = 0;
         self.caret_blink_start = Instant::now();

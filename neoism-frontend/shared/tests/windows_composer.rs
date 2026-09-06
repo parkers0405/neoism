@@ -4,6 +4,8 @@
 //! instantiate a window, keyboard dispatcher, backend Machine/messenger, or GPU
 //! block overlay. It exercises their shared input/parser/state boundary, not
 //! raw OSC byte matching. Parser replies take the production direct-reply path.
+//! On an isolated CI account, set `NEOISM_TEST_POWERSHELL_DEFAULT_PROFILE=1`
+//! to omit `-NoProfile` (loads existing profiles; never modifies them).
 #![cfg(windows)]
 
 use neoism_terminal_core::{
@@ -28,6 +30,7 @@ struct Harness {
     cwd: PathBuf,
     replies: usize,
     defer_render: bool,
+    output: Vec<u8>,
 }
 
 impl Drop for Harness {
@@ -42,13 +45,41 @@ impl Harness {
     fn new(cwd: PathBuf) -> Self {
         let shell =
             std::env::var("NEOISM_TEST_PWSH").unwrap_or_else(|_| "pwsh.exe".into());
-        let args = neoism_terminal_pty::shell_integration::powershell_args(
-            &shell,
-            &["-NoLogo".into(), "-NoProfile".into()],
-        )
-        .unwrap();
+        Self::with_shell(cwd, &shell, false)
+    }
+
+    fn with_shell(cwd: PathBuf, shell: &str, without_readline: bool) -> Self {
+        // Profile loading is opt-in for an isolated CI account; no profile writes.
+        let mut base_args = vec!["-NoLogo".into()];
+        if std::env::var_os("NEOISM_TEST_POWERSHELL_DEFAULT_PROFILE").is_none() {
+            base_args.push("-NoProfile".into());
+        }
+        let mut args =
+            neoism_terminal_pty::shell_integration::powershell_args(shell, &base_args)
+                .unwrap();
+        if without_readline {
+            use base64::Engine;
+            let encoded = args.last_mut().unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&*encoded)
+                .unwrap();
+            let units: Vec<_> = bytes
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            let script = format!(
+                "Import-Module Microsoft.PowerShell.Utility, Microsoft.PowerShell.Management; $PSModuleAutoLoadingPreference = 'None'; Remove-Module PSReadLine -ErrorAction Ignore; Remove-Item Function:PSConsoleHostReadLine -ErrorAction Ignore\n{}\nif ($null -ne (Get-Command PSConsoleHostReadLine -ErrorAction Ignore)) {{ throw 'PSReadLine still loaded' }}; [Console]::Write('READLINE-ABSENT')",
+                String::from_utf16(&units).unwrap(),
+            );
+            *encoded = base64::engine::general_purpose::STANDARD.encode(
+                script
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+        }
         let pty = PtySession::spawn(PtySessionConfig {
-            shell: Some(shell),
+            shell: Some(shell.into()),
             args,
             cwd: Some(cwd.clone()),
             cols: 120,
@@ -71,10 +102,12 @@ impl Harness {
             cwd,
             replies: 0,
             defer_render: false,
+            output: Vec::new(),
         }
     }
 
     fn parse(&mut self, bytes: &[u8]) {
+        self.output.extend_from_slice(bytes);
         self.parser.advance(&mut self.term, bytes);
         // Same ordering as performer: parse, dispatch direct protocol writes,
         // then let the render-side composer sample the terminal's real state.
@@ -190,6 +223,62 @@ impl Harness {
         );
     }
 
+    fn foreground_input(&mut self) {
+        self.wait("editable prompt before Read-Host", |s| {
+            s.term.shell_prompt_state().awaiting_command
+        });
+        let generation = self.term.shell_prompt_state().command_finished_generation;
+        self.output.clear();
+        // Computed prompt cannot be satisfied by source echo. The reply token is
+        // sent separately to the foreground reader, not submitted as a new block.
+        self.submit("$answer = Read-Host ('composer-' + (7100 + 99) + '-ready'); Write-Output ('reply-' + $answer.ToUpperInvariant() + '-done')");
+        self.wait("Read-Host ready prompt", |s| {
+            assert_eq!(s.status(), Some(BlockStatusKind::Running));
+            assert_eq!(
+                s.term.shell_prompt_state().command_finished_generation,
+                generation
+            );
+            s.grid().contains("composer-7199-ready")
+        });
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(250) {
+            // Keep answering real cursor queries while the foreground read waits.
+            self.pump();
+            assert_eq!(self.status(), Some(BlockStatusKind::Running));
+            assert_eq!(
+                self.term.shell_prompt_state().command_finished_generation,
+                generation
+            );
+        }
+        let blocks = self.input.command_block_count();
+        let token = b"foreground7199\r";
+        assert_eq!(
+            self.pty.as_mut().unwrap().write(token).unwrap(),
+            token.len()
+        );
+        self.wait("Read-Host Finished(0)", |s| {
+            s.status() == Some(BlockStatusKind::Ok)
+        });
+        assert_eq!(self.input.command_block_count(), blocks);
+        assert_eq!(self.term.shell_prompt_state().last_exit_code, Some(0));
+        assert!(self.grid().contains("reply-FOREGROUND7199-done"));
+        let done = b"\x1b]133;D;0\x1b\\";
+        let completed_at = self
+            .output
+            .windows(done.len())
+            .position(|b| b == done)
+            .expect("successful D after foreground reply");
+        let reply = b"reply-FOREGROUND7199-done";
+        assert!(
+            self.output[..completed_at]
+                .windows(reply.len())
+                .any(|b| b == reply),
+            "computed uppercase reply must precede successful D: {:?}",
+            String::from_utf8_lossy(&self.output)
+        );
+        println!("PASS Read-Host: Running while awaiting separate CR input, uppercase reply before Finished(0)");
+    }
+
     fn ls(&mut self, filename: &str) {
         self.submit("ls");
         self.wait("ls Finished(0)", |s| {
@@ -205,6 +294,37 @@ impl Harness {
     }
 }
 
+fn foreground_input(shell: &str, without_readline: bool) {
+    let fixture = tempfile::tempdir().unwrap();
+    let mut h = Harness::with_shell(fixture.path().to_owned(), shell, without_readline);
+    h.wait("initial editable prompt", |s| {
+        s.term.shell_prompt_state().awaiting_command
+    });
+    if without_readline {
+        assert!(h.grid().contains("READLINE-ABSENT"));
+    }
+    h.foreground_input();
+}
+
+#[test]
+#[ignore = "requires native Windows ConPTY and Windows PowerShell"]
+fn powershell51_composer_foreground_input() {
+    foreground_input("powershell.exe", false);
+}
+
+#[test]
+#[ignore = "requires native Windows ConPTY and Windows PowerShell"]
+fn powershell51_composer_foreground_input_without_psreadline() {
+    foreground_input("powershell.exe", true);
+}
+
+#[test]
+#[ignore = "requires native Windows ConPTY and PowerShell 7 installed"]
+fn pwsh7_composer_foreground_input_without_psreadline() {
+    let shell = std::env::var("NEOISM_TEST_PWSH").unwrap_or_else(|_| "pwsh.exe".into());
+    foreground_input(&shell, true);
+}
+
 #[test]
 #[ignore = "requires native Windows/Wine ConPTY and installed PowerShell"]
 fn powershell_composer_parser_blocks() {
@@ -216,6 +336,7 @@ fn powershell_composer_parser_blocks() {
         s.term.shell_prompt_state().awaiting_command
     });
     h.ls(filename);
+    h.foreground_input();
 
     // Fast commands can complete between desktop render frames. Parse all real
     // output first, then sample only the final D/A/B state once.

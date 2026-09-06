@@ -818,14 +818,20 @@ impl Renderer {
         // space above the strips.
         let num_tabs = context_manager.len();
         let chrome_top = self.chrome_top(num_tabs);
-        // Overlays belong to the window viewport, not to the workspace Island.
-        // Do not use `chrome_top`, even with a synthetic tab count: when
-        // `hide_if_single` is disabled it still includes the Island height.
-        // Late-overlay rendering already places these surfaces above tabs.
-        let overlay_top = (self.top_bar_strip_height()
-            + self.buffer_tabs.height()
-            + 8.0 * self.chrome_scale())
-            * scale_factor;
+        // All four setters consume logical client-area coordinates. On Windows
+        // anchor below the same visible bands used by breadcrumb rendering and
+        // notifications; native titlebars are outside this viewport. Preserve
+        // the established Linux/macOS placement (including its legacy DPI math).
+        let overlay_top = neoism_ui::chrome_policy::desktop_overlay_anchor(
+            neoism_ui::chrome_policy::DesktopOverlayAnchorInput {
+                windows: cfg!(target_os = "windows"),
+                chrome_bottom: self.notifications_top_offset(context_manager),
+                top_bar_height: self.top_bar_strip_height(),
+                buffer_tabs_height: self.buffer_tabs.height(),
+                chrome_scale: self.chrome_scale(),
+                device_scale: scale_factor,
+            },
+        );
         self.command_palette.set_top_anchor(overlay_top);
         self.finder.set_top_anchor(overlay_top);
         self.search.set_top_anchor(overlay_top);

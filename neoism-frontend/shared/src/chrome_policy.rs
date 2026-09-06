@@ -1,5 +1,128 @@
 //! Pure chrome layout policies shared by native and web hosts.
 
+/// Desktop overlay anchor in logical client-area coordinates.
+///
+/// Windows uses the bottom of the rendered chrome bands (including visible
+/// workspace tabs and breadcrumbs). Native window decorations are outside the
+/// client viewport and must not be added here. Sugarloaf applies device scaling
+/// when drawing, so the corrected anchor must not apply it a second time.
+/// Other hosts retain their historical placement until explicitly migrated.
+#[derive(Debug, Clone, Copy)]
+pub struct DesktopOverlayAnchorInput {
+    pub windows: bool,
+    pub chrome_bottom: f32,
+    pub top_bar_height: f32,
+    pub buffer_tabs_height: f32,
+    pub chrome_scale: f32,
+    pub device_scale: f32,
+}
+
+pub fn desktop_overlay_anchor(input: DesktopOverlayAnchorInput) -> f32 {
+    let gap = 8.0 * input.chrome_scale;
+    if input.windows {
+        input.chrome_bottom + gap
+    } else {
+        (input.top_bar_height + input.buffer_tabs_height + gap) * input.device_scale
+    }
+}
+
+#[cfg(test)]
+mod desktop_overlay_anchor_tests {
+    use super::{desktop_overlay_anchor, DesktopOverlayAnchorInput};
+
+    #[test]
+    fn windows_overlay_clears_visible_chrome_at_every_dpi_and_zoom() {
+        use crate::panels::{
+            breadcrumbs::BREADCRUMBS_HEIGHT, buffer_tabs::BUFFER_TABS_HEIGHT,
+            chrome_topbar::CHROME_TOPBAR_HEIGHT,
+        };
+        use crate::widgets::island::ISLAND_HEIGHT;
+
+        for device_scale in [1.0, 1.25, 1.5, 2.0] {
+            for chrome_scale in [0.75, 1.0, 1.5] {
+                for top_bar_visible in [false, true] {
+                    // Covers disabled/auto-hidden navigation and visible workspace tabs.
+                    for island_visible in [false, true] {
+                        for tabs_visible in [false, true] {
+                            for crumbs_visible in [false, true] {
+                                let top_bar = if top_bar_visible {
+                                    CHROME_TOPBAR_HEIGHT * chrome_scale
+                                } else {
+                                    0.0
+                                };
+                                let island = if island_visible {
+                                    ISLAND_HEIGHT * chrome_scale
+                                } else {
+                                    0.0
+                                };
+                                let tabs = if tabs_visible {
+                                    BUFFER_TABS_HEIGHT * chrome_scale
+                                } else {
+                                    0.0
+                                };
+                                let crumbs = if crumbs_visible {
+                                    BREADCRUMBS_HEIGHT * chrome_scale
+                                } else {
+                                    0.0
+                                };
+                                let chrome_bottom = top_bar + island + tabs + crumbs;
+                                let anchor =
+                                    desktop_overlay_anchor(DesktopOverlayAnchorInput {
+                                        windows: true,
+                                        chrome_bottom,
+                                        top_bar_height: top_bar,
+                                        buffer_tabs_height: BUFFER_TABS_HEIGHT
+                                            * chrome_scale,
+                                        chrome_scale,
+                                        device_scale,
+                                    });
+                                assert_eq!(anchor, chrome_bottom + 8.0 * chrome_scale);
+                                // Decorations affect the screen origin, not client geometry.
+                                // Check decorated/undecorated and varied native titlebar sizes.
+                                for native_titlebar in [0.0, 23.0, 31.0, 48.0] {
+                                    let chrome_screen_y =
+                                        native_titlebar + chrome_bottom * device_scale;
+                                    let overlay_screen_y =
+                                        native_titlebar + anchor * device_scale;
+                                    assert_eq!(
+                                        overlay_screen_y - chrome_screen_y,
+                                        8.0 * chrome_scale * device_scale
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn linux_and_macos_keep_exact_legacy_anchor() {
+        for device_scale in [1.0, 1.25, 1.5, 2.0] {
+            for chrome_scale in [0.75, 1.0, 1.5] {
+                for top_bar_height in [0.0, 30.0 * chrome_scale] {
+                    for chrome_bottom in [0.0, 54.0, 88.0, 118.0] {
+                        let buffer_tabs_height = 28.0 * chrome_scale;
+                        assert_eq!(
+                            desktop_overlay_anchor(DesktopOverlayAnchorInput {
+                                windows: false,
+                                chrome_bottom,
+                                top_bar_height,
+                                buffer_tabs_height,
+                                chrome_scale,
+                                device_scale,
+                            }),
+                            (top_bar_height + buffer_tabs_height + 8.0 * chrome_scale)
+                                * device_scale
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Inputs needed to reserve workspace chrome above and below a
 /// terminal/editor grid.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -1,0 +1,12 @@
+---
+name: "Windows modals on breadcrumb — anchor geometry fixed"
+description: "Windows-only correction of shared desktop modal anchor: omitted chrome bands + logical/DPI mismatch; other OS math preserved; 40 policy tests and native/xwin checks pass"
+type: "bug"
+scope: "project"
+origin: "neoism-agent"
+created: "2026-09-06"
+updated: "2026-09-06"
+---
+
+Post-v0.7.91 Windows-only modal anchor fix; no release/commit. Source changes: neoism-frontend/desktop/src/host/run.rs uses neoism_ui::chrome_policy::desktop_overlay_anchor for shared command_palette/finder/search/modal set_top_anchor calls. Previous anchor = (top_bar_strip_height + buffer_tabs.height + 8*chrome_scale)*device_scale. Consumers use logical coordinates; Sugarloaf rect/overlay drawing applies device scale. Formula omitted breadcrumbs and visible Island. Example hidden Island, default bars: breadcrumbs y=58..84, old anchor 66 at DPI1, 82.5 at1.25. Native Windows dimensions are GetClientRect (neoism-window platform_impl/windows/window.rs inner_size), passed by router/window.rs ScreenWindowProperties into RootStyle + SugarloafWindow. Native titlebar excluded; no Windows-only titlebar/backend transform found. Common desktop math bug exposed by configuration/DPI, NOT proven platform-specific OS fault. User explicitly required Linux/macOS untouched, so helper's non-Windows branch retains exact legacy formula. Windows uses notifications_top_offset(context_manager) (host/tabs.rs: chrome_top=topbar+effective Island; adds visible buffer tabs and visible breadcrumbs) + existing 8*chrome_scale logical gap. No hardcoded platform nudge. Shared Chrome host never calls this desktop helper; shim palette draw ignores layout slot and uses own rect. Shared/web behavior unchanged.
+Tests: shared/src/chrome_policy.rs desktop_overlay_anchor_tests uses DPI 1/1.25/1.5/2, zoom .75/1/1.5, all topbar/Island/buffer-tab/breadcrumb visibility combinations; titlebar screen-origin geometry cases 0/23/31/48; exact legacy branch equality. env -u CI cargo test -p neoism-ui --lib chrome_policy:: PASS 40 tests incl 2 new. Native cargo check -p neoism --tests PASS. env -u CI cargo xwin check --target x86_64-pc-windows-msvc -p neoism --features wgpu PASS. git diff --check PASS. Runtime Windows GUI not exercised; no native macOS check. Existing Finder/universal-modal small-viewport clamps unchanged, may place tall cards above preferred anchor.

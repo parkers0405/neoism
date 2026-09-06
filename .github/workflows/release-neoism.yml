@@ -60,8 +60,8 @@ jobs:
           run_id=""
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             for id in $(gh api "repos/${{ github.repository }}/actions/workflows/release-neoism.yml/runs?head_sha=${{ github.sha }}&status=success&per_page=10" --jq '.workflow_runs[].id'); do
-              count=$(gh api "repos/${{ github.repository }}/actions/runs/$id/artifacts" --jq '.artifacts | length')
-              if [[ "$count" -ge 3 ]]; then run_id="$id"; break; fi
+              count=$(gh api "repos/${{ github.repository }}/actions/runs/$id/artifacts" --jq '[.artifacts[] | select(.expired == false) | select(.name == "neoism-linux-x86_64" or .name == "neoism-darwin-aarch64" or .name == "neoism-windows-x86_64")] | length')
+              if [[ "$count" -eq 3 ]]; then run_id="$id"; break; fi
             done
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
@@ -191,6 +191,12 @@ jobs:
            -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
           sccache --show-stats || true
 
+      - name: Native Windows production terminal validation
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        timeout-minutes: 95
+        run: ./scripts/windows-native-validation.ps1
+
       - name: Install WiX Toolset
         if: matrix.goos == 'windows'
         shell: pwsh
@@ -283,60 +289,18 @@ jobs:
       - name: Smoke-test Windows install, upgrade, and uninstall
         if: matrix.goos == 'windows'
         shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          function Invoke-Msi([string]$arguments) {
-            $process = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
-            if ($process.ExitCode -notin @(0, 3010, 1641)) {
-              throw "msiexec failed with code $($process.ExitCode): $arguments"
-            }
-          }
-          $fixture = (Resolve-Path "Neoism-upgrade-fixture.msi").Path
-          $installer = (Resolve-Path "Neoism-x86_64.msi").Path
-          $installDir = Join-Path $env:LOCALAPPDATA "Programs\Neoism"
-          $userData = Join-Path $env:LOCALAPPDATA "neoism\installer-preserve-test"
-          New-Item -ItemType Directory -Force (Split-Path $userData) | Out-Null
-          Set-Content $userData "preserve"
+        timeout-minutes: 12
+        run: ./scripts/windows-msi-validation.ps1
 
-          Invoke-Msi "/i `"$fixture`" /qn /norestart"
-          $fixtureHash = (Get-FileHash (Join-Path $installDir "neoism.exe") -Algorithm SHA256).Hash
-          Invoke-Msi "/i `"$installer`" /qn /norestart"
-
-          foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe")) {
-            if (-not (Test-Path (Join-Path $installDir $binary))) { throw "$binary was not installed" }
-          }
-          if (-not (Test-Path (Join-Path $installDir "web\index.html"))) { throw "web UI was not installed" }
-          $version = (& (Join-Path $installDir "neoism.exe") --version | Out-String).Trim()
-          if ($version -notmatch "neoism") { throw "installed executable did not report its version" }
-          $appPath = (Get-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\neoism.exe").GetValue('')
-          if ($appPath -ne (Join-Path $installDir "neoism.exe")) { throw "App Paths registration is wrong" }
-          $registeredVersion = (Get-ItemProperty "HKCU:\Software\Neoism").InstalledVersion
-          $expectedVersion = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
-            Where-Object { $_.name -eq "neoism" }).version
-          if ($registeredVersion -ne $expectedVersion) { throw "MSI major upgrade did not replace the fixture" }
-          $installedHash = (Get-FileHash (Join-Path $installDir "neoism.exe") -Algorithm SHA256).Hash
-          if ($installedHash -eq $fixtureHash) { throw "MSI major upgrade did not replace neoism.exe" }
-          $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Neoism\Neoism.lnk"
-          if (-not (Test-Path $shortcut)) { throw "Start Menu shortcut was not installed" }
-          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-          if (($userPath -split ';').TrimEnd('\') -notcontains $installDir.TrimEnd('\')) {
-            throw "Neoism install directory was not added to the user PATH"
-          }
-
-          Invoke-Msi "/x `"$installer`" /qn /norestart"
-          if (Test-Path (Join-Path $installDir "neoism.exe")) { throw "Neoism remained after uninstall" }
-          if (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\neoism.exe") { throw "App Paths registration remained after uninstall" }
-          if (Test-Path $shortcut) { throw "Start Menu shortcut remained after uninstall" }
-          if (Test-Path "HKCU:\Software\Classes\Directory\Background\shell\Open Neoism here") { throw "context menu remained after uninstall" }
-          if (Test-Path "HKCU:\Software\Neoism\Capabilities") { throw "Default Apps capabilities remained after uninstall" }
-          $registeredApp = Get-ItemProperty "HKCU:\Software\RegisteredApplications" -Name "Neoism" -ErrorAction SilentlyContinue
-          if ($null -ne $registeredApp) { throw "RegisteredApplications entry remained after uninstall" }
-          $userPathAfter = [Environment]::GetEnvironmentVariable("Path", "User")
-          if (($userPathAfter -split ';').TrimEnd('\') -contains $installDir.TrimEnd('\')) {
-            throw "Neoism install directory remained on the user PATH after uninstall"
-          }
-          if (-not (Test-Path $userData)) { throw "uninstall removed Neoism user data" }
-          Remove-Item $userData -Force
+      - name: Upload Windows validation evidence
+        if: always() && matrix.goos == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: windows-validation/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Audit macOS runtime dependencies
         if: matrix.goos == 'darwin'
@@ -578,8 +542,8 @@ jobs:
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.dmg*
 
-      - name: Upload Windows build artifact (dry runs)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.goos == 'windows' }}
+      - name: Upload Windows candidate MSI (including failed validation)
+        if: ${{ always() && matrix.goos == 'windows' }}
         uses: actions/upload-artifact@v4
         with:
           name: neoism-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -616,7 +580,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh run download "${{ needs.precheck.outputs.reuse_run }}" -R "${{ github.repository }}" -D artifacts
+          gh run download "${{ needs.precheck.outputs.reuse_run }}" -R "${{ github.repository }}" -D artifacts -n neoism-linux-x86_64 -n neoism-darwin-aarch64 -n neoism-windows-x86_64
           gh release create "${{ github.ref_name }}" -R parkers0405/neoism \
             --draft --title "${{ github.ref_name }}" || true
           gh release upload "${{ github.ref_name }}" -R parkers0405/neoism --clobber artifacts/*/*

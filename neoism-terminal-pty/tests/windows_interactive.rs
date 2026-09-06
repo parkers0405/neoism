@@ -1,6 +1,8 @@
 //! Native Windows interactive transport regressions, not one-shot `/C` spawns.
 //! Run on Windows with:
 //! `cargo test -p neoism-terminal-pty --test windows_interactive -- --ignored`
+//! On an isolated CI account, set `NEOISM_TEST_POWERSHELL_DEFAULT_PROFILE=1`
+//! to omit `-NoProfile` for integrated tests (loads existing profiles; writes none).
 #![cfg(windows)]
 
 use neoism_terminal_pty::{PtySession, PtySessionConfig};
@@ -82,6 +84,19 @@ fn interactive_roundtrip(shell: &str, args: &[&str], powershell: bool) {
         let expected = format!("neoism-{}-done", 7100 + index);
         wait_for(&mut session, expected.as_bytes());
     }
+    if !powershell {
+        // Expand on distinct command lines: cmd expands %vars% before set /p runs.
+        let setup = b"set /a _neoism_ready=7100+99\r";
+        assert_eq!(session.write(setup).unwrap(), setup.len());
+        let read = b"set /p \"_neoism_input=neoism-%_neoism_ready%-ready:\"\r";
+        assert_eq!(session.write(read).unwrap(), read.len());
+        wait_for(&mut session, b"neoism-7199-ready:");
+        let input = b"cmdforeground\r";
+        assert_eq!(session.write(input).unwrap(), input.len());
+        let reply = b"echo neoism-reply-%_neoism_input%-done\r";
+        assert_eq!(session.write(reply).unwrap(), reply.len());
+        wait_for(&mut session, b"neoism-reply-cmdforeground-done");
+    }
     session.close();
 }
 
@@ -128,13 +143,43 @@ fn assert_powershell_ls(session: &mut PtySession, filename: &str) {
     );
 }
 
+fn assert_powershell_foreground_input(session: &mut PtySession) {
+    // Neither the ready prompt nor the computed reply occurs in source/echo.
+    // Do not queue the token until Read-Host has actually printed its prompt.
+    let command = b"$answer = Read-Host ('neoism-' + (7100 + 99) + '-ready'); Write-Output ('reply-' + $answer.ToUpperInvariant() + '-done')\r";
+    assert_eq!(session.write(command).unwrap(), command.len());
+    let ready = wait_for(session, b"neoism-7199-ready");
+    assert!(
+        !ready.windows(7).any(|b| b == b"\x1b]133;D"),
+        "Read-Host completed before foreground input: {:?}",
+        String::from_utf8_lossy(&ready)
+    );
+    let token = b"foreground7199\r";
+    assert_eq!(session.write(token).unwrap(), token.len());
+    let done = b"\x1b]133;D;0\x1b\\";
+    let output = wait_for(session, done);
+    let completed_at = output.windows(done.len()).position(|b| b == done).unwrap();
+    let reply = b"reply-FOREGROUND7199-done";
+    assert!(
+        output[..completed_at]
+            .windows(reply.len())
+            .any(|b| b == reply),
+        "Read-Host must return computed uppercase input before successful D: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
 fn integrated_powershell_lifecycle(shell: &str, without_readline: bool) {
     let fixture = ListingFixture::new();
-    let mut args = neoism_terminal_pty::shell_integration::powershell_args(
-        shell,
-        &["-NoLogo".into(), "-NoProfile".into()],
-    )
-    .unwrap();
+    // Opt in only on an isolated CI account to exercise production profile loading.
+    // Never create, replace, or remove the user's real PowerShell profile.
+    let mut base_args = vec!["-NoLogo".into()];
+    if std::env::var_os("NEOISM_TEST_POWERSHELL_DEFAULT_PROFILE").is_none() {
+        base_args.push("-NoProfile".into());
+    }
+    let mut args =
+        neoism_terminal_pty::shell_integration::powershell_args(shell, &base_args)
+            .unwrap();
     if without_readline {
         use base64::Engine;
         let encoded = args.last_mut().unwrap();
@@ -171,6 +216,7 @@ fn integrated_powershell_lifecycle(shell: &str, without_readline: bool) {
     }
 
     assert_powershell_ls(&mut session, &fixture.filename);
+    assert_powershell_foreground_input(&mut session);
 
     for command in ["clear", "cls", "Clear-Host"] {
         let clear = format!("{command}\r");
@@ -235,6 +281,12 @@ fn powershell_accepts_idle_separated_commands_and_clear() {
 #[ignore = "requires native Windows ConPTY and PowerShell 7 installed"]
 fn pwsh_accepts_idle_separated_commands_and_clear() {
     interactive_roundtrip("pwsh.exe", &["-NoLogo", "-NoProfile"], true);
+}
+
+#[test]
+#[ignore = "requires native Windows ConPTY and Windows PowerShell"]
+fn powershell_integration_without_psreadline_accepts_cr_and_completes() {
+    integrated_powershell_lifecycle("powershell.exe", true);
 }
 
 #[test]

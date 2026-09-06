@@ -17,7 +17,7 @@ use windows_sys::{s, w};
 
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-    TerminateProcess, UpdateProcThreadAttribute, CREATE_NO_WINDOW,
+    TerminateProcess, UpdateProcThreadAttribute,
     CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
@@ -282,7 +282,9 @@ fn new_with_watcher(
             ptr::null_mut(),
             ptr::null_mut(),
             false as i32,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            // CREATE_NO_WINDOW regresses native interactive console input (Read-Host).
+            // This terminal is attached to HPCON, not a background helper process.
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
             environment_block.as_mut_ptr().cast(),
             cwd.as_ref().map_or_else(ptr::null, |s| s.as_ptr()),
             &mut startup_info_ex.StartupInfo as *mut STARTUPINFOW,

@@ -1324,6 +1324,86 @@ fn get_selected_font_none_in_commands_mode() {
 }
 
 #[test]
+fn theme_picker_typing_after_command_query() {
+    let mut palette = CommandPalette::new();
+    palette.set_query("ThemePicker".into());
+    palette.enter_themes_mode(vec!["pastel_dark".into(), "tokyo_night".into()]);
+    palette.insert_query_text("t");
+    assert_eq!(palette.query, "t");
+    assert_eq!(palette.query_cursor(), 1);
+    assert_eq!(palette.get_selected_theme().as_deref(), Some("tokyo_night"));
+}
+
+#[test]
+fn theme_picker_reopen_accepts_first_character_and_backspace() {
+    for text in ["a", "z", " ", "é", "🎨", "e\u{301}"] {
+        let mut palette = CommandPalette::new();
+        palette.enter_themes_mode(vec!["pastel_dark".into()]);
+        palette.insert_query_text("previous query");
+        palette.set_enabled(false);
+        palette.enter_themes_mode(vec!["pastel_dark".into()]);
+        assert_eq!(palette.query_cursor(), 0);
+        assert!(!palette.backspace_query());
+        palette.move_query_cursor_left();
+        palette.move_query_cursor_right();
+        palette.insert_query_text(text);
+        assert_eq!(palette.query, text);
+        assert_eq!(palette.query_cursor(), text.len());
+        assert!(palette.backspace_query());
+        assert!(palette.query.is_empty());
+        assert_eq!(palette.query_cursor(), 0);
+    }
+}
+
+#[test]
+fn theme_picker_filter_resets_selection_and_preview_target() {
+    use crate::primitives::ide_theme::IdeTheme;
+
+    let mut palette = CommandPalette::new();
+    palette.set_query("Themes".into());
+    palette.enter_themes_mode(vec![
+        "pastel_dark".into(),
+        "tokyo_night".into(),
+        "catppuccin_mocha".into(),
+    ]);
+    palette.move_selection_down();
+    palette.move_selection_down();
+    assert_eq!(palette.selected_index, 2);
+    palette.insert_query_text("t");
+    assert_eq!(palette.selected_index, 0);
+    assert_eq!(palette.scroll_offset, 0);
+    assert_eq!(palette.get_selected_theme().as_deref(), Some("tokyo_night"));
+    palette.move_selection_down();
+    assert_ne!(palette.get_selected_theme().as_deref(), Some("tokyo_night"));
+    palette.move_selection_up();
+    assert_eq!(palette.get_selected_theme().as_deref(), Some("tokyo_night"));
+    for ch in ["o", "k", "y", "o"] {
+        palette.insert_query_text(ch);
+        assert_eq!(palette.get_selected_theme().as_deref(), Some("tokyo_night"));
+    }
+    // Rendering and Enter/click use this same filtered accessor, not a
+    // source-list index. Resolve the preview exactly as render.rs does.
+    let selected = palette.get_selected_theme().unwrap();
+    assert_eq!(IdeTheme::by_name(&selected).name.as_str(), "tokyo_night");
+    assert_eq!(palette.filtered_rows().len(), 1);
+    palette.insert_query_text("zzzz");
+    assert!(palette.filtered_rows().is_empty());
+    palette.move_selection_down();
+    palette.move_selection_up();
+    assert!(palette.get_selected_theme().is_none());
+    assert!(palette.active_rect(1200.0, 1.0).is_some());
+    for _ in 0..4 {
+        assert!(palette.backspace_query());
+    }
+    assert_eq!(palette.query, "tokyo");
+    palette.select_clicked(0);
+    assert_eq!(palette.get_selected_theme().as_deref(), Some("tokyo_night"));
+    while palette.backspace_query() {}
+    assert_eq!(palette.filtered_rows().len(), 3);
+    assert_eq!(palette.get_selected_theme().as_deref(), Some("pastel_dark"));
+}
+
+#[test]
 fn enter_themes_mode_filters_and_returns_selected_theme() {
     let mut palette = CommandPalette::new();
     palette.enter_themes_mode(vec![

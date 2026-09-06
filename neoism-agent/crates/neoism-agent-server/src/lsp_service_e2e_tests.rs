@@ -17,6 +17,95 @@ use super::super::{
     DiagnosticsEvent, LspDiagnostic,
 };
 
+#[test]
+fn diagnostic_touch_syncs_disk_without_saving_but_editor_save_still_notifies() {
+    let workspace = TestWorkspace::new("diagnostic-touch");
+    let file = workspace.path.join("src/main.rs");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "broken_v1").unwrap();
+    let log = workspace.path.join("fake-lsp.log");
+    let fake_server = compile_fake_server(&workspace);
+    write_lsp_config(&workspace.path, &fake_server, &log, "serve");
+    let spec = configured_test_spec(&workspace.runtime, &workspace.path);
+    let service = workspace.runtime.service.as_ref();
+    let mut events = subscribe_diagnostics(&workspace.runtime);
+
+    service.touch(&workspace.path, &file, None, &spec).unwrap();
+    wait_for_event(&mut events, &file, |event| {
+        event
+            .diagnostics
+            .first()
+            .is_some_and(|d| d.message == "diagnostic broken_v1")
+    });
+    fs::write(&file, "broken_v2").unwrap();
+    service.touch(&workspace.path, &file, None, &spec).unwrap();
+    wait_for_event(&mut events, &file, |event| {
+        event
+            .diagnostics
+            .first()
+            .is_some_and(|d| d.message == "diagnostic broken_v2")
+    });
+    // Identical disk contents must not emit a redundant didChange.
+    service.touch(&workspace.path, &file, None, &spec).unwrap();
+    // Explicit live text wins over disk for a touch, just as for editor sync.
+    service
+        .touch(&workspace.path, &file, Some("clean"), &spec)
+        .unwrap();
+    wait_for_event(&mut events, &file, |event| event.diagnostics.is_empty());
+    // Navigation must NOT read the still-broken disk back over the live text.
+    let hover = service.hover(&workspace.path, &file, 0, 0, &spec).unwrap();
+    assert!(hover[0].contents.contains("fake hover for clean"));
+    assert!(service
+        .cached_diagnostics(&workspace.path, &file)
+        .is_empty());
+
+    // An actual editor save keeps negotiated didSave, including the live text.
+    service.save(&workspace.path, &file, &spec).unwrap();
+    // Request/response is a transport barrier: the preceding notifications have
+    // been processed before we inspect the log (no sleep-based assertions).
+    service.hover(&workspace.path, &file, 0, 0, &spec).unwrap();
+    let log = fs::read_to_string(&log).unwrap();
+    let lifecycle: Vec<_> = log
+        .lines()
+        .filter(|line| {
+            line.starts_with("didOpen:")
+                || line.starts_with("didChange:")
+                || line.starts_with("didSave:")
+        })
+        .collect();
+    assert_eq!(
+        lifecycle,
+        vec![
+            "didOpen:language=protocol-test:version=0:text=broken_v1",
+            "didChange:version=1:text=broken_v2",
+            "didChange:version=2:text=clean",
+            "didSave:text=clean:includesText=true",
+        ]
+    );
+    service.shutdown_all();
+}
+
+#[test]
+fn diagnostic_touch_preserves_pull_without_saving() {
+    let workspace = TestWorkspace::new("diagnostic-pull");
+    let file = workspace.path.join("src/main.rs");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "broken_v1").unwrap();
+    let log = workspace.path.join("fake-lsp.log");
+    let fake_server = compile_fake_server(&workspace);
+    write_lsp_config(&workspace.path, &fake_server, &log, "pull");
+    let spec = configured_test_spec(&workspace.runtime, &workspace.path);
+    let service = workspace.runtime.service.as_ref();
+    let diagnostics = service.touch(&workspace.path, &file, None, &spec).unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message, "pulled diagnostic");
+    let log = fs::read_to_string(&log).unwrap();
+    assert!(log.contains("didOpen:language=protocol-test:version=0:text=broken_v1"));
+    assert!(log.contains("pullDiagnostic"));
+    assert!(!log.contains("didSave:"));
+    service.shutdown_all();
+}
+
 /// Exercises the same persistent process, JSON-RPC framing, reader thread,
 /// notification bus, and per-server diagnostics cache used in production. The
 /// fake server is compiled with the active Rust toolchain, so this test never
@@ -856,11 +945,16 @@ fn main() {
                 && body.contains(r#""fixtureInit":"init-only""#)
                 && !body.contains("settings-only");
             append(log, &format!("initialize:valid={valid}"));
+            let diagnostic_provider = if mode == "pull" {
+                r#""diagnosticProvider":{},"#
+            } else {
+                ""
+            };
             let id = request_id(&body);
             send(
                 &mut output,
                 &format!(
-                    r#"{{"jsonrpc":"2.0","id":{id},"result":{{"capabilities":{{"hoverProvider":true,"codeActionProvider":{{"resolveProvider":true}},"executeCommandProvider":{{"commands":["fixture.afterFix"]}},"textDocumentSync":{{"openClose":true,"change":1,"save":{{"includeText":true}}}}}}}}}}"#,
+                    r#"{{"jsonrpc":"2.0","id":{id},"result":{{"capabilities":{{{diagnostic_provider}"hoverProvider":true,"codeActionProvider":{{"resolveProvider":true}},"executeCommandProvider":{{"commands":["fixture.afterFix"]}},"textDocumentSync":{{"openClose":true,"change":1,"save":{{"includeText":true}}}}}}}}}}"#,
                 ),
             );
         } else if has_method(&body, "initialized") {
@@ -970,6 +1064,14 @@ fn main() {
                     "stale",
                 );
             }
+        } else if has_method(&body, "textDocument/diagnostic") {
+            assert_eq!(mode, "pull");
+            append(log, "pullDiagnostic");
+            let id = request_id(&body);
+            send(
+                &mut output,
+                &format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"kind":"full","items":[{{"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":1}}}},"severity":1,"message":"pulled diagnostic"}}]}}}}"#),
+            );
         } else if has_method(&body, "textDocument/didSave") {
             let includes_text = body.contains(&format!(
                 r#""text":"{}""#,

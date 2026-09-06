@@ -420,9 +420,8 @@ fn managed_docker_language_server_publishes_dockerfile_diagnostics() {
         sync_document(&runtime, &root, &file, Some(&text)),
         vec!["docker"]
     );
-    // Exercise the same write/touch path the daemon uses. The client sends
-    // didSave only when the server advertises it, and otherwise relies on the
-    // push-diagnostics lifecycle established by didOpen/didChange.
+    // Exercise a diagnostic touch (didOpen/didChange, never didSave).
+    // Genuine editor saves use save_document separately.
     let _ = touch_document_diagnostics(&runtime, &root, &file, Some(&text));
     let deadline = Instant::now() + Duration::from_secs(30);
     let diagnostics = loop {

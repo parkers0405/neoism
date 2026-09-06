@@ -1565,9 +1565,8 @@ pub fn diagnostics(
 }
 
 /// Cached diagnostics for a single file, with no language-server round-trip.
-/// Mirrors opencode's `lsp.diagnostics()` reading each client's already-published
-/// `client.diagnostics` map: the blocking wait happens once in [`touch_document`]
-/// (opencode's `touchFile(_, "document")`), and this just reads the result.
+/// Reads each client's latest snapshot, which may predate the last touch:
+/// push publication is asynchronous and touch does not wait for a fresh push.
 pub fn cached_diagnostics(
     runtime: &LspRuntime,
     directory: impl AsRef<Path>,

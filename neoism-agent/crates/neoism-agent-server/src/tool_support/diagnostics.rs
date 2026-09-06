@@ -15,11 +15,11 @@ const DIAGNOSTICS_PROJECT_SCAN_LIMIT: usize = 200;
 /// Matches opencode's per-file cap in the "please fix" report block.
 const MAX_REPORTED_ERRORS_PER_FILE: usize = 20;
 
-/// Notify the language servers that `paths` changed on disk, mirroring
-/// opencode's `lsp.touchFile(file, "document")` step before it gathers
-/// diagnostics.
+/// Synchronize changed disk contents with didOpen/didChange, not didSave.
+/// Released OpenCode's touchFile likewise does not synthesize a save (it also
+/// sends watched-file notifications; Neoism does not add that behavior here).
 ///
-/// NOTE: this performs blocking LSP I/O (it can wait for `publishDiagnostics`).
+/// NOTE: this performs blocking LSP I/O (initialization and optional pull).
 /// Callers MUST invoke it off the async executor — see [`attach_lsp_diagnostics`].
 pub(super) fn touch_paths(
     runtime: &lsp::LspRuntime,
@@ -42,12 +42,11 @@ pub(super) fn touch_paths(
 /// return an opencode-style "please fix" block for any *errors* in the touched
 /// files so the model is prompted to repair regressions it just introduced.
 ///
-/// This is a pure cache read — the single blocking wait already happened in
-/// [`touch_paths`] (opencode's `touchFile(_, "document")`); this mirrors
-/// opencode's `diagnostics()`, which just reads each client's published
-/// `client.diagnostics`. Callers MUST run `touch_paths` first so the cache is
-/// populated. It is cheap, but stays inside the same `spawn_blocking` as
-/// `touch_paths` for simplicity.
+/// This is a pure cache read after [`touch_paths`] synchronizes the document
+/// and attempts a pull if supported. Push-only servers publish asynchronously;
+/// their previous snapshot may still be present. These results are not proof
+/// that diagnostics were recomputed for the edit (nor is empty proof of clean).
+/// Keep this in the same `spawn_blocking` as `touch_paths` for simplicity.
 pub(super) fn attach_lsp_diagnostics(
     runtime: &lsp::LspRuntime,
     cwd: &Path,
@@ -109,7 +108,7 @@ pub(super) fn attach_lsp_diagnostics(
         None
     } else {
         Some(format!(
-            "LSP errors detected in this file, please fix:\n{}",
+            "Cached LSP errors (may predate this edit; verify before fixing):\n{}",
             report_sections.join("\n")
         ))
     }
@@ -131,6 +130,8 @@ fn diagnostic_entry(
     json!({
         "path": display,
         "source": source,
+        "freshness": "unknown",
+        "diagnosticsKind": "cached",
         "errorCount": errors,
         "warningCount": warnings,
         "diagnostics": diagnostics,

@@ -13,13 +13,13 @@ use super::completion::{
 };
 use super::history::PersistentHistory;
 use super::shell::{
-    command_prefers_hidden_cursor, display_path, is_clear_command,
-    parse_zsh_history_line, sanitize_history_entry, sanitize_input_text, HISTORY_LIMIT,
-    PROMPT_BURST_MS,
+    command_prefers_hidden_cursor, display_path, parse_zsh_history_line,
+    sanitize_history_entry, sanitize_input_text, HISTORY_LIMIT, PROMPT_BURST_MS,
 };
 
 #[derive(Debug, Default)]
 pub struct TerminalInputBuffer {
+    shell_kind: Option<crate::input::TerminalShellKind>,
     text: String,
     cursor: usize,
     desired_visual_column: Option<usize>,

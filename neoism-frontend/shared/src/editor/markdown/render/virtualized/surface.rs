@@ -86,7 +86,6 @@ pub(super) fn render_virtual(
     let clip = [x, y, w, h];
     let bottom = y + h;
 
-    let cursor_was_drawn = pane.cursor_rect.is_some();
     pane.begin_block_layout();
     pane.set_cursor_rect(None);
 
@@ -251,26 +250,6 @@ pub(super) fn render_virtual(
         reveal_virtual_line(pane, line, VirtualRevealAlign::Center);
         pane.target_scroll_y = pane.scroll_y;
         pane.scroll_y = current;
-        let _ = pane
-            .virtual_render
-            .surface
-            .apply(VirtualSurfaceCommand::SetScroll(VirtualScroll {
-                scroll_y: current.max(0.0),
-                velocity_y: pane.scroll_velocity_px_s,
-            }));
-    }
-    if should_reveal_virtual_cursor(pane.follow_cursor, cursor_was_drawn) {
-        let current = pane.scroll_y;
-        let previous_target = pane.target_scroll_y;
-        let animation_velocity = pane.scroll_animation_velocity_px_s;
-        let animation_tick = pane.scroll_animation_last_tick_at;
-        reveal_virtual_cursor_source(pane);
-        let revealed = pane.scroll_y;
-        pane.scroll_y = current;
-        pane.target_scroll_y =
-            cursor_reveal_glide_target(current, previous_target, revealed);
-        pane.scroll_animation_velocity_px_s = animation_velocity;
-        pane.scroll_animation_last_tick_at = animation_tick;
         let _ = pane
             .virtual_render
             .surface
@@ -467,6 +446,33 @@ pub(super) fn render_virtual(
         clip,
     );
     ensure_virtual_cursor_visible(pane, clip);
+    // Decide from THIS layout, not the previous frame's clipped overlay.
+    // Overscan often supplies an exact offscreen caret; only use approximate
+    // source reveal when its node was not laid out at all. Leave follow armed
+    // until the host can consume exact geometry on a subsequent frame.
+    if should_reveal_virtual_cursor(
+        pane.follow_cursor,
+        pane.has_current_cursor_geometry(),
+    ) {
+        let current = pane.scroll_y;
+        let previous_target = pane.target_scroll_y;
+        let animation_velocity = pane.scroll_animation_velocity_px_s;
+        let animation_tick = pane.scroll_animation_last_tick_at;
+        reveal_virtual_cursor_source(pane);
+        let revealed = pane.scroll_y;
+        pane.scroll_y = current;
+        pane.target_scroll_y =
+            cursor_reveal_glide_target(current, previous_target, revealed);
+        pane.scroll_animation_velocity_px_s = animation_velocity;
+        pane.scroll_animation_last_tick_at = animation_tick;
+        let _ = pane
+            .virtual_render
+            .surface
+            .apply(VirtualSurfaceCommand::SetScroll(VirtualScroll {
+                scroll_y: current.max(0.0),
+                velocity_y: pane.scroll_velocity_px_s,
+            }));
+    }
     draw_remote_markdown_carets(sugarloaf, pane, theme, clip, font_scale);
     draw_markdown_scrollbar(sugarloaf, pane, rect, total_height, theme, mouse, clip);
     if let Some(footer) = pane.reader_footer.as_deref() {
@@ -1046,7 +1052,12 @@ fn reveal_virtual_cursor_source(pane: &mut MarkdownPane) {
     let line = pane
         .cursor_line
         .min(state.line_starts.len().saturating_sub(1));
-    reveal_virtual_position(pane, line, pane.cursor_col, VirtualRevealAlign::Nearest);
+    let align = if pane.read_only {
+        VirtualRevealAlign::Nearest
+    } else {
+        VirtualRevealAlign::Center
+    };
+    reveal_virtual_position(pane, line, pane.cursor_col, align);
 }
 
 fn cursor_reveal_glide_target(current: f32, previous_target: f32, revealed: f32) -> f32 {
@@ -1057,8 +1068,8 @@ fn cursor_reveal_glide_target(current: f32, previous_target: f32, revealed: f32)
     }
 }
 
-fn should_reveal_virtual_cursor(follow_cursor: bool, cursor_was_drawn: bool) -> bool {
-    follow_cursor && !cursor_was_drawn
+fn should_reveal_virtual_cursor(follow_cursor: bool, has_current_geometry: bool) -> bool {
+    follow_cursor && !has_current_geometry
 }
 
 #[cfg(test)]
@@ -1076,15 +1087,20 @@ mod cursor_reveal_glide_tests {
     }
 
     #[test]
-    fn visible_single_line_move_does_not_override_scrolloff_spring() {
+    fn only_missing_current_layout_needs_virtual_reveal() {
+        // Geometry can exist in overscan with no visible overlay. It still
+        // supplies exact center-follow; don't replace it with an estimate.
         assert!(!should_reveal_virtual_cursor(true, true));
         assert!(should_reveal_virtual_cursor(true, false));
+        // A touch-detached viewport must never reveal the caret's node.
+        assert!(!should_reveal_virtual_cursor(false, true));
+        assert!(!should_reveal_virtual_cursor(false, false));
     }
 }
 
 /// Scroll the virtual surface so `line` (0-based) is in view with the
-/// requested alignment. Shared by follow-cursor reveal (`Nearest`) and
-/// the Wave 7G roster click-to-jump (`Center`).
+/// requested alignment. Keyboard follow centers editors; read-only selection
+/// uses nearest-edge reveal. Roster click-to-jump also uses `Center`.
 fn reveal_virtual_line(pane: &mut MarkdownPane, line: usize, align: VirtualRevealAlign) {
     reveal_virtual_position(pane, line, 0, align);
 }

@@ -182,6 +182,5 @@ pub fn display_path(path: &Path) -> String {
 }
 
 pub fn is_clear_command(command: &str) -> bool {
-    let command = command.trim();
-    command == "clear" || command.starts_with("clear ")
+    crate::input::TerminalShellKind::Unknown.is_clear_command(command)
 }

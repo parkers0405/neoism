@@ -131,7 +131,7 @@ export interface ProtocolClientHandlers {
   onDisconnect?: (error: Error, intentional: boolean) => void;
   /** A previously-connected generation answered its resume liveness probe. */
   onAuthenticatedResume?: (generation: number) => void;
-  onPtyCreated?: (sessionId: string, workspaceRoot: string | null) => void;
+  onPtyCreated?: (sessionId: string, workspaceRoot: string | null, shell: string | null) => void;
   onPtyOutput?: (sessionId: string, bytes: Uint8Array) => void;
   onPtyClosed?: (sessionId: string, exitCode: number | null) => void;
   /// Daemon-tracked live cwd of a PTY's foreground process. Pushed
@@ -926,6 +926,7 @@ export class ProtocolClient {
       this.handlers.onPtyCreated?.(
         msg.PtyCreated.session_id,
         msg.PtyCreated.workspace_root ?? null,
+        msg.PtyCreated.shell ?? null,
       );
       return;
     }

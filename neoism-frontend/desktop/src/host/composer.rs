@@ -494,7 +494,7 @@ impl Renderer {
             #[cfg(target_os = "windows")]
             let detected =
                 crate::terminal::blocks::detect_foreground_shell(current.shell_pid);
-            if let Some(shell_kind) = detected {
+            if let Some(shell_kind) = detected.filter(|_| current.remote_pty.is_none()) {
                 if current.terminal_shell_kind != shell_kind {
                     current
                         .terminal_input

@@ -13,6 +13,15 @@ use web_time::Instant;
 use crate::input::CompletionFlashState;
 
 impl TerminalInputBuffer {
+    pub fn set_shell_kind(&mut self, kind: crate::input::TerminalShellKind) {
+        self.shell_kind = Some(kind);
+    }
+
+    pub fn shell_kind(&self) -> crate::input::TerminalShellKind {
+        self.shell_kind
+            .unwrap_or(crate::input::TerminalShellKind::Unknown)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
@@ -148,6 +157,13 @@ impl TerminalInputBuffer {
         cursor_abs_row: Option<usize>,
         allow_blank_prompt: bool,
     ) -> bool {
+        // Once OSC integration has spoken, only its lifecycle can finish a
+        // block. A sleeping command may leave blank rows (or print a prompt).
+        if self.ever_awaited_command {
+            self.remote_blank_prompt_anchor = None;
+            return false;
+        }
+        let shell_kind = self.shell_kind();
         let trimmed = row.trim_end();
         let visible_prompt = looks_like_shell_prompt(row);
 
@@ -175,7 +191,7 @@ impl TerminalInputBuffer {
         //       `output_start_row` keeps a silent, still-running command
         //       (e.g. `sleep`, whose cursor never leaves the submission row)
         //       from being marked finished early.
-        let clear_cmd = is_clear_command(&block.command);
+        let clear_cmd = shell_kind.is_clear_command(&block.command);
         let blank_prompt_below_output = allow_blank_prompt
             && trimmed.is_empty()
             && matches!(
@@ -552,6 +568,7 @@ impl TerminalInputBuffer {
     }
 
     pub fn sync_shell_state(&mut self, state: ShellPromptState) -> bool {
+        let shell_kind = self.shell_kind();
         let command_finished =
             state.command_finished_generation > self.last_command_finished_generation;
         self.last_command_finished_generation = state.command_finished_generation;
@@ -561,7 +578,10 @@ impl TerminalInputBuffer {
         // line to the composer (see `should_capture_input`). Set this
         // before the early returns below so it latches even on the very
         // first prompt of a brand-new pane (no command block yet).
-        if state.awaiting_command || state.running_command {
+        if state.awaiting_command
+            || state.running_command
+            || state.command_finished_generation > 0
+        {
             self.ever_awaited_command = true;
         }
         if state.running_command {
@@ -580,13 +600,11 @@ impl TerminalInputBuffer {
         }
         if state.running_command {
             block.saw_command_start = true;
-        } else if command_finished
-            || block.saw_command_start
-            || (state.awaiting_command
-                && Instant::now().saturating_duration_since(block.submitted_at)
-                    > Duration::from_millis(150))
-        {
-            let clear_completed = is_clear_command(&block.command);
+        // An unchanged B/awaiting flag can belong to the old prompt for an
+        // arbitrarily delayed remote submission. Require a lifecycle edge,
+        // not elapsed wall time. The D generation covers batched fast commands.
+        } else if command_finished || block.saw_command_start {
+            let clear_completed = shell_kind.is_clear_command(&block.command);
             block.status = TerminalCommandBlockStatus::Finished {
                 exit_code: state.last_exit_code,
             };
@@ -627,6 +645,7 @@ impl TerminalInputBuffer {
         self.text.clear();
         self.cursor = 0;
         self.remote_prompt_fallback_open = false;
+        self.remote_blank_prompt_anchor = None;
         self.reset_transient_edit_state();
     }
 
@@ -656,17 +675,19 @@ impl TerminalInputBuffer {
         cwd: Option<&Path>,
         output_start_row: Option<usize>,
     ) -> String {
+        let shell_kind = self.shell_kind();
         let command =
             sanitize_history_entry(&sanitize_input_text(&std::mem::take(&mut self.text)));
         self.cursor = 0;
         self.remote_prompt_fallback_open = false;
+        self.remote_blank_prompt_anchor = None;
         self.reset_transient_edit_state();
         self.trigger_prompt_burst();
         if !command.trim().is_empty() {
-            if !is_clear_command(&command) {
+            if !shell_kind.is_clear_command(&command) {
                 self.command_blocks.retain(|block| {
                     !(matches!(block.status, TerminalCommandBlockStatus::Finished { .. })
-                        && is_clear_command(&block.command))
+                        && shell_kind.is_clear_command(&block.command))
                 });
             }
             self.push_history(command.clone());
@@ -675,6 +696,9 @@ impl TerminalInputBuffer {
                 cwd.map(display_path),
                 output_start_row,
             );
+            if shell_kind.is_clear_command(&command) {
+                self.clear_previous_blocks_for_active_command();
+            }
         }
         command
     }

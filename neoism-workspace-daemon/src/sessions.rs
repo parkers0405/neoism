@@ -59,6 +59,7 @@ struct SessionEntry {
     pty: Arc<Mutex<PtySession>>,
     backlog: Arc<Mutex<Vec<u8>>>,
     workspace_root: Option<String>,
+    shell: Option<String>,
     /// Workspace-registry tab id this live PTY backs, once bridged. See
     /// the module-level "Workspace-session vs PTY-session id" note. A
     /// PTY can exist before it is attached to a logical tab (web spawns
@@ -111,6 +112,7 @@ impl SessionRegistry {
             messages.push(ServerMessage::PtyCreated {
                 session_id: session_id.clone(),
                 workspace_root: entry.value().workspace_root.clone(),
+                shell: entry.value().shell.clone(),
             });
             let bytes = entry.value().backlog.lock().clone();
             if !bytes.is_empty() {
@@ -212,11 +214,16 @@ impl SessionRegistry {
                 message: format!("unknown session {session_id}"),
             }];
         };
-        let bytes = entry.value().backlog.lock().clone();
-        if bytes.is_empty() {
-            return Vec::new();
+        let mut messages = vec![ServerMessage::PtyCreated {
+            session_id: session_id.clone(),
+            workspace_root: entry.workspace_root.clone(),
+            shell: entry.shell.clone(),
+        }];
+        let bytes = entry.backlog.lock().clone();
+        if !bytes.is_empty() {
+            messages.push(ServerMessage::PtyOutput { session_id, bytes });
         }
-        vec![ServerMessage::PtyOutput { session_id, bytes }]
+        messages
     }
 
     fn create(
@@ -237,6 +244,7 @@ impl SessionRegistry {
             env.push(("TERM".to_string(), "xterm-256color".to_string()));
         }
         ensure_neoism_pty_env(&mut env);
+        let actual_shell = shell.clone();
         let config = PtySessionConfig {
             shell,
             args,
@@ -246,6 +254,8 @@ impl SessionRegistry {
             rows,
         };
 
+        // Native spawning also frames interactive cmd's PROMPT environment;
+        // unlike a desktop-only factory this covers daemon prepared PTYs.
         let pty = match PtySession::spawn(config) {
             Ok(p) => p,
             Err(err) => {
@@ -262,6 +272,7 @@ impl SessionRegistry {
         let entry = SessionEntry {
             pty: Arc::new(Mutex::new(pty)),
             backlog: backlog.clone(),
+            shell: actual_shell.clone(),
             workspace_root: workspace_root.clone(),
             // Bridged later by `link_workspace_session` once the client
             // attaches this shell to a workspace tab.
@@ -292,6 +303,7 @@ impl SessionRegistry {
         vec![ServerMessage::PtyCreated {
             session_id,
             workspace_root,
+            shell: actual_shell,
         }]
     }
 
@@ -360,9 +372,26 @@ fn ensure_neoism_pty_env(env: &mut Vec<(String, String)>) {
 
 #[cfg(test)]
 mod pty_env_tests {
+    #[cfg(windows)]
+    #[test]
+    fn daemon_windows_shell_selection_installs_the_shared_hook() {
+        for program in ["pwsh.exe", "powershell.exe"] {
+            let (shell, args) = super::shell_for_create(Some(program.into()));
+            assert_eq!(shell.as_deref(), Some(program));
+            assert!(args.iter().any(|arg| arg == "-EncodedCommand"));
+            assert!(!args.iter().any(|arg| arg == "-NoProfile"));
+        }
+        let (shell, args) = super::shell_for_create(Some("cmd.exe".into()));
+        assert_eq!(shell.as_deref(), Some("cmd.exe"));
+        assert!(args.is_empty());
+    }
+
     #[test]
     fn daemon_pty_environment_preserves_shell_env_and_marks_neoism() {
-        let mut env = vec![("PATH".to_string(), "/bin".to_string()), ("TERM".to_string(), "screen".to_string())];
+        let mut env = vec![
+            ("PATH".to_string(), "/bin".to_string()),
+            ("TERM".to_string(), "screen".to_string()),
+        ];
         super::ensure_neoism_pty_env(&mut env);
         assert!(env.contains(&("PATH".into(), "/bin".into())));
         assert!(env.contains(&("TERM".into(), "screen".into())));
@@ -386,7 +415,10 @@ fn shell_for_create(explicit_shell: Option<String>) -> (Option<String>, Vec<Stri
     #[cfg(windows)]
     {
         let requested = explicit_shell.unwrap_or_else(default_windows_shell);
-        return (Some(requested), Vec::new());
+        let args =
+            neoism_terminal_pty::shell_integration::powershell_args(&requested, &[])
+                .unwrap_or_default();
+        return (Some(requested), args);
     }
 
     #[cfg(not(windows))]
@@ -760,13 +792,15 @@ mod tests {
         std::fs::write(&rc, block_bash_script()).unwrap();
         let status = std::process::Command::new("bash")
             .args(["--noprofile", "--norc", "-c"])
-            .arg(r#"set -u
+            .arg(
+                r#"set -u
 source "$1"
 builtin cd "$2"
 neoism cd "$3"
 [ "$PWD" = "$3" ]
 neoism cd - >/dev/null
-[ "$PWD" = "$2" ]"#)
+[ "$PWD" = "$2" ]"#,
+            )
             .arg("neoism-cd-test")
             .arg(&rc)
             .arg(&start)
@@ -834,6 +868,18 @@ neoism cd - >/dev/null
             Some(ServerMessage::PtyCreated { session_id, .. }) => session_id.clone(),
             other => panic!("expected PtyCreated, got {other:?}"),
         };
+
+        // Identity precedes replay bytes both on explicit attach (including
+        // an empty backlog) and on reconnect's registry snapshot.
+        for messages in [
+            &created,
+            &reg.attach(pty_id.clone()),
+            &reg.backlog_messages(),
+        ] {
+            assert!(matches!(messages.first(), Some(ServerMessage::PtyCreated {
+                session_id, shell: Some(shell), ..
+            }) if session_id == &pty_id && shell == "/bin/sh"));
+        }
 
         // Bridge it to a workspace tab and resolve both directions.
         assert!(reg.link_workspace_session(&pty_id, "tab-7".into()));

@@ -438,10 +438,10 @@ pub fn dispatch_markdown_pane_key(
         let action = kind.and_then(|kind| markdown_ctrl_action(classes, kind));
         match action {
             Some(MarkdownCtrlAction::ScrollCursorDownHalfPage) => {
-                pane.scroll_cursor_by_content_pixels(viewport * 0.5, viewport);
+                pane.page_cursor(1, viewport);
             }
             Some(MarkdownCtrlAction::ScrollCursorUpHalfPage) => {
-                pane.scroll_cursor_by_content_pixels(-(viewport * 0.5), viewport);
+                pane.page_cursor(-1, viewport);
             }
             Some(MarkdownCtrlAction::ScrollCursorDownLine) => {
                 pane.scroll_cursor_by_lines(1, viewport);

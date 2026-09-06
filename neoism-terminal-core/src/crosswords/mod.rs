@@ -6066,6 +6066,35 @@ mod tests {
     }
 
     #[test]
+    fn cmd_st_terminated_prompt_finishes_without_a_fabricated_exit_code() {
+        let mut cw = new_term(40, 4);
+        let mut processor: crate::handler::Processor<crate::handler::StdSyncHandler> =
+            crate::handler::Processor::new();
+        // Fragment across every byte, including ESC / backslash in ST.
+        let prompt = concat!(
+            "\x1b]133;D\x1b\\",
+            "\x1b]133;A\x1b\\\r\n",
+            "C:\\work>",
+            "\x1b]133;B\x1b\\",
+        ).as_bytes();
+        for byte in prompt {
+            processor.advance(&mut cw, &[*byte]);
+        }
+        let ready = cw.shell_prompt_state();
+        assert!(ready.awaiting_command);
+        assert_eq!(ready.command_finished_generation, 1);
+        assert_eq!(ready.last_exit_code, None);
+        // With no C, cmd's old B is unchanged throughout foreground output.
+        processor.advance(&mut cw, b"many rows\r\n\r\n");
+        assert_eq!(cw.shell_prompt_state(), ready);
+        processor.advance(&mut cw, b"\x1b[2J\x1b[H"); // cls is not completion.
+        assert_eq!(cw.shell_prompt_state(), ready);
+        processor.advance(&mut cw, prompt);
+        assert_eq!(cw.shell_prompt_state().command_finished_generation, 2);
+        assert_eq!(cw.shell_prompt_state().last_exit_code, None);
+    }
+
+    #[test]
     fn osc_133_shell_lifecycle_updates_prompt_state() {
         let mut cw = new_term(20, 4);
         let mut processor: crate::handler::Processor<crate::handler::StdSyncHandler> =

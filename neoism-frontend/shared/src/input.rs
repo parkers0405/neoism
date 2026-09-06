@@ -54,17 +54,37 @@ impl TerminalShellKind {
         }
     }
 
+    /// Only standalone screen-clearing commands may discard block history.
+    /// Never treat a compound command (`clear; sleep 10`) as a screen reset.
+    pub fn is_clear_command(self, command: &str) -> bool {
+        let command = command.trim();
+        if command.contains([';', '&', '|', '\n', '\r', '`', '$', '>', '<']) {
+            return false;
+        }
+        match self {
+            Self::PowerShell => ["clear", "cls", "Clear-Host"]
+                .iter()
+                .any(|alias| command.eq_ignore_ascii_case(alias)),
+            Self::Cmd => command.eq_ignore_ascii_case("cls"),
+            _ => command.split_whitespace().next() == Some("clear"),
+        }
+    }
+
     /// Sanitise + frame the command bytes the host should write into
     /// the PTY when the user submits. Fish wants ` \x08\n` to drop the
-    /// inline autosuggestion before executing; every other shell just
-    /// needs the newline.
+    /// inline autosuggestion before executing. Known Unix shells retain
+    /// their LF framing. Windows shells, and remote shells whose metadata has
+    /// not arrived yet, get a physical Enter (CR). Unix terminal line discipline
+    /// accepts CR too; assuming LF while identity is pending breaks ConPTY.
     pub fn command_payload(self, command: &str, _bracketed_paste: bool) -> Vec<u8> {
         let sanitized = crate::terminal_blocks::shell::sanitize_input_text(command);
         let mut bytes = Vec::with_capacity(sanitized.len() + 4);
         bytes.extend_from_slice(sanitized.as_bytes());
         bytes.extend_from_slice(match self {
             TerminalShellKind::Fish => b" \x08\n",
-            TerminalShellKind::PowerShell | TerminalShellKind::Cmd => b"\r",
+            TerminalShellKind::PowerShell
+            | TerminalShellKind::Cmd
+            | TerminalShellKind::Unknown => b"\r",
             _ => b"\n",
         });
         bytes

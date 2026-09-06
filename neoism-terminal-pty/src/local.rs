@@ -144,6 +144,16 @@ impl LocalPty {
         });
         #[cfg(windows)]
         let shell = config.shell.clone().unwrap_or_else(default_windows_shell);
+        #[cfg(windows)]
+        let config = {
+            let mut config = config;
+            // Last native spawn boundary: includes daemon prepared PTYs,
+            // desktop sessions and platform-default cmd fallback alike.
+            crate::shell_integration::apply_cmd_prompt_env(
+                &shell, &config.args, &mut config.env,
+            );
+            config
+        };
         let working_dir = config
             .cwd
             .as_ref()

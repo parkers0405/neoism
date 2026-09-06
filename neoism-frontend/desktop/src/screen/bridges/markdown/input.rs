@@ -876,12 +876,10 @@ impl Screen<'_> {
                 });
                 match action {
                     Some(MarkdownCtrlAction::ScrollCursorDownHalfPage) => {
-                        markdown
-                            .scroll_cursor_by_content_pixels(viewport * 0.5, viewport);
+                        markdown.page_cursor(1, viewport);
                     }
                     Some(MarkdownCtrlAction::ScrollCursorUpHalfPage) => {
-                        markdown
-                            .scroll_cursor_by_content_pixels(-(viewport * 0.5), viewport);
+                        markdown.page_cursor(-1, viewport);
                     }
                     Some(MarkdownCtrlAction::ScrollCursorDownLine) => {
                         markdown.scroll_cursor_by_lines(1, viewport);

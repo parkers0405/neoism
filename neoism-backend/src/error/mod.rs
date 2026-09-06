@@ -49,6 +49,7 @@ pub enum RioErrorType {
     // navigation configuration has changed
     // NavigationHasChanged,
     InitializationError(String),
+    TerminalIoFailure(String),
 
     // configurlation file was not found
     ConfigurationNotFound,
@@ -93,6 +94,9 @@ impl std::fmt::Display for RioErrorType {
             // }
             RioErrorType::InitializationError(message) => {
                 write!(f, "Error initializing Neoism terminal:\n{message}")
+            }
+            RioErrorType::TerminalIoFailure(message) => {
+                write!(f, "Terminal I/O failed:\n{message}\n\nThe terminal was closed. Open a new terminal to continue. Command execution status is unknown.")
             }
             RioErrorType::IgnoredReport => write!(f, ""),
             RioErrorType::InvalidConfigurationFormat(message) => {

@@ -151,6 +151,21 @@ pub struct Machine<U: EventListener> {
     route_id: usize,
 }
 
+/// Channel loss is a transport failure unless a real child exit was observed.
+fn disconnected_worker_error(
+    exited: bool,
+    failure: Option<std::io::Error>,
+) -> Option<std::io::Error> {
+    failure.or_else(|| {
+        (!exited).then(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "PTY worker disconnected without child exit",
+            )
+        })
+    })
+}
+
 #[derive(Default)]
 pub struct State {
     parser: handler::Processor,
@@ -335,6 +350,22 @@ where
         );
     }
 
+    /// Retire a broken transport, not a successfully completed command.
+    fn fail_terminal(&self, err: std::io::Error) {
+        error!(route_id = self.route_id, error = %err, "terminal PTY failed; command status unknown");
+        self.event_proxy.send_event(
+            RioEvent::ReportToAssistant(crate::error::RioError {
+                report: crate::error::RioErrorType::TerminalIoFailure(err.to_string()),
+                level: crate::error::RioErrorLevel::Error,
+            }),
+            self.window_id,
+        );
+        self.event_proxy
+            .send_event(RioEvent::CloseTerminal(self.route_id), self.window_id);
+        self.event_proxy
+            .send_event(RioEvent::Render, self.window_id);
+    }
+
     /// Drain the channel.
     ///
     /// Returns `false` when a shutdown message was received.
@@ -352,13 +383,8 @@ where
                         "drained input message from frontend"
                     );
                     if let Err(err) = self.pty.write(input.as_ref()) {
-                        tracing::warn!(
-                            target: "neoism_backend::pty_input",
-                            window_id = ?self.window_id,
-                            route_id = self.route_id,
-                            error = %err,
-                            "failed to forward Msg::Input to PtySession"
-                        );
+                        self.fail_terminal(err);
+                        return false;
                     }
                 }
                 Msg::Resize(window_size) => {
@@ -515,6 +541,13 @@ where
                                     Err(TryRecvError::Empty) => break,
                                     Err(TryRecvError::Disconnected) => {
                                         exited = exited || self.pty.exit_code().is_some();
+                                        if let Some(err) = disconnected_worker_error(
+                                            exited,
+                                            self.pty.worker_error(),
+                                        ) {
+                                            self.fail_terminal(err);
+                                            break 'event_loop;
+                                        }
                                         break;
                                     }
                                 }
@@ -580,6 +613,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnected_worker_is_failure_not_success_without_real_exit() {
+        assert_eq!(
+            disconnected_worker_error(false, None).unwrap().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert!(disconnected_worker_error(true, None).is_none());
+        for exited in [false, true] {
+            let err = std::io::Error::from_raw_os_error(9);
+            assert_eq!(
+                disconnected_worker_error(exited, Some(err))
+                    .unwrap()
+                    .raw_os_error(),
+                Some(9)
+            );
+        }
+    }
 
     #[test]
     fn pty_write_effects_are_written_synchronously_in_order_exactly_once() {

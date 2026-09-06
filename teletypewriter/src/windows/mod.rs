@@ -62,15 +62,45 @@ pub fn create_pty_env(
     rows: u16,
     env: &[(String, String)],
 ) -> Result<Pty, std::io::Error> {
-    // The shell is passed through verbatim (it may already be a full
-    // command line from user config); each argument is quoted per the
-    // CommandLineToArgvW rules so paths with spaces survive.
-    let mut exec = shell.to_string();
-    for arg in &args {
+    let (application, exec) = shell_command_line(shell, &args);
+    conpty::new(
+        application.as_deref(),
+        &exec,
+        working_directory,
+        columns,
+        rows,
+        env,
+    )
+}
+
+fn shell_command_line(shell: &str, args: &[String]) -> (Option<String>, String) {
+    let shell = cmdline(shell);
+    // Accept the existing raw-command-line config format, but recognize an
+    // explicit executable path BEFORE appending arguments. Never let Windows
+    // reinterpret C:\Program Files\... as C:\Program.exe. Bare names retain
+    // CreateProcessW's search semantics (not SearchPathW's different order).
+    let path = std::path::Path::new(&shell);
+    let lower = shell.to_ascii_lowercase();
+    // A persisted raw command may itself end in an executable argument, e.g.
+    // `cmd.exe /C C:\tools\helper.exe`. An earlier executable boundary rules
+    // out treating the entire command as a path, unless that exact file exists.
+    let has_executable_boundary = lower
+        .match_indices(".exe")
+        .any(|(index, _)| lower[index + 4..].starts_with(char::is_whitespace));
+    let explicit_path = !shell.starts_with('"')
+        && (shell.contains('\\') || shell.contains('/'))
+        && (path.is_file() || (lower.ends_with(".exe") && !has_executable_boundary));
+    let application = explicit_path.then(|| shell.clone());
+    let mut exec = if explicit_path {
+        quote_cmdline_arg(&shell)
+    } else {
+        shell
+    };
+    for arg in args {
         exec.push(' ');
         exec.push_str(&quote_cmdline_arg(arg));
     }
-    conpty::new(&exec, working_directory, columns, rows, env)
+    (application, exec)
 }
 
 /// Quote a single command-line argument per the MSVCRT/CommandLineToArgvW
@@ -541,7 +571,77 @@ pub fn foreground_process_path(
 
 #[cfg(test)]
 mod cmdline_tests {
-    use super::quote_cmdline_arg;
+    use super::{quote_cmdline_arg, shell_command_line};
+
+    #[test]
+    fn explicit_executable_path_is_unambiguous() {
+        let shell = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let (application, command) = shell_command_line(shell, &["-NoLogo".into()]);
+        assert_eq!(application.as_deref(), Some(shell));
+        assert_eq!(command, format!("\"{shell}\" -NoLogo"));
+        let relative = r".\my tools\shell.exe";
+        assert_eq!(
+            shell_command_line(relative, &[]),
+            (Some(relative.into()), format!("\"{relative}\""))
+        );
+    }
+
+    #[test]
+    fn bare_search_and_legacy_command_lines_are_preserved() {
+        for shell in [
+            "pwsh",
+            "pwsh.exe",
+            "cmd.exe /D /K",
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#,
+        ] {
+            assert_eq!(shell_command_line(shell, &[]), (None, shell.into()));
+        }
+        assert_eq!(
+            shell_command_line("", &["-NoLogo".into()]),
+            (None, "powershell -NoLogo".into())
+        );
+    }
+
+    #[test]
+    fn executable_argument_does_not_reclassify_raw_command_as_path() {
+        for shell in [
+            r"cmd.exe /C C:\tools\helper.exe",
+            r"C:\Windows\System32\cmd.exe /C C:\tools\helper.exe",
+            r"C:\Windows\System32\cmd.exe /C helper.exe",
+            "cmd.EXE\t/C C:\\tools\\helper.exe",
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -File C:\tools\helper.exe"#,
+            "cmd.exe /D /K",
+            "pwsh",
+        ] {
+            assert_eq!(shell_command_line(shell, &[]), (None, shell.into()));
+            assert_eq!(
+                shell_command_line(shell, &["argument with spaces".into()]),
+                (None, format!("{shell} \"argument with spaces\""))
+            );
+        }
+    }
+
+    #[test]
+    fn existing_full_filename_takes_precedence_over_executable_boundary() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "neoism-quoting-{}-{unique}.exe helper.exe",
+            std::process::id()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let shell = path.to_str().unwrap();
+        let result = shell_command_line(shell, &["-NoLogo".into()]);
+        drop(file);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(result, (Some(shell.into()), format!("\"{shell}\" -NoLogo")));
+    }
 
     #[test]
     fn plain_args_are_untouched() {

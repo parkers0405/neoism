@@ -411,16 +411,24 @@ impl NeoismAgentPane {
             .filter(|status| matches!(status.kind.as_str(), "busy" | "retry"));
         if let Some(status) = active_status {
             self.terminal_idle_sessions.remove(session_id);
-            self.queued_prompt_count = status.queue_count;
+            self.queued_prompt_count = self
+                .status_timing
+                .queue_count(status.queue_count, status.started_at);
             self.queued_prompt_preview = status.preview.clone();
             self.refresh_streaming_from_tail();
             if !self.is_streaming() {
                 self.note_streaming(NeoismAgentStreamingState::Thinking, None);
             }
             if let Some(started_at) = status.started_at {
-                let started = instant_from_epoch_millis(started_at);
+                let started = self
+                    .status_timing
+                    .started_at(self.streaming_started_at, started_at);
                 self.streaming_started_at = Some(started);
-                self.streaming_state_changed_at = Some(started);
+                if !self.status_timing.enabled()
+                    || self.streaming_state_changed_at.is_none()
+                {
+                    self.streaming_state_changed_at = Some(started);
+                }
             }
             // A cold child activation paints its fetched transcript before
             // this runtime snapshot arrives. Open the existing trace as soon
@@ -510,7 +518,9 @@ impl NeoismAgentPane {
             } else if !self.is_streaming() {
                 self.note_streaming(NeoismAgentStreamingState::Thinking, None);
                 if let Some(started_at) = started_at {
-                    let started = instant_from_epoch_millis(started_at);
+                    let started = self
+                        .status_timing
+                        .started_at(self.streaming_started_at, started_at);
                     self.streaming_started_at = Some(started);
                     self.streaming_state_changed_at = Some(started);
                 }
@@ -527,7 +537,9 @@ impl NeoismAgentPane {
         } else if !runtime.is_streaming() {
             runtime.note_streaming(NeoismAgentStreamingState::Thinking, None);
             if let Some(started_at) = started_at {
-                let started = instant_from_epoch_millis(started_at);
+                let started = runtime
+                    .status_timing
+                    .started_at(runtime.streaming_started_at, started_at);
                 runtime.streaming_started_at = Some(started);
                 runtime.streaming_state_changed_at = Some(started);
             }
@@ -723,7 +735,9 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
-        if let Some(activity) = &self.execution_activity {
+        if let Some(activity) = self.execution_activity.as_ref().filter(|activity| {
+            self.status_timing.accepts_execution(&activity.execution_id)
+        }) {
             let viewed = self
                 .session_id
                 .as_deref()
@@ -749,6 +763,9 @@ impl NeoismAgentPane {
         &mut self,
         mut incoming: neoism_ui::panels::agent_pane::state::ExecutionActivityState,
     ) -> bool {
+        if !self.status_timing.accepts_execution(&incoming.execution_id) {
+            return false;
+        }
         let now = Instant::now();
         let viewed = self
             .session_id
@@ -788,7 +805,11 @@ impl NeoismAgentPane {
                 neoism_ui::panels::agent_pane::state::ExecutionTimerAnchor::from_snapshot(
                     activity,
                     self.session_id.as_deref(),
-                    unix_millis(),
+                    self.status_timing.execution_wall_ms(
+                        &activity.execution_id,
+                        now,
+                        unix_millis(),
+                    ),
                     now,
                     current_floor,
                 ),
@@ -1458,6 +1479,7 @@ impl NeoismAgentPane {
             self.retain_current_turn_trace();
         }
         if state == NeoismAgentStreamingState::Idle {
+            self.status_timing.settle();
             self.streaming_state = state;
             self.streaming_started_at = None;
             self.streaming_state_changed_at = None;

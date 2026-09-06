@@ -3,6 +3,156 @@ use neoism_ui::panels::agent_pane::state::side_panel::STATUS_LABEL_GRACE;
 use std::fs;
 
 #[test]
+fn windows_admission_split_frames_and_batched_frames_converge() {
+    for windows_policy in [false, true] {
+        for batched in [false, true] {
+            let mut pane = NeoismAgentPane::default();
+            pane.session_id = Some("root".into());
+            pane.status_timing =
+                status_timing::DesktopStatusTiming::for_test(windows_policy);
+            pane.status_timing.admit("first");
+            pane.messages
+                .push(NeoismAgentMessage::user("hello").with_id("first"));
+            pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+            let started = pane.streaming_started_at;
+            let queue = AgentSessionUpdate::QueueStatus {
+                count: 1,
+                preview: Some("hello".into()),
+                started_at: None,
+            };
+            let dequeue = AgentSessionUpdate::DequeuedPrompt {
+                text: "hello".into(),
+                message_id: Some("first".into()),
+                author: None,
+            };
+            let updates = if batched {
+                vec![queue, dequeue]
+            } else {
+                vec![queue]
+            };
+            pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+                "root", updates,
+            ));
+            pane.drain_live_session_updates();
+            assert_eq!(pane.streaming_label(), "Crafting");
+            if !batched {
+                assert_eq!(pane.queued_prompt_count, usize::from(!windows_policy));
+                pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+                    "root",
+                    [AgentSessionUpdate::DequeuedPrompt {
+                        text: "hello".into(),
+                        message_id: Some("first".into()),
+                        author: None,
+                    }],
+                ));
+                pane.drain_live_session_updates();
+            }
+            assert_eq!(pane.queued_prompt_count, 0);
+            assert_eq!(pane.messages.len(), 1);
+            assert_eq!(pane.streaming_started_at, started);
+        }
+    }
+}
+
+#[test]
+fn windows_admission_cache_and_hydration_preserve_real_followup() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.status_timing = status_timing::DesktopStatusTiming::for_test(true);
+    pane.status_timing.admit("first");
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    let start = pane.streaming_started_at;
+    let mut runtime = pane.take_session_runtime_ui();
+    runtime.apply_queue_status(2, Some("next".into()), None);
+    assert_eq!(runtime.queued_prompt_count, 1);
+    assert!(runtime.status_timing.dequeue(Some("first")));
+    runtime.apply_queue_status(1, Some("next".into()), None);
+    pane.restore_session_runtime_ui(runtime);
+    assert_eq!(pane.queued_prompt_count, 1);
+    let statuses = HashMap::from([(
+        "root".into(),
+        super::super::api::SessionStatusSnapshot {
+            kind: "busy".into(),
+            queue_count: 1,
+            preview: Some("next".into()),
+            started_at: Some(100),
+            ..Default::default()
+        },
+    )]);
+    pane.apply_runtime_status_for_session("root", &statuses);
+    assert_eq!(pane.queued_prompt_count, 1);
+    assert_eq!(pane.streaming_started_at, start);
+    pane.apply_runtime_status_for_session("root", &statuses);
+    assert_eq!(pane.streaming_started_at, start);
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None);
+    assert_eq!(pane.status_timing.queue_count(1, None), 1);
+}
+
+#[test]
+fn windows_new_prompt_does_not_borrow_finished_execution_timer() {
+    use neoism_ui::panels::agent_pane::state::ExecutionActivityState;
+    for windows_policy in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_id = Some("root".into());
+        pane.status_timing = status_timing::DesktopStatusTiming::for_test(windows_policy);
+        let previous = ExecutionActivityState {
+            execution_id: "execution-a".into(),
+            root_session_id: "root".into(),
+            completed_ms: 90_000,
+            finished: true,
+            revision: 1,
+            ..Default::default()
+        };
+        assert!(pane.apply_execution_activity(previous.clone()));
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(90.0));
+        let revision = pane.session_runtime_revision("root");
+        pane.note_prompt_admission("next");
+        pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+        assert_eq!(pane.streaming_label(), "Crafting");
+        assert_eq!(
+            pane.session_runtime_revision("root"),
+            revision + u64::from(windows_policy)
+        );
+        if windows_policy {
+            assert!(pane.streaming_elapsed_seconds().unwrap() < 1.0);
+            assert!(!pane.apply_execution_activity(previous));
+        } else {
+            assert_eq!(pane.streaming_elapsed_seconds(), Some(90.0));
+            assert!(pane.apply_execution_activity(previous));
+        }
+        assert!(pane.apply_execution_activity(ExecutionActivityState {
+            execution_id: "execution-b".into(),
+            root_session_id: "root".into(),
+            revision: 1,
+            completed_ms: 2_000,
+            ..Default::default()
+        }));
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(2.0));
+    }
+}
+
+#[test]
+fn windows_new_prompt_keeps_live_family_execution_and_real_queue() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.status_timing = status_timing::DesktopStatusTiming::for_test(true);
+    pane.apply_execution_activity(
+        neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            execution_id: "execution-a".into(),
+            root_session_id: "root".into(),
+            completed_ms: 9_000,
+            revision: 1,
+            ..Default::default()
+        },
+    );
+    pane.note_prompt_admission("next");
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(9.0));
+    // An authoritative active run means the submitted request really waits,
+    // even if the local pane thought it was idle when Enter arrived.
+    assert_eq!(pane.status_timing.queue_count(1, Some(100)), 1);
+}
+
+#[test]
 fn file_mention_options_filter_workspace_trash_dirs() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("src")).unwrap();
@@ -1868,6 +2018,33 @@ fn approval_card_does_not_leak_into_an_unrelated_family() {
     pane.switch_session("child-b".to_string());
 
     assert!(pane.pending_permission().is_none());
+}
+
+#[test]
+fn windows_local_submit_invalidates_pre_submit_idle_hydration_only() {
+    for windows_policy in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_id = Some("root".into());
+        pane.status_timing = status_timing::DesktopStatusTiming::for_test(windows_policy);
+        pane.runtime_status_requests.insert("root".into(), 7);
+        let revision = pane.session_runtime_revision("root");
+        pane.note_prompt_admission("first");
+        pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+        pane.background_sender()
+            .send(NeoismAgentBackgroundUpdate::SessionRuntimeStatusRefreshed {
+                session_id: "root".into(),
+                request_generation: 7,
+                runtime_revision: revision,
+                result: Ok(HashMap::new()),
+                runtime: Err("not requested".into()),
+                permissions: Ok(Vec::new()),
+                questions: Ok(Vec::new()),
+            })
+            .unwrap();
+        pane.drain_background_updates();
+        assert_eq!(pane.is_streaming(), windows_policy);
+        assert!(!pane.runtime_status_requests.contains_key("root"));
+    }
 }
 
 #[test]

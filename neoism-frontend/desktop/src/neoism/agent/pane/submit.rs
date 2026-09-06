@@ -1,6 +1,33 @@
 use super::*;
 
 impl NeoismAgentPane {
+    pub(super) fn note_prompt_admission(&mut self, message_id: &str) {
+        self.status_timing.admit(message_id);
+        if !self.status_timing.enabled() {
+            return;
+        }
+        // A hydration request captured before Enter must not settle the new
+        // optimistic run. Event revisions already guard live updates; include
+        // the local submit boundary on Windows as well.
+        if let Some(session_id) = self.session_id.clone() {
+            let revision = self
+                .session_runtime_revisions
+                .entry(session_id)
+                .or_default();
+            *revision = revision.wrapping_add(1);
+        }
+        // Until the new execution event arrives, do not label the new turn
+        // with the previous execution's final provider duration. Never discard
+        // an ongoing family execution (children may still be working).
+        if let Some(activity) = self
+            .execution_activity
+            .as_ref()
+            .filter(|activity| activity.finished)
+        {
+            self.status_timing.retire_execution(&activity.execution_id);
+            self.side_panel.clear_status_display_hold();
+        }
+    }
     pub fn commit_picker(&mut self) -> bool {
         let Some(picker) = self.picker.take() else {
             return false;
@@ -127,6 +154,7 @@ impl NeoismAgentPane {
         let message_id =
             neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
         if !was_streaming {
+            self.note_prompt_admission(&message_id);
             let mut message =
                 NeoismAgentMessage::user(text.clone()).with_id(message_id.clone());
             message.author = Some(crate::neoism::agent::commands::native_prompt_author(
@@ -180,6 +208,7 @@ impl NeoismAgentPane {
         let message_id =
             neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
         if !was_streaming {
+            self.note_prompt_admission(&message_id);
             self.messages.push(
                 NeoismAgentMessage::user(prompt.clone()).with_id(message_id.clone()),
             );

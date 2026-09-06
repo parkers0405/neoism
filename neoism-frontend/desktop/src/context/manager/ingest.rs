@@ -240,6 +240,66 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         self.daemon.cache.host_ended_reason.take()
     }
 
+    /// A remote delivery failure invalidates this client view, not the remote
+    /// process. Child-exit drives the existing pane teardown path, while the
+    /// app displays the reason (never a fabricated command exit status).
+    pub fn apply_remote_pty_failure(
+        &mut self,
+        request_id: u64,
+        session_id: Option<&str>,
+        message: &str,
+    ) -> bool {
+        let attached = self.daemon.cache.pending_pty_attaches.remove(&request_id);
+        let route_id = self
+            .daemon
+            .cache
+            .pending_pty_routes
+            .remove(&request_id)
+            .or_else(|| {
+                attached.and_then(|(route, expected)| {
+                    (self.daemon.cache.route_sessions.get(&route) == Some(&expected))
+                        .then_some(route)
+                })
+            })
+            .or_else(|| {
+                session_id
+                    .and_then(|id| self.daemon.cache.session_routes.get(id).copied())
+            });
+        let Some(route_id) = route_id else {
+            tracing::warn!(target: "neoism::remote_pty", request_id, ?session_id, %message, "unmatched remote PTY error");
+            return false;
+        };
+        let Some(binding) = self.daemon.cache.remote_routes.remove(&route_id) else {
+            tracing::warn!(target: "neoism::remote_pty", request_id, route_id, %message, "PTY error has no remote binding (local/mirror or already detached)");
+            return false;
+        };
+        tracing::warn!(target: "neoism::remote_pty", request_id, route_id, ?session_id, %message, "invalidating remote terminal view; execution is not inferred");
+        crate::context::remote_pty::invalidate(&binding);
+        if let Some(id) = self.daemon.cache.route_sessions.remove(&route_id) {
+            self.daemon.cache.session_routes.remove(&id);
+            self.daemon.cache.remote_session_cwds.remove(&id);
+        }
+        self.daemon
+            .cache
+            .pending_pty_routes
+            .retain(|_, route| *route != route_id);
+        self.daemon
+            .cache
+            .pending_pty_attaches
+            .retain(|_, (route, _)| *route != route_id);
+        self.event_proxy.send_event(
+            neoism_backend::event::RioEvent::ReportToAssistant(neoism_backend::error::RioError {
+                report: neoism_backend::error::RioErrorType::TerminalIoFailure(format!(
+                    "Remote PTY: {message}. Nothing was replayed. Reattach and inspect the remote shell before retrying a command."
+                )),
+                level: neoism_backend::error::RioErrorLevel::Error,
+            }),
+            self.window_id,
+        );
+        binding.feed.child_exited(1);
+        true
+    }
+
     pub fn apply_pty_server_message(
         &mut self,
         request_id: u64,
@@ -250,14 +310,23 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             PtyServerMessage::PtyCreated {
                 session_id, shell, ..
             } => {
+                let attached_route = self
+                    .daemon
+                    .cache
+                    .pending_pty_attaches
+                    .remove(&request_id)
+                    .and_then(|(route_id, expected)| {
+                        (expected == session_id
+                            && self.daemon.cache.route_sessions.get(&route_id)
+                                == Some(&expected))
+                        .then_some(route_id)
+                    });
                 if let Some(route_id) = self
                     .daemon
                     .cache
                     .pending_pty_routes
                     .remove(&request_id)
-                    .or_else(|| {
-                        self.daemon.cache.session_routes.get(&session_id).copied()
-                    })
+                    .or(attached_route)
                 {
                     if let Some(shell) = shell.as_deref() {
                         if let Some(item) = self.get_by_route_id(route_id) {
@@ -361,22 +430,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 }
             }
             PtyServerMessage::Error { message } => {
-                let Some(route_id) =
-                    self.daemon.cache.pending_pty_routes.remove(&request_id)
-                else {
-                    return false;
-                };
-                tracing::warn!(
-                    target: "neoism::remote_pty",
-                    request_id,
-                    route_id,
-                    %message,
-                    "daemon PTY creation failed"
-                );
-                if let Some(binding) = self.daemon.cache.remote_routes.remove(&route_id) {
-                    binding.feed.child_exited(1);
-                }
-                true
+                self.apply_remote_pty_failure(request_id, None, &message)
             }
         }
     }

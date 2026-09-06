@@ -641,3 +641,106 @@ fn test_move_current_to_prev() {
     assert_eq!(context_manager.current_index, 4);
     assert_eq!(context_manager.current().rich_text_id, 1);
 }
+
+#[test]
+fn remote_attach_error_invalidates_binding_and_late_success_cannot_revive_it() {
+    use crate::context::remote_pty;
+    use neoism_protocol::pty::ServerMessage;
+    let mut manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
+            .unwrap();
+    let runtime = attach_unconnected_daemon(&mut manager);
+    let (handle, _) = manager
+        .daemon
+        .link
+        .as_ref()
+        .unwrap()
+        .handle_and_runtime()
+        .unwrap();
+    let prepared = remote_pty::prepare(handle, runtime.handle().clone());
+    let (mut pty, feed) = neoism_terminal_pty::PtySession::remote(prepared.sink);
+    let binding = remote_pty::RemotePtyBinding {
+        feed,
+        shared: prepared.shared,
+    };
+    let route = 987;
+    manager
+        .daemon
+        .cache
+        .remote_routes
+        .insert(route, binding.clone());
+    manager
+        .daemon
+        .cache
+        .route_sessions
+        .insert(route, "stale".into());
+    manager
+        .daemon
+        .cache
+        .session_routes
+        .insert("stale".into(), route);
+    manager
+        .daemon
+        .cache
+        .pending_pty_attaches
+        .insert(123, (route, "stale".into()));
+    pty.write(b"ls\n").unwrap();
+    assert_eq!(binding.shared.lock().unwrap().queued.len(), 1);
+    assert!(manager.apply_pty_server_message(
+        123,
+        ServerMessage::Error {
+            message: "unknown session stale".into()
+        }
+    ));
+    assert!(binding.shared.lock().unwrap().queued.is_empty());
+    assert!(binding.shared.lock().unwrap().session_id.is_none());
+    assert!(!manager.daemon.cache.route_sessions.contains_key(&route));
+    assert!(!manager.daemon.cache.session_routes.contains_key("stale"));
+    assert!(pty.exit_code().is_some());
+    assert!(!manager.apply_pty_server_message(
+        123,
+        ServerMessage::PtyCreated {
+            session_id: "stale".into(),
+            shell: None,
+            workspace_root: None
+        }
+    ));
+    pty.write(b"never replay\n").unwrap();
+    assert!(binding.shared.lock().unwrap().queued.is_empty());
+    // Close after invalidation must not send ClosePty to a possibly live shell.
+    pty.close();
+}
+
+#[test]
+fn stale_attach_reply_cannot_bind_a_reassigned_route() {
+    let mut manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
+            .unwrap();
+    manager
+        .daemon
+        .cache
+        .pending_pty_attaches
+        .insert(123, (987, "old".into()));
+    manager
+        .daemon
+        .cache
+        .route_sessions
+        .insert(987, "new".into());
+    assert!(!manager.apply_pty_server_message(
+        123,
+        neoism_protocol::pty::ServerMessage::PtyCreated {
+            session_id: "old".into(),
+            shell: None,
+            workspace_root: None
+        }
+    ));
+    assert_eq!(
+        manager
+            .daemon
+            .cache
+            .route_sessions
+            .get(&987)
+            .map(String::as_str),
+        Some("new")
+    );
+}

@@ -30,8 +30,12 @@ use crate::daemon_client::DaemonClientHandle;
 /// session id from the daemon's `PtyCreated` reply).
 pub struct RemoteRouteShared {
     pub session_id: Option<String>,
-    /// Ops issued before the daemon confirmed the session — replayed
-    /// in order by [`bind_session`].
+    failed: bool,
+    /// Existing session awaiting AttachPty validation. Unlike first creation,
+    /// input in this state must be rejected, not queued for later execution.
+    awaiting_attach: Option<String>,
+    /// Ops issued before initial creation, or safe geometry changes while
+    /// awaiting attach. Reattach never retains queued input.
     pub queued: Vec<RemotePtyOp>,
     /// Transport currently serving this route. Quick SSH can recreate its
     /// local forward without recreating the pane or the daemon-owned shell;
@@ -69,14 +73,16 @@ pub fn daemon_tabs_enabled() -> bool {
 }
 
 /// Build the input sink for one future daemon-backed pane. `handle` /
-/// `runtime` are clones of the daemon link's — sends are fire-and-forget
-/// spawns, mirroring `ContextManagerDaemonLink::send_pty`.
+/// `runtime` are clones of the daemon link's. Enqueueing is synchronous;
+/// rejected delivery is disclosed asynchronously and never retried.
 pub fn prepare(
     handle: DaemonClientHandle,
     runtime: tokio::runtime::Handle,
 ) -> PreparedRemotePty {
     let shared = Arc::new(Mutex::new(RemoteRouteShared {
         session_id: None,
+        failed: false,
+        awaiting_attach: None,
         queued: Vec::new(),
         transport: Some(RemotePtyTransport { handle, runtime }),
     }));
@@ -87,23 +93,69 @@ pub fn prepare(
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            match (guard.session_id.clone(), guard.transport.clone()) {
-                (Some(id), Some(transport)) => Some((id, transport)),
-                _ => {
-                    guard.queued.push(op.clone());
-                    None
+            if guard.failed {
+                return;
+            }
+            if let Some(id) = guard.awaiting_attach.clone() {
+                match &op {
+                    RemotePtyOp::Input(_) => {
+                        // Fence a racing successful attach immediately, before
+                        // its UI-thread failure event arrives. Never send these
+                        // bytes even if the connection opens in the meantime.
+                        guard.failed = true;
+                        guard.queued.clear();
+                        guard
+                            .transport
+                            .clone()
+                            .map(|transport| (id, transport, true))
+                    }
+                    RemotePtyOp::Resize { .. } => {
+                        guard.queued.push(op.clone());
+                        None
+                    }
+                    RemotePtyOp::Close => {
+                        guard.failed = true;
+                        guard.queued.clear();
+                        None
+                    }
+                }
+            } else {
+                match (guard.session_id.clone(), guard.transport.clone()) {
+                    (Some(id), Some(transport)) => Some((id, transport, false)),
+                    _ => {
+                        // Intentional first-ever creation queue only.
+                        guard.queued.push(op.clone());
+                        None
+                    }
                 }
             }
         };
-        if let Some((id, transport)) = dispatch {
-            send_op(&transport.handle, &transport.runtime, &id, op);
+        if let Some((id, transport, rejected)) = dispatch {
+            if rejected {
+                tracing::warn!(target: "neoism::remote_pty", session_id = %id,
+                    "input not delivered: awaiting AttachPty validation; no replay");
+                if let RemotePtyOp::Input(bytes) = op {
+                    transport.runtime.spawn(async move {
+                        transport
+                            .handle
+                            .reject_pty_with_reason(PtyClientMessage::PtyInput {
+                                session_id: id,
+                                bytes,
+                            }, "not delivered: remote session is awaiting attach validation")
+                            .await;
+                    });
+                }
+            } else {
+                send_op(&transport.handle, &transport.runtime, &id, op);
+            }
         }
     });
     PreparedRemotePty { sink, shared }
 }
 
 /// Called when the daemon's `PtyCreated` lands for this route: record
-/// the session id and replay every op the pane issued while waiting.
+/// the session id and flush initial-create input or deferred safe geometry.
+/// Rejected attach input fences this method until the view is retired.
 pub fn bind_session(
     binding: &RemotePtyBinding,
     session_id: &str,
@@ -115,7 +167,11 @@ pub fn bind_session(
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+        if guard.failed {
+            return;
+        }
         guard.session_id = Some(session_id.to_string());
+        guard.awaiting_attach = None;
         guard.transport = Some(RemotePtyTransport {
             handle: handle.clone(),
             runtime: runtime.clone(),
@@ -152,15 +208,71 @@ fn send_op(
     // on this — a querier like gh/termenv reads its OSC 11 color
     // reply and the paired CPR in sequence, and the old per-op
     // `runtime.spawn` let two sends enqueue in either order. Only a
-    // full (or closed) channel falls back to the async send.
+    // full/disconnected channel rejects the operation; asynchronously retrying
+    // input could execute it after reconnect, despite the failed submission.
     let message = match handle.try_send_pty(message) {
         Ok(_) => return,
         Err(message) => message,
     };
     let handle = handle.clone();
     runtime.spawn(async move {
-        if let Err(error) = handle.send_pty(message).await {
-            tracing::warn!(%error, "remote pty op send failed");
-        }
+        handle.reject_pty(message).await;
     });
+}
+
+/// Detach only this view. Dropping it must not send ClosePty to a shell whose
+/// command may still be running remotely. A fresh explicit attach is safe;
+/// automatically repeating the command is not.
+pub fn invalidate(binding: &RemotePtyBinding) {
+    let mut guard = binding.shared.lock().unwrap_or_else(|e| e.into_inner());
+    guard.failed = true;
+    guard.awaiting_attach = None;
+    guard.session_id = None;
+    guard.transport = None;
+    guard.queued.clear();
+}
+
+/// Reject input until the replacement transport validates this existing
+/// session. Keep only a rejection channel, not a writable session identity.
+/// Clearing the old queue also prevents pre-adoption input from leaking into
+/// an existing shell. Initial CreatePty deliberately does not call this.
+pub fn await_attach(
+    binding: &RemotePtyBinding,
+    session_id: &str,
+    handle: DaemonClientHandle,
+    runtime: tokio::runtime::Handle,
+) {
+    let mut guard = binding.shared.lock().unwrap_or_else(|e| e.into_inner());
+    guard.session_id = None;
+    guard.awaiting_attach = Some(session_id.to_string());
+    guard.transport = Some(RemotePtyTransport {
+        handle: handle.clone(),
+        runtime: runtime.clone(),
+    });
+    let rejected_input = std::mem::take(&mut guard.queued)
+        .into_iter()
+        .find_map(|op| {
+            if let RemotePtyOp::Input(bytes) = op {
+                Some(bytes)
+            } else {
+                None
+            }
+        });
+    if rejected_input.is_some() {
+        guard.failed = true;
+    }
+    drop(guard);
+    if let Some(bytes) = rejected_input {
+        let session_id = session_id.to_string();
+        tracing::warn!(target: "neoism::remote_pty", %session_id,
+            "discarding queued input at attach boundary; not delivered, no replay");
+        runtime.spawn(async move {
+            handle
+                .reject_pty_with_reason(
+                    PtyClientMessage::PtyInput { session_id, bytes },
+                    "not delivered: queued input discarded at remote attach boundary",
+                )
+                .await;
+        });
+    }
 }

@@ -1,7 +1,7 @@
 use crate::Winsize;
 use std::io::{Error, Result};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::IntoRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::{mem, ptr};
 use tracing::*;
 
@@ -16,14 +16,16 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::{s, w};
 
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+    TerminateProcess, UpdateProcThreadAttribute, CREATE_NO_WINDOW,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     STARTUPINFOW,
 };
 
 use crate::windows::child::ChildExitWatcher;
-use crate::windows::{cmdline, win32_string, Pty};
+use crate::windows::{win32_string, Pty};
 
 /// Load the pseudoconsole API from conpty.dll if possible, otherwise use the
 /// standard Windows API.
@@ -104,12 +106,66 @@ impl Drop for Conpty {
 // The ConPTY handle can be sent between threads.
 unsafe impl Send for Conpty {}
 
+// Attribute lists need pointer-aligned storage and deletion before that storage is freed.
+struct AttributeList {
+    _storage: Box<[usize]>,
+    ptr: LPPROC_THREAD_ATTRIBUTE_LIST,
+}
+
+impl AttributeList {
+    fn new() -> Result<Self> {
+        let mut size = 0;
+        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut size) };
+        if size == 0 {
+            return Err(Error::last_os_error());
+        }
+        let mut storage =
+            vec![0usize; size.div_ceil(mem::size_of::<usize>())].into_boxed_slice();
+        let ptr = storage.as_mut_ptr().cast();
+        if unsafe { InitializeProcThreadAttributeList(ptr, 1, 0, &mut size) } == 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(Self {
+            _storage: storage,
+            ptr,
+        })
+    }
+}
+
+impl Drop for AttributeList {
+    fn drop(&mut self) {
+        unsafe { DeleteProcThreadAttributeList(self.ptr) };
+    }
+}
+
 pub fn new(
-    shell: &str,
+    application: Option<&str>,
+    command_line: &str,
     working_directory: &Option<String>,
     columns: u16,
     rows: u16,
     env_overrides: &[(String, String)],
+) -> Result<Pty> {
+    new_with_watcher(
+        application,
+        command_line,
+        working_directory,
+        columns,
+        rows,
+        env_overrides,
+        ChildExitWatcher::new,
+    )
+}
+
+// Keep the ownership transfer testable without exhausting OS wait registrations.
+fn new_with_watcher(
+    application: Option<&str>,
+    command_line: &str,
+    working_directory: &Option<String>,
+    columns: u16,
+    rows: u16,
+    env_overrides: &[(String, String)],
+    watch: impl FnOnce(HANDLE) -> Result<ChildExitWatcher>,
 ) -> Result<Pty> {
     let api = ConptyApi::new();
     let mut pty_handle: HPCON = 0;
@@ -120,6 +176,11 @@ pub fn new(
     // start point.
     let (conout, conout_pty_handle) = miow::pipe::anonymous(0)?;
     let (conin_pty_handle, conin) = miow::pipe::anonymous(0)?;
+
+    // Start draining before owning HPCON, so every error path closes HPCON while
+    // its output reader is still alive (ClosePseudoConsole can block on output).
+    let conin = EventedAnonWrite::new(conin);
+    let conout = EventedAnonRead::new(conout);
 
     let winsize = Winsize {
         ws_row: rows as libc::c_ushort,
@@ -132,20 +193,26 @@ pub fn new(
     let result = unsafe {
         (api.create)(
             winsize.into(),
-            conin_pty_handle.into_raw_handle() as HANDLE,
-            conout_pty_handle.into_raw_handle() as HANDLE,
+            conin_pty_handle.as_raw_handle() as HANDLE,
+            conout_pty_handle.as_raw_handle() as HANDLE,
             0,
             &mut pty_handle as *mut _,
         )
     };
 
-    assert_eq!(result, S_OK);
+    if result != S_OK {
+        return Err(Error::other(format!(
+            "CreatePseudoConsole failed: HRESULT {result:#010x}"
+        )));
+    }
+    let conpty = Conpty {
+        handle: pty_handle,
+        api,
+    };
 
     let mut success;
 
     // Prepare child process startup info.
-
-    let mut size: usize = 0;
 
     let mut startup_info_ex: STARTUPINFOEXW = unsafe { mem::zeroed() };
 
@@ -161,18 +228,19 @@ pub fn new(
     let mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)> =
         std::env::vars_os().collect();
     for (key, value) in env_overrides {
-        if let Some((_, existing)) = environment
-            .iter_mut()
-            .find(|(existing, _)| existing.eq_ignore_ascii_case(std::ffi::OsStr::new(key)))
-        {
+        if let Some((_, existing)) = environment.iter_mut().find(|(existing, _)| {
+            existing.eq_ignore_ascii_case(std::ffi::OsStr::new(key))
+        }) {
             *existing = value.into();
         } else {
             environment.push((key.into(), value.into()));
         }
     }
-    environment.sort_by(|a, b| a.0.to_string_lossy().to_ascii_lowercase().cmp(
-        &b.0.to_string_lossy().to_ascii_lowercase(),
-    ));
+    environment.sort_by(|a, b| {
+        a.0.to_string_lossy()
+            .to_ascii_lowercase()
+            .cmp(&b.0.to_string_lossy().to_ascii_lowercase())
+    });
     let mut environment_block = Vec::<u16>::new();
     for (key, value) in environment {
         environment_block.extend(key.encode_wide());
@@ -182,45 +250,8 @@ pub fn new(
     }
     environment_block.push(0);
 
-    unsafe {
-        let failure = InitializeProcThreadAttributeList(
-            ptr::null_mut(),
-            1,
-            0,
-            &mut size as *mut usize,
-        ) > 0;
-
-        // This call was expected to return false.
-        if failure {
-            return Err(Error::last_os_error());
-        }
-    }
-
-    let mut attr_list: Box<[u8]> = vec![0; size].into_boxed_slice();
-
-    // Set startup info's attribute list & initialize it
-    //
-    // Lint failure is spurious; it's because winapi's definition of PROC_THREAD_ATTRIBUTE_LIST
-    // implies it is one pointer in size (32 or 64 bits) but really this is just a dummy value.
-    // Casting a *mut u8 (pointer to 8 bit type) might therefore not be aligned correctly in
-    // the compiler's eyes.
-    #[allow(clippy::cast_ptr_alignment)]
-    {
-        startup_info_ex.lpAttributeList = attr_list.as_mut_ptr() as _;
-    }
-
-    unsafe {
-        success = InitializeProcThreadAttributeList(
-            startup_info_ex.lpAttributeList,
-            1,
-            0,
-            &mut size as *mut usize,
-        ) > 0;
-
-        if !success {
-            return Err(Error::last_os_error());
-        }
-    }
+    let attr_list = AttributeList::new()?;
+    startup_info_ex.lpAttributeList = attr_list.ptr;
 
     // Set thread attribute list's Pseudo Console to the specified ConPTY.
     unsafe {
@@ -239,14 +270,15 @@ pub fn new(
         }
     }
 
-    let cmdline = win32_string(&cmdline(shell));
+    let mut cmdline = win32_string(command_line);
+    let application = application.map(win32_string);
     let cwd = working_directory.as_ref().map(win32_string);
 
     let mut proc_info: PROCESS_INFORMATION = unsafe { mem::zeroed() };
     unsafe {
         success = CreateProcessW(
-            ptr::null(),
-            cmdline.as_ptr() as PWSTR,
+            application.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+            cmdline.as_mut_ptr(),
             ptr::null_mut(),
             ptr::null_mut(),
             false as i32,
@@ -262,13 +294,25 @@ pub fn new(
         }
     }
 
-    let conin = EventedAnonWrite::new(conin);
-    let conout = EventedAnonRead::new(conout);
+    // Wine requires the console-side pipe ends to survive CreateProcessW.
+    // They are borrowed by CreatePseudoConsole, not transferred to it.
+    drop(conin_pty_handle);
+    drop(conout_pty_handle);
+    drop(attr_list);
+    let process = unsafe { OwnedHandle::from_raw_handle(proc_info.hProcess) };
+    drop(unsafe { OwnedHandle::from_raw_handle(proc_info.hThread) });
 
-    let child_watcher = ChildExitWatcher::new(proc_info.hProcess)?;
-    let conpty = Conpty {
-        handle: pty_handle as HPCON,
-        api,
+    // The watcher takes ownership only on success. On failure, terminate the
+    // unobservable child and let our guard close the process handle exactly once.
+    let child_watcher = match watch(process.as_raw_handle()) {
+        Ok(watcher) => {
+            let _ = process.into_raw_handle();
+            watcher
+        }
+        Err(error) => {
+            unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+            return Err(error);
+        }
     };
 
     Ok(Pty::new(conpty, conout, conin, child_watcher))
@@ -289,5 +333,28 @@ impl From<Winsize> for COORD {
             X: columns as i16,
             Y: lines as i16,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Foundation::GetHandleInformation;
+
+    #[test]
+    #[ignore = "requires real ConPTY; injects a wait-registration failure"]
+    fn watcher_failure_closes_process_handle() {
+        let mut handle = ptr::null_mut();
+        let result =
+            new_with_watcher(None, "cmd.exe /D /K", &None, 80, 24, &[], |process| {
+                handle = process;
+                Err(Error::other("injected watcher failure"))
+            });
+        assert!(
+            matches!(result, Err(ref error) if error.to_string() == "injected watcher failure")
+        );
+        assert!(!handle.is_null());
+        let mut flags = 0;
+        assert_eq!(unsafe { GetHandleInformation(handle, &mut flags) }, 0);
     }
 }

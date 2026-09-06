@@ -31,11 +31,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let Some(endpoint) = self.daemon_endpoint().map(str::to_string) else {
             return;
         };
-        let transport = self
-            .daemon
-            .link
-            .as_ref()
-            .and_then(|link| link.handle_and_runtime());
         let routes = self
             .contexts
             .iter()
@@ -59,14 +54,33 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             })
             .collect::<Vec<_>>();
 
+        let Some((handle, runtime)) = self
+            .daemon
+            .link
+            .as_ref()
+            .and_then(|link| link.handle_and_runtime())
+        else {
+            return;
+        };
         for (route_id, session_id, binding) in routes {
-            if let Some((handle, runtime)) = transport.clone() {
-                crate::context::remote_pty::bind_session(
-                    &binding,
-                    &session_id,
-                    handle,
-                    runtime,
-                );
+            crate::context::remote_pty::await_attach(
+                &binding,
+                &session_id,
+                handle.clone(),
+                runtime.clone(),
+            );
+            self.daemon
+                .cache
+                .pending_pty_attaches
+                .retain(|_, (route, _)| *route != route_id);
+            if let Some(link) = self.daemon.link.as_ref() {
+                let request_id = link.send_pty(PtyClientMessage::AttachPty {
+                    session_id: session_id.clone(),
+                });
+                self.daemon
+                    .cache
+                    .pending_pty_attaches
+                    .insert(request_id, (route_id, session_id.clone()));
             }
             self.daemon
                 .cache
@@ -325,29 +339,40 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .cache
             .session_routes
             .insert(session_id.to_string(), context.route_id);
-        if let Some((handle, runtime)) = link.handle_and_runtime() {
-            crate::context::remote_pty::bind_session(
-                binding, session_id, handle, runtime,
-            );
-        }
-        // Scrollback first (one-shot backlog reply), then a resize so
-        // the remote shell repaints its prompt at our geometry.
-        link.send_pty(PtyClientMessage::AttachPty {
+        let Some((handle, runtime)) = link.handle_and_runtime() else {
+            return;
+        };
+        crate::context::remote_pty::await_attach(binding, session_id, handle, runtime);
+        self.daemon
+            .cache
+            .pending_pty_attaches
+            .retain(|_, (route, _)| *route != context.route_id);
+        // Keep input unbound until the correlated PtyCreated confirms this
+        // exact session; stale persisted IDs must not become writable routes.
+        let request_id = link.send_pty(PtyClientMessage::AttachPty {
             session_id: session_id.to_string(),
         });
-        link.send_pty(PtyClientMessage::Resize {
-            session_id: session_id.to_string(),
-            cols: context
-                .dimension
-                .columns
-                .try_into()
-                .unwrap_or(MIN_COLUMNS as u16),
-            rows: context
-                .dimension
-                .lines
-                .try_into()
-                .unwrap_or(MIN_LINES as u16),
-        });
+        self.daemon
+            .cache
+            .pending_pty_attaches
+            .insert(request_id, (context.route_id, session_id.to_string()));
+        binding
+            .shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .queued
+            .push(neoism_terminal_pty::RemotePtyOp::Resize {
+                cols: context
+                    .dimension
+                    .columns
+                    .try_into()
+                    .unwrap_or(MIN_COLUMNS as u16),
+                rows: context
+                    .dimension
+                    .lines
+                    .try_into()
+                    .unwrap_or(MIN_LINES as u16),
+            });
     }
 
     /// The workspace id a grid publishes/answers to: the DAEMON's id

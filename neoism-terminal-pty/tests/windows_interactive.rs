@@ -85,30 +85,104 @@ fn interactive_roundtrip(shell: &str, args: &[&str], powershell: bool) {
     session.close();
 }
 
-fn integrated_powershell_lifecycle(shell: &str) {
-    let args = neoism_terminal_pty::shell_integration::powershell_args(
+struct ListingFixture {
+    dir: std::path::PathBuf,
+    filename: String,
+}
+
+impl ListingFixture {
+    fn new() -> Self {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let filename = format!("ls-{unique:x}.txt");
+        let dir = std::env::temp_dir()
+            .join(format!("neoism-ls-{}-{unique:x}", std::process::id()));
+        std::fs::create_dir(&dir).expect("create PowerShell listing fixture");
+        std::fs::write(dir.join(&filename), b"actual directory listing probe")
+            .expect("write PowerShell listing fixture");
+        Self { dir, filename }
+    }
+}
+
+impl Drop for ListingFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn assert_powershell_ls(session: &mut PtySession, filename: &str) {
+    // Exact composer submission: the expected filename is never in the input,
+    // so echo cannot satisfy this assertion. Require output before completion.
+    assert_eq!(session.write(b"ls\r").unwrap(), 3);
+    let done = b"\x1b]133;D;0\x1b\\";
+    let output = wait_for(session, done);
+    let completed_at = output.windows(done.len()).position(|b| b == done).unwrap();
+    assert!(
+        output[..completed_at]
+            .windows(filename.len())
+            .any(|b| b == filename.as_bytes()),
+        "ls completed without the fixture filename {filename:?}: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+fn integrated_powershell_lifecycle(shell: &str, without_readline: bool) {
+    let fixture = ListingFixture::new();
+    let mut args = neoism_terminal_pty::shell_integration::powershell_args(
         shell,
         &["-NoLogo".into(), "-NoProfile".into()],
     )
     .unwrap();
+    if without_readline {
+        use base64::Engine;
+        let encoded = args.last_mut().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&*encoded)
+            .unwrap();
+        let units: Vec<_> = bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let script = format!(
+            "Import-Module Microsoft.PowerShell.Utility, Microsoft.PowerShell.Management; $PSModuleAutoLoadingPreference = 'None'; Remove-Module PSReadLine -ErrorAction Ignore; Remove-Item Function:PSConsoleHostReadLine -ErrorAction Ignore\n{}\nif ($null -ne (Get-Command PSConsoleHostReadLine -ErrorAction Ignore)) {{ throw 'PSReadLine still loaded' }}; [Console]::Write('READLINE-ABSENT')",
+            String::from_utf16(&units).unwrap(),
+        );
+        *encoded = base64::engine::general_purpose::STANDARD.encode(
+            script
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+    }
     let mut session = PtySession::spawn(PtySessionConfig {
         shell: Some(shell.into()),
         args,
+        cwd: Some(fixture.dir.clone()),
         ..PtySessionConfig::default()
     })
     .expect("spawn integrated PowerShell");
-    wait_for(&mut session, b"\x1b]133;B\x07");
+    let startup = wait_for(&mut session, b"\x1b]133;B\x1b\\");
+    if without_readline {
+        assert!(startup
+            .windows(b"READLINE-ABSENT".len())
+            .any(|b| b == b"READLINE-ABSENT"));
+    }
+
+    assert_powershell_ls(&mut session, &fixture.filename);
 
     for command in ["clear", "cls", "Clear-Host"] {
         let clear = format!("{command}\r");
         assert_eq!(session.write(clear.as_bytes()).unwrap(), clear.len());
-        wait_for(&mut session, b"\x1b]133;B\x07");
+        wait_for(&mut session, b"\x1b]133;D;0\x1b\\");
+        assert_powershell_ls(&mut session, &fixture.filename);
 
         let started = Instant::now();
         let command = b"Write-Output ('neoism-' + (7100 + 99) + '-done'); Start-Sleep -Milliseconds 250\r";
         assert_eq!(session.write(command).unwrap(), command.len());
-        let output = wait_for(&mut session, b"\x1b]133;B\x07");
-        for marker in [b"neoism-7199-done".as_slice(), b"\x1b]133;D;0\x07"] {
+        let output = wait_for(&mut session, b"\x1b]133;D;0\x1b\\");
+        for marker in [b"neoism-7199-done".as_slice(), b"\x1b]133;D;0\x1b\\"] {
             assert!(
                 output.windows(marker.len()).any(|bytes| bytes == marker),
                 "missing {:?} in {:?}",
@@ -123,8 +197,8 @@ fn integrated_powershell_lifecycle(shell: &str) {
     }
     let command = b"Write-Error 'intentional lifecycle regression probe'\r";
     assert_eq!(session.write(command).unwrap(), command.len());
-    let output = wait_for(&mut session, b"\x1b]133;B\x07");
-    let failed = b"\x1b]133;D;1\x07";
+    let output = wait_for(&mut session, b"\x1b]133;D;1\x1b\\");
+    let failed = b"\x1b]133;D;1\x1b\\";
     assert!(
         output.windows(failed.len()).any(|bytes| bytes == failed),
         "failed command lost exit status: {:?}",
@@ -136,13 +210,13 @@ fn integrated_powershell_lifecycle(shell: &str) {
 #[test]
 #[ignore = "requires native Windows ConPTY and Windows PowerShell"]
 fn powershell_integration_completes_clear_sleep_and_errors() {
-    integrated_powershell_lifecycle("powershell.exe");
+    integrated_powershell_lifecycle("powershell.exe", false);
 }
 
 #[test]
 #[ignore = "requires native Windows ConPTY and PowerShell 7 installed"]
 fn pwsh_integration_completes_clear_sleep_and_errors() {
-    integrated_powershell_lifecycle("pwsh.exe");
+    integrated_powershell_lifecycle("pwsh.exe", false);
 }
 
 #[test]
@@ -161,4 +235,10 @@ fn powershell_accepts_idle_separated_commands_and_clear() {
 #[ignore = "requires native Windows ConPTY and PowerShell 7 installed"]
 fn pwsh_accepts_idle_separated_commands_and_clear() {
     interactive_roundtrip("pwsh.exe", &["-NoLogo", "-NoProfile"], true);
+}
+
+#[test]
+#[ignore = "requires native Windows ConPTY and PowerShell 7 installed"]
+fn pwsh_integration_without_psreadline_accepts_cr_and_completes() {
+    integrated_powershell_lifecycle("pwsh.exe", true);
 }

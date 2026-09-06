@@ -65,6 +65,7 @@ impl Screen<'_> {
             }
         }
         if markdown_scroll_moving || extensions_scroll_moving {
+            has_animation = true;
             self.mark_dirty();
         }
 

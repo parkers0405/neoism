@@ -1073,6 +1073,9 @@ impl LspService {
         })
     }
 
+    /// Synchronize a diagnostic touch without synthesizing an editor save.
+    /// Unlike navigation's ensure_open(None), a touch without live text means
+    /// the caller changed the file on disk, including when it is already open.
     pub(super) fn touch(
         &self,
         root: &Path,
@@ -1080,12 +1083,22 @@ impl LspService {
         text: Option<&str>,
         spec: &LanguageAdapter,
     ) -> anyhow::Result<Vec<super::LspDiagnostic>> {
+        let disk_text;
+        let text = match text {
+            Some(text) => text,
+            None => {
+                disk_text = fs::read_to_string(file).with_context(|| {
+                    format!("failed to read touched document {}", file.display())
+                })?;
+                &disk_text
+            }
+        };
         let pulled = self.with_file_client(root, file, spec, |client| {
-            client.ensure_open(file, text)?;
-            client.client.save_document(file)?;
-            // Fast path: pull diagnostics (`textDocument/diagnostic`) when the
-            // server supports it. This returns whatever is ready immediately
-            // instead of stalling on a flycheck push — the opencode model.
+            client.ensure_open(file, Some(text))?;
+            // didSave belongs exclusively to save(): an agent diagnostic touch
+            // must not trigger a redundant check-on-save build.
+            // Preserve pull diagnostics when supported and asynchronous pushes
+            // otherwise; neither guarantees a fresh build-backed snapshot.
             if client.initialized.diagnostic_provider {
                 if let Ok(report) = client
                     .client
@@ -1101,7 +1114,7 @@ impl LspService {
             }
             // Push-only diagnostics are captured by the reader thread in
             // dispatch_diagnostics. Do not consume the request channel here:
-            // it may contain an older publish queued before this save, which
+            // it may contain an older publish queued before this touch, which
             // would overwrite the newer real-time cache and make the UI flash
             // between stale and current counts.
             Ok(None)

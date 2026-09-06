@@ -1,3 +1,9 @@
+[build]
+# Bound memory use for automatic and explicit Cargo work in this workspace.
+# This limits workers per new invocation, not aggregate or already-running jobs.
+# Callers can still override this with --jobs or CARGO_BUILD_JOBS.
+jobs = 2
+
 [target.wasm32-unknown-unknown]
 # Enabled unstable APIs from web_sys.
 rustflags = "--cfg=web_sys_unstable_apis"

@@ -20,6 +20,9 @@ public static class NeoismWindowProbe {
         public uint ProcessId;
         public string Title;
         public string ClassName;
+        public long ExtendedStyle;
+        public int Width, Height;
+        public bool Infrastructure;
     }
     private delegate bool EnumWindowProc(IntPtr h, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowProc callback, IntPtr parameter);
@@ -29,6 +32,14 @@ public static class NeoismWindowProbe {
     [StructLayout(LayoutKind.Sequential)]
     private struct Rect { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out Rect rect);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr64(IntPtr h, int index);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongW")] private static extern int GetWindowLong32(IntPtr h, int index);
+    // This exact class/style combination is winit's layered event-dispatch
+    // target, not an application window. Its outer rectangle need not stay zero.
+    public static bool IsInternalEventWindow(string className, long extendedStyle) {
+        const long eventStyles = 0x08000000L | 0x00080000L | 0x00000080L | 0x00000020L;
+        return className == "Winit Thread Event Target" && (extendedStyle & eventStyles) == eventStyles;
+    }
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SendMessageTimeout(
         IntPtr h, uint msg, UIntPtr w, IntPtr l, uint flags, uint timeout, out UIntPtr result);
@@ -36,18 +47,20 @@ public static class NeoismWindowProbe {
         var windows = new List<Window>();
         EnumWindows((h, unused) => {
             if (!IsWindowVisible(h)) return true;
-            // Winit's zero-size event target carries WS_VISIBLE for WM_PAINT
-            // dispatch but is not displayed. Count actual window rectangles.
             Rect rect;
-            if (!GetWindowRect(h, out rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top) return true;
+            if (!GetWindowRect(h, out rect)) return true;
             uint pid;
             GetWindowThreadProcessId(h, out pid);
             var title = new StringBuilder(1024);
             var className = new StringBuilder(256);
             GetWindowText(h, title, title.Capacity);
             GetClassName(h, className, className.Capacity);
+            long style = IntPtr.Size == 8 ? GetWindowLongPtr64(h, -20).ToInt64() : GetWindowLong32(h, -20);
+            bool infrastructure = IsInternalEventWindow(className.ToString(), style);
+            if (!infrastructure && (rect.Right <= rect.Left || rect.Bottom <= rect.Top)) return true;
             windows.Add(new Window { Handle = h.ToInt64(), ProcessId = pid,
-                Title = title.ToString(), ClassName = className.ToString() });
+                Title = title.ToString(), ClassName = className.ToString(), ExtendedStyle = style,
+                Width = rect.Right - rect.Left, Height = rect.Bottom - rect.Top, Infrastructure = infrastructure });
             return true;
         }, IntPtr.Zero);
         return windows.ToArray();
@@ -68,7 +81,9 @@ public static class NeoismWindowProbe {
     while ((Get-Date) -lt $deadline) {
         $p.Refresh()
         if ($p.HasExited) { throw "Installed GUI crashed/exited: $($p.ExitCode) (stack overflow is 0xC00000FD; do not patch stack reserve)" }
-        $visibleWindows = [NeoismWindowProbe]::Snapshot()
+        $windowCensus = [NeoismWindowProbe]::Snapshot()
+        $windowCensus | ConvertTo-Json -Depth 3 -Compress | Add-Content "$Evidence/window-census.jsonl"
+        $visibleWindows = @($windowCensus | Where-Object { -not $_.Infrastructure })
         $mainWindows = @($visibleWindows | Where-Object { $_.ProcessId -eq $p.Id })
         # Process.MainWindowHandle can briefly select the same internal event
         # target. Use the positive-area windows for primary-window detection too.

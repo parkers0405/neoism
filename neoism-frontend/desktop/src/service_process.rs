@@ -311,10 +311,13 @@ fn probe_tcp(port: u16) -> DaemonProbe {
                 DaemonProbe::NotReady
             }
         }
-        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+        Err(error) => {
+            // Windows can exhaust a short connect deadline before reporting a
+            // refused loopback connection. Only an established connection can
+            // prove the endpoint is occupied; the child's bind remains final.
+            tracing::debug!(kind = ?error.kind(), os_error = error.raw_os_error(), "local daemon endpoint could not be reached");
             DaemonProbe::Missing
         }
-        Err(_) => DaemonProbe::NotReady,
     }
 }
 fn daemon_health(stream: &mut (impl Read + Write)) -> bool {
@@ -434,6 +437,14 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nneoism-daemon"
         ));
     }
+    #[test]
+    fn closed_daemon_port_allows_startup() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert_eq!(probe_tcp(port), DaemonProbe::Missing);
+    }
+
     #[test]
     fn listening_but_not_serving_is_not_ready() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

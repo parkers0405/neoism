@@ -25,6 +25,7 @@ use super::updates::{start_session_event_stream, AgentSessionEventStream};
 
 impl NeoismAgentPane {
     pub(super) fn execute_slash_text(&mut self, text: &str) {
+        self.close_connect();
         match command_controller::plan_slash_command(text) {
             SlashCommandAction::Noop => {}
             SlashCommandAction::ShowHelp => self.show_help(),
@@ -523,6 +524,7 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn execute_switch_session_command(&mut self, session_id: String) {
+        self.close_connect();
         if session_id.is_empty() {
             return;
         }
@@ -1760,6 +1762,7 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn create_new_session(&mut self) {
+        self.close_connect();
         self.prompt_draft_id = self.prompt_draft_id.wrapping_add(1);
         self.session_id = None;
         self.parent_session_id = None;

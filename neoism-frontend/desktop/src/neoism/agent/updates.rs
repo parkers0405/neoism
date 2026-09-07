@@ -1415,8 +1415,22 @@ mod tests {
         let (request_started_tx, request_started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let responder = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
+            // The HTTP client probes the actual endpoint before requesting
+            // history. Serve a real health contract, then gate the history I/O.
+            let (mut health, _) = listener.accept().unwrap();
             let mut request = [0_u8; 2048];
+            let _ = health.read(&mut request).unwrap();
+            let body =
+                r#"{"healthy":true,"version":"test","providerCredentialStore":"test"}"#;
+            write!(
+                health,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            drop(health);
+            let (mut socket, _) = listener.accept().unwrap();
             let _ = socket.read(&mut request).unwrap();
             request_started_tx.send(()).unwrap();
             release_rx.recv().unwrap();
@@ -1479,8 +1493,22 @@ mod tests {
         let (request_started_tx, request_started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let responder = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
+            // The HTTP client probes the actual endpoint before requesting
+            // history. Serve a real health contract, then gate the history I/O.
+            let (mut health, _) = listener.accept().unwrap();
             let mut request = [0_u8; 2048];
+            let _ = health.read(&mut request).unwrap();
+            let body =
+                r#"{"healthy":true,"version":"test","providerCredentialStore":"test"}"#;
+            write!(
+                health,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            drop(health);
+            let (mut socket, _) = listener.accept().unwrap();
             let _ = socket.read(&mut request).unwrap();
             request_started_tx.send(()).unwrap();
             release_rx.recv().unwrap();
@@ -1600,8 +1628,22 @@ mod tests {
         let (request_started_tx, request_started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let responder = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
+            // The HTTP client probes the actual endpoint before requesting
+            // history. Serve a real health contract, then gate the history I/O.
+            let (mut health, _) = listener.accept().unwrap();
             let mut request = [0_u8; 2048];
+            let _ = health.read(&mut request).unwrap();
+            let body =
+                r#"{"healthy":true,"version":"test","providerCredentialStore":"test"}"#;
+            write!(
+                health,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            drop(health);
+            let (mut socket, _) = listener.accept().unwrap();
             let _ = socket.read(&mut request).unwrap();
             request_started_tx.send(()).unwrap();
             release_rx.recv().unwrap();

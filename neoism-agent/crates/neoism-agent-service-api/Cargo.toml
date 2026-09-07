@@ -12,5 +12,8 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle = "2.5"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_System_Threading"] }
+
 [dev-dependencies]
 tokio.workspace = true

@@ -1640,6 +1640,12 @@ const HOSTED_SIDECAR_FILE: &str = "hosted-spec.json";
 /// workspace ever appears. Probe the standard install dir before giving up
 /// to PATH so a dev build still finds the installed companion.
 fn sibling_binary(bin: &str) -> std::path::PathBuf {
+    // is_file() does not perform Windows PATHEXT lookup. Packaged siblings
+    // must include their executable suffix before checking the filesystem.
+    #[cfg(windows)]
+    let executable_name = format!("{bin}.exe");
+    #[cfg(windows)]
+    let bin = executable_name.as_str();
     // 1) Next to the running executable (installed/packaged layout).
     if let Some(path) = std::env::current_exe()
         .ok()

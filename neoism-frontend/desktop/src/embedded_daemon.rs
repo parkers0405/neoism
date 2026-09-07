@@ -234,11 +234,10 @@ impl EmbeddedDaemonHandle {
                     let auth_service = match auth::AuthService::bootstrap(&data_dir) {
                         Ok(service) => service,
                         Err(error) => {
-                            // Readiness was already signalled, so we can no
-                            // longer surface this to the caller. Log and let
-                            // the daemon thread exit; the desktop just runs
-                            // without daemon-backed features (same outcome as
-                            // a spawn failure in `resolve_daemon`).
+                            let _ = ready_tx.send(Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                "embedded daemon: auth bootstrap failed",
+                            )));
                             tracing::error!(
                                 %error,
                                 "embedded daemon: auth bootstrap failed; daemon unavailable"
@@ -265,15 +264,6 @@ impl EmbeddedDaemonHandle {
                         workspaces.clone(),
                         neoism_desktop::notes_mcp::install(neoism_agent_neoism_adapter::neoism_services()),
                     );
-                    // Do not release the desktop while the daemon-owned agent
-                    // supervisor is still absent. In particular, the Windows
-                    // Tailscale probe above can take seconds; advertising a
-                    // bound daemon port before this point let `/connect` race
-                    // an agent server that had not even begun starting.
-                    #[cfg(unix)]
-                    let _ = ready_tx.send(Ok(None));
-                    #[cfg(not(unix))]
-                    let _ = ready_tx.send(Ok(Some(primary_port)));
                     let pairing_tokens = handshake::PairingTokenStore::in_memory();
                     // Paired hosts DO persist (unlike pairing tokens):
                     // a cross-host pairing the user set up from the
@@ -490,6 +480,14 @@ impl EmbeddedDaemonHandle {
                         });
                     }
 
+                    // Router, accept tasks and the agent supervisor now exist.
+                    // Agent HTTP readiness is a separate request-time contract;
+                    // do not gate the workspace socket on hosted association.
+                    #[cfg(unix)]
+                    let _ = ready_tx.send(Ok(None));
+                    #[cfg(not(unix))]
+                    let _ = ready_tx.send(Ok(Some(primary_port)));
+
                     shutdown_for_task.notified().await;
                     tracing::debug!("embedded daemon: shutdown signal received");
                 });
@@ -518,6 +516,10 @@ impl EmbeddedDaemonHandle {
                 "embedded daemon: runtime thread exited before reporting readiness",
             )),
         }
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.runtime_thread.as_ref().is_none_or(|thread| thread.is_finished())
     }
 
     /// Path to the unix socket the embedded daemon is listening on.

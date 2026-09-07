@@ -13,6 +13,13 @@ const PROJECT_SOURCE: &str = "neoism:project";
 const PROJECT_MCP_SOURCE: &str = "neoism:project-mcp";
 const LEGACY_NATIVE_MCP_IDS: [&str; 3] = ["neoism-docs", "neoism-memory", "neoism-notes"];
 
+#[cfg(test)]
+thread_local! {
+    // Per-thread instrumentation avoids PATH/current-dir mutation and parallel
+    // test races while observing the actual snapshot -> Git launch path.
+    static GIT_ROOT_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Debug)]
 pub struct NeoismConfigSourceService {
     gui_path: PathBuf,
@@ -48,7 +55,9 @@ impl NeoismConfigSourceService {
     }
 
     fn git_root(workspace: &Path) -> PathBuf {
-        let mut command = std::process::Command::new("git");
+        #[cfg(test)]
+        GIT_ROOT_PROBES.with(|count| count.set(count.get() + 1));
+        let mut command = neoism_agent_service_api::background_process::command("git");
         command
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(workspace);
@@ -91,12 +100,19 @@ impl NeoismConfigSourceService {
     }
 
     fn migrate_project_config(workspace: &Path) -> Result<(), ServiceError> {
-        let project = Self::git_root(workspace);
-        if project != workspace {
+        // Snapshots are frequent. Do not start Git (or canonicalize paths) unless
+        // there is actually a legacy file in this workspace to migrate. A file
+        // in an ancestor is deliberately not a migration candidate.
+        let source = workspace.join("neoism.json");
+        if !source.is_file() {
             return Ok(());
         }
-        let source = project.join("neoism.json");
-        if !source.is_file() {
+        let project = Self::git_root(workspace);
+        // Git resolves symlinks and dot components and may use a different
+        // Windows path spelling. Compare filesystem identities, not strings.
+        if project != workspace
+            && std::fs::canonicalize(&project)? != std::fs::canonicalize(workspace)?
+        {
             return Ok(());
         }
         let target = workspace.join(".neoism/config.json");
@@ -486,6 +502,183 @@ fn strip_trailing_commas(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MigrationFixture(PathBuf);
+
+    impl MigrationFixture {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "neoism-config-migration-{name}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+
+        fn init_git(&self) {
+            let output = neoism_agent_service_api::background_process::command("git")
+                .args(["init", "--quiet"])
+                .arg(&self.0)
+                .output()
+                .expect("Git is required for migration regression tests");
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        fn service(&self) -> NeoismConfigSourceService {
+            NeoismConfigSourceService::at(self.0.join("user/config.json"))
+        }
+
+        fn legacy(&self) {
+            std::fs::write(self.0.join("neoism.json"), r#"{"model":"legacy/model"}"#)
+                .unwrap();
+        }
+    }
+
+    impl Drop for MigrationFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn snapshots_without_a_legacy_file_never_probe_git() {
+        let fixture = MigrationFixture::new("no-legacy");
+        let before = GIT_ROOT_PROBES.with(|count| count.get());
+        for _ in 0..3 {
+            fixture
+                .service()
+                .snapshot(&ConfigSnapshotRequest::new(&fixture.0))
+                .unwrap();
+        }
+        // Even a candidate in an ancestor must not cause a subprocess.
+        fixture.legacy();
+        let workspace = fixture.0.join("nested");
+        std::fs::create_dir_all(&workspace).unwrap();
+        for path in [
+            workspace.clone(),
+            workspace.join("."),
+            workspace.join("missing"),
+        ] {
+            for _ in 0..3 {
+                fixture
+                    .service()
+                    .snapshot(&ConfigSnapshotRequest::new(path.clone()))
+                    .unwrap();
+            }
+        }
+        // A directory named neoism.json is not a legacy config file either.
+        std::fs::create_dir_all(workspace.join("neoism.json")).unwrap();
+        fixture
+            .service()
+            .snapshot(&ConfigSnapshotRequest::new(&workspace))
+            .unwrap();
+        assert_eq!(GIT_ROOT_PROBES.with(|count| count.get()), before);
+        assert!(fixture.0.join("neoism.json").is_file());
+        assert!(!workspace.join(".neoism/config.json").exists());
+    }
+
+    #[test]
+    fn root_migration_accepts_dot_components_and_only_probes_once() {
+        let fixture = MigrationFixture::new("dot-root");
+        fixture.init_git();
+        fixture.legacy();
+        std::fs::create_dir_all(fixture.0.join("child")).unwrap();
+        let workspace = fixture.0.join("child/../.");
+        let before = GIT_ROOT_PROBES.with(|count| count.get());
+        for _ in 0..3 {
+            let snapshot = fixture
+                .service()
+                .snapshot(&ConfigSnapshotRequest::new(&workspace))
+                .unwrap();
+            assert_eq!(snapshot.layers[2].document["model"], "legacy/model");
+        }
+        assert_eq!(GIT_ROOT_PROBES.with(|count| count.get()), before + 1);
+        assert!(!fixture.0.join("neoism.json").exists());
+    }
+
+    #[test]
+    fn nested_workspace_does_not_migrate_a_non_root_legacy_file() {
+        let fixture = MigrationFixture::new("nested");
+        fixture.init_git();
+        fixture.legacy();
+        let nested = fixture.0.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("neoism.json"), r#"{"model":"nested/model"}"#)
+            .unwrap();
+        fixture
+            .service()
+            .snapshot(&ConfigSnapshotRequest::new(&nested))
+            .unwrap();
+        assert!(nested.join("neoism.json").is_file());
+        assert!(fixture.0.join("neoism.json").is_file());
+        assert!(!nested.join(".neoism/config.json").exists());
+        assert!(!fixture.0.join(".neoism/config.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_migration_accepts_a_symlink_workspace() {
+        let fixture = MigrationFixture::new("symlink");
+        let root = fixture.0.join("repository");
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = MigrationFixture(root);
+        repo.init_git();
+        repo.legacy();
+        let alias = fixture.0.join("alias");
+        std::os::unix::fs::symlink(&repo.0, &alias).unwrap();
+        let snapshot = fixture
+            .service()
+            .snapshot(&ConfigSnapshotRequest::new(&alias))
+            .unwrap();
+        assert_eq!(snapshot.layers[2].document["model"], "legacy/model");
+        assert!(!repo.0.join("neoism.json").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn root_migration_accepts_a_verbatim_windows_workspace() {
+        let fixture = MigrationFixture::new("verbatim-root");
+        fixture.init_git();
+        fixture.legacy();
+        // canonicalize returns a verbatim Windows path, whereas Git normally
+        // returns a drive path with forward slashes.
+        let workspace = std::fs::canonicalize(&fixture.0).unwrap();
+        let snapshot = fixture
+            .service()
+            .snapshot(&ConfigSnapshotRequest::new(&workspace))
+            .unwrap();
+        assert_eq!(snapshot.layers[2].document["model"], "legacy/model");
+        assert!(!fixture.0.join("neoism.json").exists());
+    }
+
+    #[test]
+    fn malformed_target_keeps_the_legacy_file_intact() {
+        let fixture = MigrationFixture::new("malformed");
+        fixture.legacy();
+        std::fs::create_dir_all(fixture.0.join(".neoism")).unwrap();
+        let target = fixture.0.join(".neoism/config.json");
+        std::fs::write(&target, "{ not json").unwrap();
+        assert!(fixture
+            .service()
+            .snapshot(&ConfigSnapshotRequest::new(&fixture.0))
+            .is_err());
+        assert!(fixture.0.join("neoism.json").is_file());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn relative_workspace_paths_are_resolved_without_git() {
+        let before = GIT_ROOT_PROBES.with(|count| count.get());
+        for path in [".", "child", "child/.."] {
+            assert_eq!(
+                NeoismConfigSourceService::workspace_root(Path::new(path)),
+                std::env::current_dir().unwrap().join(path)
+            );
+        }
+        let root = std::env::temp_dir();
+        assert_eq!(NeoismConfigSourceService::workspace_root(&root), root);
+        assert_eq!(GIT_ROOT_PROBES.with(|count| count.get()), before);
+    }
 
     #[test]
     fn legacy_product_mcp_entries_cannot_shadow_native_tools() {

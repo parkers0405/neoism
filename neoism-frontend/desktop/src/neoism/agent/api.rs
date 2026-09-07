@@ -1245,17 +1245,76 @@ fn message_blocks_from_response(
     .collect()
 }
 
+/// Worker-thread readiness. The startup owner handles uncredentialed/local
+/// endpoints. A joined host's health route is authenticated just like its API:
+/// use the same transport and registered bearer credential as the real request,
+/// rather than rejecting a healthy host with an anonymous health probe.
+fn ensure_request_server_ready(server: &str) -> Result<(), String> {
+    if agent_server_credential(server).is_none() {
+        return crate::agent_server::ensure_started_for_request(server);
+    }
+    let response = http_request(
+        server,
+        "GET",
+        "/v2/health",
+        None,
+        Duration::from_millis(500),
+    )
+    .map_err(|_| {
+        "The selected authenticated agent endpoint is not ready or access was denied"
+            .to_string()
+    })?;
+    let value = response_json(response)?.unwrap_or(Value::Null);
+    if value["healthy"] == true
+        && value["version"]
+            .as_str()
+            .is_some_and(|version| !version.is_empty())
+        && (value["providerCredentialStore"].is_string()
+            || value["provider_credential_store"].is_string())
+    {
+        Ok(())
+    } else {
+        Err("The selected endpoint did not return a valid agent health response".into())
+    }
+}
+
 pub(super) fn api_request_json(
     server: &str,
     method: &str,
     path: &str,
     body: Option<&Value>,
 ) -> Result<Option<Value>, String> {
-    crate::agent_server::ensure_started_for_request();
+    ensure_request_server_ready(server)?;
     // Cold Windows machines can still be finishing agent-store migrations
     // when the listener first becomes healthy. Catalog/config requests are
     // not latency-sensitive enough to justify failing after 900 ms.
     let response = http_request(server, method, path, body, Duration::from_secs(5))?;
+    response_json(response)
+}
+
+/// Connect workers can be cancelled while readiness is waiting on startup.
+/// Re-check before issuing the actual request (especially credential writes).
+/// In-flight HTTP cannot be rolled back; its completion is separately scoped
+/// by the pane's request token.
+pub(super) fn api_request_json_while_active(
+    server: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    read_timeout: Duration,
+    active: &std::sync::atomic::AtomicBool,
+) -> Result<Option<Value>, String> {
+    let check_active = || {
+        if active.load(std::sync::atomic::Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err("Connect cancelled".to_string())
+        }
+    };
+    check_active()?;
+    ensure_request_server_ready(server)?;
+    check_active()?;
+    let response = http_request(server, method, path, body, read_timeout)?;
     response_json(response)
 }
 
@@ -1266,7 +1325,7 @@ pub(super) fn api_request_json_with_read_timeout(
     body: Option<&Value>,
     read_timeout: Duration,
 ) -> Result<Option<Value>, String> {
-    crate::agent_server::ensure_started_for_request();
+    ensure_request_server_ready(server)?;
     let response = http_request(server, method, path, body, read_timeout)?;
     response_json(response)
 }
@@ -1594,7 +1653,7 @@ pub(super) fn open_event_stream(
     server: &str,
     session_id: &str,
 ) -> Result<EventStreamConnection, String> {
-    crate::agent_server::ensure_started_for_request();
+    ensure_request_server_ready(server)?;
     let server = server.trim().trim_end_matches('/');
     let (tls, host, port, base_path) = parse_http_server(server)?;
     let addr = (host.as_str(), port)

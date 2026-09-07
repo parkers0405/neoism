@@ -2988,7 +2988,9 @@ fn enter_still_runs_argumentless_slash_command_from_picker() {
 fn model_change_queues_context_limit_refresh_for_runtime() {
     let mut pane = NeoismAgentPane::default();
 
-    pane.apply_model("claude-test".to_string());
+    // Account discovery now runs off-thread; this test covers the committed
+    // model transition after reconciliation, without requiring a live server.
+    pane.apply_model_with_connection("claude-test".to_string(), None);
 
     // A model change persists the choice into the unified config AND refreshes
     // the context limit for the new model.

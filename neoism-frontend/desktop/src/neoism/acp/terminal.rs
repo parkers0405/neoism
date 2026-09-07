@@ -71,6 +71,11 @@ impl AcpTerminalManager {
             .unwrap_or(DEFAULT_TERMINAL_OUTPUT_LIMIT);
 
         let mut child_cmd = Command::new(&command);
+        // ACP terminals are pipe-backed background jobs, not ConPTY shells.
+        // Keep a direct child so terminal/kill still kills the actual command
+        // rather than only the GUI background-command wrapper.
+        #[cfg(windows)]
+        neoism_workspace_daemon::hide_std_command(&mut child_cmd);
         child_cmd
             .args(&args)
             .current_dir(&cwd)

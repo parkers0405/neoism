@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -461,7 +460,7 @@ impl WorkspaceManagementService for StandaloneWorkspaceManagementService {
                 if root.exists() {
                     return Err(ServiceError::new("clone destination already exists"));
                 }
-                let mut command = Command::new("git");
+                let mut command = crate::background_process::command("git");
                 command.arg("clone");
                 if let Some(depth) = depth {
                     command.args(["--depth", &depth.to_string()]);
@@ -628,7 +627,7 @@ fn secure_create_directory(path: &Path) -> Result<(), ServiceError> {
 
 fn secure_git_repository(path: &Path) -> Result<PathBuf, ServiceError> {
     let root = secure_existing_directory(path)?;
-    let output = Command::new("git")
+    let output = crate::background_process::command("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(&root)
         .output()?;
@@ -670,7 +669,10 @@ fn git_output<const N: usize>(
     root: &Path,
     args: [&str; N],
 ) -> Result<String, ServiceError> {
-    let output = Command::new("git").args(args).current_dir(root).output()?;
+    let output = crate::background_process::command("git")
+        .args(args)
+        .current_dir(root)
+        .output()?;
     if !output.status.success() {
         return Err(ServiceError::new("git metadata lookup failed"));
     }
@@ -766,7 +768,7 @@ mod tests {
         let root = temp_root("repository");
         let repository = root.join("repo");
         fs::create_dir_all(&repository).unwrap();
-        assert!(Command::new("git")
+        assert!(crate::background_process::command("git")
             .args(["init", "-q"])
             .current_dir(&repository)
             .status()

@@ -49,6 +49,8 @@ tempfile = "3"
 tower = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Bounded Tailscale discovery captures stdout without inheritable pipe readers.
+tempfile = "3"
 bitflags = { workspace = true }
 discord-presence = "3.2.0"
 fff-search = { workspace = true }
@@ -115,6 +117,7 @@ dunce = { workspace = true }
 tinyvec = { version = "1.8.1", features = ["alloc"] }
 windows-sys = { version = "0.60.2", features = [
     "Win32_System_Console",
+    "Win32_System_Com",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_LibraryLoader",

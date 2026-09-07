@@ -688,18 +688,9 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         title: String,
         error: String,
     },
-    /// An auto-completing OAuth `/connect` flow (e.g. OpenAI, GitHub Copilot)
-    /// finished on a background thread — the browser callback was captured and
-    /// the token exchanged/stored.
-    ConnectOauthFinished {
-        provider_name: String,
-        connection_id: Option<String>,
-    },
-    /// An auto-completing OAuth `/connect` flow failed (timed out, cancelled in
-    /// the browser, or the exchange errored).
-    ConnectOauthFailed {
-        provider_name: String,
-        error: String,
+    ConnectCompleted {
+        token: Arc<std::sync::atomic::AtomicBool>,
+        result: Result<connect::ConnectOutcome, String>,
     },
 }
 
@@ -833,6 +824,7 @@ pub struct NeoismAgentPane {
     /// pickers (provider list / auth method / secret entry) is open, carrying
     /// the fetched catalog and the in-progress provider/method selection.
     pub(super) connect: Option<connect::ConnectFlow>,
+    pending_connect: Option<connect::PendingConnect>,
     /// Active inline rename of a `/sessions` picker row: `(session_id,
     /// buffer)`. `Some` diverts typed keys into the buffer until the user
     /// commits (Enter) or cancels (Esc).
@@ -1140,6 +1132,7 @@ impl Default for NeoismAgentPane {
             server: neoism_agent_server(),
             picker: None,
             connect: None,
+            pending_connect: None,
             session_rename: None,
             recent_model_options: Vec::new(),
             skill_options: Vec::new(),

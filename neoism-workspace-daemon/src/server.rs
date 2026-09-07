@@ -265,6 +265,11 @@ async fn agent_proxy_inner(
         )
             .into_response();
     };
+    // No proxy caller (including guests and trust-local clients) can invoke
+    // the daemon-operator association endpoint or receive its signing subject.
+    if path.trim_start_matches('/').starts_with("v2/hosting/") {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let root = match agent_workspace_root(&state.workspaces, &workspace_id) {
         Some(root) => root,
         None => return (StatusCode::NOT_FOUND, "unknown workspace").into_response(),
@@ -272,6 +277,30 @@ async fn agent_proxy_inner(
     let credential =
         match agent_proxy_credential(&state.auth, &headers, &workspace_id, &root) {
             Ok(identity) => identity,
+            Err(_)
+                if headers.get(header::AUTHORIZATION).is_none()
+                    && !handshake::require_auth_enabled()
+                    && !cloud_auth::provision_token_configured()
+                    && state
+                        .workspaces
+                        .get_host_workspace(&workspace_id)
+                        .is_some_and(|workspace| {
+                            workspace.visibility
+                                == neoism_protocol::workspace::WorkspaceVisibility::Shared
+                        }) =>
+            {
+                // Password-free sharing authorizes only an explicitly Shared
+                // workspace, never the daemon's private/project namespaces.
+                let namespace = crate::agent_hosting::namespace(&workspace_id, &root);
+                match mint_agent_credential(
+                    "trust-local".into(),
+                    namespace.as_deref().unwrap_or(&workspace_id),
+                    &root,
+                ) {
+                    Ok(credential) => credential,
+                    Err(response) => return response,
+                }
+            }
             Err(response) => return response,
         };
     crate::agent::ensure_agent_server_started(state.workspaces.clone());
@@ -349,7 +378,8 @@ fn agent_proxy_credential(
     root: &std::path::Path,
 ) -> Result<String, Response> {
     let subject = agent_proxy_principal(auth, headers)?;
-    mint_agent_credential(subject, workspace_id, root)
+    let namespace = crate::agent_hosting::namespace(workspace_id, root);
+    mint_agent_credential(subject, namespace.as_deref().unwrap_or(workspace_id), root)
 }
 
 fn agent_proxy_principal(
@@ -357,6 +387,17 @@ fn agent_proxy_principal(
     headers: &HeaderMap,
 ) -> Result<String, Response> {
     let bearer = cloud_auth::extract_bearer(headers);
+    // Preserve the daemon's global auth policy here. Password-free access to
+    // an explicitly Shared workspace is handled separately by agent_proxy_inner;
+    // it must not authorize private/project namespaces or operator adoption.
+    if bearer.is_none()
+        && headers.get(header::AUTHORIZATION).is_none()
+        && !handshake::require_auth_enabled()
+        && !cloud_auth::provision_token_configured()
+        && !cloud_auth::legacy_daemon_token_configured()
+    {
+        return Ok("trust-local".to_string());
+    }
     let supplied = bearer.as_deref().ok_or_else(|| {
         (StatusCode::UNAUTHORIZED, "missing daemon authentication").into_response()
     })?;
@@ -388,7 +429,7 @@ fn agent_workspace_root(
         .filter(|root| root.is_dir())
 }
 
-fn mint_agent_credential(
+pub(crate) fn mint_agent_credential(
     subject: String,
     workspace_id: &str,
     root: &std::path::Path,
@@ -548,6 +589,8 @@ mod agent_proxy_auth_tests {
 
     #[tokio::test]
     async fn every_agent_proxy_route_rejects_an_unauthenticated_request() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _token = DaemonTokenGuard::set("daemon-test-key");
         let temp = tempfile::tempdir().unwrap();
         let app = router(test_state(AuthService::bootstrap(temp.path()).unwrap()));
         for path in ["/agent", "/agent/", "/agent/v2/sessions"] {
@@ -562,6 +605,21 @@ mod agent_proxy_auth_tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn hosting_association_is_never_available_through_workspace_proxy() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = router(test_state(AuthService::bootstrap(temp.path()).unwrap()));
+        let response = app
+            .oneshot(
+                axum::http::Request::post("/agent/workspaces/any/v2/hosting/associate")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

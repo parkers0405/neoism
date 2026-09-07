@@ -71,11 +71,10 @@ pub(crate) fn generate_client_id() -> u64 {
 }
 
 /// Buffer id scheme shared with the daemon (`crdt_buffer_id_for_path`):
-/// `file://<absolute-path>`. Canonicalized so the markdown pane and an
-/// nvim view of the same file land on the same authoritative document.
+/// `file://<absolute-path>`. Paths stay lexical because a joined path belongs
+/// to the host; resolving it on the guest is both incorrect and can block.
 pub fn buffer_id_for_markdown_path(path: &std::path::Path) -> String {
-    let canonical = canonical_buffer_path(path);
-    format!("file://{}", canonical.to_string_lossy())
+    format!("file://{}", path.to_string_lossy())
 }
 
 /// Virtual CRDT buffer for a notebook's rendered markdown view.
@@ -85,8 +84,7 @@ pub fn buffer_id_for_markdown_path(path: &std::path::Path) -> String {
 /// over this virtual text buffer; `NotebookPane::save()` remains the JSON
 /// writer.
 pub fn buffer_id_for_notebook_render_path(path: &std::path::Path) -> String {
-    let canonical = canonical_buffer_path(path);
-    format!("notebook-render://{}", canonical.to_string_lossy())
+    format!("notebook-render://{}", path.to_string_lossy())
 }
 
 fn canonical_buffer_path(path: &std::path::Path) -> PathBuf {
@@ -635,6 +633,20 @@ mod tests {
         assert_eq!(
             buffer_id_for_notebook_render_path(path),
             "notebook-render:///work/demo.ipynb"
+        );
+    }
+
+    #[test]
+    fn buffer_ids_preserve_remote_paths_lexically() {
+        let path = std::path::Path::new("/home/remote/work/../demo.md");
+
+        assert_eq!(
+            buffer_id_for_markdown_path(path),
+            "file:///home/remote/work/../demo.md"
+        );
+        assert_eq!(
+            buffer_id_for_notebook_render_path(path),
+            "notebook-render:///home/remote/work/../demo.md"
         );
     }
 

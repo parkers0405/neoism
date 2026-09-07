@@ -33,6 +33,7 @@ pub struct TerminalInputBuffer {
     completion_items: Vec<String>,
     completion_detail: Option<String>,
     completion_state: Option<CompletionCycle>,
+    completion_scope: Option<(String, Option<std::path::PathBuf>)>,
     command_blocks: Vec<TerminalCommandBlock>,
     passthrough_session_active: bool,
     /// True once the shell has emitted at least one OSC 133 prompt

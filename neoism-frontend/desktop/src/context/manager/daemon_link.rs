@@ -495,6 +495,19 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// True when the daemon tree says this machine owns `workspace_id`
     /// (or the tree doesn't know it yet — local summaries are ours).
     pub fn workspace_owned_locally(&self, workspace_id: &str) -> bool {
+        if let Some(binding) = self
+            .adopted_workspaces
+            .values()
+            .find(|binding| binding.workspace_id == workspace_id)
+        {
+            return !binding.is_peer;
+        }
+        // Hostnames are labels, not globally unique identities. Two machines
+        // commonly share one after migration or cloning; a peer connection is
+        // positive proof that its workspace is not owned by this desktop.
+        if self.daemon.link_is_peer {
+            return false;
+        }
         let local = self.local_host_id();
         self.daemon
             .cache
@@ -588,6 +601,16 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// times a second. Adopted ids only pass with the tree's explicit
     /// confirmation.
     pub fn may_publish_workspace(&self, workspace_id: &str) -> bool {
+        if let Some(binding) = self
+            .adopted_workspaces
+            .values()
+            .find(|binding| binding.workspace_id == workspace_id)
+        {
+            return !binding.is_peer;
+        }
+        if self.daemon.link_is_peer {
+            return false;
+        }
         let local = self.local_host_id();
         match self
             .daemon

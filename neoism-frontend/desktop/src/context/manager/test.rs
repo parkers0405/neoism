@@ -149,6 +149,41 @@ fn adopted_workspace_identity_survives_active_server_cache_reset() {
 }
 
 #[test]
+fn peer_workspace_is_not_local_when_hostnames_collide() {
+    use neoism_protocol::workspace::{
+        WorkspaceHostKind, WorkspaceSummary, WorkspaceVisibility,
+    };
+
+    let window_id: WindowId = WindowId::from(0);
+    let mut context_manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+    context_manager.daemon.link_is_peer = true;
+    context_manager
+        .daemon
+        .cache
+        .daemon_host_workspaces
+        .push(WorkspaceSummary {
+            id: "same-hostname-peer".to_string(),
+            host_id: context_manager.local_host_id(),
+            title: "Remote".to_string(),
+            host_kind: WorkspaceHostKind::Local,
+            visibility: WorkspaceVisibility::Shared,
+            main_session_id: None,
+            root_dir: Some("/home/user/project".into()),
+            linked_vault_dir: None,
+            notes_vault_dir: None,
+            active_tab_id: None,
+            running_on_host_id: None,
+            controlled_by_host_id: None,
+            layout_snapshot: None,
+            last_active: 0,
+        });
+
+    assert!(!context_manager.workspace_owned_locally("same-hostname-peer"));
+    assert!(!context_manager.may_publish_workspace("same-hostname-peer"));
+}
+
+#[test]
 fn quick_ssh_workspace_is_distinct_from_shared_remote_join() {
     let window_id: WindowId = WindowId::from(0);
     let mut context_manager =

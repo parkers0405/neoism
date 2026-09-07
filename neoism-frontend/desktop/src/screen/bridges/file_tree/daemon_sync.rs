@@ -2,6 +2,89 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 impl Screen<'_> {
+    pub(crate) fn terminal_completion_scope(&self) -> String {
+        // Endpoint + workspace, not host_id: hostnames can collide across peers.
+        format!(
+            "{:?}",
+            (
+                self.context_manager.daemon_endpoint(),
+                self.context_manager.current_adopted_workspace_id(),
+            )
+        )
+    }
+
+    pub(crate) fn request_remote_terminal_completion_dirs(
+        &mut self,
+        cwd: Option<PathBuf>,
+    ) {
+        let Some(cwd) = cwd else { return };
+        let Some((handle, runtime)) =
+            self.context_manager.daemon_link_handle_and_runtime()
+        else {
+            return;
+        };
+        let scope = self.terminal_completion_scope();
+        let route_id = self.context_manager.current().route_id;
+        let text = self
+            .context_manager
+            .current()
+            .terminal_input
+            .text()
+            .to_string();
+        let cursor = self.context_manager.current().terminal_input.cursor_byte();
+        // Lost replies must not suppress subsequent Tabs indefinitely.
+        self.pending_remote_terminal_completions
+            .retain(|_, pending| {
+                pending.requested_at.elapsed() < std::time::Duration::from_secs(10)
+            });
+        for dir in
+            neoism_ui::terminal_blocks::completion::drain_joined_dir_requests(&scope)
+        {
+            if self
+                .pending_remote_terminal_completions
+                .values()
+                .any(|pending| {
+                    pending.route_id == route_id
+                        && pending.scope == scope
+                        && pending.dir == dir
+                        && pending.cwd == cwd
+                        && pending.text == text
+                        && pending.cursor == cursor
+                })
+            {
+                continue;
+            }
+            let request_id = handle.allocate_request_id();
+            self.pending_remote_terminal_completions.insert(
+                request_id,
+                RemoteTerminalCompletion {
+                    route_id,
+                    scope: scope.clone(),
+                    dir: dir.clone(),
+                    cwd: cwd.clone(),
+                    text: text.clone(),
+                    cursor,
+                    requested_at: std::time::Instant::now(),
+                },
+            );
+            let handle = handle.clone();
+            let cwd = cwd.clone();
+            runtime.spawn(async move {
+                let _ = handle.send_files_with_request_id(
+                    request_id,
+                    if dir.starts_with("~") {
+                        neoism_protocol::files::FilesClientMessage::ListBrowserLocations
+                    } else {
+                            neoism_protocol::files::FilesClientMessage::ListDir {
+                                path: String::new(),
+                            }
+                        },
+                        Some(if dir.starts_with("~") { cwd } else { dir }),
+                ).await;
+            });
+        }
+    }
+
     pub(crate) fn populate_file_tree_from_dir(&mut self, root: &Path) {
         self.sync_file_tree_remote_mode(root);
         self.renderer.file_tree.populate_from_dir(root);
@@ -507,6 +590,80 @@ impl Screen<'_> {
         let notes_listing = self.pending_remote_notes_listing.remove(&request_id);
         let notes_create_vault = self.pending_remote_notes_creates.remove(&request_id);
         let notes_mutation = self.pending_remote_notes_mutations.remove(&request_id);
+        let terminal_completion =
+            self.pending_remote_terminal_completions.remove(&request_id);
+        // Consume only our replies, including obsolete/error replies. Never seed
+        // the path-only link cache with data from a joined peer.
+        if let Some(RemoteTerminalCompletion {
+            route_id,
+            scope,
+            dir,
+            cwd,
+            text,
+            cursor,
+            ..
+        }) = terminal_completion
+        {
+            if !self.context_manager.current_workspace_is_remote_joined()
+                || self.terminal_completion_scope() != scope
+                || self.context_manager.current().route_id != route_id
+                || self.current_terminal_completion_cwd().as_ref() != Some(&cwd)
+                || self.context_manager.current().terminal_input.text() != text
+                || self.context_manager.current().terminal_input.cursor_byte() != cursor
+            {
+                return true;
+            }
+            match message {
+                FilesServerMessage::BrowserLocations { locations } => {
+                    let home = locations.iter().find(|location| {
+                        location.kind == neoism_protocol::files::FileLocationKind::Home
+                    });
+                    if let (Some(home), Some((handle, runtime))) =
+                        (home, self.context_manager.daemon_link_handle_and_runtime())
+                    {
+                        let Ok(suffix) = dir.strip_prefix("~") else {
+                            return true;
+                        };
+                        let path = PathBuf::from(&home.path).join(suffix);
+                        let request_id = handle.allocate_request_id();
+                        self.pending_remote_terminal_completions.insert(
+                            request_id,
+                            RemoteTerminalCompletion {
+                                route_id,
+                                scope,
+                                dir,
+                                cwd: cwd.clone(),
+                                text,
+                                cursor,
+                                requested_at: std::time::Instant::now(),
+                            },
+                        );
+                        runtime.spawn(async move {
+                            let _ = handle.send_files_with_request_id(request_id,
+                                neoism_protocol::files::FilesClientMessage::BrowserListDir {
+                                    path: path.to_string_lossy().into_owned(),
+                                }, Some(cwd)).await;
+                        });
+                    }
+                }
+                FilesServerMessage::DirListing { entries, .. } => {
+                    let listing = entries
+                        .iter()
+                        .map(|entry| (entry.name.clone(), entry.is_dir))
+                        .collect();
+                    neoism_ui::terminal_blocks::completion::seed_joined_dir_listing(
+                        &scope, dir, listing,
+                    );
+                    self.context_manager
+                        .current_mut()
+                        .terminal_input
+                        .complete_or_accept_host(Some(&cwd), &scope);
+                    self.mark_dirty();
+                }
+                _ => {}
+            }
+            return true;
+        }
         match message {
             // A note just created in the host's linked vault: the reply
             // path is vault-relative, so join it onto the vault root (NOT

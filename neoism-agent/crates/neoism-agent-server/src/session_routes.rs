@@ -100,6 +100,19 @@ pub(crate) async fn session_create(
             crate::caller::TENANT_EXTRA_KEY.to_string(),
             Value::String(claims.tenant_id.clone()),
         );
+        if let Some(parent_id) = request.parent_id.as_ref() {
+            let parent = state
+                .inner
+                .store
+                .get_session(parent_id.as_str())
+                .await?
+                .ok_or_else(|| ApiError::not_found("Parent session not found"))?;
+            if !crate::caller::allows_session(&claims, &parent) {
+                return Err(ApiError::forbidden(
+                    "Parent session is outside the caller's workspace",
+                ));
+            }
+        }
         bind_authenticated_workspace(&mut request, &claims)?;
     }
     Ok(Json(
@@ -130,7 +143,7 @@ fn bind_authenticated_workspace(
 pub(crate) async fn create_session_in_directory(
     state: &AppState,
     directory: &str,
-    request: CreateSessionRequest,
+    mut request: CreateSessionRequest,
     mut extra: BTreeMap<String, Value>,
 ) -> Result<SessionInfo, ApiError> {
     let now = now_millis();
@@ -160,6 +173,24 @@ pub(crate) async fn create_session_in_directory(
             .await?
             .ok_or_else(|| ApiError::not_found("Parent session not found"))?;
         let parent_tenant = crate::caller::session_tenant(&parent);
+        let local_continuation = request.workspace_id.is_none()
+            && extra
+                .get(crate::caller::TENANT_EXTRA_KEY)
+                .and_then(Value::as_str)
+                .unwrap_or("local")
+                == "local"
+            && parent
+                .extra
+                .get(crate::caller::HOST_LOCAL_ACCESS_KEY)
+                .and_then(Value::as_bool)
+                == Some(true);
+        if local_continuation {
+            request.workspace_id = parent.workspace_id.clone();
+            extra.insert(
+                crate::caller::TENANT_EXTRA_KEY.into(),
+                Value::String(parent_tenant.into()),
+            );
+        }
         if let Some(tenant) = extra
             .get(crate::caller::TENANT_EXTRA_KEY)
             .and_then(Value::as_str)

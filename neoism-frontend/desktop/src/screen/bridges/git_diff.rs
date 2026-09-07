@@ -345,8 +345,14 @@ impl Screen<'_> {
         let _ = self.sync_workspace_root_from_active_pane();
         let target_route = self.finder_target_route_for_current_focus();
         let cwd = self.finder_cwd(target_route);
-        let repo_root = neoism_ui::panels::git_branch::repo_root_for(&cwd);
-        let branch = neoism_ui::panels::git_branch::branch_for(&cwd);
+        let (repo_root, branch) = if self.context_manager.current_workspace_is_remote_joined() {
+            (None, None)
+        } else {
+            (
+                neoism_ui::panels::git_branch::repo_root_for(&cwd),
+                neoism_ui::panels::git_branch::branch_for(&cwd),
+            )
+        };
         self.renderer.file_tree.set_focused(false);
         self.renderer.git_diff_panel.toggle(repo_root, branch);
         self.reapply_chrome_layout();
@@ -363,8 +369,14 @@ impl Screen<'_> {
         let _ = self.sync_workspace_root_from_active_pane();
         let target_route = self.finder_target_route_for_current_focus();
         let cwd = self.finder_cwd(target_route);
-        let repo_root = neoism_ui::panels::git_branch::repo_root_for(&cwd);
-        let branch = neoism_ui::panels::git_branch::branch_for(&cwd);
+        let (repo_root, branch) = if self.context_manager.current_workspace_is_remote_joined() {
+            (None, None)
+        } else {
+            (
+                neoism_ui::panels::git_branch::repo_root_for(&cwd),
+                neoism_ui::panels::git_branch::branch_for(&cwd),
+            )
+        };
         self.renderer.file_tree.set_focused(false);
         self.renderer.git_diff_panel.open(repo_root, branch);
         self.reapply_chrome_layout();

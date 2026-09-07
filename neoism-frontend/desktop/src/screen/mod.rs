@@ -628,6 +628,16 @@ struct ChromeLayoutSignature {
     pane_breadcrumb_count: usize,
 }
 
+struct RemoteTerminalCompletion {
+    route_id: usize,
+    scope: String,
+    dir: PathBuf,
+    cwd: PathBuf,
+    text: String,
+    cursor: usize,
+    requested_at: std::time::Instant,
+}
+
 pub struct Screen<'screen> {
     bindings: crate::bindings::KeyBindings,
     mouse_bindings: Vec<MouseBinding>,
@@ -796,6 +806,9 @@ pub struct Screen<'screen> {
     /// these ids drive toasts + re-lists; unknown ids are listing
     /// traffic and stay quiet.
     pending_remote_file_ops: std::collections::HashSet<u64>,
+    /// Host directory listings requested by joined-terminal Tab completion.
+    /// The snapshot prevents a delayed reply from editing newer input.
+    pending_remote_terminal_completions: HashMap<u64, RemoteTerminalCompletion>,
     /// In-flight daemon `ReadFile` fetches for markdown panes opened in
     /// a joined workspace (the bytes only exist on the host), by request
     /// id → pane path. The correlated `FileContent` reply fills the pane.
@@ -1805,6 +1818,7 @@ impl Screen<'_> {
             pending_workspace_subscription: None,
             pending_workspace_unsubscriptions: Vec::new(),
             pending_remote_file_ops: std::collections::HashSet::new(),
+            pending_remote_terminal_completions: HashMap::new(),
             pending_remote_markdown_opens: HashMap::new(),
             pending_remote_code_opens: HashMap::new(),
             markdown_cover_cache: HashMap::new(),

@@ -19,6 +19,7 @@ impl Screen<'_> {
         let theme = self.renderer.theme;
         let markdown_font_scale = self.renderer.chrome_scale();
         let spellcheck_enabled = self.renderer.markdown_spellcheck;
+        let remote_joined = self.context_manager.current_workspace_is_remote_joined();
         let window_size = self.sugarloaf.window_size();
         let text_occlusions = self.renderer.active_text_occlusion_rects(
             window_size.width,
@@ -292,7 +293,7 @@ impl Screen<'_> {
                         12,
                     );
                 }
-            } else {
+            } else if !remote_joined {
                 self.ensure_ink_overlay(&path);
                 if let Some((_, Some(scene))) = self.ink_overlay_cache.get(&path) {
                     let cam = Camera {

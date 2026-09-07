@@ -57,10 +57,11 @@ pub(crate) async fn artifact_create(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let session_id = header_text(&headers, "x-neoism-session-id");
-    let tenant_id = claims
+    let mut tenant_id = claims
         .as_ref()
         .map(|Extension(claims)| claims.tenant_id.as_str())
-        .unwrap_or("local");
+        .unwrap_or("local")
+        .to_string();
     if let Some(session_id) = session_id.as_deref() {
         let session = state
             .inner
@@ -68,9 +69,21 @@ pub(crate) async fn artifact_create(
             .get_session(session_id)
             .await?
             .ok_or_else(|| ApiError::not_found("Session not found"))?;
-        if crate::caller::session_tenant(&session) != tenant_id {
+        let allowed = claims
+            .as_ref()
+            .map(|Extension(claims)| crate::caller::allows_session(claims, &session))
+            .unwrap_or_else(|| {
+                crate::caller::session_tenant(&session) == "local"
+                    || session
+                        .extra
+                        .get(crate::caller::HOST_LOCAL_ACCESS_KEY)
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            });
+        if !allowed {
             return Err(ApiError::forbidden("Session belongs to another tenant"));
         }
+        tenant_id = crate::caller::session_tenant(&session).to_string();
     }
     let id = Id::ascending(IdKind::Artifact).to_string();
     let sha256 = format_hash(Sha256::digest(&body));
@@ -99,7 +112,7 @@ pub(crate) async fn artifact_create(
     if let Err(error) = state
         .inner
         .store
-        .insert_artifact(&artifact, tenant_id)
+        .insert_artifact(&artifact, &tenant_id)
         .await
     {
         let _ = tokio::fs::remove_file(path).await;
@@ -120,10 +133,17 @@ pub(crate) async fn artifact_list(
             query.session_id.as_deref(),
             claims
                 .as_ref()
+                .filter(|_| query.session_id.is_none())
                 .map(|Extension(claims)| claims.tenant_id.as_str()),
         )
         .await?;
     for artifact in &mut artifacts {
+        authorize_artifact(
+            &state,
+            &artifact.id,
+            claims.as_ref().map(|Extension(claims)| claims),
+        )
+        .await?;
         artifact.download_url = format!("/v2/artifacts/{}/content", artifact.id);
     }
     Ok(Json(artifacts))
@@ -215,7 +235,30 @@ async fn authorize_artifact(
         .await?
         .ok_or_else(|| ApiError::not_found("Artifact not found"))?;
     if tenant != claims.tenant_id {
-        return Err(ApiError::forbidden("Artifact belongs to another tenant"));
+        let artifact = state
+            .inner
+            .store
+            .get_artifact(id)
+            .await?
+            .ok_or_else(|| ApiError::not_found("Artifact not found"))?;
+        let session = match artifact.session_id.as_deref() {
+            Some(id) => state.inner.store.get_session(id).await?,
+            None => None,
+        };
+        let shared = session.as_ref().is_some_and(|session| {
+            // Only artifacts originally local (or owned by this exact adopted
+            // namespace) follow the authoritative hosting association.
+            (tenant == "local" || tenant == crate::caller::session_tenant(session))
+                && session
+                    .extra
+                    .get(crate::caller::HOST_LOCAL_ACCESS_KEY)
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && crate::caller::allows_session(claims, session)
+        });
+        if !shared {
+            return Err(ApiError::forbidden("Artifact belongs to another tenant"));
+        }
     }
     if let Some(days) = claims.artifact_retention_days {
         let artifact = state

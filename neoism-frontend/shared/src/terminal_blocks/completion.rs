@@ -14,6 +14,9 @@ thread_local! {
     /// drains these, fetches the listing from the daemon, seeds the
     /// cache, and the next Tab press completes.
     static HOST_DIR_REQUESTS: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+    // Joined desktops never consult or seed the legacy path-only web namespace.
+    static JOINED_DIR_CACHE: RefCell<HashMap<(String, PathBuf), (Instant, Vec<(String, bool)>)>> = RefCell::new(HashMap::new());
+    static JOINED_DIR_REQUESTS: RefCell<Vec<(String, PathBuf)>> = RefCell::new(Vec::new());
 }
 
 /// Store a host-resolved directory listing for Tab completion.
@@ -26,6 +29,34 @@ pub fn seed_host_dir_listing(dir: PathBuf, entries: Vec<(String, bool)>) {
 /// Drain directories Tab completion wanted but had no listing for.
 pub fn drain_host_dir_requests() -> Vec<PathBuf> {
     HOST_DIR_REQUESTS.with(|requests| std::mem::take(&mut *requests.borrow_mut()))
+}
+
+/// Joined desktops use a separate namespace from the legacy web cache. The
+/// caller supplies the owning daemon/workspace identity, never a hostname label.
+pub fn seed_joined_dir_listing(scope: &str, dir: PathBuf, entries: Vec<(String, bool)>) {
+    JOINED_DIR_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert((scope.to_owned(), dir), (Instant::now(), entries));
+    });
+}
+
+pub fn drain_joined_dir_requests(scope: &str) -> Vec<PathBuf> {
+    JOINED_DIR_REQUESTS.with(|requests| {
+        let mut requests = requests.borrow_mut();
+        let mut dirs = Vec::new();
+        requests.retain(|(owner, dir)| {
+            if owner == scope {
+                dirs.push(dir.clone());
+                false
+            } else {
+                true
+            }
+        });
+        dirs
+    })
 }
 
 pub const COMPLETION_LIMIT: usize = 256;
@@ -93,26 +124,72 @@ pub fn completion_candidates(
     directories_only: bool,
     cwd: Option<&Path>,
 ) -> Vec<CompletionCandidate> {
+    completion_candidates_with_source(
+        token,
+        command_prefix,
+        command_position,
+        directories_only,
+        cwd,
+        None,
+    )
+}
+
+/// Completion for a filesystem owned by another host. Dynamic candidates are
+/// restricted to daemon-seeded directory listings, never the guest's disk.
+pub fn completion_candidates_host(
+    token: &str,
+    command_prefix: &str,
+    command_position: bool,
+    directories_only: bool,
+    cwd: Option<&Path>,
+    scope: &str,
+) -> Vec<CompletionCandidate> {
+    completion_candidates_with_source(
+        token,
+        command_prefix,
+        command_position,
+        directories_only,
+        cwd,
+        Some(scope),
+    )
+}
+
+fn completion_candidates_with_source(
+    token: &str,
+    command_prefix: &str,
+    command_position: bool,
+    directories_only: bool,
+    cwd: Option<&Path>,
+    host_scope: Option<&str>,
+) -> Vec<CompletionCandidate> {
+    let host_only = host_scope.is_some();
     let mut candidates = Vec::new();
-    if command_position && !token.contains('/') {
+    if !host_only && command_position && !token.contains('/') {
         candidates.extend(command_completion_candidates(token));
     }
     let argument_policy = argument_completion_policy(command_prefix);
-    candidates.extend(command_argument_completion_candidates(
-        token,
-        command_prefix,
-        directories_only,
-        cwd,
-    ));
+    if !host_only {
+        candidates.extend(command_argument_completion_candidates(
+            token,
+            command_prefix,
+            directories_only,
+            cwd,
+        ));
+    }
     let git_branch_context = git_branch_completion_context(command_prefix);
-    if git_subcommand_completion_context(command_prefix) {
+    if !host_only && git_subcommand_completion_context(command_prefix) {
         candidates.extend(git_subcommand_completion_candidates(token));
     }
-    if git_branch_context {
+    if !host_only && git_branch_context {
         candidates.extend(git_branch_completion_candidates(token, cwd));
     }
     if !git_branch_context && argument_policy.allows_path_completion(token) {
-        candidates.extend(path_completion_candidates(token, cwd, directories_only));
+        candidates.extend(path_completion_candidates(
+            token,
+            cwd,
+            directories_only,
+            host_scope,
+        ));
     }
 
     candidates.sort_by(|a, b| {
@@ -1249,11 +1326,33 @@ fn path_completion_candidates(
     token: &str,
     cwd: Option<&Path>,
     directories_only: bool,
+    host_scope: Option<&str>,
 ) -> Vec<CompletionCandidate> {
-    let (dir_token, name_prefix) = split_completion_path(token);
+    let host_only = host_scope.is_some();
+    let (dir_token, name_prefix) = if host_only && token == "~" {
+        ("~/", "")
+    } else {
+        split_completion_path(token)
+    };
     let dir_lookup = shell_unescape_token(dir_token);
     let name_lookup = shell_unescape_token(name_prefix);
-    let base_dir = completion_base_dir(&dir_lookup, cwd);
+    let base_dir = if host_only {
+        // Tilde stays symbolic until the daemon advertises its Home location.
+        // Never consult guest HOME, cwd, metadata, or executable search paths.
+        let path = Path::new(&dir_lookup);
+        if dir_lookup.starts_with('~') && !dir_lookup.starts_with("~/") {
+            // The protocol advertises the daemon user's Home, not ~other users.
+            return Vec::new();
+        }
+        if dir_lookup.starts_with("~/") || path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            let Some(cwd) = cwd else { return Vec::new() };
+            cwd.join(path)
+        }
+    } else {
+        completion_base_dir(&dir_lookup, cwd)
+    };
     let push_candidate =
         |out: &mut Vec<CompletionCandidate>, name: &str, is_dir: bool| {
             if name.starts_with('.') && !name_lookup.starts_with('.') {
@@ -1275,7 +1374,11 @@ fn path_completion_candidates(
             } else {
                 format!("{}{}", dir_token, shell_escape_path_segment(name))
             };
-            let detail = path_completion_detail(&base_dir.join(name), is_dir);
+            let detail = if host_only {
+                is_dir.then(|| "Directory".to_string())
+            } else {
+                path_completion_detail(&base_dir.join(name), is_dir)
+            };
             out.push(CompletionCandidate {
                 replacement,
                 label,
@@ -1292,32 +1395,60 @@ fn path_completion_candidates(
         };
 
     let mut out = Vec::new();
-    match std::fs::read_dir(&base_dir) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let is_dir = entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false);
-                push_candidate(&mut out, &name, is_dir);
+    let cached = || HOST_DIR_CACHE.with(|cache| cache.borrow().get(&base_dir).cloned());
+    let queue_host_request = || {
+        HOST_DIR_REQUESTS.with(|requests| {
+            let mut requests = requests.borrow_mut();
+            if !requests.contains(&base_dir) {
+                requests.push(base_dir.clone());
             }
-        }
-        Err(_) => {
-            // No local fs (wasm) — consult the host-seeded cache and
-            // queue a fetch when the listing isn't there yet.
-            let cached =
-                HOST_DIR_CACHE.with(|cache| cache.borrow().get(&base_dir).cloned());
-            match cached {
-                Some(entries) => {
-                    for (name, is_dir) in &entries {
-                        push_candidate(&mut out, name, *is_dir);
-                    }
+        });
+    };
+    if let Some(scope) = host_scope {
+        let key = (scope.to_owned(), base_dir.clone());
+        // Brief caching makes repeated Tab cheap without hiding newly-created
+        // host files forever (or retaining an old listing across reconnects).
+        let entries = JOINED_DIR_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .get(&key)
+                .filter(|(at, _)| at.elapsed() < web_time::Duration::from_secs(5))
+                .map(|(_, entries)| entries.clone())
+        });
+        match entries {
+            Some(entries) => {
+                for (name, is_dir) in &entries {
+                    push_candidate(&mut out, name, *is_dir);
                 }
-                None => {
-                    HOST_DIR_REQUESTS.with(|requests| {
-                        let mut requests = requests.borrow_mut();
-                        if !requests.contains(&base_dir) {
-                            requests.push(base_dir.clone());
+            }
+            None => JOINED_DIR_REQUESTS.with(|requests| {
+                let mut requests = requests.borrow_mut();
+                if !requests.contains(&key) {
+                    requests.push(key);
+                }
+            }),
+        }
+    } else {
+        match std::fs::read_dir(&base_dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let is_dir = entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false);
+                    push_candidate(&mut out, &name, is_dir);
+                }
+            }
+            Err(_) => {
+                // No local fs (wasm) — consult the host-seeded cache and
+                // queue a fetch when the listing isn't there yet.
+                match cached() {
+                    Some(entries) => {
+                        for (name, is_dir) in &entries {
+                            push_candidate(&mut out, name, *is_dir);
                         }
-                    });
+                    }
+                    None => {
+                        queue_host_request();
+                    }
                 }
             }
         }

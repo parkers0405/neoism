@@ -403,6 +403,20 @@ impl Screen<'_> {
         // `process_window_server_requests` reads it back and persists it onto
         // the SavedServer so a later dead-daemon dial can rehost it.
         write_hosted_sidecar(&spec);
+        for context in self
+            .context_manager
+            .current_grid_mut()
+            .contexts_mut()
+            .values_mut()
+        {
+            if let Some(agent) = context.context_mut().neoism_agent.as_ref() {
+                agent.remember_hosted_selection(&dir, port);
+            }
+        }
+        // Prefer the focused conversation if there are several Agent panes.
+        if let Some(agent) = self.context_manager.current().neoism_agent.as_ref() {
+            agent.remember_hosted_selection(&dir, port);
+        }
 
         // Co-hosted agent on port + 1 (the convention joined clients
         // derive). Missing binary just means no remote agent — the

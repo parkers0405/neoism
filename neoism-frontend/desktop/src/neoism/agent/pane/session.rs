@@ -1,6 +1,40 @@
 use super::*;
 
+// An explicit Create Server handoff only; ordinary server switches must still
+// discard all cached history. Selection is reloaded through hosted authorization.
+static HOSTED_SELECTIONS: std::sync::OnceLock<Mutex<HashMap<(String, PathBuf), String>>> =
+    std::sync::OnceLock::new();
+
 impl NeoismAgentPane {
+    pub(crate) fn remember_hosted_selection(&self, directory: &Path, port: u16) {
+        if self.server.trim_end_matches('/')
+            != neoism_agent_server().trim_end_matches('/')
+        {
+            return;
+        }
+        let (Some(session), Some(pane_directory)) =
+            (self.session_id.as_ref(), self.directory.as_ref())
+        else {
+            return;
+        };
+        let (Ok(root), Ok(pane_root)) = (
+            std::fs::canonicalize(directory),
+            std::fs::canonicalize(pane_directory),
+        ) else {
+            return;
+        };
+        if root == pane_root {
+            HOSTED_SELECTIONS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .insert(
+                    (format!("http://127.0.0.1:{port}"), PathBuf::from(pane_directory)),
+                    session.clone(),
+                );
+        }
+    }
+
     pub fn switch_server(&mut self, server: String) {
         let server = server.trim_end_matches('/').to_string();
         if self.server == server {
@@ -15,6 +49,22 @@ impl NeoismAgentPane {
         // selected host as well; joined panes otherwise stay on
         // "server default" / "none" while the host uses its configured model.
         self.apply_config_defaults();
+        let selected =
+            self.server
+                .split_once("/agent/workspaces/")
+                .and_then(|(base, _)| {
+                    // This directory can belong to a remote host. Match the
+                    // remembered local selection lexically; never probe it here.
+                    let directory = PathBuf::from(self.directory.as_ref()?);
+                    HOSTED_SELECTIONS
+                        .get()?
+                        .lock()
+                        .ok()?
+                        .remove(&(base.to_string(), directory))
+                });
+        if let Some(session) = selected {
+            self.switch_session(session);
+        }
         // Keep server switching off the UI thread. The next visible sidebar
         // render calls `maybe_refresh_side_panel_sessions`, which paints its
         // unloaded skeleton immediately and hydrates the host's chats through

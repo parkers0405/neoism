@@ -391,10 +391,8 @@ impl Screen<'_> {
             "open_or_adopt_daemon_workspace",
         );
         if let Some(index) = matched_index {
-            if replacement_source.is_some() {
-                self.context_manager
-                    .rebind_adopted_workspace_at(index, &workspace_id);
-            }
+            self.context_manager
+                .rebind_adopted_workspace_at(index, &workspace_id);
             // A match on the CURRENT grid while that grid isn't actually
             // this daemon workspace is a FALSE positive (a guest sitting
             // on a local grid whose synthetic id collided): treat it as

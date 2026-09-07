@@ -10,6 +10,7 @@ name = "neoism-workspace-daemon"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 neoism-protocol = { workspace = true }
 neoism-ui = { workspace = true }
 neoism-backend = { workspace = true }

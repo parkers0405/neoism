@@ -759,6 +759,113 @@ fn git_branch_completion_uses_local_and_remote_refs() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn host_completion_never_reads_a_conflicting_local_directory() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-host-completion-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("local-only")).unwrap();
+    super::super::completion::seed_joined_dir_listing(
+        "test-host",
+        root.clone(),
+        vec![("remote-only".to_string(), true)],
+    );
+
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("cd ");
+    assert!(input.complete_or_accept_host(Some(&root), "test-host"));
+    assert_eq!(input.text(), "cd remote-only/");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn host_completion_cache_miss_does_not_fall_back_to_guest_disk() {
+    use super::super::completion::{
+        completion_candidates_host, drain_joined_dir_requests,
+    };
+    let root =
+        std::env::temp_dir().join(format!("neoism-host-miss-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("guest-only")).unwrap();
+    assert!(
+        completion_candidates_host("", "cd ", false, true, Some(&root), "miss-host")
+            .is_empty()
+    );
+    assert_eq!(drain_joined_dir_requests("miss-host"), vec![root.clone()]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn host_completion_isolates_hosts_and_invalidates_cycles_on_cwd_switch() {
+    use super::super::completion::seed_joined_dir_listing;
+    let cwd = std::path::Path::new("/host/project");
+    let other_cwd = std::path::Path::new("/host/other");
+    seed_joined_dir_listing(
+        "host-a",
+        cwd.into(),
+        vec![("a-one".into(), true), ("a-two".into(), true)],
+    );
+    seed_joined_dir_listing("host-b", cwd.into(), vec![("a-remote".into(), true)]);
+    seed_joined_dir_listing("host-a", other_cwd.into(), vec![("a-other".into(), true)]);
+    for (scope, directory, expected) in [
+        ("host-b", cwd, "cd a-remote/"),
+        ("host-a", other_cwd, "cd a-other/"),
+    ] {
+        let mut input = TerminalInputBuffer::default();
+        input.insert_str("cd a");
+        assert!(input.complete_or_accept_host(Some(cwd), "host-a"));
+        assert_eq!(input.text(), "cd a-");
+        assert!(input.complete_or_accept_host(Some(directory), scope));
+        assert_eq!(input.text(), expected);
+    }
+}
+
+#[test]
+fn host_completion_tilde_stays_symbolic_until_host_listing_arrives() {
+    use super::super::completion::{
+        completion_candidates_host, drain_joined_dir_requests, seed_joined_dir_listing,
+    };
+    let cwd = std::path::Path::new("/host/project");
+    for token in ["~", "~/", "~/Documents/"] {
+        assert!(completion_candidates_host(
+            token,
+            "cd ",
+            false,
+            true,
+            Some(cwd),
+            "tilde-host"
+        )
+        .is_empty());
+        let expected = if token == "~" { "~/" } else { token };
+        assert_eq!(
+            drain_joined_dir_requests("tilde-host"),
+            vec![std::path::PathBuf::from(expected)]
+        );
+    }
+    seed_joined_dir_listing("tilde-host", "~/".into(), vec![("Documents".into(), true)]);
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("cd ~");
+    assert!(input.complete_or_accept_host(Some(cwd), "tilde-host"));
+    assert_eq!(input.text(), "cd ~/Documents/");
+    // Requests and listings from another endpoint with the same path stay isolated.
+    assert!(completion_candidates_host(
+        "~/",
+        "cd ",
+        false,
+        true,
+        Some(cwd),
+        "other-tilde-host"
+    )
+    .is_empty());
+    assert!(drain_joined_dir_requests("tilde-host").is_empty());
+    assert_eq!(
+        drain_joined_dir_requests("other-tilde-host"),
+        vec![std::path::PathBuf::from("~/")]
+    );
+}
+
 fn snapshot(
     idx: usize,
     output_start: usize,

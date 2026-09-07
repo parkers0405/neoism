@@ -44,7 +44,7 @@ pub(crate) fn neoism_agent_server() -> String {
 /// `ContextManager::agent_server_override_for_current`).
 pub(crate) fn agent_reverse_proxy_for_daemon_endpoint(endpoint: &str) -> Option<String> {
     let mut endpoint = url::Url::parse(endpoint.trim()).ok()?;
-    if endpoint.path() != "/session" {
+    if !matches!(endpoint.path(), "" | "/" | "/session" | "/session/") {
         return None;
     }
     let scheme = match endpoint.scheme() {
@@ -743,7 +743,7 @@ mod subagent_runtime_snapshot_tests {
     }
 
     #[test]
-    fn daemon_endpoint_conversion_requires_explicit_session_path() {
+    fn daemon_endpoint_conversion_accepts_normalized_and_root_paths() {
         assert_eq!(
             agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878/session"),
             Some("http://127.0.0.1:7878/agent".to_string())
@@ -754,11 +754,11 @@ mod subagent_runtime_snapshot_tests {
         );
         assert_eq!(
             agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878"),
-            None
+            Some("http://127.0.0.1:7878/agent".to_string())
         );
         assert_eq!(
             agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878/session/"),
-            None
+            Some("http://127.0.0.1:7878/agent".to_string())
         );
         assert_eq!(
             agent_reverse_proxy_for_daemon_workspace(

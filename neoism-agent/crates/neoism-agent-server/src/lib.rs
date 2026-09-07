@@ -94,6 +94,7 @@ mod tool_selection;
 mod utility_runtime;
 mod v2_routes;
 pub(crate) mod windows_process;
+mod hosting;
 mod workflow;
 mod workspace_runtime;
 

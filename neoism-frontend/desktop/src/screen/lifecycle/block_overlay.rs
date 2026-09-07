@@ -998,17 +998,33 @@ impl Screen<'_> {
                 self.context_manager.current_mut().terminal_input.delete();
             }
             Key::Named(NamedKey::Tab) => {
+                let cwd = self.current_terminal_completion_cwd();
+                let scope = self
+                    .context_manager
+                    .current_workspace_is_remote_joined()
+                    .then(|| self.terminal_completion_scope());
+                self.context_manager
+                    .current_mut()
+                    .terminal_input
+                    .sync_completion_scope(cwd.as_deref(), scope.as_deref());
                 if mods.shift_key() {
                     self.context_manager
                         .current_mut()
                         .terminal_input
                         .completion_previous();
                 } else {
-                    let cwd = self.current_terminal_completion_cwd();
-                    self.context_manager
-                        .current_mut()
-                        .terminal_input
-                        .complete_or_accept(cwd.as_deref());
+                    if let Some(scope) = scope {
+                        self.context_manager
+                            .current_mut()
+                            .terminal_input
+                            .complete_or_accept_host(cwd.as_deref(), &scope);
+                        self.request_remote_terminal_completion_dirs(cwd);
+                    } else {
+                        self.context_manager
+                            .current_mut()
+                            .terminal_input
+                            .complete_or_accept(cwd.as_deref());
+                    }
                 }
             }
             Key::Named(NamedKey::ArrowLeft) => {

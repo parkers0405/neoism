@@ -3093,6 +3093,37 @@ fn switching_to_joined_agent_server_reloads_that_hosts_defaults() {
 }
 
 #[test]
+fn explicit_hosting_handoff_preserves_selection_but_not_local_cached_history() {
+    let root = std::env::temp_dir()
+        .join(format!("neoism-host-selection-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut local =
+        NeoismAgentPane::with_directory(Some(root.to_string_lossy().into_owned()));
+    local.session_id = Some("ses_host_continuity".into());
+    local.remember_hosted_selection(&root, 9898);
+    // Server switching must not require the guest filesystem to resolve the
+    // host's path. The remembered selection is sufficient even without it.
+    std::fs::remove_dir_all(&root).unwrap();
+    let mut joined =
+        NeoismAgentPane::with_directory(Some(root.to_string_lossy().into_owned()));
+    joined.switch_server("http://127.0.0.1:9898/agent/workspaces/hosted".into());
+    assert_eq!(
+        joined.pending_session_switch.as_deref(),
+        Some("ses_host_continuity")
+    );
+    assert!(joined.messages.is_empty());
+    assert!(
+        joined.session_id.is_none(),
+        "selection waits for authorized hosted hydration"
+    );
+    let mut unrelated =
+        NeoismAgentPane::with_directory(Some(root.to_string_lossy().into_owned()));
+    unrelated.switch_server("http://127.0.0.1:9899/agent/workspaces/other".into());
+    assert!(unrelated.pending_session_switch.is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn permission_reply_queues_outbound_command_for_runtime() {
     let mut pane = NeoismAgentPane::default();
     pane.pending_permission = Some(test_permission(0));

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub(crate) const HOST_LOCAL_ACCESS_KEY: &str = "neoismHostLocalAccess";
 pub(crate) const TENANT_EXTRA_KEY: &str = "neoismTenantId";
 
 #[derive(Clone, Debug)]
@@ -360,6 +361,17 @@ pub(crate) fn allows_session(
     claims: &CallerClaims,
     session: &neoism_agent_core::SessionInfo,
 ) -> bool {
+    if !claims.hosted
+        && claims.workspace_id.is_none()
+        && claims.tenant_id == "local"
+        && session
+            .extra
+            .get(HOST_LOCAL_ACCESS_KEY)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return allows_directory(claims, &session.directory);
+    }
     claims.workspace_id.as_ref().is_none_or(|workspace_id| {
         session
             .workspace_id

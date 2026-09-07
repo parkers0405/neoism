@@ -220,3 +220,4 @@
 - [PowerShell ConPTY OSC terminator failure](bug_windows_powershell_osc_terminators.md) - Reproduced PowerShell lifecycle failure: Wine ConPTY strips BEL OSC terminators; ST fixes ls/clear/sleep/error tests without changing Unix hooks
 - [Windows modals on breadcrumb — anchor geometry fixed](bug_windows_modal_breadcrumb_anchor.md) - Windows-only correction of shared desktop modal anchor: omitted chrome bands + logical/DPI mismatch; other OS math preserved; 40 policy tests and native/xwin checks pass
 - [Theme picker typing panic — FIXED](bug_theme_picker_stale_query_cursor.md) - Theme input panic from stale byte cursor after enter_themes_mode cleared query; reproduced and reset cursor, shared all-platform fix
+- [Host chat continuity: explicit directory association](bug_host_chat_continuity.md) - Create Server associates exact local directory history with persistent hosted Agent namespace; selected ID reload; scoped operator-only boundary; tests passed

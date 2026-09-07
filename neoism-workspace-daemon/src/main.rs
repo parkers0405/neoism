@@ -135,6 +135,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         });
     for dir in &cli.workspace {
         let workspace = workspaces.declare_startup_workspace(dir);
+        if let Some(root) = workspace.root_dir.as_deref() {
+            neoism_workspace_daemon::agent_hosting::associate(&workspace.id, root)
+                .await?;
+        }
         tracing::info!(
             workspace_id = %workspace.id,
             root = ?workspace.root_dir,

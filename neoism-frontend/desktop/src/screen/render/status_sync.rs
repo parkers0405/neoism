@@ -59,6 +59,14 @@ impl Screen<'_> {
                 self.mark_dirty();
             }
 
+            let remote_joined = self.context_manager.current_workspace_is_remote_joined();
+            let branch_for = |path: Option<&Path>| {
+                if remote_joined {
+                    None
+                } else {
+                    path.and_then(neoism_ui::panels::git_branch::branch_for)
+                }
+            };
             let current = self.context_manager.current();
             // The workspace tab strip owns the workspace breadcrumb row.
             // Do not derive this from `current`: that is the *focused pane*,
@@ -79,10 +87,7 @@ impl Screen<'_> {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "(no file)".to_string());
-                    let branch = active_path
-                        .as_deref()
-                        .or(cwd.as_deref())
-                        .and_then(neoism_ui::panels::git_branch::branch_for);
+                    let branch = branch_for(active_path.as_deref().or(cwd.as_deref()));
                     // Vim panes report their modal state; standard
                     // input is always insert-like.
                     let mode = match (code.input_mode, code.buffer.mode) {
@@ -109,9 +114,7 @@ impl Screen<'_> {
                         .active_workspace_root
                         .clone()
                         .or_else(|| std::env::current_dir().ok());
-                    let branch = cwd
-                        .as_deref()
-                        .and_then(neoism_ui::panels::git_branch::branch_for);
+                    let branch = branch_for(cwd.as_deref());
                     (
                         neoism_ui::panels::status_line::Mode::Agent,
                         "Neoism".to_string(),
@@ -125,9 +128,7 @@ impl Screen<'_> {
                         .active_workspace_root
                         .clone()
                         .or_else(|| Some(tags.workspace_root().to_path_buf()));
-                    let branch = cwd
-                        .as_deref()
-                        .and_then(neoism_ui::panels::git_branch::branch_for);
+                    let branch = branch_for(cwd.as_deref());
                     (
                         neoism_ui::panels::status_line::Mode::Markdown,
                         "Tags".to_string(),
@@ -146,9 +147,8 @@ impl Screen<'_> {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "Markdown".to_string());
-                    let branch = Some(active_path.as_path())
-                        .or(cwd.as_deref())
-                        .and_then(neoism_ui::panels::git_branch::branch_for);
+                    let branch =
+                        branch_for(Some(active_path.as_path()).or(cwd.as_deref()));
                     // With vim on, surface the modal state (Normal / Insert /
                     // Visual) like the code editor; plain "Markdown" when off.
                     let mode = if markdown.vim_enabled {
@@ -182,9 +182,8 @@ impl Screen<'_> {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "Notebook".to_string());
-                    let branch = Some(active_path.as_path())
-                        .or(cwd.as_deref())
-                        .and_then(neoism_ui::panels::git_branch::branch_for);
+                    let branch =
+                        branch_for(Some(active_path.as_path()).or(cwd.as_deref()));
                     (
                         neoism_ui::panels::status_line::Mode::Markdown,
                         primary,
@@ -263,9 +262,7 @@ impl Screen<'_> {
                                 .map(|n| n.to_string_lossy().into_owned())
                         })
                         .unwrap_or_default();
-                    let branch = cwd_buf
-                        .as_deref()
-                        .and_then(neoism_ui::panels::git_branch::branch_for);
+                    let branch = branch_for(cwd_buf.as_deref());
                     (
                         if terminal_agent.is_some() {
                             neoism_ui::panels::status_line::Mode::Agent
@@ -289,7 +286,8 @@ impl Screen<'_> {
             // rendered zsh-style: `$HOME` collapses to `~`, and any
             // tail is kept (`~/projects/neoism`); paths outside `$HOME`
             // show verbatim.
-            let cwd_label = self.active_workspace_root
+            let cwd_label = self
+                .active_workspace_root
                 .as_deref()
                 .or(active_cwd.as_deref())
                 .map(|p| {
@@ -339,22 +337,26 @@ impl Screen<'_> {
                     None
                 };
             let workspace = cursor_lines.map(|(cur, total)| format!("WS {cur}/{total}"));
-            let git_changes = active_path
-                .as_deref()
-                .or(active_cwd.as_deref())
-                .and_then(neoism_ui::panels::git_branch::change_summary_for)
-                .filter(|summary| !summary.is_empty())
-                .map(|summary| {
-                    // `git_branch::GitChangeSummary` and
-                    // `status_line::GitChangeSummary` are the same shape
-                    // but distinct types after the cutover — the shared
-                    // status_line crate has its own POD copy so it
-                    // doesn't depend on `git_branch`'s filesystem code.
-                    neoism_ui::panels::status_line::GitChangeSummary {
-                        added: summary.added,
-                        deleted: summary.deleted,
-                    }
-                });
+            let git_changes = if remote_joined {
+                None
+            } else {
+                active_path
+                    .as_deref()
+                    .or(active_cwd.as_deref())
+                    .and_then(neoism_ui::panels::git_branch::change_summary_for)
+            }
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| {
+                // `git_branch::GitChangeSummary` and
+                // `status_line::GitChangeSummary` are the same shape
+                // but distinct types after the cutover — the shared
+                // status_line crate has its own POD copy so it
+                // doesn't depend on `git_branch`'s filesystem code.
+                neoism_ui::panels::status_line::GitChangeSummary {
+                    added: summary.added,
+                    deleted: summary.deleted,
+                }
+            });
             // nvim removed; native editor LSP/diagnostic feeds TBD.
             // LSP pill: connected server(s) for the active code file,
             // from the code bridge's worker-maintained cache.

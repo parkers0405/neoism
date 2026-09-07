@@ -160,6 +160,7 @@ impl Screen<'_> {
         self.pending_daemon_go_home = false;
         self.pending_workspace_unsubscriptions.clear();
         self.pending_remote_file_ops.clear();
+        self.pending_remote_terminal_completions.clear();
         self.pending_remote_notes_mutations.clear();
         self.pending_remote_git_status.clear();
         // Presence was just reset — drop any stale path->peers index. The

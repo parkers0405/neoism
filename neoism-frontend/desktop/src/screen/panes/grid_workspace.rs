@@ -65,14 +65,16 @@ impl Screen<'_> {
         path.is_dir().then_some(path)
     }
 
-    /// [`Self::normalize_workspace_dir`] that trusts the path when the
-    /// CURRENT workspace is JOINED from another host: its root is a
-    /// directory on the HOST machine — the local `is_dir` gate
-    /// rejected every such root ("ignored non-directory workspace
-    /// root"), which left the guest's file tree permanently empty.
+    /// [`Self::normalize_workspace_dir`] that treats a JOINED workspace path
+    /// as an opaque host-side identifier. Neither canonicalize nor stat it on
+    /// the guest: a Linux `/home/...` path triggers macOS auto_home lookups.
     fn normalize_workspace_dir_for_current(&self, path: PathBuf) -> Option<PathBuf> {
         if self.context_manager.current_workspace_is_remote_joined() {
-            Some(Self::normalize_workspace_root(path))
+            // This path belongs to the host and is only an opaque identifier
+            // on the guest. In particular, probing a Linux `/home/...` path
+            // on macOS enters auto_home and blocks the render thread in
+            // automountd/opendirectoryd.
+            Some(path)
         } else {
             Self::normalize_workspace_dir(path)
         }
@@ -86,6 +88,14 @@ impl Screen<'_> {
     pub(crate) fn active_terminal_process_cwd(&self) -> Option<PathBuf> {
         let current = self.context_manager.current();
         if current.has_non_terminal_surface() {
+            return None;
+        }
+        // A joined terminal reports the host shell's live cwd. It must not
+        // replace the host-selected workspace root when that shell happens to
+        // be sitting in $HOME. Quick SSH remains cwd-driven by design.
+        if self.context_manager.current_workspace_is_remote_joined()
+            && !self.context_manager.current_workspace_is_quick_ssh()
+        {
             return None;
         }
         #[cfg(not(target_os = "windows"))]
@@ -114,9 +124,7 @@ impl Screen<'_> {
         }
         // Daemon-backed (remote) terminal pane: there's no local PTY fd to
         // read `/proc` from, so the shell's cwd arrives via the daemon's
-        // `SessionCwd` push (cached per session). Resolve this pane's route
-        // to its session and use that — keeps remote panes re-rooting on
-        // `cd` exactly like local ones, and matches the web frontend.
+        // `SessionCwd` push (cached per session).
         let cache = self.context_manager.daemon_cache();
         let cwd = cache
             .route_sessions
@@ -129,6 +137,29 @@ impl Screen<'_> {
         let current = self.context_manager.current();
         if current.has_non_terminal_surface() {
             return None;
+        }
+
+        if self.context_manager.current_workspace_is_remote_joined() {
+            let route_id = current.route_id;
+            return self
+                .context_manager
+                .daemon_cache()
+                .route_sessions
+                .get(&route_id)
+                .and_then(|session| {
+                    self.context_manager
+                        .daemon_cache()
+                        .remote_session_cwds
+                        .get(session)
+                })
+                .map(PathBuf::from)
+                .or_else(|| {
+                    current
+                        .terminal
+                        .try_lock_unfair()
+                        .and_then(|terminal| terminal.current_directory.clone())
+                })
+                .or_else(|| self.active_workspace_root.clone());
         }
 
         self.active_terminal_process_cwd()
@@ -343,13 +374,13 @@ impl Screen<'_> {
     pub(crate) fn sync_workspace_root_from_active_pane(&mut self) -> bool {
         self.active_pane_workspace_root()
             .map(|root| {
-                let publish = {
-                    let current = self.context_manager.current();
-                    !current.has_non_terminal_surface()
-                        && self.context_manager.current_grid().root
-                            == Some(self.context_manager.current_grid().current)
-                        && self.active_workspace_root.as_deref() != Some(root.as_path())
-                };
+                // Joined panes cannot publish ambient cwd changes as host roots.
+                // Keep the existing root-pane behavior for local workspaces.
+                let publish = !self.context_manager.current_workspace_is_remote_joined()
+                    && !self.context_manager.current().has_non_terminal_surface()
+                    && self.context_manager.current_grid().root
+                        == Some(self.context_manager.current_grid().current)
+                    && self.active_workspace_root.as_deref() != Some(root.as_path());
                 self.set_active_workspace_root(root, publish)
             })
             .unwrap_or(false)
@@ -580,7 +611,9 @@ impl Screen<'_> {
                 }
             }
         }
-        if self.renderer.git_diff_panel.is_visible() {
+        if self.renderer.git_diff_panel.is_visible()
+            && !self.context_manager.current_workspace_is_remote_joined()
+        {
             let cwd = self
                 .active_workspace_root
                 .clone()

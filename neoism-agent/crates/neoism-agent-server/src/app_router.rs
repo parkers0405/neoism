@@ -50,6 +50,7 @@ pub fn app(state: AppState) -> Router {
 pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Router {
     let middleware_state = state.clone();
     let router = Router::new()
+        .route("/v2/hosting/associate", post(crate::hosting::associate))
         .route("/v2/health", get(global_health))
         .route("/v2/meta", get(v2_meta))
         .route("/v2/openapi.json", get(canonical_openapi_doc))

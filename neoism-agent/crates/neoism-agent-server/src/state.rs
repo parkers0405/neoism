@@ -139,6 +139,8 @@ pub(crate) enum ExecutionSubtaskRegistration {
     Rejected,
 }
 
+mod hosting;
+
 #[derive(Clone)]
 pub(crate) struct SessionStore {
     db: Db,
@@ -1365,6 +1367,10 @@ impl SessionStore {
     }
 
     async fn migrate(&self) -> anyhow::Result<()> {
+        self.db.execute_transaction(vec![
+            ("CREATE TABLE IF NOT EXISTS hosted_chat_directories (directory TEXT PRIMARY KEY, workspace_id TEXT NOT NULL UNIQUE)".into(), vec![]),
+            ("CREATE TABLE IF NOT EXISTS hosted_chat_sessions (session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL)".into(), vec![]),
+        ]).await?;
         self.db
             .execute(
                 r#"
@@ -2356,9 +2362,12 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
-        rows.into_iter()
+        let mut sessions = rows
+            .into_iter()
             .map(|row| decode_json(row.get_str("info_json")?))
-            .collect()
+            .collect::<anyhow::Result<Vec<SessionInfo>>>()?;
+        self.hydrate_host_associations(&mut sessions).await?;
+        Ok(sessions)
     }
 
     pub(crate) async fn list_root_sessions_page(
@@ -2374,7 +2383,8 @@ impl SessionStore {
         let mut clauses = vec!["i.parent_id IS NULL".to_string()];
         let mut params = Vec::new();
         if let Some(directory) = directory {
-            clauses.push("i.directory = ?".to_string());
+            clauses.push("(i.directory = ? OR i.session_id IN (SELECT h.session_id FROM hosted_chat_sessions h JOIN hosted_chat_directories d ON d.workspace_id = h.workspace_id WHERE d.directory = ?))".to_string());
+            params.push(text(directory));
             params.push(text(directory));
         }
         if let Some(path) = path {
@@ -2418,6 +2428,7 @@ impl SessionStore {
             ));
             items.push(session_list_info_from_row(&row)?);
         }
+        self.hydrate_host_associations(&mut items).await?;
         Ok(SessionListPage {
             next_cursor: has_more.then(|| {
                 let (updated, id) = last_key.expect("a page with more rows has an item");
@@ -2454,9 +2465,12 @@ impl SessionStore {
                 vec![text(format!("%\"{key}\"%"))],
             )
             .await?;
-        rows.into_iter()
+        let mut sessions = rows
+            .into_iter()
             .map(|row| decode_json(row.get_str("info_json")?))
-            .collect()
+            .collect::<anyhow::Result<Vec<SessionInfo>>>()?;
+        self.hydrate_host_associations(&mut sessions).await?;
+        Ok(sessions)
     }
 
     pub(crate) async fn insert_session(&self, info: &SessionInfo) -> anyhow::Result<()> {
@@ -2847,8 +2861,14 @@ impl SessionStore {
                 vec![text(session_id)],
             )
             .await?;
-        row.map(|row| decode_json(row.get_str("info_json")?))
-            .transpose()
+        let mut session: Option<SessionInfo> = row
+            .map(|row| decode_json(row.get_str("info_json")?))
+            .transpose()?;
+        if let Some(session) = session.as_mut() {
+            self.hydrate_host_associations(std::slice::from_mut(session))
+                .await?;
+        }
+        Ok(session)
     }
 
     #[cfg(test)]

@@ -16,6 +16,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tower::ServiceExt;
 
+#[path = "tests_hosting.rs"]
+mod hosting_tests;
+
 #[path = "tests_interaction_tools.rs"]
 mod interaction_tool_tests;
 

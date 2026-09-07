@@ -861,10 +861,40 @@ impl TerminalInputBuffer {
         true
     }
 
+    /// Discard cycling/display state when the owning filesystem or cwd changes.
+    pub fn sync_completion_scope(
+        &mut self,
+        cwd: Option<&Path>,
+        host_scope: Option<&str>,
+    ) {
+        let scope = (
+            host_scope.unwrap_or_default().to_owned(),
+            cwd.map(Path::to_path_buf),
+        );
+        if self.completion_scope.as_ref() != Some(&scope) {
+            self.completion_state = None;
+            self.completion_items.clear();
+            self.completion_detail = None;
+            self.completion_scope = Some(scope);
+        }
+    }
+
     pub fn complete_or_accept(&mut self, cwd: Option<&Path>) -> bool {
+        self.complete_or_accept_from(cwd, None)
+    }
+
+    pub fn complete_or_accept_host(&mut self, cwd: Option<&Path>, scope: &str) -> bool {
+        self.complete_or_accept_from(cwd, Some(scope))
+    }
+
+    fn complete_or_accept_from(
+        &mut self,
+        cwd: Option<&Path>,
+        host_scope: Option<&str>,
+    ) -> bool {
         let prev_text = self.text.clone();
         let prev_cursor = self.cursor;
-        let result = self.complete_or_accept_inner(cwd);
+        let result = self.complete_or_accept_inner_from(cwd, host_scope);
         self.update_completion_flash(&prev_text, prev_cursor, result);
         result
     }
@@ -908,11 +938,16 @@ impl TerminalInputBuffer {
         let _ = prev_cursor;
     }
 
-    pub(crate) fn complete_or_accept_inner(&mut self, cwd: Option<&Path>) -> bool {
+    fn complete_or_accept_inner_from(
+        &mut self,
+        cwd: Option<&Path>,
+        host_scope: Option<&str>,
+    ) -> bool {
         self.desired_visual_column = None;
         self.history_cursor = None;
         self.history_draft.clear();
 
+        self.sync_completion_scope(cwd, host_scope);
         if self.advance_completion_cycle() {
             return true;
         }
@@ -927,15 +962,28 @@ impl TerminalInputBuffer {
         let token_len = token.len();
         let command_position = self.text[..start].trim().is_empty();
         let command_name = self.text.split_whitespace().next().unwrap_or_default();
-        let candidates = completion_candidates(
-            &token,
-            &self.text[..start],
-            command_position,
-            command_name.eq_ignore_ascii_case("cd"),
-            cwd,
-        );
+        let candidates = if let Some(scope) = host_scope {
+            super::super::completion::completion_candidates_host(
+                &token,
+                &self.text[..start],
+                command_position,
+                command_name.eq_ignore_ascii_case("cd"),
+                cwd,
+                scope,
+            )
+        } else {
+            completion_candidates(
+                &token,
+                &self.text[..start],
+                command_position,
+                command_name.eq_ignore_ascii_case("cd"),
+                cwd,
+            )
+        };
         if candidates.is_empty() {
-            return history_suggestion_allowed(&self.text) && self.accept_suggestion();
+            return host_scope.is_none()
+                && history_suggestion_allowed(&self.text)
+                && self.accept_suggestion();
         }
 
         let replacements = candidates

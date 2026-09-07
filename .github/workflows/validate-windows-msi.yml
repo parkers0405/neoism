@@ -1,0 +1,84 @@
+name: Validate existing Windows MSI
+
+# Diagnostic only: no build, upgrade fixture, release, or publishing.
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Run containing the neoism-windows-x86_64 artifact
+        required: true
+        type: string
+        default: '34126898861'
+      version:
+        description: Exact installed version expected (without v)
+        required: true
+        type: string
+        default: '0.7.95'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      # Use the dispatched ref's corrected smoke, NOT the source artifact's ref.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: neoism-windows-x86_64
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: candidate
+      - name: Install existing MSI and run native GUI smoke
+        shell: pwsh
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./scripts/windows-validation-process.ps1
+          $evidence = (New-Item -ItemType Directory -Force 'windows-validation').FullName
+          Start-Transcript -Path "$evidence/transcript.log"
+          try {
+            if ($env:SOURCE_RUN_ID -notmatch '^\d+$' -or $env:EXPECTED_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid source run ID or version' }
+            [pscustomobject]@{ sourceRun = $env:SOURCE_RUN_ID; version = $env:EXPECTED_VERSION; validationCommit = $env:GITHUB_SHA } | ConvertTo-Json | Set-Content "$evidence/provenance.json"
+            Get-FileHash ./scripts/windows-installed-gui-smoke.ps1, ./scripts/windows-validation-process.ps1 | Format-List | Out-File "$evidence/script-hashes.log"
+            $installer = (Resolve-Path 'candidate/Neoism-x86_64.msi').Path
+            $hash = (Get-FileHash $installer -Algorithm SHA256).Hash
+            $sum = (Get-Content 'candidate/Neoism-x86_64.msi.sha256' -Raw).Trim()
+            "MSI SHA256=$hash" | Set-Content "$evidence/msi-hash.log"
+            if ($sum -notmatch '^([a-fA-F0-9]{64})\s+\*?Neoism-x86_64\.msi$' -or $hash -ne $Matches[1]) { throw 'MSI checksum mismatch' }
+            $installDir = Join-Path $env:LOCALAPPDATA 'Programs\Neoism'
+            try {
+              Invoke-CheckedProcess 'msiexec.exe' "/i `"$installer`" /qn /norestart /L*v `"$evidence/install.log`"" "$evidence/install" 180 @(0, 3010)
+              foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe')) {
+                $file = Join-Path $installDir $binary
+                $signature = Get-AuthenticodeSignature $file
+                [pscustomobject]@{ binary = $binary; sha256 = (Get-FileHash $file).Hash; signature = "$($signature.Status)"; signer = "$($signature.SignerCertificate.Thumbprint)" } | ConvertTo-Json -Compress | Add-Content "$evidence/installed-binaries.jsonl"
+                # Record signing as shipped; the source run may not have signing credentials.
+              }
+              Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--version' "$evidence/version" 30
+              if ((Get-Content "$evidence/version.stdout.log" -Raw).Trim() -cne "neoism $env:EXPECTED_VERSION") { throw 'Installed version differs from requested version' }
+              # Hard dependency: the current ref must contain the corrected parent smoke.
+              & ./scripts/windows-installed-gui-smoke.ps1 -InstallDir $installDir -Evidence $evidence
+            } finally {
+              Invoke-CheckedProcess 'msiexec.exe' "/x `"$installer`" /qn /norestart /L*v `"$evidence/uninstall.log`"" "$evidence/uninstall" 180 @(0, 3010, 1605)
+            }
+            if (Test-Path (Join-Path $installDir 'neoism.exe')) { throw 'Neoism remained after uninstall' }
+          } finally { Stop-Transcript }
+      - name: Retain full logs and original artifact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            windows-validation/
+            candidate/
+            scripts/windows-installed-gui-smoke.ps1
+            scripts/windows-validation-process.ps1

@@ -20,6 +20,11 @@ fn validate_smoke_script(shell: &str) {
          $a -is [System.Management.Automation.Language.CommandAst] -and \
          $a.GetCommandName() -eq 'Add-Type'}},$true); \
          Add-Type -TypeDefinition $add.CommandElements[1].Value; \
+         if(-not [NeoismWindowProbe]::IsInternalEventWindow('Winit Thread Event Target',0x080800A0)){{throw 'event target not classified'}}; \
+         if([NeoismWindowProbe]::IsInternalEventWindow('Winit Thread Event Target',0)){{throw 'ordinary target incorrectly excluded'}}; \
+         foreach($class in @('Neoism','ConsoleWindowClass','CASCADIA_HOSTING_WINDOW_CLASS')){{ \
+           if([NeoismWindowProbe]::IsInternalEventWindow($class,0x080800A0)){{throw 'real window incorrectly excluded'}} \
+         }}; \
          Write-Output ('neoism-' + 'script-validated')"
     );
     let mut session = PtySession::spawn(PtySessionConfig {

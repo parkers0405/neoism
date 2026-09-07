@@ -26,6 +26,9 @@ public static class NeoismWindowProbe {
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint processId);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder text, int length);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder text, int length);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out Rect rect);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SendMessageTimeout(
         IntPtr h, uint msg, UIntPtr w, IntPtr l, uint flags, uint timeout, out UIntPtr result);
@@ -33,6 +36,10 @@ public static class NeoismWindowProbe {
         var windows = new List<Window>();
         EnumWindows((h, unused) => {
             if (!IsWindowVisible(h)) return true;
+            // Winit's zero-size event target carries WS_VISIBLE for WM_PAINT
+            // dispatch but is not displayed. Count actual window rectangles.
+            Rect rect;
+            if (!GetWindowRect(h, out rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top) return true;
             uint pid;
             GetWindowThreadProcessId(h, out pid);
             var title = new StringBuilder(1024);
@@ -61,8 +68,12 @@ public static class NeoismWindowProbe {
     while ((Get-Date) -lt $deadline) {
         $p.Refresh()
         if ($p.HasExited) { throw "Installed GUI crashed/exited: $($p.ExitCode) (stack overflow is 0xC00000FD; do not patch stack reserve)" }
-        $h = $p.MainWindowHandle
-        foreach ($window in [NeoismWindowProbe]::Snapshot()) {
+        $visibleWindows = [NeoismWindowProbe]::Snapshot()
+        $mainWindows = @($visibleWindows | Where-Object { $_.ProcessId -eq $p.Id })
+        # Process.MainWindowHandle can briefly select the same internal event
+        # target. Use the positive-area windows for primary-window detection too.
+        $h = if ($mainWindows.Count -gt 0) { [IntPtr]::new($mainWindows[0].Handle) } else { [IntPtr]::Zero }
+        foreach ($window in $visibleWindows) {
             if ($baseline.Contains($window.Handle) -or $window.Handle -eq $h.ToInt64()) { continue }
             $owner = Get-Process -Id $window.ProcessId -ErrorAction SilentlyContinue
             $isUnexpected = $window.ProcessId -eq $p.Id -or

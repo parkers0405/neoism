@@ -270,6 +270,10 @@ impl NeoismAgentPane {
     }
 
     pub fn clear_or_abort(&mut self) {
+        if self.pending_connect.is_some() {
+            self.close_connect();
+            return;
+        }
         let now = Instant::now();
         if !self.input.is_empty() {
             self.input.clear();
@@ -389,6 +393,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_agent_picker(&mut self) {
+        self.close_connect();
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Agent,
             "Agents",
@@ -414,6 +419,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_model_picker(&mut self) {
+        self.close_connect();
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Model,
             "Select model",
@@ -532,6 +538,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_thinking_picker(&mut self) {
+        self.close_connect();
         let mut options = vec![
             NeoismAgentPickerOption::new(
                 "none",
@@ -572,6 +579,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_sessions_picker(&mut self) {
+        self.close_connect();
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Session,
             "Sessions",
@@ -770,6 +778,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_skill_picker(&mut self) {
+        self.close_connect();
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Skill,
             "Skills",
@@ -797,6 +806,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_subagent_picker(&mut self) {
+        self.close_connect();
         let Some(session_id) = self.session_id.clone() else {
             self.system_message("Subagents", "no session has started yet");
             return;
@@ -820,6 +830,10 @@ impl NeoismAgentPane {
     }
 
     pub fn close_picker(&mut self) {
+        if self.pending_connect.is_some() {
+            self.close_connect();
+            return;
+        }
         // The `/connect` flow is multi-stage: ESC steps back one screen (like
         // the per-screen "esc" affordance) rather than dismissing everything.
         if let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) {

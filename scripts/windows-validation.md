@@ -14,7 +14,9 @@ Signing remains conditional on the workflow's existing signing credentials.
 
 ## Manual native GUI acceptance still outstanding
 
-Automated startup only proves a visible window answering messages; the headless
+Automated startup checks a responsive visible window, Agent auto-start health,
+and a census of additional Neoism/console-helper windows at each sample. Very
+short-lived windows between samples can escape detection. The headless
 composer test does not exercise the real keyboard dispatcher or GPU rendering.
 Before declaring native GUI acceptance, an operator must install the candidate
 MSI on native Windows, record its hash, and use the **actual keyboard** in a

@@ -802,16 +802,6 @@ fn probe_daemon_socket(path: &std::path::Path) -> bool {
     UnixStream::connect_addr(&addr).is_ok()
 }
 
-/// Quick connect-only probe of an existing daemon's loopback TCP port —
-/// the non-unix analogue of `probe_daemon_socket`. A short timeout keeps
-/// a firewalled/blackholed port from stalling launch.
-#[cfg(all(not(unix), not(target_arch = "wasm32")))]
-fn probe_daemon_tcp(port: u16) -> bool {
-    use std::net::{SocketAddr, TcpStream};
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).is_ok()
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonMode {
@@ -892,53 +882,39 @@ fn resolve_daemon(daemon_url: Option<&str>) -> Option<ResolvedDaemon> {
             return Some(resolved);
         }
     }
-    // No socket file to probe off-unix: a live listener on the default
-    // loopback port (embedded desktop or standalone daemon) is the
-    // "already running" signal instead.
-    #[cfg(not(unix))]
-    {
-        let port = embedded_daemon::default_tcp_port();
-        if probe_daemon_tcp(port) {
-            let url = format!("ws://127.0.0.1:{port}/session");
-            tracing::info!(daemon = url, "Attached to external daemon at {url}");
-            let resolved =
-                ResolvedDaemon::external(url, DaemonMode::ExternalDefaultSocket);
-            return Some(resolved);
-        }
-    }
+    // Windows attachment and recovery are both owned by the monitor. It only
+    // adopts an existing listener after validating /health, never TCP connect.
 
     match service_process::spawn_daemon() {
         Ok(service) => {
-            let ready = std::time::Instant::now();
-            let url = loop {
-                #[cfg(unix)]
-                if probe_daemon_socket(&embedded_daemon::default_socket_path()) {
-                    break Some(unix_socket_url(&embedded_daemon::default_socket_path()));
+            // This is a UI patience budget, not a process lifetime deadline.
+            // Keep the endpoint/owner alive so reconnects and later agent
+            // requests can succeed after a slow boot or a recovered child.
+            #[cfg(not(unix))]
+            if let Err(error) = service.wait_ready(std::time::Duration::from_secs(3)) {
+                tracing::warn!(%error, "workspace service not ready yet; continuing startup with background recovery");
+            }
+            // Preserve the Unix first-frame fast path: its per-user socket is
+            // bound before optional discovery/bootstrap. The owner still uses
+            // explicit child readiness and health for monitoring/recovery.
+            #[cfg(unix)]
+            {
+                let started = std::time::Instant::now();
+                while !probe_daemon_socket(&embedded_daemon::default_socket_path())
+                    && started.elapsed() < std::time::Duration::from_secs(3)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
                 }
-                #[cfg(not(unix))]
-                if probe_daemon_tcp(embedded_daemon::default_tcp_port()) {
-                    break Some(format!(
-                        "ws://127.0.0.1:{}/session",
-                        embedded_daemon::default_tcp_port()
-                    ));
-                }
-                if ready.elapsed() >= std::time::Duration::from_secs(3) {
-                    break None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            };
-            let Some(url) = url else {
-                drop(service);
-                tracing::error!(
-                    "isolated daemon service did not become ready; desktop will run without daemon-backed features"
-                );
-                return None;
-            };
+            }
+            #[cfg(unix)]
+            let url = unix_socket_url(&embedded_daemon::default_socket_path());
+            #[cfg(not(unix))]
+            let url = format!("ws://127.0.0.1:{}/session", embedded_daemon::default_tcp_port());
             let resolved = ResolvedDaemon::isolated(url, service);
             tracing::info!(
                 daemon = resolved.url,
                 mode = resolved.mode.as_str(),
-                "Started isolated daemon service at {}",
+                "Monitoring local workspace service at {}",
                 resolved.url,
             );
             Some(resolved)
@@ -1308,7 +1284,7 @@ fn process_is_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn process_is_alive(pid: u32) -> bool {
-    std::process::Command::new("tasklist.exe")
+    crate::background_process::command("tasklist.exe")
         .args(["/FI", &format!("PID eq {pid}"), "/NH"])
         .output()
         .ok()
@@ -1772,7 +1748,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let Some(result) = neoism_agent_server::auth_cli::maybe_run(
         &raw_args,
-        || agent_server::ensure_started_for_request(),
+        || {
+            let server = agent_server::configured_server();
+            if let Err(error) = agent_server::ensure_started_for_request(&server) {
+                eprintln!("{error}");
+            }
+        },
         neoism_agent_neoism_adapter::neoism_services(),
     ) {
         return result.map_err(Into::into);

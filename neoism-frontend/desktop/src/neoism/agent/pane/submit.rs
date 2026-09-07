@@ -29,6 +29,16 @@ impl NeoismAgentPane {
         }
     }
     pub fn commit_picker(&mut self) -> bool {
+        if !self
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Connect)
+        {
+            self.pending_connect = None;
+        }
+        if self.connect_request_loading() {
+            return true;
+        }
         let Some(picker) = self.picker.take() else {
             return false;
         };

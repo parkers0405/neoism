@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+pub mod background_process;
 pub mod daemon_credential;
 pub mod mcp_credentials;
 pub mod provider_credentials;

@@ -1,7 +1,7 @@
 use neoism_backend::event::{EventProxy, RioEvent, RioEventType, WindowId};
 use std::cmp::Ordering;
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 const DEFAULT_REPO: &str = "parkers0405/neoism";
 const PROGRESS_PREFIX: &str = "NEOISM_UPDATE\t";
@@ -33,7 +33,7 @@ pub(crate) fn spawn_install(
     std::thread::Builder::new()
         .name("neoism-update-install".to_string())
         .spawn(move || {
-            let child = Command::new(exe)
+            let child = crate::background_process::command(exe)
                 .args([
                     "update",
                     "--gui",
@@ -157,7 +157,7 @@ fn available_version() -> Option<String> {
     #[cfg(not(windows))]
     let null_device = "/dev/null";
 
-    let output = Command::new("curl")
+    let output = crate::background_process::command("curl")
         .args([
             "-fsSL",
             "--connect-timeout",

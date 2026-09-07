@@ -68,20 +68,19 @@ pub fn cached_ipv4() -> Option<IpAddr> {
 /// starts out warm.
 pub fn blocking_ipv4() -> Option<IpAddr> {
     {
-        let Ok(guard) = state().lock() else {
+        let Ok(mut guard) = state().lock() else {
             return None;
         };
         if guard.probed_at.is_some() || guard.in_flight {
-            // A probe already ran (or is running); don't shell out
-            // again — the freshest value is (or will shortly be) in
-            // the cache.
             return guard.ip;
         }
+        guard.in_flight = true;
     }
     let ip = probe_ipv4();
     if let Ok(mut guard) = state().lock() {
         guard.ip = ip;
         guard.probed_at = Some(Instant::now());
+        guard.in_flight = false;
     }
     ip
 }
@@ -107,16 +106,110 @@ fn cli_candidates() -> &'static [&'static str] {
 
 fn probe_ipv4() -> Option<IpAddr> {
     cli_candidates().iter().find_map(|cli| {
-        let mut command = crate::background_process::command(cli);
-        let output = command.args(["ip", "-4"]).output().ok()?;
-        if !output.status.success() {
-            return None;
+        // Bound each candidate separately: on macOS a stalled PATH CLI must
+        // not consume the app-bundle fallback's opportunity to answer.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        // Direct hidden child, not the GUI trampoline: on timeout we must
+        // terminate/reap the actual CLI rather than orphan it behind a wrapper.
+        let mut command = std::process::Command::new(cli);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout
+        command.args(["ip", "-4"]);
+        let stdout = bounded_output(&mut command, deadline).ok()?;
+        String::from_utf8_lossy(&stdout)
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
             .and_then(|line| line.parse().ok())
     })
+}
+
+/// File-backed bounded capture avoids pipe-full deadlocks and a reader thread
+/// stuck forever on a pipe inherited by a descendant. Nothing from CLI output
+/// (or environment/arguments) is written to logs.
+fn bounded_output(
+    command: &mut std::process::Command,
+    deadline: Instant,
+) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::process::Stdio;
+    if Instant::now() >= deadline {
+        return Err(std::io::ErrorKind::TimedOut.into());
+    }
+    let mut output = tempfile::tempfile()?;
+    command
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(output.try_clone()?);
+    let mut child = command.spawn()?;
+    loop {
+        let result = child.try_wait();
+        match result {
+            Ok(Some(status)) if status.success() => {
+                output.seek(SeekFrom::Start(0))?;
+                let mut bytes = Vec::new();
+                output.take(4097).read_to_end(&mut bytes)?;
+                return if bytes.len() <= 4096 {
+                    Ok(bytes)
+                } else {
+                    Err(std::io::ErrorKind::InvalidData.into())
+                };
+            }
+            Ok(Some(_)) => return Err(std::io::ErrorKind::Other.into()),
+            Ok(None)
+                if Instant::now() < deadline
+                    && output.metadata().is_ok_and(|m| m.len() <= 4096) => {}
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::debug!("Tailscale discovery timed out or failed; continuing without tailnet discovery");
+                return Err(result
+                    .err()
+                    .unwrap_or_else(|| std::io::ErrorKind::TimedOut.into()));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn hung_discovery_is_killed_and_reaped() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exec sleep 30"]);
+        let start = Instant::now();
+        assert!(bounded_output(&mut command, start + Duration::from_millis(80)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn slow_discovery_can_succeed_within_budget() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 0.05; printf '100.64.0.1\\n'"]);
+        assert_eq!(
+            bounded_output(&mut command, Instant::now() + Duration::from_secs(1))
+                .unwrap(),
+            b"100.64.0.1\n"
+        );
+    }
+    #[test]
+    fn expired_budget_does_not_spawn() {
+        let mut command =
+            std::process::Command::new("not-a-real-neoism-discovery-program");
+        assert_eq!(
+            bounded_output(&mut command, Instant::now())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
 }

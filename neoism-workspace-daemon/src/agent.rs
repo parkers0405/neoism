@@ -83,7 +83,6 @@ pub fn ensure_agent_server_started_with_services(
     let Some((hostname, port)) = local_bind_target(&server) else {
         tracing::warn!(
             target: "neoism_workspace_daemon::agent",
-            server,
             "skipping embedded agent-server start (non-local NEOISM_AGENT_SERVER)"
         );
         let _ = AGENT_SERVER_STARTED.set(());
@@ -108,18 +107,17 @@ pub fn ensure_agent_server_started_with_services(
     // bypasses `NeoismConfigSourceService` and makes release builds ignore
     // the GUI-owned `~/.config/neoism/config.json` while debug builds work.
     tokio::spawn(async move {
-        tracing::info!(target: "neoism_workspace_daemon::agent", %server, "using linked Neoism Agent server with product config services");
+        tracing::info!(target: "neoism_workspace_daemon::agent", "using linked Neoism Agent server with product config services");
         let health_url = format!("{server}{AGENT_SERVER_HEALTH_PATH}");
         let probe = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()
             .ok();
         loop {
             let healthy = match &probe {
-                Some(client) => matches!(
-                    client.get(&health_url).send().await,
-                    Ok(resp) if resp.status().is_success()
-                ),
+                Some(client) => agent_health_ready(client, &health_url).await,
                 None => false,
             };
             if !healthy {
@@ -128,15 +126,75 @@ pub fn ensure_agent_server_started_with_services(
                     port,
                     cors: Vec::new(),
                 };
-                if let Err(error) =
-                    neoism_agent_server::listen(options, services.clone()).await
-                {
-                    tracing::warn!(target: "neoism_workspace_daemon::agent", %error, "embedded Neoism Agent server exited; retrying");
+                // Isolate a listen-task panic from this process-local supervisor.
+                // Only INITIAL readiness has a deadline; never timeout a healthy
+                // long-running server. Allow cold hosted association (up to 96s).
+                let services = services.clone();
+                let mut task = tokio::spawn(async move {
+                    neoism_agent_server::listen(options, services).await
+                });
+                let boot = async {
+                    loop {
+                        tokio::select! {
+                            result = &mut task => return Some(result),
+                            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        }
+                        if let Some(client) = &probe {
+                            if agent_health_ready(client, &health_url).await {
+                                return None;
+                            }
+                        }
+                    }
+                };
+                match tokio::time::timeout(Duration::from_secs(120), boot).await {
+                    Ok(Some(_)) => {
+                        tracing::warn!(target: "neoism_workspace_daemon::agent", "embedded Neoism Agent exited during startup; retrying");
+                    }
+                    Ok(None) => {
+                        tracing::info!(target: "neoism_workspace_daemon::agent", "embedded Neoism Agent ready");
+                        let _ = task.await;
+                        tracing::warn!(target: "neoism_workspace_daemon::agent", "embedded Neoism Agent exited; retrying");
+                    }
+                    Err(_) => {
+                        task.abort();
+                        let _ = task.await;
+                        tracing::warn!(target: "neoism_workspace_daemon::agent", "embedded Neoism Agent startup exceeded 120 seconds; retrying");
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
+}
+
+async fn agent_health_ready(client: &reqwest::Client, url: &str) -> bool {
+    tokio::time::timeout(Duration::from_millis(500), async {
+        let Ok(mut response) = client.get(url).send().await else {
+            return false;
+        };
+        if response.status() != reqwest::StatusCode::OK {
+            return false;
+        }
+        let mut body = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) if body.len() + chunk.len() <= 16 * 1024 => {
+                    body.extend_from_slice(&chunk)
+                }
+                Ok(None) => break,
+                _ => return false,
+            }
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+            return false;
+        };
+        value["healthy"] == true
+            && value["version"].as_str().is_some_and(|version| !version.is_empty())
+            && (value["provider_credential_store"].is_string()
+                || value["providerCredentialStore"].is_string())
+    })
+    .await
+    .unwrap_or(false)
 }
 
 pub(crate) fn configured_agent_server() -> String {
@@ -149,14 +207,23 @@ pub(crate) fn configured_agent_server() -> String {
 }
 
 fn local_bind_target(server: &str) -> Option<(String, u16)> {
-    let rest = server.strip_prefix("http://")?;
-    let host_port = rest.split('/').next().unwrap_or(rest);
-    let (host, port_str) = host_port.split_once(':').unwrap_or((host_port, "4096"));
-    let port = port_str.parse::<u16>().ok()?;
-    if matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
-        Some(("127.0.0.1".to_string(), port))
-    } else {
-        None
+    let url = url::Url::parse(server).ok()?;
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return None;
+    }
+    let host = url.host_str()?;
+    // Bind the same port the request URL addresses (HTTP's default is 80).
+    let port = url.port_or_known_default()?;
+    match host {
+        "127.0.0.1" | "localhost" => Some(("127.0.0.1".to_string(), port)),
+        "[::1]" => Some(("[::1]".to_string(), port)),
+        _ => None,
     }
 }
 
@@ -314,6 +381,43 @@ pub(crate) use http::*;
 pub(crate) use turn::*;
 
 pub use dispatcher::dispatch;
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn only_root_local_agent_urls_are_owned() {
+        assert_eq!(
+            local_bind_target("http://127.0.0.1:4096"),
+            Some(("127.0.0.1".into(), 4096))
+        );
+        assert_eq!(
+            local_bind_target("http://[::1]:4096"),
+            Some(("[::1]".into(), 4096))
+        );
+        assert!(local_bind_target("http://127.0.0.1:7878/agent").is_none());
+        assert!(local_bind_target("https://host.example/agent").is_none());
+        assert!(local_bind_target("http://secret@localhost:4096").is_none());
+        assert!(local_bind_target("http://localhost:4096?token=secret").is_none());
+    }
+
+    #[tokio::test]
+    async fn unrelated_http_ok_is_not_an_agent() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v2/health", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).await;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK").await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        assert!(!agent_health_ready(&client, &url).await);
+        server.await.unwrap();
+    }
+}
 
 #[cfg(test)]
 mod tests;

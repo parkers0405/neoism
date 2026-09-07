@@ -401,7 +401,7 @@ fn harden_windows_owner_only(path: &Path) -> Result<(), ServiceError> {
     let owner = std::env::var("USERNAME").map_err(|_| {
         ServiceError::new("USERNAME is unavailable for MCP credential ACL")
     })?;
-    let status = std::process::Command::new("icacls.exe")
+    let status = crate::background_process::command("icacls.exe")
         .arg(path)
         .arg("/inheritance:r")
         .arg("/grant:r")

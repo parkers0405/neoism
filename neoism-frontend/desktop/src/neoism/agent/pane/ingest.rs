@@ -1834,29 +1834,8 @@ impl NeoismAgentPane {
                     }
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::ConnectOauthFinished {
-                    provider_name,
-                    connection_id,
-                }) => {
-                    if connection_id.is_some() {
-                        self.connection_id = connection_id;
-                    }
-                    self.system_message(
-                        "Connected",
-                        format!(
-                            "{provider_name} connected. Open /model to pick one of its models."
-                        ),
-                    );
-                    changed = true;
-                }
-                Ok(NeoismAgentBackgroundUpdate::ConnectOauthFailed {
-                    provider_name,
-                    error,
-                }) => {
-                    self.system_message(
-                        &provider_name,
-                        format!("sign-in didn't complete: {error}"),
-                    );
+                Ok(NeoismAgentBackgroundUpdate::ConnectCompleted { token, result }) => {
+                    self.finish_connect_request(token, result);
                     changed = true;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -1905,6 +1884,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn request_close_tab(&mut self) {
+        self.close_connect();
         self.ui_events.push(NeoismAgentUiEvent::CloseTab);
     }
 

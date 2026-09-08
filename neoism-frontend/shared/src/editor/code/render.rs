@@ -13,6 +13,13 @@
 //! via the cached `WrapIndex`. `wrap = false` restores NoWrap plus a
 //! plain horizontal caret-follow (`scroll_x`).
 
+mod blame;
+
+/// Clear frame-local avatar placements before any editor visibility branches.
+pub fn clear_blame_overlays(sugarloaf: &mut Sugarloaf) {
+    sugarloaf.clear_image_overlays_for(blame::OVERLAY_ID);
+}
+
 use sugarloaf::{text::DrawOpts, Sugarloaf};
 
 use crate::primitives::draw_icon_centered_with_occlusion;
@@ -703,6 +710,100 @@ pub fn render(
     // line and sliced per wrap segment; continuation rows draw an
     // empty gutter cell (line number only on the first segment — nvim
     // look).
+    // Inline blame is paint-only virtual text. No gutter reservation, no wrap
+    // width changes. Plan hover occlusion BEFORE emitting any code glyphs.
+    pane.blame.observe_cursor(&pane.buffer);
+    pane.blame.observe_pointer(mouse);
+    pane.blame
+        .observe_viewport([scroll_y, scroll_x, pane.target_scroll_y]);
+    let blame_settling = pane.blame.settling();
+    let mut blame_layout = None;
+    if pane.blame.enabled && pane.blame.focused && !blame_settling {
+        if let Some(rv) = visible.iter().find(|rv| rv.vrow == cursor_vrow) {
+            let line = &pane.buffer.lines[rv.line];
+            let has_diagnostic = pane
+                .diagnostics
+                .get(&rv.line)
+                .is_some_and(|diags| diags.iter().any(|d| !d.message.is_empty()));
+            if !line.trim().is_empty() && !has_diagnostic {
+                let end_col = display_col_for_byte(line, rv.seg_end, TAB_DISPLAY_WIDTH);
+                let end_x = text_x
+                    + (rv.visual_indent + end_col.saturating_sub(rv.base_col)) as f32
+                        * cell_w
+                    - scroll_x;
+                let bx = end_x + 7.0 * cell_w;
+                let available = text_clip[0] + text_clip[2] - SCROLLBAR_W - 8.0 - bx;
+                if bx >= text_x && available > 0.0 {
+                    blame_layout = blame::layout(
+                        sugarloaf,
+                        pane,
+                        rv.line,
+                        [bx, row_screen_y(rv.vrow), available, row_h],
+                        &base_opts,
+                    );
+                }
+            }
+        }
+    }
+    pane.blame.hit_rect = blame_layout.as_ref().map(|layout| layout.rect);
+    let hovered = pane.blame.hit_rect.filter(|rect| {
+        pane.blame.hover_allowed()
+            && mouse.is_some_and(|[mx, my]| {
+                ((mx >= rect[0]
+                    && mx < rect[0] + rect[2]
+                    && my >= rect[1]
+                    && my < rect[1] + rect[3])
+                    || (pane.blame.hover.is_some_and(|(line, revision, _)| {
+                        line == cursor_line && revision == pane.buffer.revision
+                    }) && pane.blame.tooltip_rect.is_some_and(|r| {
+                        mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
+                    })))
+                    && !text_occlusions.iter().any(|o| {
+                        mx >= o[0] && mx < o[0] + o[2] && my >= o[1] && my < o[1] + o[3]
+                    })
+            })
+    });
+    let mut blame_hover_pending = false;
+    let mut blame_tooltip = None;
+    if let Some(anchor) = hovered {
+        let key = (pane.buffer.cursor_line, pane.buffer.revision);
+        if !pane
+            .blame
+            .hover
+            .is_some_and(|(line, revision, _)| (line, revision) == key)
+        {
+            pane.blame.hover = Some((key.0, key.1, Instant::now()));
+        }
+        if pane
+            .blame
+            .hover
+            .is_some_and(|(_, _, since)| since.elapsed().as_millis() >= 300)
+        {
+            blame_tooltip = blame::tooltip_layout(
+                sugarloaf,
+                pane,
+                anchor,
+                pane.geometry.rect,
+                &base_opts,
+                text_occlusions,
+            );
+        } else {
+            blame_hover_pending = true;
+        }
+    } else {
+        pane.blame.hover = None;
+    }
+    pane.blame.tooltip_rect = blame_tooltip.as_ref().map(|layout| layout.rect);
+    let original_text_occlusions = text_occlusions;
+    let mut blame_occlusions = Vec::new();
+    let text_occlusions = if let Some(layout) = &blame_tooltip {
+        blame_occlusions.extend_from_slice(text_occlusions);
+        blame_occlusions.push(layout.rect);
+        blame_occlusions.as_slice()
+    } else {
+        text_occlusions
+    };
+
     let text_pad_y = ((row_h - font_size * 1.2) * 0.5).max(0.0);
     let number_dim = theme.u8_alpha(theme.dim, 0.9);
     let number_cursor = theme.u8(theme.fg);
@@ -1245,9 +1346,46 @@ pub fn render(
         );
     }
 
+    if let Some(layout) = &blame_layout {
+        blame::inline(
+            sugarloaf,
+            pane,
+            cursor_line,
+            layout,
+            layout.rect[1] + text_pad_y,
+            &DrawOpts {
+                clip_rect: Some(text_clip),
+                ..base_opts
+            },
+            theme,
+            text_occlusions,
+        );
+    }
+    if let Some(layout) = &blame_tooltip {
+        blame::tooltip(
+            sugarloaf,
+            layout,
+            &base_opts,
+            theme,
+            original_text_occlusions,
+        );
+        if pane
+            .cursor_rect
+            .is_some_and(|r| intersect_cursor_rect(r, layout.rect).is_some())
+        {
+            pane.cursor_rect = None;
+        }
+    }
+
     // Keep frames coming while the glide settles or a debounced
     // symbol-trail parse is waiting for the cursor to go still.
-    scroll_animating
+    // Both hosts propagate this finite animation owner into their redraw
+    // policy. Once the configured cursor delay and optional 150ms scroll
+    // settling window pass, it stops requesting frames. Snapshot arrivals
+    // never reset either deadline; delay=0 restores immediate cursor behavior.
+    (blame_settling && pane.blame.focused)
+        || blame_hover_pending
+        || scroll_animating
         || flash_animating
         || external_flash_animating
         || pane.symbol_trail_pending.is_some()

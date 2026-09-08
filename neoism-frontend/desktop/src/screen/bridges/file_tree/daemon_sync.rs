@@ -1,7 +1,35 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+fn host_join(root: &Path, relative: &str) -> PathBuf {
+    neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
+        .join(relative).as_str().into()
+}
+
 impl Screen<'_> {
+    /// Complete just the correlated read. Never turn failed/placeholder bytes
+    /// into an authoritative CRDT seed, or discard an existing dirty buffer.
+    pub(crate) fn fail_remote_editor_read(&mut self, request_id: u64, message: &str) -> bool {
+        let mut handled = false;
+        if let Some(path) = self.pending_remote_code_opens.remove(&request_id) {
+            if let Some(pane) = self.context_manager.code_pane_mut_by_path(&path) {
+                pane.fail_remote_loading(message);
+            }
+            handled = true;
+        }
+        if let Some(path) = self.pending_remote_markdown_opens.remove(&request_id) {
+            if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(&path) {
+                pane.fail_remote_loading(message);
+            }
+            handled = true;
+        }
+        if handled {
+            self.file_tree_notify(format!("Could not read host file: {message}"),
+                neoism_ui::panels::notifications::NotificationLevel::Error);
+            self.mark_dirty();
+        }
+        handled
+    }
     pub(crate) fn terminal_completion_scope(&self) -> String {
         // Endpoint + workspace, not host_id: hostnames can collide across peers.
         format!(
@@ -180,10 +208,9 @@ impl Screen<'_> {
     /// tolerates).
     pub(crate) fn remote_tree_rel(&self, path: &Path) -> Option<String> {
         let root = self.renderer.file_tree.remote_root()?;
-        Some(match path.strip_prefix(&root) {
-            Ok(rel) => rel.to_string_lossy().into_owned(),
-            Err(_) => path.to_string_lossy().into_owned(),
-        })
+        Some(neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
+            .relative(&path.to_string_lossy())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned()))
     }
 
     /// Fire a files-plane MUTATION at the remote tree's root and track
@@ -269,6 +296,12 @@ impl Screen<'_> {
     /// the daemon only in this case; a local vault reads/writes this
     /// machine's disk exactly as it does outside a joined workspace.
     pub(crate) fn notes_sidebar_shows_shared_vault(&self) -> bool {
+        if self.context_manager.current_workspace_is_remote_joined() {
+            // Explicit local-vault selection wins even if its native path is
+            // byte-for-byte equal to the host's linked-vault path. Retain the
+            // host origin on disconnect rather than falling back to guest I/O.
+            return self.renderer.notes_sidebar.is_remote_workspace();
+        }
         let Some(shared) = self.served_notes_vault_root() else {
             return false;
         };
@@ -305,14 +338,17 @@ impl Screen<'_> {
         else {
             return false;
         };
-        let Ok(relative) = path.strip_prefix(&vault_root) else {
+        let Some(relative) = neoism_protocol::host_path::HostPath::new(vault_root.to_string_lossy())
+            .relative(&path.to_string_lossy()) else {
             return false;
         };
         if markdown {
             if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(&path) {
+                if pane.local_only || pane.remote_content_pending || pane.is_dirty() { return true; }
                 pane.mark_remote_loading();
             }
         } else if let Some(pane) = self.context_manager.code_pane_mut_by_path(&path) {
+            if pane.local_only || pane.remote_content_pending || pane.is_dirty() { return true; }
             pane.mark_remote_loading();
         }
         let request_id = handle.allocate_request_id();
@@ -323,7 +359,15 @@ impl Screen<'_> {
             self.pending_remote_code_opens
                 .insert(request_id, path.clone());
         }
-        let relative = relative.to_string_lossy().into_owned();
+        let event_proxy = self.context_manager.event_proxy();
+        let window_id = self.context_manager.window_id();
+        runtime.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            event_proxy.send_event(
+                neoism_backend::event::RioEvent::RemoteEditorReadTimeout(request_id).into(),
+                window_id,
+            );
+        });
         runtime.spawn(async move {
             if let Err(error) = handle
                 .send_files_with_request_id(
@@ -473,6 +517,7 @@ impl Screen<'_> {
     /// host linked no vault there is nothing to list — the panel shows the
     /// "no linked vault" empty state instead.
     pub(crate) fn request_remote_notes_listing(&mut self) {
+        if !self.notes_sidebar_shows_shared_vault() { return; }
         let Some(vault_root) = self.served_notes_vault_root() else {
             return;
         };
@@ -505,74 +550,6 @@ impl Screen<'_> {
         });
     }
 
-    /// Remote git-status fetch for the JOINED workspace's repo (the
-    /// host machine's disk); the reply re-badges the tree in place.
-    pub(crate) fn start_remote_git_status_refresh(&mut self) {
-        let Some(root) = self.renderer.file_tree.remote_root() else {
-            return;
-        };
-        let Some((handle, runtime)) =
-            self.context_manager.daemon_link_handle_and_runtime()
-        else {
-            return;
-        };
-        let request_id = handle.allocate_request_id();
-        self.pending_remote_git_status
-            .insert(request_id, root.clone());
-        runtime.spawn(async move {
-            let _ = handle
-                .send_git_with_request_id(
-                    request_id,
-                    neoism_protocol::git::GitClientMessage::Status,
-                    Some(root),
-                )
-                .await;
-        });
-    }
-
-    /// Git-plane inbound: a `Status` reply for a remote tree re-badges
-    /// its rows from the HOST repo's state.
-    pub(crate) fn apply_daemon_git_message(
-        &mut self,
-        request_id: u64,
-        message: &neoism_protocol::git::GitServerMessage,
-    ) -> bool {
-        use neoism_protocol::git::{GitFileStatus, GitServerMessage};
-        use neoism_ui::panels::file_tree::GitStatus;
-
-        let Some(root) = self.pending_remote_git_status.remove(&request_id) else {
-            return false;
-        };
-        if self.renderer.file_tree.remote_root().as_deref() != Some(root.as_path()) {
-            return false;
-        }
-        let GitServerMessage::Status { entries } = message else {
-            return false;
-        };
-        let statuses: std::collections::HashMap<PathBuf, GitStatus> = entries
-            .iter()
-            .map(|entry| {
-                let status = match entry.status {
-                    GitFileStatus::Modified => GitStatus::Modified,
-                    GitFileStatus::Added => GitStatus::Added,
-                    GitFileStatus::Deleted => GitStatus::Deleted,
-                    GitFileStatus::Renamed => GitStatus::Renamed,
-                    GitFileStatus::Untracked => GitStatus::Untracked,
-                    GitFileStatus::Conflicted => GitStatus::Conflict,
-                };
-                (root.join(&entry.path), status)
-            })
-            .collect();
-        let applied = self
-            .renderer
-            .file_tree
-            .apply_git_statuses_map(&root, statuses);
-        if applied {
-            self.mark_dirty();
-        }
-        applied
-    }
-
     /// Files-plane inbound: correlated `DirListing` replies feed the
     /// tree's pending-request map; mutation acks (create/rename/
     /// delete) toast + re-list; unsolicited `Changed` pushes
@@ -592,6 +569,11 @@ impl Screen<'_> {
         let notes_mutation = self.pending_remote_notes_mutations.remove(&request_id);
         let terminal_completion =
             self.pending_remote_terminal_completions.remove(&request_id);
+        if let FilesServerMessage::Error { message } = message {
+            if self.fail_remote_editor_read(request_id, message) {
+                return true;
+            }
+        }
         // Consume only our replies, including obsolete/error replies. Never seed
         // the path-only link cache with data from a joined peer.
         if let Some(RemoteTerminalCompletion {
@@ -624,7 +606,7 @@ impl Screen<'_> {
                         let Ok(suffix) = dir.strip_prefix("~") else {
                             return true;
                         };
-                        let path = PathBuf::from(&home.path).join(suffix);
+                        let path = host_join(Path::new(&home.path), &suffix.to_string_lossy());
                         let request_id = handle.allocate_request_id();
                         self.pending_remote_terminal_completions.insert(
                             request_id,
@@ -678,7 +660,7 @@ impl Screen<'_> {
                 );
                 if !is_dir {
                     if let Some(vault_root) = notes_create_vault {
-                        self.open_path_in_markdown(vault_root.join(path));
+                        self.open_path_in_markdown(host_join(&vault_root, path));
                     }
                 }
                 self.request_remote_notes_listing();
@@ -710,7 +692,7 @@ impl Screen<'_> {
                     NotificationLevel::Info,
                 );
                 if let Some(root) = self.served_notes_vault_root() {
-                    self.close_buffer_tabs_under_path(&root.join(path));
+                    self.close_buffer_tabs_under_path(&host_join(&root, path));
                 }
                 self.request_remote_notes_listing();
                 self.mark_dirty();
@@ -725,15 +707,25 @@ impl Screen<'_> {
                 true
             }
             FilesServerMessage::TreeListing { entries, .. } if notes_listing => {
+                if self.context_manager.current_workspace_is_remote_joined()
+                    && !self.renderer.notes_sidebar.is_remote_workspace() {
+                    // A local-vault selection made while this request was in
+                    // flight must not be rehomed by the late host reply.
+                    return false;
+                }
                 let Some(notes_root) = self.renderer.notes_sidebar.workspace_path()
                 else {
                     return false;
                 };
                 let list: Vec<(std::path::PathBuf, bool)> = entries
                     .iter()
-                    .map(|entry| (notes_root.join(&entry.path), entry.is_dir))
+                    .map(|entry| (host_join(&notes_root, &entry.path), entry.is_dir))
                     .collect();
-                self.renderer.notes_sidebar.set_entries_from_host(list);
+                if self.context_manager.current_workspace_is_remote_joined() {
+                    self.renderer.notes_sidebar.set_remote_entries_from_host(list);
+                } else {
+                    self.renderer.notes_sidebar.set_entries_from_host(list);
+                }
                 self.mark_dirty();
                 true
             }
@@ -741,9 +733,12 @@ impl Screen<'_> {
             // (with its "+ New note" button) is the correct answer, not
             // an error toast; the first create makes the folder.
             FilesServerMessage::Error { .. } if notes_listing => {
-                self.renderer
-                    .notes_sidebar
-                    .set_entries_from_host(Vec::new());
+                if self.context_manager.current_workspace_is_remote_joined() {
+                    if !self.renderer.notes_sidebar.is_remote_workspace() { return false; }
+                    self.renderer.notes_sidebar.set_remote_entries_from_host(Vec::new());
+                } else {
+                    self.renderer.notes_sidebar.set_entries_from_host(Vec::new());
+                }
                 self.mark_dirty();
                 true
             }
@@ -864,7 +859,7 @@ impl Screen<'_> {
                         .served_workspace_root()
                         .or_else(|| self.renderer.file_tree.remote_root())
                     {
-                        let abs = root.join(path);
+                        let abs = host_join(&root, path);
                         // Notes open in the markdown surface and the
                         // sidebar re-lists; everything else keeps the
                         // editor open the tree ops always did.
@@ -901,7 +896,7 @@ impl Screen<'_> {
                     NotificationLevel::Info,
                 );
                 if let Some(root) = self.renderer.file_tree.remote_root() {
-                    self.close_buffer_tabs_under_path(&root.join(path));
+                    self.close_buffer_tabs_under_path(&host_join(&root, path));
                 }
                 self.renderer.file_tree.relist_open_dirs();
                 self.mark_dirty();

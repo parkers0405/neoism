@@ -157,6 +157,9 @@ pub(super) struct CodeInsertBurst {
 /// a tty host needs to edit a file lives here.
 #[derive(Clone, Debug)]
 pub struct CodeBuffer {
+    /// Explicit caret placements (including repeated clicks on the same cell).
+    /// Not document history: consumers combine this with position + revision.
+    pub(super) cursor_placement_revision: u64,
     pub lines: Vec<String>,
     pub mode: CodeMode,
     pub cursor_line: usize,
@@ -431,6 +434,7 @@ impl CodePane {
     /// raw accumulator AND visual position move together so the spring
     /// has nothing to chase (1:1 hand tracking).
     pub fn set_scroll_progress(&mut self, progress: f32) {
+        self.blame.note_scroll();
         let max_scroll = (self.content_height - self.scroll_viewport_height).max(0.0);
         let target = (progress.clamp(0.0, 1.0) * max_scroll).clamp(0.0, max_scroll);
         self.target_scroll_y = target;
@@ -626,6 +630,10 @@ pub struct CodePane {
     /// on the host daemon); the renderer shows a skeleton and the CRDT
     /// drain must not bind the buffer yet.
     pub remote_content_pending: bool,
+    /// Host-owned bytes must never fall back to writing the guest filesystem.
+    pub remote_source: bool,
+    /// Explicit guest-local source, never attached to the workspace daemon.
+    pub local_only: bool,
     /// Geometry of the last painted frame (hit-testing, page sizing).
     pub geometry: CodePaneGeometry,
     /// A left-button drag selection is in progress (host mouse state).
@@ -685,6 +693,7 @@ pub struct CodePane {
     /// Git gutter marks (added/modified lines + deleted-above rows),
     /// prepared asynchronously against the HEAD baseline and consumed by
     /// paint. `git_scheduled_revision` coalesces one job per pane revision.
+    pub blame: super::blame::CodeBlame,
     pub git_marks: super::gitdiff::CodeGitMarks,
     pub git_scheduled_revision: Option<u64>,
     /// Cursor position when `/` opened in-buffer search — Esc restores
@@ -738,6 +747,8 @@ impl CodePane {
             cursor_rect: None,
             error: None,
             remote_content_pending: false,
+            remote_source: false,
+            local_only: false,
             geometry: CodePaneGeometry::default(),
             mouse_selecting: false,
             touch_word_edges: None,
@@ -756,6 +767,7 @@ impl CodePane {
             symbol_trail_pending: None,
             caret_drawn_by_host: false,
             leader_pending: false,
+            blame: super::blame::CodeBlame::default(),
             git_marks: super::gitdiff::CodeGitMarks::default(),
             git_scheduled_revision: None,
             remote_cursors: Vec::new(),
@@ -767,6 +779,25 @@ impl CodePane {
 
     /// Open a file from disk. Read failures surface via `error` on an
     /// empty buffer (same contract as `MarkdownPane::load`).
+    /// Shared gate used by the desktop document-plane open/save paths.
+    pub fn workspace_sync_ready(&self) -> bool {
+        !self.local_only && !self.remote_content_pending && self.error.is_none()
+    }
+
+    pub fn load_with_source(path: PathBuf, source: crate::services::FileOpenSource) -> Self {
+        use crate::services::FileOpenSource;
+        if source == FileOpenSource::Host {
+            let mut pane = Self::new(path, "");
+            pane.remote_source = true;
+            pane.error = Some("Host content has not loaded".into());
+            pane
+        } else {
+            let mut pane = Self::load(path);
+            pane.local_only = source == FileOpenSource::LocalOnly;
+            pane
+        }
+    }
+
     pub fn load(path: PathBuf) -> Self {
         match std::fs::read_to_string(&path) {
             Ok(text) => Self::new(path, &text),
@@ -778,28 +809,45 @@ impl CodePane {
         }
     }
 
-    /// Local read failed because the file lives on a joined server or an
-    /// ssh host — clear the raw os error and show an empty buffer while
-    /// the remote fetch is in flight (mirrors the markdown pane).
+    /// Mark a host read in flight without touching the guest filesystem or
+    /// discarding any existing edits (mirrors the markdown pane).
     pub fn mark_remote_loading(&mut self) {
+        if self.local_only { return; }
+        self.remote_source = true;
         self.error = None;
         self.remote_content_pending = true;
-        self.buffer.reset_from_text("");
+        // Do not discard existing edits while a read is in flight.
     }
 
     /// Seed the pane with bytes fetched from the host/ssh remote, exactly
     /// like a successful local load would. Language/highlighting were
     /// already resolved from the path at construction.
     pub fn apply_remote_source(&mut self, text: &str) {
+        if self.local_only { return; }
+        self.remote_source = true;
+        if self.is_dirty() {
+            self.fail_remote_loading("Local edits were preserved; resolve them before reloading");
+            return;
+        }
         self.buffer.reset_from_text(text);
         self.remote_content_pending = false;
         self.error = None;
+    }
+
+    /// Finish only the loading state. Preserve any user edits for recovery.
+    pub fn fail_remote_loading(&mut self, message: &str) {
+        if self.local_only { return; }
+        self.remote_content_pending = false;
+        self.error = Some(format!("Could not read host file: {message}"));
     }
 
     /// Local host-side save: writes the buffer with its original line
     /// ending / trailing newline restored, then resets the dirty
     /// baseline. (Daemon/CRDT-owned saves come with the LSP wiring.)
     pub fn save(&mut self) -> std::io::Result<()> {
+        if self.remote_source || self.remote_content_pending {
+            return Err(std::io::Error::other("Host-owned buffers must be saved through the daemon"));
+        }
         match std::fs::write(&self.path, self.buffer.text_for_disk()) {
             Ok(()) => {
                 self.buffer.mark_saved();
@@ -813,11 +861,17 @@ impl CodePane {
         }
     }
 
+    /// Host request pumps observe scrolling before deciding whether to fetch.
+    pub fn observe_blame_viewport(&mut self) {
+        self.blame.observe_viewport([self.scroll_y, self.scroll_x, self.target_scroll_y]);
+    }
+
     /// Wheel/trackpad scroll: viewport only, cursor stays put (matching
     /// the markdown pane's `scroll_pixels` semantics and sign). The
     /// raw accumulator keeps sub-row deltas; the exposed target snaps
     /// to whole rows (Neovide-style line steps, glided by the painter).
     pub fn scroll_pixels(&mut self, delta_pixels: f32, viewport_height: f32) {
+        if delta_pixels != 0.0 { self.blame.note_scroll(); }
         self.touch_viewport_detached = false;
         let content_delta = -delta_pixels;
         // Inertia guard: sub-row wheel deltas within a beat of a
@@ -885,6 +939,7 @@ impl CodePane {
         delta_pixels: f32,
         viewport_height: f32,
     ) -> bool {
+        if delta_pixels != 0.0 { self.blame.note_scroll(); }
         self.scroll_viewport_height = viewport_height;
         let before = self.scroll_y;
         let max_scroll = (self.content_height - viewport_height).max(0.0);

@@ -137,6 +137,7 @@ impl CodeBuffer {
     /// Host mouse click / drag caret placement (the host hit-tests
     /// pixels to line/col). Shift-click extends from the old caret.
     pub fn set_cursor_position(&mut self, line: usize, col: usize, extend: bool) {
+        self.cursor_placement_revision = self.cursor_placement_revision.wrapping_add(1);
         self.break_undo_group();
         self.clamp_cursor();
         if extend {

@@ -228,6 +228,7 @@ export interface GitFileDiff {
 }
 
 export type GitClientMessage =
+  | { Blame: { path: string } }
   | "Status"
   | { Diff: { path: string | null } }
   | { Log: { max_count: number | null } }
@@ -241,7 +242,28 @@ export type GitClientMessage =
   | { Checkout: { branch: string } }
   | { DiffFiles: { paths: string[] } };
 
+export interface GitBlameCommit {
+  sha: string;
+  author: string;
+  email: string;
+  timestamp: number;
+  summary: string;
+  avatar: number | null;
+}
+
+export interface GitBlameSnapshot {
+  repo_root: string;
+  path: string;
+  head: string;
+  baseline: string[];
+  lines: (number | null)[];
+  /** Deduplicated base64 32x32 RGBA8 GitHub images, decoded on the daemon. */
+  avatars: string[];
+  commits: GitBlameCommit[];
+}
+
 export type GitServerMessage =
+  | { Blame: { snapshot: GitBlameSnapshot } }
   | { Status: { entries: GitStatusEntry[] } }
   | { Diff: { hunks: DiffHunk[] } }
   | { Log: { commits: CommitSummary[] } }
@@ -260,6 +282,7 @@ export type GitServerMessage =
 
 export interface GitEnvelope {
   request_id: number;
+  workspace_root?: string | null;
   message: GitClientMessage;
 }
 

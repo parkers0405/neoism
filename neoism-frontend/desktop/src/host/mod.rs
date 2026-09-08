@@ -135,6 +135,9 @@ pub struct Renderer {
     pub status_fps_enabled: bool,
     /// `[neoism] format-on-save` — the code pane formats via LSP
     /// before each save (default true).
+    pub code_git_blame: bool,
+    pub code_git_blame_delay_ms: u64,
+    pub code_git_blame_hide_on_scroll: bool,
     pub code_format_on_save: bool,
     /// `[neoism] vim-mode` — new code/markdown editors open with the
     /// vim modal layer (default true). Read at editor creation.
@@ -415,6 +418,9 @@ impl Renderer {
             trail_cursor_enabled: config.appearance.effects.trail_cursor,
             trail_cursor: trail_cursor::TrailCursor::new(),
             status_fps_enabled: config.ui.status_fps,
+            code_git_blame: config.editor.git_blame,
+            code_git_blame_delay_ms: config.editor.git_blame_delay_ms,
+            code_git_blame_hide_on_scroll: config.editor.git_blame_hide_on_scroll,
             code_format_on_save: config.editor.format_on_save,
             vim_mode: config.editor.vim_mode,
             markdown_spellcheck: config.editor.markdown.spellcheck,

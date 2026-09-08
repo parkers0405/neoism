@@ -124,6 +124,8 @@ mod tests {
             remote_loading_started: None,
             value_picker_suppressed: None,
             remote_content_pending: false,
+            remote_source: false,
+            local_only: false,
             cover_overlay_rect: None,
             value_picker: None,
             available_covers: Vec::new(),

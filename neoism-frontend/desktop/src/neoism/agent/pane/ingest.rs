@@ -446,10 +446,12 @@ impl NeoismAgentPane {
                             .entry(session_id)
                             .or_insert_with(CachedAgentSession::live_only);
                         upsert_cached_part_message(&mut cached.messages, message);
-                        cached.runtime.running_background_task_count =
-                            running_background_task_count(&cached.messages);
-                        if cached.runtime.running_background_task_count == 0 {
-                            cached.runtime.background_tasks_started_at = None;
+                        if !cached.runtime.background_task_authority.is_authoritative() {
+                            cached.runtime.running_background_task_count =
+                                running_background_task_count(&cached.messages);
+                            if cached.runtime.running_background_task_count == 0 {
+                                cached.runtime.background_tasks_started_at = None;
+                            }
                         }
                         cached.invalidate_timeline_layout();
                     }
@@ -1721,8 +1723,22 @@ impl NeoismAgentPane {
                     }
                     if !is_latest
                         || self.session_id.as_deref() != Some(session_id.as_str())
-                        || self.session_runtime_revision(&session_id) != runtime_revision
                     {
+                        continue;
+                    }
+                    // Jobs have their own epoch/revision. Token/status events
+                    // during this fetch must not discard a valid empty job list.
+                    if let Ok(runtime) = &runtime {
+                        if let (Some(epoch), Some(revision), Some(tasks)) = (
+                            runtime.background_jobs_epoch.as_deref(),
+                            runtime.background_jobs_revision,
+                            runtime.running_background_tasks.as_deref(),
+                        ) {
+                            changed |= self
+                                .apply_running_background_tasks(epoch, revision, tasks);
+                        }
+                    }
+                    if self.session_runtime_revision(&session_id) != runtime_revision {
                         continue;
                     }
                     if let Ok(statuses) = result {
@@ -1735,14 +1751,6 @@ impl NeoismAgentPane {
                             .collect::<HashSet<_>>()
                     });
                     if let Ok(runtime) = runtime {
-                        if let (Some(epoch), Some(revision), Some(tasks)) = (
-                            runtime.background_jobs_epoch.as_deref(),
-                            runtime.background_jobs_revision,
-                            runtime.running_background_tasks.as_deref(),
-                        ) {
-                            changed |= self
-                                .apply_running_background_tasks(epoch, revision, tasks);
-                        }
                         changed |= self.apply_runtime_lifecycle_snapshot(
                             runtime.execution,
                             runtime.root_session_id,
@@ -2442,8 +2450,9 @@ impl NeoismAgentPane {
             running_background_task_count: std::mem::take(
                 &mut self.running_background_task_count,
             ),
-            background_jobs_epoch: self.background_jobs_epoch.take(),
-            background_jobs_revision: std::mem::take(&mut self.background_jobs_revision),
+            background_task_authority: std::mem::take(
+                &mut self.background_task_authority,
+            ),
             abort_requested_at: self.abort_requested_at.take(),
         }
     }
@@ -2459,8 +2468,7 @@ impl NeoismAgentPane {
         self.subagent_waiting_started_at = runtime.subagent_waiting_started_at;
         self.background_tasks_started_at = runtime.background_tasks_started_at;
         self.running_background_task_count = runtime.running_background_task_count;
-        self.background_jobs_epoch = runtime.background_jobs_epoch;
-        self.background_jobs_revision = runtime.background_jobs_revision;
+        self.background_task_authority = runtime.background_task_authority;
         self.abort_requested_at = runtime.abort_requested_at;
         self.permission_choice_hit_rects.clear();
         self.question_option_hit_rects.clear();

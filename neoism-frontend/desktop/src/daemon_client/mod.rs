@@ -360,7 +360,7 @@ impl DaemonClientHandle {
         message: EditorClientMessage,
         workspace_root: Option<PathBuf>,
     ) -> Result<u64> {
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = self.allocate_request_id();
         self.tx
             .send(OutboundServiceMessage::Editor {
                 request_id,
@@ -370,6 +370,82 @@ impl DaemonClientHandle {
             .await
             .map_err(|_| DaemonClientError::ChannelClosed)?;
         Ok(request_id)
+    }
+
+    /// A watch cursor owned by an editor subscription, independent of other
+    /// handle clones. It notices reconnects even if BackingOff was brief.
+    pub fn take_editor_connection_change(&mut self) -> Option<bool> {
+        if !self.status.has_changed().unwrap_or(false) {
+            return None;
+        }
+        Some(*self.status.borrow_and_update() == DaemonClientStatus::Open)
+    }
+
+    pub fn connection_key(&self) -> usize {
+        Arc::as_ptr(&self.next_request_id) as usize
+    }
+
+    /// Register correlation before a fast localhost daemon can reply.
+    pub async fn send_editor_with_request_id(
+        &self,
+        request_id: u64,
+        message: EditorClientMessage,
+        workspace_root: Option<PathBuf>,
+    ) -> Result<()> {
+        if *self.status.borrow() != DaemonClientStatus::Open {
+            return Err(DaemonClientError::ChannelClosed);
+        }
+        self.tx
+            .try_send(OutboundServiceMessage::Editor {
+                request_id,
+                workspace_root,
+                message,
+            })
+            .map_err(|_| DaemonClientError::ChannelClosed)
+    }
+
+    /// Git-only request namespace, process-wide across windows and fresh
+    /// connections. Git replies lack source tags at app ingress; a per-link
+    /// counter would let a drained old-host DiffFiles/Error hit a new request.
+    /// The upper half also keeps Git acknowledgments separate from the normal
+    /// per-connection workspace/files/editor request sequence.
+    pub fn allocate_git_request_id(&self) -> u64 {
+        static NEXT_GIT_REQUEST: AtomicU64 = AtomicU64::new(1 << 63);
+        NEXT_GIT_REQUEST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("Git request namespace exhausted")
+    }
+
+    /// Live for one screen scope. Wait for Open and resubscribe on every Open
+    /// revision, including a brief BackingOff->Open between render frames.
+    /// A pre-open failure/reconnect needs no frame or user input to retry.
+    /// Dropping the screen's task owner aborts this loop on workspace switch.
+    pub async fn maintain_git_status_watch(
+        self, request_id: u64, token: String, workspace_root: PathBuf,
+    ) {
+        let mut status = self.status.clone();
+        let result: Result<()> = async {
+            loop {
+                let current = *status.borrow_and_update();
+                match current {
+                    DaemonClientStatus::Closed => return Err(DaemonClientError::ChannelClosed),
+                    DaemonClientStatus::Open => self.send_git_with_request_id(
+                        request_id, GitClientMessage::WatchStatus { token: token.clone() },
+                        Some(workspace_root.clone()),
+                    ).await?,
+                    _ => {},
+                }
+                status.changed().await.map_err(|_| DaemonClientError::ChannelClosed)?;
+            }
+        }.await;
+        if let Err(error) = result {
+            // Surface terminal delivery failures instead of silently leaving
+            // the panel in its initial empty/loading state. A new handle/scope
+            // starts a new task; never retry a closed channel in a tight loop.
+            let _ = self.failures.send(DaemonServerMessage::Git {
+                request_id,
+                message: GitServerMessage::Error { message: format!("Host Git subscription unavailable: {error}") },
+            }).await;
+        }
     }
 
     /// Git-plane request against an explicit repo root (a guest asks
@@ -1026,7 +1102,10 @@ fn pty_delivery_failure(
 fn outbound_is_replayable(message: &OutboundServiceMessage) -> bool {
     !matches!(
         message,
-        OutboundServiceMessage::Crdt { .. } | OutboundServiceMessage::Pty { .. }
+        OutboundServiceMessage::Crdt { .. }
+            | OutboundServiceMessage::Pty { .. }
+            | OutboundServiceMessage::Editor { .. }
+            | OutboundServiceMessage::Git { .. }
     )
 }
 
@@ -1298,6 +1377,122 @@ mod tests {
 
         assert!(!outbound_is_replayable(&input));
         assert!(!outbound_is_replayable(&resize));
+    }
+
+    #[test]
+    fn git_ids_do_not_repeat_across_fresh_connections_and_roundtrip_exactly() {
+        let (_, a, _) = delivery_test_client(DaemonClientStatus::Open);
+        let (_, b, _) = delivery_test_client(DaemonClientStatus::Open);
+        assert_eq!(a.allocate_request_id(), b.allocate_request_id()); // old failure mode
+        let old = a.allocate_git_request_id();
+        let new = b.allocate_git_request_id();
+        assert_ne!(old, new);
+        assert!(new > old);
+        let json = serialize_outbound_service_message(&OutboundServiceMessage::Git {
+            request_id: new, workspace_root: Some("/same/path".into()),
+            message: GitClientMessage::DiffFiles { paths: vec!["same.rs".into()] },
+        }).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap()["Git"]["request_id"].as_u64(), Some(new));
+        for message in [GitServerMessage::FileDiffs { diffs: vec![] }, GitServerMessage::Error { message: "old host error".into() }] {
+            let value = serde_json::json!({"GitReply": {"request_id": old, "message": message}});
+            let parsed = parse_server_frame(Message::Text(value.to_string().into())).unwrap().unwrap();
+            assert_eq!(parsed.request_id(), old);
+        }
+    }
+
+    #[tokio::test]
+    async fn git_watch_recovers_before_open_and_after_dropped_send_without_a_frame() {
+        let (mut runner, handle, _) = delivery_test_client(DaemonClientStatus::Connecting);
+        let request_id = handle.allocate_git_request_id();
+        let root = PathBuf::from(r"C:\Host\same-path");
+        let task = tokio::spawn(handle.maintain_git_status_watch(request_id, "scope:1".into(), root.clone()));
+        // Initial connection attempt fails. No Git request is queued into the
+        // backoff buffer; no render/Screen method is called anywhere in test.
+        runner.status_tx.send_replace(DaemonClientStatus::BackingOff);
+        assert!(tokio::time::timeout(Duration::from_millis(20), runner.out_rx.recv()).await.is_err());
+        runner.status_tx.send_replace(DaemonClientStatus::Open);
+        let first = tokio::time::timeout(Duration::from_secs(1), runner.out_rx.recv()).await.unwrap().unwrap();
+        assert!(matches!(&first, OutboundServiceMessage::Git { request_id: id, workspace_root: Some(path), message: GitClientMessage::WatchStatus { token } }
+            if *id == request_id && path == &root && token == "scope:1"));
+        assert!(!outbound_is_replayable(&first));
+        // Simulate send success into queue followed by connection loss before
+        // reaching the server: discard first request. Re-Open must send again,
+        // even when BackingOff was too brief to observe as a separate revision.
+        drop(first);
+        runner.status_tx.send_replace(DaemonClientStatus::BackingOff);
+        runner.status_tx.send_replace(DaemonClientStatus::Open);
+        let retry = tokio::time::timeout(Duration::from_secs(1), runner.out_rx.recv()).await.unwrap().unwrap();
+        assert!(matches!(retry, OutboundServiceMessage::Git { request_id: id, message: GitClientMessage::WatchStatus { .. }, .. } if id == request_id));
+        assert!(tokio::time::timeout(Duration::from_millis(20), runner.out_rx.recv()).await.is_err(), "healthy idle connection retried without an Open revision");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn git_watch_closed_delivery_reports_correlated_error_instead_of_hanging() {
+        let (mut runner, handle, mut incoming) = delivery_test_client(DaemonClientStatus::Connecting);
+        let id = handle.allocate_git_request_id();
+        let task = tokio::spawn(handle.maintain_git_status_watch(id, "scope:failed".into(), "/host/repo".into()));
+        runner.out_rx.close();
+        runner.status_tx.send_replace(DaemonClientStatus::Open);
+        let reply = tokio::time::timeout(Duration::from_secs(1), incoming.recv()).await.unwrap().unwrap();
+        assert!(matches!(reply, DaemonServerMessage::Git { request_id, message: GitServerMessage::Error { .. } } if request_id == id));
+        tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn git_actions_and_obsolete_watches_are_not_replayed() {
+        for message in [GitClientMessage::Commit { message: "one action".into() }, GitClientMessage::WatchStatus { token: "obsolete".into() }] {
+            assert!(!outbound_is_replayable(&OutboundServiceMessage::Git { request_id: 7, workspace_root: None, message }));
+        }
+    }
+
+    #[test]
+    fn shared_lsp_reconnect_watch_notices_brief_disconnect_without_polling_it() {
+        let (runner, mut handle, _) = delivery_test_client(DaemonClientStatus::Open);
+        assert_eq!(handle.take_editor_connection_change(), None);
+        runner
+            .status_tx
+            .send_replace(DaemonClientStatus::BackingOff);
+        runner.status_tx.send_replace(DaemonClientStatus::Open);
+        assert_eq!(handle.take_editor_connection_change(), Some(true));
+        assert_eq!(handle.take_editor_connection_change(), None);
+    }
+
+    #[tokio::test]
+    async fn shared_lsp_preallocated_request_keeps_owner_root_and_is_never_replayed() {
+        let (mut runner, handle, _) = delivery_test_client(DaemonClientStatus::Open);
+        let id = handle.allocate_request_id();
+        let root = PathBuf::from(r"C:\Host Workspace");
+        let request = EditorClientMessage::LspQueryAt {
+            seq: 17,
+            action: neoism_protocol::editor::EditorLspAction::Rename,
+            path: root.join("main.rs"),
+            line: 2,
+            character: 3,
+            text: Some("renamed".into()),
+            buffer_text: Some("unsaved host text".into()),
+            open_paths: Vec::new(),
+            surface_id: Some("pane-7".into()),
+        };
+        handle
+            .send_editor_with_request_id(id, request, Some(root.clone()))
+            .await
+            .unwrap();
+        let envelope = runner.out_rx.try_recv().unwrap();
+        assert!(!outbound_is_replayable(&envelope));
+        assert!(
+            matches!(envelope, OutboundServiceMessage::Editor { request_id, workspace_root: Some(got), message: EditorClientMessage::LspQueryAt { seq: 17, .. } } if request_id == id && got == root)
+        );
+        let (mut runner, handle, _) =
+            delivery_test_client(DaemonClientStatus::BackingOff);
+        assert!(handle
+            .send_editor_with_request_id(100, EditorClientMessage::Close, Some(root))
+            .await
+            .is_err());
+        assert!(
+            runner.out_rx.try_recv().is_err(),
+            "offline edits cannot wait to replay on reconnect"
+        );
     }
 
     fn delivery_test_client(

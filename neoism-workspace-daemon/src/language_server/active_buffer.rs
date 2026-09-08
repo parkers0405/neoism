@@ -9,18 +9,28 @@ use neoism_protocol::{diagnostics::DiagnosticItem, editor::EditorServerMessage};
 /// editor through `OpenBuffer`. Interactive queries (completion) and
 /// reference-row previews read this so they reflect unsaved edits
 /// instead of stale disk content.
-fn live_text_store() -> &'static Mutex<HashMap<PathBuf, String>> {
-    static STORE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+fn live_text_store() -> &'static Mutex<HashMap<(usize, PathBuf, PathBuf), String>> {
+    static STORE: OnceLock<Mutex<HashMap<(usize, PathBuf, PathBuf), String>>> =
+        OnceLock::new();
     STORE.get_or_init(Default::default)
 }
 
 /// The text last synced for `file` (None when the editor never opened
 /// it on this daemon).
-pub(crate) fn live_buffer_text(file: &Path) -> Option<String> {
-    live_text_store()
-        .lock()
-        .ok()
-        .and_then(|store| store.get(file).cloned())
+pub(crate) fn live_buffer_text(
+    runtime: &language_server::LspRuntime,
+    root: &Path,
+    file: &Path,
+) -> Option<String> {
+    live_text_store().lock().ok().and_then(|store| {
+        store
+            .get(&(
+                runtime.instance_key(),
+                root.to_path_buf(),
+                file.to_path_buf(),
+            ))
+            .cloned()
+    })
 }
 
 /// Queue the native editor's authoritative text into the host LSP —
@@ -37,43 +47,63 @@ pub(crate) fn queue_buffer_sync(
     text: String,
 ) {
     if let Ok(mut store) = live_text_store().lock() {
-        store.insert(file.to_path_buf(), text.clone());
+        store.insert(
+            (
+                runtime.instance_key(),
+                workspace_root.to_path_buf(),
+                file.to_path_buf(),
+            ),
+            text.clone(),
+        );
     }
     super::live_sync::sync_document(runtime, workspace_root, file, text);
 }
 
 /// The BLOCKING half: wait for the queued sync to reach the engine,
 /// then build the `LspSnapshot` status message. Run on a blocking
-/// task. Returns `None` when the per-file snapshot throttle says the
-/// last one is fresh enough (`language_server::status` walks the
-/// workspace — desktop throttles the same way in `refresh_lsp_pill`).
+/// task. Every request receives a reply, including simultaneous opens
+/// by two clients. Clients throttle polling, never delivery.
 pub(crate) fn buffer_snapshot_message(
     runtime: &language_server::LspRuntime,
     workspace_root: &Path,
     file: &Path,
     surface_id: Option<String>,
 ) -> Option<EditorServerMessage> {
-    {
-        static LAST_SNAPSHOT: OnceLock<Mutex<HashMap<PathBuf, std::time::Instant>>> =
-            OnceLock::new();
-        let mut last = match LAST_SNAPSHOT.get_or_init(Default::default).lock() {
-            Ok(last) => last,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let now = std::time::Instant::now();
-        match last.get(file) {
-            Some(at) if now.duration_since(*at).as_secs_f32() < 3.0 => return None,
-            _ => {
-                last.insert(file.to_path_buf(), now);
-            }
-        }
-    }
     super::live_sync::flush_document_sync(runtime, workspace_root, file);
+    // Cache the expensive status walk, NEVER the delivery. A second client
+    // opening this file must receive its own surface-tagged initial reply.
+    type Key = (usize, PathBuf, PathBuf);
+    type Cached = (
+        std::time::Instant,
+        String,
+        Vec<neoism_protocol::editor::LspSnapshotServer>,
+    );
+    static STATUS: OnceLock<Mutex<HashMap<Key, Cached>>> = OnceLock::new();
+    let cache = STATUS.get_or_init(Default::default);
+    let key = (
+        runtime.instance_key(),
+        workspace_root.to_path_buf(),
+        file.to_path_buf(),
+    );
+    let cached = cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+        .filter(|(at, _, _)| at.elapsed() < std::time::Duration::from_secs(3))
+        .cloned();
+    if let Some((_, filetype, servers)) = cached {
+        return Some(EditorServerMessage::LspSnapshot {
+            surface_id,
+            file_path: Some(file.to_path_buf()),
+            filetype,
+            servers,
+        });
+    }
     let statuses = language_server::status(runtime, workspace_root, Some(file));
     let filetype =
         language_server::language_id_for_path_in(runtime, workspace_root, file)
             .unwrap_or_default();
-    let servers = statuses
+    let servers: Vec<neoism_protocol::editor::LspSnapshotServer> = statuses
         .into_iter()
         .map(|status| {
             use neoism_agent_server::language_server::{
@@ -99,11 +129,15 @@ pub(crate) fn buffer_snapshot_message(
                     }
                     .to_string(),
                 ),
-                message: None,
+                message: status.detected.message,
                 level: None,
             }
         })
         .collect();
+    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(
+        key,
+        (std::time::Instant::now(), filetype.clone(), servers.clone()),
+    );
     Some(EditorServerMessage::LspSnapshot {
         surface_id,
         file_path: Some(file.to_path_buf()),
@@ -135,10 +169,26 @@ pub(crate) fn diagnostics_event_message(
     diagnostics_message(&diagnostics, std::path::Path::new(&event.file))
 }
 
-/// The file a diagnostics push is for (so the socket loop can drop pushes for
-/// buffers other than the active one).
-pub(crate) fn diagnostics_event_file(event: &language_server::DiagnosticsEvent) -> &str {
-    &event.file
+/// Initial diagnostics must be delivered even when the server published before
+/// this socket subscribed (second client / unchanged buffer).
+pub(crate) fn initial_diagnostics(
+    runtime: &language_server::LspRuntime,
+    root: &Path,
+    file: &Path,
+    surface_id: Option<String>,
+) -> EditorServerMessage {
+    let diagnostics = language_server::cached_diagnostics(runtime, root, file)
+        .into_iter()
+        .map(map_diagnostic)
+        .collect::<Vec<_>>();
+    let mut message = diagnostics_message(&diagnostics, file);
+    if let EditorServerMessage::Diagnostics {
+        surface_id: target, ..
+    } = &mut message
+    {
+        *target = surface_id;
+    }
+    message
 }
 
 /// Build the desktop inline-diagnostics message (`EditorServerMessage::

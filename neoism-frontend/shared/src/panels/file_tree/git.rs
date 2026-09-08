@@ -49,7 +49,7 @@ impl GitStatus {
         }
     }
 
-    fn merge(self, other: GitStatus) -> GitStatus {
+    pub(super) fn merge(self, other: GitStatus) -> GitStatus {
         if other.priority() > self.priority() {
             other
         } else {

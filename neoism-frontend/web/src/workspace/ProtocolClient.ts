@@ -619,7 +619,10 @@ export class ProtocolClient {
    * Send a git request and return a promise that resolves with the
    * `GitServerMessage` payload tagged with the matching request id.
    */
-  requestGit(message: GitClientMessage): Promise<GitServerMessage> {
+  requestGit(
+    message: GitClientMessage,
+    workspace_root?: string | null,
+  ): Promise<GitServerMessage> {
     const request_id = this.allocateRequestId();
     return new Promise<GitServerMessage>((resolve, reject) => {
       if (!this.authenticated || !this.socket || this.socket.readyState !== 1) {
@@ -630,7 +633,7 @@ export class ProtocolClient {
         resolve: (payload) => resolve(payload as GitServerMessage),
         reject,
       });
-      if (!this.send(ClientMessage.git({ request_id, message }))) {
+      if (!this.send(ClientMessage.git({ request_id, workspace_root, message }))) {
         this.pending.delete(request_id);
         reject(new Error("connection unavailable"));
       }

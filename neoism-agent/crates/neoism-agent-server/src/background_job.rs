@@ -315,7 +315,7 @@ pub(crate) async fn start_background_task_tool(
         .await
         .insert(job_id.clone(), cancel_tx);
     background.active_jobs.fetch_add(1, Ordering::AcqRel);
-    publish_background_jobs_updated(state, &background, &job.session_id).await;
+    publish_background_jobs_updated(state, &job.session_id).await;
     tokio::spawn(run_background_job(
         state.clone(),
         background,
@@ -587,15 +587,11 @@ async fn finish_background_job(
             .background_jobs_revision
             .fetch_add(1, Ordering::AcqRel);
     }
-    publish_background_jobs_updated(state, background, &session_id).await;
+    publish_background_jobs_updated(state, &session_id).await;
     publish_background_job_completion(state, &job).await;
 }
 
-async fn publish_background_jobs_updated(
-    state: &AppState,
-    background: &BackgroundWorkspaceRuntime,
-    session_id: &str,
-) {
+async fn publish_background_jobs_updated(state: &AppState, session_id: &str) {
     let root_id = match state.inner.store.get_session(session_id).await {
         Ok(Some(session)) => {
             crate::execution_activity::root_session_id(state, &session).await
@@ -603,34 +599,24 @@ async fn publish_background_jobs_updated(
         _ => session_id.to_string(),
     };
     let family = crate::v2_routes::session_family_ids(state, &root_id).await;
-    let (revision, jobs) = loop {
-        let before = state.inner.background_jobs_revision.load(Ordering::Acquire);
-        let jobs = background
-            .jobs
-            .read()
-            .await
-            .values()
-            .filter(|job| {
-                job.status == BackgroundJobStatus::Running
-                    && family.contains(&job.session_id)
+    // Match GET /v2/sessions/:id/runtime: a family can span workspaces
+    // (for example a child running in a worktree). A full-list event must not
+    // accidentally clear jobs owned by another workspace in the same family.
+    let (revision, jobs) = running_jobs_for_family(state, &family).await;
+    let jobs = jobs
+        .into_iter()
+        .map(|job| {
+            json!({
+                "jobID": job.job_id,
+                "sessionID": job.session_id,
+                "startedAt": job.started_at,
             })
-            .map(|job| {
-                json!({
-                    "jobID": job.id.clone(),
-                    "sessionID": job.session_id.clone(),
-                    "startedAt": job.started_at,
-                })
-            })
-            .collect::<Vec<_>>();
-        let after = state.inner.background_jobs_revision.load(Ordering::Acquire);
-        if before == after {
-            break (after, jobs);
-        }
-    };
+        })
+        .collect::<Vec<_>>();
     state.publish(EventPayload::new(
         event_type::SESSION_BACKGROUND_TASKS_UPDATED,
         json!({
-            "sessionID": session_id,
+            "sessionID": root_id,
             "backgroundJobsEpoch": state.inner.execution_owner_id,
             "backgroundJobsRevision": revision,
             "runningBackgroundTasks": jobs,
@@ -1081,6 +1067,110 @@ mod tests {
             always_patterns: vec!["cargo *".to_string()],
             external_dirs: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn background_family_events_include_other_workspaces_and_clear_last_job() {
+        let dir = std::env::temp_dir().join(format!(
+            "background-family-{}",
+            Id::ascending(IdKind::Event)
+        ));
+        let child_dir = dir.join("child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let state = AppState::open_database(dir.join("state.db")).await.unwrap();
+        let root = neoism_agent_core::SessionInfo {
+            id: neoism_agent_core::new_session_id(),
+            slug: "root".into(),
+            project_id: "global".into(),
+            workspace_id: None,
+            directory: dir.to_string_lossy().into_owned(),
+            path: None,
+            parent_id: None,
+            title: "Root".into(),
+            agent: None,
+            model: None,
+            version: env!("CARGO_PKG_VERSION").into(),
+            time: neoism_agent_core::TimeInfo {
+                created: 1,
+                updated: 1,
+                compacting: None,
+                archived: None,
+            },
+            permission: None,
+            extra: BTreeMap::new(),
+        };
+        let mut child = root.clone();
+        child.id = neoism_agent_core::new_session_id();
+        child.parent_id = Some(root.id.clone());
+        child.directory = child_dir.to_string_lossy().into_owned();
+        state.inner.store.insert_session(&root).await.unwrap();
+        state.inner.store.insert_session(&child).await.unwrap();
+        let root_runtime = state.workspace_runtime(&root.directory).await.unwrap();
+        let child_runtime = state.workspace_runtime(&child.directory).await.unwrap();
+        let root_generation = root_runtime.snapshot();
+        let child_generation = child_runtime.snapshot();
+        let root_jobs = root_generation.background().unwrap();
+        let child_jobs = child_generation.background().unwrap();
+        let mut root_job = test_job(BackgroundJobStatus::Running, "");
+        root_job.id = "root-job".into();
+        root_job.session_id = root.id.to_string();
+        let mut child_job = root_job.clone();
+        child_job.id = "child-job".into();
+        child_job.session_id = child.id.to_string();
+        root_jobs
+            .jobs
+            .write()
+            .await
+            .insert(root_job.id.clone(), root_job);
+        child_jobs
+            .jobs
+            .write()
+            .await
+            .insert(child_job.id.clone(), child_job);
+        state
+            .inner
+            .background_jobs_revision
+            .store(2, Ordering::Release);
+        let mut events = state.subscribe();
+        for (revision, expected) in [(2, 2), (3, 1), (4, 0)] {
+            if revision == 3 {
+                child_jobs.jobs.write().await.clear();
+            }
+            if revision == 4 {
+                root_jobs.jobs.write().await.clear();
+            }
+            state
+                .inner
+                .background_jobs_revision
+                .store(revision, Ordering::Release);
+            publish_background_jobs_updated(&state, child.id.as_str()).await;
+            let event = events.recv().await.unwrap();
+            assert_eq!(event.kind, event_type::SESSION_BACKGROUND_TASKS_UPDATED);
+            assert_eq!(
+                event.properties["sessionID"],
+                root.id.as_str(),
+                "family root owns full-list events"
+            );
+            let jobs = event.properties["runningBackgroundTasks"]
+                .as_array()
+                .unwrap();
+            assert_eq!(jobs.len(), expected);
+            let family =
+                crate::v2_routes::session_family_ids(&state, root.id.as_str()).await;
+            let (snapshot_revision, snapshot_jobs) =
+                running_jobs_for_family(&state, &family).await;
+            assert_eq!(snapshot_revision, revision);
+            assert_eq!(snapshot_jobs.len(), jobs.len());
+            if expected == 1 {
+                assert_eq!(jobs[0]["jobID"], "root-job");
+            }
+        }
+        drop(root_generation);
+        drop(child_generation);
+        drop(root_jobs);
+        drop(child_jobs);
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

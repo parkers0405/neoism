@@ -70,7 +70,7 @@ impl Screen<'_> {
                 if self
                     .renderer
                     .modal
-                    .has_action(&neoism_ui::widgets::modal::ModalAction::UpdateNeoism)
+                    .has_action(|action| matches!(action, neoism_ui::widgets::modal::ModalAction::UpdateNeoism { .. }))
                 {
                     return true;
                 }
@@ -104,7 +104,7 @@ impl Screen<'_> {
             ModalAction::Close => {
                 self.renderer.modal.close();
             }
-            ModalAction::UpdateNeoism => {
+            ModalAction::UpdateNeoism { version } => {
                 #[cfg(debug_assertions)]
                 if std::env::var_os("NEOISM_UPDATE_CHECK").is_some() {
                     self.renderer
@@ -131,6 +131,7 @@ impl Screen<'_> {
                 let result = crate::update::spawn_install(
                     self.context_manager.event_proxy(),
                     self.context_manager.window_id(),
+                    version,
                 );
                 match result {
                     Ok(()) => self.renderer.modal.open(

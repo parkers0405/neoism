@@ -71,6 +71,7 @@ impl Screen<'_> {
                     item.val
                         .markdown
                         .as_ref()
+                        .filter(|pane| !pane.local_only)
                         .map(|pane| {
                             (
                                 pane.path.clone(),
@@ -93,7 +94,7 @@ impl Screen<'_> {
                 .collect()
         };
         let mut remote_by_path: std::collections::HashMap<
-            std::path::PathBuf,
+            std::ffi::OsString,
             Vec<neoism_ui::editor::markdown::MarkdownRemoteCursor>,
         > = std::collections::HashMap::new();
         for (path, buffer_id) in pane_buffers {
@@ -111,7 +112,7 @@ impl Screen<'_> {
                     },
                 )
                 .collect::<Vec<_>>();
-            remote_by_path.insert(path, cursors);
+            remote_by_path.insert(path.into_os_string(), cursors);
         }
         // (rect, note path, scroll) collected here, composited after the
         // loop to avoid borrowing `context_manager` while we render ink.
@@ -157,7 +158,7 @@ impl Screen<'_> {
                         let markdown = &mut notebook.markdown;
                         markdown.spellcheck_enabled = spellcheck_enabled;
                         markdown.remote_cursors =
-                            remote_by_path.remove(&markdown.path).unwrap_or_default();
+                            remote_by_path.remove(markdown.path.as_os_str()).unwrap_or_default();
                         crate::editor::markdown::render::render(
                             &mut self.sugarloaf,
                             markdown,
@@ -218,7 +219,7 @@ impl Screen<'_> {
                 .clear_image_overlays_for(item.val.rich_text_id);
             markdown.spellcheck_enabled = spellcheck_enabled;
             markdown.remote_cursors =
-                remote_by_path.remove(&markdown.path).unwrap_or_default();
+                remote_by_path.remove(markdown.path.as_os_str()).unwrap_or_default();
             let rect = [
                 (scaled_margin.left + item.layout_rect[0]) / scale,
                 (scaled_margin.top + item.layout_rect[1]) / scale,

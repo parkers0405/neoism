@@ -26,6 +26,7 @@ pub(super) fn scan_dir(
                     let name = dent.file_name().to_str()?.to_string();
                     let file_type = dent.file_type().ok()?;
                     Some(DirEntry {
+                        host_path: None,
                         name,
                         is_dir: file_type.is_dir(),
                         size: None,

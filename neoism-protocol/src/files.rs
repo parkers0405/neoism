@@ -133,6 +133,10 @@ pub struct FileLocationDescriptor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirEntry {
+    /// Host-produced absolute lexical identity. Guests must not join `name`
+    /// using their native path rules. Optional for older daemon compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_path: Option<String>,
     pub name: String,
     pub is_dir: bool,
     pub size: Option<u64>,

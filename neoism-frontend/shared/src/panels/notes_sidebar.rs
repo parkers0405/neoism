@@ -51,6 +51,7 @@ pub struct NotesSidebar {
     width: f32,
     workspace_name: String,
     workspace_path: Option<PathBuf>,
+    remote_workspace: bool,
     all_entries: Vec<NoteSidebarEntry>,
     rows: Vec<NoteSidebarRow>,
     open_dirs: HashSet<PathBuf>,
@@ -216,6 +217,7 @@ impl Default for NotesSidebar {
             width: FILE_TREE_WIDTH,
             workspace_name: "Default".to_string(),
             workspace_path: None,
+            remote_workspace: false,
             all_entries: Vec::new(),
             rows: Vec::new(),
             open_dirs: HashSet::new(),
@@ -325,14 +327,28 @@ impl NotesSidebar {
     }
 
     pub fn set_workspace(&mut self, name: impl Into<String>, path: Option<PathBuf>) {
+        let source_changed = self.remote_workspace;
+        self.remote_workspace = false;
+        self.set_workspace_inner(name, path, source_changed);
+    }
+
+    pub fn set_remote_workspace(&mut self, name: impl Into<String>, path: Option<PathBuf>) {
+        let source_changed = !self.remote_workspace;
+        self.remote_workspace = true;
+        self.set_workspace_inner(name, path, source_changed);
+    }
+
+    fn set_workspace_inner(&mut self, name: impl Into<String>, path: Option<PathBuf>, source_changed: bool) {
         // Only wipe the expanded-folder set when the vault actually
         // changes. The Alt+N toggle re-calls `set_workspace` with the
         // SAME path on every open; clearing unconditionally was what
         // collapsed every open folder on a close/reopen.
-        let vault_changed = self.workspace_path != path;
+        let vault_changed = source_changed || self.workspace_path != path;
         self.workspace_name = name.into();
         self.workspace_path = path;
         if vault_changed {
+            self.all_entries.clear();
+            self.rows.clear();
             self.open_dirs.clear();
             self.icon_overrides.clear();
         }
@@ -384,6 +400,10 @@ impl NotesSidebar {
     }
 
     pub fn refresh_notes(&mut self) {
+        if self.remote_workspace {
+            self.pending_refresh = true;
+            return;
+        }
         let selected_path = self.selected_note_path();
         self.all_entries.clear();
         let root = self.workspace_path.clone();
@@ -446,7 +466,7 @@ impl NotesSidebar {
             .iter()
             .map(|(path, _, icon)| (path.clone(), icon.clone()))
             .collect();
-        self.set_entries_from_host(
+        self.set_remote_entries_from_host(
             entries
                 .into_iter()
                 .map(|(path, is_dir, _)| (path, is_dir))
@@ -459,7 +479,7 @@ impl NotesSidebar {
                 continue;
             };
             if let Some(entry) =
-                self.all_entries.iter_mut().find(|entry| entry.path == path)
+                self.all_entries.iter_mut().find(|entry| entry.path.as_os_str() == path.as_os_str())
             {
                 entry.icon = Some(icon);
             }
@@ -468,6 +488,18 @@ impl NotesSidebar {
     }
 
     pub fn set_entries_from_host(&mut self, entries: Vec<(PathBuf, bool)>) {
+        self.set_host_entries(entries, true);
+    }
+
+    /// Joined hosts are not the guest filesystem. In particular, never read
+    /// frontmatter/icon maps from a coincidentally matching local path.
+    pub fn set_remote_entries_from_host(&mut self, entries: Vec<(PathBuf, bool)>) {
+        self.set_host_entries(entries, false);
+    }
+
+    fn set_host_entries(&mut self, entries: Vec<(PathBuf, bool)>, local: bool) {
+        self.remote_workspace = !local;
+        self.pending_refresh = false;
         let Some(root) = self.workspace_path.clone() else {
             return;
         };
@@ -475,20 +507,17 @@ impl NotesSidebar {
         self.all_entries.clear();
         self.open_dirs.insert(root.clone());
         for (path, is_dir) in entries {
-            if should_skip_note_entry(&root, &path) || path == root {
+            let host_root = neoism_protocol::host_path::HostPath::new(root.to_string_lossy());
+            let Some(relative) = host_root.relative(&path.to_string_lossy()) else { continue; };
+            if relative.is_empty() { continue; }
+            let (parent_relative, name) = relative.rsplit_once('/').unwrap_or(("", &relative));
+            if name.starts_with('.') || matches!(name, "target" | "node_modules")
+                || (parent_relative.is_empty() && matches!(name, "project.toml" | "project.json")) {
                 continue;
             }
-            let fallback = if is_dir { "folder" } else { "file" };
-            let label = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(fallback)
-                .to_string();
-            let parent = path.parent().unwrap_or(&root).to_path_buf();
-            let depth = path
-                .strip_prefix(&root)
-                .map(|rel| rel.components().count().saturating_sub(1))
-                .unwrap_or(0);
+            let label = name.to_string();
+            let parent = PathBuf::from(host_root.join(parent_relative).as_str());
+            let depth = relative.split('/').count().saturating_sub(1);
             // Mirror the note's frontmatter `icon:` onto the row, exactly
             // like `refresh_notes`/`collect_note_entries` do. This host path
             // (daemon-listed notes — the path the DESKTOP sidebar actually
@@ -498,7 +527,7 @@ impl NotesSidebar {
             // row keeps the default md icon" bug. On wasm the fs read is a
             // graceful no-op (None); a remote host path that isn't local also
             // reads None (the daemon would have to supply it).
-            let icon = if is_dir {
+            let icon = if is_dir || !local {
                 None
             } else {
                 note_frontmatter_icon(&path)
@@ -515,7 +544,7 @@ impl NotesSidebar {
         // Live buffer overrides first, then the explicit `.neoism-icons.json`
         // map LAST (highest priority) — same ordering as `refresh_notes`.
         self.apply_icon_overrides();
-        let icons = load_notes_icons(&root);
+        let icons = if local { load_notes_icons(&root) } else { HashMap::new() };
         if !icons.is_empty() {
             for entry in &mut self.all_entries {
                 if let Some(icon) = entry
@@ -557,7 +586,7 @@ impl NotesSidebar {
         let icon = icon.filter(|glyph| !glyph.trim().is_empty());
         self.icon_overrides.insert(path.to_path_buf(), icon.clone());
         for entry in &mut self.all_entries {
-            if entry.path == path {
+            if entry.path.as_os_str() == path.as_os_str() {
                 entry.icon = icon;
                 return;
             }
@@ -627,16 +656,23 @@ impl NotesSidebar {
         false
     }
 
+    /// Explicit source chosen by the vault selector. Equal host/guest path
+    /// spelling does not imply equal ownership (notably on two Macs).
+    pub fn is_remote_workspace(&self) -> bool {
+        self.remote_workspace
+    }
+
     pub fn workspace_path(&self) -> Option<PathBuf> {
         self.workspace_path.clone()
     }
 
     pub fn contains_path(&self, path: &Path) -> bool {
-        self.all_entries.iter().any(|entry| entry.path == path)
+        self.all_entries.iter().any(|entry| entry.path.as_os_str() == path.as_os_str())
     }
 
     pub fn note_icon_for_path(&self, path: &Path) -> Option<String> {
         let saved = || {
+            if self.remote_workspace { return None; }
             let root = self.workspace_path.as_ref()?;
             let relative = path.strip_prefix(root).ok()?.to_string_lossy();
             load_notes_icons(root).get(relative.as_ref()).cloned()
@@ -646,10 +682,10 @@ impl NotesSidebar {
             .or_else(|| {
                 self.all_entries
                     .iter()
-                    .find(|entry| entry.path == path)
+                    .find(|entry| entry.path.as_os_str() == path.as_os_str())
                     .and_then(|entry| entry.icon.clone())
             })
-            .or_else(|| note_frontmatter_icon(path))
+            .or_else(|| (!self.remote_workspace).then(|| note_frontmatter_icon(path)).flatten())
     }
 
     pub fn animate_workspace_selector_press(&mut self) {
@@ -1917,7 +1953,7 @@ impl NotesSidebar {
         self.rows.iter().position(|row| {
             self.all_entries
                 .get(row.entry_index)
-                .is_some_and(|entry| entry.path == path)
+                .is_some_and(|entry| entry.path.as_os_str() == path.as_os_str())
         })
     }
 
@@ -2323,11 +2359,11 @@ fn should_skip_note_entry(root: &Path, path: &Path) -> bool {
     name.starts_with('.') || matches!(name, "target" | "node_modules")
 }
 
-fn children_by_parent(entries: &[NoteSidebarEntry]) -> HashMap<PathBuf, Vec<usize>> {
-    let mut by_parent: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+fn children_by_parent(entries: &[NoteSidebarEntry]) -> HashMap<std::ffi::OsString, Vec<usize>> {
+    let mut by_parent: HashMap<std::ffi::OsString, Vec<usize>> = HashMap::new();
     for (index, entry) in entries.iter().enumerate() {
         by_parent
-            .entry(entry.parent.clone())
+            .entry(entry.parent.as_os_str().to_owned())
             .or_default()
             .push(index);
     }
@@ -2336,12 +2372,12 @@ fn children_by_parent(entries: &[NoteSidebarEntry]) -> HashMap<PathBuf, Vec<usiz
 
 fn push_visible_children(
     entries: &[NoteSidebarEntry],
-    by_parent: &HashMap<PathBuf, Vec<usize>>,
+    by_parent: &HashMap<std::ffi::OsString, Vec<usize>>,
     open_dirs: &HashSet<PathBuf>,
     parent: &Path,
     rows: &mut Vec<NoteSidebarRow>,
 ) {
-    let Some(children) = by_parent.get(parent) else {
+    let Some(children) = by_parent.get(parent.as_os_str()) else {
         return;
     };
     for &entry_index in children {

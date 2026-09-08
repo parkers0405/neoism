@@ -640,6 +640,10 @@ pub struct MarkdownPane {
     /// made its (empty) snapshot clobber the fetched content the moment
     /// it painted.
     pub remote_content_pending: bool,
+    /// Host-owned bytes must never fall back to writing the guest filesystem.
+    pub remote_source: bool,
+    /// Explicit guest-local source, never attached to the workspace daemon.
+    pub local_only: bool,
     /// When the in-flight fetch started. The skeleton fades in only
     /// after a short grace period, so near-instant loads never flash it.
     pub(super) remote_loading_started: Option<Instant>,

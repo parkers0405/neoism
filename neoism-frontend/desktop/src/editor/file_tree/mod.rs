@@ -77,6 +77,7 @@ impl neoism_ui::services::FilesService for NativeFiles {
                 let name = entry.file_name().to_str()?.to_string();
                 let is_dir = entry.file_type().ok()?.is_dir();
                 Some(neoism_ui::services::DirEntry {
+                    host_path: None,
                     name,
                     is_dir,
                     size: None,
@@ -111,6 +112,7 @@ impl neoism_ui::services::FilesService for NativeFiles {
             .unwrap_or("")
             .to_string();
         Ok(neoism_ui::services::DirEntry {
+            host_path: None,
             name,
             is_dir: meta.is_dir(),
             size: Some(meta.len()),

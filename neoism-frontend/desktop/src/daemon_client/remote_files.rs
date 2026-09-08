@@ -65,10 +65,9 @@ impl RemoteFiles {
     /// drift) is sent absolute rather than collapsed to "" — listing
     /// the root in place of a subdir would splice wrong children.
     fn relative(&self, path: &Path) -> String {
-        match path.strip_prefix(&self.root) {
-            Ok(rel) => rel.to_string_lossy().into_owned(),
-            Err(_) => path.to_string_lossy().into_owned(),
-        }
+        neoism_protocol::host_path::HostPath::new(self.root.to_string_lossy())
+            .relative(&path.to_string_lossy())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
     }
 
     fn dispatch(&self, message: FilesClientMessage) -> u64 {
@@ -82,6 +81,18 @@ impl RemoteFiles {
         );
         let handle = self.handle.clone();
         let root = self.root.clone();
+        let is_read = matches!(message, FilesClientMessage::ReadFile { .. });
+        if is_read {
+            let event_proxy = self.event_proxy.clone();
+            let window_id = self.window_id;
+            self.runtime.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                event_proxy.send_event(
+                    neoism_backend::event::RioEvent::RemoteEditorReadTimeout(request_id).into(),
+                    window_id,
+                );
+            });
+        }
         let is_list_dir = matches!(message, FilesClientMessage::ListDir { .. });
         if is_list_dir {
             let event_proxy = self.event_proxy.clone();

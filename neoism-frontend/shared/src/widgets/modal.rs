@@ -40,7 +40,7 @@ const ORDER: u8 = 24;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
     Close,
-    UpdateNeoism,
+    UpdateNeoism { version: String },
     InstallLsp {
         server: String,
     },
@@ -1142,8 +1142,8 @@ impl UniversalModal {
         Some(self.apply_input(action))
     }
 
-    pub fn has_action(&self, action: &ModalAction) -> bool {
-        self.buttons.iter().any(|button| &button.action == action)
+    pub fn has_action(&self, matches: impl Fn(&ModalAction) -> bool) -> bool {
+        self.buttons.iter().any(|button| matches(&button.action))
     }
 
     pub fn submit_form(&mut self) -> Option<ModalAction> {

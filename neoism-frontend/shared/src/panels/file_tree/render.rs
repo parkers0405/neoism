@@ -710,7 +710,7 @@ impl FileTree {
             let peers_here: Vec<PresenceAvatarPeer> = entry
                 .path
                 .as_deref()
-                .and_then(|p| self.presence_index.get(p))
+                .and_then(|p| self.presence_index.get(p.as_os_str()))
                 .cloned()
                 .unwrap_or_default();
             let presence_av = (font_size + 2.0).clamp(14.0, 18.0);

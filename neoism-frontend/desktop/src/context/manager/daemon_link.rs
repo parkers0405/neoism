@@ -193,6 +193,21 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .map(|binding| binding.endpoint.as_str())
     }
 
+    /// Stable ownership for background editor replies. Does not consult the
+    /// active connection/cache, which may currently describe another host.
+    pub fn adopted_workspace_identity_for_route(
+        &self,
+        route: usize,
+    ) -> Option<(&str, &str)> {
+        let grid = self.contexts.iter().find(|grid| {
+            grid.contexts()
+                .values()
+                .any(|i| i.context().route_id == route)
+        })?;
+        let binding = self.adopted_workspaces.get(&grid.workspace_route_id()?)?;
+        Some((&binding.endpoint, &binding.workspace_id))
+    }
+
     /// Rebind an already-open adopted grid to the currently attached daemon.
     /// Quick SSH uses this after recreating a dropped local tunnel: workspace
     /// identity and PTYs remain daemon-owned, while file/Agent traffic must use

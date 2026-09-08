@@ -45,6 +45,7 @@ subtle = "2.5"
 time = { version = "0.3", features = ["serde", "formatting"] }
 dirs = "5"
 gethostname = "1.1"
+image_rs = { workspace = true }
 reqwest = { workspace = true }
 clap = { workspace = true }
 # Unix-socket serving in the binary (same hyper-util accept loop the

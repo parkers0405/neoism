@@ -17,6 +17,7 @@ impl Screen<'_> {
         }
 
         self.sync_file_tree_watchers();
+        self.sync_host_git();
 
         let is_search_active = self.search_active();
         if is_search_active {
@@ -59,10 +60,10 @@ impl Screen<'_> {
                 self.mark_dirty();
             }
 
-            let remote_joined = self.context_manager.current_workspace_is_remote_joined();
+            let remote_joined = self.uses_host_git();
             let branch_for = |path: Option<&Path>| {
                 if remote_joined {
-                    None
+                    self.host_git.snapshot.as_ref().and_then(|snapshot| snapshot.branch.clone())
                 } else {
                     path.and_then(neoism_ui::panels::git_branch::branch_for)
                 }
@@ -338,7 +339,7 @@ impl Screen<'_> {
                 };
             let workspace = cursor_lines.map(|(cur, total)| format!("WS {cur}/{total}"));
             let git_changes = if remote_joined {
-                None
+                self.host_git.counts
             } else {
                 active_path
                     .as_deref()

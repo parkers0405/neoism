@@ -29,8 +29,8 @@ pub(in crate::panels::agent_pane::state) struct CachedAgentRuntime {
     pub subagent_waiting_started_at: Option<Instant>,
     pub background_tasks_started_at: Option<Instant>,
     pub running_background_task_count: usize,
-    pub background_jobs_epoch: Option<String>,
-    pub background_jobs_revision: u64,
+    pub background_task_authority:
+        super::super::background_runtime::BackgroundTaskAuthority,
     pub abort_requested_at: Option<Instant>,
 }
 
@@ -46,8 +46,7 @@ impl Default for CachedAgentRuntime {
             subagent_waiting_started_at: None,
             background_tasks_started_at: None,
             running_background_task_count: 0,
-            background_jobs_epoch: None,
-            background_jobs_revision: 0,
+            background_task_authority: Default::default(),
             abort_requested_at: None,
         }
     }
@@ -521,6 +520,16 @@ impl NeoismAgentPane {
                         .skip(1)
                         .any(|entry| entry.id == session_id)
             });
+        // Job authority is family-wide, unlike the parked transcript/runtime.
+        let family_jobs = (stays_in_family
+            && self.background_task_authority.is_authoritative())
+        .then(|| {
+            (
+                self.background_task_authority.clone(),
+                self.running_background_task_count,
+                self.background_tasks_started_at,
+            )
+        });
         self.cache_current_session();
         let state = cached.state;
         self.session_id = Some(session_id.to_string());
@@ -571,6 +580,11 @@ impl NeoismAgentPane {
         self.pending_user_prompts = cached.pending_user_prompts;
         self.prompt_echo_aliases = cached.prompt_echo_aliases;
         self.restore_session_runtime_ui(cached.runtime);
+        if let Some((authority, count, started_at)) = family_jobs {
+            self.background_task_authority = authority;
+            self.running_background_task_count = count;
+            self.background_tasks_started_at = started_at;
+        }
         // Live-trace was cleared by the switch. Drop the parked layout so
         // settled tool/reasoning rows are re-masked instead of flashing as
         // leftover titles from the previous visit.
@@ -642,8 +656,9 @@ impl NeoismAgentPane {
             running_background_task_count: std::mem::take(
                 &mut self.running_background_task_count,
             ),
-            background_jobs_epoch: self.background_jobs_epoch.take(),
-            background_jobs_revision: std::mem::take(&mut self.background_jobs_revision),
+            background_task_authority: std::mem::take(
+                &mut self.background_task_authority,
+            ),
             abort_requested_at: self.abort_requested_at.take(),
         }
     }
@@ -661,8 +676,7 @@ impl NeoismAgentPane {
         self.subagent_waiting_started_at = runtime.subagent_waiting_started_at;
         self.background_tasks_started_at = runtime.background_tasks_started_at;
         self.running_background_task_count = runtime.running_background_task_count;
-        self.background_jobs_epoch = runtime.background_jobs_epoch;
-        self.background_jobs_revision = runtime.background_jobs_revision;
+        self.background_task_authority = runtime.background_task_authority;
         self.abort_requested_at = runtime.abort_requested_at;
         self.permission_choice_hit_rects.clear();
         self.question_option_hit_rects.clear();

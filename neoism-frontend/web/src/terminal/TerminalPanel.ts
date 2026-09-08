@@ -596,6 +596,10 @@ export class TerminalPanel {
   private readonly markdownContentCache = new Map<string, string>();
   private readonly markdownReloadInFlight = new Set<string>();
   private markdownReloadCursor = 0;
+  private blameConnectionEpoch = 0;
+  private blameConfigLastPoll = 0;
+  private blameConfigInFlight = false;
+  private blameConfigJson = "";
   private transportAvailable = true;
   private crdtTransportAvailable = true;
   private readonly pendingReconnectSnapshots = new Set<string>();
@@ -1294,6 +1298,9 @@ export class TerminalPanel {
 
   /** Freeze transport-driven pumps while preserving every editor/panel bit. */
   connectionInterrupted(reason: string): void {
+    this.blameConnectionEpoch++;
+    this.blameConfigLastPoll = 0;
+    this.blameConfigJson = "";
     this.transportAvailable = false;
     this.notesWorkspaceBarrierReady = false;
     this.crdtTransportAvailable = false;
@@ -3157,7 +3164,11 @@ export class TerminalPanel {
     );
     for (const action of actions) {
       if (action.kind === "set") {
-        void persistSetting(this.options.client, action.key, action.value);
+        void persistSetting(this.options.client, action.key, action.value).then(() => {
+          this.blameConfigJson = "";
+          this.blameConfigLastPoll = 0;
+          this.pumpCodeBlame();
+        });
       } else if (action.kind === "set_keybind") {
         void persistKeybind(
           this.options.client,
@@ -4586,7 +4597,46 @@ export class TerminalPanel {
   /** Code-pane co-editing pump — the code twin of `pumpCrdtOutbox`.
    *  Binds the active code pane's doc (OpenBuffer on first sight),
    *  flushes pane mutations, ships queued client messages. */
+  private pumpCodeBlame(): void {
+    if (!this.transportAvailable || !this.wasmAdapter) return;
+    // Config has no watch verb. Poll its typed daemon snapshot at a bounded
+    // cadence even while blame is off, so external config edits hot-reload.
+    if (!this.blameConfigInFlight && Date.now() - this.blameConfigLastPoll >= 15000) {
+      this.blameConfigLastPoll = Date.now();
+      this.blameConfigInFlight = true;
+      const epoch = this.blameConnectionEpoch;
+      const adapter = this.wasmAdapter;
+      void fetchConfig(this.options.client).then((value) => {
+        if (value === null || this.blameConnectionEpoch !== epoch || adapter !== this.wasmAdapter) return;
+        const json = JSON.stringify(value);
+        if (json !== this.blameConfigJson) {
+          this.blameConfigJson = json;
+          adapter?.setSettingsValues?.(json);
+          this.scheduleDraw();
+        }
+      }).finally(() => { this.blameConfigInFlight = false; });
+    }
+    const adapter = this.wasmAdapter as unknown as { inner?: {
+      code_blame_request?: (scope: string) => string | undefined;
+      code_blame_reply?: (id: number, reply: string) => boolean;
+    } } | null;
+    const bridge = adapter?.inner;
+    if (!bridge?.code_blame_request) return;
+    const root = this.options.workspaceRoot ?? null;
+    const epoch = this.blameConnectionEpoch;
+    const request = bridge.code_blame_request(`${epoch}:${root}`);
+    if (!request) return;
+    const { id, path } = JSON.parse(request) as { id: number; path: string };
+    const deliver = (reply: unknown): void => {
+      if (this.blameConnectionEpoch !== epoch || (this.options.workspaceRoot ?? null) !== root) return;
+      if (bridge.code_blame_reply?.(id, JSON.stringify(reply))) this.scheduleDraw();
+    };
+    void this.options.client.requestGit({ Blame: { path } }, root)
+      .then(deliver, (error: unknown) => deliver({ Error: { message: String(error) } }));
+  }
+
   private pumpCodeCrdt(): void {
+    this.pumpCodeBlame();
     if (!this.transportAvailable || !this.crdtTransportAvailable) return;
     const adapter = this.wasmAdapter as {
       codeCrdtPump?: (bufferId: string | null) => string | null;

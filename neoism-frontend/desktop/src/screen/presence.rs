@@ -81,7 +81,6 @@ impl Screen<'_> {
     /// map lookup, so it costs nothing when nothing changes.
     pub(crate) fn rebuild_file_tree_presence_index(&mut self) {
         use std::collections::HashMap;
-        use std::path::PathBuf;
         if !self.context_manager.current_workspace_is_collaborative() {
             if self.renderer.file_tree.has_presence() {
                 self.renderer.file_tree.set_presence_index(HashMap::new());
@@ -95,7 +94,7 @@ impl Screen<'_> {
             return;
         }
         let mut index: HashMap<
-            PathBuf,
+            std::ffi::OsString,
             Vec<neoism_ui::editor::crdt::PresenceAvatarPeer>,
         > = HashMap::new();
         for (buffer_id, peers) in by_buffer {
@@ -103,7 +102,7 @@ impl Screen<'_> {
             // path a tree row carries. Virtual buffers (notebook render
             // surfaces, etc.) own no row and are skipped.
             if let Some(path) = buffer_id.strip_prefix("file://") {
-                index.insert(PathBuf::from(path), peers);
+                index.insert(std::ffi::OsString::from(path), peers);
             }
         }
         self.renderer.file_tree.set_presence_index(index);
@@ -132,6 +131,7 @@ impl Screen<'_> {
             current
                 .markdown
                 .as_ref()
+                .filter(|pane| !pane.local_only)
                 .map(|markdown| {
                     (
                         presence_buffer_id_for_path(&markdown.path),
@@ -157,7 +157,7 @@ impl Screen<'_> {
                     })
                 })
                 .or_else(|| {
-                    current.code.as_ref().map(|code| {
+                    current.code.as_ref().filter(|pane| !pane.local_only).map(|code| {
                         // The wire column is UTF-16 (CRDT offset policy);
                         // the code buffer's cursor_col is a byte column —
                         // convert against the live line text.

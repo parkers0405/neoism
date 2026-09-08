@@ -57,6 +57,8 @@ if (($userPath -split ';').TrimEnd('\') -notcontains $installDir.TrimEnd('\')) {
   throw "Neoism install directory was not added to the user PATH"
 }
 
+& "$PSScriptRoot/windows-updater-native-validation.ps1" -CandidateMsi $installer `
+    -ManagedDir $installDir -PackagingDir $packagingDir -Version $expectedVersion -Evidence $evidence
 & "$PSScriptRoot/windows-installed-gui-smoke.ps1" -InstallDir $installDir -Evidence $evidence
 } finally {
     try {

@@ -211,6 +211,7 @@ impl CodeBuffer {
             // Panes open in vim Normal (matches the default input mode;
             // `toggle` to Standard switches this to Insert).
             mode: CodeMode::Normal,
+            cursor_placement_revision: 0,
             cursor_line: 0,
             cursor_col: 0,
             visual_anchor: None,

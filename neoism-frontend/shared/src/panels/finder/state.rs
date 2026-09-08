@@ -75,6 +75,9 @@ pub struct Finder {
     /// Master list for References mode, installed by
     /// `open_references`; `results` is the fuzzy-filtered view.
     pub(super) reference_rows: Vec<GrepResult>,
+    /// References supplied by an owning daemon carry HOST paths, not guest
+    /// filesystem paths. Never join or preview them through the guest service.
+    pub(super) reference_host_paths: bool,
     /// Master list for Symbols mode, installed by `set_symbol_rows`;
     /// `results` is the fuzzy-filtered view.
     pub(super) symbol_rows: Vec<SymbolRow>,
@@ -129,6 +132,7 @@ impl Default for Finder {
             buffer_lines: Vec::new(),
             buffer_match_total: 0,
             reference_rows: Vec::new(),
+            reference_host_paths: false,
             symbol_rows: Vec::new(),
             symbols_loading: false,
             results: Vec::new(),
@@ -226,6 +230,9 @@ impl Finder {
     /// / search in buffer") — a single muted row rendered between
     /// the input and the results.
     pub(super) fn preview_enabled(&self) -> bool {
+        if self.mode == FinderMode::References && self.reference_host_paths {
+            return false;
+        }
         matches!(
             self.mode,
             FinderMode::Grep | FinderMode::GitChanges | FinderMode::References
@@ -310,9 +317,23 @@ impl Finder {
     /// `:edit <path>` (with `+<line>` for grep results).
     pub fn selected_open_target(&self) -> Option<(PathBuf, Option<u32>)> {
         let (_, r) = self.results.get(self.selected_index)?;
-        let mut p = self.cwd.clone();
-        p.push(r.path());
-        Some((p, r.line()))
+        Some((self.resolve_row_path(r.path()), r.line()))
+    }
+
+    fn resolve_row_path(&self, row_path: &str) -> PathBuf {
+        if self.mode == FinderMode::References && self.reference_host_paths {
+            let root =
+                neoism_protocol::host_path::HostPath::new(self.cwd.to_string_lossy());
+            let path = neoism_protocol::host_path::HostPath::new(row_path);
+            let absolute =
+                row_path.starts_with('/') || (root.is_windows() && path.is_windows());
+            let path = if absolute { path } else { root.join(row_path) };
+            PathBuf::from(path.as_str())
+        } else {
+            let mut path = self.cwd.clone();
+            path.push(row_path);
+            path
+        }
     }
 
     /// 1-based line number of the currently-selected row, when the row
@@ -333,9 +354,7 @@ impl Finder {
         let Result_::Grep(hit) = r else {
             return None;
         };
-        let mut path = self.cwd.clone();
-        path.push(&hit.path);
-        Some((path, hit.line, hit.column))
+        Some((self.resolve_row_path(&hit.path), hit.line, hit.column))
     }
 
     /// `(1-based line, 0-based byte column)` of the selected Symbols
@@ -350,5 +369,78 @@ impl Finder {
             return None;
         };
         Some((row.line, row.column))
+    }
+}
+
+#[cfg(test)]
+mod host_reference_tests {
+    use super::super::ReferenceRow;
+    use super::*;
+    #[test]
+    fn shared_lsp_reference_targets_use_host_syntax_and_never_guest_previews() {
+        for root in [
+            "/host/项目 space",
+            r"C:\Host Workspace",
+            r"\\server\share\work",
+            r"\\?\C:\work",
+        ] {
+            let host = neoism_protocol::host_path::HostPath::new(root);
+            let relative = r"src\literal/file.rs";
+            let expected = host.join(relative);
+            let mut finder = Finder::default();
+            finder.open_host_references(
+                PathBuf::from(host.as_str()),
+                vec![ReferenceRow {
+                    path: relative.into(),
+                    line: 19,
+                    column: 7,
+                    text: "symbol".into(),
+                }],
+            );
+            let (actual, line, column) = finder.selected_reference_target().unwrap();
+            assert_eq!(actual.as_os_str(), std::ffi::OsStr::new(expected.as_str()));
+            assert_eq!((line, column), (19, 7));
+            assert_eq!(
+                finder.selected_open_target().unwrap().0.as_os_str(),
+                actual.as_os_str()
+            );
+            assert!(
+                !finder.preview_enabled(),
+                "must not read the guest's same-named file"
+            );
+            finder.open_host_references(
+                PathBuf::from(host.as_str()),
+                vec![ReferenceRow {
+                    path: expected.as_str().into(),
+                    line: 19,
+                    column: 7,
+                    text: "symbol".into(),
+                }],
+            );
+            assert_eq!(
+                finder.selected_reference_target().unwrap().0.as_os_str(),
+                actual.as_os_str()
+            );
+        }
+    }
+    #[test]
+    fn shared_lsp_local_references_reset_host_mode() {
+        let mut finder = Finder::default();
+        finder.open_host_references("/host".into(), Vec::new());
+        let root = std::env::temp_dir();
+        finder.open_references(
+            root.clone(),
+            vec![ReferenceRow {
+                path: "file.rs".into(),
+                line: 1,
+                column: 0,
+                text: "local".into(),
+            }],
+        );
+        assert!(finder.preview_enabled());
+        assert_eq!(
+            finder.selected_reference_target().unwrap().0,
+            root.join("file.rs")
+        );
     }
 }

@@ -33,6 +33,7 @@ pub enum PaletteAction {
     DecreaseFontSize,
     ResetFontSize,
     ToggleViMode,
+    ToggleGitBlame,
     ToggleWordWrap,
     ReplaceInFile,
     ProjectProblems,
@@ -738,7 +739,7 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::ToggleMinimap => surface == PaletteSurface::Editor,
         // Word-wrap toggle and in-buffer replace act on the focused code
         // buffer, so they only surface when a code pane owns focus.
-        PaletteAction::ToggleWordWrap | PaletteAction::ReplaceInFile => {
+        PaletteAction::ToggleGitBlame | PaletteAction::ToggleWordWrap | PaletteAction::ReplaceInFile => {
             surface == PaletteSurface::Editor
         }
         PaletteAction::TabCreate

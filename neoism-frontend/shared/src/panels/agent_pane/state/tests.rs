@@ -3064,6 +3064,77 @@ fn historical_unmatched_background_task_is_not_live_activity() {
 }
 
 #[test]
+fn background_authority_survives_completion_and_delayed_launch_parts() {
+    let mut pane = NeoismAgentPane::default();
+    let stale = NeoismAgentMessage::tool(
+        "Old release monitor",
+        "job_id: old-monitor\nstatus: running",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    )
+    .with_id("old-launch");
+    pane.upsert_part_message(stale.clone());
+    pane.apply_running_background_tasks("server-a", 10, &[("latest-check".into(), 100)]);
+    assert_eq!(pane.active_background_task_summaries(), vec!["latest-check · running"]);
+    pane.apply_running_background_tasks("server-a", 11, &[]);
+    pane.upsert_part_message(
+        NeoismAgentMessage::tool(
+            "Completed checks",
+            "job_id: latest-check\nstatus: completed",
+            "completed",
+            "background_task_result",
+            NeoismAgentOutputKind::Text,
+            "text",
+            Vec::new(),
+        )
+        .with_id("completion"),
+    );
+    assert_eq!(pane.running_background_task_count(), 0);
+    pane.upsert_part_message(stale.clone());
+    pane.apply_history(vec![stale]);
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert!(pane.active_background_task_summaries().is_empty());
+    assert!(!pane.apply_running_background_tasks(
+        "server-a",
+        10,
+        &[("latest-check".into(), 100)]
+    ));
+    pane.apply_running_background_tasks("server-a", 11, &[]);
+    assert_eq!(pane.running_background_task_count(), 0);
+}
+
+#[test]
+fn background_family_authority_survives_child_switch_and_hydration() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.side_panel.ensure_subagent_main_entry("root");
+    pane.side_panel.upsert_subagent("child", "Child", "explore");
+    pane.apply_history_to_cache("child", vec![NeoismAgentMessage::user("go")], None);
+    pane.apply_running_background_tasks("server", 1, &[("child-job".into(), 100)]);
+    pane.switch_session("child".into());
+    assert_eq!(pane.running_background_task_count(), 1);
+    assert_eq!(
+        pane.active_background_task_summaries(),
+        vec!["child-job · running"]
+    );
+    // A transcript without the launch cannot erase live family jobs.
+    pane.apply_history(vec![NeoismAgentMessage::user("go")]);
+    assert_eq!(pane.running_background_task_count(), 1);
+    pane.apply_running_background_tasks("server", 2, &[]);
+    pane.switch_session("root".into());
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert!(pane.active_background_task_summaries().is_empty());
+    assert!(!pane.apply_running_background_tasks(
+        "server",
+        1,
+        &[("child-job".into(), 100)]
+    ));
+}
+
+#[test]
 fn background_runtime_rejects_stale_revision_and_accepts_new_server_epoch() {
     let mut pane = NeoismAgentPane::default();
     assert!(pane.apply_running_background_tasks("server-a", 2, &[("job-1".into(), 100)],));

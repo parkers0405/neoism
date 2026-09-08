@@ -319,6 +319,9 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// [`Chrome::open_editor_file`]; painted by `Chrome::draw` inside
     /// the terminal rect whenever [`Chrome::active_editor_pane_kind`]
     /// says the pane belongs to the active tab.
+    pub code_git_blame: bool,
+    pub code_git_blame_delay_ms: u64,
+    pub code_git_blame_hide_on_scroll: bool,
     code_pane: Option<crate::editor::code::CodePane>,
     /// Hosted `.ipynb` notebook pane (owns an inner `MarkdownPane`
     /// that the shared markdown renderer paints — desktop parity with

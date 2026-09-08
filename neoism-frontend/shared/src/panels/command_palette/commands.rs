@@ -238,6 +238,12 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Code,
     },
     Command {
+        title: "Toggle Inline Git Blame",
+        shortcut: "",
+        action: PaletteAction::ToggleGitBlame,
+        service: CommandService::Code,
+    },
+    Command {
         title: "Toggle Word Wrap",
         shortcut: "",
         action: PaletteAction::ToggleWordWrap,

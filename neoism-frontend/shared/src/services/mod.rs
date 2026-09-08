@@ -41,9 +41,36 @@ pub enum IoError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirEntry {
+    /// Opaque host-produced path for remote entries; native entries leave None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_path: Option<String>,
     pub name: String,
     pub is_dir: bool,
     pub size: Option<u64>,
+}
+
+/// File origin is explicit, not inferred from whether a same-named guest file
+/// exists. LocalOnly is an explicitly selected guest vault while joined: it
+/// must bypass both remote reads and the workspace daemon's document plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileOpenSource {
+    Local,
+    Host,
+    LocalOnly,
+}
+
+impl FileOpenSource {
+    pub fn conflicts_with(self, remote_source: bool, local_only: bool) -> bool {
+        (self == Self::LocalOnly && remote_source) || (self == Self::Host && local_only)
+    }
+
+    pub fn notes(joined: bool, shared_vault: bool) -> Self {
+        if joined && !shared_vault { Self::LocalOnly } else { Self::workspace(joined) }
+    }
+
+    pub fn workspace(joined: bool) -> Self {
+        if joined { Self::Host } else { Self::Local }
+    }
 }
 
 pub trait FilesService: Send + Sync {

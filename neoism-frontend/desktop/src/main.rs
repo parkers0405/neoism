@@ -25,6 +25,8 @@ mod host;
 mod input;
 mod ipc;
 mod layout;
+#[cfg(any(target_os = "macos", all(test, unix)))]
+mod macos_update;
 mod mashup;
 mod neoism;
 mod neoworld_runtime;
@@ -938,6 +940,7 @@ struct SelfUpdateOptions {
     gui: bool,
     relaunch: bool,
     parent_pid: Option<u32>,
+    target_version: Option<String>,
 }
 
 struct UpdateReporter {
@@ -951,6 +954,13 @@ impl UpdateReporter {
 
     fn ready(&self, message: impl AsRef<str>) {
         self.emit(Some(100), true, false, message.as_ref());
+    }
+
+    /// The installer is staged, not yet installed. The GUI must close so the
+    /// detached helper can replace locked files; its durable result is final.
+    #[cfg(any(windows, target_os = "macos"))]
+    fn handoff(&self, message: impl AsRef<str>) {
+        self.emit(Some(95), true, false, message.as_ref());
     }
 
     fn failed(&self, message: impl AsRef<str>) {
@@ -987,6 +997,15 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
             Some("--force") => options.force = true,
             Some("--gui") => options.gui = true,
             Some("--relaunch") => options.relaunch = true,
+            Some("--target-version") => {
+                index += 1;
+                let version = args
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .filter(|value| crate::update::valid_release_tag(value))
+                    .ok_or("--target-version requires a valid release version")?;
+                options.target_version = Some(version.to_owned());
+            }
             Some("--parent-pid") => {
                 index += 1;
                 options.parent_pid = Some(
@@ -1075,158 +1094,30 @@ fn download_update_file(
 }
 
 #[cfg(windows)]
+mod windows_update;
+
+#[cfg(windows)]
 fn stage_windows_msi_update(
     msi: &std::path::Path,
     temp_dir: &std::path::Path,
     gui_pid: Option<u32>,
     relaunch: bool,
-    relaunch_exe: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::windows::process::CommandExt;
-
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const HELPER: &str = r#"param(
-  [Parameter(Mandatory = $true)][int]$UpdaterPid,
-  [Parameter(Mandatory = $true)][int]$GuiPid,
-  [Parameter(Mandatory = $true)][string]$MsiPath,
-  [Parameter(Mandatory = $true)][string]$TempDir,
-  [Parameter(Mandatory = $true)][string]$RelaunchExe,
-  [Parameter(Mandatory = $true)][int]$Relaunch
-)
-$ErrorActionPreference = 'Stop'
-$log = Join-Path $env:TEMP 'neoism-update.log'
-try {
-  $deadline = [DateTime]::UtcNow.AddMinutes(2)
-  while (Get-Process -Id $UpdaterPid -ErrorAction SilentlyContinue) {
-    if ([DateTime]::UtcNow -ge $deadline) { throw 'timed out waiting for the updater to exit' }
-    Start-Sleep -Milliseconds 250
-  }
-  while ($GuiPid -gt 0 -and (Get-Process -Id $GuiPid -ErrorAction SilentlyContinue)) {
-    if ([DateTime]::UtcNow -ge $deadline) { throw 'timed out waiting for Neoism to close' }
-    Start-Sleep -Milliseconds 250
-  }
-  foreach ($name in @('neoism', 'neoism-workspace-daemon', 'neoism-agent')) {
-    Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  }
-  foreach ($image in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe')) {
-    & taskkill.exe /F /IM $image 2>$null | Out-Null
-  }
-  Start-Sleep -Milliseconds 500
-  $arguments = @('/i', ('"' + $MsiPath + '"'), '/passive', '/norestart')
-  $installer = Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -PassThru
-  if ($installer.ExitCode -notin @(0, 3010, 1641)) {
-    throw "Windows Installer exited with code $($installer.ExitCode)"
-  }
-  "$(Get-Date -Format o) Neoism MSI update completed with code $($installer.ExitCode)" | Set-Content $log
-  if ($Relaunch -eq 1) { Start-Process -FilePath $RelaunchExe }
-  Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue
-} catch {
-  "$(Get-Date -Format o) Neoism MSI update failed: $($_.Exception.Message)" | Set-Content $log
-  exit 1
-}
-"#;
-
-    let helper = temp_dir.join("finish-update.ps1");
-    std::fs::write(&helper, HELPER)?;
-    std::process::Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(&helper)
-        .arg("-UpdaterPid")
-        .arg(std::process::id().to_string())
-        .arg("-GuiPid")
-        .arg(gui_pid.unwrap_or_default().to_string())
-        .arg("-MsiPath")
-        .arg(msi)
-        .arg("-TempDir")
-        .arg(temp_dir)
-        .arg("-RelaunchExe")
-        .arg(relaunch_exe)
-        .arg("-Relaunch")
-        .arg(if relaunch { "1" } else { "0" })
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-    Ok(())
+    invoking_exe: &std::path::Path,
+    expected_version: &str,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    windows_update::stage(
+        msi,
+        temp_dir,
+        gui_pid,
+        relaunch,
+        invoking_exe,
+        expected_version,
+    )
 }
 
 #[cfg(target_os = "macos")]
 fn run_macos_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
-    use std::time::{Duration, Instant};
-
-    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if args.first().and_then(|arg| arg.to_str()) != Some("--macos-update-helper") {
-        return Ok(false);
-    }
-    if args.len() != 5 {
-        return Err("invalid macOS update helper arguments".into());
-    }
-    let app_dst = std::path::PathBuf::from(&args[1]);
-    let app_src = std::path::PathBuf::from(&args[2]);
-    let gui_pid = args[3]
-        .to_str()
-        .ok_or("invalid macOS GUI pid")?
-        .parse::<u32>()?;
-    let relaunch = args[4].to_str() == Some("1");
-    let parent = app_dst.parent().ok_or("cannot resolve Neoism.app parent")?;
-    let staged_app = parent.join(".Neoism.app.new");
-    let old_app = parent.join(".Neoism.app.old");
-    let deadline = Instant::now() + Duration::from_secs(120);
-    let helper_pid = std::process::id();
-
-    if gui_pid > 0 {
-        wait_for_process_exit(gui_pid, Duration::from_secs(120))?;
-    }
-    let _ = terminate_other_neoism_processes();
-    while process_ids_by_name("neoism")
-        .into_iter()
-        .any(|pid| pid != helper_pid && is_host_process(pid))
-    {
-        if Instant::now() >= deadline {
-            return Err("timed out waiting for Neoism windows to close".into());
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    let _ = std::fs::remove_dir_all(&staged_app);
-    let _ = std::fs::remove_dir_all(&old_app);
-    let copied = std::process::Command::new("ditto")
-        .arg(&app_src)
-        .arg(&staged_app)
-        .status()?;
-    if !copied.success() {
-        return Err(format!("cannot stage {}", app_dst.display()).into());
-    }
-    if app_dst.exists() {
-        std::fs::rename(&app_dst, &old_app)?;
-    }
-    if let Err(err) = std::fs::rename(&staged_app, &app_dst) {
-        let _ = std::fs::rename(&old_app, &app_dst);
-        return Err(format!("cannot replace {}: {err}", app_dst.display()).into());
-    }
-    let _ = std::fs::remove_dir_all(&old_app);
-    if let Some(temp_dir) = app_src.parent() {
-        let _ = std::fs::remove_dir_all(temp_dir);
-    }
-    if relaunch {
-        std::process::Command::new("/usr/bin/open")
-            .arg("-n")
-            .arg(&app_dst)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-    }
-    Ok(true)
+    macos_update::run_helper()
 }
 
 /// Best-effort handoff after replacing the binaries: every still-running
@@ -1366,7 +1257,7 @@ fn self_update(
     let repo =
         std::env::var("NEOISM_REPO").unwrap_or_else(|_| "parkers0405/neoism".to_string());
     let repo = repo.as_str();
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     const BINS: [&str; 3] = ["neoism", "neoism-workspace-daemon", "neoism-agent"];
 
     let goos = match std::env::consts::OS {
@@ -1387,81 +1278,29 @@ fn self_update(
 
     let current = concat!("v", env!("CARGO_PKG_VERSION"));
     println!("neoism {current} ({goos}/{goarch}) — checking for updates…");
+    println!("Installation: {}", std::env::current_exe()?.display());
     reporter.progress(Some(5), "Checking the latest Neoism release");
 
-    // The unauthenticated GitHub API is limited to 60 requests/hour per public
-    // IP, so users behind the same NAT could exhaust it and get a misleading
-    // "could not reach GitHub" failure. The regular latest-release URL redirects
-    // to `/releases/tag/<tag>` and does not consume that API quota.
-    let latest_url = format!("https://github.com/{repo}/releases/latest");
-    #[cfg(windows)]
-    let null_device = "NUL";
-    #[cfg(not(windows))]
-    let null_device = "/dev/null";
-    let out = std::process::Command::new("curl")
-        .args([
-            "-fsSL",
-            "-o",
-            null_device,
-            "-w",
-            "%{url_effective}",
-            "-A",
-            "neoism-self-update",
-            &latest_url,
-        ])
-        .output()?;
-    if !out.status.success() {
-        return Err(format!(
-            "GitHub release check failed (curl exit status {})",
-            out.status
-        )
-        .into());
+    // The modal pins its displayed release. CLI invocations resolve latest once.
+    let latest = match &options.target_version {
+        Some(version) => version.clone(),
+        None => crate::update::latest_release(repo)?,
+    };
+
+    if !options.force && !crate::update::is_newer(&latest, current) {
+        let message = if crate::update::is_newer(current, &latest) {
+            format!("Installed Neoism {current} is newer than {latest}; use --force for an explicit downgrade")
+        } else {
+            format!("Neoism is already up to date ({current})")
+        };
+        println!("{message}");
+        reporter.progress(Some(100), message);
+        return Ok(());
     }
-    let effective_url = String::from_utf8(out.stdout)?;
-    let latest = effective_url
-        .trim()
-        .rsplit_once("/releases/tag/")
-        .map(|(_, tag)| tag)
-        .filter(|tag| !tag.is_empty() && !tag.contains('/'))
-        .map(str::to_string)
-        .ok_or("no published GitHub release found")?;
 
     #[cfg(target_os = "macos")]
-    let macos_app_is_current = [
-        std::path::PathBuf::from("/Applications/Neoism.app"),
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join("Applications/Neoism.app"),
-    ]
-    .into_iter()
-    .filter(|app| app.exists())
-    .all(|app| {
-        std::process::Command::new("/usr/libexec/PlistBuddy")
-            .args(["-c", "Print :CFBundleShortVersionString"])
-            .arg(app.join("Contents/Info.plist"))
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .and_then(|out| String::from_utf8(out.stdout).ok())
-            .is_some_and(|version| latest.trim_start_matches('v') == version.trim())
-    });
+    let macos_installation = macos_update::installation(&std::env::current_exe()?)?;
 
-    if !options.force && latest == current {
-        #[cfg(target_os = "macos")]
-        if !macos_app_is_current {
-            println!("The Neoism.app bundle is stale; replacing it with {latest}.");
-        } else {
-            println!("Already up to date ({current}).");
-            reporter.failed(format!("Neoism is already up to date ({current})"));
-            return Ok(());
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            println!("Already up to date ({current}).");
-            reporter.failed(format!("Neoism is already up to date ({current})"));
-            return Ok(());
-        }
-    }
     println!("Updating {current} → {latest}…");
 
     #[cfg(windows)]
@@ -1469,9 +1308,8 @@ fn self_update(
     #[cfg(not(windows))]
     let asset = format!("neoism-{goos}-{goarch}.tar.gz");
     let url = format!("https://github.com/{repo}/releases/download/{latest}/{asset}");
-    let tmp = std::env::temp_dir().join(format!("neoism-update-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp)?;
+    // Private, unpredictable staging also isolates concurrent updater processes.
+    let tmp = tempfile::Builder::new().prefix("neoism-update-").tempdir()?.keep();
     let archive = tmp.join(&asset);
     reporter.progress(Some(10), format!("Downloading Neoism {latest}"));
     if let Err(error) = download_update_file(&url, &archive, reporter, (10, 70)) {
@@ -1513,22 +1351,23 @@ fn self_update(
     }
     #[cfg(windows)]
     {
-        reporter.progress(Some(85), "Staging the Windows installer");
-        stage_windows_msi_update(
+        reporter.progress(Some(85), "Verifying the Windows payload and update target");
+        let result_path = stage_windows_msi_update(
             &archive,
             &tmp,
             options.parent_pid,
             options.relaunch,
             &std::env::current_exe()?,
+            &latest,
         )?;
-        println!(
-            "Neoism {latest} is staged. Closing Neoism, its daemon, and its agent to finish the Windows update."
+        let handoff = format!(
+            "Neoism {latest} update handed off; installation is not complete. Result: {}",
+            result_path.display()
         );
-        println!(
-            "  • Windows Installer will upgrade all three executables transactionally."
-        );
-        println!("  • Update status is written to %TEMP%\\neoism-update.log.");
-        reporter.ready("Restarting Neoism to finish the update");
+        println!("{handoff}");
+        println!("  • The invoking stack will be updated after this process exits; other PATH copies are left alone.");
+        println!("  • Inspect the result JSON for succeeded, failed, or reboot_required; helper and MSI logs are alongside it.");
+        reporter.handoff(handoff);
         return Ok(());
     }
     #[cfg(not(windows))]
@@ -1548,9 +1387,9 @@ fn self_update(
 
     // Swap the binaries next to the running exe, atomically (stage in the
     // same dir -> same filesystem -> rename works even over the running bin).
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let exe = std::env::current_exe()?;
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let dir = exe
         .parent()
         .ok_or("cannot resolve install directory")?
@@ -1559,62 +1398,34 @@ fn self_update(
     let extracted = tmp.join(format!("neoism-{goos}-{goarch}"));
 
     #[cfg(target_os = "macos")]
-    let installed_app = exe
-        .ancestors()
-        .find(|path| {
-            path.file_name().and_then(|name| name.to_str()) == Some("Neoism.app")
-        })
-        .map(std::path::Path::to_path_buf)
-        .or_else(|| {
-            let app = std::path::PathBuf::from("/Applications/Neoism.app");
-            app.exists().then_some(app)
-        })
-        .or_else(|| {
-            dirs::home_dir()
-                .map(|home| home.join("Applications/Neoism.app"))
-                .filter(|app| app.exists())
-        });
-
-    #[cfg(target_os = "macos")]
-    if let Some(app_dst) = installed_app.as_ref() {
-        let retained = std::env::temp_dir().join(format!(
-            "neoism-update-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis()
+    {
+        let handoff = match &macos_installation {
+            macos_update::Installation::Bundle(app_dst) => macos_update::stage_update(
+                app_dst, &extracted.join("Neoism.app"), &latest,
+                options.parent_pid, options.relaunch,
+            )?,
+            macos_update::Installation::Loose(executable) => macos_update::stage_loose_update(
+                executable, &extracted, &latest,
+                options.parent_pid, options.relaunch,
+            )?,
+        };
+        println!("Neoism {latest} is staged; the detached helper will finish the macOS update.");
+        println!("  • Executable: {}", handoff.target_executable.display());
+        println!("  • Result: {}", handoff.result_path.display());
+        println!("  • Helper log: {}", handoff.log_path.display());
+        println!("  • Replacement and application health are not yet confirmed.");
+        reporter.handoff(format!(
+            "Update handed to macOS helper; result: {}",
+            handoff.result_path.display()
         ));
-        std::fs::rename(&extracted, &retained)?;
-        let app_src = retained.join("Neoism.app");
-        if !app_src.exists() {
-            return Err(format!("`Neoism.app` missing from {asset}").into());
-        }
-        std::process::Command::new(app_src.join("Contents/MacOS/neoism"))
-            .arg("--macos-update-helper")
-            .arg(app_dst)
-            .arg(&app_src)
-            .arg(options.parent_pid.unwrap_or_default().to_string())
-            .arg(if options.relaunch { "1" } else { "0" })
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        println!("Neoism {latest} is staged. Closing Neoism to finish the macOS update.");
-        reporter.ready("Restarting Neoism to install the update");
+        let _ = std::fs::remove_dir_all(&tmp);
         return Ok(());
     }
 
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     reporter.progress(Some(85), "Installing Neoism");
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     for bin in BINS {
-        #[cfg(target_os = "macos")]
-        if installed_app
-            .as_ref()
-            .is_some_and(|app| dir.starts_with(app))
-        {
-            break;
-        }
         let src = extracted.join(bin);
         if !src.exists() {
             return Err(format!("`{bin}` missing from {asset}").into());
@@ -1636,7 +1447,7 @@ fn self_update(
         println!("  ✓ {}", dst.display());
     }
 
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let web_src = extracted.join("web");
         if !web_src.join("index.html").is_file() {

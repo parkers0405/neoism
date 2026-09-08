@@ -51,6 +51,17 @@ impl Screen<'_> {
         font_library: &neoism_backend::sugarloaf::font::FontLibrary,
         should_update_font_library: bool,
     ) {
+        self.renderer.code_git_blame = config.editor.git_blame;
+        self.renderer.code_git_blame_delay_ms = config.editor.git_blame_delay_ms;
+        self.renderer.code_git_blame_hide_on_scroll = config.editor.git_blame_hide_on_scroll;
+        for grid in self.context_manager.all_grids_mut().iter_mut() {
+            for item in grid.contexts_mut().values_mut() {
+                if let Some(code) = item.context_mut().code.as_mut() {
+                    code.blame.configure(config.editor.git_blame);
+                    code.blame.set_options(config.editor.git_blame_delay_ms, config.editor.git_blame_hide_on_scroll);
+                }
+            }
+        }
         let previous_style = self.sugarloaf.style();
         let grid_text_geometry_changed = should_update_font_library
             || (previous_style.font_size - config.appearance.fonts.size).abs()

@@ -68,6 +68,20 @@ pub fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(root.join(candidate))
 }
 
+/// Produce the exact lexical path a recursively expanded native HOST tree
+/// uses, without leaking canonicalize()'s symlink target/verbatim prefix into
+/// document IDs. Incoming Windows wire paths may contain `/`; rebuilding one
+/// component at a time yields the same separators as the host's tree joins.
+fn listing_identity_path(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let lexical = resolve_path(root, path)?;
+    Ok(lexical.strip_prefix(root).map(|relative| {
+        relative.components().fold(root.to_path_buf(), |mut path, part| {
+            path.push(part.as_os_str());
+            path
+        })
+    }).unwrap_or(lexical))
+}
+
 /// Resolve an existing path and reject symlink escapes as well as lexical
 /// traversal. Read/list/stat calls use this stricter form so a symlink inside
 /// a shared workspace cannot expose an arbitrary host image or document.
@@ -202,6 +216,7 @@ async fn browser_list_dir(root: &Path, path: String) -> Vec<FilesServerMessage> 
     while let Ok(Some(entry)) = read.next_entry().await {
         let Ok(metadata) = entry.metadata().await else { continue; };
         entries.push(DirEntry {
+            host_path: Some(entry.path().to_string_lossy().into_owned()),
             name: entry.file_name().to_string_lossy().into_owned(),
             is_dir: metadata.is_dir(),
             size: metadata.is_file().then(|| metadata.len()),
@@ -224,6 +239,7 @@ async fn browser_stat(root: &Path, path: String) -> Vec<FilesServerMessage> {
         Ok(metadata) => vec![FilesServerMessage::Stat {
             path,
             entry: DirEntry {
+                host_path: Some(resolved.to_string_lossy().into_owned()),
                 name: resolved.file_name().unwrap_or_default().to_string_lossy().into_owned(),
                 is_dir: metadata.is_dir(),
                 size: metadata.is_file().then(|| metadata.len()),
@@ -454,6 +470,11 @@ async fn list_dir(root: &Path, rel: String) -> Vec<FilesServerMessage> {
     // joined client could paint even one row. Keep the wire contract (file
     // sizes are still populated), but resolve a bounded batch concurrently.
     const METADATA_CONCURRENCY: usize = 32;
+    // Keep the advertised workspace root spelling, not canonicalize()'s
+    // Windows verbatim prefix or a symlink target. This is the same path the
+    // host tab uses for CRDT/presence; canonicalize above only authorizes I/O.
+    let lexical_dir = listing_identity_path(root, &rel).expect("validated directory path");
+    let lexical_dir = &lexical_dir;
     let mut entries = stream::iter(raw_entries)
         .map(|entry| async move {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -473,6 +494,7 @@ async fn list_dir(root: &Path, rel: String) -> Vec<FilesServerMessage> {
                 markdown_frontmatter_icon(&entry.path()).await
             };
             DirEntry {
+                host_path: Some(lexical_dir.join(&name).to_string_lossy().into_owned()),
                 name,
                 is_dir,
                 size,
@@ -503,8 +525,9 @@ async fn stat(root: &Path, rel: String) -> Vec<FilesServerMessage> {
             let is_dir = md.is_dir();
             let size = if md.is_file() { Some(md.len()) } else { None };
             vec![FilesServerMessage::Stat {
-                path: rel,
+                path: rel.clone(),
                 entry: DirEntry {
+                    host_path: listing_identity_path(root, &rel).ok().map(|path| path.to_string_lossy().into_owned()),
                     name,
                     is_dir,
                     size,

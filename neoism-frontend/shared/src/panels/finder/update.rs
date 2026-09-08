@@ -147,6 +147,7 @@ impl Finder {
         cwd: PathBuf,
         rows: Vec<super::types::ReferenceRow>,
     ) {
+        self.reference_host_paths = false;
         self.enabled = true;
         self.mode = FinderMode::References;
         if cwd != self.cwd {
@@ -173,6 +174,18 @@ impl Finder {
         self.caret_blink_start = Instant::now();
         self.start_open_pop();
         self.refresh_reference_results();
+    }
+
+    /// Host-owned LSP references use lexical HostPath resolution and do not
+    /// read a same-named file on the guest for previews.
+    pub fn open_host_references(
+        &mut self,
+        root: PathBuf,
+        rows: Vec<super::types::ReferenceRow>,
+    ) {
+        self.open_references(root, rows);
+        self.reference_host_paths = true;
+        self.invalidate_preview_cache();
     }
 
     /// Open the finder in Symbols mode (VS Code Ctrl+P `@` / the

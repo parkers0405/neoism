@@ -831,7 +831,7 @@ pub struct Screen<'screen> {
     markdown_image_overlay_ids: std::collections::HashSet<usize>,
     /// In-flight remote git-status request → the root it was asked
     /// for, so a stale reply for a workspace we've left is dropped.
-    pending_remote_git_status: HashMap<u64, PathBuf>,
+    host_git: git_state::HostGitState,
     /// In-flight WalkTree listings of a joined workspace's `Notes/`
     /// folder — replies feed the notes sidebar, not the file tree.
     pending_remote_notes_listing: std::collections::HashSet<u64>,
@@ -1384,6 +1384,8 @@ pub mod bridges;
 pub mod chrome_geom;
 pub mod code_crdt;
 pub mod daemon_layout;
+mod code_blame;
+mod git_state;
 pub mod editor_scroll;
 pub mod lifecycle;
 pub mod markdown_crdt;
@@ -1823,7 +1825,7 @@ impl Screen<'_> {
             pending_remote_code_opens: HashMap::new(),
             markdown_cover_cache: HashMap::new(),
             markdown_image_overlay_ids: std::collections::HashSet::new(),
-            pending_remote_git_status: HashMap::new(),
+            host_git: git_state::HostGitState::default(),
             pending_remote_notes_listing: std::collections::HashSet::new(),
             pending_remote_notes_creates: HashMap::new(),
             pending_remote_notes_mutations: std::collections::HashSet::new(),

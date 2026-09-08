@@ -216,6 +216,7 @@ fn press(named: NamedKey) -> UiEvent {
 
 fn entry(name: &str, is_dir: bool) -> DirEntry {
     DirEntry {
+        host_path: None,
         name: name.to_string(),
         is_dir,
         size: None,
@@ -282,6 +283,62 @@ fn arrow_keys_move_selection() {
         }
     });
     assert_eq!(tree.selected_path(), Some(Path::new("/workspace/c")));
+}
+
+#[test]
+fn joined_legacy_listing_keeps_host_path_bytes_through_nested_reads() {
+    use neoism_protocol::host_path::HostPath;
+    let root = Path::new("/host/项目 space");
+    let mut tree = FileTree::new(root.into());
+    let harness = Harness::new(PendingFiles::new(707));
+    harness.run(|ctx| tree.populate_from_dir(root, ctx));
+    assert!(tree.handle_service_reply(707, &serde_json::json!({
+        "DirListing": { "path": "", "entries": [
+            { "name": "src 子 dir", "is_dir": true, "size": null },
+            { "name": "README.md", "is_dir": false, "size": null }
+        ]}
+    })));
+    let directory = tree.nodes().iter().find(|e| e.label == "src 子 dir").unwrap().path.clone().unwrap();
+    assert_eq!(directory.to_str().unwrap(), "/host/项目 space/src 子 dir");
+    harness.run(|ctx| { tree.open_dir(&directory, ctx); });
+    assert!(tree.handle_service_reply(707, &serde_json::json!({
+        "DirListing": { "path": "src 子 dir", "entries": [
+            { "name": "main 文.rs", "is_dir": false, "size": null },
+            { "name": "literal\\backslash.rs", "is_dir": false, "size": null }
+        ]}
+    })));
+    for name in ["main 文.rs", "literal\\backslash.rs"] {
+        let path = tree.nodes().iter().find(|e| e.label == name).unwrap().path.as_ref().unwrap();
+        let host = HostPath::new(root.to_str().unwrap());
+        let read = host.relative(path.to_str().unwrap()).unwrap();
+        assert_eq!(read, format!("src 子 dir/{name}"));
+        assert_eq!(neoism_ui::editor::crdt::presence_buffer_id_for_path(path), host.join(&read).buffer_id());
+    }
+}
+
+#[test]
+fn joined_unix_backslash_directory_does_not_alias_nested_directory() {
+    let root = Path::new("/host");
+    let mut tree = FileTree::new(root.into());
+    let harness = Harness::new(PendingFiles::new(708));
+    harness.run(|ctx| tree.populate_from_dir(root, ctx));
+    assert!(tree.handle_service_reply(708, &serde_json::json!([
+        { "name": "literal\\dir", "is_dir": true, "size": null },
+        { "name": "literal", "is_dir": true, "size": null }
+    ])));
+    harness.run(|ctx| { tree.open_dir(Path::new("/host/literal"), ctx); });
+    assert!(tree.handle_service_reply(708, &serde_json::json!([
+        { "name": "dir", "is_dir": true, "size": null }
+    ])));
+    harness.run(|ctx| { tree.open_dir(Path::new("/host/literal/dir"), ctx); });
+    assert!(tree.handle_service_reply(708, &serde_json::json!([
+        { "name": "main.rs", "is_dir": false, "size": null }
+    ])));
+    assert!(tree.is_expanded(Path::new("/host/literal/dir")));
+    assert!(!tree.is_expanded(Path::new(r"/host/literal\dir")));
+    let row = tree.nodes().iter().find(|e| e.label == "main.rs").unwrap();
+    assert_eq!(row.path.as_ref().unwrap().to_str().unwrap(), "/host/literal/dir/main.rs");
+    assert_eq!(row.depth, 2);
 }
 
 #[test]

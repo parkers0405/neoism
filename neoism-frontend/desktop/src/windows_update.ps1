@@ -8,6 +8,13 @@ param(
 )
 Set-StrictMode -Version 3
 $ErrorActionPreference = 'Stop'
+if (-not $LibraryOnly) {
+    # A PowerShell 7 parent can pass its module path to Windows PowerShell 5.1.
+    # This installer uses only the trusted modules shipped with its own engine.
+    $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
+    Import-Module ([IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1')) -Force
+    Import-Module ([IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -Force
+}
 $script:BinaryNames = @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe')
 
 function Get-FullPath([string]$Path) {
@@ -93,17 +100,23 @@ function Assert-StackVersion([string]$Directory, [string]$Expected) {
         Assert-VersionOutput $name (Get-BinaryVersion $exe) $Expected
     }
 }
+function Get-UpdateFileHash([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+    finally { $sha.Dispose(); $stream.Dispose() }
+}
 function Get-PayloadManifest([string]$Directory) {
     $manifest = @{}
     foreach ($name in $script:BinaryNames) {
-        $manifest[$name] = (Get-FileHash -LiteralPath (Join-Path $Directory $name) -Algorithm SHA256).Hash
+        $manifest[$name] = Get-UpdateFileHash (Join-Path $Directory $name)
     }
     $web = Join-Path $Directory 'web'
     if (-not (Test-Path -LiteralPath $web -PathType Container)) { throw 'MSI payload is missing web assets' }
     foreach ($file in Get-ChildItem -LiteralPath $web -File -Recurse -Force) {
         Assert-NoReparsePoint $file.FullName
         $relative = $file.FullName.Substring($Directory.TrimEnd('\').Length + 1)
-        $manifest[$relative] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        $manifest[$relative] = Get-UpdateFileHash $file.FullName
     }
     return $manifest
 }
@@ -112,7 +125,7 @@ function Assert-InstalledPayload([string]$Directory, [hashtable]$Manifest, [stri
         $path = Join-Path $Directory $relative
         Assert-NoReparsePoint $path
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Installed payload missing: $path" }
-        if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $Manifest[$relative]) {
+        if ((Get-UpdateFileHash $path) -ne $Manifest[$relative]) {
             throw "Installed payload checksum mismatch: $path"
         }
     }
@@ -339,7 +352,7 @@ function Invoke-WindowsUpdate {
         [IO.File]::WriteAllText($probe, '')
         [IO.File]::Delete($probe)
         Write-UpdateResult 'preparing' "Verifying $($script:Target.mode) update for $($script:Target.directory)"
-        $msiHash = (Get-FileHash -LiteralPath $MsiPath -Algorithm SHA256).Hash
+        $msiHash = Get-UpdateFileHash $MsiPath
         $extract = Join-Path $TempDir 'payload'
         New-Item -ItemType Directory -Path $extract | Out-Null
         $extractLog = Join-Path (Split-Path $ResultPath) 'extract-msi.log'
@@ -360,7 +373,7 @@ function Invoke-WindowsUpdate {
         $targetNow = Resolve-UpdateTarget $InvokingExe (Get-RegisteredInstallDir)
         if ($targetNow.mode -ne $script:Target.mode) { throw 'Installation registration changed during update; retry' }
         Stop-TargetStack $script:Target.directory
-        if ((Get-FileHash -LiteralPath $MsiPath -Algorithm SHA256).Hash -ne $msiHash) { throw 'Staged MSI changed after verification' }
+        if ((Get-UpdateFileHash $MsiPath) -ne $msiHash) { throw 'Staged MSI changed after verification' }
         if ($script:Target.mode -eq 'managed') {
             Write-UpdateResult 'applying' 'Windows Installer is upgrading the registered stack'
             # REINSTALLMODE alone does not select installed features for repair:

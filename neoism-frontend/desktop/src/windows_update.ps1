@@ -316,10 +316,11 @@ function Invoke-WindowsUpdate {
     try {
         $updater = Get-TrackedProcess $UpdaterPid $InvokingExe
         $gui = Get-TrackedProcess $GuiPid $InvokingExe
-        $lockPath = Join-Path $env:LOCALAPPDATA 'Neoism\updates\update.lock'
+        $updatesDirectory = [IO.Directory]::CreateDirectory((Join-Path $env:LOCALAPPDATA 'Neoism\updates'))
+        $lockPath = Join-Path $updatesDirectory.FullName 'update.lock'
         # FileShare.None serializes all this user's Neoism updates across sessions.
         try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
-        catch { throw 'Another Neoism update is active (or its update lock is inaccessible); wait and retry' }
+        catch { throw "Another Neoism update is active or its lock cannot be opened at ${lockPath}: $($_.Exception.Message)" }
         $blocked = Join-Path $env:LOCALAPPDATA 'Neoism\updates\recovery-required.txt'
         if (Test-Path -LiteralPath $blocked) { throw "Previous MSI timed out; recovery required before retry: $blocked" }
         if ($ExpectedVersion -cnotmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw 'Invalid expected release version' }

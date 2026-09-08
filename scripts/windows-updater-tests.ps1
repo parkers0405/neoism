@@ -154,7 +154,8 @@ function Read-Receipt { return (Get-Content -LiteralPath $ResultPath -Raw | Conv
 try {
     foreach ($mode in @('managed', 'portable')) {
         New-Fixture $mode
-        Assert ((Invoke-WindowsUpdate) -eq 0) "$mode must complete"
+        Remove-Item -LiteralPath $env:LOCALAPPDATA -Recurse -Force
+        Assert ((Invoke-WindowsUpdate) -eq 0) "$mode must complete without a precreated update directory"
         $receipt = Read-Receipt
         Assert ($receipt.state -eq 'succeeded' -and $receipt.installation_verified) "$mode verified completion"
         Assert ($script:SawHandoff -and $script:Launches -eq 1) "$mode handoff before one verified relaunch"

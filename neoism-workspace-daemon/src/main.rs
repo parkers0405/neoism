@@ -11,7 +11,7 @@ use neoism_workspace_daemon::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "neoism-workspace-daemon")]
+#[command(name = "neoism-workspace-daemon", version)]
 #[command(about = "Neoism workspace daemon")]
 struct Cli {
     /// Address for the daemon HTTP/WebSocket server.
@@ -46,6 +46,19 @@ struct Cli {
     /// a previous run (restored from the state snapshot) is not duplicated.
     #[arg(long, value_name = "DIR")]
     workspace: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn version_is_reported_without_starting_services() {
+        let version = Cli::try_parse_from(["neoism-workspace-daemon", "--version"])
+            .unwrap_err();
+        assert_eq!(version.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert_eq!(version.to_string().trim(), concat!("neoism-workspace-daemon ", env!("CARGO_PKG_VERSION")));
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

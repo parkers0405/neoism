@@ -679,9 +679,13 @@ async fn background_task_runs_shell_command_and_result_can_be_collected() {
         .expect("job id")
         .to_string();
 
+    let mut job_updates = Vec::new();
     let completion = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = events.recv().await.unwrap();
+            if event.kind == event_type::SESSION_BACKGROUND_TASKS_UPDATED {
+                job_updates.push(event.properties.clone());
+            }
             if event.kind == event_type::SESSION_BACKGROUND_TASK_COMPLETED
                 && event.properties["jobID"] == job_id
             {
@@ -693,6 +697,27 @@ async fn background_task_runs_shell_command_and_result_can_be_collected() {
     .expect("background task should complete");
     assert_eq!(completion.properties["status"], "completed");
     assert_eq!(completion.properties["result"], "background-ok");
+    assert_eq!(
+        completion.properties["parentSessionID"],
+        session.id.as_str()
+    );
+    assert_eq!(job_updates.len(), 2);
+    assert_eq!(job_updates[0]["runningBackgroundTasks"][0]["jobID"], job_id);
+    assert_eq!(job_updates[1]["runningBackgroundTasks"], json!([]));
+    assert!(
+        job_updates[1]["backgroundJobsRevision"].as_u64().unwrap()
+            > job_updates[0]["backgroundJobsRevision"].as_u64().unwrap()
+    );
+    let (revision, jobs) = crate::background_job::running_jobs_for_family(
+        &state,
+        &std::collections::HashSet::from([session.id.to_string()]),
+    )
+    .await;
+    assert!(jobs.is_empty());
+    assert_eq!(
+        Some(revision),
+        job_updates[1]["backgroundJobsRevision"].as_u64()
+    );
 
     let collected = execute_tool_call_with_permission_wait(
         &state,
@@ -714,18 +739,24 @@ async fn background_task_runs_shell_command_and_result_can_be_collected() {
     assert!(collected.output.contains("<background_task_result>"));
     assert!(collected.output.contains("background-ok"));
 
-    for _ in 0..50 {
-        if !state
-            .inner
-            .session_coordinator
-            .active_run(session.id.as_str())
-            .await
-            .is_some()
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let messages = wait_for_session_message_count(&state, session.id.as_str(), 2).await;
+    let completion_id = format!("msg_background_completion_{job_id}");
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| match &message.info {
+                MessageInfo::User(info) => info.id.as_str() == completion_id,
+                _ => false,
+            })
+            .count(),
+        1,
+        "completion is delivered once to the launching session"
+    );
+    // Collecting a result must not enqueue or broadcast another completion.
+    while let Ok(event) = events.try_recv() {
+        assert_ne!(event.kind, event_type::SESSION_BACKGROUND_TASK_COMPLETED);
     }
+    state.shutdown().await.unwrap();
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
 }

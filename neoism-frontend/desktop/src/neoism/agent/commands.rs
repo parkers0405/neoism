@@ -768,6 +768,10 @@ impl NeoismAgentPane {
                         .skip(1)
                         .any(|entry| entry.id == session_id)
             });
+        // Job authority is family-wide, unlike the parked transcript/runtime.
+        let family_jobs = stays_in_family
+            .then(|| self.background_task_runtime())
+            .flatten();
         self.cache_current_session(stays_in_family);
         let state = cached.state;
         let parent_id = state.parent_id.clone().or(roster_parent.clone());
@@ -844,6 +848,9 @@ impl NeoismAgentPane {
         self.pending_user_prompts = cached.pending_user_prompts;
         self.prompt_echo_aliases = cached.prompt_echo_aliases;
         self.restore_session_runtime_ui(cached.runtime);
+        if let Some(runtime) = family_jobs {
+            self.restore_background_task_runtime(runtime);
+        }
         if !stays_in_family {
             self.clear_family_activity();
         }

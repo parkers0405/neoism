@@ -244,12 +244,14 @@ impl Application<'_> {
         use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
         route.window.screen.renderer.modal.open(ModalSpec {
             title: format!("Neoism {version} is available"),
-            body: "## A fresh build is ready\n\n- Latest fixes and performance improvements\n- Installs through Neoism's platform updater\n- Your workspace stays available when you reopen"
-                .to_string(),
+            body: format!(
+                "## A fresh build is ready\n\n- Latest fixes and performance improvements\n- Installs through Neoism's platform updater\n- Your workspace stays available when you reopen\n\nInstallation: `{}`",
+                std::env::current_exe().map(|path| path.display().to_string()).unwrap_or_else(|_| "current Neoism installation".to_string())
+            ),
             meta: format!("Installed: v{}", env!("CARGO_PKG_VERSION")),
             input: None,
             buttons: vec![
-                ModalButton::new("Update", "Enter", ModalAction::UpdateNeoism),
+                ModalButton::new("Update", "Enter", ModalAction::UpdateNeoism { version: version.clone() }),
                 ModalButton::new("Not now", "Esc", ModalAction::Close),
             ],
             busy: false,
@@ -359,11 +361,24 @@ impl Application<'_> {
                     .top_bar
                     .set_server_status(status);
             }
-            let messages = self
-                .window_sessions
-                .get(&window_id)
-                .map(|session| session.connection.drain_messages())
-                .unwrap_or_default();
+            // Capture the source endpoint BEFORE processing workspace events:
+            // an earlier event in this batch can switch the active connection.
+            let (endpoint, messages, parked_editors) = self.window_sessions.get(&window_id)
+                .map(|session| (
+                    session.connection.endpoint().to_string(),
+                    session.connection.drain_messages(),
+                    session.parked_connections.values().flat_map(|connection| {
+                        let endpoint = connection.endpoint().to_string();
+                        connection.drain_editor_messages().into_iter().map(move |message| (endpoint.clone(), message))
+                    }).collect::<Vec<_>>(),
+                )).unwrap_or_default();
+            for (endpoint, message) in parked_editors {
+                if let DaemonServerMessage::Editor { request_id, message } = message {
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        if route.window.screen.apply_remote_code_lsp_message(&endpoint, request_id, &message) { route.request_redraw(); }
+                    }
+                }
+            }
             for message in messages {
                 match message {
                     DaemonServerMessage::Workspace { message, .. } => {
@@ -374,9 +389,9 @@ impl Application<'_> {
                     // Native guest code panes reuse the editor envelope for
                     // host-owned LSP snapshots/diagnostics. Grid/nvim
                     // messages remain harmless no-ops in the screen bridge.
-                    DaemonServerMessage::Editor { message, .. } => {
+                    DaemonServerMessage::Editor { request_id, message } => {
                         if let Some(route) = self.router.routes.get_mut(&window_id) {
-                            if route.window.screen.apply_remote_code_lsp_message(&message)
+                            if route.window.screen.apply_remote_code_lsp_message(&endpoint, request_id, &message)
                             {
                                 route.request_redraw();
                             }
@@ -2289,6 +2304,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     match close_terminal_action(handled) {
                         CloseTerminalAction::RemoveRouteAndMaybeExit => {
                             self.router.unbind_native_window(window_id);
+                            if let Some(route) = self.router.routes.get(&window_id) { route.window.screen.clear_remote_code_lsp(); }
                             self.router.routes.remove(&window_id);
                             crate::app::freeze_watchdog::unregister_window(window_id);
                             // Unschedule pending events.
@@ -2378,6 +2394,13 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     let notes_redraw =
                         route.window.screen.refresh_notes_sidebar_if_visible();
                     if tree_redraw || notes_redraw {
+                        route.request_redraw();
+                    }
+                }
+            }
+            RioEventType::Rio(RioEvent::RemoteEditorReadTimeout(request_id)) => {
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    if route.window.screen.fail_remote_editor_read(request_id, "Host read timed out; reopen the file to retry") {
                         route.request_redraw();
                     }
                 }
@@ -2515,7 +2538,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         route.window.screen.renderer.modal.open(ModalSpec {
                             title: "Update failed".to_string(),
                             body: message.clone(),
-                            meta: "Neoism was not changed. You can keep working and try again later."
+                            meta: "Review the update log before retrying; installation may have partially completed."
                                 .to_string(),
                             input: None,
                             buttons: vec![ModalButton::new("Close", "Enter", ModalAction::Close)],
@@ -2526,6 +2549,17 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             format!("Neoism update failed: {message}"),
                             neoism_ui::panels::notifications::NotificationLevel::Error,
                         );
+                    } else if percent == Some(100) && !ready_to_restart {
+                        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+                        route.window.screen.renderer.modal.open(ModalSpec {
+                            title: "Neoism update".to_string(),
+                            body: message,
+                            meta: "No restart required.".to_string(),
+                            input: None,
+                            buttons: vec![ModalButton::new("Close", "Enter", ModalAction::Close)],
+                            busy: false,
+                            blocking: false,
+                        });
                     } else {
                         route.window.screen.renderer.modal.update_progress(
                             message,
@@ -2539,7 +2573,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     }
                     route.request_overlay_redraw();
                 }
-                if ready_to_restart {
+                if ready_to_restart && !failed {
                     event_loop.exit();
                 }
             }
@@ -2657,6 +2691,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     );
                 }
                 self.router.unbind_native_window(window_id);
+                if let Some(route) = self.router.routes.get(&window_id) { route.window.screen.clear_remote_code_lsp(); }
                 self.router.routes.remove(&window_id);
                 self.window_sessions.remove(&window_id);
                 crate::app::freeze_watchdog::unregister_window(window_id);

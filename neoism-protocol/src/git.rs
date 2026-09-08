@@ -7,7 +7,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitClientMessage {
+    /// Read-only HEAD attribution. Path is workspace-relative or an absolute host path.
+    Blame { path: String },
     Status,
+    /// Subscribe to one workspace on this socket; echo the opaque scope token.
+    WatchStatus {
+        token: String,
+    },
+    UnwatchStatus {
+        token: String,
+    },
     Diff {
         path: Option<String>,
     },
@@ -71,6 +80,12 @@ impl GitClientMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitServerMessage {
+    Blame { snapshot: GitBlameSnapshot },
+    /// Authoritative, atomic branch/count/tree snapshot for a scoped subscription.
+    RepoStatus {
+        token: String,
+        snapshot: GitRepoStatus,
+    },
     Status {
         entries: Vec<GitStatusEntry>,
     },
@@ -127,10 +142,36 @@ pub enum GitServerMessage {
     },
 }
 
+/// Immutable HEAD attribution, never computed from the index or working tree.
+/// `lines` indexes `commits`; absent entries are not attributed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitBlameSnapshot {
+    pub repo_root: String,
+    pub path: String,
+    pub head: String,
+    pub baseline: Vec<String>,
+    pub lines: Vec<Option<u32>>,
+    pub commits: Vec<GitBlameCommit>,
+    /// Deduplicated base64 32x32 RGBA8 images with circular alpha; at most 32.
+    pub avatars: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitBlameCommit {
+    pub sha: String,
+    pub author: String,
+    pub email: String,
+    pub timestamp: i64,
+    pub summary: String,
+    /// Index into the snapshot's actual GitHub images, decoded on the daemon.
+    /// None means no verified image; clients must not invent profile pictures.
+    pub avatar: Option<u32>,
+}
+
 /// One changed file with the same shape the shared git panel's
 /// `FileChange` renders: repo-relative path, desktop-style status tag,
 /// add/del line counts and the index-column staged bit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitFileChange {
     pub path: String,
     pub status: GitChangeStatus,
@@ -197,4 +238,15 @@ pub struct CommitSummary {
     pub author: String,
     pub message: String,
     pub timestamp: i64,
+}
+
+/// All paths are HOST identities. File paths are relative to `repo_root`, which
+/// can differ from `workspace_root` (a workspace may be a repository subdir).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitRepoStatus {
+    pub workspace_root: String,
+    pub repo_root: Option<String>,
+    pub branch: Option<String>,
+    pub files: Vec<GitFileChange>,
+    pub error: Option<String>,
 }

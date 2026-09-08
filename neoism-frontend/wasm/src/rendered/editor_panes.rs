@@ -108,6 +108,7 @@ fn editor_lsp_wire_message(
     let query =
         |seq, action, path: std::path::PathBuf, line, character, text, open: bool| {
             Wire::LspQueryAt {
+                buffer_text: None,
                 seq,
                 action,
                 open_paths: if open { vec![path.clone()] } else { Vec::new() },
@@ -207,6 +208,7 @@ fn editor_lsp_wire_message(
             action,
             seq,
         } => Wire::ApplyLspCodeActionAt {
+            buffer_text: None,
             seq,
             open_paths: vec![path.clone()],
             action: EditorLspCodeAction {
@@ -1039,6 +1041,31 @@ impl ChromeBridge {
             }
             None => "none".to_string(),
         }
+    }
+
+    /// Host update pump, outside paint. The owning workspace sends this over Git.
+    pub fn code_blame_request(&mut self, scope: String) -> Option<String> {
+        let enabled = self.chrome.code_git_blame;
+        let delay_ms = self.chrome.code_git_blame_delay_ms;
+        let hide_on_scroll = self.chrome.code_git_blame_hide_on_scroll;
+        let pane = self.chrome.code_pane_mut()?;
+        pane.blame.apply_default(enabled);
+        pane.blame.set_options(delay_ms, hide_on_scroll);
+        pane.observe_blame_viewport();
+        pane.blame.update(&pane.buffer);
+        if !pane.blame.needs_request(format!("{scope}:{:?}", pane.path)) { return None; }
+        thread_local! { static NEXT: std::cell::Cell<u32> = const { std::cell::Cell::new(1) }; }
+        let id = NEXT.with(|next| { let id = next.get(); next.set(id.checked_add(1).expect("blame request IDs exhausted")); id });
+        pane.blame.requested(u64::from(id));
+        Some(serde_json::json!({"id":id,"path":pane.path.to_string_lossy()}).to_string())
+    }
+
+    pub fn code_blame_reply(&mut self, id: u32, json: String) -> bool {
+        let Some(pane) = self.chrome.code_pane_mut() else { return false; };
+        let Ok(reply) = serde_json::from_str::<neoism_protocol::git::GitServerMessage>(&json) else { return false; };
+        if !pane.blame.accept(u64::from(id), &reply) { return false; }
+        pane.blame.update(&pane.buffer);
+        true
     }
 
     /// Code-pane co-editing pump — the code twin of `crdt_pump`

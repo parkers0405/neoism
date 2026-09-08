@@ -25,7 +25,7 @@ pub mod sync;
 /// converges on a single authoritative replica. This is a pure helper so
 /// the scheme stays consistent and testable.
 pub fn crdt_buffer_id_for_path(path: &std::path::Path) -> String {
-    format!("file://{}", path.to_string_lossy())
+    neoism_protocol::host_path::HostPath::new(path.to_string_lossy()).buffer_id()
 }
 
 /// Inverse of [`crdt_buffer_id_for_path`]: recover the absolute file

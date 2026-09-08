@@ -345,8 +345,8 @@ impl Screen<'_> {
         let _ = self.sync_workspace_root_from_active_pane();
         let target_route = self.finder_target_route_for_current_focus();
         let cwd = self.finder_cwd(target_route);
-        let (repo_root, branch) = if self.context_manager.current_workspace_is_remote_joined() {
-            (None, None)
+        let (repo_root, branch) = if self.uses_host_git() {
+            self.host_git_repo_branch()
         } else {
             (
                 neoism_ui::panels::git_branch::repo_root_for(&cwd),
@@ -369,8 +369,8 @@ impl Screen<'_> {
         let _ = self.sync_workspace_root_from_active_pane();
         let target_route = self.finder_target_route_for_current_focus();
         let cwd = self.finder_cwd(target_route);
-        let (repo_root, branch) = if self.context_manager.current_workspace_is_remote_joined() {
-            (None, None)
+        let (repo_root, branch) = if self.uses_host_git() {
+            self.host_git_repo_branch()
         } else {
             (
                 neoism_ui::panels::git_branch::repo_root_for(&cwd),

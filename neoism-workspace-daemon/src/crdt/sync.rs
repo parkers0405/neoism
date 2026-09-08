@@ -251,7 +251,20 @@ impl CrdtSyncHub {
                 }
             }
         };
-        match std::fs::write(path, text.as_bytes()) {
+        // Only a successfully read backing file authorizes creation by Save.
+        // This permits normal delete-then-save recovery (including legitimate
+        // Unix backslash names), but an old malformed guest ID cannot invent
+        // a new phantom file. UI New File creates through Files::CreateFile
+        // before OpenBuffer; unbacked local panes save locally before binding.
+        // Preserve lexical/relative IDs: read_file_backing already resolved
+        // them on this host. This is a save-safety guard, not a new sandbox.
+        let write = || -> std::io::Result<()> {
+            if !self.disk_texts.lock().contains_key(buffer_id) {
+                return Err(std::io::Error::other("file identity has no successfully read disk baseline; create/open the host file before saving"));
+            }
+            std::fs::write(path, text.as_bytes())
+        };
+        match write() {
             Ok(()) => {
                 self.disk_texts
                     .lock()

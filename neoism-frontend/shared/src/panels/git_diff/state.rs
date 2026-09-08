@@ -17,6 +17,13 @@ use super::PANEL_DEFAULT_WIDTH;
 /// build leaves it `None` and the daemon pushes data directly into
 /// the panel's `Arc<Mutex<PanelData>>` instead.
 pub trait GitDiffIo: Send + Sync {
+    /// Host-driven providers queue RPCs and return immediately. Never run the
+    /// native load_diff/collect worker against these opaque host paths.
+    fn is_host_driven(&self) -> bool {
+        false
+    }
+    fn request_diff(&self, _path: &str) {}
+
     /// Run `git status` + `git diff --numstat` for `repo_root` and
     /// return the changed-file list. Called from a background thread.
     fn collect_files(&self, repo_root: &Path) -> Vec<FileChange>;
@@ -221,6 +228,10 @@ impl GitDiffPanel {
     /// native shell-out, or the web's daemon-marshalling provider. The
     /// wasm host uses this to ignore the legacy staged-less push path
     /// once the provider-driven flow owns the panel's data.
+    pub fn is_host_driven(&self) -> bool {
+        self.io.as_ref().is_some_and(|io| io.is_host_driven())
+    }
+
     pub fn has_io_provider(&self) -> bool {
         self.io.is_some()
     }

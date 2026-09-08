@@ -3,6 +3,17 @@ use std::path::Path;
 
 impl Screen<'_> {
     pub fn open_path_in_code(&mut self, path: std::path::PathBuf) {
+        let source = neoism_ui::services::FileOpenSource::workspace(self.context_manager.current_workspace_is_remote_joined());
+        self.open_path_in_code_with_source(path, source);
+    }
+
+    pub(crate) fn open_path_in_code_with_source(&mut self, path: std::path::PathBuf, source: neoism_ui::services::FileOpenSource) {
+        if self.context_manager.code_node_by_path(&path).is_some()
+            && self.context_manager.code_pane_mut_by_path(&path)
+                .is_some_and(|pane| source.conflicts_with(pane.remote_source, pane.local_only)) {
+            self.file_tree_notify("That path is already open from another source; preserve its edits and close it before opening the other source", neoism_ui::panels::notifications::NotificationLevel::Warn);
+            return;
+        }
         let workspace_root = self
             .active_pane_workspace_root()
             .or_else(|| self.active_workspace_root.clone())
@@ -14,14 +25,16 @@ impl Screen<'_> {
         self.renderer.buffer_tabs.ensure_terminal_tab();
         self.renderer.buffer_tabs.open_path(path.clone());
         self.renderer.file_tree.set_active_path(Some(path.clone()));
-        let workspace_id = self.current_workspace_id();
-        self.apply_workspace_active_path_update(
-            workspace_id,
-            &neoism_ui::panels::buffer_tabs::WorkspaceActivePathUpdate::Insert(
-                path.clone(),
-            ),
-        );
-        self.activate_code_path(path.clone());
+        if source != neoism_ui::services::FileOpenSource::LocalOnly {
+            let workspace_id = self.current_workspace_id();
+            self.apply_workspace_active_path_update(
+                workspace_id,
+                &neoism_ui::panels::buffer_tabs::WorkspaceActivePathUpdate::Insert(
+                    path.clone(),
+                ),
+            );
+        }
+        self.activate_code_path_with_source(path.clone(), source);
         // Remote tree (joined workspace OR ssh-followed): the CodePane's
         // local read just failed with os error 2 because the file lives
         // on the host. Fetch it over the same files plane the tree uses
@@ -40,14 +53,15 @@ impl Screen<'_> {
         let Some(remote) = self.renderer.file_tree.remote_files() else {
             return;
         };
-        if !path.starts_with(remote.root()) {
+        if neoism_protocol::host_path::HostPath::new(remote.root().to_string_lossy())
+            .relative(&path.to_string_lossy()).is_none() {
             return;
         }
         let needs_fetch = self
             .context_manager
             .code_pane_mut_by_path(path)
             .map(|pane| {
-                if pane.remote_content_pending {
+                if pane.local_only || pane.remote_content_pending || pane.is_dirty() {
                     return false;
                 }
                 let missing = pane.error.is_some();
@@ -66,6 +80,11 @@ impl Screen<'_> {
     }
 
     pub(crate) fn activate_code_path(&mut self, path: std::path::PathBuf) {
+        let source = neoism_ui::services::FileOpenSource::workspace(self.context_manager.current_workspace_is_remote_joined());
+        self.activate_code_path_with_source(path, source);
+    }
+
+    fn activate_code_path_with_source(&mut self, path: std::path::PathBuf, source: neoism_ui::services::FileOpenSource) {
         if let Some((_route_id, node)) = self.context_manager.code_node_by_path(&path) {
             let _ = self
                 .context_manager
@@ -78,7 +97,7 @@ impl Screen<'_> {
         let _ = self.sugarloaf.text(Some(rich_text_id));
         if !self
             .context_manager
-            .add_stacked_code(path, rich_text_id, &mut self.sugarloaf)
+            .add_stacked_code_with_source(path, rich_text_id, &mut self.sugarloaf, source)
         {
             self.file_tree_notify(
                 "Could not open code pane",

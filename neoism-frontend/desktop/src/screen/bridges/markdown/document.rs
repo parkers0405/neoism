@@ -3,6 +3,17 @@ use std::path::Path;
 
 impl Screen<'_> {
     pub fn open_path_in_markdown(&mut self, path: std::path::PathBuf) {
+        let source = neoism_ui::services::FileOpenSource::workspace(self.context_manager.current_workspace_is_remote_joined());
+        self.open_path_in_markdown_with_source(path, source);
+    }
+
+    pub(crate) fn open_path_in_markdown_with_source(&mut self, path: std::path::PathBuf, source: neoism_ui::services::FileOpenSource) {
+        if self.context_manager.markdown_node_by_path(&path).is_some()
+            && self.context_manager.markdown_pane_mut_by_path(&path)
+                .is_some_and(|pane| source.conflicts_with(pane.remote_source, pane.local_only)) {
+            self.file_tree_notify("That path is already open from another source; preserve its edits and close it before opening the other source", neoism_ui::panels::notifications::NotificationLevel::Warn);
+            return;
+        }
         // `.neodraw` tabs are registered as markdown buffer tabs; route
         // them to the sketch surface instead of loading the JSON as text.
         if crate::editor::neodraw::is_neodraw_path(&path) {
@@ -26,11 +37,13 @@ impl Screen<'_> {
         let note_icon = self.renderer.notes_sidebar.note_icon_for_path(&path);
         self.sync_note_tab_icon(&path, note_icon);
         self.renderer.file_tree.set_active_path(Some(path.clone()));
-        if let Some(id) = self.current_workspace_id() {
-            self.workspace_editor_active_paths.insert(id, path.clone());
+        if source != neoism_ui::services::FileOpenSource::LocalOnly {
+            if let Some(id) = self.current_workspace_id() {
+                self.workspace_editor_active_paths.insert(id, path.clone());
+            }
         }
 
-        self.activate_markdown_path(path.clone());
+        self.activate_markdown_path_with_source(path.clone(), source);
         self.request_remote_markdown_content(&path);
         // Feed the cover picker its candidates — the shared pane cannot
         // list directories.
@@ -91,8 +104,16 @@ impl Screen<'_> {
             );
             return;
         }
-        let remote = self.renderer.file_tree.is_remote();
-        self.rename_file_tree_path(old_path.clone(), file_name, false);
+        let local_only = self.context_manager.current().markdown.as_ref().is_some_and(|pane| pane.local_only);
+        let remote = self.renderer.file_tree.is_remote() && !local_only;
+        if local_only {
+            if let Err(error) = std::fs::rename(&old_path, &new_path) {
+                self.file_tree_notify(format!("Rename failed: {error}"), NotificationLevel::Error);
+                return;
+            }
+        } else {
+            self.rename_file_tree_path(old_path.clone(), file_name, false);
+        }
         if remote {
             // The daemon performs the rename; its push refreshes panes.
             return;
@@ -146,14 +167,15 @@ impl Screen<'_> {
         let Some(remote) = self.renderer.file_tree.remote_files() else {
             return;
         };
-        if !path.starts_with(remote.root()) {
+        if neoism_protocol::host_path::HostPath::new(remote.root().to_string_lossy())
+            .relative(&path.to_string_lossy()).is_none() {
             return;
         }
         let pane_needs_fetch = self
             .context_manager
             .markdown_pane_mut_by_path(path)
             .map(|pane| {
-                if pane.remote_content_pending {
+                if pane.local_only || pane.remote_content_pending || pane.is_dirty() {
                     // A fetch is already in flight for this pane.
                     return false;
                 }
@@ -173,6 +195,11 @@ impl Screen<'_> {
     }
 
     pub(crate) fn activate_markdown_path(&mut self, path: std::path::PathBuf) {
+        let source = neoism_ui::services::FileOpenSource::workspace(self.context_manager.current_workspace_is_remote_joined());
+        self.activate_markdown_path_with_source(path, source);
+    }
+
+    fn activate_markdown_path_with_source(&mut self, path: std::path::PathBuf, source: neoism_ui::services::FileOpenSource) {
         if crate::editor::neodraw::is_neodraw_path(&path) {
             self.activate_draw_path(path);
             return;
@@ -204,10 +231,11 @@ impl Screen<'_> {
 
         let rich_text_id = next_rich_text_id();
         let _ = self.sugarloaf.text(Some(rich_text_id));
-        if !self.context_manager.add_stacked_markdown(
+        if !self.context_manager.add_stacked_markdown_with_source(
             path,
             rich_text_id,
             &mut self.sugarloaf,
+            source,
         ) {
             self.file_tree_notify(
                 "Could not open markdown pane",

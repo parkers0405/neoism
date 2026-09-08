@@ -1707,6 +1707,32 @@ mod tests {
     }
 
     #[test]
+    fn background_runtime_empty_family_event_is_not_dropped() {
+        let event = json!({"type": "session.background_tasks.updated", "properties": {
+            "sessionID": "root", "backgroundJobsEpoch": "server", "backgroundJobsRevision": 8,
+            "runningBackgroundTasks": []
+        }});
+        assert_eq!(
+            classify_session_event(
+                event.clone(),
+                "root",
+                &mut SessionEventUpdateState::default()
+            ),
+            vec![SessionEventUpdate::BackgroundTasksUpdated {
+                epoch: "server".into(),
+                revision: 8,
+                tasks: Vec::new()
+            }]
+        );
+        assert!(classify_session_event(
+            event,
+            "unrelated",
+            &mut SessionEventUpdateState::default()
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn background_runtime_event_preserves_epoch_revision_and_full_job_list() {
         let mut state = SessionEventUpdateState::default();
         let updates = classify_session_event(

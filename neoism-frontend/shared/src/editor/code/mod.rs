@@ -17,6 +17,7 @@
 //!   buffer directly, so the same feed can paint sugarloaf spans or
 //!   terminal cells. The feed lands with the syntax layer.
 
+pub mod blame;
 pub mod buffer;
 pub mod doc_sync;
 pub mod feed;

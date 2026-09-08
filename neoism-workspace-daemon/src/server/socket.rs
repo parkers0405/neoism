@@ -274,21 +274,27 @@ pub(crate) async fn handle_socket(
     // can stall for seconds on cold start); their replies ride the same
     // push lane so the socket pump never blocks behind them.
     let editor_query_tx = push_tx.clone();
+    let git_blame_tx = push_tx.clone();
+    let (git_watch_tx, git_watch_rx) = tokio::sync::watch::channel(None);
+    // Git request IDs are monotonic for one client. A cancelled old scope's
+    // task may finish enqueuing while a newer task starts on another thread.
+    // Never let that late WatchStatus replace the selected workspace's watch.
+    let mut git_watch_request_id = 0;
     let poll_task = tokio::spawn(status_poll_loop(
         push_tx,
         initial_branch_name(&initial_branch),
+        git_watch_rx,
     ));
 
     // Real-time `publishDiagnostics` bus (event-driven — no polling). The
     // engine pushes here the instant a language server publishes; we forward
-    // to the editor from the select loop below. `active_editor_file` gates it
-    // so a workspace-wide push for a non-focused buffer isn't shown.
+    // to exact workspace/file/surface subscribers from the select loop below.
     let mut lsp_diagnostics_rx =
         crate::language_server::subscribe_diagnostics(&lsp_runtime);
-    let mut active_editor_file: Option<String> = None;
-    // Latest `Editor` envelope request id. Unsolicited engine pushes are
-    // tagged with it so the client's reply-correlation routing still works.
-    let mut editor_request_id: u64 = 0;
+    let mut editor_documents: std::collections::HashMap<
+        (std::path::PathBuf, std::path::PathBuf, Option<String>),
+        (),
+    > = Default::default();
 
     // Per-socket Claude API proxy. Spawned eagerly so the chrome
     // sees an immediate `Disabled` event when `NEOISM_AGENT_API_KEY`
@@ -402,27 +408,19 @@ pub(crate) async fn handle_socket(
             diag = lsp_diagnostics_rx.recv() => {
                 // Event-driven inline diagnostics: forward the instant the
                 // engine gets a `publishDiagnostics` push. Only the active
-                // buffer's file is shown (a server publishes for many files).
+                // subscribers receive only their workspace/file diagnostics.
                 match diag {
                     Ok(event) => {
-                        let matches_active = active_editor_file
-                            .as_deref()
-                            .map(|active| {
-                                let file = crate::language_server::diagnostics_event_file(&event);
-                                // Tolerant match: the engine's canonical path
-                                // and the frontend's OpenBuffer path may differ
-                                // in absolute/relative form or symlinks.
-                                file == active
-                                    || file.ends_with(active)
-                                    || active.ends_with(file)
-                            })
-                            .unwrap_or(true);
-                        if matches_active {
-                            let message = crate::language_server::diagnostics_event_message(event);
-                            let resp = ServiceServerMessage::EditorReply {
-                                request_id: editor_request_id,
-                                message,
-                            };
+                        // Subscribe by exact workspace + canonical HOST file + surface.
+                        // Never leak another workspace's diagnostics via suffix matches.
+                        let file = std::path::PathBuf::from(&event.file);
+                        for ((root, subscribed_file, surface), _) in &editor_documents {
+                            if root != &event.root || subscribed_file != &file { continue; }
+                            let mut message = crate::language_server::diagnostics_event_message(event.clone());
+                            if let EditorServerMessage::Diagnostics { surface_id, .. } = &mut message {
+                                *surface_id = surface.clone();
+                            }
+                            let resp = ServiceServerMessage::EditorReply { request_id: 0, message };
                             if let Err(err) = send_json(&mut sink, &resp).await {
                                 tracing::warn!(error = %err, "websocket send error draining lsp diagnostics push");
                                 poll_task.abort();
@@ -886,6 +884,37 @@ pub(crate) async fn handle_socket(
                                 continue;
                             }
                         };
+                    // One selected workspace per socket; replacement is atomic.
+                    // Echo the client's token, not just the path: two endpoints
+                    // can serve identical root strings and replies may be queued.
+                    if let GitClientMessage::WatchStatus { token } = &message {
+                        if !git_handler::accept_watch_request(&mut git_watch_request_id, request_id) { continue; }
+                        git_watch_tx.send_replace(Some((root, request_id, token.clone())));
+                        continue;
+                    }
+                    if let GitClientMessage::UnwatchStatus { token } = &message {
+                        // A delayed cancellation must not cancel a newer scope.
+                        let owns_watch = git_watch_tx.borrow().as_ref()
+                            .is_some_and(|(_, _, active)| active == token);
+                        if owns_watch { git_watch_tx.send_replace(None); }
+                        continue;
+                    }
+                    if matches!(message, GitClientMessage::Blame { .. }) {
+                        let tx = git_blame_tx.clone();
+                        tokio::spawn(async move {
+                            // Blame/HTTP must never hold up PTYs, edits or input.
+                            // Cancelling the socket also cancels its HTTP work.
+                            tokio::select! {
+                                _ = tx.closed() => {}
+                                replies = git_handler::handle_with_root(root, message) => {
+                                    for message in replies {
+                                        if tx.send(ServiceServerMessage::GitReply { request_id, message }).is_err() { break; }
+                                    }
+                                }
+                            }
+                        });
+                        continue;
+                    }
                     for message in git_handler::handle_with_root(root, message).await {
                         let resp = ServiceServerMessage::GitReply {
                             request_id,
@@ -903,20 +932,40 @@ pub(crate) async fn handle_socket(
                     message,
                 } => {
                     let surface_id = message.surface_id().map(str::to_owned);
-                    // Editor envelopes reuse the file-read permission — a
-                    // session that can read files can also drive the editor.
-                    if let Err(denial) = check_permission(&device, Permission::ReadFiles)
-                    {
-                        let _ = send_json(&mut sink, &denial).await;
+                    let required: &[Permission] = if matches!(
+                        &message,
+                        EditorClientMessage::ApplyLspCodeActionAt { .. }
+                            | EditorClientMessage::LspQueryAt {
+                                action: neoism_protocol::editor::EditorLspAction::Rename,
+                                ..
+                            }
+                    ) {
+                        &[Permission::ReadFiles, Permission::WriteFiles]
+                    } else {
+                        &[Permission::ReadFiles]
+                    };
+                    if let Some(denial) = required.iter().find_map(|permission| {
+                        check_permission(&device, *permission).err()
+                    }) {
+                        let _ = send_json(&mut sink, &ServiceServerMessage::EditorReply {
+                            request_id, message: EditorServerMessage::Error {
+                                surface_id, message: format!("LSP requires {required:?} permission: {denial:?}"),
+                            },
+                        }).await;
                         continue;
                     }
-                    // Track the latest request_id so unsolicited engine
-                    // pushes (diagnostics) route through the same channel
-                    // on the JS side.
-                    editor_request_id = request_id;
+
+                    if let EditorClientMessage::CloseLspBuffer { surface_id } = &message {
+                        editor_documents
+                            .retain(|(_, _, surface), _| surface != surface_id);
+                        continue;
+                    }
                     // Fire-and-forget teardown/cancel: nothing to tear down
                     // without a backing editor session, and no reply is
                     // expected.
+                    if matches!(message, EditorClientMessage::Close) {
+                        editor_documents.clear();
+                    }
                     if matches!(
                         message,
                         EditorClientMessage::Close
@@ -965,9 +1014,9 @@ pub(crate) async fn handle_socket(
                                         let resp = EditorServerMessage::Error {
                                             surface_id,
                                             message: format!(
-                                            "editor path is outside workspace root: {}",
-                                            file.display()
-                                        ),
+                                                "editor path is outside workspace root: {}",
+                                                file.display()
+                                            ),
                                         };
                                         let _ = send_json(
                                             &mut sink,
@@ -983,9 +1032,9 @@ pub(crate) async fn handle_socket(
                                         let resp = EditorServerMessage::Error {
                                             surface_id,
                                             message: format!(
-                                            "editor path cannot be resolved: {}: {error}",
-                                            file.display()
-                                        ),
+                                                "editor path cannot be resolved: {}: {error}",
+                                                file.display()
+                                            ),
                                         };
                                         let _ = send_json(
                                             &mut sink,
@@ -1004,8 +1053,14 @@ pub(crate) async fn handle_socket(
                                         std::fs::read_to_string(&file).unwrap_or_default()
                                     }
                                 };
-                                active_editor_file =
-                                    Some(file.to_string_lossy().into_owned());
+                                // One live subscription per surface. Reopening a pane
+                                // replaces its old document; socket close drops all.
+                                editor_documents
+                                    .retain(|(_, _, surface), _| surface != &surface_id);
+                                editor_documents.insert(
+                                    (root.clone(), file.clone(), surface_id.clone()),
+                                    (),
+                                );
                                 // Non-blocking half inline (cache + FIFO queue,
                                 // socket order = sync order); the flush barrier
                                 // + status walk build the LspSnapshot on a
@@ -1023,16 +1078,30 @@ pub(crate) async fn handle_socket(
                                     let lsp_runtime = lsp_runtime.clone();
                                     tokio::task::spawn_blocking(move || {
                                         if let Some(message) =
-                                        crate::language_server::buffer_snapshot_message(
-                                            &lsp_runtime, &root, &file, surface_id,
-                                        )
-                                    {
-                                        let _ =
-                                            tx.send(ServiceServerMessage::EditorReply {
-                                                request_id,
-                                                message,
-                                            });
-                                    }
+                                            crate::language_server::buffer_snapshot_message(
+                                                &lsp_runtime,
+                                                &root,
+                                                &file,
+                                                surface_id.clone(),
+                                            )
+                                        {
+                                            let _ =
+                                                tx.send(ServiceServerMessage::EditorReply {
+                                                    request_id,
+                                                    message,
+                                                });
+                                        }
+                                        let message =
+                                            crate::language_server::initial_diagnostics(
+                                                &lsp_runtime,
+                                                &root,
+                                                &file,
+                                                surface_id,
+                                            );
+                                        let _ = tx.send(ServiceServerMessage::EditorReply {
+                                            request_id: 0,
+                                            message,
+                                        });
                                     });
                                 }
                                 continue;
@@ -1065,9 +1134,8 @@ pub(crate) async fn handle_socket(
                             EditorClientMessage::ApplyLspCodeAction {
                                 action,
                                 surface_id,
-                            } => match crate::language_server::run_code_action(
-                                &root, action,
-                            ) {
+                            } => match crate::language_server::run_code_action(&root, action)
+                            {
                                 Ok(mut message) => {
                                     if let EditorServerMessage::LspActionResult {
                                         surface_id: target,
@@ -1150,9 +1218,25 @@ pub(crate) async fn handle_socket(
                                 line,
                                 character,
                                 text,
+                                buffer_text,
                                 open_paths,
                                 surface_id,
                             } => {
+                                // Queue the request snapshot IN SOCKET ORDER, not
+                                // when a blocking worker happens to start. Otherwise
+                                // an older query can overwrite a newer OpenBuffer.
+                                let path = match crate::language_server::native_lsp_file(&root, &path) {
+                                    Ok(file) => file,
+                                    Err(message) => {
+                                        let _ = send_json(&mut sink, &ServiceServerMessage::EditorReply {
+                                            request_id, message: EditorServerMessage::Error { surface_id, message },
+                                        }).await;
+                                        continue;
+                                    }
+                                };
+                                if let Some(text) = buffer_text {
+                                    crate::language_server::queue_buffer_sync(&lsp_runtime, &root, &path, text);
+                                }
                                 let root = root.clone();
                                 let tx = editor_query_tx.clone();
                                 let lsp_runtime = lsp_runtime.clone();
@@ -1166,6 +1250,7 @@ pub(crate) async fn handle_socket(
                                         line,
                                         character,
                                         text.as_deref(),
+                                        None,
                                         &open_paths,
                                         surface_id,
                                     );
@@ -1180,8 +1265,21 @@ pub(crate) async fn handle_socket(
                                 seq,
                                 action,
                                 open_paths,
+                                buffer_text,
                                 surface_id,
                             } => {
+                                if let Some(text) = buffer_text {
+                                    let file = match crate::language_server::native_lsp_file(&root, &action.file_path) {
+                                        Ok(file) => file,
+                                        Err(message) => {
+                                            let _ = send_json(&mut sink, &ServiceServerMessage::EditorReply {
+                                                request_id, message: EditorServerMessage::Error { surface_id, message },
+                                            }).await;
+                                            continue;
+                                        }
+                                    };
+                                    crate::language_server::queue_buffer_sync(&lsp_runtime, &root, &file, text);
+                                }
                                 let root = root.clone();
                                 let tx = editor_query_tx.clone();
                                 let lsp_runtime = lsp_runtime.clone();
@@ -1610,7 +1708,9 @@ pub(crate) fn initial_branch_name(msg: &GitServerMessage) -> Option<String> {
 pub(crate) async fn status_poll_loop(
     tx: tokio::sync::mpsc::UnboundedSender<ServiceServerMessage>,
     seed_branch: Option<String>,
+    mut subscription: tokio::sync::watch::Receiver<Option<(std::path::PathBuf, u64, String)>>,
 ) {
+    let mut last_snapshot = None;
     let mut last_branch = seed_branch;
     let mut last_changes: Option<(u64, u64)> = None;
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -1619,35 +1719,40 @@ pub(crate) async fn status_poll_loop(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await;
     loop {
-        tick.tick().await;
-
-        // Branch can change when the user checks out a different ref.
-        // Cheap to compute (libgit2 HEAD read on a blocking task).
-        let branch_msg = git_handler::current_branch_snapshot().await;
-        let new_branch = match &branch_msg {
-            GitServerMessage::Branch { name } => name.clone(),
-            _ => last_branch.clone(),
-        };
-        if new_branch != last_branch {
-            last_branch = new_branch;
-            if tx
-                .send(ServiceServerMessage::GitReply {
-                    request_id: 0,
-                    message: branch_msg,
-                })
-                .is_err()
-            {
-                return;
+        tokio::select! {
+            _ = tick.tick() => {},
+            changed = subscription.changed() => {
+                if changed.is_err() { return; }
+                last_snapshot = None;
             }
         }
+        let watched = subscription.borrow_and_update().clone();
+        if let Some((root, request_id, token)) = watched {
+            let snapshot = crate::git_snapshot::snapshot(root).await;
+            if last_snapshot.as_ref() != Some(&snapshot) {
+                last_snapshot = Some(snapshot.clone());
+                if tx.send(ServiceServerMessage::GitReply {
+                    request_id,
+                    message: GitServerMessage::RepoStatus { token, snapshot },
+                }).is_err() { return; }
+            }
+            continue;
+        }
 
-        // Working-tree change counts. Shelled out to `git status
-        // --porcelain` on a blocking task so the reactor stays free.
-        let root = files_handler::workspace_root();
-        let counts =
-            tokio::task::spawn_blocking(move || git_handler::git_changes_snapshot(&root))
-                .await
-                .unwrap_or((0, 0));
+        // Legacy web clients still receive their two historical messages, but
+        // share the same root-scoped collector as subscribed desktop clients.
+        let snapshot = crate::git_snapshot::snapshot(files_handler::workspace_root()).await;
+        let new_branch = snapshot.branch.clone();
+        if new_branch != last_branch {
+            last_branch = new_branch.clone();
+            if tx.send(ServiceServerMessage::GitReply {
+                request_id: 0,
+                message: GitServerMessage::Branch { name: new_branch },
+            }).is_err() { return; }
+        }
+        let counts = snapshot.files.iter().fold((0u64, 0u64), |(a, d), f| {
+            (a + u64::from(f.additions), d + u64::from(f.deletions))
+        });
         if Some(counts) != last_changes {
             last_changes = Some(counts);
             let (added, deleted) = counts;
@@ -1743,5 +1848,47 @@ mod highlight_tests {
             highlight_spans_for(std::path::Path::new("notes.unknownext"), "hello",)
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod git_subscription_tests {
+    use super::*;
+    #[tokio::test]
+    async fn subscription_replaces_root_and_token_and_only_pushes_changes() {
+        use std::time::Duration;
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first = std::fs::canonicalize(first_dir.path()).unwrap();
+        let second = std::fs::canonicalize(second_dir.path()).unwrap();
+        let _repo = git2::Repository::init(&first).unwrap();
+        let _other_repo = git2::Repository::init(&second).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (watch, cursor) = tokio::sync::watch::channel(None);
+        let task = tokio::spawn(status_poll_loop(tx, None, cursor));
+        watch.send_replace(Some((first.clone(), 11, "host-a:workspace:1".into())));
+        async fn next(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ServiceServerMessage>) -> (u64, String, neoism_protocol::git::GitRepoStatus) {
+            let message = tokio::time::timeout(Duration::from_secs(8), rx.recv()).await.unwrap().unwrap();
+            let ServiceServerMessage::GitReply { request_id, message: GitServerMessage::RepoStatus { token, snapshot } } = message else { panic!("wrong status plane") };
+            (request_id, token, snapshot)
+        }
+        let (id, token, clean) = next(&mut rx).await;
+        assert_eq!((id, token.as_str()), (11, "host-a:workspace:1"));
+        assert_eq!(clean.workspace_root, first.to_string_lossy());
+        assert!(tokio::time::timeout(Duration::from_millis(2200), rx.recv()).await.is_err(), "unchanged repo emitted traffic");
+        std::fs::write(first.join("host-edit"), "changed\n").unwrap();
+        let (_, _, dirty) = next(&mut rx).await;
+        assert!(dirty.files.iter().any(|f| f.path == "host-edit"));
+        watch.send_replace(Some((second.clone(), 12, "host-a:other-workspace:2".into())));
+        let (id, token, other) = next(&mut rx).await;
+        assert_eq!((id, token.as_str()), (12, "host-a:other-workspace:2"));
+        assert_eq!(other.workspace_root, second.to_string_lossy());
+        assert!(other.files.is_empty());
+        // Re-subscribing to the same root with a fresh generation must still
+        // send an initial reply; content equality cannot hide scope changes.
+        watch.send_replace(Some((second.clone(), 13, "host-b:same-root:3".into())));
+        let (id, token, _) = next(&mut rx).await;
+        assert_eq!((id, token.as_str()), (13, "host-b:same-root:3"));
+        task.abort();
     }
 }

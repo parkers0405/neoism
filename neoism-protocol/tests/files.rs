@@ -61,12 +61,14 @@ fn server_dir_listing_roundtrip() {
         path: "src".into(),
         entries: vec![
             DirEntry {
+                host_path: None,
                 name: "lib.rs".into(),
                 is_dir: false,
                 size: Some(1024),
                 icon: None,
             },
             DirEntry {
+                host_path: None,
                 name: "submod".into(),
                 is_dir: true,
                 size: None,
@@ -143,6 +145,7 @@ fn server_stat_roundtrip() {
     roundtrip_server(&FilesServerMessage::Stat {
         path: "src/lib.rs".into(),
         entry: DirEntry {
+            host_path: None,
             name: "lib.rs".into(),
             is_dir: false,
             size: Some(2048),

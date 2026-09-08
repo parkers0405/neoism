@@ -301,40 +301,32 @@ impl Screen<'_> {
     pub(crate) fn move_notes_sidebar_path(&mut self, source: PathBuf, dest_dir: PathBuf) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
-        let Some(file_name) = source.file_name() else {
-            return;
-        };
-        let target = dest_dir.join(file_name);
-        if target == source {
-            return;
-        }
-
-        // Shared vault on a served/joined workspace: the move happens on
-        // the HOST, through the files plane scoped to the vault root.
-        // Path math is pure here; existence checks belong to the daemon.
-        // A LOCAL vault picked while joined falls through to the on-disk
-        // move below — it lives on this machine's disk.
+        // A shared vault never falls through to guest filesystem I/O, even
+        // when its daemon link is temporarily unavailable.
         if self.notes_sidebar_shows_shared_vault() {
             if let Some(vault_root) = self.served_notes_vault_root() {
-                // Vault-relative forms (fall back to absolute, which the
-                // daemon tolerates) — computed before `vault_root` moves
-                // into the send.
-                let strip = |path: &Path| -> String {
-                    path.strip_prefix(&vault_root)
-                        .map(|rel| rel.to_string_lossy().into_owned())
-                        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
-                };
-                let (from, to) = (strip(&source), strip(&target));
-                if self.send_remote_notes_move(vault_root, from, to) {
-                    // Open the destination so the moved item is in view
-                    // when the host's relist lands.
-                    self.renderer.notes_sidebar.reveal_dir(&dest_dir);
-                    self.mark_dirty();
-                    return;
+                let root = neoism_protocol::host_path::HostPath::new(vault_root.to_string_lossy());
+                if let Some(from) = root.relative(&source.to_string_lossy()) {
+                    if let Some(name) = from.rsplit('/').next().filter(|name| !name.is_empty()) {
+                        let target = neoism_protocol::host_path::HostPath::new(dest_dir.to_string_lossy()).join(name);
+                        if let Some(to) = root.relative(target.as_str()) {
+                            if from == to { return; }
+                            if self.send_remote_notes_move(vault_root, from, to) {
+                                self.renderer.notes_sidebar.reveal_dir(&dest_dir);
+                                self.mark_dirty();
+                                return;
+                            }
+                        }
+                    }
                 }
             }
-            // No daemon link attached — fall through to the local path.
+            self.renderer.notifications.push("Host vault is unavailable; move was not performed", NotificationLevel::Error);
+            self.mark_dirty();
+            return;
         }
+        let Some(file_name) = source.file_name() else { return; };
+        let target = dest_dir.join(file_name);
+        if target == source { return; }
 
         if !source.exists() {
             self.renderer.notifications.push(
@@ -715,15 +707,22 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    fn open_path_from_notes_sidebar(&mut self, path: PathBuf) {
+    pub(crate) fn open_path_from_notes_sidebar(&mut self, path: PathBuf) {
+        let source = neoism_ui::services::FileOpenSource::notes(
+            self.context_manager.current_workspace_is_remote_joined(),
+            self.notes_sidebar_shows_shared_vault(),
+        );
         let markdown = crate::editor::markdown::state::is_markdown_path(&path);
         let epub = crate::screen::bridges::epub::is_epub_path(&path);
         if epub {
             self.open_path_in_epub(path.clone());
         } else if markdown {
-            self.open_path_in_markdown(path.clone());
-        } else {
+            self.open_path_in_markdown_with_source(path.clone(), source);
+        } else if crate::editor::neodraw::is_neodraw_path(&path)
+            || crate::editor::notebook::is_notebook_path(&path) {
             self.open_path_in_editor(path.clone());
+        } else {
+            self.open_path_in_code_with_source(path.clone(), source);
         }
 
         // Opening creates the normal pane first; this vault-scoped read then
@@ -789,10 +788,12 @@ impl Screen<'_> {
         // ordinary local create below — it lives on this machine's disk.
         if self.notes_sidebar_shows_shared_vault() {
             if let Some(vault_root) = self.served_notes_vault_root() {
-                let rel_dir = dir
-                    .strip_prefix(&vault_root)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let Some(rel_dir) = neoism_protocol::host_path::HostPath::new(vault_root.to_string_lossy())
+                    .relative(&dir.to_string_lossy()) else {
+                    self.renderer.notifications.push("Note directory is outside the host vault", NotificationLevel::Error);
+                    self.mark_dirty();
+                    return;
+                };
                 if self.send_remote_notes_create(vault_root, rel_dir, name.clone()) {
                     self.renderer.notifications.push(
                         format!("Creating note {name} in the shared vault…"),
@@ -802,6 +803,9 @@ impl Screen<'_> {
                     return;
                 }
             }
+            self.renderer.notifications.push("Host vault is unavailable; note was not created", NotificationLevel::Error);
+            self.mark_dirty();
+            return;
         }
         let path = dir.join(name);
         if path.exists() {

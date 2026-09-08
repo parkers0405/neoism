@@ -39,6 +39,7 @@ impl FilesService for StdFiles {
             };
             let is_dir = dent.file_type().map(|t| t.is_dir()).unwrap_or(false);
             out.push(DirEntry {
+                host_path: None,
                 name,
                 is_dir,
                 size: None,
@@ -60,6 +61,7 @@ impl FilesService for StdFiles {
             .unwrap_or("")
             .to_string();
         Ok(DirEntry {
+            host_path: None,
             name,
             is_dir: meta.is_dir(),
             size: Some(meta.len()),

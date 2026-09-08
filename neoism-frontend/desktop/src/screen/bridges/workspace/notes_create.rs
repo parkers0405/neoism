@@ -25,6 +25,13 @@ impl Screen<'_> {
         use neoism_ui::panels::notifications::NotificationLevel;
 
         let note_dir = self.notes_creation_dir();
+        if self.context_manager.current_workspace_is_remote_joined()
+            && self.notes_sidebar_shows_shared_vault() {
+            // Name allocation/existence belongs to the host. Do not probe or
+            // create directories on the guest for a shared vault path.
+            self.open_notes_new_file_prompt(note_dir);
+            return;
+        }
 
         let target = match unique_note_path(&note_dir) {
             Ok(path) => path,
@@ -50,7 +57,7 @@ impl Screen<'_> {
             Ok(()) => {
                 self.renderer.notes_sidebar.refresh_notes();
                 self.refresh_file_tree_entries();
-                self.open_path_in_markdown(target);
+                self.open_path_from_notes_sidebar(target);
             }
             Err(err) => {
                 self.renderer.notifications.push(
@@ -117,7 +124,11 @@ impl Screen<'_> {
                     .filter(|name| !name.is_empty())
                     .unwrap_or_else(|| "Shared vault".to_string());
                 self.renderer.notes_sidebar.set_vault_actions(false);
-                self.renderer.notes_sidebar.set_workspace(name, Some(vault));
+                if self.context_manager.current_workspace_is_remote_joined() {
+                    self.renderer.notes_sidebar.set_remote_workspace(name, Some(vault));
+                } else {
+                    self.renderer.notes_sidebar.set_workspace(name, Some(vault));
+                }
                 self.request_remote_notes_listing();
             }
             // Host linked no vault → the Notion-style "no linked vault"

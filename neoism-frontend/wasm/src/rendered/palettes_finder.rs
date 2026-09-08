@@ -1325,6 +1325,13 @@ impl ChromeBridge {
                 false
             }
             // Desktop `toggle_code_word_wrap` (bridges/code/input.rs).
+            "ToggleGitBlame" => {
+                let enabled = self.chrome.code_git_blame;
+                let Some(pane) = self.chrome.code_pane_mut() else { return false; };
+                pane.blame.apply_default(enabled);
+                pane.blame.toggle();
+                true
+            }
             "ToggleWordWrap" => {
                 let Some(pane) = self.chrome.code_pane_mut() else {
                     return false;

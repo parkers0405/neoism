@@ -31,6 +31,7 @@
 
 mod drag;
 mod git;
+mod host_git;
 pub mod icons;
 mod policy;
 mod render;

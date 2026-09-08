@@ -338,6 +338,7 @@ fn parse_ls_output(stdout: &[u8]) -> Vec<DirEntry> {
         .map(|line| {
             if let Some(name) = line.strip_suffix('/') {
                 DirEntry {
+                    host_path: None,
                     name: name.to_string(),
                     is_dir: true,
                     size: None,
@@ -345,6 +346,7 @@ fn parse_ls_output(stdout: &[u8]) -> Vec<DirEntry> {
                 }
             } else {
                 DirEntry {
+                    host_path: None,
                     name: line.to_string(),
                     is_dir: false,
                     size: None,

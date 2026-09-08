@@ -86,7 +86,7 @@ impl<A> BufferTabs<A> {
     pub fn set_path_icon(&mut self, path: &Path, icon: Option<String>) {
         let icon = icon.filter(|glyph| !glyph.trim().is_empty());
         for tab in &mut self.tabs {
-            if tab.path.as_deref() == Some(path) {
+            if tab.path.as_ref().is_some_and(|p| p.as_os_str() == path.as_os_str()) {
                 tab.custom_icon = icon.clone();
             }
         }
@@ -419,7 +419,7 @@ impl<A> BufferTabs<A> {
     pub fn find_path(&self, path: &Path) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|t| t.path.as_deref() == Some(path))
+            .position(|t| t.path.as_ref().is_some_and(|p| p.as_os_str() == path.as_os_str()))
     }
 
     pub fn active_path(&self) -> Option<&Path> {
@@ -874,7 +874,7 @@ impl<A> BufferTabs<A> {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| new.display().to_string());
         for tab in &mut self.tabs {
-            if tab.path.as_deref() == Some(old) {
+            if tab.path.as_ref().is_some_and(|p| p.as_os_str() == old.as_os_str()) {
                 tab.path = Some(new.clone());
                 tab.title = title.clone();
             }

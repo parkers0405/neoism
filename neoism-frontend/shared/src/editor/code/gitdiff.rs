@@ -121,6 +121,57 @@ pub fn compute_git_marks(baseline: &[String], current: &[String]) -> CodeGitMark
     marks
 }
 
+/// Exact unchanged-line correspondence. Changed/new lines are None, never
+/// matched by a global text lookup (which misattributes repeated lines).
+/// On the bounded Myers fallback only proven prefix/suffix lines survive.
+pub fn unchanged_line_map(baseline: &[String], current: &[String]) -> Vec<Option<usize>> {
+    unchanged_line_map_checked(baseline, current).0
+}
+
+/// The boolean is false when the edit-distance budget was exhausted. Callers
+/// must distinguish unknown middle spans from genuinely uncommitted lines.
+pub fn unchanged_line_map_checked(
+    baseline: &[String],
+    current: &[String],
+) -> (Vec<Option<usize>>, bool) {
+    let mut complete = false;
+    let mut map = vec![None; current.len()];
+    let mut prefix = 0;
+    while prefix < baseline.len().min(current.len())
+        && baseline[prefix] == current[prefix]
+    {
+        map[prefix] = Some(prefix);
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < baseline.len().min(current.len()) - prefix
+        && baseline[baseline.len() - 1 - suffix] == current[current.len() - 1 - suffix]
+    {
+        map[current.len() - 1 - suffix] = Some(baseline.len() - 1 - suffix);
+        suffix += 1;
+    }
+    if let Some(ops) = myers_line_ops_bounded(
+        &baseline[prefix..baseline.len() - suffix],
+        &current[prefix..current.len() - suffix],
+        128,
+    ) {
+        complete = true;
+        let (mut old, mut new) = (prefix, prefix);
+        for op in ops {
+            match op {
+                LineOp::Keep => {
+                    map[new] = Some(old);
+                    old += 1;
+                    new += 1;
+                }
+                LineOp::Delete => old += 1,
+                LineOp::Insert => new += 1,
+            }
+        }
+    }
+    (map, complete)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LineOp {
     Keep,
@@ -132,6 +183,14 @@ enum LineOp {
 /// exceeds [`MAX_DIFF_DEPTH`]. Ops are emitted old-to-new with Delete
 /// ordered before Insert inside a changed region.
 fn myers_line_ops(old: &[String], new: &[String]) -> Option<Vec<LineOp>> {
+    myers_line_ops_bounded(old, new, MAX_DIFF_DEPTH)
+}
+
+fn myers_line_ops_bounded(
+    old: &[String],
+    new: &[String],
+    depth_limit: usize,
+) -> Option<Vec<LineOp>> {
     let n = old.len();
     let m = new.len();
     if n == 0 {
@@ -140,7 +199,7 @@ fn myers_line_ops(old: &[String], new: &[String]) -> Option<Vec<LineOp>> {
     if m == 0 {
         return Some(vec![LineOp::Delete; n]);
     }
-    let max = (n + m).min(MAX_DIFF_DEPTH);
+    let max = (n + m).min(depth_limit);
     let offset = max;
     // v[k + offset] = furthest x on diagonal k; one frontier per depth
     // is kept for backtracking.

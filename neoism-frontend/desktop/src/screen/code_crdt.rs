@@ -113,6 +113,9 @@ impl Screen<'_> {
         let Some(code) = self.context_manager.current_mut().code.as_mut() else {
             return false;
         };
+        if !code.workspace_sync_ready() {
+            return false;
+        }
         let buffer_id = buffer_id_for_markdown_path(&code.path);
         let state = &mut self.code_crdt;
         let Some(binding) = state.bindings.get_mut(&buffer_id) else {
@@ -258,12 +261,7 @@ fn drain_code_pane_crdt(
     // fetched content the moment it paints — the "code shows nothing, then
     // flickers" bug. Bind on the next drain after `apply_remote_source`
     // lands. (Mirror of `drain_markdown_pane_crdt`.)
-    if code.remote_content_pending {
-        return false;
-    }
-    // A pane that genuinely failed to load locally (not a pending remote
-    // fetch) has no authoritative text to seed.
-    if code.error.is_some() {
+    if !code.workspace_sync_ready() {
         return false;
     }
     let mut pane_changed = false;
@@ -325,7 +323,7 @@ fn find_code_pane_mut<'a>(
             let matches = context
                 .code
                 .as_ref()
-                .is_some_and(|code| buffer_id_for_markdown_path(&code.path) == buffer_id);
+                .is_some_and(|code| !code.local_only && buffer_id_for_markdown_path(&code.path) == buffer_id);
             if matches {
                 return context.code.as_mut();
             }

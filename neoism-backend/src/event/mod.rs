@@ -224,6 +224,8 @@ pub enum RioEvent {
     /// the listing if the tree is still empty — covering dropped
     /// requests and reconnect races without polling.
     RemoteFileTreeCheck,
+    /// Correlated read liveness deadline; ignored if the reply already landed.
+    RemoteEditorReadTimeout(u64),
 
     /// Background ACP worker has new session/file/debug events to drain.
     AcpWake,
@@ -366,6 +368,7 @@ impl Debug for RioEvent {
             }
             RioEvent::CodeDiagnosticsReady => write!(f, "CodeDiagnosticsReady"),
             RioEvent::CodeGitMarksReady => write!(f, "CodeGitMarksReady"),
+            RioEvent::RemoteEditorReadTimeout(id) => write!(f, "RemoteEditorReadTimeout({id})"),
             RioEvent::RemoteFileTreeCheck => {
                 write!(f, "RemoteFileTreeCheck")
             }

@@ -31,13 +31,20 @@ pub struct FileTree {
     /// the keyboard selection too.
     pub(super) active_path: Option<PathBuf>,
     pub(super) root: Option<PathBuf>,
+    /// Async host listings use opaque identities; native local trees retain
+    /// native Path equivalence (notably `/` versus `\\` on Windows).
+    pub(super) host_paths: bool,
     pub(super) git_statuses: HashMap<PathBuf, GitStatus>,
+    /// Raw host identities cannot use PathBuf hashing on a foreign OS (Unix
+    /// backslash filenames and Windows separators would otherwise alias).
+    pub(super) host_git_root: Option<std::ffi::OsString>,
+    pub(super) host_git_statuses: HashMap<std::ffi::OsString, GitStatus>,
     /// Multiplayer presence: which remote peers are currently on each
     /// file, so a row can show their avatars (Notion-style "who's here").
     /// Keyed by absolute file path. Rebuilt out-of-band by the host ONLY
     /// when presence changes (never per frame) via [`set_presence_index`]
     /// and read per-row in `render`; empty when nobody else is connected.
-    pub(super) presence_index: HashMap<PathBuf, Vec<PresenceAvatarPeer>>,
+    pub(super) presence_index: HashMap<std::ffi::OsString, Vec<PresenceAvatarPeer>>,
     pub(super) pending_dir_requests: HashMap<RequestId, PendingDirRequest>,
     // TODO(wave6-cutover): swap to the lifted `Scroll` widget once
     // `chrome/widgets/scroll.rs` lands in neoism-ui. The pair of
@@ -122,7 +129,10 @@ impl FileTree {
             width: FILE_TREE_WIDTH,
             active_path: None,
             root: Some(root),
+            host_paths: false,
             git_statuses: HashMap::new(),
+            host_git_root: None,
+            host_git_statuses: HashMap::new(),
             presence_index: HashMap::new(),
             pending_dir_requests: HashMap::new(),
             scroll: CriticallyDampedSpring::new(),
@@ -160,7 +170,10 @@ impl FileTree {
             width: FILE_TREE_WIDTH,
             active_path: None,
             root: None,
+            host_paths: false,
             git_statuses: HashMap::new(),
+            host_git_root: None,
+            host_git_statuses: HashMap::new(),
             presence_index: HashMap::new(),
             pending_dir_requests: HashMap::new(),
             scroll: CriticallyDampedSpring::new(),
@@ -195,7 +208,7 @@ impl FileTree {
     /// draw is a cheap map lookup with zero polling.
     pub fn set_presence_index(
         &mut self,
-        index: HashMap<PathBuf, Vec<PresenceAvatarPeer>>,
+        index: HashMap<std::ffi::OsString, Vec<PresenceAvatarPeer>>,
     ) {
         self.presence_index = index;
     }

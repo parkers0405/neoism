@@ -92,11 +92,12 @@ pub fn create_code_context<T: neoism_backend::event::EventListener>(
     rich_text_id: usize,
     dimension: ContextDimension,
     path: PathBuf,
+    source: neoism_ui::services::FileOpenSource,
 ) -> Context<T> {
     let route_id = ROUTE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
     let mut context =
         create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
-    context.code = Some(neoism_ui::editor::code::CodePane::load(path));
+    context.code = Some(neoism_ui::editor::code::CodePane::load_with_source(path, source));
     context
 }
 
@@ -106,11 +107,12 @@ pub fn create_markdown_context<T: neoism_backend::event::EventListener>(
     rich_text_id: usize,
     dimension: ContextDimension,
     path: PathBuf,
+    source: neoism_ui::services::FileOpenSource,
 ) -> Context<T> {
     let route_id = ROUTE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
     let mut context =
         create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
-    context.markdown = Some(MarkdownPane::load(path));
+    context.markdown = Some(MarkdownPane::load_with_source(path, source));
     context
 }
 

@@ -104,6 +104,7 @@ pub(crate) fn palette_action_name(
         A::DecreaseFontSize => "DecreaseFontSize",
         A::ResetFontSize => "ResetFontSize",
         A::ToggleViMode => "ToggleViMode",
+        A::ToggleGitBlame => "ToggleGitBlame",
         A::ToggleWordWrap => "ToggleWordWrap",
         A::ReplaceInFile => "ReplaceInFile",
         A::ProjectProblems => "ProjectProblems",

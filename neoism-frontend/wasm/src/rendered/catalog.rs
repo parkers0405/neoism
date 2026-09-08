@@ -372,7 +372,9 @@ pub(crate) fn apply_agent_event_to_pane(
             } else {
                 false
             };
-            if !accepted {
+            // A stale branch revision does not make the independently
+            // versioned job list stale. Still reject unrelated families.
+            if !accepted && !pane.session_family_contains(&snapshot.root_session_id) {
                 return;
             }
             if let (Some(epoch), Some(revision), Some(tasks)) = (
@@ -977,7 +979,8 @@ pub(crate) fn apply_agent_event_to_cache(
             } else {
                 false
             };
-            if !accepted {
+            // Branch and job revisions are independent, including empty lists.
+            if !accepted && !pane.session_family_contains(&snapshot.root_session_id) {
                 return true;
             }
             if let (Some(epoch), Some(revision), Some(tasks)) = (

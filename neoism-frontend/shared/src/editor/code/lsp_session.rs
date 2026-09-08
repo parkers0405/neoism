@@ -293,6 +293,21 @@ pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     String::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
+/// Engine formatting returns one `{ language, path, edits }` group per
+/// adapter, not a flat TextEdit list. Select one provider, never double-apply.
+pub fn formatting_text_edits(groups: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    groups
+        .iter()
+        .find_map(|group| {
+            group
+                .get("edits")
+                .and_then(|v| v.as_array())
+                .filter(|edits| !edits.is_empty())
+        })
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Parse raw LSP text edits (byte-coordinate boundary — the engine
 /// transport already converted them) into buffer edits. Desktop:
 /// `parse_lsp_text_edits`.
@@ -1061,6 +1076,7 @@ impl CodeLspUi {
         };
         let [gx, gy, gw, gh] = pane.geometry.rect;
         let inside = gw > 0.0
+            && !pane.blame.contains_pointer(mx, my)
             && mx >= pane.geometry.text_x
             && mx <= gx + gw
             && my >= gy

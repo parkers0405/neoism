@@ -120,6 +120,8 @@ impl MarkdownPane {
             saved_baseline,
             error: None,
             remote_content_pending: false,
+            remote_source: false,
+            local_only: false,
             remote_loading_started: None,
             cover_overlay_rect: None,
             value_picker: None,
@@ -197,6 +199,25 @@ impl MarkdownPane {
         // stable scroll anchor. Resetting it here loses that anchor, so the
         // freshly-created surface reports scroll 0 and an agent filesystem
         // edit appears to reload the note at the top.
+    }
+
+    /// Shared gate used by the desktop document-plane open/save paths.
+    pub fn workspace_sync_ready(&self) -> bool {
+        !self.local_only && !self.remote_content_pending && self.error.is_none()
+    }
+
+    pub fn load_with_source(path: PathBuf, source: crate::services::FileOpenSource) -> Self {
+        use crate::services::FileOpenSource;
+        if source == FileOpenSource::Host {
+            let mut pane = Self::from_source(path, "");
+            pane.remote_source = true;
+            pane.error = Some("Host content has not loaded".into());
+            pane
+        } else {
+            let mut pane = Self::load(path);
+            pane.local_only = source == FileOpenSource::LocalOnly;
+            pane
+        }
     }
 
     pub fn load(path: PathBuf) -> Self {
@@ -283,6 +304,8 @@ impl MarkdownPane {
             saved_baseline: vec![String::new()],
             error: None,
             remote_content_pending: false,
+            remote_source: false,
+            local_only: false,
             remote_loading_started: None,
             cover_overlay_rect: None,
             value_picker: None,
@@ -336,6 +359,12 @@ impl MarkdownPane {
     /// `error`). Replaces the pane content exactly like a successful
     /// local reload would.
     pub fn apply_remote_source(&mut self, source: &str) {
+        if self.local_only { return; }
+        self.remote_source = true;
+        if self.is_dirty() {
+            self.fail_remote_loading("Local edits were preserved; resolve them before reloading");
+            return;
+        }
         self.apply_source(source);
         self.remote_content_pending = false;
         self.remote_loading_started = None;
@@ -346,10 +375,20 @@ impl MarkdownPane {
     /// the daemon read is in flight, and keep the CRDT drain from
     /// seeding the buffer with placeholder text.
     pub fn mark_remote_loading(&mut self) {
-        self.blocks.clear();
+        if self.local_only { return; }
+        self.remote_source = true;
+        // The loading renderer hides blocks; retain them for failure recovery.
         self.error = None;
         self.remote_content_pending = true;
         self.remote_loading_started = Some(Instant::now());
+    }
+
+    /// Finish only the loading state. Preserve any user edits for recovery.
+    pub fn fail_remote_loading(&mut self, message: &str) {
+        if self.local_only { return; }
+        self.remote_content_pending = false;
+        self.remote_loading_started = None;
+        self.error = Some(format!("Could not read host file: {message}"));
     }
 
     /// The frontmatter decoration key (`icon:` / `cover:`) the cursor's
@@ -756,6 +795,9 @@ impl MarkdownPane {
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {
+        if self.remote_source || self.remote_content_pending {
+            return Err(std::io::Error::other("Host-owned buffers must be saved through the daemon"));
+        }
         let source = source_from_lines(&self.lines);
         match std::fs::write(&self.path, source) {
             Ok(()) => {

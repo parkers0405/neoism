@@ -161,6 +161,16 @@ pub struct EditorConfig {
     /// save in the code editor. On by default.
     #[serde(default = "default_bool_true", rename = "format-on-save")]
     pub format_on_save: bool,
+    /// Current-line inline Git attribution with real GitHub avatars. Opt-in;
+    /// disabling it hides the annotation and stops new blame/avatar requests.
+    #[serde(default, rename = "git-blame")]
+    pub git_blame: bool,
+    /// Cursor-settle delay; zero keeps attribution immediate.
+    #[serde(default, rename = "git-blame-delay-ms")]
+    pub git_blame_delay_ms: u64,
+    /// Hide during scrolling and restore 150ms after the viewport settles.
+    #[serde(default, rename = "git-blame-hide-on-scroll")]
+    pub git_blame_hide_on_scroll: bool,
     #[serde(default)]
     pub minimap: bool,
     #[serde(default)]
@@ -177,6 +187,9 @@ impl Default for EditorConfig {
         Self {
             vim_mode: true,
             format_on_save: true,
+            git_blame: false,
+            git_blame_delay_ms: 0,
+            git_blame_hide_on_scroll: false,
             minimap: false,
             markdown: MarkdownEditorConfig::default(),
             external: default_editor(),
@@ -1165,8 +1178,57 @@ mod tests {
         assert_eq!(config.appearance.theme, default_neoism_theme());
         assert!(config.ui.status_fps);
         assert!(config.editor.format_on_save);
+        assert!(!config.editor.git_blame);
+        assert_eq!(config.editor.git_blame_delay_ms, 0);
+        assert!(!config.editor.git_blame_hide_on_scroll);
         assert!(!config.editor.minimap);
         assert!(config.editor.markdown.spellcheck);
+    }
+
+    #[test]
+    fn inline_git_blame_is_a_typed_grouped_opt_in() {
+        let config = parse(r#"{ "editor": { "git-blame": true } }"#);
+        assert!(config.editor.git_blame);
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            value.pointer("/editor/git-blame"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(serde_json::from_str::<Config>(
+            r#"{ "editor": { "git-blame": "yes" } }"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn inline_blame_timing_options_are_typed_and_grouped() {
+        let config = parse(
+            r#"{"editor":{"git-blame":true,"git-blame-delay-ms":250,"git-blame-hide-on-scroll":true}}"#,
+        );
+        assert!(config.editor.git_blame);
+        assert_eq!(config.editor.git_blame_delay_ms, 250);
+        assert!(config.editor.git_blame_hide_on_scroll);
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            value.pointer("/editor/git-blame-delay-ms"),
+            Some(&serde_json::json!(250))
+        );
+        assert_eq!(
+            value.pointer("/editor/git-blame-hide-on-scroll"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(serde_json::from_str::<Config>(
+            r#"{"editor":{"git-blame-delay-ms":-1}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<Config>(
+            r#"{"editor":{"git-blame-delay-ms":0.5}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<Config>(
+            r#"{"editor":{"git-blame-hide-on-scroll":"yes"}}"#
+        )
+        .is_err());
     }
 
     #[test]

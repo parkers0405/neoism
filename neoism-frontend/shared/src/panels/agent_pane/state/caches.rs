@@ -354,12 +354,10 @@ impl NeoismAgentPane {
         revision: u64,
         tasks: &[(String, u64)],
     ) -> bool {
-        if self.background_jobs_epoch.as_deref() == Some(epoch)
-            && revision <= self.background_jobs_revision
-        {
+        if !self.background_task_authority.apply(epoch, revision, tasks) {
             return false;
         }
-        let count = tasks.len();
+        let count = self.background_task_authority.job_ids().len();
         let started_at = tasks
             .iter()
             .map(|(_, started_at)| *started_at)
@@ -369,8 +367,6 @@ impl NeoismAgentPane {
             || self.background_tasks_started_at != started_at;
         self.running_background_task_count = count;
         self.background_tasks_started_at = started_at;
-        self.background_jobs_epoch = Some(epoch.to_string());
-        self.background_jobs_revision = revision;
         if count == 0 {
             self.background_task_details_expanded = false;
         }
@@ -387,6 +383,11 @@ impl NeoismAgentPane {
     pub(in crate::panels::agent_pane::state) fn refresh_background_task_activity_clock(
         &mut self,
     ) {
+        // Launch/result tool output is immutable history, not process liveness.
+        // In particular a completion card for B must not revive an old job A.
+        if self.background_task_authority.is_authoritative() {
+            return;
+        }
         self.running_background_task_count =
             running_background_task_count(&self.messages);
         if self.running_background_task_count > 0 {

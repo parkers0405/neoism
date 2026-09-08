@@ -57,7 +57,8 @@ pub fn entries_from_dir_listing(
             continue;
         }
         let label = dent.name.clone();
-        let entry_path = root.join(&dent.name);
+        let entry_path = dent.host_path.map(PathBuf::from)
+            .unwrap_or_else(|| root.join(&dent.name));
         let normalized = normalize_path(&entry_path);
         seen.insert(normalized.clone());
         let git_status = git_statuses.get(&normalized).copied().unwrap_or_default();

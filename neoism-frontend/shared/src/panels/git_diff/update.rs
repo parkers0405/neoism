@@ -377,7 +377,14 @@ impl GitDiffPanel {
         let data = self.data.lock().ok()?;
         let f = data.files.get(self.selected)?;
         let root = data.repo_root.clone()?;
-        let abs = root.join(&f.path);
+        let abs = if self.io.as_ref().is_some_and(|io| io.is_host_driven()) {
+            neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
+                .join(&f.path)
+                .as_str()
+                .into()
+        } else {
+            root.join(&f.path)
+        };
         Some((abs, root))
     }
 
@@ -456,9 +463,9 @@ impl GitDiffPanel {
 
     pub fn reset_for_server_switch(&mut self) {
         self.close();
-        if let Ok(mut data) = self.data.lock() {
-            *data = PanelData::default();
-        }
+        // Detach old workers: a reply from a previous endpoint must never
+        // paint a newly selected workspace even if refresh ids coincide.
+        self.data = Arc::new(std::sync::Mutex::new(PanelData::default()));
         self.selected = 0;
         self.clear_pending();
     }
@@ -516,6 +523,11 @@ impl GitDiffPanel {
             return;
         };
 
+        if let Some(io) = self.io.as_ref().filter(|io| io.is_host_driven()) {
+            let _ = io.collect_files(&root);
+            return;
+        }
+
         // Web/wasm has no `GitDiffIo` provider installed by default —
         // the daemon pushes data directly into `self.data` instead.
         // Native fork installs an `Arc<dyn GitDiffIo>` so we can shell
@@ -564,6 +576,13 @@ impl GitDiffPanel {
     /// is no `GitDiffIo` provider — the daemon is the data source and
     /// the host stores results back here, mirroring the native
     /// refresh thread's store-back.
+    pub fn host_set_repo(&mut self, root: Option<PathBuf>, branch: Option<String>) {
+        if let Ok(mut data) = self.data.lock() {
+            data.repo_root = root;
+            data.branch = branch;
+        }
+    }
+
     pub fn host_set_files(&mut self, files: Vec<super::types::FileChange>) {
         let file_count = files.len();
         if let Ok(mut data) = self.data.lock() {
@@ -943,6 +962,13 @@ impl GitDiffPanel {
 
     /// Fetch the local branch list off-thread into `data.branches`.
     pub fn load_branches(&mut self) {
+        if let Some(io) = self.io.as_ref().filter(|io| io.is_host_driven()) {
+            let root = self.data.lock().ok().and_then(|d| d.repo_root.clone());
+            if let Some(root) = root {
+                let _ = io.list_branches(&root);
+            }
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(io) = self.io.clone() else {
@@ -986,6 +1012,10 @@ impl GitDiffPanel {
         self.close_branch_menu();
         self.selected = 0;
         self.file_scroll = 0.0;
+        if self.io.as_ref().is_some_and(|io| io.is_host_driven()) {
+            self.run_mutation(move |io, root| io.checkout(root, &branch));
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(io) = self.io.clone() else {
@@ -1106,6 +1136,12 @@ impl GitDiffPanel {
             data.last_refresh = Some(Instant::now());
             (root, data.refresh_id)
         };
+        if io.is_host_driven() {
+            if let Err(error) = op(&io, &root) {
+                self.host_set_error(error);
+            }
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let arc = Arc::clone(&self.data);
@@ -1227,12 +1263,17 @@ impl GitDiffPanel {
         self.diff_scroll_spring.reset();
         self.scroll_selected_into_view();
         if needs_load {
+            if let Some(io) = self.io.as_ref().filter(|io| io.is_host_driven()) {
+                io.request_diff(&path);
+                return changed;
+            }
             // Background load of the per-file diff. Native only —
             // wasm relies on the daemon pushing diffs into
             // `self.data.diffs` ahead of time.
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(root) = repo_root {
                 let arc = Arc::clone(&self.data);
+                let refresh_id = arc.lock().ok().map(|d| d.refresh_id);
                 let path_for_thread = path.clone();
                 std::thread::spawn(move || {
                     let file = {
@@ -1242,6 +1283,9 @@ impl GitDiffPanel {
                     let Some(file) = file else { return };
                     let diff = super::parse::load_diff(&root, &file);
                     if let Ok(mut d) = arc.lock() {
+                        if Some(d.refresh_id) != refresh_id {
+                            return;
+                        }
                         d.diffs.insert(path_for_thread, diff);
                     }
                 });

@@ -74,7 +74,7 @@ pub(crate) fn generate_client_id() -> u64 {
 /// `file://<absolute-path>`. Paths stay lexical because a joined path belongs
 /// to the host; resolving it on the guest is both incorrect and can block.
 pub fn buffer_id_for_markdown_path(path: &std::path::Path) -> String {
-    format!("file://{}", path.to_string_lossy())
+    neoism_protocol::host_path::HostPath::new(path.to_string_lossy()).buffer_id()
 }
 
 /// Virtual CRDT buffer for a notebook's rendered markdown view.
@@ -238,6 +238,9 @@ impl Screen<'_> {
         let Some(pane) = self.context_manager.current_mut().markdown.as_mut() else {
             return false;
         };
+        if !pane.workspace_sync_ready() {
+            return false;
+        }
         let buffer_id = buffer_id_for_markdown_path(&pane.path);
         let state = &mut self.markdown_crdt;
         let Some(binding) = state.bindings.get_mut(&buffer_id) else {
@@ -436,7 +439,7 @@ fn drain_markdown_pane_crdt(
     // whose snapshot then CLOBBERS the fetched content the moment it
     // paints (content flashes, goes blank, tab reads dirty). Bind on the
     // next drain after `apply_remote_source` lands.
-    if pane.remote_content_pending {
+    if !pane.workspace_sync_ready() {
         return false;
     }
     let mut pane_changed = false;
@@ -522,7 +525,7 @@ fn find_crdt_pane_mut<'a>(
             if context
                 .markdown
                 .as_ref()
-                .is_some_and(|pane| buffer_id_for_markdown_path(&pane.path) == buffer_id)
+                .is_some_and(|pane| !pane.local_only && buffer_id_for_markdown_path(&pane.path) == buffer_id)
             {
                 return context
                     .markdown
@@ -552,7 +555,7 @@ fn find_markdown_pane_mut<'a>(
             let matches = context
                 .markdown
                 .as_ref()
-                .is_some_and(|pane| buffer_id_for_markdown_path(&pane.path) == buffer_id);
+                .is_some_and(|pane| !pane.local_only && buffer_id_for_markdown_path(&pane.path) == buffer_id);
             if matches {
                 return context.markdown.as_mut();
             }

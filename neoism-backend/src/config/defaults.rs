@@ -252,6 +252,9 @@ pub fn default_config_file_content() -> String {
     // ── [editor] — the built-in code + markdown editor ────────────
     // "editor": {
     //     "vim-mode": true,
+    //     "git-blame": false,       // current-line inline blame; fetches public GitHub avatars when enabled
+    //     "git-blame-delay-ms": 0,   // 0 = immediate; 250 = wait for cursor to settle
+    //     "git-blame-hide-on-scroll": false, // true = hide until 150ms after scrolling settles
     //     "format-on-save": true,    // run the LSP formatter before every save
     //     "minimap": true,
     //     "markdown": { "spellcheck": true },

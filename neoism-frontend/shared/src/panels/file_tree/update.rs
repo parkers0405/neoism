@@ -29,6 +29,10 @@ use super::{
     SCROLL_ANIMATION_LENGTH, SCROLL_OFF_ROWS,
 };
 
+fn path_matches(host_paths: bool, left: &Path, right: &Path) -> bool {
+    if host_paths { left.as_os_str() == right.as_os_str() } else { left == right }
+}
+
 impl FileTree {
     /// Mark `path` as the buffer nvim currently has open, so its row
     /// gets the active-buffer accent. Pass `None` to clear (e.g. when
@@ -109,6 +113,7 @@ impl FileTree {
             ctx.services.files,
         ) {
             Ok(_) => {
+                self.host_paths = false;
                 let entries = scan_root_with_workspace(
                     &root,
                     &self.git_statuses,
@@ -122,7 +127,7 @@ impl FileTree {
                     if let Some(index) = self
                         .entries
                         .iter()
-                        .position(|entry| entry.path.as_deref() == Some(path.as_path()))
+                        .position(|entry| entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path)))
                     {
                         self.selected = index;
                     }
@@ -135,7 +140,7 @@ impl FileTree {
                     .filter_map(|path| {
                         self.entries
                             .iter()
-                            .find(|entry| entry.path.as_deref() == Some(path.as_path()))
+                            .find(|entry| entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path)))
                             .map(|entry| (path, entry.depth + 1))
                     })
                     .collect::<Vec<_>>();
@@ -321,16 +326,29 @@ impl FileTree {
         let Some(request) = self.pending_dir_requests.remove(&request_id) else {
             return false;
         };
-        let Some(entries) = Self::parse_dir_entries(payload) else {
+        let Some(mut entries) = Self::parse_dir_entries(payload) else {
             return false;
         };
-        let children = entries_from_dir_listing(
+        // Async listings are host-owned. Older daemons send only names: join
+        // using the advertised root's syntax, never the guest's PathBuf rules.
+        let host = neoism_protocol::host_path::HostPath::new(request.path.to_string_lossy());
+        for entry in &mut entries {
+            if self.host_paths && entry.host_path.is_none() {
+                entry.host_path = Some(host.join(&entry.name).as_str().to_owned());
+            }
+        }
+        let raw_host_git = self.host_paths && self.host_git_root.is_some();
+        let empty_git = std::collections::HashMap::new();
+        let mut children = entries_from_dir_listing(
             &request.path,
             request.depth,
-            &self.git_statuses,
+            if raw_host_git { &empty_git } else { &self.git_statuses },
             entries,
             self.show_hidden,
         );
+        if raw_host_git {
+            self.apply_host_git_children(&request.path, request.depth, &mut children);
+        }
 
         match request.kind {
             PendingDirKind::Root => {
@@ -364,7 +382,7 @@ impl FileTree {
                     self.set_entries_preserve_scroll(children);
                     if let Some(path) = selected_path {
                         if let Some(ix) = self.entries.iter().position(|entry| {
-                            entry.path.as_deref() == Some(path.as_path())
+                            entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path))
                         }) {
                             self.selected = ix;
                         }
@@ -384,7 +402,7 @@ impl FileTree {
                     if reopen {
                         if let Some(path) = child_path {
                             if let Some(ix) = self.entries.iter().position(|entry| {
-                                entry.path.as_deref() == Some(path.as_path())
+                                entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path))
                             }) {
                                 let depth = self.entries[ix].depth;
                                 let mut end = ix + 1;
@@ -407,7 +425,7 @@ impl FileTree {
                     if let Some(ix) = self
                         .entries
                         .iter()
-                        .position(|entry| entry.path.as_deref() == Some(path.as_path()))
+                        .position(|entry| entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path)))
                     {
                         self.selected = ix;
                     }
@@ -416,7 +434,7 @@ impl FileTree {
             }
             PendingDirKind::Expand => {
                 let Some(parent_ix) = self.entries.iter().position(|entry| {
-                    entry.path.as_deref() == Some(request.path.as_path())
+                    entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &request.path))
                 }) else {
                     return false;
                 };
@@ -437,7 +455,7 @@ impl FileTree {
                 // nested) rows. Same fix the Root arm already applies.
                 let old_subtree: Vec<TreeEntry> =
                     self.entries[parent_ix + 1..end].to_vec();
-                let merged = merge_children_preserving_open(children, &old_subtree);
+                let merged = merge_children_preserving_open(children, &old_subtree, self.host_paths);
                 self.entries.splice(parent_ix + 1..end, merged);
                 if self.selected >= self.entries.len() {
                     self.selected = self.entries.len().saturating_sub(1);
@@ -498,6 +516,7 @@ impl FileTree {
             ctx.services.files,
         ) {
             Ok(_) => {
+                self.host_paths = false;
                 let entries = scan_root_with_workspace(
                     &root,
                     &self.git_statuses,
@@ -509,6 +528,7 @@ impl FileTree {
                 self.set_entries(entries);
             }
             Err(IoError::Pending(id)) => {
+                self.host_paths = true;
                 self.track_pending_dir(id, root, 0, PendingDirKind::Root);
                 if self.entries.is_empty() {
                     self.set_entries(Vec::new());
@@ -566,7 +586,7 @@ impl FileTree {
             if let Some(ix) = self
                 .entries
                 .iter()
-                .position(|entry| entry.path.as_deref() == Some(path.as_path()))
+                .position(|entry| entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path)))
             {
                 self.selected = ix;
             }
@@ -598,7 +618,7 @@ impl FileTree {
                 if let Some(ix) = self
                     .entries
                     .iter()
-                    .position(|entry| entry.path.as_deref() == Some(path.as_path()))
+                    .position(|entry| entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path)))
                 {
                     self.selected = ix;
                 }
@@ -660,7 +680,7 @@ impl FileTree {
                 if let Some(ix) = self
                     .entries
                     .iter()
-                    .position(|entry| entry.path.as_deref() == Some(path.as_path()))
+                    .position(|entry| entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path)))
                 {
                     self.selected = ix;
                 }
@@ -780,6 +800,9 @@ impl FileTree {
     /// When `path` is an open directory already present in the tree,
     /// its visible descendants are replaced in place.
     pub fn apply_listing(&mut self, path: &Path, listing: Vec<DirEntry>) {
+        if listing.iter().any(|entry| entry.host_path.is_some()) {
+            self.host_paths = true;
+        }
         let path = normalize_path(path);
         if self.root.is_none() {
             self.root = Some(path.clone());
@@ -789,7 +812,7 @@ impl FileTree {
         } else {
             self.entries
                 .iter()
-                .find(|entry| entry.path.as_deref() == Some(path.as_path()))
+                .find(|entry| entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path)))
                 .map(|entry| entry.depth + 1)
                 .unwrap_or(0)
         };
@@ -809,7 +832,7 @@ impl FileTree {
         let Some(parent_ix) = self
             .entries
             .iter()
-            .position(|entry| entry.path.as_deref() == Some(path.as_path()))
+            .position(|entry| entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path)))
         else {
             return;
         };
@@ -845,7 +868,7 @@ impl FileTree {
     pub fn is_expanded(&self, path: &Path) -> bool {
         let path = normalize_path(path);
         self.entries.iter().any(|entry| {
-            entry.path.as_deref() == Some(path.as_path())
+            entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path))
                 && matches!(entry.kind, NodeKind::Dir { open: true })
         })
     }
@@ -853,7 +876,7 @@ impl FileTree {
     pub fn open_dir(&mut self, path: &Path, ctx: &PanelContext) -> bool {
         let path = normalize_path(path);
         let Some(index) = self.entries.iter().position(|entry| {
-            entry.path.as_deref() == Some(path.as_path())
+            entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path))
                 && matches!(entry.kind, NodeKind::Dir { .. })
         }) else {
             return false;
@@ -867,7 +890,7 @@ impl FileTree {
     pub fn close_dir(&mut self, path: &Path) -> bool {
         let path = normalize_path(path);
         let Some(index) = self.entries.iter().position(|entry| {
-            entry.path.as_deref() == Some(path.as_path())
+            entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &path))
                 && matches!(entry.kind, NodeKind::Dir { open: true })
         }) else {
             return false;
@@ -906,7 +929,7 @@ impl FileTree {
             let idx = self
                 .entries
                 .iter()
-                .position(|entry| entry.path.as_deref() == Some(current.as_path()))?;
+                .position(|entry| entry.path.as_ref().is_some_and(|p| path_matches(self.host_paths, p, &current)))?;
             let is_target = current == target;
             if !is_target && self.entries[idx].kind == (NodeKind::Dir { open: false }) {
                 self.toggle_dir_at(idx, ctx);
@@ -1475,18 +1498,19 @@ impl FileTree {
 fn merge_children_preserving_open(
     fresh: Vec<TreeEntry>,
     old_subtree: &[TreeEntry],
+    host_paths: bool,
 ) -> Vec<TreeEntry> {
-    let open_dirs: HashSet<PathBuf> = old_subtree
+    let open_dirs: Vec<&Path> = old_subtree
         .iter()
         .filter(|entry| matches!(entry.kind, NodeKind::Dir { open: true }))
-        .filter_map(|entry| entry.path.clone())
+        .filter_map(|entry| entry.path.as_deref())
         .collect();
     let mut merged = Vec::with_capacity(fresh.len());
     for mut child in fresh {
         let child_path = child.path.clone();
         let reopen = child_path
             .as_ref()
-            .is_some_and(|path| open_dirs.contains(path));
+            .is_some_and(|path| open_dirs.iter().any(|open| path_matches(host_paths, open, path)));
         if reopen {
             child.kind = NodeKind::Dir { open: true };
         }
@@ -1495,7 +1519,7 @@ fn merge_children_preserving_open(
             if let Some(path) = child_path {
                 if let Some(ix) = old_subtree
                     .iter()
-                    .position(|entry| entry.path.as_deref() == Some(path.as_path()))
+                    .position(|entry| entry.path.as_ref().is_some_and(|p| path_matches(host_paths, p, &path)))
                 {
                     // Everything deeper than this dir is its subtree — copy
                     // it wholesale, which carries arbitrarily deep nesting.

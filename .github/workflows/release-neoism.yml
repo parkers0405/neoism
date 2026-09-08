@@ -58,7 +58,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           run_id=""
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             for id in $(gh api "repos/${{ github.repository }}/actions/workflows/release-neoism.yml/runs?head_sha=${{ github.sha }}&status=success&per_page=10" --jq '.workflow_runs[].id'); do
               count=$(gh api "repos/${{ github.repository }}/actions/runs/$id/artifacts" --jq '[.artifacts[] | select(.expired == false) | select(.name == "neoism-linux-x86_64" or .name == "neoism-darwin-aarch64" or .name == "neoism-windows-x86_64")] | length')
               if [[ "$count" -eq 3 ]]; then run_id="$id"; break; fi
@@ -147,14 +147,16 @@ jobs:
       - name: Configure compilation cache backend
         shell: bash
         run: |
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          if [ "$HAVE_R2_CACHE" = "true" ]; then
-            echo "SCCACHE_BUCKET=$SCCACHE_R2_BUCKET" >> "$GITHUB_ENV"
-            echo "SCCACHE_ENDPOINT=$SCCACHE_R2_ENDPOINT" >> "$GITHUB_ENV"
-            echo "SCCACHE_REGION=auto" >> "$GITHUB_ENV"
-          else
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          fi
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            if [ "$HAVE_R2_CACHE" = "true" ]; then
+              echo "SCCACHE_BUCKET=$SCCACHE_R2_BUCKET"
+              echo "SCCACHE_ENDPOINT=$SCCACHE_R2_ENDPOINT"
+              echo "SCCACHE_REGION=auto"
+            else
+              echo "SCCACHE_GHA_ENABLED=true"
+            fi
+          } >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -168,6 +170,17 @@ jobs:
           # anyway so the retry (always a new commit after a version
           # bump) starts warm instead of rebuilding every dependency.
           cache-on-failure: true
+
+      - name: Verify release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "neoism"))')
+          if [[ "$GITHUB_REF" == refs/tags/* && "${GITHUB_REF#refs/tags/}" != "v$version" ]]; then
+            printf 'Release tag %s does not match workspace version %s\n' "$GITHUB_REF" "$version" >&2
+            exit 1
+          fi
+          printf 'NEOISM_RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
       - name: Build the production web UI
         shell: bash
@@ -190,6 +203,20 @@ jobs:
           env -u CI cargo build --release --locked --target ${{ matrix.target }} \
            -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
           sccache --show-stats || true
+
+      - name: Verify all packaged executable versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix=''
+          if [ "$RUNNER_OS" = Windows ]; then suffix='.exe'; fi
+          for binary in neoism neoism-workspace-daemon neoism-agent; do
+            actual=$("target/${{ matrix.target }}/release/$binary$suffix" --version | tr -d '\r')
+            if [ "$actual" != "$binary $NEOISM_RELEASE_VERSION" ]; then
+              printf 'Version mismatch in %s: expected %s, received %s\n' "$binary" "$NEOISM_RELEASE_VERSION" "$actual" >&2
+              exit 1
+            fi
+          done
 
       - name: Native Windows production terminal validation
         if: matrix.goos == 'windows'

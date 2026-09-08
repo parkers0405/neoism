@@ -12,6 +12,7 @@ pub mod crdt;
 pub mod cursor;
 pub mod diagnostics;
 pub mod editor;
+pub mod host_path;
 pub mod files;
 pub mod git;
 pub mod ide_tools;

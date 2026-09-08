@@ -93,6 +93,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             self.buffer_tabs.set_focused(false);
             self.blur(PanelKey::BufferTabs);
         }
+        crate::editor::code::render::clear_blame_overlays(sugarloaf);
         // Agent-logo overlays are immediate-mode: `push_image_overlay`
         // APPENDS to a per-panel Vec, so the strip must drop last frame's
         // pushes or every repaint would stack another copy forever. The
@@ -334,7 +335,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         crate::chrome::EditorPaneKind::Code => {
                             let mouse =
                                 Some([self.last_pointer_pos.0, self.last_pointer_pos.1]);
+                            let blame_focused = self.buffer_tabs.focused_cursor_rect().is_none()
+                                && !self.agent_pane.as_ref().is_some_and(|pane| pane.side_panel().is_focused())
+                                && !self.file_tree.as_ref().is_some_and(|tree| tree.is_focused())
+                                && !self.notes_sidebar.is_focused() && !self.git_diff_panel.is_focused()
+                                && !self.command_palette.is_enabled() && !self.finder.is_enabled()
+                                && !self.generic_keyboard_overlay_active();
                             if let Some(pane) = self.code_pane.as_mut() {
+                                pane.blame.apply_default(self.code_git_blame);
+                                pane.blame.set_options(self.code_git_blame_delay_ms, self.code_git_blame_hide_on_scroll);
+                                pane.blame.focused = blame_focused;
                                 // The chrome trail cursor draws the
                                 // caret (desktop parity) — the pane
                                 // only publishes `cursor_rect`.
@@ -1147,6 +1157,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             let mut animating = false;
             if let Some(path) = info.as_ref().and_then(|i| i.path.clone()) {
                 if let Some(pane) = self.parked_code_panes.get_mut(&path) {
+                    pane.blame.focused = false;
                     pane.caret_drawn_by_host = true;
                     animating |= crate::editor::code::render::render(
                         sugarloaf,
@@ -1185,6 +1196,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         .is_some_and(|pane| pane.path == path)
                     {
                         let pane = self.code_pane.as_mut().expect("checked above");
+                        pane.blame.focused = false;
                         pane.caret_drawn_by_host = true;
                         animating |= crate::editor::code::render::render(
                             sugarloaf,

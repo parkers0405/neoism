@@ -131,7 +131,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         font_families: Vec<String>,
     ) {
         self.hide_focus_modals();
-        self.settings_page.set_values(values);
+        self.set_settings_values(values);
         if !font_families.is_empty() {
             self.settings_page.set_font_families(font_families);
         }
@@ -143,6 +143,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// config snapshot — used when the daemon fetch resolves after the
     /// overlay already opened.
     pub fn set_settings_values(&mut self, values: serde_json::Value) {
+        let enabled = values.pointer("/editor/git-blame").and_then(|v| v.as_bool()).unwrap_or(false);
+        self.code_git_blame = enabled;
+        let delay_ms = values.pointer("/editor/git-blame-delay-ms").and_then(|v| v.as_u64()).unwrap_or(0);
+        let hide_on_scroll = values.pointer("/editor/git-blame-hide-on-scroll").and_then(|v| v.as_bool()).unwrap_or(false);
+        self.code_git_blame_delay_ms = delay_ms;
+        self.code_git_blame_hide_on_scroll = hide_on_scroll;
+        for pane in self.code_pane.iter_mut().chain(self.parked_code_panes.values_mut()) {
+            pane.blame.configure(enabled);
+            pane.blame.set_options(delay_ms, hide_on_scroll);
+        }
         self.settings_page.set_values(values);
     }
 

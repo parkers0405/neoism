@@ -1487,6 +1487,123 @@ fn historical_unmatched_background_task_is_not_live_activity() {
 }
 
 #[test]
+fn background_authority_survives_completion_and_delayed_launch_parts() {
+    let mut pane = NeoismAgentPane::default();
+    let stale = NeoismAgentMessage::tool(
+        "Old release monitor",
+        "job_id: old-monitor\nstatus: running",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    )
+    .with_id("old-launch");
+    pane.upsert_part_message(stale.clone());
+    pane.apply_running_background_tasks("server-a", 10, &[("latest-check".into(), 100)]);
+    assert_eq!(pane.active_background_task_summaries(), vec!["latest-check · running"]);
+    pane.apply_running_background_tasks("server-a", 11, &[]);
+    // Production finish ordering: authoritative empty, then completion card.
+    pane.upsert_part_message(client_background_completion_card("latest-check"));
+    assert_eq!(pane.running_background_task_count(), 0);
+    pane.upsert_part_message(stale);
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert!(pane.active_background_task_summaries().is_empty());
+    assert!(!pane.has_status_activity());
+    assert!(!pane.apply_running_background_tasks(
+        "server-a",
+        10,
+        &[("latest-check".into(), 100)]
+    ));
+    pane.apply_running_background_tasks("server-a", 11, &[]);
+    assert_eq!(pane.running_background_task_count(), 0);
+}
+
+#[test]
+fn background_reconnect_empty_is_independent_of_execution_hydration_race() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.apply_running_background_tasks("old-server", 100, &[("old-job".into(), 100)]);
+    pane.runtime_status_requests.insert("root".into(), 7);
+    pane.note_session_runtime_event("root");
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.background_sender()
+        .send(NeoismAgentBackgroundUpdate::SessionRuntimeStatusRefreshed {
+            session_id: "root".into(),
+            request_generation: 7,
+            runtime_revision: 0,
+            result: Ok(HashMap::new()),
+            runtime: Ok(super::super::api::FamilyRuntimeSnapshot {
+                root_session_id: "root".into(),
+                running_background_tasks: Some(Vec::new()),
+                background_jobs_epoch: Some("new-server".into()),
+                background_jobs_revision: Some(0),
+                ..Default::default()
+            }),
+            permissions: Ok(Vec::new()),
+            questions: Ok(Vec::new()),
+        })
+        .unwrap();
+    pane.drain_background_updates();
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    assert!(!pane.apply_running_background_tasks(
+        "old-server",
+        101,
+        &[("old-job".into(), 100)]
+    ));
+}
+
+#[test]
+fn background_family_authority_survives_child_switch_and_duplicate_completion() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    let mut child = CachedAgentSession::live_only();
+    child.hydrated = true;
+    child.state.parent_id = Some("root".into());
+    pane.session_cache.insert("child".into(), child);
+    pane.apply_running_background_tasks("server", 1, &[("child-job".into(), 100)]);
+    pane.activate_cached_session("child");
+    assert_eq!(pane.running_background_task_count(), 1);
+    assert_eq!(
+        pane.active_background_task_summaries(),
+        vec!["child-job · running"]
+    );
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [
+            AgentSessionUpdate::BackgroundTasksUpdated {
+                epoch: "server".into(),
+                revision: 2,
+                tasks: Vec::new(),
+            },
+            AgentSessionUpdate::BackgroundTaskCompleted {
+                session_id: "child".into(),
+                job_id: "child-job".into(),
+                status: "completed".into(),
+            },
+            AgentSessionUpdate::BackgroundTaskCompleted {
+                session_id: "child".into(),
+                job_id: "child-job".into(),
+                status: "completed".into(),
+            },
+        ],
+    ));
+    pane.drain_server_updates();
+    assert_eq!(
+        pane.messages
+            .iter()
+            .filter(|m| m.id == "background-task-child-job")
+            .count(),
+        1
+    );
+    assert_eq!(pane.running_background_task_count(), 0);
+    pane.activate_cached_session("root");
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert!(pane.active_background_task_summaries().is_empty());
+}
+
+#[test]
 fn background_runtime_rejects_stale_revision_and_accepts_new_server_epoch() {
     let mut pane = NeoismAgentPane::default();
     assert!(pane.apply_running_background_tasks("server-a", 2, &[("job-1".into(), 100)],));

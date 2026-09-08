@@ -420,7 +420,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 item.context()
                     .markdown
                     .as_ref()
-                    .filter(|pane| pane.path.as_path() == path)
+                    .filter(|pane| pane.path.as_os_str() == path.as_os_str())
                     .map(|_| (item.context().route_id, *node))
             })
         })
@@ -438,7 +438,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 item.context_mut()
                     .markdown
                     .as_mut()
-                    .filter(|pane| pane.path.as_path() == path)
+                    .filter(|pane| pane.path.as_os_str() == path.as_os_str())
             })
         })
     }
@@ -452,7 +452,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 item.context()
                     .draw
                     .as_ref()
-                    .filter(|pane| pane.path.as_path() == path)
+                    .filter(|pane| pane.path.as_os_str() == path.as_os_str())
                     .map(|_| (item.context().route_id, *node))
             })
         })
@@ -510,13 +510,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 context
                     .markdown
                     .as_ref()
-                    .filter(|pane| pane.path.as_path() == path)
+                    .filter(|pane| pane.path.as_os_str() == path.as_os_str())
                     .map(|_| *node)
                     .or_else(|| {
                         context
                             .notebook
                             .as_ref()
-                            .filter(|pane| pane.path.as_path() == path)
+                            .filter(|pane| pane.path.as_os_str() == path.as_os_str())
                             .map(|_| *node)
                     })
                     .or_else(|| {
@@ -550,7 +550,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 item.context()
                     .code
                     .as_ref()
-                    .filter(|pane| pane.path.as_path() == path)
+                    .filter(|pane| pane.path.as_os_str() == path.as_os_str())
                     .map(|_| *node)
             })
         else {
@@ -648,7 +648,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 item.context()
                     .code
                     .as_ref()
-                    .filter(|pane| pane.path.as_path() == path)
+                    .filter(|pane| pane.path.as_os_str() == path.as_os_str())
                     .map(|_| (item.context().route_id, *node))
             })
         })
@@ -665,7 +665,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 item.context_mut()
                     .code
                     .as_mut()
-                    .filter(|pane| pane.path.as_path() == path)
+                    .filter(|pane| pane.path.as_os_str() == path.as_os_str())
             })
         })
     }
@@ -676,6 +676,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         rich_text_id: usize,
         sugarloaf: &mut Sugarloaf,
     ) -> bool {
+        let source = neoism_ui::services::FileOpenSource::workspace(self.current_workspace_is_remote_joined());
+        self.add_stacked_code_with_source(file, rich_text_id, sugarloaf, source)
+    }
+
+    pub fn add_stacked_code_with_source(
+        &mut self,
+        file: PathBuf,
+        rich_text_id: usize,
+        sugarloaf: &mut Sugarloaf,
+        source: neoism_ui::services::FileOpenSource,
+    ) -> bool {
         let dimension = self.current_grid().grid_dimension();
         let new_context = create_code_context(
             self.event_proxy.clone(),
@@ -683,6 +694,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             rich_text_id,
             dimension,
             file,
+            source,
         );
         let new_route_id = new_context.route_id;
         if self.contexts[self.current_index]
@@ -702,6 +714,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         rich_text_id: usize,
         sugarloaf: &mut Sugarloaf,
     ) -> bool {
+        let source = neoism_ui::services::FileOpenSource::workspace(self.current_workspace_is_remote_joined());
+        self.add_stacked_markdown_with_source(file, rich_text_id, sugarloaf, source)
+    }
+
+    pub fn add_stacked_markdown_with_source(
+        &mut self,
+        file: PathBuf,
+        rich_text_id: usize,
+        sugarloaf: &mut Sugarloaf,
+        source: neoism_ui::services::FileOpenSource,
+    ) -> bool {
         let dimension = self.current_grid().grid_dimension();
         let new_context = create_markdown_context(
             self.event_proxy.clone(),
@@ -709,6 +732,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             rich_text_id,
             dimension,
             file,
+            source,
         );
         let new_route_id = new_context.route_id;
         if self.contexts[self.current_index]
@@ -783,7 +807,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 item.context()
                     .notebook
                     .as_ref()
-                    .filter(|pane| pane.path.as_path() == path)
+                    .filter(|pane| pane.path.as_os_str() == path.as_os_str())
                     .map(|_| (item.context().route_id, *node))
             })
         })
@@ -942,6 +966,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             rich_text_id,
             dimension,
             file,
+            neoism_ui::services::FileOpenSource::workspace(self.current_workspace_is_remote_joined()),
         );
         let new_route_id = new_context.route_id;
         self.contexts[self.current_index].add_stacked_context_on_parent(
@@ -1026,6 +1051,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             rich_text_id,
             dimension,
             file,
+            neoism_ui::services::FileOpenSource::workspace(self.current_workspace_is_remote_joined()),
         );
         let new_route_id = new_context.route_id;
         self.contexts[self.current_index].add_stacked_context_on_parent(

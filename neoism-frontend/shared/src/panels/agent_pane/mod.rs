@@ -7,6 +7,7 @@
 
 pub mod api_mapping;
 pub mod attachment_policy;
+pub mod background_runtime;
 pub mod bridge_policy;
 
 pub mod command_controller;

@@ -1085,6 +1085,13 @@ impl Screen<'_> {
             PaletteAction::GoToSymbol => {
                 self.open_finder_symbols();
             }
+            PaletteAction::ToggleGitBlame => {
+                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    code.blame.apply_default(self.renderer.code_git_blame);
+                    code.blame.toggle();
+                }
+                self.mark_dirty();
+            }
             PaletteAction::ToggleWordWrap => {
                 let _ = self.toggle_code_word_wrap();
             }

@@ -40,6 +40,16 @@ pub async fn handle(msg: GitClientMessage) -> Vec<GitServerMessage> {
     handle_with_root(workspace_root(), msg).await
 }
 
+/// Late cancelled subscription tasks must not replace a newer scope on the
+/// same socket. Equal IDs are allowed for reconnect/open-revision renewal.
+pub(crate) fn accept_watch_request(high_water: &mut u64, request_id: u64) -> bool {
+    if request_id < *high_water {
+        return false;
+    }
+    *high_water = request_id;
+    true
+}
+
 /// [`handle`] against an explicit repo root — the `workspace_root`
 /// envelope override, so a guest browsing a JOINED workspace gets git
 /// status for THAT workspace's repo rather than the daemon's default
@@ -48,7 +58,23 @@ pub async fn handle_with_root(
     root: std::path::PathBuf,
     msg: GitClientMessage,
 ) -> Vec<GitServerMessage> {
+    if let GitClientMessage::Blame { path } = msg {
+        return crate::git_blame::handle(root, path).await;
+    }
+    if matches!(msg, GitClientMessage::ChangedFiles) {
+        let snapshot = crate::git_snapshot::snapshot(root).await;
+        return vec![GitServerMessage::ChangedFiles {
+            files: snapshot.files,
+            branch: snapshot.branch,
+            error: snapshot.error,
+        }];
+    }
+    let mutated = msg.is_mutation();
+    let cache_root = root.clone();
     let result = tokio::task::spawn_blocking(move || handle_blocking(&root, msg)).await;
+    if mutated {
+        crate::git_snapshot::invalidate(&cache_root).await;
+    }
     match result {
         Ok(out) => out,
         Err(e) => err(format!("git task join error: {e}")),
@@ -149,7 +175,17 @@ fn bytecount_lines(bytes: &[u8]) -> usize {
 
 fn resolve_branch(root: &Path) -> Option<String> {
     let repo = Repository::discover(root).ok()?;
-    let head = repo.head().ok()?;
+    let head = match repo.head() {
+        Ok(head) => head,
+        Err(_) => {
+            return repo
+                .find_reference("HEAD")
+                .ok()?
+                .symbolic_target()
+                .and_then(|name| name.strip_prefix("refs/heads/"))
+                .map(str::to_owned)
+        }
+    };
     if head.is_branch() {
         head.shorthand().map(str::to_owned)
     } else {
@@ -168,6 +204,10 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
         Err(e) => return err(format!("not a git repository at {}: {e}", root.display())),
     };
     match msg {
+        GitClientMessage::WatchStatus { .. } | GitClientMessage::UnwatchStatus { .. } => {
+            vec![]
+        }
+        GitClientMessage::Blame { .. } => err("Blame requires async dispatch"),
         GitClientMessage::Status => status(&repo),
         GitClientMessage::Diff { path } => diff(&repo, path.as_deref(), root),
         GitClientMessage::Log { max_count } => log(&repo, max_count),
@@ -264,18 +304,32 @@ fn changed_files_reply(workdir: &Path, error: Option<String>) -> GitServerMessag
 /// staged bit, `git diff HEAD --numstat -z` for per-file line counts,
 /// and a raw line count for untracked files.
 fn collect_changed_files(workdir: &Path) -> Vec<GitFileChange> {
-    let status = match git_command(workdir)
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .output()
-    {
+    collect_changed_files_checked(workdir).unwrap_or_default()
+}
+
+fn collect_changed_files_checked(workdir: &Path) -> Result<Vec<GitFileChange>, String> {
+    let status = match crate::git_snapshot::output(git_command(workdir).args([
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    ])) {
         Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
+        Ok(o) => return Err(String::from_utf8_lossy(&o.stderr).into_owned()),
+        Err(e) => return Err(e.to_string()),
     };
 
-    let numstat = git_command(workdir)
-        .args(["diff", "HEAD", "--numstat", "-z", "--no-color"])
-        .output()
-        .ok()
+    let numstat = crate::git_snapshot::output(git_command(workdir).args([
+        "diff",
+        "HEAD",
+        "--numstat",
+        "-z",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]))
+    .map_err(|e| e.to_string())?;
+    let numstat = Some(numstat)
         .filter(|o| o.status.success())
         .map(|o| neoism_ui::panels::git_diff::parse_numstat(&o.stdout))
         .unwrap_or_default();
@@ -325,8 +379,28 @@ fn collect_changed_files(workdir: &Path) -> Vec<GitFileChange> {
 
         let (additions, deletions) = if matches!(status_kind, GitChangeStatus::Untracked)
         {
-            let line_count = std::fs::read(workdir.join(&path))
-                .map(|bytes| bytecount_lines(&bytes) as u32)
+            let line_count = std::fs::File::open(workdir.join(&path))
+                .and_then(|file| {
+                    use std::io::Read;
+                    let mut file = file;
+                    let mut buf = [0u8; 8192];
+                    let mut lines = 0u32;
+                    let mut last = None;
+                    loop {
+                        let n = file.read(&mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        if buf[..n].contains(&0) {
+                            return Ok(0);
+                        }
+                        lines = lines.saturating_add(
+                            buf[..n].iter().filter(|&&b| b == b'\n').count() as u32,
+                        );
+                        last = Some(buf[n - 1]);
+                    }
+                    Ok(lines.saturating_add(u32::from(last.is_some_and(|b| b != b'\n'))))
+                })
                 .unwrap_or(0);
             (line_count, 0)
         } else {
@@ -345,7 +419,7 @@ fn collect_changed_files(workdir: &Path) -> Vec<GitFileChange> {
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    files
+    Ok(files)
 }
 
 /// List every local branch, newest committer date first — desktop
@@ -374,9 +448,15 @@ fn list_branches(workdir: &Path) -> Vec<String> {
 /// untracked files diff against `/dev/null` via `--no-index`, which
 /// exits non-zero by design when a diff exists.
 fn load_file_diff(workdir: &Path, path: &str) -> String {
-    let tracked = git_command(workdir)
-        .args(["diff", "HEAD", "--no-color", "--", path])
-        .output();
+    let tracked = crate::git_snapshot::output(git_command(workdir).args([
+        "diff",
+        "HEAD",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--",
+        path,
+    ]));
     if let Ok(o) = &tracked {
         if o.status.success() && !o.stdout.is_empty() {
             return String::from_utf8_lossy(&o.stdout).into_owned();
@@ -389,10 +469,20 @@ fn load_file_diff(workdir: &Path, path: &str) -> String {
     if !abs.is_file() {
         return String::new();
     }
-    let untracked = git_command(workdir)
-        .args(["diff", "--no-index", "--no-color", "--", "/dev/null"])
-        .arg(&abs)
-        .output();
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let untracked = crate::git_snapshot::output(
+        git_command(workdir)
+            .args([
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                null,
+            ])
+            .arg(&abs),
+    );
     match untracked {
         // `--no-index` exits 1 when the files differ; take stdout
         // whenever git produced any.
@@ -427,7 +517,11 @@ fn run_git(workdir: &Path, args: &[&str]) -> Result<(), String> {
 /// uses.
 fn git_command(workdir: &Path) -> std::process::Command {
     let mut cmd = crate::process::background_command("git");
-    cmd.env("GIT_OPTIONAL_LOCKS", "0").arg("-C").arg(workdir);
+    cmd.env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["-c", "core.fsmonitor=false"])
+        .arg("-C")
+        .arg(workdir);
     cmd
 }
 
@@ -819,6 +913,16 @@ mod tests {
     }
 
     #[test]
+    fn late_old_subscription_cannot_override_new_workspace_watch() {
+        let mut high_water = 0;
+        assert!(super::accept_watch_request(&mut high_water, 101));
+        assert!(super::accept_watch_request(&mut high_water, 102));
+        assert!(!super::accept_watch_request(&mut high_water, 101));
+        assert!(super::accept_watch_request(&mut high_water, 102));
+        assert_eq!(high_water, 102);
+    }
+
+    #[test]
     fn mutation_verbs_require_write_permission() {
         assert!(matches!(
             required_permission(&GitClientMessage::Stage { path: "x".into() }),
@@ -869,4 +973,35 @@ mod tests {
             other => panic!("expected traversal error, got {other:?}"),
         }
     }
+}
+
+/// Combined snapshot: discovery, branch and file list all refer to the host's
+/// repository workdir, never to the requesting machine's filesystem.
+pub(crate) fn collect_repo_snapshot(root: &Path) -> neoism_protocol::git::GitRepoStatus {
+    use neoism_protocol::git::GitRepoStatus;
+    let mut snapshot = GitRepoStatus {
+        workspace_root: root.to_string_lossy().into_owned(),
+        repo_root: None,
+        branch: None,
+        files: Vec::new(),
+        error: None,
+    };
+    let repo = match Repository::discover(root) {
+        Ok(repo) => repo,
+        Err(_) => return snapshot,
+    };
+    let Some(workdir) = repo.workdir() else {
+        return snapshot;
+    };
+    // Match daemon-produced directory identities (Windows canonical roots may
+    // carry a verbatim prefix). Canonicalization only happens on the HOST.
+    let workdir =
+        std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
+    snapshot.repo_root = Some(workdir.to_string_lossy().into_owned());
+    snapshot.branch = resolve_branch(&workdir);
+    match collect_changed_files_checked(&workdir) {
+        Ok(files) => snapshot.files = files,
+        Err(error) => snapshot.error = Some(error),
+    }
+    snapshot
 }

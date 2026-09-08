@@ -763,6 +763,28 @@ impl NeoismAgentPane {
         if self.running_background_task_count() == 0 {
             return Vec::new();
         }
+        if self.background_task_authority.is_authoritative() {
+            return self
+                .background_task_authority
+                .job_ids()
+                .iter()
+                .map(|id| {
+                    let command = self
+                        .messages
+                        .iter()
+                        .find(|message| {
+                            message.tool == "background_task"
+                                && background_job_id_from_message(message).as_deref()
+                                    == Some(id.as_str())
+                        })
+                        .and_then(background_task_command_from_message);
+                    command.map_or_else(
+                        || format!("{id} · running"),
+                        |command| format!("{id} · running · {command}"),
+                    )
+                })
+                .collect();
+        }
         active_background_task_summaries(&self.messages)
     }
 

@@ -82,6 +82,12 @@ pub enum EditorClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_id: Option<String>,
     },
+    /// Stop one native surface subscription without closing the host LSP
+    /// document still used by other clients.
+    CloseLspBuffer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
     /// Forward raw input bytes (as produced by the user's keypresses)
     /// to nvim's `nvim_input`. The bytes are the literal sequence nvim
     /// expects — e.g. `b"i"`, `b"<Esc>"`, `b":wq<CR>"`, etc.
@@ -206,6 +212,10 @@ pub enum EditorClientMessage {
         path: PathBuf,
         line: u32,
         character: u32,
+        /// Authoritative native buffer for this query. Older clients may omit
+        /// it after an ordered OpenBuffer; native clients avoid sync/query races.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        buffer_text: Option<String>,
         /// Action payload: rename new-name, completion trigger char.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
@@ -225,6 +235,9 @@ pub enum EditorClientMessage {
     ApplyLspCodeActionAt {
         seq: u64,
         action: EditorLspCodeAction,
+        /// Live text after accepting a completion, before its follow-up command.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        buffer_text: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         open_paths: Vec<PathBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,13 +279,133 @@ pub enum EditorLspAction {
     /// `LspQueryAt` path). Result rides `LspHoverResult` as one
     /// synthetic hover, matching the desktop card surface.
     SignatureHelp,
+    DocumentHighlight,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EditorLspLocation {
+    /// Legacy URI/path representation. Prefer `host_path` when present.
     pub uri: String,
+    /// Authoritative, decoded, absolute path produced on the daemon host.
+    /// This is neither a file URI nor a Neoism CRDT buffer ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_path: Option<String>,
     pub line: u32,
     pub character: u32,
+}
+
+impl EditorLspLocation {
+    pub fn resolve_host_path(
+        &self,
+        root: &crate::host_path::HostPath,
+    ) -> Option<crate::host_path::HostPath> {
+        match &self.host_path {
+            Some(path) => Some(crate::host_path::HostPath::new(path)),
+            None => decode_host_lsp_path(root, &self.uri),
+        }
+    }
+}
+
+/// Resolve an LSP file URI (or engine-relative/raw path) with HOST syntax.
+/// Never calls guest `Url::to_file_path`, `Path::is_absolute`, join or stat.
+/// Do not pass Neoism CRDT buffer IDs here: those are opaque, not encoded URIs.
+/// The ordinary local-native URI decoder is intentionally separate.
+pub fn decode_host_lsp_path(
+    root: &crate::host_path::HostPath,
+    value: &str,
+) -> Option<crate::host_path::HostPath> {
+    use crate::host_path::HostPath;
+    if value.is_empty() || value.contains('\0') {
+        return None;
+    }
+    let file_uri = value
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"));
+    if !file_uri {
+        if root.is_windows() && value.starts_with("//") {
+            return Some(HostPath::new(format!(
+                "\\\\{}",
+                value.trim_start_matches('/').replace('/', "\\")
+            )));
+        }
+        let path = HostPath::new(value);
+        if (!root.is_windows() && value.starts_with('/'))
+            || (root.is_windows() && path.is_windows())
+        {
+            return Some(path);
+        }
+        if value.is_empty() || value.contains("://") || value.contains('\0') {
+            return None;
+        }
+        // Engine paths can be workspace-relative. They are ALREADY decoded.
+        return Some(root.join(value));
+    }
+    fn decode(value: &str) -> Option<String> {
+        let raw = value.as_bytes();
+        let mut decoded = Vec::with_capacity(raw.len());
+        let mut at = 0;
+        while at < raw.len() {
+            if raw[at] == b'%' {
+                let digits = value.get(at + 1..at + 3)?;
+                decoded.push(u8::from_str_radix(digits, 16).ok()?);
+                at += 3;
+            } else {
+                decoded.push(raw[at]);
+                at += 1;
+            }
+        }
+        if decoded.contains(&0) {
+            return None;
+        }
+        String::from_utf8(decoded).ok()
+    }
+    let rest = &value[7..];
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let rest = &rest[..end];
+    let split = rest.find('/')?;
+    let authority = decode(&rest[..split])?;
+    let path = decode(&rest[split..])?;
+    if !root.is_windows() {
+        if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+            return None;
+        }
+        return Some(HostPath::new(path)); // preserves Unix literal backslashes
+    }
+    let drive_path = path.strip_prefix('/').unwrap_or(&path);
+    let drive = drive_path.as_bytes();
+    let is_drive = drive.len() >= 3
+        && drive[0].is_ascii_alphabetic()
+        && drive[1] == b':'
+        && drive[2] == b'/';
+    let mut result = if authority.is_empty()
+        || (authority.eq_ignore_ascii_case("localhost") && is_drive)
+    {
+        if is_drive {
+            drive_path.replace('/', "\\")
+        } else if path.starts_with("//") {
+            format!("\\\\{}", path.trim_start_matches('/').replace('/', "\\"))
+        } else {
+            return None;
+        }
+    } else {
+        if authority.contains(['@', ':', '\\']) {
+            return None;
+        }
+        format!(
+            "\\\\{}\\{}",
+            authority,
+            path.trim_start_matches('/').replace('/', "\\")
+        )
+    };
+    // Older hosts may publish verbatim roots. Keep the same identity spelling.
+    if root.as_str().starts_with(r"\\?\") && !result.starts_with(r"\\?\") {
+        result = if let Some(unc) = result.strip_prefix(r"\\") {
+            format!(r"\\?\UNC\{unc}")
+        } else {
+            format!(r"\\?\{result}")
+        };
+    }
+    Some(HostPath::new(result))
 }
 
 /// One entry in a document-symbol result, flattened from the LSP symbol
@@ -657,6 +790,11 @@ pub enum EditorServerMessage {
         /// reference paths are relative to it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        symbols: Vec<EditorLspSymbol>,
+        /// Single-line occurrences: (zero-based line, byte start, byte end).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        highlights: Vec<(u32, u32, u32)>,
         /// Definition targets (0-based line/character).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         locations: Vec<EditorLspLocation>,
@@ -807,6 +945,7 @@ impl EditorClientMessage {
             | EditorClientMessage::LspComplete { surface_id, .. }
             | EditorClientMessage::ApplyLspCompletion { surface_id, .. }
             | EditorClientMessage::CancelLspCompletion { surface_id }
+            | EditorClientMessage::CloseLspBuffer { surface_id, .. }
             | EditorClientMessage::LspQueryAt { surface_id, .. }
             | EditorClientMessage::ApplyLspCodeActionAt { surface_id, .. }
             | EditorClientMessage::LspHoverAt { surface_id, .. }
@@ -956,6 +1095,97 @@ mod tests {
     }
 
     #[test]
+    fn lsp_host_uri_decoding_is_guest_os_independent() {
+        use crate::host_path::HostPath;
+        for (root, uri, expected) in [
+            (
+                "/home/host/work",
+                "file:///home/host/work/space%20%E9%A1%B9%E7%9B%AE/%2520.rs",
+                "/home/host/work/space 项目/%20.rs",
+            ),
+            (
+                "/home/host/work",
+                "file://localhost/home/host/work/literal%5Cname.rs",
+                "/home/host/work/literal\\name.rs",
+            ),
+            (
+                r"C:\Work",
+                "file:///C:/Work/space%20%E9%A1%B9%E7%9B%AE.rs",
+                r"C:\Work\space 项目.rs",
+            ),
+            (
+                r"\\Server\Share\Work",
+                "file://Server/Share/Work/space%20%E9%A1%B9%E7%9B%AE.rs",
+                r"\\Server\Share\Work\space 项目.rs",
+            ),
+            (
+                r"\\?\C:\Work",
+                "file:///C:/Work/file.rs",
+                r"\\?\C:\Work\file.rs",
+            ),
+            (
+                r"\\?\UNC\Server\Share\Work",
+                "file://Server/Share/Work/file.rs",
+                r"\\?\UNC\Server\Share\Work\file.rs",
+            ),
+            (
+                r"\\Server\Share",
+                "file://///Server/Share/file.rs",
+                r"\\Server\Share\file.rs",
+            ),
+        ] {
+            let target = EditorLspLocation {
+                uri: uri.into(),
+                host_path: None,
+                line: 4,
+                character: 2,
+            };
+            let host = target.resolve_host_path(&HostPath::new(root)).unwrap();
+            assert_eq!(host.as_str(), expected);
+            let stored = std::path::PathBuf::from(host.as_str());
+            assert_eq!(stored.as_os_str(), std::ffi::OsStr::new(expected));
+        }
+    }
+
+    #[test]
+    fn lsp_host_paths_are_not_decoded_twice_or_treated_as_buffer_ids() {
+        use crate::host_path::HostPath;
+        let root = HostPath::new("/host/work");
+        let target = EditorLspLocation {
+            uri: "file:///wrong".into(),
+            host_path: Some("/host/work/%20 项目.rs".into()),
+            line: 0,
+            character: 0,
+        };
+        assert_eq!(
+            target.resolve_host_path(&root).unwrap().as_str(),
+            "/host/work/%20 项目.rs"
+        );
+        assert_eq!(
+            decode_host_lsp_path(&root, "src/%20.rs").unwrap().as_str(),
+            "/host/work/src/%20.rs"
+        );
+        assert_eq!(
+            decode_host_lsp_path(&root, "file:///host/work/%2520.rs")
+                .unwrap()
+                .as_str(),
+            "/host/work/%20.rs"
+        );
+        for uri in [
+            "https://host/file.rs",
+            "file:///host/%XX",
+            "file:///host/%",
+            "file:///host/%00",
+            "file://other-host/private",
+        ] {
+            assert!(
+                decode_host_lsp_path(&root, uri).is_none(),
+                "must reject {uri}"
+            );
+        }
+    }
+
+    #[test]
     fn editor_client_input_resize_mouse_roundtrip() {
         roundtrip_client(&EditorClientMessage::OpenBuffer {
             path: "src/lib.rs".into(),
@@ -1037,11 +1267,15 @@ mod tests {
         roundtrip_client(&EditorClientMessage::LspQueryAt {
             seq: 7,
             action: EditorLspAction::Rename,
+            buffer_text: Some("fn shared() {}".into()),
             path: "src/lib.rs".into(),
             line: 12,
             character: 4,
             text: Some("new_name".into()),
             open_paths: vec!["src/lib.rs".into()],
+            surface_id: Some("pane:7".into()),
+        });
+        roundtrip_client(&EditorClientMessage::CloseLspBuffer {
             surface_id: Some("pane:7".into()),
         });
         roundtrip_client(&EditorClientMessage::Close);
@@ -1054,7 +1288,10 @@ mod tests {
             seq: 9,
             action: EditorLspAction::References,
             root: Some("/workspace".into()),
+            symbols: Vec::new(),
+            highlights: vec![(3, 8, 14)],
             locations: vec![EditorLspLocation {
+                host_path: Some("/host/src/main file.rs".into()),
                 uri: "/workspace/src/lib.rs".into(),
                 line: 3,
                 character: 8,

@@ -1385,6 +1385,34 @@ mod tests {
     }
 
     #[test]
+    fn background_runtime_empty_family_event_survives_proxy() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "session.background_tasks.updated", "properties": {
+                    "sessionID": "root", "backgroundJobsEpoch": "server", "backgroundJobsRevision": 8,
+                    "runningBackgroundTasks": []
+                }
+            }),
+        );
+        let AgentServerMessage::BackgroundTasksUpdated {
+            session_id,
+            epoch,
+            revision,
+            tasks,
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("empty list must be forwarded");
+        };
+        assert_eq!(session_id, "root");
+        assert_eq!(epoch, "server");
+        assert_eq!(revision, 8);
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
     fn background_runtime_event_maps_to_versioned_protocol_update() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         forward_agent_server_event(

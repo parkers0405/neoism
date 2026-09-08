@@ -24,6 +24,7 @@
 //! the diagnostics worker removes that one-based offset exactly once.
 
 use super::*;
+mod remote;
 use neoism_agent_server::language_server as engine;
 use neoism_backend::event::{EventProxy, RioEvent, RioEventType, WindowId};
 // Pure LSP session helpers now live in the shared crate
@@ -306,6 +307,39 @@ pub(crate) fn drain_code_diagnostic_snapshots() -> Vec<CodeDiagnosticSnapshot> {
 /// the path parsed from the server's URI, which can differ from the
 /// pane's path in symlinks/normalization — a raw string match silently
 /// drops every diagnostic.
+/// Ownership is per pane: a local vault may be viewed inside a joined grid.
+fn code_uses_host_lsp(code: &neoism_ui::editor::code::CodePane) -> bool {
+    code.remote_source && !code.local_only
+}
+fn host_path_eq(left: &Path, right: &Path) -> bool {
+    // Path equality normalizes separators on Windows; host identities cannot.
+    left.as_os_str() == right.as_os_str()
+}
+fn code_lsp_file_matches(code: &neoism_ui::editor::code::CodePane, file: &Path) -> bool {
+    if code_uses_host_lsp(code) {
+        host_path_eq(&code.path, file)
+    } else {
+        canonical_key(&code.path) == canonical_key(file)
+    }
+}
+fn code_lsp_source_root(
+    code: &neoism_ui::editor::code::CodePane,
+    joined: bool,
+    workspace: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if code_uses_host_lsp(code) {
+        workspace.map(|root| {
+            let host = neoism_protocol::host_path::HostPath::new(root.to_string_lossy());
+            PathBuf::from(host.as_str())
+        })
+    } else if code.local_only || joined {
+        // Explicit local sources must never borrow the joined host's root.
+        code.path.parent().map(Path::to_path_buf)
+    } else {
+        workspace.or_else(|| code.path.parent().map(Path::to_path_buf))
+    }
+}
+
 fn canonical_key(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -397,15 +431,6 @@ fn lsp_pill_store() -> &'static LspPillStore {
     STORE.get_or_init(Default::default)
 }
 
-/// Last remote LSP buffer selected per window. Revision alone cannot detect
-/// returning to an unchanged pane after another shared file became active on
-/// the same daemon; this focus key forces a fresh OpenBuffer so diagnostics
-/// pushes are routed to the pane the user actually switched back to.
-fn remote_lsp_focus_store() -> &'static Mutex<HashMap<WindowId, (String, PathBuf)>> {
-    static STORE: OnceLock<Mutex<HashMap<WindowId, (String, PathBuf)>>> = OnceLock::new();
-    STORE.get_or_init(Default::default)
-}
-
 fn refresh_lsp_pill(runtime: &engine::LspRuntime, root: &Path, file: &Path) {
     use neoism_ui::panels::status_line::LspStatus as Pill;
     // engine::status() WALKS the workspace (up to 10k files) — running
@@ -446,7 +471,7 @@ fn refresh_lsp_pill(runtime: &engine::LspRuntime, root: &Path, file: &Path) {
                     engine::LspServerState::Available => RowState::Ready,
                     engine::LspServerState::Error => RowState::Errored,
                 },
-                message: None,
+                message: s.detected.message.clone(),
                 level: None,
                 diagnostics: Default::default(),
                 source: Some(
@@ -470,6 +495,11 @@ fn refresh_lsp_pill(runtime: &engine::LspRuntime, root: &Path, file: &Path) {
         (Pill::Active, label, rows)
     } else if statuses.is_empty() {
         (Pill::Missing, String::new(), rows)
+    } else if statuses
+        .iter()
+        .all(|s| s.status == engine::LspServerState::Error)
+    {
+        (Pill::Missing, "LSP error".into(), rows)
     } else {
         (Pill::Initializing, statuses[0].name.clone(), rows)
     };
@@ -695,7 +725,8 @@ fn code_git_result_matches(
     code: &neoism_ui::editor::code::CodePane,
     result: &CodeGitResult,
 ) -> bool {
-    canonical_key(&code.path) == result.key.file
+    !code_uses_host_lsp(code)
+        && canonical_key(&code.path) == result.key.file
         && code.buffer.revision == result.revision
 }
 
@@ -1367,8 +1398,17 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 if newest_definition != Some(ix) {
                                     continue;
                                 }
-                                let locations =
+                                let mut locations =
                                     engine::definition(&query_runtime, root, file, *line, *character);
+                                // This worker is LOCAL-only. The engine may return
+                                // relative native paths; bind them to the captured
+                                // local query root (not a joined workspace's root).
+                                for location in &mut locations {
+                                    let path = Path::new(&location.path);
+                                    if !path.is_absolute() {
+                                        location.path = root.join(path).to_string_lossy().into_owned();
+                                    }
+                                }
                                 if lsp_log() {
                                     eprintln!(
                                         "neoism::lsp code definition result: seq={seq} locations={} at {line}:{character}",
@@ -1387,7 +1427,8 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 file,
                                 revision,
                             } => {
-                                let edits = engine::formatting(&query_runtime, root, file);
+                                let groups = engine::formatting(&query_runtime, root, file);
+                                let edits = neoism_ui::editor::code::lsp_session::formatting_text_edits(&groups);
                                 let mut results = match results_store().lock() {
                                     Ok(results) => results,
                                     Err(poisoned) => poisoned.into_inner(),
@@ -1732,29 +1773,22 @@ impl Screen<'_> {
         snapshot: &CodeDiagnosticSnapshot,
     ) -> bool {
         let current_index = self.context_manager.current_index();
-        let matching_grids = (0..self.context_manager.len())
+        let grid_roots = (0..self.context_manager.len())
             .map(|index| {
-                let Some(workspace_id) =
-                    self.context_manager.workspace_tree_id_for_index(index)
-                else {
-                    return false;
-                };
                 if self
                     .context_manager
                     .workspace_is_remote_joined_for_index(index)
                 {
-                    return false;
+                    return None;
                 }
-                let root =
-                    self.workspace_roots
-                        .get(&workspace_id)
-                        .cloned()
-                        .or_else(|| {
-                            (index == current_index)
-                                .then(|| self.active_workspace_root.clone())
-                                .flatten()
-                        });
-                root.is_some_and(|root| canonical_key(&root) == snapshot.key.root)
+                self.context_manager
+                    .workspace_tree_id_for_index(index)
+                    .and_then(|id| self.workspace_roots.get(&id).cloned())
+                    .or_else(|| {
+                        (index == current_index)
+                            .then(|| self.active_workspace_root.clone())
+                            .flatten()
+                    })
             })
             .collect::<Vec<_>>();
 
@@ -1776,16 +1810,28 @@ impl Screen<'_> {
             .collect::<Vec<_>>();
         let mut changed = false;
         for (index, grid) in self.context_manager.all_grids_mut().iter_mut().enumerate() {
-            if !matching_grids.get(index).copied().unwrap_or(false) {
-                continue;
-            }
             for item in grid.contexts_mut().values_mut() {
                 let Some(code) = item.context_mut().code.as_mut() else {
                     continue;
                 };
-                if canonical_key(&code.path) != snapshot.key.file {
+                if code_uses_host_lsp(code) {
                     continue;
                 }
+                let root = if code.local_only {
+                    code.path.parent().map(Path::to_path_buf)
+                } else {
+                    grid_roots
+                        .get(index)
+                        .cloned()
+                        .flatten()
+                        .or_else(|| code.path.parent().map(Path::to_path_buf))
+                };
+                if root.is_none_or(|root| canonical_key(&root) != snapshot.key.root)
+                    || canonical_key(&code.path) != snapshot.key.file
+                {
+                    continue;
+                }
+                let binding = if code.local_only { None } else { binding };
 
                 code.diagnostic_summaries = summaries.clone();
                 code.diag_anchors.clear();
@@ -1837,24 +1883,18 @@ impl Screen<'_> {
         let proxy = self.context_manager.event_proxy_clone();
         let window_id = self.context_manager.window_id();
         let worker = ensure_code_git_worker(proxy);
-        let remote_grids = (0..self.context_manager.len())
-            .map(|index| {
-                self.context_manager
-                    .workspace_is_remote_joined_for_index(index)
-            })
-            .collect::<Vec<_>>();
         let bindings = &self.code_crdt;
         let mut changed = false;
 
-        for (index, grid) in self.context_manager.all_grids_mut().iter_mut().enumerate() {
-            let remote = remote_grids.get(index).copied().unwrap_or(false);
+        for grid in self.context_manager.all_grids_mut().iter_mut() {
             for item in grid.contexts_mut().values_mut() {
                 let route_id = item.context().route_id;
                 let Some(code) = item.context_mut().code.as_mut() else {
                     continue;
                 };
                 let revision = code.buffer.revision;
-                if !code.diag_anchors.is_empty()
+                if !code.local_only
+                    && !code.diag_anchors.is_empty()
                     && code.diagnostics_resolved_revision != Some(revision)
                 {
                     let buffer_id =
@@ -1871,7 +1911,9 @@ impl Screen<'_> {
                     }
                 }
 
-                if !remote && code.git_scheduled_revision != Some(revision) {
+                if !code_uses_host_lsp(code)
+                    && code.git_scheduled_revision != Some(revision)
+                {
                     code.git_scheduled_revision = Some(revision);
                     enqueue_code_git_job(
                         worker,
@@ -1894,16 +1936,7 @@ impl Screen<'_> {
     /// Install a background git result only into the exact pane route and
     /// revision that produced it. This is the stale-result rejection gate.
     pub(crate) fn apply_code_git_result(&mut self, result: &CodeGitResult) -> bool {
-        let remote_grids = (0..self.context_manager.len())
-            .map(|index| {
-                self.context_manager
-                    .workspace_is_remote_joined_for_index(index)
-            })
-            .collect::<Vec<_>>();
-        for (index, grid) in self.context_manager.all_grids_mut().iter_mut().enumerate() {
-            if remote_grids.get(index).copied().unwrap_or(false) {
-                continue;
-            }
+        for grid in self.context_manager.all_grids_mut().iter_mut() {
             for item in grid.contexts_mut().values_mut() {
                 let context = item.context_mut();
                 if context.route_id != result.key.route_id {
@@ -1931,31 +1964,46 @@ impl Screen<'_> {
         ensure_workers(proxy, window_id)
     }
 
-    /// True when the focused code pane belongs to a remote-joined
-    /// workspace: its `root`/`file` are HOST paths, so the in-process
+    /// True when the focused code pane has a host-owned source (not an
+    /// explicitly local vault inside a joined grid). The in-process
     /// language server must NOT touch them (it would spawn a local
     /// server against files that don't exist here). LSP for joined
     /// workspaces is served by the daemon that owns the files.
     fn code_lsp_is_remote(&self) -> bool {
-        self.context_manager.current_workspace_is_remote_joined()
+        self.context_manager
+            .current()
+            .code
+            .as_ref()
+            .is_some_and(code_uses_host_lsp)
     }
 
-    /// `(workspace root, file)` for the focused code pane. `None` for a
-    /// remote-joined pane so every query/apply path no-ops locally.
+    /// Opaque owner paths for the focused buffer. Dispatch decides transport;
+    /// remote paths must never be passed to the in-process engine.
     fn code_lsp_target(&self) -> Option<(PathBuf, PathBuf)> {
-        if self.code_lsp_is_remote() {
+        let code = self.context_manager.current().code.as_ref()?;
+        if code.remote_content_pending || (code.remote_source && code.error.is_some()) {
             return None;
         }
-        let root = self.active_pane_workspace_root();
-        let code = self.context_manager.current().code.as_ref()?;
-        let file = code.path.clone();
-        let root = root.or_else(|| file.parent().map(Path::to_path_buf))?;
+        let file = if code_uses_host_lsp(code) {
+            let host =
+                neoism_protocol::host_path::HostPath::new(code.path.to_string_lossy());
+            PathBuf::from(host.as_str()) // NOT HostPath::buffer_id (an opaque CRDT key).
+        } else {
+            code.path.clone()
+        };
+        let root = code_lsp_source_root(
+            code,
+            self.context_manager.current_workspace_is_remote_joined(),
+            self.active_pane_workspace_root(),
+        )?;
         Some((root, file))
     }
 
     /// Per-frame LSP pump for sync/query timing only. Diagnostics and git
     /// marks are prepared by event/service hooks and merely consumed by paint.
     pub(crate) fn pump_code_lsp(&mut self) {
+        self.pump_code_blame();
+        self.pump_remote_code_lsp();
         if self.context_manager.current().code.is_none() {
             // Focus left the code pane — no stale popups may linger.
             let ui = &mut self.renderer.code_lsp;
@@ -1964,91 +2012,28 @@ impl Screen<'_> {
             }
             return;
         }
-        let proxy = self.context_manager.event_proxy_clone();
-        let window_id = self.context_manager.window_id();
-        let shared = ensure_workers(proxy, window_id);
-        let root = self.active_pane_workspace_root();
-        // Remote-joined panes never drive the in-process language
-        // server (host paths — a local server would start against files
-        // that don't exist here); diagnostics/LSP come from the daemon.
+        let Some((root, file)) = self.code_lsp_target() else {
+            return;
+        };
         let remote = self.code_lsp_is_remote();
-        let remote_endpoint = remote
-            .then(|| {
-                self.context_manager
-                    .current_adopted_workspace_endpoint()
-                    .or_else(|| self.context_manager.daemon_endpoint())
-                    .map(str::to_owned)
-            })
-            .flatten();
-        let remote_route = remote
-            .then(|| self.context_manager.daemon_link_handle_and_runtime())
-            .flatten();
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
-            return;
-        };
-        if remote && code.remote_content_pending {
-            // Never didOpen the host server with the guest pane's temporary
-            // empty placeholder. The remote file reply clears this flag; the
-            // following pump then sends the real authoritative buffer.
-            return;
-        }
-        let file = code.path.clone();
-        let Some(root) = root.or_else(|| file.parent().map(Path::to_path_buf)) else {
-            return;
-        };
-        let remote_focus_changed = remote_endpoint.is_some_and(|endpoint| {
-            let key = (endpoint, file.clone());
-            let mut store = match remote_lsp_focus_store().lock() {
-                Ok(store) => store,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            store.insert(window_id, key.clone()) != Some(key)
-        });
-        if remote
-            && (remote_focus_changed
-                || code.lsp_synced_revision != Some(code.buffer.revision))
-        {
-            // The native guest editor owns the live text, while the language
-            // server must run beside the files on the host. Ship each new
-            // revision through the daemon editor envelope with the explicit
-            // workspace root; the reply feeds the same status/diagnostic UI
-            // caches as the local engine.
-            if let Some((handle, runtime)) = remote_route {
-                code.lsp_synced_revision = Some(code.buffer.revision);
-                let text = code.buffer.text();
-                let file = file.clone();
-                let workspace_root = root.clone();
-                runtime.spawn(async move {
-                    if let Err(error) = handle
-                        .send_editor_with_workspace_root(
-                            neoism_protocol::editor::EditorClientMessage::OpenBuffer {
-                                path: file,
-                                text: Some(text),
-                                line: None,
-                                character: None,
-                                surface_id: None,
-                            },
-                            Some(workspace_root),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            target: "neoism::remote_lsp",
-                            %error,
-                            "remote LSP buffer sync failed"
-                        );
-                    }
-                });
+        if !remote {
+            let code = self.context_manager.current().code.as_ref().unwrap();
+            if code.lsp_synced_revision != Some(code.buffer.revision) {
+                let revision = code.buffer.revision;
+                let job = CodeLspJob::Sync {
+                    root: root.clone(),
+                    file: file.clone(),
+                    text: code.buffer.text(),
+                };
+                if self.dispatch_code_lsp(job).is_ok() {
+                    self.context_manager
+                        .current_mut()
+                        .code
+                        .as_mut()
+                        .unwrap()
+                        .lsp_synced_revision = Some(revision);
+                }
             }
-        }
-
-        if !remote && code.lsp_synced_revision != Some(code.buffer.revision) {
-            code.lsp_synced_revision = Some(code.buffer.revision);
-            let _ = shared.jobs.send(CodeLspJob::Sync {
-                root: root.clone(),
-                file: file.clone(),
-                text: code.buffer.text(),
-            });
         }
 
         // Caret-idle occurrence probe (documentHighlight): once the
@@ -2098,7 +2083,7 @@ impl Screen<'_> {
                             probe.requested = true;
                             probe.seq = seq;
                         }
-                        let _ = shared.jobs.send(CodeLspJob::DocumentHighlight {
+                        let _ = self.dispatch_code_lsp(CodeLspJob::DocumentHighlight {
                             root: root.clone(),
                             file: file.clone(),
                             line: line as u32,
@@ -2154,6 +2139,19 @@ impl Screen<'_> {
     /// Fold worker results into the UI state and enforce position-based
     /// dismissal (cursor left the hover/anchor position).
     fn drain_code_lsp_results(&mut self) {
+        if self.code_lsp_is_remote() {
+            // Keep the same caret/popup lifecycle without consuming another
+            // window's in-process result mailbox.
+            self.apply_code_lsp_results(CodeLspResults::default());
+            return;
+        }
+        let results = std::mem::take(
+            &mut *results_store().lock().unwrap_or_else(|p| p.into_inner()),
+        );
+        self.apply_code_lsp_results(results);
+    }
+
+    fn apply_code_lsp_results(&mut self, mut results: CodeLspResults) {
         let Some((path, cursor, line_text)) =
             self.context_manager.current().code.as_ref().map(|code| {
                 (
@@ -2216,10 +2214,6 @@ impl Screen<'_> {
             document_symbols,
             occurrences,
         ) = {
-            let mut results = match results_store().lock() {
-                Ok(results) => results,
-                Err(poisoned) => poisoned.into_inner(),
-            };
             (
                 results.completion.take(),
                 results.hover.take(),
@@ -2412,7 +2406,11 @@ impl Screen<'_> {
                 } else {
                     self.finder_target_route = None;
                     self.renderer.file_tree.set_focused(false);
-                    self.renderer.finder.open_references(root, rows);
+                    if self.code_lsp_is_remote() {
+                        self.renderer.finder.open_host_references(root, rows);
+                    } else {
+                        self.renderer.finder.open_references(root, rows);
+                    }
                 }
                 self.mark_dirty();
             }
@@ -2484,25 +2482,36 @@ impl Screen<'_> {
                 touched += 1;
                 continue;
             }
-            let mut open_pane: Option<PathBuf> = None;
-            if self.context_manager.code_pane_mut_by_path(&path).is_some() {
-                open_pane = Some(path.clone());
-            } else if canonical != path
-                && self
-                    .context_manager
-                    .code_pane_mut_by_path(&canonical)
-                    .is_some()
-            {
-                open_pane = Some(canonical.clone());
-            }
-            if let Some(pane_path) = open_pane {
-                if let Some(pane) = self.context_manager.code_pane_mut_by_path(&pane_path)
-                {
-                    pane.buffer.apply_text_edits(&parsed);
-                    let dirty = pane.is_dirty();
-                    self.sync_markdown_tab_modified(&pane_path, dirty);
-                    touched += 1;
+            // A local action must not mutate an identically named host path
+            // in a joined workspace. Resolve live targets only among local grids.
+            let routes = self
+                .context_manager
+                .all_grids()
+                .iter()
+                .flat_map(|grid| grid.contexts().values())
+                .filter_map(|item| {
+                    item.context()
+                        .code
+                        .as_ref()
+                        .filter(|code| {
+                            !code_uses_host_lsp(code)
+                                && (code.path == path
+                                    || canonical_key(&code.path) == canonical)
+                        })
+                        .map(|_| item.context().route_id)
+                })
+                .collect::<Vec<_>>();
+            if !routes.is_empty() {
+                for route in routes {
+                    if let Some(code) = self
+                        .context_manager
+                        .get_by_route_id(route)
+                        .and_then(|item| item.context_mut().code.as_mut())
+                    {
+                        code.buffer.apply_text_edits(&parsed);
+                    }
                 }
+                touched += 1;
                 continue;
             }
             match apply_edits_on_disk(&path, &parsed) {
@@ -2553,12 +2562,12 @@ impl Screen<'_> {
             .current()
             .code
             .as_ref()
-            .is_some_and(|code| code.path == target);
+            .is_some_and(|code| code_lsp_file_matches(code, &target));
         if !same_file {
             self.open_path_in_code(target.clone());
         }
         if let Some(code) = self.context_manager.current_mut().code.as_mut() {
-            if code.path == target {
+            if code_lsp_file_matches(code, &target) {
                 let line = line.min(code.buffer.lines.len().saturating_sub(1));
                 code.buffer.set_cursor_position(line, col, false);
                 code.buffer.follow_cursor = true;
@@ -2570,14 +2579,11 @@ impl Screen<'_> {
     /// Finder Symbols mode: fetch the active file's document symbols
     /// on the worker. False when there's no LSP target.
     pub(crate) fn request_code_document_symbols(&mut self) -> bool {
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return false;
         };
         let seq = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
-        shared
-            .jobs
-            .send(CodeLspJob::DocumentSymbols { root, file, seq })
+        self.dispatch_code_lsp(CodeLspJob::DocumentSymbols { root, file, seq })
             .is_ok()
     }
 
@@ -2587,6 +2593,11 @@ impl Screen<'_> {
         &self,
         file: &Path,
     ) -> Option<(neoism_ui::panels::status_line::LspStatus, Option<String>)> {
+        if self.code_lsp_is_remote() {
+            return self.remote_code_lsp_pill(file).map(|(status, label, _)| {
+                (status, (!label.is_empty()).then_some(label))
+            });
+        }
         let store = match lsp_pill_store().lock() {
             Ok(store) => store,
             Err(poisoned) => poisoned.into_inner(),
@@ -2600,136 +2611,6 @@ impl Screen<'_> {
     /// Fold host-daemon LSP replies into the native code pane. Joined
     /// workspaces cannot run the in-process engine against host-only paths,
     /// so their status snapshot and diagnostics arrive over EditorReply.
-    pub(crate) fn apply_remote_code_lsp_message(
-        &mut self,
-        message: &neoism_protocol::editor::EditorServerMessage,
-    ) -> bool {
-        use neoism_protocol::editor::{DiagnosticSeverity, EditorServerMessage};
-        match message {
-            EditorServerMessage::Batch { messages, .. } => {
-                let mut changed = false;
-                for message in messages {
-                    changed |= self.apply_remote_code_lsp_message(message);
-                }
-                changed
-            }
-            EditorServerMessage::LspSnapshot {
-                file_path, servers, ..
-            } => {
-                let Some(file) = self
-                    .context_manager
-                    .current()
-                    .code
-                    .as_ref()
-                    .map(|code| code.path.clone())
-                else {
-                    return false;
-                };
-                if file_path.as_ref().is_some_and(|path| path != &file) {
-                    return false;
-                }
-                use neoism_ui::panels::lsp_popup::LspServerState as RowState;
-                use neoism_ui::panels::status_line::LspStatus as Pill;
-                let rows = servers
-                    .iter()
-                    .map(|server| neoism_ui::panels::lsp_popup::LspServerRow {
-                        name: server.name.clone(),
-                        binary: (!server.binary.is_empty())
-                            .then(|| server.binary.clone()),
-                        filetype: (!server.filetype.is_empty())
-                            .then(|| server.filetype.clone()),
-                        state: match server.state.as_str() {
-                            "connected" | "active" => RowState::Active,
-                            "available" | "ready" => RowState::Ready,
-                            "initializing" | "starting" => RowState::Initializing,
-                            "error" | "errored" => RowState::Errored,
-                            "disabled" => RowState::Disabled,
-                            _ => RowState::Missing,
-                        },
-                        message: server.message.clone(),
-                        level: server.level.clone(),
-                        diagnostics: Default::default(),
-                        source: server.source.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                let connected = servers
-                    .iter()
-                    .filter(|server| {
-                        matches!(server.state.as_str(), "connected" | "active")
-                    })
-                    .map(|server| server.name.as_str())
-                    .collect::<Vec<_>>();
-                let (status, label) = if connected.is_empty() {
-                    if servers.is_empty() {
-                        (Pill::Missing, String::new())
-                    } else {
-                        (Pill::Initializing, servers[0].name.clone())
-                    }
-                } else {
-                    let label = match connected.len() {
-                        1 => connected[0].to_string(),
-                        count => format!("{}+{}", connected[0], count - 1),
-                    };
-                    (Pill::Active, label)
-                };
-                let mut store = match lsp_pill_store().lock() {
-                    Ok(store) => store,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                store.insert(file, (status, label, rows));
-                self.mark_dirty();
-                true
-            }
-            EditorServerMessage::Diagnostics {
-                file_path, items, ..
-            } => {
-                let Some(code) = self.context_manager.current_mut().code.as_mut() else {
-                    return false;
-                };
-                let file = file_path.clone().unwrap_or_else(|| code.path.clone());
-                if file != code.path {
-                    return false;
-                }
-
-                // Remote protocol columns are also UTF-8 bytes. Preserve the
-                // current-pane routing for this increment, but share the exact
-                // same projection/clamping policy as local diagnostics.
-                let diagnostics = items
-                    .iter()
-                    .map(|item| DocumentDiagnostic {
-                        start_line: item.line as usize,
-                        start_byte: item.col as usize,
-                        end_line: item.end_line as usize,
-                        end_byte: item.end_col as usize,
-                        severity: match item.severity {
-                            DiagnosticSeverity::Error => CodeDiagnosticSeverity::Error,
-                            DiagnosticSeverity::Warn => CodeDiagnosticSeverity::Warn,
-                            DiagnosticSeverity::Info => CodeDiagnosticSeverity::Info,
-                            DiagnosticSeverity::Hint => CodeDiagnosticSeverity::Hint,
-                        },
-                        message: item.message.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                code.diag_anchors.clear();
-                code.diagnostic_summaries = diagnostics
-                    .iter()
-                    .map(|diagnostic| CodeDiagnosticSummary {
-                        line: diagnostic.start_line,
-                        byte: diagnostic.start_byte,
-                        severity: diagnostic.severity,
-                        message: diagnostic.message.clone(),
-                    })
-                    .collect();
-                code.diagnostics =
-                    project_diagnostic_ranges(&code.buffer.lines, &diagnostics);
-                code.diagnostics_resolved_revision = Some(code.buffer.revision);
-                self.mark_dirty();
-                true
-            }
-            _ => false,
-        }
-    }
-
     /// Click on a diagnostic span: show its message(s) as a hover-style
     /// card pinned to the span start. Non-consuming — the click also
     /// moved the cursor as usual.
@@ -2806,7 +2687,7 @@ impl Screen<'_> {
     ) -> neoism_ui::panels::status_line::DiagnosticCounts {
         let mut counts = neoism_ui::panels::status_line::DiagnosticCounts::default();
         if let Some(code) = self.context_manager.current().code.as_ref() {
-            if canonical_key(&code.path) == canonical_key(file) {
+            if code_lsp_file_matches(code, file) {
                 for diagnostic in &code.diagnostic_summaries {
                     match diagnostic.severity {
                         CodeDiagnosticSeverity::Error => counts.error += 1,
@@ -2830,7 +2711,7 @@ impl Screen<'_> {
         use neoism_ui::panels::diagnostics_popup::{PopupItem, Severity};
         let mut items = Vec::new();
         if let Some(code) = self.context_manager.current().code.as_ref() {
-            if canonical_key(&code.path) == canonical_key(file) {
+            if code_lsp_file_matches(code, file) {
                 for diagnostic in &code.diagnostic_summaries {
                     let severity = diagnostic.severity;
                     let wanted = match pill {
@@ -2866,6 +2747,12 @@ impl Screen<'_> {
         &self,
         file: &Path,
     ) -> Vec<neoism_ui::panels::lsp_popup::LspServerRow> {
+        if self.code_lsp_is_remote() {
+            return self
+                .remote_code_lsp_pill(file)
+                .map(|(_, _, rows)| rows)
+                .unwrap_or_default();
+        }
         let store = match lsp_pill_store().lock() {
             Ok(store) => store,
             Err(poisoned) => poisoned.into_inner(),
@@ -2879,7 +2766,6 @@ impl Screen<'_> {
     /// Format-on-save entry: enqueue formatter + deferred save. False
     /// when there's no LSP target (caller saves directly).
     pub(crate) fn queue_code_format_then_save(&mut self) -> bool {
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return false;
         };
@@ -2892,36 +2778,30 @@ impl Screen<'_> {
         else {
             return false;
         };
-        shared
-            .jobs
-            .send(CodeLspJob::FormatThenSave {
-                root,
-                file,
-                revision,
-            })
-            .is_ok()
+        self.dispatch_code_lsp(CodeLspJob::FormatThenSave {
+            root,
+            file,
+            revision,
+        })
+        .is_ok()
     }
 
     /// Notify the engine after a successful save (didSave triggers
     /// slow-lane checks like `cargo check` on rust-analyzer).
     pub(crate) fn notify_code_lsp_saved(&mut self, file: &Path) {
-        // Remote-joined pane: the host daemon owns didSave for its own
-        // files; never fire a local server's slow-lane check here.
-        if self.code_lsp_is_remote() {
-            return;
-        }
-        let Some(shared) = CODE_LSP.get() else {
+        let Some((root, target)) = self.code_lsp_target() else {
             return;
         };
-        let root = self
-            .active_pane_workspace_root()
-            .or_else(|| file.parent().map(Path::to_path_buf));
-        if let Some(root) = root {
-            let _ = shared.jobs.send(CodeLspJob::Save {
-                root,
-                file: file.to_path_buf(),
-            });
+        if !self
+            .context_manager
+            .current()
+            .code
+            .as_ref()
+            .is_some_and(|code| code_lsp_file_matches(code, file))
+        {
+            return;
         }
+        let _ = self.dispatch_code_lsp(CodeLspJob::Save { root, file: target });
     }
 
     // -----------------------------------------------------------------
@@ -2933,7 +2813,6 @@ impl Screen<'_> {
     /// at the cursor, empty prefix); `None` anchors at the identifier
     /// start under the cursor.
     pub(crate) fn request_code_completion(&mut self, trigger: Option<String>) {
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
@@ -2985,7 +2864,7 @@ impl Screen<'_> {
                 });
             }
         }
-        let _ = shared.jobs.send(CodeLspJob::Completion {
+        let _ = self.dispatch_code_lsp(CodeLspJob::Completion {
             root,
             file,
             text,
@@ -3016,7 +2895,6 @@ impl Screen<'_> {
         col: usize,
         from_mouse: bool,
     ) {
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
@@ -3040,7 +2918,7 @@ impl Screen<'_> {
             lines: Vec::new(),
             from_mouse,
         });
-        let _ = shared.jobs.send(CodeLspJob::Hover {
+        let _ = self.dispatch_code_lsp(CodeLspJob::Hover {
             root,
             file,
             text,
@@ -3055,7 +2933,6 @@ impl Screen<'_> {
     /// the previous card's lines while retriggering so the popup never
     /// flickers empty between keystrokes.
     pub(crate) fn request_code_signature_help(&mut self) {
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
@@ -3086,7 +2963,7 @@ impl Screen<'_> {
             lines: carried_lines,
             from_mouse: false,
         });
-        let _ = shared.jobs.send(CodeLspJob::SignatureHelp {
+        let _ = self.dispatch_code_lsp(CodeLspJob::SignatureHelp {
             root,
             file,
             line: line as u32,
@@ -3110,11 +2987,27 @@ impl Screen<'_> {
     /// finder rows. Duplicate panes for one file are collapsed.
     pub(crate) fn open_project_problems(&mut self) {
         let Some(cwd) = self
-            .active_pane_workspace_root()
+            .code_lsp_target()
+            .map(|(root, _)| root)
+            .or_else(|| self.active_pane_workspace_root())
             .or_else(|| self.active_workspace_root.clone())
         else {
             return;
         };
+        let remote = self
+            .context_manager
+            .current()
+            .code
+            .as_ref()
+            .map(code_uses_host_lsp)
+            .unwrap_or_else(|| self.context_manager.current_workspace_is_remote_joined());
+        let owner = remote
+            .then(|| {
+                self.context_manager.adopted_workspace_identity_for_route(
+                    self.context_manager.current().route_id,
+                )
+            })
+            .flatten();
         let mut rows: Vec<neoism_ui::panels::finder::ReferenceRow> = Vec::new();
         {
             let mut seen = std::collections::HashSet::new();
@@ -3123,12 +3016,33 @@ impl Screen<'_> {
                     let Some(code) = item.context().code.as_ref() else {
                         continue;
                     };
-                    let path = canonical_key(&code.path);
-                    let display = path
-                        .strip_prefix(&cwd)
-                        .unwrap_or(path.as_path())
-                        .to_string_lossy()
-                        .into_owned();
+                    if code_uses_host_lsp(code) != remote {
+                        continue;
+                    }
+                    let (path, display) = if remote {
+                        if owner.is_none()
+                            || self.context_manager.adopted_workspace_identity_for_route(
+                                item.context().route_id,
+                            ) != owner
+                        {
+                            continue;
+                        }
+                        let path = code.path.to_string_lossy().into_owned();
+                        let display = neoism_protocol::host_path::HostPath::new(
+                            cwd.to_string_lossy(),
+                        )
+                        .relative(&path)
+                        .unwrap_or_else(|| path.clone());
+                        (path, display)
+                    } else {
+                        let path = canonical_key(&code.path);
+                        let display = path
+                            .strip_prefix(&cwd)
+                            .unwrap_or(path.as_path())
+                            .to_string_lossy()
+                            .into_owned();
+                        (path.to_string_lossy().into_owned(), display)
+                    };
                     for diagnostic in &code.diagnostic_summaries {
                         if !seen.insert((
                             path.clone(),
@@ -3165,7 +3079,11 @@ impl Screen<'_> {
         rows.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
         self.finder_target_route = None;
         self.renderer.file_tree.set_focused(false);
-        self.renderer.finder.open_references(cwd, rows);
+        if remote {
+            self.renderer.finder.open_host_references(cwd, rows);
+        } else {
+            self.renderer.finder.open_references(cwd, rows);
+        }
         self.mark_dirty();
     }
 
@@ -3181,6 +3099,7 @@ impl Screen<'_> {
         };
         let [gx, gy, gw, gh] = code.geometry.rect;
         let inside = gw > 0.0
+            && !code.blame.contains_pointer(mx, my)
             && mx >= code.geometry.text_x
             && mx <= gx + gw
             && my >= gy
@@ -3232,7 +3151,6 @@ impl Screen<'_> {
     /// Request go-to-definition at an explicit buffer position
     /// (Ctrl+Click hit or the cursor for vim `gd`).
     pub(crate) fn request_code_definition_at(&mut self, line: usize, col: usize) {
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
@@ -3241,7 +3159,7 @@ impl Screen<'_> {
             eprintln!("neoism::lsp code definition request: seq={seq} at {line}:{col}");
         }
         self.renderer.code_lsp.definition_seq = Some(seq);
-        let _ = shared.jobs.send(CodeLspJob::Definition {
+        let _ = self.dispatch_code_lsp(CodeLspJob::Definition {
             root,
             file,
             line: line as u32,
@@ -3266,7 +3184,6 @@ impl Screen<'_> {
     /// menu session pinned there; the drain fills it or dismisses with
     /// a "No code actions" toast.
     pub(crate) fn request_code_actions(&mut self) {
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
@@ -3299,7 +3216,7 @@ impl Screen<'_> {
             selected: 0,
             display: PopupMenu::default(),
         });
-        let _ = shared.jobs.send(CodeLspJob::CodeActions {
+        let _ = self.dispatch_code_lsp(CodeLspJob::CodeActions {
             root,
             file,
             line: cursor.line as u32,
@@ -3336,17 +3253,19 @@ impl Screen<'_> {
     /// worker (resolve → edit → execute) and close the menu. The edit
     /// lands back through the drain and is applied there.
     pub(crate) fn apply_selected_code_action(&mut self) -> bool {
+        if !self.remote_code_lsp_ui_scope_current() {
+            return false;
+        }
         let Some(session) = self.renderer.code_lsp.actions.take() else {
             return false;
         };
         let Some(item) = session.items.get(session.selected).cloned() else {
             return false;
         };
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return false;
         };
-        let _ = shared.jobs.send(CodeLspJob::ApplyCodeAction {
+        let _ = self.dispatch_code_lsp(CodeLspJob::ApplyCodeAction {
             root,
             file,
             server_id: item.server_id,
@@ -3364,7 +3283,6 @@ impl Screen<'_> {
     /// Request find-references at the cursor; the drain opens the
     /// finder's References mode over the hits (or toasts when empty).
     pub(crate) fn request_code_references(&mut self) {
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
@@ -3386,7 +3304,7 @@ impl Screen<'_> {
         }
         self.renderer.code_lsp.dismiss_popups();
         self.renderer.code_lsp.references_seq = Some(seq);
-        let _ = shared.jobs.send(CodeLspJob::References {
+        let _ = self.dispatch_code_lsp(CodeLspJob::References {
             root,
             file,
             line: cursor.line as u32,
@@ -3450,6 +3368,9 @@ impl Screen<'_> {
 
     /// Modal submit: fire the rename request at the frozen position.
     pub(crate) fn submit_code_rename(&mut self, new_name: String) {
+        if !self.remote_code_lsp_ui_scope_current() {
+            return;
+        }
         let Some(pending) = self.renderer.code_lsp.pending_rename.take() else {
             return;
         };
@@ -3457,7 +3378,6 @@ impl Screen<'_> {
         if new_name.is_empty() {
             return;
         }
-        let shared = self.code_lsp_shared();
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
@@ -3476,7 +3396,7 @@ impl Screen<'_> {
             );
         }
         self.renderer.code_lsp.rename_seq = Some(seq);
-        let _ = shared.jobs.send(CodeLspJob::Rename {
+        let _ = self.dispatch_code_lsp(CodeLspJob::Rename {
             root,
             file,
             line: pending.line as u32,
@@ -3517,6 +3437,9 @@ impl Screen<'_> {
     /// (or the server's `textEdit` start when it names one on the same
     /// line). Runs the item's follow-up `command` when present.
     pub(crate) fn accept_code_completion(&mut self) -> bool {
+        if !self.remote_code_lsp_ui_scope_current() {
+            return false;
+        }
         let Some(session) = self.renderer.code_lsp.completion.take() else {
             return false;
         };
@@ -3641,9 +3564,23 @@ impl Screen<'_> {
         }
 
         if let Some((server_id, command)) = follow_up {
-            let shared = self.code_lsp_shared();
             if let Some((root, file)) = self.code_lsp_target() {
-                let _ = shared.jobs.send(CodeLspJob::CompletionCommand {
+                if !self.code_lsp_is_remote() {
+                    if let Some(text) = self
+                        .context_manager
+                        .current()
+                        .code
+                        .as_ref()
+                        .map(|code| code.buffer.text())
+                    {
+                        let _ = self.dispatch_code_lsp(CodeLspJob::Sync {
+                            root: root.clone(),
+                            file: file.clone(),
+                            text,
+                        });
+                    }
+                }
+                let _ = self.dispatch_code_lsp(CodeLspJob::CompletionCommand {
                     root,
                     file,
                     server_id,

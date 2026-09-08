@@ -1,0 +1,19 @@
+---
+name: "Shared editor parity: Windows identities, LSP and Git"
+description: "Shared file presence/CRDT identities, host-backed native LSP and Git implemented and checked; Windows startup/terminal untouched; user forbids release until asked"
+type: "project"
+scope: "project"
+origin: "Cross-device shared workspace fixes on0.7.96"
+created: "2026-09-08"
+updated: "2026-09-08"
+---
+
+Implemented after user confirmed workspace-level Windows presence worked but file-tree orb, in-file presence, and edits did not sync. Root: guest-native PathBuf::join inserted Windows backslashes into Linuxhost paths, then raw file:// identities forked CRDT/presence; nested ReadFile paths alsofailed and pendingreads nevercleared. New protocol HostPath lexical host semantics and optional daemon DirEntry.host_path; opaque identities through remote tree/tabs/presence/read/CRDT. Unix literal backslashes stay literal, Windows drive/UNC spellingpreserved. No guestcanonicalize/stat restored. Failedread timeout30s/errors clearloading but preserveedits and preventplaceholderseeding/localSave. SaveBuffer requires successfullyread diskbaseline but permitsdelete/recreate; newfile flow CreateFile->ReadFile->OpenBuffer->Save tested. Existing malformedforks not automaticallymigrated. FileOpenSource Local/Host/LocalOnly keeps explicitlocalvaults localwhilejoined, including samepathsourceconflicts; local_only bypasses sharedCRDT/presence but keepslocalLSP.
+
+Shared LSP root: localhostCreateServerusesremotejoin; code_lsp_target gatedout remoteactions. Desktop nowroutesallnativeLSPquery/action families overowningdaemon Editor protocol, notlocal/AgentHTTP. Endpoint/workspace/pane/document/revision/request/surfacecorrelation, per-clientinitialsnapshotdelivery (cachecomputation notdelivery), retry/reconnect/errorhandling, backgrounddiagforinactiveworkspaces, nonreplayeditorrequests. Canonicalhost_path definitionmetadata and host-semantic URIfallback/editdecode. Narrow agentserver/lsp_uri.rs WindowsonlyUNCauthority fix; drive andUnix production decodingunchanged. Resourcecreate/delete/rename operations in WorkspaceEdit still explicitlyunsupported; symbolrename/multi-filetextedits supported; genericpalette/contextmenustubs notexpanded.
+
+Shared Git root: priorMac guards correctlydisabledguestGit butnoauthoritativefeed. Git WatchStatus/UnwatchStatus/RepoStatus subscription nowfeedsbranch/counts/tree/panel, reusing2sdaemonrefreshrootcache singleflight2collectors boundedGit. Unchangedpayloads suppressed. HostGitIo avoids guestworkers. Scopeendpoint/connection/workspace/root/token, processwideuniqueGitrequestIDs preventlateoldhostDiff/Action/Error idcollision. Independenttransportstatuswatchresubscribeswithoutrequiringrender; obsoletewatch/actions notreplayed. No guestGit/FS scans restored.
+
+Validation: filetree/loading/protocolidentity tests Linux+WindowsWine, localvault+saveflow guards; Gitfocusedtests plus9reply/reconnectregressions; LSP27focused tests incltwo-clientWS->realstdioLSPmockfixture allnativequeryfamilies. Final env-uCI cargo check desktop/daemon/shared --tests PASS; Windowsdesktop/daemon production cargo-xwin check PASS; wasmcheckPASS; gitdiffcheckPASS. Live two-machineGUI and actualnetworkUNC notrun. Parentverified zero changes to teletypewriter, terminal-pty/src, Windowsmain/agent_server/service_process/embedded_daemon/background_process/tailscale and /connect implementation. User explicitly NOreleaseuntilasks: changesremainuncommitted/unreleased onbase0.7.96.
+
+One child tooklongmodelturn afterquestion; actualv2sessionAPI showedanswercompleted andnewassistantturnstartsameinstant,streamactivity butnovisibletoolsuntilmodelresumed. Usercancelledtraceinvestigationoncevisibleoutputresumed. Don'tclaimquestionresumebug proven. Don'tfetchrawreasoningencryptedmetadata; filteroperationaltimestamps/tools/visibletextonly.

@@ -178,6 +178,24 @@ impl DesktopDaemonConnection {
         });
     }
 
+    /// Parked connections still own background editors. Drain only editor
+    /// replies; preserve other families until their normal workspace pump runs.
+    pub fn drain_editor_messages(&self) -> Vec<DaemonServerMessage> {
+        let mut queue = self.inbound.lock().unwrap_or_else(|p| p.into_inner());
+        let mut editors = Vec::new();
+        let mut kept = std::collections::VecDeque::new();
+        for message in queue.drain(..) {
+            if matches!(message, DaemonServerMessage::Editor { .. }) {
+                editors.push(message);
+            } else {
+                kept.push_back(message);
+            }
+        }
+        queue.extend(kept);
+        self.inbound_wake_pending.store(false, Ordering::Release);
+        editors
+    }
+
     pub fn drain_messages(&self) -> Vec<DaemonServerMessage> {
         match self.inbound.lock() {
             Ok(mut queue) => {

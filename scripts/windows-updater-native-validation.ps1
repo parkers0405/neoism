@@ -34,7 +34,9 @@ function Invoke-NativeWorker([string]$Mode, [string]$Directory) {
     Assert-NoFixtureProcesses $Directory
     $caseEvidence = (New-Item -ItemType Directory -Path (Join-Path $evidenceRoot $Mode) -Force).FullName
     $download = (New-Item -ItemType Directory -Path (Join-Path $fixtureRoot "$Mode-download")).FullName
-    $msi = Join-Path $download 'candidate.msi'
+    # MSI maintenance resolves its registered package name within SourceDir.
+    # Match production downloads: preserve the release asset's original name.
+    $msi = Join-Path $download ([IO.Path]::GetFileName($CandidateMsi))
     Copy-Item -LiteralPath $CandidateMsi -Destination $msi
     $result = Join-Path $caseEvidence 'result.json'
     $exe = Join-Path $Directory 'neoism.exe'

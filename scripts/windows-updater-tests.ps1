@@ -1,5 +1,5 @@
-# Isolated updater policy/transaction tests. Never invokes MSI, real binaries,
-# process termination, registry writes, or the user's installation.
+# Isolated updater policy/transaction tests. Never installs MSI, launches product
+# binaries, terminates processes, or writes registry/user installation data.
 param([string]$Helper = (Join-Path $PSScriptRoot '../neoism-frontend/desktop/src/windows_update.ps1'))
 $ErrorActionPreference = 'Stop'
 $tokens = $null; $parseErrors = $null
@@ -41,8 +41,11 @@ Assert ((Get-MsiOutcome 0) -eq 'succeeded') 'MSI 0 classification'
 foreach ($code in @(3010, 1641)) { Assert ((Get-MsiOutcome $code) -eq 'reboot_required') 'Reboot must not be success' }
 foreach ($code in @(1603, 1618, 1)) { Assert ((Get-MsiOutcome $code) -eq 'failed') 'MSI failure classification' }
 
-# Exercise the real read-only ProductCode/state query with an Automation-shaped
-# fake. No Windows Installer API or installed-product enumeration runs locally.
+# Exercise the actual native binding read-only, rather than mocking a COM object
+# with properties that its real PowerShell projection may not expose.
+Assert ((Get-CurrentUserMsiProductState '{00000000-0000-0000-0000-000000000000}') -eq -1) 'Unknown product is not installed'
+
+# Candidate metadata and known installed/advertised outcomes are isolated fakes.
 & {
     $script:QueryCode = '{12345678-1234-1234-1234-123456789012}'
     $script:QueryRecord = [pscustomobject]@{}
@@ -55,17 +58,16 @@ foreach ($code in @(1603, 1618, 1)) { Assert ((Get-MsiOutcome $code) -eq 'failed
     $script:QueryDatabase | Add-Member ScriptMethod OpenView { param($sql) Assert ($sql -like '*ProductCode*') 'Must query candidate ProductCode'; return $script:QueryView }
     $script:QueryInstaller = [pscustomobject]@{}
     $script:QueryInstaller | Add-Member ScriptMethod OpenDatabase { param($path, $mode) Assert ($mode -eq 0) 'MSI metadata must be read-only'; return $script:QueryDatabase }
-    $script:QueryInstaller | Add-Member ScriptMethod ProductsEx {
-        param($code, $sid, $context)
-        Assert ($code -eq $script:QueryCode -and $sid -eq '' -and $context -eq 2) 'Repair query must match candidate ProductCode/current-user per-user context'
-        return $script:QueryProducts
+    function Get-CurrentUserMsiProductState([string]$code) {
+        Assert ($code -eq $script:QueryCode) 'Repair query must match candidate ProductCode'
+        return $script:QueryState
     }
     function New-Object { param($ComObject) Assert ($ComObject -eq 'WindowsInstaller.Installer') 'Only read-only Installer Automation expected'; return $script:QueryInstaller }
-    $script:QueryProducts = @()
+    $script:QueryState = -1
     Assert (-not (Test-MsiProductInstalled 'C:\candidate.msi')) 'New ProductCode must not enter repair mode'
-    $script:QueryProducts = @([pscustomobject]@{ State = 1 })
+    $script:QueryState = 1
     Assert (-not (Test-MsiProductInstalled 'C:\candidate.msi')) 'Advertised-only product must use normal installation'
-    $script:QueryProducts = @([pscustomobject]@{ State = 5 })
+    $script:QueryState = 5
     Assert (Test-MsiProductInstalled 'C:\candidate.msi') 'Already installed candidate ProductCode must enter repair mode'
 }
 

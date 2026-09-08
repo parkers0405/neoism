@@ -8,12 +8,12 @@ on:
         description: Run containing the neoism-windows-x86_64 artifact
         required: true
         type: string
-        default: '34126898861'
+        default: '34182827453'
       version:
         description: Exact installed version expected (without v)
         required: true
         type: string
-        default: '0.7.95'
+        default: '0.7.97'
 
 permissions:
   contents: read
@@ -34,7 +34,7 @@ jobs:
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ github.token }}
           path: candidate
-      - name: Install existing MSI and run native GUI smoke
+      - name: Install existing MSI and validate updater and GUI
         shell: pwsh
         env:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
@@ -64,7 +64,11 @@ jobs:
               }
               Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--version' "$evidence/version" 30
               if ((Get-Content "$evidence/version.stdout.log" -Raw).Trim() -cne "neoism $env:EXPECTED_VERSION") { throw 'Installed version differs from requested version' }
-              # Hard dependency: the current ref must contain the corrected parent smoke.
+              $baseline = New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP 'neoism-update-baseline')
+              foreach ($name in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'web')) {
+                Copy-Item -LiteralPath (Join-Path $installDir $name) -Destination $baseline.FullName -Recurse
+              }
+              & ./scripts/windows-updater-native-validation.ps1 -CandidateMsi $installer -ManagedDir $installDir -PackagingDir $baseline.FullName -Version $env:EXPECTED_VERSION -Evidence $evidence
               & ./scripts/windows-installed-gui-smoke.ps1 -InstallDir $installDir -Evidence $evidence
             } finally {
               Invoke-CheckedProcess 'msiexec.exe' "/x `"$installer`" /qn /norestart /L*v `"$evidence/uninstall.log`"" "$evidence/uninstall" 180 @(0, 3010, 1605)
@@ -82,3 +86,5 @@ jobs:
             candidate/
             scripts/windows-installed-gui-smoke.ps1
             scripts/windows-validation-process.ps1
+            scripts/windows-updater-native-validation.ps1
+            neoism-frontend/desktop/src/windows_update.ps1

@@ -145,10 +145,37 @@ function Get-MsiOutcome([int]$Code) {
     if ($Code -in @(3010, 1641)) { return 'reboot_required' }
     return 'failed'
 }
+function Get-CurrentUserMsiProductState([string]$ProductCode) {
+    # Query the exact per-user instance directly. ProductsEx exposes a COM
+    # collection whose PowerShell enumeration is not reliably Product objects.
+    if (-not ('NeoismMsiProductQuery' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class NeoismMsiProductQuery {
+    [DllImport("msi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern uint MsiGetProductInfoExW(string product, string sid,
+        uint context, string property, StringBuilder value, ref uint length);
+    public static int CurrentUserState(string product) {
+        var value = new StringBuilder(16);
+        uint length = (uint)value.Capacity;
+        uint result = MsiGetProductInfoExW(product, null, 2, "State", value, ref length);
+        if (result == 1605) return -1; // ERROR_UNKNOWN_PRODUCT
+        if (result != 0) throw new Win32Exception((int)result, "Cannot query current-user MSI product state");
+        return int.Parse(value.ToString(), CultureInfo.InvariantCulture);
+    }
+}
+'@
+    }
+    return [NeoismMsiProductQuery]::CurrentUserState($ProductCode)
+}
 function Test-MsiProductInstalled([string]$Path) {
     # Read-only MSI metadata and current-user installation enumeration. Never
     # Win32_Product: querying that provider can trigger unrelated MSI repairs.
-    $installer = $null; $database = $null; $view = $null; $record = $null; $products = $null
+    $installer = $null; $database = $null; $view = $null; $record = $null
     try {
         $installer = New-Object -ComObject WindowsInstaller.Installer
         $database = $installer.OpenDatabase($Path, 0)
@@ -159,17 +186,11 @@ function Test-MsiProductInstalled([string]$Path) {
         $code = $record.StringData(1)
         $guid = [Guid]::Empty
         if (-not [Guid]::TryParse($code, [ref]$guid)) { throw 'Candidate MSI ProductCode is invalid' }
-        # WiX Scope=perUser uses USERUNMANAGED (2); empty SID means current user.
-        # Advertising alone is not an installed product eligible for REINSTALL.
-        $products = $installer.ProductsEx($code, '', 2)
-        foreach ($product in $products) {
-            try { if ($product.State -eq 5) { return $true } } # INSTALLSTATE_DEFAULT
-            finally { if ([Runtime.InteropServices.Marshal]::IsComObject($product)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($product) } }
-        }
-        return $false
+        # MSIINSTALLCONTEXT_USERUNMANAGED, current user only; advertised is not installed.
+        return (Get-CurrentUserMsiProductState $code) -eq 5
     } finally {
         if ($null -ne $view) { $view.Close() }
-        foreach ($object in @($record, $view, $database, $products, $installer)) {
+        foreach ($object in @($record, $view, $database, $installer)) {
             if ($null -ne $object -and [Runtime.InteropServices.Marshal]::IsComObject($object)) {
                 [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($object)
             }

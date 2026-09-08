@@ -152,6 +152,12 @@ function New-Fixture([string]$Mode) {
 }
 function Read-Receipt { return (Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json) }
 try {
+    $hashFixture = Join-Path $root 'hash.bin'
+    [IO.File]::WriteAllBytes($hashFixture, [Text.Encoding]::UTF8.GetBytes('abc'))
+    & {
+        function Get-FileHash { throw 'Updater must not depend on Get-FileHash module resolution' }
+        Assert ((Get-UpdateFileHash $hashFixture) -eq 'BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD') 'Streaming SHA256 must match the known vector'
+    }
     foreach ($mode in @('managed', 'portable')) {
         New-Fixture $mode
         Remove-Item -LiteralPath $env:LOCALAPPDATA -Recurse -Force

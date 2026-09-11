@@ -7290,6 +7290,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -7839,6 +7852,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -8208,6 +8234,101 @@
               }
             },
             "description": "Configuration validation"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v2/directories": {
+      "get": {
+        "operationId": "v2.directories.list",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "description": "Server path, supporting ~ expansion. Omit for caller root or server working directory.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "entries": {
+                      "items": {
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "path"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "parent": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "parent",
+                    "entries"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Canonical folder and authorized child directories"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -10567,6 +10688,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -10641,6 +10775,35 @@
             "in": "path",
             "name": "version",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "directory",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Neoism-Directory",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -10734,6 +10897,19 @@
             "name": "If-Match",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
               "type": "string"
             }
           },
@@ -15259,6 +15435,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -15321,6 +15510,19 @@
             "name": "directory",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
               "type": "string"
             }
           },
@@ -15427,6 +15629,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -15490,6 +15705,19 @@
             "name": "directory",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
               "type": "string"
             }
           },
@@ -15572,6 +15800,19 @@
             "name": "If-Match",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
               "type": "string"
             }
           },
@@ -15668,6 +15909,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -15754,6 +16008,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -15826,6 +16093,19 @@
             "name": "directory",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
               "type": "string"
             }
           },
@@ -15906,6 +16186,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -15978,6 +16271,19 @@
             "name": "directory",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
               "type": "string"
             }
           },
@@ -16067,6 +16373,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -16151,6 +16470,19 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -16231,6 +16563,19 @@
             "name": "directory",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
               "type": "string"
             }
           },
@@ -16511,6 +16856,19 @@
             "name": "directory",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
               "type": "string"
             }
           },
@@ -19885,6 +20243,19 @@
             "name": "directory",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector.",
+              "enum": [
+                "installation",
+                "workspace"
+              ],
               "type": "string"
             }
           },

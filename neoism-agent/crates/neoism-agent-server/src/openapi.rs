@@ -733,6 +733,16 @@ fn apply_authoritative_contract(document: &mut Value) {
               parameters: Value,
               request: Option<Value>,
               responses: Value| {
+        let mut parameters = parameters;
+        if id.starts_with("v2.plugins.workflows.")
+            || id.starts_with("v2.management.skills.versions.")
+            || matches!(id, "v2.capabilities.list" | "v2.agents.list" | "v2.skills.list" | "v2.providers.configured") {
+            parameters.as_array_mut().expect("operation parameters").push(query("scope", false,
+                json!({ "type": "string", "enum": ["installation", "workspace"], "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector." })));
+        }
+        if id == "v2.management.skills.versions.get" {
+            parameters.as_array_mut().expect("operation parameters").push(directory());
+        }
         let mut value = json!({
             "tags": [tag], "operationId": id, "parameters": parameters,
             "responses": merge_responses(responses, canonical_errors())
@@ -743,6 +753,18 @@ fn apply_authoritative_contract(document: &mut Value) {
         value
     };
 
+    add("/v2/directories", "get", op(
+        "v2.directories.list", "system",
+        json!([query("path", false, json!({ "type": "string", "description": "Server path, supporting ~ expansion. Omit for caller root or server working directory." }))]),
+        None,
+        success("200", "Canonical folder and authorized child directories", json!({
+            "type": "object", "required": ["path", "parent", "entries"],
+            "properties": {
+                "path": { "type": "string" }, "parent": { "type": ["string", "null"] },
+                "entries": { "type": "array", "items": { "type": "object", "required": ["name", "path"], "properties": { "name": { "type": "string" }, "path": { "type": "string" } } } }
+            }
+        }))
+    ));
     let mut health = op(
         "v2.health",
         "system",
@@ -4050,7 +4072,11 @@ mod tests {
                     ("patch(", "PATCH"),
                     ("delete(", "DELETE"),
                 ] {
-                    if invocation.contains(needle) {
+                    // Internal daemon-operator capability, not a public SDK operation.
+                    // Keep this exact: other hosting methods/paths must participate.
+                    if invocation.contains(needle)
+                        && !(method == "POST" && path == "/v2/hosting/associate")
+                    {
                         operations.insert((method.to_string(), normalize_path(path)));
                     }
                 }
@@ -4058,6 +4084,22 @@ mod tests {
             offset = end + 1;
         }
         operations
+    }
+
+    #[test]
+    fn public_router_excludes_only_exact_internal_hosting_operation() {
+        let operations = router_operations(r#"
+            Router::new()
+                .route("/v2/hosting/associate", post(associate).get(read))
+                .route("/v2/hosting/other", post(other))
+                .route("/v2/directories", get(list))
+        "#);
+        assert_eq!(operations, BTreeSet::from([
+            ("GET".into(), "/v2/hosting/associate".into()),
+            ("POST".into(), "/v2/hosting/other".into()),
+            ("GET".into(), "/v2/directories".into()),
+        ]));
+        assert!(canonical_openapi()["paths"].get("/v2/hosting/associate").is_none());
     }
 
     fn matching_paren(source: &str, start: usize) -> Option<usize> {

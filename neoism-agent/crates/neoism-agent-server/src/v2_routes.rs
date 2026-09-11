@@ -58,12 +58,19 @@ pub(crate) async fn v2_meta(
 
 pub(crate) async fn v2_capabilities(
     State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<crate::workflow::WorkflowQuery>,
     headers: HeaderMap,
-) -> Json<Vec<CapabilityInfo>> {
-    let directory = resolve_directory(query.directory, &headers);
+) -> Result<Json<Vec<CapabilityInfo>>, ApiError> {
+    let directory = match query.scope {
+        crate::workflow::WorkflowScope::Installation => crate::workflow::installation_context(state.services())?,
+        crate::workflow::WorkflowScope::Workspace => resolve_directory(query.directory, &headers),
+    };
     let snapshot = state.plugin_snapshot(&directory).await;
     let mut capabilities = crate::plugins::capabilities(snapshot.as_ref());
+    capabilities.push(CapabilityInfo {
+        id: "neoism.resources.installation".into(), version: "1.0.0".into(), enabled: true,
+        disableable: false, source: "server".into(), plugin_id: None, api_prefix: None, reason: None,
+    });
     if state.management_enabled() {
         capabilities.push(CapabilityInfo {
             id: crate::management::CAPABILITY.into(),
@@ -77,7 +84,7 @@ pub(crate) async fn v2_capabilities(
         });
         capabilities.sort_by(|left, right| left.id.cmp(&right.id));
     }
-    Json(capabilities)
+    Ok(Json(capabilities))
 }
 
 pub(crate) async fn v2_plugins(

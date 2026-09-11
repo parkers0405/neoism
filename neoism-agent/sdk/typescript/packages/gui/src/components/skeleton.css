@@ -1,0 +1,45 @@
+.skeleton {
+    pointer-events: none;
+    user-select: none;
+    min-width: 0;
+    width: 100%;
+    contain: layout style;
+}
+.skeleton-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+.skeleton-block {
+    display: block;
+    height: 12px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--theme-fg, var(--fg)) 12%, var(--theme-bg, var(--panel)));
+    animation: skeleton-wave 1.6s ease-in-out infinite;
+}
+.skeleton-row { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 12px 4px; }
+.skeleton-copy { display: grid; gap: 9px; flex: 1; min-width: 0; }
+.skeleton-secondary { height: 9px; }
+.skeleton-heading { padding: 16px 4px 8px; }
+.skeleton-session .skeleton-row { min-height: 36px; padding: 10px 8px; }
+.skeleton .skeleton-icon { width: 24px !important; height: 24px; flex: 0 0 24px; border-radius: 6px; }
+.skeleton .skeleton-control { width: 58px !important; height: 26px; flex: 0 0 58px; }
+.skeleton-row:nth-child(2n) .skeleton-block { animation-delay: -.3s; }
+.skeleton-row:nth-child(3n) .skeleton-block { animation-delay: -.6s; }
+.skeleton-conversation { max-width: 780px; margin: 0 auto; padding: 24px 16px; }
+.skeleton-conversation .skeleton-shapes { display: grid; gap: 30px; }
+.skeleton-user, .skeleton-assistant, .skeleton-code { display: grid; gap: 12px; border: 0; outline: none; box-shadow: none; }
+.skeleton-user { width: 55%; justify-self: end; padding: 16px; border-radius: 16px; background: color-mix(in srgb, var(--theme-blue, var(--accent)) 10%, var(--theme-bg, var(--panel))); }
+.skeleton-assistant { width: 92%; }
+.skeleton-code { width: 88%; padding: 18px; border: 0; border-radius: 8px; background: color-mix(in srgb, var(--theme-fg, var(--fg)) 4%, var(--theme-bg, var(--bg))); }
+.skeleton-activity { width: 64px; margin: 8px 0; }
+.skeleton-activity .skeleton-block { height: 4px; }
+@keyframes skeleton-wave { 0%, 100% { opacity: .48; } 50% { opacity: 1; } }
+.skeleton[data-paused] .skeleton-block { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) { .skeleton .skeleton-block { animation: none; opacity: .75; } }
+@media print { .skeleton .skeleton-block { animation: none; } }

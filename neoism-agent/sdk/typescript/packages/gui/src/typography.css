@@ -1,0 +1,20 @@
+:root {
+    --font-code: "Neoism JetBrains Mono", ui-monospace, monospace;
+}
+pre,
+code,
+.markdown pre,
+.markdown code,
+.chat-tool-input pre,
+.chat-tool-output,
+.chat-tool-error {
+    font-family: var(--font-code);
+}
+:root .native-composer,
+:root .native-composer .native-composer-input textarea {
+    font-family: var(--font);
+}
+.native-composer .native-composer-skirt,
+.native-composer-hints {
+    font-family: var(--font-code);
+}

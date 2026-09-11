@@ -90,7 +90,7 @@ pub fn plan_slash_command(text: &str) -> SlashCommandAction {
 
     match raw {
         "/help" => SlashCommandAction::ShowHelp,
-        "/model" => first_arg_or_picker(
+        "/model" | "/models" => first_arg_or_picker(
             &args,
             SlashCommandAction::ApplyModel,
             SlashCommandAction::OpenModelPicker,
@@ -409,6 +409,16 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn models_alias_matches_model_with_and_without_arguments() {
+        for suffix in ["", " provider/model", " provider/model extra"] {
+            assert_eq!(
+                plan_slash_command(&format!("/models{suffix}")),
+                plan_slash_command(&format!("/model{suffix}")),
+            );
+        }
+    }
 
     #[test]
     fn plans_picker_or_direct_value_commands() {

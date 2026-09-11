@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use crate::message_part_mutation::append_tool_input_delta;
 
 use futures::{stream::FuturesUnordered, StreamExt};
 use neoism_agent_core::{
@@ -12,7 +16,7 @@ use serde_json::json;
 
 use crate::error::ApiError;
 use crate::message_part_mutation::{
-    append_text_delta, append_tool_input_delta, finish_text_part, set_tool_completed,
+    append_text_delta, append_tool_input_delta_in_place, finish_text_part, set_tool_completed,
     set_tool_error, set_tool_running, upsert_part,
 };
 use crate::now_millis;
@@ -29,12 +33,49 @@ use crate::tool_runtime::execute_tool_call_in_generation;
 use crate::tool_selection::normalize_provider_tool_name;
 
 const TOOL_EXECUTION_CONCURRENCY: usize = 10;
+// Per call: first delta immediately, then at most one growing snapshot / 45ms.
+// Event-loop led: no timer/task to cancel. End and semantic updates bypass pacing.
+const TOOL_INPUT_PUBLISH_INTERVAL: Duration = Duration::from_millis(45);
+
+#[derive(Default)]
+struct ToolInputSnapshots {
+    last_publish: HashMap<String, Instant>,
+}
+
+impl ToolInputSnapshots {
+    fn append(
+        &mut self,
+        parts: &mut [Part],
+        call_id: &str,
+        part_id: &str,
+        delta: &str,
+        now: Instant,
+    ) -> Option<Part> {
+        let part = append_tool_input_delta_in_place(parts, part_id, delta)?;
+        if self.last_publish.get(call_id).is_some_and(|last| {
+            now.saturating_duration_since(*last) < TOOL_INPUT_PUBLISH_INTERVAL
+        }) {
+            return None;
+        }
+        self.last_publish.insert(call_id.to_owned(), now);
+        Some(part.clone())
+    }
+
+    fn end(&mut self, parts: &[Part], call_id: &str, part_id: &str) -> Option<Part> {
+        self.last_publish.remove(call_id);
+        parts.iter().find(|part| matches!(part,
+            Part::Tool(tool) if tool.id.as_str() == part_id
+                && matches!(&tool.state, ToolState::Pending { raw, .. } if !raw.is_empty())
+        )).cloned()
+    }
+}
 
 pub(crate) struct ProviderStreamStepState {
     pub provider_response: ProviderGenerationResponse,
     pub reasoning_parts: HashMap<String, Id>,
     pub tool_parts: HashMap<String, Id>,
     pub executed_tool_calls: HashSet<String>,
+    tool_input_snapshots: ToolInputSnapshots,
     tool_tasks: VecDeque<(
         QueuedToolCall,
         tokio::task::JoinHandle<Result<crate::tool::ToolExecutionResult, String>>,
@@ -60,6 +101,7 @@ impl ProviderStreamStepState {
             reasoning_parts: HashMap::new(),
             tool_parts: HashMap::new(),
             executed_tool_calls: HashSet::new(),
+            tool_input_snapshots: ToolInputSnapshots::default(),
             tool_tasks: VecDeque::new(),
             tool_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 TOOL_EXECUTION_CONCURRENCY,
@@ -564,6 +606,7 @@ pub(crate) async fn process_provider_stream_event(
             }
         }
         ProviderStreamEvent::ToolInputStart { id, name } => {
+            stream.tool_input_snapshots.last_publish.remove(&id);
             let part_id = stream
                 .tool_parts
                 .entry(id.clone())
@@ -599,11 +642,34 @@ pub(crate) async fn process_provider_stream_event(
             let Some(part_id) = stream.tool_parts.get(&id).cloned() else {
                 return Ok(());
             };
-            let mut message = ctx.live_message.lock().await;
-            append_tool_input_delta(&mut message.parts, part_id.as_str(), &delta);
+            let part = {
+                let mut message = ctx.live_message.lock().await;
+                stream.tool_input_snapshots.append(
+                    &mut message.parts, &id, part_id.as_str(), &delta, Instant::now(),
+                )
+            };
+            // Pending input is rendered by both native and SDK clients. Previously
+            // raw only changed in memory, leaving clients at the empty Start part
+            // until ToolCall. Publish the existing full-part wire shape, not a new
+            // nested delta field that older reducers would put at the top level.
+            if let Some(part) = part {
+                ctx.state.publish_live(tool_input_update_event(ctx.session_id, part));
+            }
         }
-        ProviderStreamEvent::ToolInputEnd { .. } => {}
+        ProviderStreamEvent::ToolInputEnd { id } => {
+            let Some(part_id) = stream.tool_parts.get(&id) else {
+                return Ok(());
+            };
+            let part = {
+                let message = ctx.live_message.lock().await;
+                stream.tool_input_snapshots.end(&message.parts, &id, part_id.as_str())
+            };
+            if let Some(part) = part {
+                ctx.state.publish_live(tool_input_update_event(ctx.session_id, part));
+            }
+        }
         ProviderStreamEvent::ToolCall { id, name, input } => {
+            stream.tool_input_snapshots.last_publish.remove(&id);
             if !stream.executed_tool_calls.insert(id.clone()) {
                 return Ok(());
             }
@@ -997,12 +1063,162 @@ async fn persist_queued_tool_results(
     Ok(())
 }
 
+fn tool_input_update_event(session_id: &Id, part: Part) -> EventPayload {
+    EventPayload::new(
+        event_type::MESSAGE_PART_UPDATED,
+        json!({ "sessionID": session_id, "part": part, "time": now_millis() }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         provider_event_finishes_stream, provider_stream_timeout_is_retryable,
         ProviderStreamEvent, ProviderStreamStepState,
     };
+
+    #[test]
+    fn pending_tool_input_updates_publish_accumulated_raw_parts() {
+        use super::{append_tool_input_delta, tool_input_update_event};
+        use neoism_agent_core::{event_type, Id, IdKind, Part, ToolPart, ToolState};
+        use serde_json::json;
+        let session_id = Id::ascending(IdKind::Session);
+        let part_id = Id::ascending(IdKind::Part);
+        let mut parts = vec![Part::Tool(ToolPart {
+            id: part_id.clone(), session_id: session_id.clone(),
+            message_id: Id::ascending(IdKind::Message), call_id: "call_patch".into(),
+            tool: "functions.apply_patch".into(), metadata: None,
+            state: ToolState::Pending { input: json!({}), raw: String::new() },
+        })];
+        let mut accumulated = String::new();
+        for delta in [r#"{"patchText":"*** Begin Patch\n"#, r#"*** Add File: a.rs\n+fn main() {}"#] {
+            accumulated.push_str(delta);
+            let part = append_tool_input_delta(&mut parts, part_id.as_str(), delta).unwrap();
+            let event = tool_input_update_event(&session_id, part);
+            assert_eq!(event.kind, event_type::MESSAGE_PART_UPDATED);
+            assert_eq!(event.properties["sessionID"], json!(session_id));
+            assert_eq!(event.properties["part"]["id"], json!(part_id));
+            assert_eq!(event.properties["part"]["tool"], "functions.apply_patch");
+            assert_eq!(event.properties["part"]["state"]["status"], "pending");
+            assert_eq!(event.properties["part"]["state"]["raw"], accumulated);
+            assert!(event.properties.get("field").is_none());
+        }
+        assert!(append_tool_input_delta(&mut parts, "unknown", "ignored").is_none());
+    }
+
+    fn pending_part(call: &str) -> super::Part {
+        use neoism_agent_core::{Id, IdKind, Part, ToolPart, ToolState};
+        Part::Tool(ToolPart {
+            id: Id::ascending(IdKind::Part),
+            session_id: Id::ascending(IdKind::Session),
+            message_id: Id::ascending(IdKind::Message),
+            call_id: call.into(), tool: "functions.apply_patch".into(), metadata: None,
+            state: ToolState::Pending { input: serde_json::json!({}), raw: String::new() },
+        })
+    }
+
+    fn part_key(part: &super::Part) -> String {
+        let super::Part::Tool(tool) = part else { panic!("not tool") };
+        tool.id.to_string()
+    }
+
+    fn raw(part: &super::Part) -> &str {
+        let super::Part::Tool(tool) = part else { panic!("not tool") };
+        let super::ToolState::Pending { raw, .. } = &tool.state else { panic!("not pending") };
+        raw
+    }
+
+    #[test]
+    fn tool_input_burst_keeps_exact_raw_without_snapshot_flood() {
+        let mut pacing = super::ToolInputSnapshots::default();
+        let mut parts = vec![pending_part("a")];
+        let id = part_key(&parts[0]);
+        let now = super::Instant::now();
+        let delta = "\n+patch 🦀\"";
+        let mut published = 0;
+        for _ in 0..10_000 {
+            if let Some(part) = pacing.append(&mut parts, "a", &id, delta, now) {
+                published += 1;
+                assert_eq!(raw(&part), delta);
+            }
+        }
+        assert_eq!(published, 1);
+        assert_eq!(raw(&parts[0]), delta.repeat(10_000));
+        let end = pacing.end(&parts, "a", &id).unwrap();
+        assert_eq!(raw(&end), raw(&parts[0]));
+        assert!(pacing.last_publish.is_empty());
+    }
+
+    #[test]
+    fn tool_input_elapsed_budget_and_end_bypass() {
+        let mut pacing = super::ToolInputSnapshots::default();
+        let mut parts = vec![pending_part("a")];
+        let id = part_key(&parts[0]);
+        let now = super::Instant::now();
+        let mut published = 0;
+        for ms in 0..=1000 {
+            if let Some(part) = pacing.append(&mut parts, "a", &id, "x", now + super::Duration::from_millis(ms)) {
+                assert_eq!(ms % 45, 0);
+                assert_eq!(raw(&part).len(), ms as usize + 1);
+                published += 1;
+            }
+        }
+        assert_eq!(published, 23); // immediate + floor(1000 / 45)
+        assert_eq!(raw(&pacing.end(&parts, "a", &id).unwrap()).len(), 1001);
+    }
+
+    #[test]
+    fn tool_input_empty_and_unknown_do_not_consume_first_publish() {
+        let mut pacing = super::ToolInputSnapshots::default();
+        let mut parts = vec![pending_part("a")];
+        let id = part_key(&parts[0]);
+        let now = super::Instant::now();
+        assert!(pacing.append(&mut parts, "a", &id, "", now).is_none());
+        assert!(pacing.end(&parts, "a", &id).is_none());
+        assert!(pacing.append(&mut parts, "a", "missing", "x", now).is_none());
+        assert!(pacing.last_publish.is_empty());
+        assert!(pacing.append(&mut parts, "a", &id, "x", now).is_some());
+        assert!(pacing.append(&mut parts, "a", &id, "", now + super::Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn tool_input_nonpending_and_error_ignore_late_deltas_and_end() {
+        let mut pacing = super::ToolInputSnapshots::default();
+        let mut parts = vec![pending_part("a")];
+        let id = part_key(&parts[0]);
+        let super::Part::Tool(tool) = &mut parts[0] else { unreachable!() };
+        tool.state = super::ToolState::Running {
+            input: serde_json::json!({"patchText":"complete"}),
+            time: super::PartTime { start: 0, end: None },
+        };
+        for error in [false, true] {
+            if error {
+                super::set_tool_error(&mut parts, &id, "failed".into());
+            }
+            let before = serde_json::to_value(&parts).unwrap();
+            assert!(pacing.append(&mut parts, "a", &id, "ignored", super::Instant::now()).is_none());
+            assert!(pacing.end(&parts, "a", &id).is_none());
+            assert_eq!(serde_json::to_value(&parts).unwrap(), before);
+            assert!(pacing.last_publish.is_empty());
+        }
+    }
+
+    #[test]
+    fn tool_input_interleaved_calls_have_independent_budgets() {
+        let mut pacing = super::ToolInputSnapshots::default();
+        let mut parts = vec![pending_part("a"), pending_part("b")];
+        let a = part_key(&parts[0]);
+        let b = part_key(&parts[1]);
+        let now = super::Instant::now();
+        assert!(pacing.append(&mut parts, "a", &a, "a", now).is_some());
+        let later = now + super::Duration::from_millis(30);
+        assert!(pacing.append(&mut parts, "b", &b, "b", later).is_some());
+        let later = now + super::TOOL_INPUT_PUBLISH_INTERVAL;
+        assert!(pacing.append(&mut parts, "a", &a, "A", later).is_some());
+        assert!(pacing.append(&mut parts, "b", &b, "B", later).is_none());
+        assert_eq!(raw(&pacing.end(&parts, "b", &b).unwrap()), "bB");
+        assert!(pacing.last_publish.contains_key("a"));
+    }
 
     #[test]
     fn finish_event_terminates_without_waiting_for_transport_eof() {

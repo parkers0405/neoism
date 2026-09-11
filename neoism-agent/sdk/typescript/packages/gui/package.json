@@ -1,0 +1,33 @@
+{
+    "name": "@neoism/gui",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite --host 127.0.0.1",
+        "build": "tsc --noEmit && vite build",
+        "preview": "vite preview",
+        "test": "vitest run",
+        "assets:generate": "node scripts/generate-parity-assets.mjs && node scripts/generate-font-assets.mjs && node scripts/generate-wordmark.mjs",
+        "assets:check": "node scripts/generate-parity-assets.mjs --check && node scripts/generate-font-assets.mjs --check && node scripts/generate-wordmark.mjs --check",
+        "test:assets": "node scripts/test-parity-assets.mjs && node scripts/test-font-assets.mjs"
+    },
+    "dependencies": {
+        "@neoism/sdk": "*",
+        "lucide-react": "^0.468.0",
+        "react": "^19.1.0",
+        "react-dom": "^19.1.0",
+        "react-markdown": "^10.1.0",
+        "remark-gfm": "^4.0.1",
+        "web-tree-sitter": "^0.25.10"
+    },
+    "devDependencies": {
+        "@types/react": "^19.1.0",
+        "@types/react-dom": "^19.1.0",
+        "@vitejs/plugin-react": "^4.5.0",
+        "happy-dom": "^20.14.3",
+        "typescript": "^5.5.0",
+        "vite": "^6.3.0",
+        "vitest": "^4.1.11"
+    }
+}

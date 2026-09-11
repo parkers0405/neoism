@@ -1,0 +1,36 @@
+.composer-anchor { position: relative; }
+.composer-panel {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    inset-inline: 0;
+    z-index: 12;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    /* Height also respects the measured room above the composer (inline max-height). */
+    height: fit-content;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-1);
+    color: var(--fg);
+    box-shadow: var(--overlay-shadow);
+    padding: 8px;
+    font-size: 13px;
+    line-height: 20px;
+}
+.composer-panel-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px 8px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    font-size: 13px;
+}
+.composer-panel-heading strong { font-weight: 530; }
+.composer-panel-heading button { width: 28px; height: 28px; padding: 6px; }
+.composer-panel-content { min-height: 0; max-height: 264px; overflow-y: auto; padding: 8px 0 0; overscroll-behavior: contain; }
+.composer-panel-content > input { width: 100%; margin-bottom: 8px; }
+.composer-panel .choice-list { max-height: none; overflow: visible; margin-top: 0; }
+.composer-panel .choice-list button { width: 100%; text-align: left; padding: 6px 8px; gap: 0; }
+.composer-panel .choice-list small { overflow-wrap: anywhere; font-size: 13px; }

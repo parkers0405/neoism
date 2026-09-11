@@ -42,6 +42,25 @@ assert.deepEqual(
   ],
 );
 
+const sessionRequests = [];
+const sessionClient = createNeoismClient({
+  async request(request) {
+    sessionRequests.push(request);
+    return { items: [], cursor: {} };
+  },
+  async *events() {},
+});
+await sessionClient.sessions.messages("session-1", { order: "desc", limit: 40, cursor: "msg_oldest", slim: true });
+await sessionClient.sessions.command("session-1", "review", {
+  arguments: "src/main.rs", agent: "build", model: "provider/model",
+});
+await sessionClient.sessions.command("session-1", "init");
+assert.deepEqual(sessionRequests[0].query, { order: "desc", limit: 40, cursor: "msg_oldest", slim: true });
+assert.deepEqual(sessionRequests[1].body, {
+  arguments: "src/main.rs", agent: "build", model: "provider/model", command: "review",
+});
+assert.deepEqual(sessionRequests[2].body, { command: "init" });
+
 const managementRequests = [];
 const managementClient = createNeoismClient({
   async request(request) {
@@ -141,6 +160,19 @@ await assert.rejects(
   (error) => error instanceof CapabilityUnavailableError,
 );
 
+const prefixRequests = [];
+const prefixed = createHttpTransport({
+  baseUrl: "https://agent.test/agent/",
+  token: "test-token",
+  fetch: async (url, options) => {
+    prefixRequests.push({ url: String(url), options });
+    return new Response("{}", { headers: { "content-type": "application/json" } });
+  },
+});
+await prefixed.request({ method: "GET", path: "/v2/sessions", query: { directory: "/a b" } });
+assert.equal(prefixRequests[0].url, "https://agent.test/agent/v2/sessions?directory=%2Fa+b");
+assert.equal(prefixRequests[0].options.headers.authorization, "Bearer test-token");
+
 const event = {
   id: "evt-1",
   sequence: 1,
@@ -152,18 +184,23 @@ const event = {
 };
 const bytes = new TextEncoder().encode(`data: ${JSON.stringify(event)}\r\n\r\n`);
 const abort = new AbortController();
+let eventUrl;
 const sse = createHttpTransport({
-  baseUrl: "http://agent.test",
-  fetch: async () => new Response(new ReadableStream({
-    start(controller) {
-      controller.enqueue(bytes.subarray(0, 17));
-      controller.enqueue(bytes.subarray(17));
-      controller.close();
-    },
-  }), { status: 200, headers: { "content-type": "text/event-stream" } }),
+  baseUrl: "http://agent.test/agent/",
+  fetch: async (url) => {
+    eventUrl = String(url);
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes.subarray(0, 17));
+        controller.enqueue(bytes.subarray(17));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  },
 });
 const iterator = sse.events({ signal: abort.signal })[Symbol.asyncIterator]();
 assert.deepEqual((await iterator.next()).value, event);
+assert.equal(eventUrl, "http://agent.test/agent/v2/events");
 abort.abort();
 await iterator.return?.();
 
@@ -189,7 +226,7 @@ const websocket = await websocketTransport.connectSocket({
 });
 assert.equal(
   socketUrl,
-  "wss://agent.test/v2/plugins/dev.neoism.pty/pty-1/connect?ticket=one+use&cursor=9",
+  "wss://agent.test/base/v2/plugins/dev.neoism.pty/pty-1/connect?ticket=one+use&cursor=9",
 );
 websocket.close();
 

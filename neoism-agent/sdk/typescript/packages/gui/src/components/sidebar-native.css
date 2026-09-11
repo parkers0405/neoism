@@ -1,0 +1,36 @@
+/* Native session details only: no shared timeline or application chrome rules. */
+.right-sidebar.sidebar-native {
+    font-family: Geist, ui-sans-serif, system-ui, sans-serif;
+    font-size: 12px;
+    overflow-y: auto;
+}
+.sidebar-native > section + section { margin-top: 24px; }
+.sidebar-native h3 {
+    font-family: var(--font-heading);
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+    margin: 0 0 12px;
+    color: var(--fg);
+    text-transform: none;
+    letter-spacing: 0;
+}
+.sidebar-native .directory { margin: 0; overflow-wrap: anywhere; font-family: inherit; }
+.sidebar-native .sidebar-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; margin: 0; }
+.sidebar-native .sidebar-kv dt { color: var(--muted); font-weight: 400; }
+.sidebar-native .sidebar-kv dd { margin: 0; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.sidebar-native .sidebar-context-meter {
+    box-sizing: border-box;
+    height: 11px;
+    width: 100%;
+    margin-top: 2px;
+    padding: 1px 0 0 1px;
+    border: 1px solid #2e3030;
+    border-radius: 0;
+    background: #dbd9cf;
+}
+.sidebar-native .sidebar-context-well { height: 100%; background: #6b6e6b; }
+.sidebar-native .sidebar-context-fill { height: 100%; background: #b0b0a6; border-radius: 0; }
+.sidebar-native .sidebar-context-caption { margin: 6px 0 14px; font-variant-numeric: tabular-nums; }
+.sidebar-native .chat-subagent-heading h3 { margin: 0; }
+.sidebar-native .chat-subagent-heading { margin-bottom: 12px; }

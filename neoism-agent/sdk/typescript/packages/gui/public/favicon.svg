@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- neoism web app icon: brand-dark squircle tile + the wordmark's
+       blocky "n" glyph (same letterform the desktop wordmark uses),
+       drawn solid so it reads at 16px and on any tab background. -->
+  <rect width="512" height="512" rx="112" fill="#0b0d10"/>
+  <rect x="8" y="8" width="496" height="496" rx="106" fill="none" stroke="#1c2230" stroke-width="4"/>
+  <g transform="translate(81,416) scale(1.6)" fill="#e8edf4">
+    <path d="M 0 -31.25 L 0 -187.5 L 187.5 -187.5 L 187.5 -156.25 L 218.75 -156.25 L 218.75 -31.25 L 156.25 -31.25 L 156.25 -156.25 L 62.5 -156.25 L 62.5 -31.25 Z"/>
+  </g>
+</svg>

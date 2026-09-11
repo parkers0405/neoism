@@ -1,0 +1,15 @@
+/* One continuous chrome band; only the active tab borrows the chat canvas. */
+.chat-tabs-bar { display: flex; align-items: stretch; min-width: 0; flex: 1; align-self: stretch; }
+.chat-tabs { display: flex; align-items: stretch; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.chat-tabs::-webkit-scrollbar { display: none; }
+.chat-tab { display: flex; align-items: center; flex: 0 0 auto; width: max-content; min-width: 120px; max-width: 220px; margin: 4px 0 0; border: 0; border-radius: 8px 8px 0 0; background: transparent; color: var(--muted); }
+.chat-tab.selected { background: var(--bg); color: var(--fg); }
+/* Explicitly reset native button chrome; only keyboard focus paints an outline. */
+.chat-tabs-bar button { appearance: none; font-family: var(--font); font-size: 13px; font-weight: 400; line-height: 20px; outline: none; box-shadow: none; caret-color: transparent; }
+.chat-tab > button[role=tab] { display: flex; flex: 1 1 auto; align-self: stretch; min-width: 0; overflow: hidden; border: 0; background: transparent; border-radius: 8px 8px 0 0; padding: 6px 10px; text-decoration: none; text-align: left; }
+.chat-tab-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-tab .chat-tab-close, .chat-tabs-bar .chat-tab-add { display: flex; align-items: center; justify-content: center; border: 0; background: transparent; padding: 7px; flex-shrink: 0; }
+.chat-tab .chat-tab-close { flex: 0 0 27px; width: 27px; height: 27px; margin-right: 4px; }
+.chat-tabs-bar .chat-tab-add { align-self: center; margin-inline: 2px; }
+.chat-tabs-bar button:hover { color: var(--fg); }
+.chat-tabs-bar button:focus-visible { outline: 1px solid var(--accent, currentColor); outline-offset: -3px; }

@@ -9,6 +9,7 @@ export interface PluginSdk<TClient> {
 }
 
 export interface PluginUseOptions {
+  scope?: "installation" | "workspace";
   directory?: string;
   minimumVersion?: string;
 }

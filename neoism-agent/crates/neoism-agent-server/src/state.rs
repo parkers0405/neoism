@@ -4162,6 +4162,7 @@ impl SessionStore {
         &self,
         skill_id: &str,
         scope: crate::management::ResourceScope,
+        root: &std::path::Path,
         revision: &str,
         bundle: &crate::management::SkillWriteRequest,
     ) -> anyhow::Result<crate::management::SkillVersion> {
@@ -4171,7 +4172,8 @@ impl SessionStore {
         let sequence = VERSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let version = crate::management::SkillVersion {
             id: format!(
-                "sv_{created_at}_{sequence}_{}",
+                "{}sv_{created_at}_{sequence}_{}",
+                crate::management::skill_version_root_prefix(root),
                 revision
                     .trim_start_matches("sha256:")
                     .chars()

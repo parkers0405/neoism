@@ -1,0 +1,10 @@
+.native-footer-activity { display: inline-flex; flex: 0 0 68px; height: 12.5px; }
+.native-footer-scanner { display: flex; width: 68px; height: 12.5px; }
+.native-footer-cell { position: relative; flex: 0 0 8.5px; height: 12.5px; --scanner-size: 2.75px; --scanner-alpha: .18; --scanner-bloom: 0%; }
+.native-footer-cell > i, .native-footer-cell > b, .native-footer-cell > em {
+    position: absolute; left: calc((8.5px - var(--scanner-size)) / 2); top: calc((12.5px - var(--scanner-size)) / 2);
+    width: var(--scanner-size); height: var(--scanner-size); border-radius: 0;
+}
+.native-footer-cell > i { transform: translate(3px, 3px); background: var(--theme-bg, #000); opacity: calc(var(--scanner-alpha) * 2 / 3); }
+.native-footer-cell > b { transform: translate(1.5px, 1.5px); background: var(--theme-dim, #b0b0b0); opacity: calc(var(--scanner-alpha) * 7 / 8); }
+.native-footer-cell > em { background: color-mix(in srgb, var(--theme-magenta, #c2a2e3), var(--theme-fg, #e8e8e8) var(--scanner-bloom)); opacity: var(--scanner-alpha); }

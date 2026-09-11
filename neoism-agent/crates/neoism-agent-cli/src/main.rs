@@ -25,6 +25,7 @@ mod cli_direct_commands;
 mod cli_http;
 mod model_ref;
 mod tui_launcher;
+mod web_launcher;
 
 pub(crate) use cli_http::{
     get_and_print, normalize_server, post_and_print, print_json, redact_secrets,
@@ -84,6 +85,21 @@ enum Command {
         hostname: String,
         #[arg(long)]
         cors: Vec<String>,
+        /// Require a built standalone GUI dist and serve it at /.
+        #[arg(long)]
+        web: bool,
+    },
+    /// Open the standalone GUI, reusing an existing agent or serving locally.
+    Web {
+        /// Attach only to this agent origin; never start a replacement.
+        #[arg(long)]
+        server: Option<String>,
+        #[arg(long, default_value = "4096")]
+        port: u16,
+        #[arg(long, default_value = "127.0.0.1")]
+        hostname: String,
+        #[arg(long)]
+        no_open: bool,
     },
     Acp {
         #[arg(long, default_value = "4096")]
@@ -363,14 +379,27 @@ async fn main() -> anyhow::Result<()> {
             port,
             hostname,
             cors,
+            web,
         } => {
             let options = ServerOptions {
                 hostname: hostname.clone(),
                 port,
                 cors,
             };
-            println!("neoism agent listening on http://{hostname}:{port}");
-            neoism_agent_server::listen(options, standalone_services()).await?;
+            if web {
+                let root = neoism_agent_server::gui::GuiRoot::discover()?;
+                neoism_agent_server::listen_with_gui(
+                    options,
+                    standalone_services(),
+                    Some(root),
+                )
+                .await?;
+            } else {
+                neoism_agent_server::listen(options, standalone_services()).await?;
+            }
+        }
+        Command::Web { server, hostname, port, no_open } => {
+            web_launcher::run(server, hostname, port, no_open).await?;
         }
         Command::Acp {
             port,

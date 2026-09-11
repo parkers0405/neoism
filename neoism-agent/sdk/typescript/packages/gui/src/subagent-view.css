@@ -1,0 +1,30 @@
+.subagent-view-hint {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-shrink: 0;
+    margin: 0 auto;
+    padding: 12px 0;
+    width: calc(100% - 2 * var(--chat-side-gutter));
+    max-width: var(--chat-content-width);
+    font-family: var(--font);
+    font-size: 13px;
+    color: var(--muted);
+}
+.subagent-view-hint button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #007aff;
+    font: inherit;
+}
+.chat-main.without-composer:not(.home) .transcript {
+    padding-bottom: calc(var(--composer-clearance, 0px) + max(24px, env(safe-area-inset-bottom)));
+}
+.chat-main.without-composer:not(.home) .timeline {
+    scroll-padding-bottom: 24px;
+}
+@supports (width: 1cqw) {
+    .subagent-view-hint { --chat-side-gutter: clamp(32px, calc(14cqw - 16px), 128px); }
+}

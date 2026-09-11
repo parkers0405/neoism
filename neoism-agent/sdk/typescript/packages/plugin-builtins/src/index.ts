@@ -97,20 +97,26 @@ export const semanticSearch = optionalPlugin<SemanticSearchClient>(
   },
 );
 
+export type WorkflowOptions = { directory?: string; scope?: "installation" | "workspace" };
+type WorkflowContext = string | WorkflowOptions;
+function workflowQuery(context?: WorkflowContext): WorkflowOptions {
+  return typeof context === "string" ? { directory: context } : query(context ?? {});
+}
+
 export interface WorkflowsClient {
-  list(directory?: string): Promise<OperationResponse<"v2.plugins.workflows.list">>;
-  create(input: OperationInput<"v2.plugins.workflows.create">["body"], directory?: string): Promise<OperationResponse<"v2.plugins.workflows.create">>;
-  get(id: string, directory?: string): Promise<OperationResponse<"v2.plugins.workflows.get">>;
-  update(id: string, input: OperationInput<"v2.plugins.workflows.update">["body"], options?: DirectoryOptions & { revision?: string }): Promise<OperationResponse<"v2.plugins.workflows.update">>;
-  patch(id: string, input: OperationInput<"v2.plugins.workflows.patch">["body"], options?: DirectoryOptions & { revision?: string }): Promise<OperationResponse<"v2.plugins.workflows.patch">>;
-  remove(id: string, options?: DirectoryOptions & { revision?: string }): Promise<void>;
-  activate(id: string, directory?: string): Promise<OperationResponse<"v2.plugins.workflows.activate">>;
-  pause(id: string, directory?: string): Promise<OperationResponse<"v2.plugins.workflows.pause">>;
-  preview(id: string, directory?: string): Promise<OperationResponse<"v2.plugins.workflows.preview">>;
-  run(id: string, directory?: string): Promise<OperationResponse<"v2.plugins.workflows.run">>;
-  history(id: string, options?: DirectoryOptions & { limit?: number }): Promise<OperationResponse<"v2.plugins.workflows.history">>;
-  getRun(id: string, runId: string, directory?: string): Promise<OperationResponse<"v2.plugins.workflows.runs.get">>;
-  retryRun(id: string, runId: string, directory?: string): Promise<OperationResponse<"v2.plugins.workflows.runs.retry">>;
+  list(context?: WorkflowContext): Promise<OperationResponse<"v2.plugins.workflows.list">>;
+  create(input: OperationInput<"v2.plugins.workflows.create">["body"], context?: WorkflowContext): Promise<OperationResponse<"v2.plugins.workflows.create">>;
+  get(id: string, context?: WorkflowContext): Promise<OperationResponse<"v2.plugins.workflows.get">>;
+  update(id: string, input: OperationInput<"v2.plugins.workflows.update">["body"], options?: WorkflowOptions & { revision?: string }): Promise<OperationResponse<"v2.plugins.workflows.update">>;
+  patch(id: string, input: OperationInput<"v2.plugins.workflows.patch">["body"], options?: WorkflowOptions & { revision?: string }): Promise<OperationResponse<"v2.plugins.workflows.patch">>;
+  remove(id: string, options?: WorkflowOptions & { revision?: string }): Promise<void>;
+  activate(id: string, context?: WorkflowContext): Promise<OperationResponse<"v2.plugins.workflows.activate">>;
+  pause(id: string, context?: WorkflowContext): Promise<OperationResponse<"v2.plugins.workflows.pause">>;
+  preview(id: string, context?: WorkflowContext): Promise<OperationResponse<"v2.plugins.workflows.preview">>;
+  run(id: string, context?: WorkflowContext): Promise<OperationResponse<"v2.plugins.workflows.run">>;
+  history(id: string, options?: WorkflowOptions & { limit?: number }): Promise<OperationResponse<"v2.plugins.workflows.history">>;
+  getRun(id: string, runId: string, context?: WorkflowContext): Promise<OperationResponse<"v2.plugins.workflows.runs.get">>;
+  retryRun(id: string, runId: string, context?: WorkflowContext): Promise<OperationResponse<"v2.plugins.workflows.runs.retry">>;
 }
 
 export const workflows = optionalPlugin<WorkflowsClient>(
@@ -119,13 +125,14 @@ export const workflows = optionalPlugin<WorkflowsClient>(
   (core) => {
     const operations = createContractClient(core.transport);
     const path = (id: string) => ({ workflow_id: id });
+    const directoryQuery = workflowQuery;
     return {
       list: (directory) => operations.request("v2.plugins.workflows.list", { query: directoryQuery(directory) }),
       create: (body, directory) => operations.request("v2.plugins.workflows.create", { query: directoryQuery(directory), body }),
       get: (id, directory) => operations.request("v2.plugins.workflows.get", { path: path(id), query: directoryQuery(directory) }),
-      update: (id, body, options = {}) => operations.request("v2.plugins.workflows.update", { path: path(id), query: directoryQuery(options.directory), headers: options.revision ? { "If-Match": options.revision } : {}, body }),
-      patch: (id, body, options = {}) => operations.request("v2.plugins.workflows.patch", { path: path(id), query: directoryQuery(options.directory), headers: options.revision ? { "If-Match": options.revision } : {}, body }),
-      remove: (id, options = {}) => operations.request("v2.plugins.workflows.delete", { path: path(id), query: query({ directory: options.directory, expectedRevision: options.revision }) }),
+      update: (id, body, options = {}) => operations.request("v2.plugins.workflows.update", { path: path(id), query: query({ directory: options.directory, scope: options.scope }), headers: options.revision ? { "If-Match": options.revision } : {}, body }),
+      patch: (id, body, options = {}) => operations.request("v2.plugins.workflows.patch", { path: path(id), query: query({ directory: options.directory, scope: options.scope }), headers: options.revision ? { "If-Match": options.revision } : {}, body }),
+      remove: (id, options = {}) => operations.request("v2.plugins.workflows.delete", { path: path(id), query: query({ directory: options.directory, scope: options.scope, expectedRevision: options.revision }) }),
       activate: (id, directory) => operations.request("v2.plugins.workflows.activate", { path: path(id), query: directoryQuery(directory) }),
       pause: (id, directory) => operations.request("v2.plugins.workflows.pause", { path: path(id), query: directoryQuery(directory) }),
       preview: (id, directory) => operations.request("v2.plugins.workflows.preview", { path: path(id), query: directoryQuery(directory) }),

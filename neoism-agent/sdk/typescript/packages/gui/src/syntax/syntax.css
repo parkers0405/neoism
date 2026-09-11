@@ -1,0 +1,14 @@
+/* Scoped to agent fenced code. Values come from the current IdeTheme, not a
+   highlight.js theme. Missing palette entries inherit the native foreground.
+   Native agent span_opts changes color, not weight or style. */
+.markdown .neo-code-card .neo-syntax { color: var(--theme-fg, inherit); font-weight: normal; font-style: normal; }
+.markdown .neo-code-card .neo-syn-plain { color: var(--theme-fg, inherit); }
+.markdown .neo-code-card .neo-syn-keyword { color: var(--theme-syn_keyword, var(--theme-fg, inherit)); }
+.markdown .neo-code-card .neo-syn-type { color: var(--theme-syn_type, var(--theme-fg, inherit)); }
+.markdown .neo-code-card .neo-syn-string { color: var(--theme-syn_string, var(--theme-fg, inherit)); }
+.markdown .neo-code-card .neo-syn-number { color: var(--theme-syn_number, var(--theme-fg, inherit)); }
+.markdown .neo-code-card .neo-syn-comment { color: var(--theme-syn_comment, var(--theme-fg, inherit)); }
+.markdown .neo-code-card .neo-syn-func { color: var(--theme-syn_func, var(--theme-fg, inherit)); }
+.markdown .neo-code-card .neo-syn-property { color: var(--theme-syn_property, var(--theme-fg, inherit)); }
+.markdown .neo-code-card .neo-syn-constructor { color: var(--theme-syn_constructor, var(--theme-fg, inherit)); }
+.markdown .neo-code-card .neo-syn-special { color: var(--theme-syn_special, var(--theme-fg, inherit)); }

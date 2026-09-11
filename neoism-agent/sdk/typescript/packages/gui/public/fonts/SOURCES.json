@@ -1,0 +1,172 @@
+{
+  "generator": "scripts/generate-font-assets.mjs",
+  "license": "OFL-1.1",
+  "note": "Unmodified source copies. Upstream URLs identify projects/license sources; source hashes identify the exact bundled bytes.",
+  "families": [
+    {
+      "id": "geist-mono",
+      "upstream": "https://github.com/vercel/geist-font/tree/1.5.0",
+      "license": "GeistMono-OFL.txt"
+    },
+    {
+      "id": "jetbrains-mono",
+      "upstream": "https://github.com/JetBrains/JetBrainsMono/tree/v2.304",
+      "license": "JetBrainsMono-OFL.txt"
+    },
+    {
+      "id": "cinzel-decorative",
+      "upstream": "https://github.com/google/fonts/tree/main/ofl/cinzeldecorative",
+      "license": "CinzelDecorative-OFL.txt"
+    },
+    {
+      "id": "medieval-sharp",
+      "upstream": "https://github.com/google/fonts/tree/main/ofl/medievalsharp",
+      "license": "MedievalSharp-OFL.txt"
+    },
+    {
+      "id": "geist",
+      "upstream": "https://github.com/vercel/geist-font/tree/10dc7658f13c38a474cde201bb09a4617267545b",
+      "license": "Geist-OFL.txt"
+    },
+    {
+      "id": "press-start-2p",
+      "upstream": "https://github.com/google/fonts/tree/main/ofl/pressstart2p",
+      "license": "PressStart2P-OFL.txt"
+    }
+  ],
+  "files": [
+    {
+      "source": "neoism-frontend/web/public/fonts/geist-mono/GeistMono-Regular.otf",
+      "destination": "public/fonts/geist-mono/GeistMono-Regular.otf",
+      "bytes": 142188,
+      "sha256": "6d1e288917e5173c6d759112cded56a52cd21cc04338611aad191e9d066c5056",
+      "mime": "font/otf"
+    },
+    {
+      "source": "neoism-frontend/web/public/fonts/geist-mono/GeistMono-Bold.otf",
+      "destination": "public/fonts/geist-mono/GeistMono-Bold.otf",
+      "bytes": 147696,
+      "sha256": "e7ab87eb4684d9a5c7a25cb16523e3d19fe6575a6476fa4a597f74e7b58a3201",
+      "mime": "font/otf"
+    },
+    {
+      "source": "neoism-frontend/web/public/fonts/geist-mono/GeistMono-Italic.otf",
+      "destination": "public/fonts/geist-mono/GeistMono-Italic.otf",
+      "bytes": 144572,
+      "sha256": "b8e5fa429afca5cf1233f9ba4faf7dbb65c95f4677d4ba69c23c04c7cfe8d30c",
+      "mime": "font/otf"
+    },
+    {
+      "source": "neoism-frontend/web/public/fonts/geist-mono/GeistMono-BoldItalic.otf",
+      "destination": "public/fonts/geist-mono/GeistMono-BoldItalic.otf",
+      "bytes": 148628,
+      "sha256": "34b0be704df46ed9f468761e73df0e3999d7dc99c310d64d0e91747c22dfa997",
+      "mime": "font/otf"
+    },
+    {
+      "source": "neoism-agent/sdk/typescript/packages/gui/scripts/font-licenses/GeistMono-OFL.txt",
+      "destination": "public/fonts/licenses/GeistMono-OFL.txt",
+      "bytes": 4387,
+      "sha256": "1781d2806a07d91c4edf4740b88449fab7d0eadad53f7c351b94cd4d4eb8c00f",
+      "mime": "text/plain"
+    },
+    {
+      "source": "neoism-frontend/web/public/fonts/jetbrains-mono/JetBrainsMono-Regular.woff2",
+      "destination": "public/fonts/jetbrains-mono/JetBrainsMono-Regular.woff2",
+      "bytes": 92164,
+      "sha256": "a9cb1cd82332b23a47e3a1239d25d13c86d16c4220695e34b243effa999f45f2",
+      "mime": "font/woff2"
+    },
+    {
+      "source": "neoism-frontend/web/public/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2",
+      "destination": "public/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2",
+      "bytes": 94588,
+      "sha256": "c503cc5ec5f8b2c7666b7ecda1adf44bd45f2e6579b2eba0fc292150416588a2",
+      "mime": "font/woff2"
+    },
+    {
+      "source": "neoism-frontend/web/public/fonts/jetbrains-mono/JetBrainsMono-Italic.woff2",
+      "destination": "public/fonts/jetbrains-mono/JetBrainsMono-Italic.woff2",
+      "bytes": 95864,
+      "sha256": "cb6a1b246318ed3885d7dffa14a2609297fe80e9b8e500bea33b52fa312a36a4",
+      "mime": "font/woff2"
+    },
+    {
+      "source": "neoism-frontend/web/public/fonts/jetbrains-mono/JetBrainsMono-BoldItalic.woff2",
+      "destination": "public/fonts/jetbrains-mono/JetBrainsMono-BoldItalic.woff2",
+      "bytes": 98152,
+      "sha256": "3a013466c0eee979fb9d42c2d7a8887cd3645dc8b897cfc5b71781cf982efc5a",
+      "mime": "font/woff2"
+    },
+    {
+      "source": "neoism-agent/sdk/typescript/packages/gui/scripts/font-licenses/JetBrainsMono-OFL.txt",
+      "destination": "public/fonts/licenses/JetBrainsMono-OFL.txt",
+      "bytes": 4399,
+      "sha256": "30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad",
+      "mime": "text/plain"
+    },
+    {
+      "source": "neoism-frontend/shared/assets/illuminated/fonts/google-ofl/CinzelDecorative-Regular.ttf",
+      "destination": "public/fonts/cinzel-decorative/CinzelDecorative-Regular.ttf",
+      "bytes": 60408,
+      "sha256": "5b862be329103ad287a10f0a53e27a40e8cc519999253f1a0223e2dc330b10b8",
+      "mime": "font/ttf"
+    },
+    {
+      "source": "neoism-frontend/shared/assets/illuminated/fonts/google-ofl/CinzelDecorative-Bold.ttf",
+      "destination": "public/fonts/cinzel-decorative/CinzelDecorative-Bold.ttf",
+      "bytes": 62300,
+      "sha256": "e854e68a388aa50d742a4415c1ae5c17a617ef7956c95a70021d0a4a44f20518",
+      "mime": "font/ttf"
+    },
+    {
+      "source": "neoism-agent/sdk/typescript/packages/gui/scripts/font-licenses/CinzelDecorative-OFL.txt",
+      "destination": "public/fonts/licenses/CinzelDecorative-OFL.txt",
+      "bytes": 4392,
+      "sha256": "1b4138c185b50bc68a8fd3388df0f746894d687ea9dc4c5d1b7fc2876a9e650f",
+      "mime": "text/plain"
+    },
+    {
+      "source": "neoism-frontend/shared/assets/illuminated/fonts/google-ofl/MedievalSharp.ttf",
+      "destination": "public/fonts/medieval-sharp/MedievalSharp.ttf",
+      "bytes": 148712,
+      "sha256": "74cb2e6738bd7703adf120802f68fba0c9ddb9147a08e6847f1005b1e55df5a5",
+      "mime": "font/ttf"
+    },
+    {
+      "source": "neoism-agent/sdk/typescript/packages/gui/scripts/font-licenses/MedievalSharp-OFL.txt",
+      "destination": "public/fonts/licenses/MedievalSharp-OFL.txt",
+      "bytes": 4380,
+      "sha256": "74a70d0d837b9d78b114ad5cabc3d3c449ff5228c5293f072e10db6fbfc76a14",
+      "mime": "text/plain"
+    },
+    {
+      "source": "neoism-agent/sdk/typescript/packages/gui/scripts/assets/geist/Geist-Variable.ttf",
+      "destination": "public/fonts/geist/Geist-Variable.ttf",
+      "bytes": 169056,
+      "sha256": "73894e0448cae90a92b6c2f8732b7bb9acb7b94c418bff559dad4a18e1de9659",
+      "mime": "font/ttf"
+    },
+    {
+      "source": "neoism-agent/sdk/typescript/packages/gui/scripts/font-licenses/Geist-OFL.txt",
+      "destination": "public/fonts/licenses/Geist-OFL.txt",
+      "bytes": 4383,
+      "sha256": "c683bfbcc7e087f5d37a54ef628f10387c451a83ddc459b151403a164ac46c90",
+      "mime": "text/plain"
+    },
+    {
+      "source": "sugarloaf/src/font/resources/PressStart2P/PressStart2P-Regular.ttf",
+      "destination": "public/fonts/press-start-2p/PressStart2P-Regular.ttf",
+      "bytes": 118204,
+      "sha256": "034c77f1f05ec89421e4a63f0e3a4ca1ecf852cc6d2bf611f126f275728e017d",
+      "mime": "font/ttf"
+    },
+    {
+      "source": "neoism-agent/sdk/typescript/packages/gui/scripts/font-licenses/PressStart2P-OFL.txt",
+      "destination": "public/fonts/licenses/PressStart2P-OFL.txt",
+      "bytes": 4413,
+      "sha256": "705960c3281a5765ecc0b59bd4ed7ca59eed165748076bc2fc3e8fdbfeb944b0",
+      "mime": "text/plain"
+    }
+  ]
+}

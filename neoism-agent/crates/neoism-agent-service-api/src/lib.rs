@@ -190,17 +190,26 @@ pub trait WorkspaceSearchService: Send + Sync {
     ) -> Result<DirectorySearchResult, ServiceError>;
 }
 
-/// A workspace-scoped request for the host's projected Agent configuration.
+/// Internal config-runtime identity prefix. HTTP clients select this context with
+/// scope=installation, never by supplying a filesystem directory.
+pub const INSTALLATION_CONTEXT_PREFIX: &str = "agent-installation:";
+
+/// A request for workspace or installation-only projected Agent configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigSnapshotRequest {
     pub workspace: PathBuf,
+    pub installation: bool,
 }
 
 impl ConfigSnapshotRequest {
+    pub fn installation() -> Self {
+        Self { workspace: PathBuf::new(), installation: true }
+    }
+
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace: workspace.into(),
-        }
+        let workspace = workspace.into();
+        let installation = workspace.to_string_lossy().starts_with(INSTALLATION_CONTEXT_PREFIX);
+        Self { workspace, installation }
     }
 }
 
@@ -217,7 +226,14 @@ pub struct ConfigLayer {
 /// A root in which Agent-owned supplementary content (skills, commands,
 /// workflows, plugins, and instructions) may be discovered.
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigDiscoveryScope {
+    Installation,
+    Workspace,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigDiscoveryRoot {
+    pub scope: ConfigDiscoveryScope,
     pub source_id: String,
     pub path: PathBuf,
 }
@@ -951,6 +967,21 @@ impl ConfigSourceService for StandardConfigSourceService {
         &self,
         request: &ConfigSnapshotRequest,
     ) -> Result<ConfigSnapshot, ServiceError> {
+        if request.installation {
+            let mut layers = vec![ConfigLayer {
+                source_id: "standard:user".into(),
+                document: Self::read_layer(&self.user_root.join(STANDARD_AGENT_CONFIG_FILENAME))?,
+                writable: true,
+            }];
+            layers.extend(self.memory_layers.iter().map(|(id, document)| ConfigLayer {
+                source_id: id.clone(), document: document.clone(), writable: false,
+            }));
+            return Ok(ConfigSnapshot {
+                identity: snapshot_identity(&layers), workspace: self.user_root.clone(), layers,
+                discovery_roots: vec![ConfigDiscoveryRoot { scope: ConfigDiscoveryScope::Installation, source_id: "standard:user-root".into(), path: self.user_root.clone() }],
+                writable_target: ConfigWritableTarget { source_id: "standard:user".into(), label: "global Agent config".into() },
+            });
+        }
         let workspace = absolute_workspace(&request.workspace);
         let project_root = self.project_root(&workspace);
         let mut layers = vec![
@@ -981,10 +1012,12 @@ impl ConfigSourceService for StandardConfigSourceService {
             layers,
             discovery_roots: vec![
                 ConfigDiscoveryRoot {
+                    scope: ConfigDiscoveryScope::Installation,
                     source_id: "standard:user-root".into(),
                     path: self.user_root.clone(),
                 },
                 ConfigDiscoveryRoot {
+                    scope: ConfigDiscoveryScope::Workspace,
                     source_id: "standard:project-root".into(),
                     path: project_root,
                 },

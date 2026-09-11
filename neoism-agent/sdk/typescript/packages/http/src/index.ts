@@ -231,7 +231,7 @@ async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterable<Even
 }
 
 function buildUrl(baseUrl: string, request: RequestDescriptor): string {
-  const url = new URL(request.path, `${baseUrl}/`);
+  const url = new URL(request.path.replace(/^\/+/, ""), `${baseUrl}/`);
   for (const [key, value] of Object.entries(request.query ?? {})) {
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
@@ -239,7 +239,7 @@ function buildUrl(baseUrl: string, request: RequestDescriptor): string {
 }
 
 function buildSocketUrl(baseUrl: string, request: SocketDescriptor): string {
-  const url = new URL(request.path, `${baseUrl}/`);
+  const url = new URL(request.path.replace(/^\/+/, ""), `${baseUrl}/`);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   for (const [key, value] of Object.entries(request.query ?? {})) {
     if (value !== undefined) url.searchParams.set(key, String(value));

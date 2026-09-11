@@ -772,6 +772,13 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
             use axum::extract::{Path, Query, State};
             use neoism_agent_builtins::plugin::workflows::WorkflowAction;
             let query = route_query(&request);
+            // An omitted scope keeps the shipped workspace destination.
+            let scope: crate::workflow::WorkflowQuery = query_value(query.clone())?;
+            let global_context = match scope.scope {
+                crate::workflow::WorkflowScope::Installation => Some(crate::workflow::installation_context(self.0.services()).map_err(api_error)?),
+                crate::workflow::WorkflowScope::Workspace => None,
+            };
+            let definition_workspace = global_context.as_deref().map(std::path::Path::new).or(request.workspace.as_deref());
             let state = State(self.0.clone());
             let headers = header_map(&request.headers);
             let workflow_id =
@@ -791,7 +798,7 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
                 WorkflowAction::Create => {
                     return crate::workflow::workflow_create(
                         &self.0,
-                        request.workspace.as_deref(),
+                        definition_workspace,
                         request.actor.as_deref(),
                         &headers,
                         request.body,
@@ -812,7 +819,7 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
                 WorkflowAction::Update => {
                     return crate::workflow::workflow_update(
                         &self.0,
-                        request.workspace.as_deref(),
+                        definition_workspace,
                         request.actor.as_deref(),
                         &headers,
                         &workflow_id,
@@ -824,7 +831,7 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
                 WorkflowAction::Patch => {
                     return crate::workflow::workflow_update(
                         &self.0,
-                        request.workspace.as_deref(),
+                        definition_workspace,
                         request.actor.as_deref(),
                         &headers,
                         &workflow_id,
@@ -836,7 +843,7 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
                 WorkflowAction::Delete => {
                     return crate::workflow::workflow_delete(
                         &self.0,
-                        request.workspace.as_deref(),
+                        definition_workspace,
                         request.actor.as_deref(),
                         &headers,
                         &workflow_id,

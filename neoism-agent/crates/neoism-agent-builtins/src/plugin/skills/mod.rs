@@ -208,6 +208,11 @@ pub async fn load(
     services: &AgentServices,
     directory: &str,
 ) -> anyhow::Result<Vec<Skill>> {
+    if directory.starts_with(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX) {
+        let snapshot = services.config.snapshot(&neoism_agent_service_api::ConfigSnapshotRequest::installation())?;
+        let (document, roots) = config::load_snapshot(&snapshot)?;
+        return load_from_config(&snapshot.workspace.to_string_lossy(), &document, &roots).await;
+    }
     let (document, roots) = config::load(services, directory)?;
     load_from_config(directory, &document, &roots).await
 }

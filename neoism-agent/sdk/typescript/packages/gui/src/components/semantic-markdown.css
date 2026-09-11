@@ -1,0 +1,13 @@
+/* Native prose roles, not syntax tokenizer output. Theme variables come from IdeTheme. */
+.markdown .neo-semantic-accent { color: var(--theme-accent, var(--fg)); }
+.markdown .neo-semantic-blue, .neo-response-footer .neo-response-agent { color: var(--theme-blue, var(--fg)); }
+.markdown .neo-semantic-cyan { color: var(--theme-cyan, var(--fg)); }
+.markdown .neo-semantic-magenta { color: var(--theme-magenta, var(--fg)); }
+.markdown .neo-semantic-yellow { color: var(--theme-yellow, var(--fg)); }
+.markdown .neo-semantic-syn_type { color: var(--theme-syn_type, var(--fg)); }
+.markdown .neo-semantic-syn_string { color: var(--theme-syn_string, var(--fg)); }
+.markdown .neo-semantic-green { color: var(--theme-green, var(--fg)); }
+.markdown .neo-semantic-red { color: var(--theme-red, var(--fg)); }
+.markdown .neo-semantic-bold, .markdown .neo-inline-code { font-weight: 700; }
+.markdown strong { color: var(--fg); color: light-dark(var(--fg), var(--theme-white, var(--fg))); }
+.markdown a { color: var(--theme-blue, var(--fg)); }

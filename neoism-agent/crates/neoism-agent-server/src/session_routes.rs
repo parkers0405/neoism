@@ -430,7 +430,7 @@ fn resolve_session_directory(
     Ok(project::discover(services, canonical))
 }
 
-fn expand_home_path(path: &str) -> Result<PathBuf, ApiError> {
+pub(crate) fn expand_home_path(path: &str) -> Result<PathBuf, ApiError> {
     if path == "~" {
         return home_directory()
             .ok_or_else(|| ApiError::bad_request("cannot resolve home directory"));

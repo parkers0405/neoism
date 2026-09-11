@@ -105,9 +105,9 @@ export interface NeoismClient {
     commands: ManagementCollection<"v2.management.commands">;
     skills: ManagementCollection<"v2.management.skills"> & {
       install(input: OperationInput<"v2.management.skills.install">["body"], directory?: string): Promise<OperationResponse<"v2.management.skills.install">>;
-      versions(id: string, directory?: string): Promise<OperationResponse<"v2.management.skills.versions.list">>;
-      version(id: string, version: string): Promise<OperationResponse<"v2.management.skills.versions.get">>;
-      restore(id: string, version: string, options?: { directory?: string; expectedRevision?: string }): Promise<OperationResponse<"v2.management.skills.versions.restore">>;
+      versions(id: string, context?: string | ManagementOptions): Promise<OperationResponse<"v2.management.skills.versions.list">>;
+      version(id: string, version: string, options?: ManagementOptions): Promise<OperationResponse<"v2.management.skills.versions.get">>;
+      restore(id: string, version: string, options?: ManagementOptions): Promise<OperationResponse<"v2.management.skills.versions.restore">>;
     };
   };
   readonly sessions: {
@@ -116,14 +116,14 @@ export interface NeoismClient {
     get(id: string): Promise<Session>;
     update(id: string, input: OperationInput<"v2.sessions.update">["body"]): Promise<Session>;
     delete(id: string): Promise<boolean>;
-    messages(id: string, options?: { order?: "asc" | "desc"; limit?: number; slim?: boolean }): Promise<Page<MessageWithParts>>;
+    messages(id: string, options?: OperationInput<"v2.sessions.messages">["query"]): Promise<Page<MessageWithParts>>;
     prompt(id: string, request: PromptRequest): Promise<void>;
     abort(id: string): Promise<boolean>;
     status(): Promise<OperationResponse<"v2.sessions.status">>;
     queue(id: string): Promise<OperationResponse<"v2.sessions.queue.list">>;
     clearQueue(id: string): Promise<OperationResponse<"v2.sessions.queue.clear">>;
     popQueue(id: string): Promise<OperationResponse<"v2.sessions.queue.pop">>;
-    command(id: string, command: string): Promise<OperationResponse<"v2.sessions.commands.execute">>;
+    command(id: string, command: string, options?: Omit<NonNullable<OperationInput<"v2.sessions.commands.execute">["body"]>, "command">): Promise<OperationResponse<"v2.sessions.commands.execute">>;
     undo(id: string): Promise<OperationResponse<"v2.sessions.undo">>;
     redo(id: string): Promise<OperationResponse<"v2.sessions.redo">>;
     summarize(id: string): Promise<OperationResponse<"v2.sessions.summarize">>;
@@ -205,7 +205,7 @@ export function createNeoismClient(transport: NeoismTransport): NeoismClient {
       get: (id, directory) => operations.request("v2.plugins.get", { path: { plugin_id: id }, query: clean({ directory }) }),
       async use<TClient>(plugin: PluginSdk<TClient>, options: PluginUseOptions = {}) {
         const capabilities = await operations.request("v2.capabilities.list", {
-          query: clean({ directory: options.directory }),
+          query: clean({ directory: options.directory, scope: options.scope }),
         });
         const capability = capabilities.find((candidate) =>
           candidate.id === plugin.capability && candidate.enabled
@@ -327,10 +327,10 @@ export function createNeoismClient(transport: NeoismTransport): NeoismClient {
       commands: managedCollection("v2.management.commands"),
       skills: Object.assign(managedCollection("v2.management.skills"), {
         install: (body: OperationInput<"v2.management.skills.install">["body"], directory?: string) => operations.request("v2.management.skills.install", { query: clean({ directory }), body }),
-        versions: (id: string, directory?: string) => operations.request("v2.management.skills.versions.list", { path: { id }, query: clean({ directory }) }),
-        version: (id: string, version: string) => operations.request("v2.management.skills.versions.get", { path: { id, version } }),
-        restore: (id: string, version: string, options: { directory?: string; expectedRevision?: string } = {}) => operations.request("v2.management.skills.versions.restore", {
-          path: { id, version }, query: clean({ directory: options.directory, expectedRevision: options.expectedRevision }), headers: clean({ "If-Match": options.expectedRevision }),
+        versions: (id: string, context?: string | ManagementOptions) => operations.request("v2.management.skills.versions.list", { path: { id }, query: clean(typeof context === "string" ? { directory: context } : context ?? {}) }),
+        version: (id: string, version: string, options: ManagementOptions = {}) => operations.request("v2.management.skills.versions.get", { path: { id, version }, query: clean(options) }),
+        restore: (id: string, version: string, options: ManagementOptions = {}) => operations.request("v2.management.skills.versions.restore", {
+          path: { id, version }, query: clean({ directory: options.directory, scope: options.scope, expectedRevision: options.expectedRevision }), headers: clean({ "If-Match": options.expectedRevision }),
         }),
       }),
     },
@@ -352,7 +352,7 @@ export function createNeoismClient(transport: NeoismTransport): NeoismClient {
       queue: (id) => operations.request("v2.sessions.queue.list", { path: { session_id: id } }),
       clearQueue: (id) => operations.request("v2.sessions.queue.clear", { path: { session_id: id } }),
       popQueue: (id) => operations.request("v2.sessions.queue.pop", { path: { session_id: id } }),
-      command: (id, command) => operations.request("v2.sessions.commands.execute", { path: { session_id: id }, body: { command } }),
+      command: (id, command, options = {}) => operations.request("v2.sessions.commands.execute", { path: { session_id: id }, body: { ...options, command } }),
       undo: (id) => operations.request("v2.sessions.undo", { path: { session_id: id }, body: {} }),
       redo: (id) => operations.request("v2.sessions.redo", { path: { session_id: id }, body: {} }),
       summarize: (id) => operations.request("v2.sessions.summarize", { path: { session_id: id }, body: {} }),

@@ -1,0 +1,49 @@
+.project-picker { position: relative; min-width: 0; color: var(--fg, #eee); font-family: var(--font); font-size: 13px; }
+.project-picker button, .project-folder-dialog button { font: inherit; cursor: pointer; }
+.project-picker button:disabled, .project-folder-dialog button:disabled { cursor: default; opacity: .45; }
+.project-picker .project-pill { display: flex; align-items: center; gap: 8px; max-width: 260px; height: 32px; padding: 4px 9px 4px 5px; border-radius: 8px; background: var(--surface-1, #242424); border: 1px solid var(--border, #ffffff12); color: inherit; }
+.project-letter { display: inline-grid; place-items: center; width: 22px; height: 22px; flex-shrink: 0; border-radius: 5px; background: var(--surface-2, #ffffff0b); font-size: 11px; color: var(--muted, #aaa); }
+.project-pill-name { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.project-menu { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 80; width: min(300px, calc(100vw - 32px)); border: 1px solid var(--border, #ffffff12); border-radius: 8px; background: var(--surface-1, #242424); box-shadow: 0 8px 28px #0005; overflow: hidden; padding: 4px; }
+/* Measured from the trigger, including the mid-page home footer. Keep this
+   stronger than the native footer's legacy whole-viewport height rule. */
+.project-picker .project-menu,
+.native-composer-footer .project-picker .project-menu {
+    display: block;
+    box-sizing: border-box;
+    max-height: min(480px, var(--project-menu-available, calc(100dvh - 32px)));
+    overflow-y: auto;
+}
+.project-picker[data-menu-placement="below"] .project-menu { bottom: auto; top: calc(100% + 8px); }
+.project-search { display: flex; align-items: center; gap: 9px; padding: 10px; color: var(--muted, #aaa); }
+.project-search input { min-width: 0; width: 100%; background: transparent; border: 0; outline: none; color: var(--fg, #eee); font: inherit; padding: 0; box-shadow: none; }
+.project-menu-list { max-height: 240px; overflow-y: auto; }
+.project-menu .project-menu-row, .project-menu .project-add { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; padding: 8px; border: 0; border-radius: 5px; background: transparent; color: inherit; }
+.project-menu-row > span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-menu-row small { display: block; font-size: 10px; color: var(--muted, #aaa); overflow: hidden; text-overflow: ellipsis; }
+.project-menu .project-add { border-top: 1px solid var(--border, #ffffff12); border-radius: 0; margin-top: 4px; }
+.project-menu button:hover, .project-menu button:focus-visible, .project-folder-row:hover, .project-folder-row[aria-selected="true"] { background: var(--surface-2, #ffffff09); }
+.project-menu p { margin: 10px; }
+.project-folder-dialog { width: min(640px, calc(100vw - 32px)); max-width: 640px; max-height: calc(100dvh - 32px); padding: 0; border-radius: 8px; border: 1px solid var(--border, #ffffff15); background: var(--surface-1, #242424); color: var(--fg, #eee); box-shadow: 0 20px 70px #0007; }
+.project-folder-dialog::backdrop { background: #0007; }
+.project-folder-content { display: flex; flex-direction: column; height: min(640px, calc(100dvh - 34px)); font-size: 13px; }
+.project-folder-content > header { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px 12px; flex-shrink: 0; }
+.project-folder-content h2 { font-family: var(--font-heading); font-size: 20px; font-weight: 600; line-height: 1.3; margin: 0; }
+.project-folder-content header button, .project-folder-navigation button { display: grid; place-items: center; border: 0; padding: 5px; color: var(--muted, #aaa); background: transparent; }
+.project-folder-navigation { display: flex; align-items: center; gap: 6px; margin: 0 16px; }
+.project-folder-navigation form { flex: 1; min-width: 0; }
+.project-folder-navigation input { border: 0; background: transparent; color: var(--muted, #aaa); font: inherit; width: 100%; padding: 5px 0; text-overflow: ellipsis; }
+.project-folder-content > .project-search { margin: 4px 10px; border-bottom: 1px solid var(--border, #ffffff12); }
+.project-folder-scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 12px; }
+.project-folder-scroll h3 { color: var(--muted, #999); font-size: 11px; font-weight: 500; margin: 16px 8px 8px; }
+.project-folder-scroll p { padding: 0 8px; color: var(--muted, #999); }
+.project-folder-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 9px 8px; border: 0; border-radius: 5px; background: transparent; color: inherit; }
+.project-folder-row > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-folder-row small { display: block; overflow: hidden; text-overflow: ellipsis; color: var(--muted, #999); font-size: 10px; margin-top: 2px; }
+.project-folder-row svg { flex-shrink: 0; color: var(--muted, #aaa); }
+.project-folder-content > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 20px; border-top: 1px solid var(--border, #ffffff12); }
+.project-folder-content > footer > span { color: var(--muted, #aaa); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-folder-confirm { padding: 8px 12px; border-radius: 6px; border: 0; background: var(--fg, #eee); color: var(--bg, #181818); white-space: nowrap; }
+.project-picker-error { color: var(--danger, #ed9999); padding: 0 12px; font-size: 12px; overflow-wrap: anywhere; }
+.project-folder-dialog :focus-visible, .project-picker :focus-visible { outline: 2px solid var(--accent, #aaa); outline-offset: 1px; }
+@media (max-width: 480px) { .project-picker .project-pill { max-width: 180px; } }

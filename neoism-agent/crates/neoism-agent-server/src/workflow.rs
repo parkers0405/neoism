@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::{now_millis, resolve_directory, InstanceQuery};
+use crate::{now_millis, resolve_directory};
 
 const PREVIEW_COUNT: usize = 10;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -285,9 +285,47 @@ struct WorkflowCatalog {
     diagnostics: Vec<WorkflowDiagnostic>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum WorkflowScope {
+    Installation,
+    #[default]
+    Workspace,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct WorkflowQuery {
+    pub directory: Option<String>,
+    #[serde(default)]
+    pub scope: WorkflowScope,
+}
+
+// A persisted, scope-qualified identity, never an execution directory. This keeps
+// global activations/history distinct from all workspace activations of the same id.
+const INSTALLATION_CONTEXT_PREFIX: &str = neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX;
+
+pub(crate) fn installation_context(services: &neoism_agent_service_api::AgentServices) -> Result<String, ApiError> {
+    let snapshot = services.config.snapshot(&neoism_agent_service_api::ConfigSnapshotRequest::installation())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let root = snapshot.discovery_roots.into_iter()
+        .find(|root| root.scope == neoism_agent_service_api::ConfigDiscoveryScope::Installation)
+        .ok_or_else(|| ApiError::bad_request("No installation discovery root is configured"))?;
+    if !root.path.is_absolute() { return Err(ApiError::bad_request("Installation discovery root must be absolute")); }
+    Ok(format!("{INSTALLATION_CONTEXT_PREFIX}{}", root.path.display()))
+}
+
+fn workflow_context(state: &AppState, directory: Option<String>, scope: WorkflowScope, headers: &HeaderMap) -> Result<String, ApiError> {
+    match scope {
+        WorkflowScope::Installation => installation_context(state.services()),
+        WorkflowScope::Workspace => workspace_root(resolve_directory(directory, headers)),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct WorkflowHistoryQuery {
     directory: Option<String>,
+    #[serde(default)]
+    scope: WorkflowScope,
     limit: Option<usize>,
 }
 
@@ -413,7 +451,7 @@ fn workflow_watch_paths(
 ) -> BTreeMap<PathBuf, RecursiveMode> {
     let mut paths = BTreeMap::new();
     for workspace in workspaces {
-        let roots = crate::config::roots(services, workspace);
+        let roots = workflow_discovery_roots(services, workspace);
         for root in roots {
             if root.is_dir() {
                 insert_watch(&mut paths, root.clone(), RecursiveMode::NonRecursive);
@@ -459,10 +497,10 @@ fn nearest_existing_parent(path: &FsPath) -> Option<PathBuf> {
 
 pub(crate) async fn workflow_list(
     State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<WorkflowQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
+    let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
     let catalog = discover_async(state.services().clone(), workspace.clone()).await?;
     let persisted = state.inner.store.list_workflows().await?;
@@ -493,11 +531,11 @@ pub(crate) async fn workflow_list(
 
 pub(crate) async fn workflow_get(
     State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<WorkflowQuery>,
     headers: HeaderMap,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
+    let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
     let source = find_source(state.services(), &workspace, &workflow_id).await?;
     let projection = state
@@ -519,19 +557,19 @@ pub(crate) async fn workflow_get(
 }
 
 fn workflow_source_is_managed(workspace: &str, source: &WorkflowSource) -> bool {
-    let expected = FsPath::new(workspace)
-        .join(".agent/workflows")
+    let expected = managed_workflow_root(FsPath::new(workspace))
+        .join("workflows")
         .join(format!("{}.md", source.definition.id));
     FsPath::new(&source.source_path) == expected.canonicalize().unwrap_or(expected)
 }
 
 pub(crate) async fn workflow_activate(
     State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<WorkflowQuery>,
     headers: HeaderMap,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
+    let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
     let source = find_source(state.services(), &workspace, &workflow_id).await?;
     let id = activation_id(&workspace, &workflow_id);
@@ -560,11 +598,11 @@ pub(crate) async fn workflow_activate(
 
 pub(crate) async fn workflow_pause(
     State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<WorkflowQuery>,
     headers: HeaderMap,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
+    let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
     let id = activation_id(&workspace, &workflow_id);
     if !state
@@ -588,11 +626,11 @@ pub(crate) async fn workflow_pause(
 
 pub(crate) async fn workflow_run_now(
     State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<WorkflowQuery>,
     headers: HeaderMap,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
+    let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
     let source = find_source(state.services(), &workspace, &workflow_id).await?;
     let projection = ensure_projection(&state, workspace, source, false).await?;
@@ -615,11 +653,11 @@ pub(crate) async fn workflow_run_now(
 
 pub(crate) async fn workflow_preview(
     State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<WorkflowQuery>,
     headers: HeaderMap,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
+    let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
     let source = find_source(state.services(), &workspace, &workflow_id).await?;
     let slots = preview_slots(&source.definition.schedule, now_millis(), PREVIEW_COUNT)?;
@@ -647,7 +685,7 @@ pub(crate) async fn workflow_history(
     headers: HeaderMap,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
+    let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
     let id = activation_id(&workspace, &workflow_id);
     if state.inner.store.get_workflow(&id).await?.is_none() {
@@ -663,11 +701,11 @@ pub(crate) async fn workflow_history(
 
 pub(crate) async fn workflow_run_get(
     State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<WorkflowQuery>,
     headers: HeaderMap,
     Path((workflow_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
+    let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     let run = state
         .inner
         .store
@@ -680,11 +718,11 @@ pub(crate) async fn workflow_run_get(
 
 pub(crate) async fn workflow_run_retry(
     State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<WorkflowQuery>,
     headers: HeaderMap,
     Path((workflow_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = workspace_root(resolve_directory(query.directory, &headers))?;
+    let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
     let activation = activation_id(&workspace, &workflow_id);
     let previous = state
@@ -773,6 +811,21 @@ fn authorize_admin(
     }
 }
 
+fn managed_workflow_root(workspace: &FsPath) -> PathBuf {
+    match workspace.to_string_lossy().strip_prefix(INSTALLATION_CONTEXT_PREFIX) {
+        Some(root) => PathBuf::from(root),
+        None => workspace.join(".agent"),
+    }
+}
+
+fn canonical_definition_context(workspace: &FsPath) -> std::io::Result<PathBuf> {
+    if workspace.to_string_lossy().starts_with(INSTALLATION_CONTEXT_PREFIX) {
+        Ok(workspace.to_path_buf())
+    } else {
+        workspace.canonicalize()
+    }
+}
+
 fn managed_workflow_path(workspace: &FsPath, id: &str) -> anyhow::Result<PathBuf> {
     if id.is_empty()
         || id.len() > 80
@@ -785,7 +838,7 @@ fn managed_workflow_path(workspace: &FsPath, id: &str) -> anyhow::Result<PathBuf
     {
         bail!("id must be a 1-80 character lowercase workflow slug");
     }
-    let root = workspace.join(".agent");
+    let root = managed_workflow_root(workspace);
     for candidate in [root.as_path(), root.join("workflows").as_path()] {
         if candidate.exists() && fs::symlink_metadata(candidate)?.file_type().is_symlink()
         {
@@ -857,7 +910,7 @@ fn atomic_workflow_write(
 ) -> anyhow::Result<()> {
     let directory = path.parent().context("workflow path has no parent")?;
     fs::create_dir_all(directory)?;
-    for candidate in [workspace.join(".agent"), directory.to_path_buf()] {
+    for candidate in [managed_workflow_root(workspace), directory.to_path_buf()] {
         let metadata = fs::symlink_metadata(&candidate)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             bail!("managed workflow path is not a real directory");
@@ -948,7 +1001,7 @@ pub(crate) async fn workflow_create(
             json!({}),
         );
     };
-    let workspace = match workspace.canonicalize() {
+    let workspace = match canonical_definition_context(workspace) {
         Ok(value) => value,
         Err(error) => {
             return admin_error(
@@ -1051,7 +1104,7 @@ pub(crate) async fn workflow_update(
             json!({}),
         );
     };
-    let workspace = match workspace.canonicalize() {
+    let workspace = match canonical_definition_context(workspace) {
         Ok(value) => value,
         Err(error) => {
             return admin_error(
@@ -1250,7 +1303,7 @@ pub(crate) async fn workflow_delete(
             json!({}),
         );
     };
-    let workspace = match workspace.canonicalize() {
+    let workspace = match canonical_definition_context(workspace) {
         Ok(value) => value,
         Err(error) => {
             return admin_error(
@@ -1489,12 +1542,30 @@ async fn find_source(
     })
 }
 
+// Managed workflow writes retain their shipped .agent destination even when a
+// host adapter discovers other resources under .neoism. Reads and watches must
+// include that destination too; managed project definitions take precedence.
+fn workflow_discovery_roots(
+    services: &neoism_agent_service_api::AgentServices,
+    workspace: &str,
+) -> Vec<PathBuf> {
+    if let Some(root) = workspace.strip_prefix(INSTALLATION_CONTEXT_PREFIX) {
+        return vec![PathBuf::from(root)];
+    }
+    let mut roots = crate::config::roots(services, workspace);
+    let managed = FsPath::new(workspace).join(".agent");
+    if !roots.contains(&managed) {
+        roots.push(managed);
+    }
+    roots
+}
+
 fn discover(
     services: &neoism_agent_service_api::AgentServices,
     workspace: &str,
 ) -> anyhow::Result<WorkflowCatalog> {
     let mut catalog = WorkflowCatalog::default();
-    for root in crate::config::roots(services, workspace) {
+    for root in workflow_discovery_roots(services, workspace) {
         for directory in [root.join("workflow"), root.join("workflows")] {
             for path in markdown_files(&directory)? {
                 match parse_source(&path) {
@@ -2556,6 +2627,9 @@ fn workflow_source_is_global(
     workspace: &str,
     source_path: &str,
 ) -> bool {
+    if let Some(root) = workspace.strip_prefix(INSTALLATION_CONTEXT_PREFIX) {
+        return FsPath::new(source_path).starts_with(root);
+    }
     let source = FsPath::new(source_path);
     let workspace = PathBuf::from(workspace);
     crate::config::roots(services, workspace.to_string_lossy().as_ref())
@@ -2587,6 +2661,10 @@ fn publish_run(state: &AppState, run: &WorkflowRun) {
         }),
     ));
 }
+
+#[cfg(test)]
+#[path = "workflow_global_tests.rs"]
+mod global_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2983,6 +3061,44 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(candidate);
         }
+    }
+
+    #[test]
+    fn managed_write_is_discovered_and_watched_with_native_adapter_roots() {
+        use neoism_agent_service_api::*;
+        struct NativeRoots;
+        impl ConfigSourceService for NativeRoots {
+            fn snapshot(&self, request: &ConfigSnapshotRequest) -> Result<ConfigSnapshot, ServiceError> {
+                let mut snapshot = crate::standard_services().config.snapshot(request)?;
+                snapshot.discovery_roots = vec![ConfigDiscoveryRoot {
+                    scope: ConfigDiscoveryScope::Workspace,
+                    source_id: "native:project".into(),
+                    path: snapshot.workspace.join(".neoism"),
+                }];
+                Ok(snapshot)
+            }
+            fn update<'a>(&'a self, _: &'a ConfigUpdateRequest) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+                Box::pin(async { Err(ServiceError::new("read-only test adapter")) })
+            }
+        }
+        let root = std::env::temp_dir().join(format!("neoism-native-workflow-{}", Id::ascending(IdKind::Event)));
+        let selected = root.join("selected");
+        let other = root.join("default");
+        fs::create_dir_all(selected.join(".neoism")).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let services = crate::standard_services().with_config(std::sync::Arc::new(NativeRoots));
+        let workspace = workspace_root(selected.join("..").join("selected").display().to_string()).unwrap();
+        let path = managed_workflow_path(FsPath::new(&workspace), "selected-flow").unwrap();
+        atomic_workflow_write(FsPath::new(&workspace), &path, b"---\nid: selected-flow\nname: Selected flow\nschedule:\n  date: 2099-09-15\n  time: '09:30'\n---\nRun once.\n").unwrap();
+        assert!(selected.join(".agent/workflows/selected-flow.md").is_file());
+        assert!(!other.join(".agent").exists());
+        let catalog = discover(&services, &workspace).unwrap();
+        let source = catalog.workflows.get("selected-flow").expect("managed workflow must be discoverable under native roots");
+        assert!(workflow_source_is_managed(&workspace, source));
+        assert_eq!(workflow_watch_paths(&services, std::slice::from_ref(&workspace)).get(&path.parent().unwrap().canonicalize().unwrap()), Some(&RecursiveMode::Recursive));
+        assert!(discover(&services, other.to_str().unwrap()).unwrap().workflows.is_empty());
+        assert!(managed_workflow_path(&selected, "../escape").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

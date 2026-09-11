@@ -1,0 +1,40 @@
+.todo-panel {
+    font-family: var(--font, "Neoism Geist", sans-serif);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--fg, currentColor);
+    width: 100%;
+    max-width: 48rem;
+    min-width: 0;
+    padding-block: 12px 6px;
+    background: none;
+    border: 0;
+}
+.todo-panel[data-placement="inline"] { border-inline-start: 1px solid var(--border, #8885); padding-inline-start: 16px; }
+.todo-panel header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 7px; }
+.todo-panel h3 { font: inherit; font-weight: 600; margin: 0; }
+.todo-count { color: var(--muted, #888); font-size: 12px; font-variant-numeric: tabular-nums; }
+.todo-panel .todo-list { list-style: none; margin: 0; padding: 0; }
+.todo-panel .todo-list > li { margin: 0; padding: 0; }
+.todo-row { display: flex; align-items: start; gap: 9px; min-height: 28px; padding-block: 3px; cursor: default; }
+.todo-content { min-width: 0; overflow-wrap: anywhere; text-decoration: line-through transparent; text-decoration-thickness: 1px; transition: color 240ms ease, text-decoration-color 320ms ease; }
+.todo-status { flex: none; margin-inline-start: auto; padding-inline-start: 8px; color: var(--muted, #888); font-size: 11px; line-height: 21px; }
+.todo-list [data-status="in_progress"] .todo-content { color: var(--yellow, #c5a569); font-weight: 500; }
+.todo-list [data-status="completed"] .todo-content { color: var(--muted, #888); text-decoration-color: currentColor; }
+.todo-check { display: inline-flex; width: 20px; height: 20px; flex: 0 0 20px; color: var(--muted, #888); vertical-align: -4px; }
+.todo-check svg { width: 20px; height: 20px; overflow: visible; stroke: currentColor; stroke-width: 1.5; }
+.todo-check-box { stroke-dasharray: 2 2; transition: opacity 160ms ease; }
+.todo-check-stroke { stroke-dasharray: 1; stroke-dashoffset: 1; stroke-linecap: round; stroke-linejoin: round; transform-origin: center; transform: scale(.7); transition: stroke-dashoffset 300ms ease, transform 250ms ease; }
+.todo-check-spinner { opacity: 0; stroke-dasharray: 24 14; transform-origin: center; }
+.todo-check[data-status="completed"] .todo-check-box { stroke-dasharray: none; opacity: .5; }
+.todo-check[data-status="completed"] .todo-check-stroke { stroke-dashoffset: 0; transform: scale(1); }
+.todo-check[data-status="in_progress"] { color: var(--yellow, #c5a569); }
+.todo-check[data-status="in_progress"] .todo-check-box { opacity: 0; }
+.todo-check[data-status="in_progress"] .todo-check-spinner { opacity: 1; animation: todo-spin 1.4s linear infinite; }
+.todo-markdown-check { display: inline; margin-inline-end: 5px; }
+.todo-empty { font-family: var(--font, "Neoism Geist", sans-serif); color: var(--muted, #888); }
+@keyframes todo-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .todo-panel *, .todo-check * { animation: none !important; transition: none !important; }
+}
+@media (max-width: 400px) { .todo-status { font-size: 10px; padding-inline-start: 0; } }

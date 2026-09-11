@@ -1,0 +1,19 @@
+/* Local to Wordmark: no Avatar/Logo, composer, or application layout rules. */
+.neoism-home-wordmark {
+    display: block;
+    flex: none;
+    height: auto;
+    width: min(100%, calc(clamp(34px, 12vh, 84px) * 6.197));
+    overflow: visible;
+    color: inherit;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+}
+/* Animation is the native frame equation, not a CSS transition approximation.
+   JS also stops its RAF entirely when this preference is active. */
+@media (prefers-reduced-motion: reduce) {
+    .neoism-home-wordmark [data-wordmark-letter],
+    .neoism-home-wordmark [data-wordmark-glow] { transform: none; }
+    .neoism-home-wordmark circle { visibility: hidden; }
+}

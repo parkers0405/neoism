@@ -1,0 +1,17 @@
+.edit-diagnostics {
+    margin-block: 6px;
+    min-width: 0;
+    font-family: var(--font-code, monospace);
+    font-size: 12px;
+    line-height: 1.5;
+}
+.edit-diagnostics-file + .edit-diagnostics-file { margin-top: 8px; }
+.edit-diagnostics-path { color: var(--muted); overflow-wrap: anywhere; }
+.edit-diagnostics-cache { display: block; color: var(--muted); font-family: var(--font-ui, sans-serif); font-size: 11px; }
+.edit-diagnostics-row { white-space: pre-wrap; overflow-wrap: anywhere; }
+.edit-diagnostics-row[data-severity="error"] { color: var(--danger, #e59494); }
+.edit-diagnostics-row[data-severity="warning"] { color: var(--yellow, #c5a569); }
+.edit-diagnostics-location { font-weight: 500; }
+.edit-diagnostics-more { border: 0; padding: 3px 0; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+.edit-diagnostics-more:hover { text-decoration: underline; }
+.edit-diagnostics-more:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }

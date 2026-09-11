@@ -1,0 +1,14 @@
+/* Native panel radius 14, label x+18/y+12, body y+34, bottom inset 8. */
+.neo-thinking-part { margin: 8px 0; border: 0; border-radius: 14px; background: var(--panel); padding: 12px 18px 8px; font-family: var(--font); }
+.neo-thinking-header { display: flex; align-items: center; gap: 7px; width: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; color: color-mix(in srgb, var(--theme-yellow, #e6c384) 60%, transparent); font: italic 12px/18px var(--font); cursor: pointer; text-align: left; }
+.neo-thinking-header:hover { background: transparent; }
+.neo-thinking-header:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
+.neo-thinking-header svg { opacity: .65; }
+.neo-thinking-header .is-expanded { transform: rotate(90deg); }
+.neo-thinking-body { padding-top: 4px; padding-right: 12px; color: color-mix(in srgb, var(--fg) 60%, transparent); font: italic 13.5px/1.5 var(--font); }
+.neo-thinking-body .markdown { color: inherit; font: inherit; }
+.neo-thinking-body .markdown > :first-child { margin-top: 0; }
+.neo-thinking-body .markdown > :last-child { margin-bottom: 0; }
+.neo-thinking-body code, .neo-thinking-body pre { font-family: var(--font-code); font-style: normal; }
+.neo-thinking-header { color: light-dark(var(--theme-yellow, #946b14), color-mix(in srgb, var(--theme-yellow, #e6c384) 60%, transparent)); }
+.neo-thinking-body { color: light-dark(color-mix(in srgb, var(--fg) 60%, transparent), color-mix(in srgb, var(--theme-white, var(--fg)) 60%, transparent)); }

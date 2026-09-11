@@ -1,0 +1,23 @@
+.workflow-editor { border: 0; padding: 0; margin: 0; min-width: 0; }
+.workflow-editor .resource-section { display: grid; gap: 1rem; padding-block: 1.25rem; border-bottom: 1px solid var(--border, #ffffff20); }
+.workflow-editor .resource-section:first-child { padding-top: 0; }
+.workflow-editor .resource-section h3, .workflow-editor p { margin: 0; }
+.workflow-editor .form-field { display: flex; flex-direction: column; gap: .5rem; min-width: 0; }
+.workflow-editor .form-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 1.25rem; }
+.workflow-editor textarea { min-height: 200px; resize: vertical; line-height: 1.6; }
+.workflow-editor .workflow-checkbox { display: flex; align-items: center; gap: .65rem; }
+.workflow-editor .workflow-checkbox input { width: auto; }
+.workflow-editor .workflow-inline { display: flex; align-items: end; gap: .65rem; flex-wrap: wrap; }
+.workflow-editor .workflow-inline > .form-field { flex: 1; }
+.workflow-editor .workflow-weekdays { display: flex; flex-wrap: wrap; gap: .5rem; border: 0; padding: 0; }
+.workflow-editor .workflow-weekdays legend { margin-bottom: .65rem; }
+.workflow-editor .workflow-weekdays button { text-transform: capitalize; }
+.workflow-editor .workflow-weekdays button[aria-pressed="true"] { outline: 2px solid var(--accent, #9b8afb); outline-offset: 1px; }
+.workflow-editor .workflow-chips, .workflow-editor .workflow-permission { min-width: 0; border: 1px solid var(--border, #ffffff20); border-radius: .5rem; padding: 1rem; display: grid; gap: .8rem; }
+.workflow-editor .workflow-chip-list { display: flex; flex-wrap: wrap; gap: .5rem; }
+.workflow-editor .workflow-chip { display: flex; gap: .25rem; max-width: 100%; }
+.workflow-editor .workflow-chip input { width: 14rem; max-width: 100%; }
+.workflow-editor .workflow-preview { display: grid; gap: .75rem; justify-items: start; }
+.workflow-editor .workflow-warning, .workflow-editor .workflow-validation { padding: 1rem; border: 1px solid var(--border, #ffffff40); border-radius: .5rem; }
+.workflow-editor .workflow-validity { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; padding: 0; border: 0; }
+.workflow-editor :disabled { cursor: not-allowed; }

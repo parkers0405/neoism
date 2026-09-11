@@ -130,18 +130,32 @@ fn part_id(part: &Part) -> &str {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn append_tool_input_delta(
     parts: &mut [Part],
     part_id: &str,
     delta: &str,
 ) -> Option<Part> {
+    append_tool_input_delta_in_place(parts, part_id, delta).cloned()
+}
+
+/// Borrow the updated part so skipped live snapshots never clone growing input.
+pub(crate) fn append_tool_input_delta_in_place<'a>(
+    parts: &'a mut [Part],
+    part_id: &str,
+    delta: &str,
+) -> Option<&'a Part> {
+    if delta.is_empty() {
+        return None;
+    }
     for part in parts {
         if let Part::Tool(tool) = part {
             if tool.id.as_str() == part_id {
                 if let ToolState::Pending { raw, .. } = &mut tool.state {
                     raw.push_str(delta);
+                    return Some(part);
                 }
-                return Some(Part::Tool(tool.clone()));
+                return None;
             }
         }
     }

@@ -51,6 +51,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
     let middleware_state = state.clone();
     let router = Router::new()
         .route("/v2/hosting/associate", post(crate::hosting::associate))
+        .route("/v2/directories", get(crate::directory_routes::list))
         .route("/v2/health", get(global_health))
         .route("/v2/meta", get(v2_meta))
         .route("/v2/openapi.json", get(canonical_openapi_doc))
@@ -257,7 +258,22 @@ async fn plugin_route_dispatch(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Response {
-    let directory = if let Some(directory) = request_directory(&request) {
+    let installation = installation_resource_request(&request);
+    let directory = if installation {
+        let context = match crate::workflow::installation_context(state.services()) {
+            Ok(context) => context,
+            Err(error) => return error.into_response(),
+        };
+        if let Some(claims) = request.extensions().get::<crate::caller::CallerClaims>() {
+            if claims.hosted { return auth_error(StatusCode::FORBIDDEN, "management.hosted_unsupported", "Global resources are not available to hosted callers"); }
+            let root = context.strip_prefix(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX).expect("installation context");
+            if let Err(error) = crate::management::authorize_root(claims, std::path::Path::new(root)) { return error.into_response(); }
+        }
+        context
+    } else if let Some(directory) = request_directory(&request) {
+        if directory.starts_with(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX) {
+            return auth_error(StatusCode::BAD_REQUEST, "request.invalid_directory", "Use scope=installation for global resources");
+        }
         directory
     } else if let Some(matched) = request.extensions().get::<MatchedPluginSession>() {
         matched.directory.clone()
@@ -887,7 +903,16 @@ async fn authenticate_request(
         };
         audit_tenant = Some(claims.tenant_id.clone());
         audit_subject = Some(claims.subject.clone());
-        let requested_directory = request_directory(&request);
+        // Installation scope authorizes the adapter's real storage root, not
+        // an optional project directory used by older clients for config lookup.
+        let requested_directory = if installation_resource_request(&request) {
+            match crate::workflow::installation_context(state.services()) {
+                Ok(context) => context.strip_prefix(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX).map(str::to_owned),
+                Err(error) => return error.into_response(),
+            }
+        } else {
+            request_directory(&request)
+        };
         if let Some(directory) = requested_directory.as_deref() {
             if !crate::caller::allows_directory(&claims, &directory) {
                 return auth_error(
@@ -1116,6 +1141,16 @@ fn auth_error(status: StatusCode, code: &str, message: &str) -> Response {
         .into_response()
 }
 
+fn installation_resource_request(request: &Request<Body>) -> bool {
+    let path = request.uri().path();
+    let supported = matches!(path, "/v2/capabilities" | "/v2/agents" | "/v2/skills" | "/v2/providers/configured"
+        | "/v2/management/skills" | "/v2/plugins/dev.neoism.workflows")
+        || path.starts_with("/v2/management/skills/")
+        || path.starts_with("/v2/plugins/dev.neoism.workflows/");
+    supported && url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+        .any(|(key, value)| key == "scope" && value == "installation")
+}
+
 fn request_directory(request: &Request<Body>) -> Option<String> {
     // An explicit query is the route input and must never be hidden by a
     // transport-added default directory header. Both are still checked against
@@ -1223,6 +1258,9 @@ fn requires_directory_scope(path: &str) -> bool {
         && !path.starts_with("/v2/meta")
         && !path.starts_with("/v2/openapi")
         && !path.starts_with("/v2/capabilities")
+        // This handler resolves and authorizes its canonical path itself,
+        // including the caller's default root before the first session exists.
+        && path != "/v2/directories"
         && path != "/v2/health"
 }
 

@@ -1,0 +1,9 @@
+.neo-runtime-notice.tc-card { margin: 8px 0; border: 0; border-radius: 0; background: transparent; color: var(--fg); font-size: 12px; }
+.neo-runtime-notice .neo-runtime-toggle { display: flex; align-items: center; justify-content: flex-start; width: 100%; gap: 8px; padding: 6px 0; border: 0; background: transparent; text-align: left; font: 12.5px/20px var(--font); }
+.neo-runtime-title { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.neo-runtime-toggle small { color: var(--fg); opacity: .75; white-space: nowrap; }
+.neo-runtime-dot { width: 13px; height: 13px; flex: 0 0 13px; border-radius: 50%; background: var(--theme-green, var(--fg)); }
+.neo-runtime-notice.error .neo-runtime-dot, .neo-runtime-notice.timed_out .neo-runtime-dot { background: var(--theme-red, var(--fg)); }
+.neo-runtime-notice.running .neo-runtime-dot, .neo-runtime-notice.cancelled .neo-runtime-dot { background: var(--theme-yellow, var(--fg)); }
+.neo-runtime-notice.unknown .neo-runtime-dot { background: var(--muted); }
+.neo-runtime-notice pre { max-height: 400px; overflow: auto; margin: 0; padding: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--font-code); }

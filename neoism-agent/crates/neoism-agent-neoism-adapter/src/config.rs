@@ -271,6 +271,18 @@ impl ConfigSourceService for NeoismConfigSourceService {
         &self,
         request: &ConfigSnapshotRequest,
     ) -> Result<ConfigSnapshot, ServiceError> {
+        if request.installation {
+            let layers = vec![
+                ConfigLayer { source_id: GUI_SOURCE.into(), document: Self::project_gui(&Self::read(&self.gui_path)?), writable: true },
+                ConfigLayer { source_id: MCP_SOURCE.into(), document: Self::mcp_document(&Self::read(&self.user_root().join("mcp.json"))?), writable: true },
+            ];
+            return Ok(ConfigSnapshot {
+                identity: layers.iter().map(|layer| format!("{}\0{}", layer.source_id, layer.document)).collect::<Vec<_>>().join("\0"),
+                workspace: self.user_root(), layers,
+                discovery_roots: vec![ConfigDiscoveryRoot { scope: neoism_agent_service_api::ConfigDiscoveryScope::Installation, source_id: "neoism:user-root".into(), path: self.user_root() }],
+                writable_target: ConfigWritableTarget { source_id: GUI_SOURCE.into(), label: "global Neoism config".into() },
+            });
+        }
         let workspace = Self::workspace_root(&request.workspace);
         Self::migrate_project_config(&workspace)?;
         let gui = Self::read(&self.gui_path)?;
@@ -310,10 +322,12 @@ impl ConfigSourceService for NeoismConfigSourceService {
             layers,
             discovery_roots: vec![
                 ConfigDiscoveryRoot {
+                    scope: neoism_agent_service_api::ConfigDiscoveryScope::Installation,
                     source_id: "neoism:user-root".into(),
                     path: self.user_root(),
                 },
                 ConfigDiscoveryRoot {
+                    scope: neoism_agent_service_api::ConfigDiscoveryScope::Workspace,
                     source_id: "neoism:project-root".into(),
                     path: workspace.join(".neoism"),
                 },
@@ -538,6 +552,24 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn installation_snapshot_uses_actual_config_root_without_project_layers() {
+        use std::fs;
+        let fixture = MigrationFixture::new("installation");
+        let global = fixture.0.join("user");
+        fs::create_dir_all(&global).unwrap();
+        fs::create_dir_all(fixture.0.join(".neoism")).unwrap();
+        fs::write(global.join("config.json"), r#"{"agent":{"model":"global/model"}}"#).unwrap();
+        fs::write(fixture.0.join(".neoism/config.json"), r#"{"model":"project/model"}"#).unwrap();
+        let snapshot = fixture.service().snapshot(&ConfigSnapshotRequest::installation()).unwrap();
+        assert_eq!(snapshot.workspace, global);
+        assert_eq!(snapshot.discovery_roots.len(), 1);
+        assert_eq!(snapshot.discovery_roots[0].path, global);
+        assert_eq!(snapshot.discovery_roots[0].scope, neoism_agent_service_api::ConfigDiscoveryScope::Installation);
+        assert_eq!(snapshot.layers[0].document["model"], "global/model");
+        assert!(!snapshot.layers.iter().any(|layer| layer.source_id == PROJECT_SOURCE));
     }
 
     #[test]

@@ -1,0 +1,7 @@
+# Generated font copies (sources live in neoism-frontend / scripts/assets).
+public/fonts/**/*.ttf
+public/fonts/**/*.otf
+public/fonts/**/*.woff2
+
+# Vendored Tree-sitter grammar binaries; queries and provenance stay tracked.
+public/syntax/*.wasm

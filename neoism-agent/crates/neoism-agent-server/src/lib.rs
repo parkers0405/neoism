@@ -31,6 +31,7 @@ mod interaction;
 pub mod language_server;
 mod lsp;
 mod lsp_routes;
+pub mod gui;
 mod management;
 mod mcp;
 mod mcp_auth;
@@ -64,6 +65,7 @@ mod provider_error {
 mod context_epoch;
 mod pty;
 mod pty_routes;
+mod directory_routes;
 mod route_query;
 mod semantic;
 mod server_util;
@@ -274,15 +276,29 @@ pub async fn listen(
     options: ServerOptions,
     services: neoism_agent_service_api::AgentServices,
 ) -> anyhow::Result<SocketAddr> {
+    // Daemon-supervised agents expose installed GUI assets too, without a
+    // second backend or any change to API credentials/management policy.
+    let gui = match gui::GuiRoot::discover() {
+        Ok(root) => Some(root),
+        Err(error) if std::env::var_os("NEOISM_AGENT_GUI_ROOT").is_some() => return Err(error),
+        Err(_) => None,
+    };
+    listen_with_gui(options, services, gui).await
+}
+
+/// Serve the same API with an optional public standalone GUI dist.
+pub async fn listen_with_gui(
+    options: ServerOptions,
+    services: neoism_agent_service_api::AgentServices,
+    gui: Option<gui::GuiRoot>,
+) -> anyhow::Result<SocketAddr> {
     let started = crate::perf::now();
-    let address: SocketAddr = format!("{}:{}", options.hostname, options.port)
-        .parse()
-        .with_context(|| {
-            format!(
-                "invalid listen address {}:{}",
-                options.hostname, options.port
-            )
-        })?;
+    let address = SocketAddr::new(
+        options.hostname.parse().with_context(|| {
+            format!("invalid listen IP address {}", options.hostname)
+        })?,
+        options.port,
+    );
     if !address.ip().is_loopback()
         && std::env::var_os("NEOISM_AGENT_TOKEN").is_none()
         && std::env::var_os("NEOISM_AGENT_AUTH_CONFIG").is_none()
@@ -319,11 +335,12 @@ pub async fn listen(
         "server state opened"
     );
     state.start_session_list_backfill();
-    let result = axum::serve(
-        listener,
-        app_router::app_with_cors(state.clone(), &options.cors),
-    )
-    .await;
+    let api = app_router::app_with_cors(state.clone(), &options.cors);
+    let app = match gui {
+        Some(root) => gui::with_gui(api, root),
+        None => api,
+    };
+    let result = axum::serve(listener, app).await;
     state.shutdown().await?;
     tracing::warn!(
         target: "neoism_agent::perf",

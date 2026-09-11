@@ -1,0 +1,39 @@
+/* Chat-row actions only; no changes to the chat content width or gutters. */
+.recent .recent-action {
+    display: flex;
+    opacity: 0;
+    pointer-events: none;
+    background: transparent;
+}
+.recent:hover .recent-action,
+.recent:focus-within .recent-action,
+.recent .recent-action[aria-expanded="true"] {
+    opacity: 1;
+    pointer-events: auto;
+}
+.chat-actions-menu {
+    position: fixed;
+    z-index: 100;
+    min-width: 148px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-1, var(--bg));
+    box-shadow: 0 6px 20px #0003;
+}
+.chat-actions-menu > button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 9px;
+    text-align: left;
+    font-size: 13px;
+    border-radius: 3px;
+}
+.chat-actions-menu > button:hover,
+.chat-actions-menu > button:focus-visible { background: var(--surface-2); }
+.chat-rename { display: flex; flex: 1; min-width: 0; gap: 2px; }
+.chat-rename input { width: 0; min-width: 0; flex: 1; padding: 4px; font-size: 13px; }
+.chat-rename button { padding: 4px; }
+@media (hover: none) { .recent .recent-action { opacity: 1; pointer-events: auto; } }

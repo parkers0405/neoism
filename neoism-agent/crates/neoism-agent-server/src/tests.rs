@@ -4558,6 +4558,77 @@ async fn v2_prompt_and_wait(
     }
 }
 
+#[tokio::test]
+async fn directory_routes_obey_real_router_auth_policy() {
+    let _guard = env_lock();
+    struct Cleanup {
+        root: PathBuf,
+        env: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for (key, value) in &self.env {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    let cleanup = Cleanup {
+        root: std::env::temp_dir().join(format!("neoism-directory-auth-{}", neoism_agent_core::new_session_id())),
+        env: ["NEOISM_AGENT_TOKEN", "NEOISM_AGENT_AUTH_CONFIG", "NEOISM_AGENT_DISABLE_MODELS_FETCH"]
+            .into_iter().map(|key| (key, std::env::var_os(key))).collect(),
+    };
+    std::fs::create_dir_all(cleanup.root.join("allowed/child")).unwrap();
+    std::env::remove_var("NEOISM_AGENT_TOKEN");
+    std::env::remove_var("NEOISM_AGENT_AUTH_CONFIG");
+    std::env::set_var("NEOISM_AGENT_DISABLE_MODELS_FETCH", "true");
+    let allowed = cleanup.root.join("allowed");
+    for mode in ["no-auth", "local-token", "hosted-scoped", "hosted-unscoped"] {
+        std::env::remove_var("NEOISM_AGENT_TOKEN");
+        std::env::remove_var("NEOISM_AGENT_AUTH_CONFIG");
+        if mode == "local-token" {
+            std::env::set_var("NEOISM_AGENT_TOKEN", "directory-test-token");
+        } else if mode.starts_with("hosted-") {
+            let prefixes = if mode == "hosted-scoped" { vec![allowed.to_string_lossy().into_owned()] } else { vec![] };
+            std::env::set_var("NEOISM_AGENT_AUTH_CONFIG", json!({"tokens": [{
+                "token": "directory-test-token", "tenantId": "directory-test",
+                "directoryPrefixes": prefixes
+            }]}).to_string());
+        }
+        let state = AppState::open_database(cleanup.root.join(format!("{mode}.db"))).await.unwrap();
+        let router = app(state);
+        for token in [None, Some("invalid"), Some("directory-test-token")] {
+            let mut req = request(Method::GET, "/v2/directories", None);
+            if let Some(token) = token {
+                req.headers_mut().insert("authorization", format!("Bearer {token}").parse().unwrap());
+            }
+            let response = router.clone().oneshot(req).await.unwrap();
+            let expected = if mode == "no-auth" { StatusCode::OK }
+                else if token != Some("directory-test-token") { StatusCode::UNAUTHORIZED }
+                else if mode == "hosted-unscoped" { StatusCode::FORBIDDEN }
+                else { StatusCode::OK };
+            assert_eq!(response.status(), expected, "mode={mode}, token={token:?}");
+            if expected == StatusCode::OK {
+                let body: Value = response_json(response).await;
+                let expected_root = if mode == "hosted-scoped" { allowed.clone() } else { std::env::current_dir().unwrap() };
+                assert_eq!(body["path"], windows_process::canonicalize_path(&expected_root).unwrap().to_string_lossy().as_ref());
+                if mode == "hosted-scoped" {
+                    assert!(body["parent"].is_null());
+                    assert_eq!(body["entries"][0]["name"], "child");
+                }
+            }
+        }
+        if mode == "hosted-scoped" {
+            let mut req = request(Method::GET, "/v2/directories?path=..", None);
+            req.headers_mut().insert("authorization", "Bearer directory-test-token".parse().unwrap());
+            assert_eq!(router.oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+        }
+    }
+}
+
 fn env_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()

@@ -1702,6 +1702,9 @@ fn config_signature(
 }
 
 pub(crate) fn canonical_location(directory: &str) -> PathBuf {
+    if directory.starts_with(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX) {
+        return PathBuf::from(directory);
+    }
     let path = Path::new(directory);
     crate::windows_process::canonicalize_path(path).unwrap_or_else(|_| {
         if path.is_absolute() {

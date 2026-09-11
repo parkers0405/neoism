@@ -1,0 +1,77 @@
+.chat-timeline .message .neo-response-footer {
+    margin: 12px 0 20px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+.markdown .neo-code-card {
+    margin: 16px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--panel);
+    color: var(--fg);
+}
+.markdown .neo-code-card > .neo-code-header {
+    height: 30px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px 0 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--muted);
+    font-size: 11px;
+}
+.markdown .neo-code-header > button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 4px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font-size: inherit;
+    cursor: pointer;
+}
+.markdown .neo-code-header > button:hover { color: var(--fg); background: var(--surface-3); }
+.markdown .neo-code-header > button:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; }
+.markdown .neo-code-card > pre {
+    margin: 0;
+    padding: 12px 16px;
+    overflow: auto;
+    background: var(--panel);
+    border: 0;
+    border-radius: 0;
+}
+.markdown .neo-code-card > pre > code { padding: 0; background: transparent; border-radius: 0; }
+.markdown .neo-code-card .neo-copy-error { display: block; padding: 8px 12px; color: var(--fg); }
+.markdown .neo-code-card .neo-copy-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.markdown .markdown-table-scroll {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    margin: 16px 0 24px;
+}
+.markdown .markdown-table-scroll table {
+    display: table;
+    width: max-content;
+    min-width: 100%;
+    margin: 0;
+    overflow: visible;
+}
+.markdown .markdown-table-scroll :is(th, td) {
+    min-width: 8rem;
+    max-width: 28rem;
+    overflow-wrap: normal;
+    word-break: normal;
+}
+.markdown .markdown-table-scroll:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 2px;
+}

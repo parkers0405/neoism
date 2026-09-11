@@ -1,0 +1,79 @@
+// Maintained TypeScript port of shared/src/editor/crdt/presence_avatar.rs.
+// Arithmetic helpers preserve Rust f32 rounding, including the PRNG conversion.
+const f = Math.fround;
+const add = (a: number, b: number) => f(f(a) + f(b));
+const sub = (a: number, b: number) => f(f(a) - f(b));
+const mul = (a: number, b: number) => f(f(a) * f(b));
+const div = (a: number, b: number) => f(f(a) / f(b));
+const mod = (a: number, n: number) => f(add(f(f(a) % f(n)), n) % f(n));
+const sin = (a: number) => f(Math.sin(a));
+const lerpHue = (a: number, b: number, t: number) =>
+  mod(add(a, mul(sub(mod(add(sub(b, a), 180), 360), 180), t)), 360);
+
+function profile(seed: string) {
+  seed = seed || ' ';
+  let hash = 2166136261;
+  // Index UTF-16 code units, NOT Unicode code points or UTF-8 bytes.
+  for (let i = 0; i < seed.length; i++) hash = Math.imul(hash ^ seed.charCodeAt(i), 16777619) >>> 0;
+  let state = hash || 1;
+  const next = () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return div(f(state >>> 0), 4294967296);
+  };
+  const base = hash % 360;
+  const hues = [base, mod(add(add(base, 26), mul(next(), 24)), 360),
+    mod(add(add(base, 58), mul(next(), 30)), 360),
+    mod(sub(sub(base, 40), mul(next(), 24)), 360),
+    mod(add(add(base, 165), mul(next(), 40)), 360)];
+  const f1 = add(5, mul(next(), 7)), f2 = add(5, mul(next(), 7));
+  const f3 = add(4, mul(next(), 6)), f4 = add(6, mul(next(), 10));
+  const s1 = add(0.5, mul(next(), 0.9)), s2 = add(0.5, mul(next(), 0.9));
+  const s3 = add(0.4, mul(next(), 0.8)), s4 = add(0.6, mul(next(), 1.1));
+  const p1 = mul(next(), f(Math.PI * 2)), p2 = mul(next(), f(Math.PI * 2));
+  const grid = 11 + Math.floor(mul(next(), 4));
+  return { hues, f1, f2, f3, f4, s1, s2, s3, s4, p1, p2, grid };
+}
+
+function hsl(h: number, s: number, l: number): string {
+  l = Math.min(1, Math.max(0, l));
+  const c = mul(sub(1, Math.abs(sub(mul(2, l), 1))), s);
+  const hp = div(mod(h, 360), 60);
+  const x = mul(c, sub(1, Math.abs(sub(f(hp % 2), 1))));
+  const rgb = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][Math.min(5, Math.floor(hp))];
+  const m = sub(l, div(c, 2));
+  return '#' + rgb.map(v => Math.round(mul(add(v, m), 255)).toString(16).padStart(2, '0')).join('');
+}
+
+/** Seed-dependent resolution, 11–14 cells across and down. */
+export function avatarGridSize(seed: string): number { return profile(seed).grid; }
+
+/** Unit-grid cells (draw 1×1 squares); phase is elapsed seconds, NOT Unix time.
+ * Default 0.6 is the native still frame. Outside-circle cells are omitted.
+ * For crisp rendering snap both edges: round(x * size/grid), round((x+1) * size/grid).
+ */
+export function avatarCells(seed: string, phase: number = 0.6): { x: number; y: number; color: string }[] {
+  if (!Number.isFinite(phase)) throw new RangeError('Avatar phase must be finite');
+  const a = profile(seed), t = f(phase), cells = [];
+  for (let y = 0; y < a.grid; y++) {
+    for (let x = 0; x < a.grid; x++) {
+      const nx = sub(mul(div(add(x, 0.5), a.grid), 2), 1);
+      const ny = sub(mul(div(add(y, 0.5), a.grid), 2), 1);
+      const dist = f(Math.sqrt(add(mul(nx, nx), mul(ny, ny))));
+      if (dist > f(1.02)) continue;
+      const wave1 = sin(add(add(mul(nx, a.f1), mul(t, a.s1)), a.p1));
+      const wave2 = sin(add(sub(mul(ny, a.f2), mul(t, a.s2)), a.p2));
+      const wave3 = sin(add(mul(add(nx, ny), a.f3), mul(t, a.s3)));
+      const wave4 = sin(sub(mul(dist, a.f4), mul(t, a.s4)));
+      let p = add(add(add(wave1, wave2), wave3), wave4);
+      p = div(add(p, 4), 8);
+      const idx = mul(p, a.hues.length), lo = Math.floor(idx);
+      const hue = lerpHue(a.hues[lo % 5], a.hues[(lo + 1) % 5], sub(idx, lo));
+      const rim = sub(1, mul(Math.max(0, div(sub(dist, 0.62), 0.38)), 0.55));
+      const lightness = div(mul(add(34, mul(p, 40)), rim), 100);
+      cells.push({ x, y, color: hsl(hue, f(0.88), lightness) });
+    }
+  }
+  return cells;
+}

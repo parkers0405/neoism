@@ -1,0 +1,45 @@
+/* Resource forms use native Pastelbeans tokens, not a modal-wide gray skin. */
+dialog.resource-editor-dialog { width: min(920px, calc(100vw - 40px)); max-width: 920px; padding: 0; max-height: min(920px, calc(100dvh - 40px)); overflow: hidden; border-radius: 20px; color: var(--fg); background: var(--bg); }
+.resource-editor-shell { display: flex; flex-direction: column; max-height: min(920px, calc(100dvh - 40px)); margin: 0; }
+.resource-editor-heading { display: flex; align-items: flex-start; justify-content: space-between; padding: 28px 32px 24px; border-bottom: 1px solid var(--border); gap: 16px; }
+.resource-heading-title { display: flex; gap: 16px; align-items: center; }
+.resource-glyph { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); width: 48px; height: 48px; border-radius: 16px; display: grid; place-items: center; flex-shrink: 0; transform: rotate(-4deg); }
+.resource-editor-heading h2 { font: 600 24px/1.2 var(--font-heading); margin: 0 0 8px; }
+.resource-editor-heading p { margin: 0; color: var(--muted); font-size: 13px; }
+.resource-editor-body { overflow-y: auto; min-height: 0; padding: 26px 32px 32px; scrollbar-gutter: stable; }
+.resource-destination { display: grid; gap: 7px; border-left: 2px solid var(--accent); padding: 0 0 0 14px; margin-bottom: 26px; }
+.resource-destination span { font-weight: 600; font-size: 12px; }
+.resource-destination code { overflow-wrap: anywhere; font-size: 12px; }
+.resource-destination small { color: var(--muted); }
+.resource-editable { padding: 0; margin: 0; border: 0; min-width: 0; }
+.resource-editor-dialog .definition-form { display: grid; gap: 22px; }
+.resource-fields { padding: 22px; border: 1px solid var(--border); border-radius: 16px; display: grid; gap: 18px; min-width: 0; }
+.resource-fields h3 { margin: 0; font: 600 16px/1.4 var(--font-heading); }
+.resource-fields h3 small { color: var(--muted); font-size: 12px; float: right; }
+.resource-fields p { margin: 0; }
+.resource-editor-dialog .form-field { display: grid; gap: 9px; font-size: 13px; font-weight: 500; margin: 0; min-width: 0; }
+.resource-editor-dialog input:not([type=checkbox]):not([type=radio]), .resource-editor-dialog textarea, .resource-editor-dialog select { width: 100%; min-width: 0; border-radius: 10px; padding: 12px 14px; font-size: 14px; background: var(--bg); border: 1px solid var(--border); color: inherit; }
+.resource-editor-dialog textarea { line-height: 1.65; resize: vertical; }
+.resource-editor-dialog .resource-code, .resource-destination code { font-family: "JetBrains Mono", monospace; font-size: 12px; }
+.resource-editor-dialog .skill-definition > .resource-fields:first-child > .form-field:first-child input { font-size: 18px; padding: 16px; }
+.resource-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.resource-inline { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+.resource-inline > input, .resource-inline > .form-field { flex: 1; min-width: 120px; }
+.resource-inline button { flex-shrink: 0; }
+.structured-value { min-width: 0; border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: grid; gap: 12px; }
+.structured-value legend { font-size: 12px; padding: 0 5px; overflow-wrap: anywhere; }
+.support-file { display: grid; gap: 14px; border-top: 1px solid var(--border); padding-top: 18px; }
+.resource-fields summary { cursor: pointer; font-weight: 500; }
+.resource-fields[open] summary { margin-bottom: 18px; }
+.resource-editor-actions { position: sticky; bottom: 0; display: flex; gap: 10px; align-items: center; padding: 18px 32px; border-top: 1px solid var(--border); background: var(--bg); flex-shrink: 0; }
+.resource-editor-actions > span { margin-right: auto; font-size: 12px; }
+.resource-editor-actions button { padding: 11px 18px; border-radius: 12px; }
+.resource-editor-dialog [aria-invalid=true] { border-color: var(--accent) !important; }
+.resource-version-list { display: grid; gap: 10px; margin: 16px 0; }
+@media (max-width: 600px) { dialog.resource-editor-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); } .resource-editor-shell { max-height: calc(100dvh - 16px); } .resource-editor-heading, .resource-editor-body { padding: 20px 16px; } .resource-fields { padding: 16px; } .resource-columns { grid-template-columns: 1fr; } .resource-editor-actions { padding: 14px 16px; } .resource-editor-actions > span { display: none; } .resource-editor-actions { justify-content: flex-end; } }
+.resource-editor-dialog .form-field { color: var(--fg); }
+.resource-editor-dialog .form-field small { font-weight: 400; }
+.resource-editor-dialog .skill-definition > .resource-fields:first-child textarea { background: color-mix(in srgb, var(--surface-1) 45%, var(--bg)); }
+.resource-editor-dialog .workflow-editor .resource-section { padding: 22px; border: 1px solid var(--border); border-radius: 16px; }
+.resource-editor-dialog .workflow-editor .resource-section h3 { font: 600 16px/1.4 var(--font-heading); }
+.resource-editor-dialog .workflow-editor .resource-section:first-child input[type=text] { font-size: 16px; padding-block: 16px; }

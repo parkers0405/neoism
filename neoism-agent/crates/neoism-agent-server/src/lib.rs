@@ -17,6 +17,7 @@ mod background_job;
 mod caller;
 mod command_routes;
 mod config;
+mod computer_use;
 mod custom_tool;
 #[cfg(test)]
 mod edit_smoke_tests;

@@ -74,6 +74,11 @@ pub struct TimelineLayoutCache<M> {
     /// in `timeline_layout` which rebuilds before an estimated row can scroll
     /// into the viewport.
     pub estimated_prefix_rows: usize,
+    /// First row after the exact-measured window (`rows.len()` when the
+    /// suffix is fully exact). Rows `[estimated_prefix_rows..estimated_suffix_start]`
+    /// are measured; the rest of the transcript stays estimated so scrolling
+    /// older history never exact-lays-out every later message.
+    pub estimated_suffix_start: usize,
 }
 
 #[derive(Default)]
@@ -346,9 +351,8 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
         false
     }
     /// Native viewport-only layout: on a full rebuild, measure exactly only
-    /// the rows from just above the viewport down to the end, and cheaply
-    /// estimate the off-screen prefix above. Streaming (dirty-tail patch) and
-    /// pagination (prepend) remain exact.
+    /// the rows around the current viewport and cheaply estimate the rest.
+    /// Streaming (dirty-tail patch) and pagination (prepend) remain exact.
     fn timeline_lazy_measurement(&self) -> bool {
         lazy_timeline_enabled()
     }
@@ -447,6 +451,13 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn timeline_perf_enabled(&self) -> bool {
         false
     }
+    /// True after the last paint if a user presence orb was on screen.
+    /// Cheap idle animation owner so plasma keeps vsync without waiting
+    /// on cursor blink or SSE.
+    fn visible_user_orb_active(&self) -> bool {
+        false
+    }
+    fn set_visible_user_orb_active(&mut self, _active: bool) {}
 }
 
 pub trait AgentTimelineDelegate<P: AgentTimelinePane> {
@@ -667,6 +678,14 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn timeline_perf_enabled(&self) -> bool {
                 $perf_enabled()
+            }
+
+            fn visible_user_orb_active(&self) -> bool {
+                <$pane>::visible_user_orb_active(self)
+            }
+
+            fn set_visible_user_orb_active(&mut self, active: bool) {
+                <$pane>::set_visible_user_orb_active(self, active)
             }
 
             fn timeline_layout_epoch(&self) -> u64 {

@@ -819,6 +819,14 @@ impl NeoismAgentPane {
         self.local_presence_name.as_deref()
     }
 
+    pub fn visible_user_orb_active(&self) -> bool {
+        self.visible_user_orb_active
+    }
+
+    pub fn set_visible_user_orb_active(&mut self, active: bool) {
+        self.visible_user_orb_active = active;
+    }
+
     pub fn tool_expanded(&self, id: &str) -> bool {
         !id.is_empty() && self.expanded_tool_ids.contains(id)
     }

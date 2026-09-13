@@ -25,7 +25,11 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "bash",
-            "Run shell commands",
+            if cfg!(windows) {
+                "Run a PowerShell command. The tool is named bash for compatibility; this Windows host is PowerShell (pwsh.exe if available). Use curl.exe, not curl."
+            } else {
+                "Run shell commands"
+            },
             object_required(
                 &[
                     ("command", "string"),

@@ -116,6 +116,9 @@ impl NeoismAgentPane {
         if self.timeline_is_inertial() {
             return Some("timeline_inertia");
         }
+        if self.visible_user_orb_active() {
+            return Some("user_orb");
+        }
         if self.timeline_interaction_settle_active() {
             return Some("timeline_interaction_settle");
         }

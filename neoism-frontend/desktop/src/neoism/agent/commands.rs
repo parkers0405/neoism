@@ -1176,16 +1176,23 @@ impl NeoismAgentPane {
             .unwrap_or_else(|| "/v2/plugins/dev.neoism.mcp/catalog".to_string());
         match api_request_json(&self.server, "GET", &path, None) {
             Ok(value) => {
-                let options =
-                    neoism_ui::panels::agent_pane::state::mcp_options_from_status(
-                        value.as_ref().unwrap_or(&Value::Null),
-                    );
-                self.picker = Some(NeoismAgentPicker::new(
-                    NeoismAgentPickerKind::Mcp,
-                    "MCP servers",
-                    options,
-                    0,
-                ));
+                if !self.picker.as_ref().is_some_and(|picker| {
+                    matches!(
+                        picker.kind,
+                        NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
+                    )
+                }) {
+                    self.picker = Some(NeoismAgentPicker::new(
+                        NeoismAgentPickerKind::Mcp,
+                        "MCP servers",
+                        Vec::new(),
+                        0,
+                    ));
+                }
+                self.picker
+                    .as_mut()
+                    .unwrap()
+                    .apply_mcp_status(value.as_ref().unwrap_or(&Value::Null));
             }
             Err(error) => self.system_message("MCP", error),
         }

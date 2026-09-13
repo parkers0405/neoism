@@ -900,6 +900,7 @@ impl NeoismAgentPane {
                     return;
                 }
                 NeoismAgentPickerKind::McpActions => {
+                    self.picker = None;
                     self.show_mcp();
                     return;
                 }

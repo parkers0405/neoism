@@ -80,6 +80,11 @@ fn agent_server_credentials() -> &'static RwLock<HashMap<String, String>> {
 }
 
 pub(crate) fn register_agent_server_credential(server: &str, credential: Option<&str>) {
+    #[cfg(target_os = "linux")]
+    crate::app::agent_tray::register_local_endpoint(
+        server,
+        credential.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned),
+    );
     let key = server.trim().trim_end_matches('/').to_string();
     let Ok(mut credentials) = agent_server_credentials().write() else {
         return;
@@ -1251,7 +1256,10 @@ fn message_blocks_from_response(
 /// rather than rejecting a healthy host with an anonymous health probe.
 fn ensure_request_server_ready(server: &str) -> Result<(), String> {
     if agent_server_credential(server).is_none() {
-        return crate::agent_server::ensure_started_for_request(server);
+        crate::agent_server::ensure_started_for_request(server)?;
+        #[cfg(target_os = "linux")]
+        crate::app::agent_tray::register_ready_local_endpoint(server);
+        return Ok(());
     }
     let response = http_request(
         server,

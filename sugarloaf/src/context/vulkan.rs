@@ -33,9 +33,11 @@ use std::ffi::{c_char, CStr};
 pub const FRAMES_IN_FLIGHT: usize = 3;
 
 /// Keep the UI thread from parking forever in the Vulkan driver when a
-/// compositor/swapchain/fence wait stops making progress.
-const FRAME_WAIT_TIMEOUT_NS: u64 = 16_000_000;
-const IMAGE_ACQUIRE_TIMEOUT_NS: u64 = 16_000_000;
+/// compositor/swapchain/fence wait stops making progress. Never use a hard
+/// 16 ms cap on high-refresh displays: skipping after one 60 Hz slice
+/// reads as 130–140 FPS on a 144 Hz panel.
+const MIN_FRAME_WAIT_TIMEOUT_NS: u64 = 4_000_000;
+const MAX_FRAME_WAIT_TIMEOUT_NS: u64 = 32_000_000;
 const VULKAN_DEVICE_ENV: &str = "NEOISM_VULKAN_DEVICE";
 const VULKAN_PRESENT_MODE_ENV: &str = "NEOISM_VULKAN_PRESENT_MODE";
 const VULKAN_IMAGE_COUNT_ENV: &str = "NEOISM_VULKAN_IMAGE_COUNT";
@@ -110,6 +112,7 @@ pub struct VulkanContext {
     retired_swapchains: Vec<RetiredSwapchain>,
     swapchain_loader: khr::swapchain::Device,
     present_mode: vk::PresentModeKHR,
+    frame_wait_timeout_ns: u64,
     frame_log: VulkanFrameLog,
 
     // Core device.
@@ -282,6 +285,7 @@ impl VulkanContext {
             retired_swapchains: Vec::new(),
             swapchain_loader,
             present_mode,
+            frame_wait_timeout_ns: frame_wait_timeout_ns(None),
             frame_log: vulkan_frame_log(),
             queue,
             queue_family_index,
@@ -299,6 +303,11 @@ impl VulkanContext {
     #[inline]
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale;
+    }
+
+    #[inline]
+    pub fn set_frame_wait_timeout(&mut self, interval_ns: u64) {
+        self.frame_wait_timeout_ns = frame_wait_timeout_ns(Some(interval_ns));
     }
 
     #[inline]
@@ -416,14 +425,14 @@ impl VulkanContext {
                     match self.device.wait_for_fences(
                         &[in_flight],
                         true,
-                        FRAME_WAIT_TIMEOUT_NS,
+                        self.frame_wait_timeout_ns,
                     ) {
                         Ok(()) => slot,
                         Err(vk::Result::TIMEOUT) => {
                             tracing::warn!(
                                 target: "sugarloaf::vulkan",
                                 slot,
-                                timeout_ms = FRAME_WAIT_TIMEOUT_NS / 1_000_000,
+                                timeout_ms = self.frame_wait_timeout_ns / 1_000_000,
                                 "skipping frame because no Vulkan frame fence became ready"
                             );
                             return None;
@@ -440,7 +449,7 @@ impl VulkanContext {
         let (image_index, suboptimal) = unsafe {
             match self.swapchain_loader.acquire_next_image(
                 self.swapchain,
-                IMAGE_ACQUIRE_TIMEOUT_NS,
+                self.frame_wait_timeout_ns,
                 sync.image_available,
                 vk::Fence::null(),
             ) {
@@ -456,7 +465,7 @@ impl VulkanContext {
                     tracing::warn!(
                         target: "sugarloaf::vulkan",
                         slot,
-                        timeout_ms = IMAGE_ACQUIRE_TIMEOUT_NS / 1_000_000,
+                        timeout_ms = self.frame_wait_timeout_ns / 1_000_000,
                         "skipping frame because Vulkan swapchain image acquire timed out"
                     );
                     return None;
@@ -1548,6 +1557,12 @@ fn vulkan_frame_log() -> VulkanFrameLog {
     }
 }
 
+fn frame_wait_timeout_ns(refresh_interval_ns: Option<u64>) -> u64 {
+    refresh_interval_ns
+        .unwrap_or(16_666_667)
+        .clamp(MIN_FRAME_WAIT_TIMEOUT_NS, MAX_FRAME_WAIT_TIMEOUT_NS)
+}
+
 fn env_flag(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| {
         let value = value.to_string_lossy();
@@ -1561,6 +1576,16 @@ fn env_flag(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_wait_timeout_follows_high_refresh_without_exceeding_cap() {
+        assert_eq!(frame_wait_timeout_ns(Some(6_944_444)), 6_944_444);
+        assert_eq!(frame_wait_timeout_ns(Some(8_333_333)), 8_333_333);
+        assert_eq!(frame_wait_timeout_ns(Some(3_000_000)), MIN_FRAME_WAIT_TIMEOUT_NS);
+        assert_eq!(frame_wait_timeout_ns(Some(16_666_667)), 16_666_667);
+        assert_eq!(frame_wait_timeout_ns(Some(50_000_000)), MAX_FRAME_WAIT_TIMEOUT_NS);
+        assert_eq!(frame_wait_timeout_ns(None), 16_666_667);
+    }
 
     #[test]
     fn present_mode_override_accepts_common_aliases() {

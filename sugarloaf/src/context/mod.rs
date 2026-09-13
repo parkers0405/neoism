@@ -165,6 +165,23 @@ impl Context<'_> {
         }
     }
 
+    pub fn set_frame_wait_timeout(&mut self, interval_ns: u64) {
+        match &mut self.inner {
+            #[cfg(target_os = "linux")]
+            ContextType::Vulkan(ctx) => ctx.set_frame_wait_timeout(interval_ns),
+            #[cfg(feature = "wgpu")]
+            ContextType::Wgpu(_) => {}
+            #[cfg(target_os = "macos")]
+            ContextType::Metal(_) => {}
+            #[cfg(not(target_arch = "wasm32"))]
+            ContextType::Cpu(_) => {}
+            #[cfg(not(any(target_os = "linux", feature = "wgpu")))]
+            _ => {}
+            #[cfg(not(feature = "wgpu"))]
+            ContextType::_Phantom(_) => unreachable!(),
+        }
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             self.suspend_surface();

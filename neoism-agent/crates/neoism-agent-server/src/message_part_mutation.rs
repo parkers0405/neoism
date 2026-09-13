@@ -221,6 +221,7 @@ pub(crate) fn set_tool_completed(
                 let start = tool_state_start(&tool.state).unwrap_or_else(now_millis);
                 let metadata =
                     stable_tool_metadata(metadata, &tool.tool, &title, &output);
+                if let Some(Value::Object(metadata))=&mut tool.metadata { metadata.remove("toolResult"); }
                 tool.state = ToolState::Completed {
                     input,
                     output,
@@ -271,6 +272,27 @@ fn stable_tool_metadata(metadata: Value, tool: &str, title: &str, output: &str) 
     Value::Object(metadata)
 }
 
+/// Persist a structured tool failure as Error, not Completed. ToolPart already
+/// has extensible metadata, so old Error records need no wire/schema migration.
+pub(crate) fn set_tool_execution_result(parts:&mut [Part],part_id:&str,result:crate::tool::ToolExecutionResult)->Option<Part> {
+    if !result.is_error() {
+        return set_tool_completed(parts,part_id,result.output,result.title,result.metadata.unwrap_or_else(||json!({})));
+    }
+    set_tool_error(parts,part_id,result.output.clone())?;
+    let metadata=stable_tool_metadata(result.metadata.unwrap_or_else(||json!({})),"tool-error",&result.title,&result.output);
+    for part in parts {
+        if let Part::Tool(tool)=part {
+            if tool.id.as_str()==part_id {
+                let outer=tool.metadata.get_or_insert_with(||json!({}));
+                if !outer.is_object() { *outer=json!({"previous":outer.take()}); }
+                outer["toolResult"]=metadata;
+                return Some(Part::Tool(tool.clone()));
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn set_tool_error(
     parts: &mut [Part],
     part_id: &str,
@@ -281,6 +303,7 @@ pub(crate) fn set_tool_error(
             if tool.id.as_str() == part_id {
                 let input = tool_state_input(&tool.state);
                 let start = tool_state_start(&tool.state).unwrap_or_else(now_millis);
+                if let Some(Value::Object(metadata))=&mut tool.metadata { metadata.remove("toolResult"); }
                 tool.state = ToolState::Error {
                     input,
                     error,

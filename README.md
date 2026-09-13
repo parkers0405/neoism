@@ -1,26 +1,54 @@
 # Neoism
 
-**A GPU-rendered, terminal-first workspace for code, notes, agents, and multiplayer.**
+**A terminal-first IDE for code, agents, and multiplayer.**
 
-[![Neoism terminal](https://raw.githubusercontent.com/parkers0405/neoism/241e6daaea1249d2eff6ca94b91dbacc2c426b0f/docs/images/terminal.png)](https://github.com/parkers0405/neoism)
+[![Neoism](https://raw.githubusercontent.com/parkers0405/neoism/241e6daaea1249d2eff6ca94b91dbacc2c426b0f/docs/images/terminal.png)](https://github.com/parkers0405/neoism)
 
-Neoism starts with the terminal instead of hiding it. Real shells, native code and Markdown editors, drawings, AI agents, diagnostics, files, and workspace navigation live together in one Rust-owned interface.
+Neoism is a GPU-rendered, local-first IDE that starts with the terminal instead of hiding it. Real shells, a native code editor, Markdown notes, drawings, Git, language servers, and a full agent runtime share one workspace. A workspace daemon keeps that workspace alive so desktop, web, phone, and other laptops can join it.
 
-It is not an Electron IDE or a web terminal wrapper. The desktop app owns a native `winit` window and renders through `sugarloaf`; the browser client uses the same renderer family through Rust/WASM and WebGPU/WebGL.
+It is not an Electron IDE and not a chat window bolted onto a terminal. The desktop app owns a `winit` window and renders through `sugarloaf`. The browser client uses the same renderer family through Rust/WASM and WebGPU/WebGL.
 
-## What Neoism is
+## Terminal
 
-- **Terminal-first**: real PTYs, GPU-rendered text, smooth scrollback, tabs, splits, and command navigation.
-- **Native editing**: Rust-owned code and Markdown editors with LSP, Vim-style input, a file tree, buffer tabs, diagnostics, and finder.
-- **A place for project knowledge**: Markdown, Neoism Notes, Mermaid, notebooks, EPUBs, and `.neodraw` sketches live beside the code.
-- **Agent-native**: persistent local agent sessions, parallel sub-agents, LSP, shell and file tools, permissions, checkpoints, undo trees, and durable memory.
-- **Multiplayer and remote**: a workspace daemon owns PTYs and shared state so the same workspace can be used from desktop, web, phone, or another laptop over Tailscale.
-- **Local-first**: your files, terminals, notes, agents, and credentials stay on machines you control.
-- **Discoverable configuration**: `Alt+,` opens the active host's JSONC config with completion for every setting and host-aware suggestions for fonts, agents, models, extensions, and language servers.
+The terminal is the center of the workspace, not a drawer under an editor:
 
-## One workspace, one connected system
+- Real PTYs with GPU-rendered text, smooth scrollback, tabs, splits, and command navigation
+- Interactive programs, job control, mouse reporting, OSC links, and alternate-screen apps
+- New tabs start in the workspace directory; a shell `cd` stays local to that pane
 
-The workspace daemon keeps terminals, files, collaboration, and remote sessions alive across desktop, web, phone, and other laptops. It supervises Neoism's HTTP/SSE agent server, where persistent sessions, providers, tools, permissions, plugins, MCP, LSP, memory, and sub-agents work together on the same workspace.
+## Editor
+
+Rust-owned buffers for source and Markdown, not an embedded nvim or a web editor:
+
+- File tree, buffer tabs, splits, finder, and project search
+- Tree-sitter highlighting and a managed LSP catalog (hover, go-to, references, symbols, diagnostics, format, code actions)
+- Optional Vim layer
+- Git diff panel for status, staging, commits, and branches
+- Native Markdown with wiki links, live preview, notebooks, EPUB reading, and `.neodraw` sketches
+- Settings GUI and a command palette (`Alt+P`) with completion for every action
+
+## Agent
+
+Neoism ships its own agent server, not a hosted chat iframe. Sessions belong to the workspace and survive closing a pane or reconnecting from another device.
+
+- Persistent conversations over a versioned HTTP/SSE API
+- Providers, models, skills, MCP, plugins, and a TypeScript SDK
+- Shell, file, patch, search, LSP, notes, and web tools with an ask/allow/deny permission model
+- Parallel sub-agents (`explore`, `general`, and custom agents), checkpoints, undo/redo, compaction, and durable memory
+- Open an agent pane with `Alt+A`
+
+## Multiplayer and remote
+
+The workspace daemon is the authority for files, PTYs, layout, pairing, and shared editor documents:
+
+- Live co-editing through daemon-owned CRDT documents, plus presence carets and avatars
+- The same terminals and agent sessions from desktop, browser, or phone
+- Join another machine over a private network or Tailscale; promote a workspace to a different host when you mean to move it
+- Local-first: files, terminals, notes, credentials, and agent history stay on machines you control
+
+## Notes
+
+Notes are ordinary Markdown vaults with graphs, backlinks, tags, and tasks (`Alt+N`). Drawings and notebooks live next to the code they describe.
 
 ## Install
 
@@ -34,19 +62,17 @@ curl -fsSL https://raw.githubusercontent.com/parkers0405/neoism/main/scripts/ins
 
 ### macOS
 
-Download the latest DMG from [GitHub Releases](https://github.com/parkers0405/neoism/releases/latest), or use the shell installer command above for a command-line installation.
+Download the latest DMG from [GitHub Releases](https://github.com/parkers0405/neoism/releases/latest), or use the shell installer above.
 
 ### Windows
 
-Download and open [`Neoism-x86_64.msi`](https://github.com/parkers0405/neoism/releases/latest/download/Neoism-x86_64.msi), or install it from PowerShell:
+Download [`Neoism-x86_64.msi`](https://github.com/parkers0405/neoism/releases/latest/download/Neoism-x86_64.msi), or from PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/parkers0405/neoism/main/install.ps1 | iex
 ```
 
-The per-user installer requires no administrator rights. Releases include `neoism`, `neoism-workspace-daemon`, and `neoism-agent`. `ripgrep` is recommended for full workspace text search; Neovim is not required.
-
-Update an existing installation with:
+The per-user installer requires no administrator rights. Releases include `neoism`, `neoism-workspace-daemon`, and `neoism-agent`. `ripgrep` is recommended for workspace text search.
 
 ```sh
 neoism update
@@ -63,7 +89,9 @@ cargo build --bin neoism
 
 ## Documentation
 
-Documentation ships inside Neoism instead of living in a separate website. Open **Neoism Notes** with `Alt+N` to browse guides for the editor, agent, daemon, multiplayer, extensions, configuration, keybindings, and troubleshooting.
+Documentation ships inside Neoism. Open **Neoism Notes** with `Alt+N` for the editor, agent, daemon, multiplayer, extensions, configuration, keybindings, and troubleshooting.
+
+A first tour: open a project, `Alt+E` for the file tree, `Ctrl+Shift+T` for a terminal, `Alt+A` for an agent, `Alt+P` when you do not know the command.
 
 ## Architecture
 

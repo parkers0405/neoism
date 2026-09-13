@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "dev.neoism.agent-status",
+  "name": "Neoism",
+  "version": "1.0.0",
+  "author": "Neoism",
+  "license": "MIT",
+  "description": "Native Neoism agent status, supplied by running Neoism instances",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Neoism",
+    "category": "Development",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

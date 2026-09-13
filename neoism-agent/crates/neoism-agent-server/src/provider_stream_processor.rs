@@ -1026,12 +1026,10 @@ async fn apply_queued_tool_result(
 ) -> Option<Part> {
     let mut message = ctx.live_message.lock().await;
     match result.result {
-        Ok(tool_result) => set_tool_completed(
+        Ok(tool_result) => crate::message_part_mutation::set_tool_execution_result(
             &mut message.parts,
             result.call.part_id.as_str(),
-            tool_result.output,
-            tool_result.title,
-            tool_result.metadata.unwrap_or_else(|| json!({})),
+            tool_result,
         ),
         Err(error) => {
             set_tool_error(&mut message.parts, result.call.part_id.as_str(), error)

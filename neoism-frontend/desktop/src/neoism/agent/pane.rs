@@ -1055,6 +1055,7 @@ pub struct NeoismAgentPane {
     /// fallback author for user messages with no explicit `author`, so
     /// the local user's own messages render their own presence orb.
     local_presence_name: Option<String>,
+    visible_user_orb_active: bool,
 }
 
 #[derive(Default)]
@@ -1270,6 +1271,7 @@ impl Default for NeoismAgentPane {
             side_panel: NeoismAgentSidePanel::default(),
             perf_frame: AgentPanePerfFrame::default(),
             local_presence_name: None,
+            visible_user_orb_active: false,
         }
     }
 }

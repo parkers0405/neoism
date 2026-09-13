@@ -621,6 +621,7 @@ impl NeoismAgentPane {
                         )
                     }) {
                         self.show_mcp();
+                        changed = true;
                     }
                 }
                 AgentSessionUpdate::PartDelta {

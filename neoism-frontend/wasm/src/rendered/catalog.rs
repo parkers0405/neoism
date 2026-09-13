@@ -625,7 +625,7 @@ pub(crate) fn apply_agent_event_to_pane(
             pane.apply_mcp_oauth_url(name, url);
         }
         AgentServerMessage::McpFailed { name, error } => {
-            pane.system_message(name.unwrap_or_else(|| "MCP".to_string()), error);
+            pane.apply_mcp_failure(name, error);
         }
         AgentServerMessage::McpChanged { .. } => pane.refresh_mcp_if_visible(),
         AgentServerMessage::UsageUpdate { usage, .. } => {

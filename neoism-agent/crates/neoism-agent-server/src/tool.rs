@@ -357,6 +357,11 @@ impl neoism_agent_plugin_api::RuntimeTool for BuiltinTool {
 }
 
 impl ToolExecutionResult {
+    /// Transport succeeded, but the tool itself can report a structured failure
+    /// with recovery media. Session persistence must retain the error status.
+    pub(crate) fn is_error(&self) -> bool {
+        self.metadata.as_ref().and_then(|m|m.get("isError")).and_then(Value::as_bool)==Some(true)
+    }
     /// Machine-readable result kept separate from the text sent back to the model.
     pub(crate) fn structured_output(&self) -> Value {
         serde_json::json!({

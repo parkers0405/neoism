@@ -35,7 +35,7 @@ use xkbcommon::xkb;
 
 const APP_ID: &str = "neoism-keyboard-regression";
 const URL: &str = "https://example.invalid/neoism?q=keyboard&n=42#test";
-const UNICODE: &str = "Grüße — café Ελληνικά 日本語 e\u{301} אבג";
+const LAYOUT_TEXT: &str = "Existing layout: AaZz 09 !@#$%^&*()_+-=[]{} /balance";
 const TIMEOUT: Duration = Duration::from_secs(20);
 type Reply = mpsc::Sender<std::result::Result<(), String>>;
 
@@ -601,7 +601,7 @@ fn hyprland_production_keyboard_roundtrip() -> Result<()> {
                     .context("IME/keyboard receiver did not reach expected text/chord checkpoint")?
                     .map_err(anyhow::Error::msg)
             };
-            for (i, text) in [URL, UNICODE].into_iter().enumerate() {
+            for (i, text) in [URL, LAYOUT_TEXT].into_iter().enumerate() {
                 check()?;
                 super::send_keys(&[Key::Control, Key::Unicode('l')], &check)?;
                 observed(2 * i + 1, "")?;
@@ -677,7 +677,7 @@ fn hyprland_production_keyboard_roundtrip() -> Result<()> {
         "Unexpected receiver events: {:?}",
         s.events
     );
-    for (pair, text) in s.events.chunks_exact(2).zip([URL, UNICODE]) {
+    for (pair, text) in s.events.chunks_exact(2).zip([URL, LAYOUT_TEXT]) {
         ensure!(
             pair[0].0 == "Ctrl+l" && pair[0].1 != 0,
             "Missing Ctrl+l: {pair:?}"

@@ -1,6 +1,6 @@
 //! Built-in, opt-in desktop control. No shell commands and no separate MCP process.
 //! All observation/input goes through the ordinary session MCP permission path.
-use std::{io::Cursor, path::Path, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}}, time::{Duration, Instant}};
+use std::{path::Path, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}}, time::{Duration, Instant}};
 use anyhow::{bail, ensure, Context};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use enigo::Key;
@@ -12,8 +12,14 @@ use neoism_agent_service_api::{BuiltinMcpCallResult, BuiltinMcpContent, BuiltinM
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+#[path = "computer_use/capture.rs"]
+mod capture;
+#[path = "computer_use/latency.rs"]
+mod latency;
 #[path = "computer_use/platform.rs"]
 mod platform;
+#[path = "computer_use/typing.rs"]
+mod typing;
 #[path = "computer_use/shortcuts.rs"]
 mod shortcuts;
 #[cfg(target_os = "linux")]
@@ -31,6 +37,10 @@ mod linux_browser_live_tests;
 #[path = "computer_use/windows.rs"]
 mod windows;
 pub(crate) struct ComputerUse;
+tokio::task_local! { static CLIPBOARD_AUTHORIZED: bool; }
+pub(crate) async fn with_clipboard_authorization<F: std::future::Future>(authorized: bool, future: F) -> F::Output {
+    CLIPBOARD_AUTHORIZED.scope(authorized, future).await
+}
 static SERIAL: Mutex<()> = Mutex::new(());
 static FRAME: Mutex<Option<Frame>> = Mutex::new(None);
 static STOP: AtomicU64 = AtomicU64::new(0);
@@ -68,8 +78,10 @@ enum Action {
     Click { frame: String, x: u32, y: u32, #[serde(default)] button: MouseButton },
     Drag { frame: String, x: u32, y: u32, to_x: u32, to_y: u32 },
     Scroll { amount: i32, #[serde(default)] horizontal: bool },
-    Text { text: String },
+    #[serde(rename="type", alias="text")]
+    Text { text: String, #[serde(default)] method: typing::Method, #[serde(default)] clipboard_policy: typing::ClipboardPolicy, #[serde(default)] paste_shortcut: PasteShortcut },
     Paste { text: String, clipboard_policy: String, #[serde(default)] paste_shortcut: PasteShortcut },
+    #[serde(alias="press_key")]
     Key { key: String, #[serde(default)] modifiers: Vec<String> },
 }
 #[derive(Debug, Default, Deserialize)]
@@ -92,6 +104,7 @@ impl PasteShortcut {
 #[serde(rename_all = "snake_case")]
 enum MouseButton { #[default] Left, Right, Middle }
 
+#[cfg(test)]
 fn clipboard_effects(value:&mut Value,changed:bool,uncertain:bool) {
     // Absence is intentional: never turn unknown ownership into a false claim.
     if changed {value["clipboardChanged"]=json!(true);}
@@ -101,6 +114,7 @@ fn clipboard_effects(value:&mut Value,changed:bool,uncertain:bool) {
         value["clipboardWarning"]=json!("Clipboard was or may have been replaced; history may retain text. Previous content is not read or restored. Observe before any deliberate retry; no automatic retry.");
     }
 }
+#[cfg(test)]
 fn input_timeout(total:Option<usize>,completed:usize,clipboard_changed:bool,clipboard_uncertain:bool)->BuiltinMcpCallResult {
     let mut value=json!({"status":"partial_unknown","applicationVerified":false,"error":"Computer input timed out; further input cancelled. Native input may have arrived or still be in flight; observe before any deliberate retry. No automatic retry.","partialActionPossible":true});
     if let Some(total)=total {
@@ -112,6 +126,19 @@ fn input_timeout(total:Option<usize>,completed:usize,clipboard_changed:bool,clip
 }
 fn dispatched(method:&str)->BuiltinMcpCallResult {
     text(json!({"status":"dispatched_unverified","applicationVerified":false,"method":method,"note":"Native event acceptance is not application consumption. Verify the effect with a new observation; do not blindly retry."}))
+}
+fn attach_timings(result:&mut BuiltinMcpCallResult, timing:latency::Snapshot) {
+    let stages=timing.stages.into_iter().map(|(name,(calls,micros))|(name.to_owned(),json!({"calls":calls,"totalUs":micros}))).collect::<serde_json::Map<_,_>>();
+    let timing=json!({"queueMs":timing.queue.as_secs_f64()*1000.0,"workerMs":timing.worker.as_secs_f64()*1000.0,"totalMs":(timing.queue+timing.worker).as_secs_f64()*1000.0,"stages":stages,"counters":timing.counters,"note":"Native authorized-call timing; excludes model/permission wait and response transport. Stages overlap; no application-consumption acknowledgement."});
+    for content in &mut result.content {
+        if let BuiltinMcpContent::Text {text,..}=content {
+            if let Ok(Value::Object(mut value))=serde_json::from_str(text) {
+                value.insert("timings".into(),timing);
+                *text=Value::Object(value).to_string();
+                break;
+            }
+        }
+    }
 }
 fn text(value: Value) -> BuiltinMcpCallResult {
     BuiltinMcpCallResult { content: vec![BuiltinMcpContent::Text { text: value.to_string(), annotations: None }], is_error: None }
@@ -128,11 +155,11 @@ impl BuiltinMcpService for ComputerUse {
     fn tools(&self) -> Vec<BuiltinMcpTool> {
         let mut tools:Vec<BuiltinMcpTool> = [
             ("capabilities", "Report host desktop backend, display geometry and prerequisites. Does not capture or inject input.", json!({"type":"object","properties":{},"additionalProperties":false})),
-            ("screenshot", "Capture one display as PNG with a short-lived frame token. Images may contain private information. Pass image-pixel coordinates and that token to move/click.", json!({"type":"object","properties":{"settle_ms":{"type":"integer","minimum":0,"maximum":3000,"default":1200,"description":"Bounded visual settling before returning image; 0 captures immediately. Not application readiness."},"display":{"type":"string"},"target":{"type":"string","description":"Optional foreground window token; binds image to this target for pointer input"}},"required":["display"],"additionalProperties":false})),
+            ("screenshot", "Capture one display as PNG with a short-lived frame token. Images may contain private information. Pass image-pixel coordinates and that token to move/click.", json!({"type":"object","properties":{"settle_ms":{"type":"integer","minimum":0,"maximum":3000,"default":0,"description":"Immediate capture by default (0). Positive values opt into bounded visual settling, not application readiness."},"display":{"type":"string"},"target":{"type":"string","description":"Optional foreground window token; binds image to this target for pointer input"}},"required":["display"],"additionalProperties":false})),
             ("input", "Control the HOST desktop (not a remote browser). One bounded action; no persistent key/button holds. Use a fresh screenshot frame for move/click/drag; drag uses to_x/to_y for its endpoint. Text is literal, max 512 Unicode characters, with no C0/C1 controls (including newline, CR, Tab); use explicit key actions for Return/Tab. Key names: enter, tab, escape, backspace, delete, space, up/down/left/right, home/end, page_up/page_down, or one ASCII letter/digit (case-insensitive; use shift modifier). Linux also accepts a single ASCII punctuation key present in the unmodified layout, such as / or -. For shifted punctuation, use the unshifted key with shift (for example shift+- for underscore on US layouts). Use text for other supported literal characters. Modifiers (case-insensitive): control/ctrl/Control_L, alt/option/Alt_L, shift/Shift_L, meta/super/Super_L/win/windows/logo/cmd/command. Modifier names can also be tapped as keys. Key aliases include Return, Esc, ArrowLeft/Right/Up/Down, PageUp/PgUp and PageDown/PgDn. Scroll amount -20..20; positive is down/right. Cancellation can leave partial text.", json!({"type":"object","properties":{"target":{"type":"string","description":"Optional windows token; require unchanged foreground window. Not a sandbox."},"action":{"type":"string","enum":["move","click","drag","scroll","text","key"]},"frame":{"type":"string"},"x":{"type":"integer","minimum":0},"y":{"type":"integer","minimum":0},"to_x":{"type":"integer","minimum":0},"to_y":{"type":"integer","minimum":0},"button":{"type":"string","enum":["left","right","middle"]},"amount":{"type":"integer","minimum":-20,"maximum":20},"horizontal":{"type":"boolean"},"text":{"type":"string","maxLength":512,"description":"Literal Unicode only; no C0/C1 control characters including newline, CR or Tab. Use explicit key actions for Return/Tab."},"key":{"type":"string","description":"Case-insensitive named key or ASCII letter/digit; Linux also accepts unmodified ASCII punctuation. For underscore on US layouts use key '-' with shift. Super_L/super/meta tap the system modifier; Return=enter, Esc=escape. Use action:text only where literal text is supported."},"modifiers":{"type":"array","items":{"type":"string","description":"Case-insensitive: control/ctrl/Control_L, alt/option/Alt_L, shift/Shift_L, meta/super/Super_L/win/windows/logo/cmd/command."},"maxItems":4}},"required":["action"],"additionalProperties":false})),
             ("windows", "List native windows and snapshot target tokens. Re-list invalidates old tokens. Bounds are not screenshot pixel coordinates. Foreground targeting is not isolation.", json!({"type":"object","properties":{},"additionalProperties":false})),
             ("focus", "Request focus of one listed target window; confirm foreground or fail. Invalidates screenshot coordinates. Does not guarantee exclusive input routing.", json!({"type":"object","properties":{"target":{"type":"string"}},"required":["target"],"additionalProperties":false})),
-            ("batch", "Run 1..16 already-decided input actions serially, stopping on first failure/cancellation. Optional final display screenshot is returned as model image with frame token. Do not batch blind semantic decisions: observe between decisions. Total text <=512 characters. Failed action may be partially delivered.", json!({"type":"object","properties":{"settle_ms":{"type":"integer","minimum":0,"maximum":3000,"default":1200,"description":"Final screenshot visual-settling budget; 0 captures immediately."},"actions":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","description":"Same action object as input; no nested batches"}},"target":{"type":"string"},"screenshot":{"type":"string","description":"Display ID for final screenshot"}},"required":["actions"],"additionalProperties":false})),
+            ("batch", "Run 1..16 already-decided input actions serially, stopping on first failure/cancellation. Optional final display screenshot is returned as model image with frame token. Do not batch blind semantic decisions: observe between decisions. Total text <=512 characters. Failed action may be partially delivered.", json!({"type":"object","properties":{"settle_ms":{"type":"integer","minimum":0,"maximum":3000,"default":0,"description":"Final screenshot defaults to immediate capture (0); positive values opt into visual settling, not application readiness."},"actions":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","description":"Same action object as input; no nested batches"}},"target":{"type":"string"},"screenshot":{"type":"string","description":"Display ID for final screenshot"}},"required":["actions"],"additionalProperties":false})),
             ("wait", "Bounded observation of one listed window becoming foreground or closing. No typing, clicks, browser semantics, or implicit retries of actions. Polls at 100ms; native calls can overrun.", json!({"type":"object","properties":{"target":{"type":"string"},"condition":{"type":"string","enum":["foreground","closed"]},"timeout_ms":{"type":"integer","minimum":100,"maximum":3000}},"required":["target","condition","timeout_ms"],"additionalProperties":false})),
             ("stop", "Cancel current computer action and invalidate screenshot coordinates. Does not wait for the desktop lock.", json!({"type":"object","properties":{},"additionalProperties":false})),
         ].into_iter().map(|(name, description, input_schema)| BuiltinMcpTool {
@@ -140,11 +167,12 @@ impl BuiltinMcpService for ComputerUse {
             annotations: Some(json!({"readOnlyHint": name == "capabilities" || name == "screenshot" || name == "windows" || name == "wait", "destructiveHint": name == "input" || name == "batch" || name == "focus", "openWorldHint": true})),
         }).collect();
         let input=tools.iter_mut().find(|t|t.name=="input").unwrap();
-        input.description.as_mut().unwrap().push_str(" Linux text rejects non-BMP characters before input because native character delivery is not faithful. Explicit action:paste supports Unicode and LF/Tab, requires target and clipboard_policy:replace, and replaces the desktop clipboard; clipboard history may retain the text. Old clipboard is neither read nor restored. The source remains available until another owner replaces it. Paste may execute multiline commands in terminals or trigger application behavior. No automatic text-to-paste fallback. paste_shortcut is control-v (default) or control-shift-v; dispatch is not application verification.");
-        input.input_schema["properties"]["action"]["enum"].as_array_mut().unwrap().push(json!("paste"));
-        input.input_schema["properties"]["clipboard_policy"]=json!({"type":"string","enum":["replace"],"description":"Required for paste. Explicitly replaces clipboard without reading/restoring previous content; history may retain text."});
+        input.description.as_mut().unwrap().push_str(" Canonical action:type (text alias) chooses ONE whole-string method before any input. method:auto|keyboard|native|paste defaults auto; clipboard_policy:forbid|replace defaults forbid. Linux uses the existing keyboard layout or, only with replace consent, clipboard paste. No remapping or runtime fallback. auto/keyboard/native reject C0/C1 including LF/Tab; forced method:paste deliberately permits LF/Tab. Explicit legacy paste permits LF/Tab deliberately, requires replace, and may execute commands. Paste is Linux-only. Native dispatch is not application verification.");
+        input.input_schema["properties"]["action"]["enum"]=json!(["move","click","drag","scroll","type","text","key","press_key","paste"]);
+        input.input_schema["properties"]["method"]=json!({"type":"string","enum":["auto","keyboard","native","paste"],"default":"auto"});
+        input.input_schema["properties"]["clipboard_policy"]=json!({"type":"string","enum":["forbid","replace"],"default":"forbid"});
         input.input_schema["properties"]["paste_shortcut"]=json!({"type":"string","enum":["control-v","control-shift-v"],"default":"control-v"});
-        input.input_schema["properties"]["text"]["description"]=json!("At most 512 Unicode characters. action:text forbids C0/C1 controls and on Linux non-BMP characters. action:paste permits LF/Tab/non-BMP but forbids NUL and requires explicit clipboard replacement.");
+        input.input_schema["properties"]["text"]["description"]=json!("Max 512 characters total. auto/keyboard/native reject all C0/C1 controls; forced paste and legacy paste permit LF/Tab and require replace.");
         input.input_schema["allOf"]=json!([{"if":{"properties":{"action":{"const":"paste"}},"required":["action"]},"then":{"required":["text","clipboard_policy"]}}]);
         let mut action_schema=tools.iter().find(|t|t.name=="input").unwrap().input_schema.clone();
         action_schema["properties"].as_object_mut().unwrap().remove("target");
@@ -157,7 +185,7 @@ impl BuiltinMcpService for ComputerUse {
                     tool.input_schema["properties"]["scope"]=json!({"type":"string","enum":["desktop"],"description":"Explicit unguarded desktop shortcut/pointer action. Not text. Mutually exclusive with target."});
                     tool.input_schema["oneOf"]=json!([
                         {"required":["target"],"not":{"required":["scope"]}},
-                        {"required":["scope"],"not":{"required":["target"]},"properties":{"action":{"enum":["key","move","click","drag","scroll"]}}}
+                        {"required":["scope"],"not":{"required":["target"]},"properties":{"action":{"enum":["key","press_key","move","click","drag","scroll"]}}}
                     ]);
                 }
                 "batch" => {
@@ -192,31 +220,40 @@ impl BuiltinMcpService for ComputerUse {
             let progress=Arc::new(AtomicUsize::new(0));
             let worker_progress=progress.clone();
             let batch_total=if tool=="batch" { arguments["actions"].as_array().map(Vec::len) } else { None };
-            // Retain only action kinds for timeout reporting, never text payloads.
-            let paste_indices:Vec<usize>=if tool=="batch" {arguments["actions"].as_array().into_iter().flatten().enumerate().filter_map(|(i,a)|(a["action"]=="paste").then_some(i)).collect()} else {Vec::new()};
+            let effects=Arc::new(Mutex::new(input_pipeline::Effects::default()));
+            let worker_effects=effects.clone();
+            let clipboard_authorized=CLIPBOARD_AUTHORIZED.try_with(|v|*v).unwrap_or(false);
             let input_requested=tool=="input";
-            let input_paste=input_requested && arguments["action"]=="paste";
             let tool = tool.to_owned();
             #[cfg(test)]
             let test_backend = TEST_BACKEND.try_with(Arc::clone).ok();
+            let queued=Instant::now();
             let result = tokio::time::timeout(DEADLINE, tokio::task::spawn_blocking(move || {
-                run_worker(epoch, cancel, dropped, |check| {
-                    let check=Check { progress:Some(worker_progress), ..check.clone() };
+                let timing=latency::Scope::start(queued.elapsed());
+                let result=run_worker(epoch, cancel, dropped, |check| {
+                    let check=Check { progress:Some(worker_progress), effects:worker_effects, clipboard_authorized, ..check.clone() };
                     let check=&check;
+                    preflight_request(&tool,&arguments,check)?;
                     #[cfg(test)]
                     if let Some(backend) = test_backend { return backend(&tool, arguments); }
                     execute(&tool, arguments, check)
-                })
+                });
+                (result,timing.finish())
             })).await;
             drop(guard);
             match result {
-                Ok(Ok(result)) => result.map_err(|e| ServiceError::new(format!("{e:#}"))),
+                Ok(Ok((result,timing))) => {
+                    let mut result=match result {
+                        Ok(result)=>result,
+                        Err(error) if input_requested || batch_total.is_some()=>effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).report(batch_total,Some(format!("{error:#}"))),
+                        Err(error)=>return Err(ServiceError::new(format!("{error:#}"))),
+                    };
+                    attach_timings(&mut result,timing);
+                    Ok(result)
+                },
+                Ok(Err(e)) if input_requested || batch_total.is_some() => Ok(effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).report(batch_total,Some(format!("Computer worker failed: {e}")))),
                 Ok(Err(e)) => Err(ServiceError::new(format!("Computer worker failed: {e}"))),
-                Err(_) if batch_total.is_some() => {
-                    let completed=progress.load(Ordering::SeqCst);
-                    Ok(input_timeout(batch_total,completed,paste_indices.iter().any(|i|*i<completed),paste_indices.iter().any(|i|*i>=completed)))
-                }
-                Err(_) if input_requested => Ok(input_timeout(None,0,false,input_paste)),
+                Err(_) if input_requested || batch_total.is_some() => Ok(effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).report(batch_total,Some("Computer input timed out; further input cancelled. Observe before deliberate retry; no automatic retry.".into()))),
                 Err(_) => Err(ServiceError::new("Computer operation timed out; further input cancelled. Native calls cannot be preempted.")),
             }
         })
@@ -225,30 +262,30 @@ impl BuiltinMcpService for ComputerUse {
 struct CancelOnDrop(Arc<AtomicBool>);
 impl Drop for CancelOnDrop { fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); } }
 #[derive(Clone)]
-struct Check { progress:Option<Arc<AtomicUsize>>, target: Option<windows::Window>, cancel: Arc<AtomicBool>, dropped: Arc<AtomicBool>, epoch: u64, started: Instant }
+struct Check { progress:Option<Arc<AtomicUsize>>, effects: Arc<Mutex<input_pipeline::Effects>>, clipboard_authorized:bool, target: Option<windows::Window>, cancel: Arc<AtomicBool>, dropped: Arc<AtomicBool>, epoch: u64, started: Instant }
 impl Check {
+    fn fast(&self) -> anyhow::Result<()> {
+        latency::count("cancellation_checks",1);
+        ensure!(!self.cancel.load(Ordering::SeqCst) && !self.dropped.load(Ordering::SeqCst) && self.epoch == STOP.load(Ordering::SeqCst) && self.started.elapsed() < DEADLINE, "Computer operation stopped; partial input may have been delivered");
+        Ok(())
+    }
     fn check(&self) -> anyhow::Result<()> {
-        self.check_probe(|| {
+        self.check_probe(|| latency::measure("target_validation",|| {
             if let Some(target)=&self.target { windows::validate(target,true)?; }
             Ok(())
-        })
+        }))
     }
     fn check_probe(&self, probe:impl FnOnce()->anyhow::Result<()>) -> anyhow::Result<()> {
-        let active=|| -> anyhow::Result<()> {
-            ensure!(!self.cancel.load(Ordering::SeqCst) && !self.dropped.load(Ordering::SeqCst) && self.epoch == STOP.load(Ordering::SeqCst) && self.started.elapsed() < DEADLINE, "Computer operation stopped; partial input may have been delivered");
-            Ok(())
-        };
-        active()?;
+        self.fast()?;
         probe()?;
-        // Native foreground probes can block; revocation during a probe must
-        // not admit the input event that follows it.
-        active()
+        // A blocking native probe cannot admit an event after revocation.
+        self.fast()
     }
 }
 fn run_worker<T>(epoch: u64, cancel: Arc<AtomicBool>, dropped: Arc<AtomicBool>, backend: impl FnOnce(&Check) -> anyhow::Result<T>) -> anyhow::Result<T> {
     // Never reload STOP here: an admission can have been revoked before this
     // blocking worker was scheduled. Tests use this same worker entry point.
-    let check = Check { progress:None, target:None, epoch, cancel, dropped, started: Instant::now() };
+    let check = Check { progress:None, effects:Arc::default(),clipboard_authorized:false, target:None, epoch, cancel, dropped, started: Instant::now() };
     check.check()?;
     serialized(&SERIAL, || backend(&check))
 }
@@ -281,6 +318,33 @@ fn native_boundary<T>(body:impl FnOnce()->anyhow::Result<T>)->anyhow::Result<T> 
         }
     }
 }
+// Shared request validation lies above the native test seam and below admission.
+fn preflight_request(tool:&str,arguments:&Value,check:&Check)->anyhow::Result<()> {
+    if tool=="input" || tool=="batch" {
+        let count=if tool=="batch" {arguments["actions"].as_array().map_or(0,Vec::len).min(16)} else {1};
+        check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).records=(0..count).map(input_pipeline::unplanned).collect();
+    }
+    match tool {
+        "input"=>{
+            let mut value=arguments.clone();validate_input_scope(tool,&mut value)?;
+            value.as_object_mut().unwrap().remove("target");
+            let action:Action=serde_json::from_value(value)?;validate(&action)?;
+        },
+        "batch"=>{
+            let batch=serde_json::from_value::<Batch>(arguments.clone())?;
+            if let Err(error)=validate_batch(&batch) {
+                let failed=batch.actions.iter().position(|v|serde_json::from_value::<Action>(v.clone()).map_err(anyhow::Error::from).and_then(|a|validate(&a)).is_err());
+                check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).current=failed;
+                return Err(error);
+            }
+        },
+        _=>return Ok(()),
+    }
+    fn clipboard(value:&Value)->bool {value["action"]=="paste" || value["method"]=="paste" || value["clipboard_policy"]=="replace" || value["actions"].as_array().is_some_and(|a|a.iter().any(clipboard))}
+    ensure!(!clipboard(arguments) || check.clipboard_authorized,"Clipboard replacement requires explicit human computer_clipboard permission");
+    Ok(())
+}
+
 fn execute(tool: &str, arguments: Value, check: &Check) -> anyhow::Result<BuiltinMcpCallResult> {
     check.check()?;
     if tool == "capabilities" {
@@ -331,66 +395,57 @@ fn execute_locked(tool: &str, mut arguments: Value, check: &Check) -> anyhow::Re
     let target=arguments.as_object_mut().and_then(|v|v.remove("target")).filter(|v|!v.is_null()).map(|v| {
         windows::resolve(v.as_str().context("target must be a window token")?)
     }).transpose()?;
-    let scoped = Check { progress:check.progress.clone(), cancel:check.cancel.clone(), dropped:check.dropped.clone(),epoch:check.epoch,started:check.started,target };
+    let scoped = Check { progress:check.progress.clone(), effects:check.effects.clone(), clipboard_authorized:check.clipboard_authorized, cancel:check.cancel.clone(), dropped:check.dropped.clone(),epoch:check.epoch,started:check.started,target };
     let check = if scoped.target.is_some() { &scoped } else { check };
-    check.check()?;
-    let displays = platform::displays()?;
     check.check()?;
     match tool {
         "screenshot" => {
             #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct Args { display: String, #[serde(default="default_settle_ms")] settle_ms:u64 }
             let args: Args = serde_json::from_value(arguments)?;
+            #[cfg(target_os="linux")]
+            let mut capture_session=latency::measure("capture_setup",capture::ScopedLinuxCaptureSession::new)?;
+            #[cfg(target_os="linux")]
+            let displays=capture_session.displays();
+            #[cfg(not(target_os="linux"))]
+            let displays=latency::measure("display_probe",platform::displays)?;
             let display = displays.into_iter().find(|d| d.id == args.display).context("Unknown display; call capabilities again")?;
             ensure!(u64::from(display.width) * u64::from(display.height) <= 64_000_000, "Display exceeds capture limit");
             ensure!(args.settle_ms<=3000,"settle_ms must be 0..3000");
-            let (image,settling) = capture_settled(args.settle_ms,||check.check(),||platform::capture(&display))?;
+            #[cfg(target_os="linux")]
+            let capture_image=||latency::measure("capture",||capture_session.capture(&display));
+            #[cfg(not(target_os="linux"))]
+            let capture_image=||latency::measure("capture",||platform::capture(&display));
+            let (image,settling)=capture_settled_with_checks(args.settle_ms,||check.check(),||check.fast(),capture_image)?;
+            #[cfg(not(target_os="linux"))]
             ensure!(platform::displays()?.contains(&display),"Display topology changed during capture; observe again");
             check.check()?;
-            let image = image.thumbnail(1600, 1600);
-            let mut bytes = Cursor::new(Vec::new());
-            image.write_to(&mut bytes, image_rs::ImageFormat::Png)?;
-            ensure!(bytes.get_ref().len() <= 8 * 1024 * 1024, "Screenshot exceeds encoded size limit");
+            let encoded=capture::encode(image)?;
+            latency::record("resize",encoded.timings.resize);
+            latency::record("png",encoded.timings.png);
+            latency::count("png_lossless_retries",u64::from(encoded.timings.lossless_retry));
+            latency::count("png_bytes",encoded.bytes.len() as u64);
             let current_target=check.target.as_ref().map(|target|windows::validate(target,true)).transpose()?;
-            let frame = Frame { target:current_target, id: format!("{:032x}", rand::random::<u128>()), display, width: image.width(), height: image.height(), created: Instant::now(), epoch: check.epoch };
+            let frame = Frame { target:current_target, id: format!("{:032x}", rand::random::<u128>()), display, width: encoded.width, height: encoded.height, created: Instant::now(), epoch: check.epoch };
             check.check()?;
             let mut result = text(json!({"frame":frame.id,"display":frame.display,"imageWidth":frame.width,"imageHeight":frame.height,"coordinates":"image pixels, origin top-left; pass frame unchanged","expiresAfterSeconds":30,"targetWindow":frame.target,"settling":settling}));
             *FRAME.lock().map_err(|_| anyhow::anyhow!("Frame state poisoned"))? = Some(frame);
-            result.content.push(BuiltinMcpContent::Image { data: STANDARD.encode(bytes.into_inner()), mime_type: "image/png".into(), annotations: None });
+            let data=latency::measure("base64",||STANDARD.encode(encoded.bytes));
+            result.content.push(BuiltinMcpContent::Image { data, mime_type: "image/png".into(), annotations: None });
             Ok(result)
         }
         "input" => {
             let action: Action = serde_json::from_value(arguments)?;
-            validate(&action)?;
-            #[cfg(target_os="linux")]
-            if let Action::Paste {ref text,ref paste_shortcut,..}=action {
-                // Every failure from publication onward is conservatively partial:
-                // clipboard ownership may have changed before an ACK/guard fails.
-                let result=(|| {
-                    linux_clipboard::publish(text,||check.check())?;
-                    check.check()?;
-                    linux_text::send_keys(&paste_shortcut.keys(),||check.check())?;
-                    check.check()?;
-                    Ok::<_,anyhow::Error>(())
-                })();
-                result.inspect_err(|_|invalidate_frame()).context("Paste failed: clipboard may have changed and input may have arrived. Observe before any deliberate retry; do not blindly retry")?;
-                return Ok(self::text(json!({"status":"dispatched_unverified","applicationVerified":false,"method":"wayland_clipboard_paste","clipboardChanged":true,"clipboardPolicy":"replace","note":"Clipboard replaced; history may retain text. Source remains until another owner replaces it. Native dispatch does not prove the application consumed the paste. No automatic restoration or retry."})));
-            }
-            #[cfg(target_os="linux")]
-            if let Action::Text { text: ref value } = action {
-                linux_text::send(value, || check.check()).inspect_err(|_|invalidate_frame())?;
-                check.check()?;
-                return Ok(dispatched("wayland.virtual_keyboard.text"));
-            }
-            #[cfg(target_os="linux")]
-            if let Action::Key { ref key, ref modifiers } = action {
-                let mut keys=modifiers.iter().map(|m|modifier_key(m)).collect::<anyhow::Result<Vec<_>>>()?;
-                keys.push(named_key(key)?);
-                // Resolve and inject on one owned native map. Creating Enigo
-                // first can itself change the seat map seen by another client.
-                linux_text::send_keys(&keys,||check.check()).inspect_err(|_|invalidate_frame())?;
-                check.check()?;
-                return Ok(dispatched("wayland.virtual_keyboard.keys"));
-            }
+            let displays=if needs_pointer(&action) {latency::measure("display_probe",platform::displays)?} else {Vec::new()};
+            check.check()?;
+            input_pipeline::run(vec![action], &displays, check, false)
+        }
+        _ => bail!("Unknown computer tool {tool}"),
+    }
+}
+fn needs_pointer(action:&Action)->bool {
+    matches!(action,Action::Move{..}|Action::Click{..}|Action::Drag{..}|Action::Scroll{..})
+}
+fn pointer_action(action: Action, displays: &[Display], check: &Check) -> anyhow::Result<BuiltinMcpCallResult> {
             #[cfg(target_os="linux")]
             {
                 use linux_pointer::{Command, Point};
@@ -446,24 +501,11 @@ fn execute_locked(tool: &str, mut arguments: Value, check: &Check) -> anyhow::Re
                     })?;
                 }
                 Action::Scroll { amount, horizontal } => { input.scroll(amount,if horizontal { Axis::Horizontal } else { Axis::Vertical })?; }
-                Action::Paste {..}=>bail!("Explicit clipboard paste is currently supported only on Linux Wayland"),
-                Action::Text { text } => {
-                    #[cfg(target_os="linux")] linux_text::send(&text, || check.check())?;
-                    #[cfg(not(target_os="linux"))] for ch in text.chars() { check.check()?; platform::type_character(&mut input,ch)?; }
-                }
-                Action::Key { key, modifiers } => {
-                    let mut keys = modifiers.iter().map(|m| modifier_key(m)).collect::<anyhow::Result<Vec<_>>>()?;
-                    keys.push(named_key(&key)?);
-                    let native = shortcuts::resolve(&keys)?;
-                    shortcuts::send(&mut input, &native, || check.check())?;
-                }
+                Action::Paste {..}|Action::Text {..}|Action::Key {..}=>unreachable!("Typing and shortcuts execute only through prepared plans"),
             }
             check.check()?;
             Ok(dispatched(platform::NAME))
             }
-        }
-        _ => bail!("Unknown computer tool {tool}"),
-    }
 }
 // No remembered foreground: the authorized caller must name its intended window
 // on EVERY input call. Desktop scope is an explicit escape hatch for individual
@@ -477,14 +519,14 @@ fn validate_input_scope(tool:&str, arguments:&mut Value)->anyhow::Result<()> {
     let target=object.get("target");
     if desktop {
         ensure!(target.is_none(),"scope:desktop and target are mutually exclusive");
-        ensure!(matches!(object.get("action").and_then(Value::as_str),Some("key"|"move"|"click"|"drag"|"scroll")),"Desktop scope forbids text and paste; list/focus a window and pass its target");
+        ensure!(matches!(object.get("action").and_then(Value::as_str),Some("key"|"press_key"|"move"|"click"|"drag"|"scroll")),"Desktop scope forbids text and paste; list/focus a window and pass its target");
     } else {
         ensure!(target.and_then(Value::as_str).is_some_and(|t|!t.is_empty()),"Input requires an explicit window target even after focus. Foreground is not inherited. For deliberate global shortcuts/pointer actions only, use scope:desktop");
     }
     Ok(())
 }
 
-fn default_settle_ms()->u64 { 1200 }
+fn default_settle_ms()->u64 { 0 }
 // Visual quiescence only. A cursor can blink; workspace motion changes a
 // material fraction of this small full-display sample. Never infer page load.
 #[derive(Default)]
@@ -500,9 +542,20 @@ impl Settling {
         elapsed>=Duration::from_millis(300) && elapsed.saturating_sub(self.quiet_since)>=Duration::from_millis(250)
     }
 }
-fn capture_settled(ms:u64,mut check:impl FnMut()->anyhow::Result<()>,mut capture:impl FnMut()->anyhow::Result<image_rs::DynamicImage>)->anyhow::Result<(image_rs::DynamicImage,Value)> {
+#[cfg(test)]
+fn capture_settled(ms:u64,check:impl FnMut()->anyhow::Result<()>,capture:impl FnMut()->anyhow::Result<image_rs::DynamicImage>)->anyhow::Result<(image_rs::DynamicImage,Value)> {
+    let check=std::cell::RefCell::new(check);
+    capture_settled_with_checks(ms,||(*check.borrow_mut())(),||(*check.borrow_mut())(),capture)
+}
+fn capture_settled_with_checks(ms:u64,mut check:impl FnMut()->anyhow::Result<()>,mut waiting:impl FnMut()->anyhow::Result<()>,mut capture:impl FnMut()->anyhow::Result<image_rs::DynamicImage>)->anyhow::Result<(image_rs::DynamicImage,Value)> {
     ensure!(ms<=3000,"settle_ms must be 0..3000");
     let start=Instant::now();
+    if ms==0 {
+        check()?;
+        let image=capture()?;
+        check()?;
+        return Ok((image,json!({"mode":"immediate","settled":false,"timedOut":false,"elapsedMs":start.elapsed().as_millis(),"captures":1,"samples":0,"note":"Immediate capture; no settling wait or application-readiness acknowledgement."})));
+    }
     let mut state=Settling::default();
     let mut captures=0;
     loop {
@@ -510,14 +563,15 @@ fn capture_settled(ms:u64,mut check:impl FnMut()->anyhow::Result<()>,mut capture
         let image=capture()?;
         check()?;
         captures+=1;
+        let sample=latency::measure("settle_sample",||image.resize_exact(64,64,image_rs::imageops::FilterType::Triangle).into_rgb8().into_raw());
         let elapsed=start.elapsed();
-        let stable=state.observe(elapsed,image.resize_exact(64,64,image_rs::imageops::FilterType::Triangle).into_rgb8().into_raw());
-        if ms==0 || stable || elapsed>=Duration::from_millis(ms) {
+        let stable=state.observe(elapsed,sample);
+        if stable || elapsed>=Duration::from_millis(ms) {
             return Ok((image,json!({"settled":ms!=0 && stable,"timedOut":ms!=0 && !stable,"elapsedMs":elapsed.as_millis(),"captures":captures,"note":"Visual stability only; not application readiness"})));
         }
         // Check cancellation at <=25ms while waiting between 100ms probes.
         let until=(start.elapsed()+Duration::from_millis(100)).min(Duration::from_millis(ms));
-        while start.elapsed()<until { check()?; std::thread::sleep(Duration::from_millis(25).min(until.saturating_sub(start.elapsed()))); }
+        while start.elapsed()<until { waiting()?; std::thread::sleep(Duration::from_millis(25).min(until.saturating_sub(start.elapsed()))); }
     }
 }
 #[derive(Deserialize)]
@@ -531,12 +585,13 @@ fn validate_batch(args:&Batch)->anyhow::Result<()> {
     for value in &args.actions {
         let action:Action=serde_json::from_value(value.clone())?;
         validate(&action)?;
-        if let Action::Text { text }|Action::Paste {text,..}=action { chars+=text.chars().count(); }
+        if let Action::Text { text, .. }|Action::Paste {text,..}=action { chars+=text.chars().count(); }
     }
     ensure!(chars<=MAX_TEXT,"Batch text total exceeds 512 characters");
     Ok(())
 }
 // Generic loop keeps cancellation/partial-progress tests off the real desktop.
+#[cfg(test)]
 fn sequence(count:usize, mut step:impl FnMut(usize)->anyhow::Result<()>)->(usize,Option<String>) {
     for index in 0..count {
         if let Err(error)=step(index) { return (index,Some(format!("{error:#}"))); }
@@ -544,8 +599,30 @@ fn sequence(count:usize, mut step:impl FnMut(usize)->anyhow::Result<()>)->(usize
     (count,None)
 }
 fn batch(arguments:Value,check:&Check)->anyhow::Result<BuiltinMcpCallResult> {
-    batch_with(arguments,check,execute_locked)
+    let args:Batch=serde_json::from_value(arguments)?;
+    validate_batch(&args)?;
+    let target=windows::resolve(args.target.as_deref().unwrap())?;
+    let scoped=Check {target:Some(target), ..check.clone()};
+    scoped.check()?;
+    let actions=args.actions.into_iter().map(serde_json::from_value).collect::<Result<Vec<Action>,_>>()?;
+    let displays=if actions.iter().any(needs_pointer) {latency::measure("display_probe",platform::displays)?} else {Vec::new()};
+    after_input_capture(||input_pipeline::run(actions,&displays,&scoped,true),|| {
+        args.screenshot.map(|display|scoped.check().and_then(|_|execute_locked("screenshot",json!({"display":display,"target":args.target,"settle_ms":args.settle_ms}),&scoped)))
+    })
 }
+fn after_input_capture(input:impl FnOnce()->anyhow::Result<BuiltinMcpCallResult>,capture:impl FnOnce()->Option<anyhow::Result<BuiltinMcpCallResult>>)->anyhow::Result<BuiltinMcpCallResult> {
+    // The input pipeline includes explicit keyboard finalization, on success
+    // and failure. Observation must never race ahead of that cleanup.
+    let mut result=input()?;
+    if let Some(image)=capture() {
+        match image {
+            Ok(image)=>result.content.extend(image.content),
+            Err(error)=>{result.content.extend(text(json!({"screenshotError":format!("{error:#}")})).content);result.is_error=Some(true);}
+        }
+    }
+    Ok(result)
+}
+#[cfg(test)]
 fn batch_with(arguments:Value,check:&Check,mut operation:impl FnMut(&str,Value,&Check)->anyhow::Result<BuiltinMcpCallResult>)->anyhow::Result<BuiltinMcpCallResult> {
     let args:Batch=serde_json::from_value(arguments)?;
     validate_batch(&args)?; // Reject the entire malformed batch before side effects.
@@ -598,10 +675,19 @@ fn with_button<M: Mouse>(input:&mut M,button:Button,action:impl FnOnce(&mut M)->
 
 fn validate(action: &Action) -> anyhow::Result<()> {
     match action {
-        Action::Text { text } => {
-            ensure!(text.chars().count() <= MAX_TEXT && !text.chars().any(char::is_control), "Text must contain at most 512 characters and no C0/C1 control characters; use explicit key actions for Return/Tab");
+        Action::Text { text, method, clipboard_policy, .. } => {
             #[cfg(target_os="linux")]
-            ensure!(text.chars().all(|c|u32::from(c)<=0xffff),"Linux native text cannot faithfully dispatch non-BMP characters; choose explicit clipboard paste with replacement policy if appropriate. No input was sent");
+            ensure!(*method!=typing::Method::Native,"Native Unicode injection is unsupported on Linux");
+            #[cfg(not(target_os="linux"))]
+            ensure!(*method!=typing::Method::Keyboard,"Forced layout keyboard typing is unsupported on this platform");
+            if *method==typing::Method::Paste {
+                ensure!(*clipboard_policy==typing::ClipboardPolicy::Replace,"Paste requires explicit clipboard_policy:replace");
+                ensure!(text.chars().count()<=MAX_TEXT && !text.contains('\0'),"Paste must contain at most 512 Unicode characters and no NUL");
+                #[cfg(not(target_os="linux"))] bail!("Clipboard paste is unsupported on this platform");
+                return Ok(());
+            }
+            ensure!(text.chars().count() <= MAX_TEXT && !text.chars().any(char::is_control), "Text must contain at most 512 characters and no C0/C1 control characters; use explicit key actions for Return/Tab");
+
         },
         Action::Paste {text,clipboard_policy,..}=>{
             ensure!(clipboard_policy=="replace","Paste requires explicit clipboard_policy:replace");
@@ -728,6 +814,51 @@ mod tests {
             assert!(result.is_err(),"{tool} must require session authorization");
         }
     }
+    #[test]
+    fn input_finalization_precedes_any_result_capture() {
+        let finished=std::cell::Cell::new(false);
+        let result=after_input_capture(||{
+            finished.set(true);
+            let mut result=text(json!({"completed":1,"cleanupFailure":"test failure"}));
+            result.is_error=Some(true);Ok(result)
+        },||{
+            assert!(finished.get(),"capture ran before finalized input outcome");
+            Some(Ok(text(json!({"frame":"test"}))))
+        }).unwrap();
+        assert_eq!(result.is_error,Some(true));assert_eq!(result.content.len(),2);
+        assert!(after_input_capture(||bail!("cancelled before execution"),||panic!("capture after failed admission")).is_err());
+    }
+    #[test]
+    fn immediate_capture_skips_sampling_and_waits() {
+        let scope=latency::Scope::start(Duration::ZERO);
+        let checks=std::cell::Cell::new(0);
+        let captures=std::cell::Cell::new(0);
+        assert_eq!(default_settle_ms(),0);
+        let (_,info)=capture_settled_with_checks(0,||{checks.set(checks.get()+1);Ok(())},
+            ||panic!("immediate capture must not wait"),||{captures.set(captures.get()+1);Ok(image_rs::DynamicImage::new_rgb8(2,3))}).unwrap();
+        assert_eq!(captures.get(),1);assert_eq!(checks.get(),2);
+        assert_eq!(info["mode"],"immediate");assert_eq!(info["samples"],0);assert_eq!(info["timedOut"],false);
+        assert!(!scope.finish().stages.contains_key("settle_sample"));
+    }
+    #[test]
+    fn keyboard_only_actions_do_not_need_capture_topology() {
+        for value in [json!({"action":"type","text":"hello"}),json!({"action":"key","key":"a"}),json!({"action":"paste","text":"hello","clipboard_policy":"replace"})] {
+            assert!(!needs_pointer(&serde_json::from_value(value).unwrap()));
+        }
+        assert!(needs_pointer(&Action::Scroll{amount:1,horizontal:false}));
+    }
+    #[test]
+    fn native_timing_metadata_does_not_change_dispatch_status() {
+        let scope=latency::Scope::start(Duration::from_millis(2));
+        latency::count("window_ipc_requests",1);
+        let mut result=dispatched("keyboard");
+        attach_timings(&mut result,scope.finish());
+        let BuiltinMcpContent::Text{text,..}=&result.content[0] else {panic!("JSON result")};
+        let value:Value=serde_json::from_str(text).unwrap();
+        assert_eq!(value["status"],"dispatched_unverified");
+        assert_eq!(value["applicationVerified"],false);
+        assert_eq!(value["timings"]["counters"]["window_ipc_requests"],1);
+    }
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_punctuation_keys_use_the_original_layout() {
@@ -779,8 +910,8 @@ mod tests {
             Ok(text(json!({"mockCapture":true})))
         }),async {
             let epoch=STOP.load(Ordering::SeqCst);
-            let failed=ComputerUse.call_tool_authorized_async(Path::new("/"),"input",json!({}),true,Arc::new(AtomicBool::new(false)),Some(epoch)).await;
-            assert!(failed.is_err());
+            let failed=ComputerUse.call_tool_authorized_async(Path::new("/"),"input",json!({"action":"text","text":"mock","target":"fixture"}),true,Arc::new(AtomicBool::new(false)),Some(epoch)).await;
+            assert_eq!(failed.unwrap().is_error,Some(true));
             let next=ComputerUse.call_tool_authorized_async(Path::new("/"),"screenshot",json!({}),true,Arc::new(AtomicBool::new(false)),Some(epoch)).await;
             assert!(next.is_ok(),"next async screenshot worker must not stay busy/poisoned");
         }).await;
@@ -834,7 +965,7 @@ mod tests {
     #[tokio::test] async fn batch_stops_before_next_action_on_cancel_or_revocation() {
         let _revocation=TEST_REVOCATION_LOCK.lock().await;
         for revoke in [false,true] {
-            let check=Check { progress:None,target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
+            let check=Check { progress:None,effects:Arc::default(),clipboard_authorized:false,target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
             let mut delivered=0;
             let (completed,error)=sequence(3,|_| {
                 check.check()?;
@@ -848,7 +979,7 @@ mod tests {
     #[tokio::test] async fn batch_returns_progress_and_final_image_but_never_captures_after_cancel() {
         let _revocation=TEST_REVOCATION_LOCK.lock().await;
         for (cancel,panics) in [(false,false),(true,false),(false,true)] {
-            let check=Check { progress:Some(Arc::new(AtomicUsize::new(0))),target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
+            let check=Check { progress:Some(Arc::new(AtomicUsize::new(0))),effects:Arc::default(),clipboard_authorized:false,target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
             let mut input_count=0;
             let mut captures=0;
             let result=batch_with(json!({"target":"helium","actions":[{"action":"text","text":"one"},{"action":"text","text":"two"},{"action":"text","text":"never"}],"screenshot":"display"}),&check,|tool,args,check| {
@@ -893,7 +1024,7 @@ mod tests {
     }
     #[tokio::test] async fn foreground_loss_stops_batch_and_binds_recovery_screenshot() {
         let _revocation=TEST_REVOCATION_LOCK.lock().await;
-        let check=Check { progress:None,target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
+        let check=Check { progress:None,effects:Arc::default(),clipboard_authorized:false,target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
         let helium=windows::Window {id:"helium".into(),pid:1,app:"Helium".into(),title:String::new(),x:0,y:0,width:100,height:100,focused:true};
         for loss_at in [0,1,2,3] {
             let mut sent=String::new();
@@ -933,7 +1064,7 @@ mod tests {
             (Some(2),None,true,false,2),
             (None,Some(0),true,false,1),
         ] {
-            let check=Check {progress:Some(Arc::new(AtomicUsize::new(0))),target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now()};
+            let check=Check {progress:Some(Arc::new(AtomicUsize::new(0))),effects:Arc::default(),clipboard_authorized:false,target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now()};
             let mut calls=0;
             let result=batch_with(json!({"target":"window","actions":[
                 {"action":"paste","text":"SECRET_PAYLOAD_A","clipboard_policy":"replace"},
@@ -962,7 +1093,7 @@ mod tests {
     #[cfg(target_os="linux")]
     #[test] fn cancellation_before_paste_does_not_claim_clipboard_effects() {
         let _revocation=TEST_REVOCATION_LOCK.blocking_lock();
-        let check=Check {progress:None,target:None,cancel:Arc::new(AtomicBool::new(true)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now()};
+        let check=Check {progress:None,effects:Arc::default(),clipboard_authorized:false,target:None,cancel:Arc::new(AtomicBool::new(true)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now()};
         let result=batch_with(json!({"target":"window","actions":[{"action":"paste","text":"secret","clipboard_policy":"replace"}]}),&check,|_,_,_|panic!("cancelled paste must not execute")).unwrap();
         let BuiltinMcpContent::Text{text,..}=&result.content[0] else {panic!()};
         let value:Value=serde_json::from_str(text).unwrap();
@@ -986,13 +1117,13 @@ mod tests {
     #[test] fn literal_text_rejects_controls_before_any_batch_action() {
         for c in (0u8..=31).chain(127..=159) {
             let value=format!("safe{}tail",char::from(c));
-            assert!(validate(&Action::Text{text:value.clone()}).is_err());
+            assert!(validate(&Action::Text{text:value.clone(),method:Default::default(),clipboard_policy:Default::default(),paste_shortcut:Default::default()}).is_err());
             let batch:Batch=serde_json::from_value(json!({"target":"window","actions":[{"action":"key","key":"space"},{"action":"text","text":value}]})).unwrap();
             assert!(validate_batch(&batch).is_err());
         }
-        assert!(validate(&Action::Text{text:"e\u{301} \u{200d} العربية".into()}).is_ok());
+        assert!(validate(&Action::Text{text:"e\u{301} \u{200d} العربية".into(),method:Default::default(),clipboard_policy:Default::default(),paste_shortcut:Default::default()}).is_ok());
         #[cfg(target_os="linux")]
-        assert!(validate(&Action::Text{text:"🦀".into()}).is_err());
+        assert!(validate(&Action::Text{text:"🦀".into(),method:Default::default(),clipboard_policy:Default::default(),paste_shortcut:Default::default()}).is_ok());
     }
     #[test] fn paste_is_explicit_targeted_and_preflighted() {
         let payload=json!({"action":"paste","text":"🦀\n\tمرحبا","clipboard_policy":"replace"});
@@ -1034,14 +1165,14 @@ mod tests {
         assert_eq!(input.input_schema["oneOf"][0]["required"],json!(["target"]));
         assert_eq!(input.input_schema["properties"]["scope"]["enum"],json!(["desktop"]));
         assert!(input.input_schema["properties"]["action"]["enum"].as_array().unwrap().contains(&json!("paste")));
-        assert_eq!(input.input_schema["properties"]["clipboard_policy"]["enum"],json!(["replace"]));
+        assert_eq!(input.input_schema["properties"]["clipboard_policy"]["enum"],json!(["forbid","replace"]));
         assert_eq!(input.input_schema["allOf"][0]["then"]["required"],json!(["text","clipboard_policy"]));
         assert_eq!(batch.input_schema["properties"]["actions"]["items"]["allOf"],input.input_schema["allOf"]);
         assert!(!input.input_schema["oneOf"][1]["properties"]["action"]["enum"].as_array().unwrap().contains(&json!("paste")));
     }
     #[test] fn arguments_are_strict_and_bounded() {
         assert!(serde_json::from_value::<Action>(json!({"action":"text","text":"ok","command":"bad"})).is_err());
-        assert!(validate(&Action::Text { text: "a".repeat(513) }).is_err());
+        assert!(validate(&Action::Text { text: "a".repeat(513),method:Default::default(),clipboard_policy:Default::default(),paste_shortcut:Default::default() }).is_err());
         assert!(validate(&Action::Scroll { amount: i32::MIN, horizontal: false }).is_err());
         assert!(validate(&Action::Key { key:"enter".into(),modifiers:vec!["control".into(),"control".into()] }).is_err());
         assert!(named_key("shell").is_err());
@@ -1065,7 +1196,7 @@ mod tests {
     #[tokio::test] async fn revocation_during_native_target_probe_cannot_admit_next_input() {
         let _revocation=TEST_REVOCATION_LOCK.lock().await;
         for revoke in [false,true] {
-            let check=Check { progress:None,target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
+            let check=Check { progress:None,effects:Arc::default(),clipboard_authorized:false,target:None,cancel:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicBool::new(false)),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
             assert!(check.check_probe(|| {
                 if revoke { stop(); } else { check.cancel.store(true,Ordering::SeqCst); }
                 Ok(())
@@ -1074,9 +1205,250 @@ mod tests {
     }
     #[test] fn dropping_call_cancels_worker() {
         let dropped = Arc::new(AtomicBool::new(false));
-        let check = Check { progress:None, target:None, cancel:Arc::new(AtomicBool::new(false)), dropped:dropped.clone(),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
+        let check = Check { progress:None, effects:Arc::default(),clipboard_authorized:false, target:None, cancel:Arc::new(AtomicBool::new(false)), dropped:dropped.clone(),epoch:STOP.load(Ordering::SeqCst),started:Instant::now() };
         assert!(!check.dropped.load(Ordering::SeqCst));
         drop(CancelOnDrop(dropped));
         assert!(check.check().is_err());
     }
+}
+
+mod input_pipeline {
+use super::*;
+use super::typing::{Method,ClipboardPolicy};
+#[cfg(not(target_os="linux"))]
+use super::typing::select;
+#[derive(Default)]
+pub(super) struct Effects {
+    pub records: Vec<Value>,
+    pub completed: usize,
+    pub current: Option<usize>,
+    pub started: bool,
+    pub cleanup_phase: bool,
+    pub cleanup_failure: Option<String>,
+}
+pub(super) fn unplanned(index:usize)->Value {json!({"index":index,"method":null,"phase":"preflight","status":"not_dispatched","completedNativeUnits":0,"currentUnitUncertain":false,"clipboard":"unchanged","cleanupFailure":null,"applicationVerified":false})}
+impl Effects {
+    pub fn report(&self, total: Option<usize>, error: Option<String>) -> BuiltinMcpCallResult {
+        let possible=self.records.iter().any(|r|r["currentUnitUncertain"]==true || r["completedNativeUnits"].as_u64().unwrap_or(0)>0 || matches!(r["clipboard"].as_str(),Some("changed"|"may_changed")));
+        let mut records=self.records.clone();
+        if error.is_some() {if let Some(record)=records.get_mut(self.current.unwrap_or(self.completed)) {
+            record["status"]=json!(if record["currentUnitUncertain"]==true || record["completedNativeUnits"].as_u64().unwrap_or(0)>0 || matches!(record["clipboard"].as_str(),Some("changed"|"may_changed")) {"partial_unknown"} else {"failed"});
+        }}
+        let mut value=json!({"status":if error.is_some() {if possible {"partial_unknown"} else {"failed"}} else {"dispatched_unverified"},
+            "applicationVerified":false,"actions":records,"error":error,"partialActionPossible":error.is_some() && possible,
+            "phase":if self.started {"execution"} else {"preflight"},
+            "completedNativeUnitsMeaning":"dispatched, not inserted; no application acknowledgement",
+            "clipboard":"unchanged","clipboardChanged":false,"clipboardMayHaveChanged":false});
+        if self.records.iter().any(|r|r["clipboard"]=="changed") {value["clipboard"]=json!("changed");value["clipboardChanged"]=json!(true);}
+        if self.records.iter().any(|r|r["clipboard"]=="may_changed") {value["clipboardMayHaveChanged"]=json!(true); if value["clipboard"]!="changed" {value["clipboard"]=json!("may_changed");}}
+        if let Some(total)=total {value["completed"]=json!(self.completed);value["total"]=json!(total);value["failedIndex"]=json!(if error.is_some(){self.current.filter(|i|*i<total).or((self.completed<total).then_some(self.completed))}else{None});}
+        if total.is_none() {if let Some(record)=self.records.first() {for field in ["method","phase","completedNativeUnits","currentUnitUncertain","cleanupFailure","totalNativeUnits","nativeUnitKind"] {value[field]=record[field].clone();}}}
+        if self.cleanup_phase {value["phase"]=json!("cleanup");value["cleanupPending"]=json!(self.cleanup_failure.is_none());}
+        if let Some(error)=&self.cleanup_failure {value["cleanupFailure"]=json!(error);}
+        let mut result=text(value); result.is_error=error.map(|_|true); result
+    }
+}
+fn update(check:&Check, index:usize, f:impl FnOnce(&mut Value)) {
+    let mut effects=check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(&mut effects.records[index]);
+}
+
+enum Prepared {
+    #[cfg(target_os="linux")]
+    Keyboard(linux_text::KeyPlan),
+    #[cfg(target_os="linux")]
+    Text(typing::PreparedText),
+    #[cfg(not(target_os="linux"))]
+    Native(platform::NativePlan),
+    #[cfg(not(target_os="linux"))]
+    Keys(Vec<shortcuts::NativeKey>),
+    Pointer(Action),
+}
+impl Prepared {
+    fn method(&self)->&'static str {match self {
+        #[cfg(target_os="linux")] Self::Keyboard(_)=>"keyboard",
+        #[cfg(target_os="linux")] Self::Text(plan)=>plan.method(),
+        #[cfg(not(target_os="linux"))] Self::Native(_)=>"native",
+        #[cfg(not(target_os="linux"))] Self::Keys(_)=>"keyboard",
+        Self::Pointer(_)=>"pointer",
+    }}
+}
+
+pub(super) fn run(actions:Vec<Action>,displays:&[Display],check:&Check,batch:bool)->anyhow::Result<BuiltinMcpCallResult> {
+    let total=actions.len();
+    check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).records=(0..total).map(unplanned).collect();
+    let result=native_boundary(|| {
+        for action in &actions {validate(action)?;}
+        check.check()?;
+        #[cfg(target_os="linux")]
+        let mut keyboard=if actions.iter().any(|a|matches!(a,Action::Text{..}|Action::Key{..}|Action::Paste{..})) {
+            Some(linux_text::KeyboardSession::open(&mut ||check.fast())?)
+        } else {None};
+        #[cfg(not(target_os="linux"))]
+        let mut input=Enigo::new(&Settings {open_prompt_to_get_permissions:false,release_keys_when_dropped:false,..Settings::default()})?;
+        let outcome=native_boundary(|| {
+        let prepared=latency::measure("planning",||->anyhow::Result<Vec<Prepared>> {
+        let mut prepared=Vec::with_capacity(total);
+        for (index,action) in actions.into_iter().enumerate() {
+            check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).current=Some(index);
+            check.check()?;
+            let plan=match action {
+                Action::Text {text,method,clipboard_policy,paste_shortcut}=> {
+                    #[cfg(target_os="linux")]
+                    {
+                        Prepared::Text(typing::prepare_text(keyboard.as_ref().unwrap(),&text,method,clipboard_policy,&paste_shortcut.keys(),false,check.clipboard_authorized.then(typing::ClipboardPermit::granted),&mut ||check.fast())?)
+                    }
+                    #[cfg(not(target_os="linux"))]
+                    {let _=paste_shortcut;select(method,clipboard_policy,false,false)?;Prepared::Native(platform::prepare_native(&text)?)}
+                },
+                Action::Paste{text,paste_shortcut,..}=> {
+                    #[cfg(target_os="linux")]
+                    {Prepared::Text(typing::prepare_text(keyboard.as_ref().unwrap(),&text,Method::Paste,ClipboardPolicy::Replace,&paste_shortcut.keys(),true,check.clipboard_authorized.then(typing::ClipboardPermit::granted),&mut ||check.fast())?)}
+                    #[cfg(not(target_os="linux"))]
+                    {let _=(text,paste_shortcut);bail!("Clipboard paste is unsupported on this platform")}
+                },
+                Action::Key{key,modifiers}=>{
+                    let mut keys=modifiers.iter().map(|m|modifier_key(m)).collect::<anyhow::Result<Vec<_>>>()?;
+                    keys.push(named_key(&key)?);
+                    #[cfg(target_os="linux")]
+                    {Prepared::Keyboard(keyboard.as_ref().unwrap().plan_keys(&keys)?)}
+                    #[cfg(not(target_os="linux"))]
+                    {Prepared::Keys(shortcuts::resolve(&keys)?)}
+                },
+                pointer=>{preflight_pointer(&pointer,displays,check)?;Prepared::Pointer(pointer)},
+            };
+            let index=prepared.len();
+            let mut record=json!({"index":index,"method":plan.method(),"phase":"prepared","status":"not_dispatched","completedNativeUnits":0,"currentUnitUncertain":false,"clipboard":"unchanged","cleanupFailure":null,"applicationVerified":false});
+            match &plan {
+                #[cfg(target_os="linux")] Prepared::Text(p)=>{record["totalNativeUnits"]=json!(p.unit_count());record["nativeUnitKind"]=json!(p.unit_kind());},
+                #[cfg(target_os="linux")] Prepared::Keyboard(p)=>{record["totalNativeUnits"]=json!(p.unit_count());record["nativeUnitKind"]=json!(p.units_kind);},
+                #[cfg(not(target_os="linux"))] Prepared::Native(p)=>{record["totalNativeUnits"]=json!(p.total_units());record["nativeUnitKind"]=json!(match p.unit_kind(){platform::UnitKind::Utf16CodeUnits=>"utf16_code_units",platform::UnitKind::UnicodeScalars=>"unicode_scalars"});},
+                _=>{},
+            }
+            check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).records[index]=record;
+            prepared.push(plan);
+        }
+        Ok(prepared)
+        })?;
+        for (index,plan) in prepared.into_iter().enumerate() {
+            check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).current=Some(index);
+            check.check()?;
+            {let mut e=check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner);e.current=Some(index);e.started=true;}
+            update(check,index,|r|{r["phase"]=json!("dispatch");r["currentUnitUncertain"]=json!(true);});
+            let mut progress=|units|update(check,index,|r|r["completedNativeUnits"]=json!(r["completedNativeUnits"].as_u64().unwrap_or(0)+units as u64));
+            let execution=(||->anyhow::Result<()> {match plan {
+                #[cfg(target_os="linux")]
+                Prepared::Keyboard(plan)=>keyboard.as_mut().unwrap().execute_with_checks(&plan,&mut linux_text::Checks {wait:&mut ||check.fast(),full:&mut ||check.check()},&mut progress)?,
+                #[cfg(target_os="linux")]
+                Prepared::Text(plan)=>typing::execute_text_with_wait(keyboard.as_mut().unwrap(),&plan,&mut ||check.check(),&mut ||check.fast(),&mut |effects| {
+                    update(check,index,|record| {
+                        let value=serde_json::to_value(effects).expect("text effects serialize");
+                        for (key,value) in value.as_object().unwrap() {record[key]=value.clone();}
+                    });
+                })?,
+                #[cfg(not(target_os="linux"))]
+                Prepared::Native(plan)=>{platform::execute_native(&plan,&mut ||check.check(),&mut progress)?;},
+                #[cfg(not(target_os="linux"))]
+                Prepared::Keys(keys)=>{shortcuts::send(&mut input,&keys,||check.check())?;progress(1);},
+                Prepared::Pointer(action)=>{pointer_action(action,displays,check)?;progress(1);},
+            };Ok(())})();
+            if let Err(error)=execution {
+                update(check,index,|r|{
+                    r["status"]=json!("partial_unknown");r["error"]=json!(format!("{error:#}"));
+                    #[cfg(target_os="linux")]
+                    if let Some(facts)=linux_text::failure_facts(&error) {
+                        r["completedNativeUnits"]=json!(facts.completed_units);r["currentUnitUncertain"]=json!(facts.current_unit_uncertain);
+                        if facts.cleanup_failed {r["cleanupFailure"]=json!(format!("{error:#}"));}
+                    }
+                    #[cfg(not(target_os="linux"))]
+                    if let Some(facts)=error.downcast_ref::<platform::NativeError>() {
+                        r["currentUnitUncertain"]=json!(facts.uncertain);
+                        if facts.cleanup_failed {r["cleanupFailure"]=json!(format!("{error:#}"));}
+                    }
+                });
+                invalidate_frame();return Err(error);
+            }
+            update(check,index,|r|{r["phase"]=json!("complete");r["status"]=json!("dispatched_unverified");r["currentUnitUncertain"]=json!(false);});
+            check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).completed=index+1;
+            if let Some(progress)=&check.progress {progress.store(index+1,Ordering::SeqCst);}
+        }
+        Ok(())
+        });
+        #[cfg(target_os="linux")]
+        if let Some(session)=keyboard.as_mut() {
+            return finish_outcome(&check.effects,total,outcome,||session.finish());
+        }
+        outcome
+    });
+    Ok(check.effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).report(batch.then_some(total),result.err().map(|e|format!("{e:#}"))))
+}
+
+// Finalize regardless of primary success/failure, with the native context still
+// alive outside the dispatch unwind boundary. Drop is only a last-resort backup.
+#[cfg(any(test,target_os="linux"))]
+fn finish_outcome(effects:&Mutex<Effects>,total:usize,outcome:anyhow::Result<()>,finish:impl FnOnce()->anyhow::Result<()>)->anyhow::Result<()> {
+    {
+        let mut effects=effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        effects.cleanup_phase=true;
+        if effects.completed==total {effects.current=None;}
+    }
+    match native_boundary(finish) {
+        Err(error)=>{
+            effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cleanup_failure=Some(format!("{error:#}"));
+            outcome.and(Err(error))
+        },
+        Ok(())=>{
+            effects.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cleanup_phase=false;
+            outcome
+        },
+    }
+}
+
+fn preflight_pointer(action:&Action,displays:&[Display],check:&Check)->anyhow::Result<()> {
+    let display=match action {
+        Action::Move{frame,x,y}|Action::Click{frame,x,y,..}=>coordinate_frame(frame,*x,*y,displays,check)?.display,
+        Action::Drag{frame,x,y,to_x,to_y}=>{let start=coordinate_frame(frame,*x,*y,displays,check)?;coordinate_frame(frame,*to_x,*to_y,displays,check)?;start.display},
+        Action::Scroll{..}=>{#[cfg(target_os="linux")] ensure!(displays.len()==1,"Wayland pointer control requires exactly one output");displays.first().context("No display")?.clone()},
+        _=>unreachable!(),
+    };
+    #[cfg(target_os="linux")]
+    linux_pointer::preflight(&display,||check.check())?;
+    #[cfg(not(target_os="linux"))]
+    let _=display;
+    Ok(())
+}
+
+
+#[cfg(test)] mod effect_tests {
+    use super::*;
+    fn payload(result:BuiltinMcpCallResult)->Value {let BuiltinMcpContent::Text{text,..}=&result.content[0] else {panic!()};serde_json::from_str(text).unwrap()}
+    #[test] fn timeout_reports_actual_selected_method_progress_and_clipboard() {
+        let mut effects=Effects::default();
+        let before=payload(effects.report(Some(2),Some("timeout".into())));
+        assert_eq!(before["status"],"failed");assert_eq!(before["clipboard"],"unchanged");assert_eq!(before["partialActionPossible"],false);
+        effects.started=true;effects.current=Some(1);effects.completed=1;
+        effects.records=vec![json!({"method":"keyboard","completedNativeUnits":3,"currentUnitUncertain":false,"clipboard":"unchanged","status":"dispatched_unverified"}),json!({"method":"paste","phase":"clipboard_publication","completedNativeUnits":0,"currentUnitUncertain":false,"clipboard":"may_changed"})];
+        let timed=payload(effects.report(Some(2),Some("timeout".into())));
+        assert_eq!(timed["completed"],1);assert_eq!(timed["failedIndex"],1);assert_eq!(timed["status"],"partial_unknown");assert_eq!(timed["actions"][1]["method"],"paste");assert_eq!(timed["clipboardMayHaveChanged"],true);assert_eq!(timed["applicationVerified"],false);
+    }
+    #[test] fn primary_clipboard_error_still_finishes_and_preserves_both_failures() {
+        let effects=Mutex::new(Effects{started:true,completed:1,current:Some(1),records:vec![json!({"method":"keyboard","status":"dispatched_unverified","completedNativeUnits":3,"currentUnitUncertain":false,"clipboard":"unchanged"}),json!({"method":"paste","status":"partial_unknown","completedNativeUnits":0,"currentUnitUncertain":false,"clipboard":"may_changed"})],..Default::default()});
+        let finished=std::cell::Cell::new(false);
+        let primary=finish_outcome(&effects,2,Err(anyhow::anyhow!("clipboard publication failed")),||{finished.set(true);bail!("keyboard destroy ACK failed")}).unwrap_err();
+        assert!(finished.get());assert_eq!(primary.to_string(),"clipboard publication failed");
+        let report=payload(effects.lock().unwrap().report(Some(2),Some(primary.to_string())));
+        assert_eq!(report["completed"],1);assert_eq!(report["failedIndex"],1);assert_eq!(report["actions"][0]["status"],"dispatched_unverified");assert_eq!(report["phase"],"cleanup");assert_eq!(report["cleanupFailure"],"keyboard destroy ACK failed");assert_eq!(report["error"],"clipboard publication failed");
+    }
+    #[test] fn final_cleanup_failure_preserves_completed_actions_without_out_of_range_index() {
+        let effects=Effects{started:true,completed:1,current:None,cleanup_phase:true,cleanup_failure:Some("destroy acknowledgement failed".into()),records:vec![json!({"method":"keyboard","status":"dispatched_unverified","phase":"complete","completedNativeUnits":3,"currentUnitUncertain":false,"clipboard":"unchanged"})]};
+        let report=payload(effects.report(Some(1),Some("cleanup failed".into())));
+        assert_eq!(report["completed"],1);assert!(report["failedIndex"].is_null());assert_eq!(report["phase"],"cleanup");assert_eq!(report["actions"][0]["status"],"dispatched_unverified");assert!(report["cleanupFailure"].is_string());assert_eq!(report["applicationVerified"],false);
+    }
+    #[test] fn known_pre_event_runtime_failure_does_not_claim_effects() {
+        let effects=Effects{started:true,current:Some(0),records:vec![json!({"method":"keyboard","completedNativeUnits":0,"currentUnitUncertain":false,"clipboard":"unchanged"})],..Default::default()};
+        let failed=payload(effects.report(None,Some("layout changed before event".into())));
+        assert_eq!(failed["status"],"failed");assert_eq!(failed["currentUnitUncertain"],false);assert_eq!(failed["partialActionPossible"],false);
+    }
+}
+
 }

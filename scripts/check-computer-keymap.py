@@ -43,6 +43,7 @@ nom = "8"
 log = "0.4"
 libc = "0.2"
 serde_json = {{ version = "1", optional = true }}
+serde = {{ version = "1", features = ["derive"], optional = true }}
 xkbcommon = "0.9"
 xkeysym = "0.2"
 tempfile = "3"
@@ -52,7 +53,7 @@ wayland-protocols = {{ version = "0.32", features = ["client", "unstable"] }}
 wayland-protocols-wlr = {{ version = "0.3", features = ["client"] }}
 wayland-protocols-misc = {{ version = "0.3", features = ["client"] }}
 [features]
-browser-live = ["dep:serde_json"]
+browser-live = ["dep:serde_json", "dep:serde"]
 ''')
     (directory / "src/lib.rs").write_text(f'''#![allow(dead_code)]
 pub use enigo::{{InputError,InputResult,Key}};
@@ -60,6 +61,7 @@ use anyhow::bail;
 {key_parsers}
 #[cfg(not(feature="browser-live"))]
 #[path={json.dumps(str(parser))}] mod actual_enigo;
+#[path={json.dumps(str(source.with_name('latency.rs')))}] mod latency;
 #[path={json.dumps(str(source))}] mod linux_text;
 #[path={json.dumps(str(shortcuts))}] mod shortcuts;
 #[derive(Clone, Debug, PartialEq)]
@@ -68,6 +70,12 @@ struct Display {{ id:String, x:i32, y:i32, width:u32, height:u32 }}
 #[path={json.dumps(str(source.with_name('linux_pointer.rs')))}] mod linux_pointer;
 #[cfg(feature="browser-live")]
 #[path={json.dumps(str(source.with_name('linux_clipboard.rs')))}] mod linux_clipboard;
+#[cfg(feature="browser-live")]
+static STOP: std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature="browser-live")]
+#[path={json.dumps(str(source.with_name('windows.rs')))}] mod windows;
+#[cfg(feature="browser-live")]
+#[path={json.dumps(str(source.with_name('typing.rs')))}] mod typing;
 #[cfg(all(test, feature="browser-live"))] #[path={json.dumps(str(source.with_name('linux_browser_live_tests.rs')))}] mod linux_browser_live_tests;
 #[cfg(all(test, not(feature="browser-live")))] mod regression {{
     use super::*;

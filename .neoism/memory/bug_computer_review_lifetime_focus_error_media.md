@@ -1,0 +1,16 @@
+---
+name: "Computer MCP review: window lifetime, absent focus, error recovery media"
+description: "Closed waits use native lifetime probes; AX NoValue is optional focus; failed MCP recovery images persist through Error parts to provider, regression tested"
+type: "bug"
+scope: "project"
+origin: "review fixes and regression verification"
+created: "2026-09-12"
+updated: "2026-09-12"
+---
+
+Review fixes for feature_computer_mcp_text_batch_targets.md:
+1. computer_use/windows.rs closed wait MUST NOT infer lifetime from native_list/XCap (mac on-screen-only, Windows visibility-filtered). condition_with routes closed exclusively to native_exists; foreground alone uses presentation list. Windows probe = IsWindow + GetWindowThreadProcessId owner match (query errors propagate, close-during-probe handled). mac probe = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, targetID) WITHOUT OnScreenOnly + CFNumber owner PID; NULL/malformed replies error, empty array absent. Hyprland = raw j/clients identity/PID, no mapped filter or activewindow request. Focus preflight now uses existence too, not visible-list validation. Tests enforce closed never calls presentation/focus listing, live-hidden/minimized/off-Space not closed, backend errors not absent.
+2. mac focused_id returns Result<Option<u32>>. AXIsProcessTrusted guard; kAXErrorNoValue (-25212) on focused app/window returns None; permission/APIDisabled, CannotComplete, unsupported attributes, invalid element, malformed success still errors. native_list flags no windows focused when None. Shared ax_optional_value classifier has Linux-runnable tests; exact-source crosschecks compile actual native branches.
+3. MCP batch error images previously lost: agent_tool_registry bailed on is_error before attachment normalization. Now transport result retains metadata.isError + attachments + original MCP result and error-prefixed text. ToolExecutionResult::is_error reads normalized metadata. provider_stream_processor::apply_queued_tool_result uses new message_part_mutation::set_tool_execution_result: persists ToolState::Error and stores structured result under existing ToolPart.metadata.toolResult (no core schema churn); successes still Completed. Plain errors/success reset stale toolResult metadata. message_model reads error toolResult metadata and emits normal provider media with tool_error=true. Compaction still strips attachments.
+Regression tests_computer_pipeline.rs runs only mocked NATIVE backend; real generation/session executor, MCP gateway, hooks/truncation, exact terminal-state helper, database save/reload and provider-message conversion. Cases failed+image, failed without media, success+image verify status/media and compaction stripping. This is not just mcp_image_attachments unit coverage.
+Verified: cargo check -p neoism-agent-server -p neoism passes (existing desktop warnings); cargo test -p neoism-agent-server computer --lib 29 passed/1 live probe ignored; MCP tests18, message_model14, provider_stream_processor10, tool_part_tests6 all passed. /tmp/neoism-computer-use-platform-check exact-source macOSARM64 and WindowsMSVC checks pass. No live desktop input/capture/focus. Docs computer-use.md updated. Preserve unrelated working-tree edits.

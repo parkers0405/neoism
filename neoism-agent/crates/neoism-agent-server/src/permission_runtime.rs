@@ -111,21 +111,21 @@ pub(crate) async fn ask_permission_for_tool(
 ) -> Result<Vec<PermissionRule>, String> {
     let (permission, patterns) = parse_permission_required_error(error)
         .ok_or_else(|| format!("permission request could not be parsed: {error}"))?;
+    let clipboard = permission == "computer_clipboard";
+    let metadata = if clipboard {
+        json!({"tool":tool_name,"warning":"Clipboard may be replaced; clipboard history may retain the text. Previous content is not read or restored. Paste may execute multiline commands in terminals. Actual selected method may not need the clipboard.","inputPayloadOmitted":true})
+    } else { json!({"tool":tool_name,"input":input,"error":error}) };
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let request = PermissionRequestInfo {
         id: Id::ascending(IdKind::Permission).to_string(),
         session_id: session_id.to_string(),
         message_id: message_id.to_string(),
-        title: format!("Allow {tool_name}?"),
+        title: if clipboard { "Allow clipboard replacement? History may retain text; paste may execute commands.".into() } else { format!("Allow {tool_name}?") },
         permission,
         patterns: patterns.clone(),
         always: patterns,
         tool: Some(json!({ "messageID": message_id, "callID": call_id })),
-        metadata: Some(json!({
-            "tool": tool_name,
-            "input": input,
-            "error": error,
-        })),
+        metadata: Some(metadata),
     };
     state
         .inner

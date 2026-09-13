@@ -11,11 +11,24 @@ fn guard() -> Result<()> {
     ensure!(std::env::var("XDG_RUNTIME_DIR")? == std::env::var("NEOISM_BROWSER_RUNTIME")?);
     ensure!(!std::path::Path::new("/mnt/wayland").exists());
     ensure!(!std::path::Path::new("/dev/input").exists());
-    let window = hypr("activewindow")?;
-    let pid: i64 = std::env::var("NEOISM_BROWSER_PID")?.parse()?;
-    ensure!(window["pid"].as_i64() == Some(pid), "Private browser not foreground: {window}");
-    ensure!(window["xwayland"] == false, "Not native Wayland: {window}");
-    ensure!(window["class"].as_str() == Some("neoism-browser-regression"), "Wrong app: {window}");
+    static TARGET: std::sync::Mutex<Option<super::windows::Window>>=std::sync::Mutex::new(None);
+    let target={
+        let mut cached=TARGET.lock().map_err(|_|anyhow::anyhow!("Browser guard poisoned"))?;
+        if cached.is_none() {
+            let active=hypr("activewindow")?;
+            let pid:i64=std::env::var("NEOISM_BROWSER_PID")?.parse()?;
+            ensure!(active["pid"].as_i64()==Some(pid) && active["xwayland"]==false,"Wrong private browser: {active}");
+            let listing=super::windows::list()?;
+            let token=listing["windows"].as_array().context("Native window list")?.iter()
+                .find(|entry|entry["window"]["pid"].as_i64()==Some(pid) && entry["window"]["app"]=="neoism-browser-regression")
+                .and_then(|entry|entry["target"].as_str()).context("Private browser target")?;
+            *cached=Some(super::windows::resolve(token)?);
+        }
+        cached.as_ref().unwrap().clone()
+    };
+    // Exercise the production direct-IPC guard. Spawning hyprctl for every key
+    // edge would measure test-process startup, not the public typing budget.
+    super::windows::validate(&target,true)?;
     Ok(())
 }
 fn hypr(query: &str) -> Result<Value> {
@@ -43,7 +56,29 @@ fn wait_for(label: &str, predicate: impl Fn(&Value)->bool) -> Result<Value> {
     }
 }
 fn keys(keys: &[Key]) -> Result<()> { guard()?; super::linux_text::send_keys(keys, guard) }
-fn text(text: &str) -> Result<()> { guard()?; super::linux_text::send(text, guard) }
+fn typed(content: &str, method: super::typing::Method, policy: super::typing::ClipboardPolicy, consent: bool) -> Result<super::typing::TextEffects> {
+    use super::typing;
+    let started=Instant::now();
+    let mut checked=|| {ensure!(started.elapsed()<Duration::from_secs(10),"Unified typing exceeded the public single-call budget");guard()};
+    let mut waiting=|| {ensure!(started.elapsed()<Duration::from_secs(10),"Unified typing exceeded the public single-call budget");Ok(())};
+    checked()?;
+    let mut session=super::linux_text::KeyboardSession::open(&mut waiting)?;
+    let plan=typing::prepare_text(&session,content,method,policy,&[Key::Control,Key::Unicode('v')],false,
+        consent.then(typing::ClipboardPermit::granted),&mut waiting)?;
+    let mut effects=None;
+    typing::execute_text_with_wait(&mut session,&plan,&mut checked,&mut waiting,&mut |value|effects=Some(value.clone()))?;
+    session.finish()?;
+    let effects=effects.context("Missing typing dispatch report")?;
+    ensure!(effects.phase=="complete" && !effects.current_unit_uncertain,"Incomplete typing dispatch: {effects:?}");
+    println!("TYPING METHOD: {} clipboard={} dispatched_units={}",effects.method,effects.clipboard,effects.completed_native_units);
+    Ok(effects)
+}
+fn text(content: &str) -> Result<()> {
+    let effects=typed(content,super::typing::Method::Auto,super::typing::ClipboardPolicy::Forbid,false)?;
+    ensure!(effects.method=="keyboard" && effects.clipboard=="unchanged","Representable typing must not use clipboard: {effects:?}");
+    ensure!(effects.completed_native_units==content.chars().count(),"Incomplete native scalar dispatch");
+    Ok(())
+}
 fn value_is(report:&Value, id:&str, value:&str)->bool {
     report["focused"] == true && report["activeElement"] == id && report["values"][id] == value
 }
@@ -96,10 +131,9 @@ fn clear(field:&str)->Result<()> {
     Ok(())
 }
 fn paste(field:&str,content:&str)->Result<()> {
-    guard()?;
-    let _owner=super::linux_clipboard::publish(content,&guard)?;
-    keys(&[Key::Control,Key::Unicode('v')])?;
-    wait_for("explicit native clipboard paste exact",|r|value_is(r,field,content))?;
+    let effects=typed(content,super::typing::Method::Paste,super::typing::ClipboardPolicy::Replace,true)?;
+    ensure!(effects.method=="paste" && effects.clipboard=="changed","Explicit paste method/effects missing: {effects:?}");
+    wait_for("explicit facade clipboard paste exact",|r|value_is(r,field,content))?;
     Ok(())
 }
 #[test]
@@ -141,10 +175,15 @@ fn hyprland_production_browser_roundtrip() -> Result<()> {
     let url="https://example.invalid/neoism?q=Abcdefghijklmnopqrstuvwxyz+42&z=%23#test";
     text(url)?;
     wait_for("Action::Text URL exact delivery", |r| value_is(r,"input",url))?;
+    clear("input")?;
+    let maximum="A".repeat(512);
+    text(&maximum)?;
+    wait_for("maximum-length shifted typing within public call budget",|r|value_is(r,"input",&maximum))?;
+    clear("input")?;
 
-    // More than 48 distinct printable scalars: exact chunk ordering, punctuation,
-    // combining sequence and RTL are all checked, not normalized or shortened.
-    let bmp=format!("{} Grüße — café e\u{301} Ελληνικά 日本語 العربية עברית END",('!'..='~').collect::<String>());
+    // Exercise every US printable ASCII character through existing-layout
+    // strokes, including Shift. No temporary character keymap is permitted.
+    let keyboard=format!("{} AazZ09 /balance mr_settle END",('!'..='~').collect::<String>());
     let full="Full Unicode: Grüße e\u{301} العربية 日本語 🦀 👩\u{200d}💻 🏳️\u{200d}🌈";
     let baseline=report()?["viewport"]["dpr"].as_f64().context("browser DPR")?;
     ensure!((baseline-expected_scale).abs()<0.02, "Fresh browser is not at 100 percent zoom: DPR={baseline}, output scale={expected_scale}");
@@ -161,18 +200,25 @@ fn hyprland_production_browser_roundtrip() -> Result<()> {
         for field in ["input","textarea","editable"] {
             click(field)?;
             clear(field)?;
-            text(&bmp)?;
-            wait_for("native ASCII BMP combining RTL chunked exact",|r|value_is(r,field,&bmp))?;
+            text(&keyboard)?;
+            wait_for("original-layout ASCII punctuation and Shift exact",|r|value_is(r,field,&keyboard))?;
             let before=report()?;
-            // The supplementary scalar is after >48 unique valid scalars:
-            // rejection must happen before the FIRST chunk is injected.
-            let invalid=format!("{bmp}🦀");
-            let error=text(&invalid).expect_err("supplementary native text must reject before input");
-            ensure!(format!("{error:#}").contains("supplementary Unicode"), "Wrong rejection reason: {error:#}");
-            println!("EXPECTED supplementary rejection: {error:#}");
-            let after=fresh("supplementary rejection observed",&before)?;
+            // An unsupported suffix must fail before typing its valid prefix.
+            let invalid=format!("{keyboard}🦀");
+            let error=text(&invalid).expect_err("unsupported text must reject before input");
+            println!("EXPECTED unsupported typing rejection: {error:#}");
+            let after=fresh("unsupported typing rejection observed",&before)?;
             ensure!(after["values"]==before["values"] && after["inputCount"]==before["inputCount"],
                 "Rejected text partially changed browser fields: before={} after={}",before["values"],after["values"]);
+            let error=typed(full,super::typing::Method::Auto,super::typing::ClipboardPolicy::Replace,false)
+                .expect_err("model eligibility must not authorize clipboard publication");
+            ensure!(format!("{error:#}").contains("computer_clipboard"),"Wrong missing-consent error: {error:#}");
+            let after=fresh("missing clipboard consent observed",&after)?;
+            ensure!(after["values"]==before["values"] && after["inputCount"]==before["inputCount"],"Missing-consent request changed browser input");
+            clear(field)?;
+            let effects=typed(full,super::typing::Method::Auto,super::typing::ClipboardPolicy::Replace,true)?;
+            ensure!(effects.method=="paste" && effects.clipboard=="changed","Auto fallback selected wrong method: {effects:?}");
+            wait_for("explicitly authorized auto fallback exact Unicode",|r|value_is(r,field,full))?;
             clear(field)?;
             let full=if field=="input" {full.to_owned()} else {format!("{full}\nline two\tliteral tab END")};
             paste(field,&full)?;

@@ -1,0 +1,14 @@
+{
+  "agent": {
+    "mcp": {
+      "computer": {
+        "command": [
+          "builtin",
+          "computer"
+        ],
+        "enabled": true,
+        "type": "local"
+      }
+    }
+  }
+}

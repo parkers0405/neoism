@@ -1,6 +1,6 @@
-//! Deterministic IME fixture: queued events apply only on sync. Like Hyprland's
-//! IME grab, map forwarding is cached by device identity, not map revision.
-//! Parsing, key resolution, modifier state and production transaction are real.
+//! Historical overlay/IME fixtures plus original-layout planner and stroke tests.
+//! Overlay transactions below are cfg(test)-only; production never remaps keys.
+//! Parsing, key resolution and modifier simulation use real native XKB maps.
 //! The standalone dependency harness supplies Enigo's exact FD loader as parser.
 use super::*;
 use enigo::Key;
@@ -400,4 +400,359 @@ pub(crate) fn sequence(mut parser:impl FnMut(&str)->anyhow::Result<()>) {
     transaction(&mut wire,&original,&original,0,&control_l,true,||Ok(())).unwrap();
     assert_eq!(wire.output.last(),Some(&("l".into(),true)));
     wire.assert_restored();
+}
+
+// Original-layout production planner regressions (overlay tests above historical).
+fn original_layout(layout:&str)->xkb::Keymap {
+    xkb::Keymap::new_from_names(&xkb::Context::new(xkb::CONTEXT_NO_FLAGS),"","",layout,"",None,xkb::KEYMAP_COMPILE_NO_FLAGS).unwrap()
+}
+fn assert_original_text(layout:&str,group:u32,text:&str) {
+    let map=original_layout(layout);
+    let source=map.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let plan=layout_plan::text(&map,group,text).unwrap().unwrap();
+    assert_eq!(plan.unit_count(),text.chars().count());
+    assert_eq!(plan.units_kind,"unicode_scalar");
+    assert_eq!(plan.source,source);
+    assert!(!plan.source.contains("neoism_overlay"));
+    let mut state=xkb::State::new(&map); state.update_mask(0,0,0,0,0,group);
+    for (ch,unit) in text.chars().zip(&plan.units) {
+        for code in unit {state.update_key(xkb::Keycode::new(*code),xkb::KeyDirection::Down);}
+        assert_eq!(state.key_get_utf8(xkb::Keycode::new(*unit.last().unwrap())),ch.to_string());
+        for code in unit.iter().rev() {state.update_key(xkb::Keycode::new(*code),xkb::KeyDirection::Up);}
+        assert_eq!(state.serialize_mods(xkb::STATE_MODS_EFFECTIVE),0);
+        assert_eq!(state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),group);
+    }
+}
+#[test] fn original_us_de_fr_case_punctuation_and_level3() {
+    assert_original_text("us",0,"Hello AaZz 0123456789 !@#$%^&*()_+-=[]{};:'\",.<>/?\\|`");
+    assert_original_text("de",0,"Hallo ÄäÖöÜüß @€{}[]\\|~");
+    assert_original_text("fr",0,"Bonjour AaZz éèàç @€{}[]\\|~");
+}
+#[test] fn original_group_only_and_dead_keys_not_composed() {
+    let map=original_layout("us,de");
+    assert!(layout_plan::text(&map,0,"ä").unwrap().is_none());
+    assert_original_text("us,de",1,"äÄ@€");
+    assert!(layout_plan::text(&original_layout("us"),0,"café").unwrap().is_none());
+    assert!(layout_plan::text(&original_layout("de"),0,"ê").unwrap().is_none());
+}
+#[test] fn original_full_preflight_validates_suffix_and_unicode_policy() {
+    let map=original_layout("us");
+    for text in ["prefixλ","prefix😀","e\u{301}","a\u{200d}"] {assert!(layout_plan::text(&map,0,text).unwrap().is_none());}
+    for text in ["prefix\0","prefix\n","prefix\t","prefix\u{85}","😀\n"] {assert!(layout_plan::text(&map,0,text).is_err());}
+    assert_eq!(layout_plan::text(&map,0,&"a".repeat(512)).unwrap().unwrap().unit_count(),512);
+    assert!(layout_plan::text(&map,0,&"a".repeat(513)).is_err());
+}
+#[test] fn original_custom_modifier_poison_rejected() {
+    let map=original_layout("de");
+    let mut source=map.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let state=xkb::State::new(&map);
+    let mut replacements=String::new();
+    for code in map.min_keycode().raw()..=map.max_keycode().raw() {
+        let key=xkb::Keycode::new(code);
+        if state.key_get_one_sym(key).raw()==0xfe03 {
+            replacements.push_str(&format!("\n replace key <{}> {{ [ ISO_Level3_Shift ], actions=[ SetMods(modifiers=Control) ] }};",map.key_get_name(key).unwrap()));
+        }
+    }
+    append_section(&mut source,"xkb_symbols", &replacements).unwrap();
+    let poison=compile(source).unwrap();
+    assert!(layout_plan::text(&poison,0,"@").unwrap().is_none());
+}
+
+#[derive(Default)]
+struct PlannedWire {
+    held:Vec<u32>, events:Vec<(u32,bool)>, guards:usize,
+    fail_guard:usize, panic_guard:usize, acknowledged:usize, facts:KeyboardFailureFacts,
+}
+impl StrokeWire for PlannedWire {
+    fn completed(&mut self) {self.facts.completed_units+=1;self.facts.current_unit_uncertain=false;}
+    fn guard(&mut self,check:&mut dyn FnMut()->anyhow::Result<()>)->anyhow::Result<()> {
+        check()?;
+        self.guards+=1;
+        if self.guards==self.panic_guard {panic!("injected transport panic");}
+        ensure!(self.guards!=self.fail_guard,"layout/group changed");
+        self.acknowledged=self.events.len();
+        Ok(())
+    }
+    fn stroke(&mut self,code:u32,down:bool,_:&xkb::State)->anyhow::Result<()> {
+        if down {self.held.push(code);self.facts.current_unit_uncertain=true;} else {assert_eq!(self.held.pop(),Some(code));}
+        self.events.push((code,down)); Ok(())
+    }
+}
+#[test] fn original_dispatch_is_per_scalar_chords_with_release_ack() {
+    let map=original_layout("de");
+    let plan=layout_plan::text(&map,0,"aA@b").unwrap().unwrap();
+    let mut wire=PlannedWire::default();
+    let mut completed=Vec::new();
+    dispatch_plan(&mut wire,&map,&plan,&mut ||Ok(()),&mut |n|completed.push(n)).unwrap();
+    assert_eq!(completed,vec![1,1,1,1]);
+    assert!(wire.held.is_empty());
+    assert_eq!(wire.acknowledged,wire.events.len());
+    let expected=plan.units.iter().flat_map(|unit|unit.iter().map(|c|(*c,true)).chain(unit.iter().rev().map(|c|(*c,false)))).collect::<Vec<_>>();
+    assert_eq!(wire.events,expected);
+}
+#[test] fn original_dispatch_stops_on_changed_snapshot_without_retrying_prefix() {
+    let map=original_layout("us");
+    let plan=layout_plan::text(&map,0,"ab").unwrap().unwrap();
+    let mut wire=PlannedWire {fail_guard:4,..Default::default()};
+    let mut completed=Vec::new();
+    assert!(dispatch_plan(&mut wire,&map,&plan,&mut ||Ok(()),&mut |n|completed.push(n)).is_err());
+    assert_eq!(completed,vec![1]);
+    assert_eq!(wire.facts,KeyboardFailureFacts {completed_units:1,current_unit_uncertain:false,cleanup_failed:false});
+    assert_eq!(wire.events.len(),2);
+    assert!(wire.held.is_empty());
+}
+#[test] fn original_dispatch_cancel_or_panic_before_release_never_claims_completion() {
+    let map=original_layout("us");
+    let plan=layout_plan::text(&map,0,"Ab").unwrap().unwrap();
+    for panic in [false,true] {
+        let mut wire=PlannedWire {panic_guard:if panic {3} else {0},..Default::default()};
+        let mut checks=0;
+        let mut completed=Vec::new();
+        let error=catch_native(||dispatch_plan(&mut wire,&map,&plan,&mut ||{checks+=1;ensure!(panic || checks!=3,"cancelled");Ok(())},&mut |n|completed.push(n)));
+        assert!(error.is_err());
+        assert!(completed.is_empty());
+        assert!(wire.facts.current_unit_uncertain);
+        assert_eq!(wire.facts.completed_units,0);
+        assert_eq!(wire.held.len(),2,"session cleanup must release both owned keys");
+        assert_eq!(wire.events.len(),2,"no replay or later scalar");
+    }
+}
+
+#[test] fn original_failure_facts_survive_context_without_string_matching() {
+    let facts=KeyboardFailureFacts {completed_units:2,current_unit_uncertain:true,cleanup_failed:true};
+    let error=keyboard_error(anyhow::anyhow!("arbitrary transport error"),facts).context("outer facade context");
+    assert_eq!(failure_facts(&error),Some(facts));
+    assert_eq!(failure_facts(&anyhow::anyhow!("cleanup failed")),None);
+}
+#[test] fn original_guard_before_first_key_has_no_native_effects() {
+    let map=original_layout("us");
+    let plan=layout_plan::text(&map,0,"Ab").unwrap().unwrap();
+    let mut wire=PlannedWire {fail_guard:1,..Default::default()};
+    assert!(dispatch_plan(&mut wire,&map,&plan,&mut ||Ok(()),&mut |_|panic!("must not report progress")).is_err());
+    assert!(wire.events.is_empty());
+    assert_eq!(wire.facts,KeyboardFailureFacts::default());
+}
+#[test] fn original_progress_panic_after_ack_does_not_make_unit_uncertain() {
+    let map=original_layout("us");
+    let plan=layout_plan::text(&map,0,"Ab").unwrap().unwrap();
+    let mut wire=PlannedWire::default();
+    assert!(catch_native(||dispatch_plan(&mut wire,&map,&plan,&mut ||Ok(()),&mut |_|panic!("progress panic"))).is_err());
+    assert!(wire.held.is_empty());
+    assert_eq!(wire.facts,KeyboardFailureFacts {completed_units:1,current_unit_uncertain:false,cleanup_failed:false});
+}
+
+#[test] fn original_all_ascii_uses_real_printing_positions_not_consumer_aliases() {
+    let text=(0x20..0x7f).map(|code|char::from_u32(code).unwrap()).collect::<String>();
+    assert_original_text("us",0,&text);
+    let map=original_layout("us");
+    let plan=layout_plan::text(&map,0,"#*").unwrap().unwrap();
+    assert_eq!(*plan.units[0].last().unwrap(),12,"# must be Shift+3, not XF86NumericPound");
+    assert_eq!(*plan.units[1].last().unwrap(),17,"* must be Shift+8, not XF86NumericStar");
+    assert!(plan.units.iter().all(|unit|unit.len()==2));
+    for layout in ["us","de","fr"] {
+        let map=original_layout(layout);
+        for ch in text.chars() {
+            if let Some(plan)=layout_plan::text(&map,0,&ch.to_string()).unwrap() {
+                assert!(plan.units[0].iter().all(|code|*code<=135),"{layout} {ch:?}: {:?}",plan.units);
+            }
+        }
+    }
+}
+#[test] fn original_consumer_alias_on_printing_position_is_not_direct_text() {
+    let map=original_layout("us");
+    let mut source=map.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    append_section(&mut source,"xkb_symbols","\n replace key <AC01> { [ XF86NumericPound ] };").unwrap();
+    let map=compile(source).unwrap();
+    let plan=layout_plan::text(&map,0,"#").unwrap().unwrap();
+    assert_eq!(*plan.units[0].last().unwrap(),12);
+    assert_eq!(plan.units[0].len(),2);
+}
+
+// Native finalization tests use a private socket pair, never the host compositor.
+fn disconnected_session(with_device:bool)->KeyboardSession {
+    let (client,peer)=std::os::unix::net::UnixStream::pair().unwrap();
+    let conn=Connection::from_socket(client).unwrap();
+    let queue=conn.new_event_queue::<State>();
+    let original=original_layout("us");
+    let source=original.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let keyboard=if with_device {
+        let registry=conn.display().get_registry(&queue.handle(),());
+        let seat=registry.bind::<wl_seat::WlSeat,_,_>(1,7,&queue.handle(),());
+        let manager=registry.bind::<manager::ZwpVirtualKeyboardManagerV1,_,_>(2,1,&queue.handle(),());
+        Some(manager.create_virtual_keyboard(&seat,&queue.handle(),()))
+    } else {None};
+    drop(peer);
+    KeyboardSession {conn,queue,state:State::default(),original,source,group:0,keyboard,file:None,held:Vec::new(),start:Instant::now(),failed:false,finished:false,pending_neutral:false,facts:KeyboardFailureFacts::default()}
+}
+#[test] fn original_finish_without_device_is_idempotent_and_closes_session() {
+    let mut session=disconnected_session(false);
+    session.facts.completed_units=2;
+    session.finish().unwrap();
+    session.finish().unwrap();
+    assert!(session.finished);
+    assert!(!session.failed);
+    assert_eq!(session.facts.completed_units,2);
+    assert!(session.plan_text("a").is_err());
+}
+#[test] fn original_finish_reports_native_cleanup_failure_without_inventing_pending_text() {
+    let mut session=disconnected_session(true);
+    session.facts.completed_units=3;
+    let start=Instant::now();
+    let error=session.finish().unwrap_err();
+    assert!(start.elapsed()<Duration::from_secs(2));
+    let expected=KeyboardFailureFacts {completed_units:3,current_unit_uncertain:false,cleanup_failed:true};
+    assert_eq!(failure_facts(&error),Some(expected));
+    assert!(session.failed && session.finished);
+    assert!(session.keyboard.is_none());
+    assert_eq!(failure_facts(&session.finish().unwrap_err()),Some(expected));
+}
+
+#[test] fn original_identical_fd_notifications_reuse_compilation_but_remain_fresh() {
+    let source=original_layout("us").get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let file=keymap_file(&source).unwrap();
+    let mut state=State::default();
+    let start=Instant::now();
+    // Four edges per uppercase scalar. Each notification still reads the FD.
+    for _ in 0..2048 {
+        state.record_map_source(super::super::shortcuts::read_map_source(&file,(source.len()+1) as u32));
+        assert!(state.error.is_none());
+        assert_eq!(state.canonical_map.as_deref(),Some(source.as_str()));
+    }
+    assert_eq!(state.map_revision,2048);
+    assert_eq!(state.compiled_maps,1);
+    println!("2048 fresh original-map FD observations: {:?}, {} compilation",start.elapsed(),state.compiled_maps);
+    state.group=Some(1);state.group_revision=19;
+    state.record_map_source(Ok(source));
+    assert_eq!(state.map_revision,2049);
+    assert_eq!(state.group,Some(1));
+    assert_eq!(state.group_revision,19,"map cache must not manufacture group freshness");
+}
+#[test] fn original_map_cache_recompiles_changes_and_invalidates_errors() {
+    let us=original_layout("us").get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let de=original_layout("de").get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let mut state=State::default();
+    state.record_map_source(Ok(us.clone()));
+    state.record_map_source(Ok(de.clone()));
+    assert_eq!(state.compiled_maps,2);
+    assert_eq!(state.canonical_map.as_deref(),Some(de.as_str()));
+    state.record_map_source(Err(anyhow::anyhow!("Unreadable/truncated compositor FD")));
+    assert_eq!(state.map_revision,3);
+    assert!(state.map.is_none() && state.canonical_map.is_none() && state.raw_map.is_none());
+    assert!(state.error.is_some());
+    state.record_map_source(Ok(de));
+    assert_eq!(state.compiled_maps,3,"error cannot leave a cache entry that bypasses revalidation");
+    assert!(state.error.is_none());
+    state.record_map_source(Ok("invalid xkb source".into()));
+    assert!(state.map.is_none() && state.canonical_map.is_none() && state.raw_map.is_none());
+    assert!(state.error.is_some());
+    state.record_map_source(Ok(us));
+    assert!(state.error.is_none());
+    state.record_map_source(Ok(compiled_keymap("abc").unwrap().0));
+    assert!(state.error.as_ref().unwrap().contains("temporary Neoism keymap"));
+    assert!(state.map.is_none() && state.canonical_map.is_none());
+}
+#[test] fn original_enumerated_candidates_preserve_deterministic_chord_cost() {
+    let ascii=(0x20..0x7f).map(|c|char::from_u32(c).unwrap()).collect::<String>();
+    let map=original_layout("us");
+    let full=layout_plan::text(&map,0,&ascii).unwrap().unwrap();
+    for (ch,unit) in ascii.chars().zip(&full.units) {
+        let single=layout_plan::text(&map,0,&ch.to_string()).unwrap().unwrap();
+        assert_eq!(&single.units[0],unit);
+    }
+    let repeated=layout_plan::text(&map,0,&"A".repeat(512)).unwrap().unwrap();
+    assert_eq!(repeated.unit_count(),512);
+    assert!(repeated.units.iter().all(|unit|unit==&vec![50,38]));
+    assert_eq!(layout_plan::text(&map,0,"#").unwrap().unwrap().units,vec![vec![50,12]]);
+}
+
+// These tests speak only wl_display.sync over a private socketpair. No registry,
+// seat, virtual keyboard, environment socket, or desktop input is involved.
+#[test]
+fn pending_sync_callback_has_zero_subsequent_blocking_polls() {
+    use std::io::{Read,Write};
+    let (client,mut server)=std::os::unix::net::UnixStream::pair().unwrap();
+    server.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let conn=Connection::from_socket(client).unwrap();
+    let mut queue=conn.new_event_queue::<State>();
+    let mut state=State::default();
+    let start=Instant::now();
+    let mut requests=0;
+    let mut callbacks=0;
+    BLOCKING_POLLS.with(|count|count.set(0));
+    for _ in 0..64 {
+        let done=Arc::new(AtomicBool::new(false));
+        conn.display().sync(&queue.handle(),done.clone());
+        conn.flush().unwrap();
+        let mut request=[0u8;12];
+        server.read_exact(&mut request).unwrap();
+        assert_eq!(u32::from_ne_bytes(request[0..4].try_into().unwrap()),1);
+        assert_eq!(u32::from_ne_bytes(request[4..8].try_into().unwrap()),12<<16);
+        requests+=1;
+        let mut event=[0u8;12];
+        event[0..4].copy_from_slice(&request[8..12]);
+        event[4..8].copy_from_slice(&(12u32<<16).to_ne_bytes());
+        server.write_all(&event).unwrap();
+        queue.prepare_read().unwrap().read().unwrap();
+        assert!(!done.load(Ordering::Relaxed),"callback must be pending, not dispatched");
+        pump_until(&conn,&mut queue,&mut state,Instant::now()+Duration::from_millis(500),||done.load(Ordering::Relaxed)).unwrap();
+        assert!(done.load(Ordering::Relaxed));
+        callbacks+=1;
+    }
+    let polls=BLOCKING_POLLS.with(|count|count.get());
+    assert_eq!(polls,0,"dispatching completion must not enter a blocking poll");
+    assert_eq!((requests,callbacks),(64,64));
+    eprintln!("private keyboard sync microbench: requests={requests} callbacks={callbacks} subsequent_blocking_polls={polls} elapsed_us={}",start.elapsed().as_micros());
+}
+
+#[test]
+fn cancellation_during_read_only_sync_wait_uses_only_cheap_check() {
+    let metrics=super::super::latency::Scope::start(Duration::ZERO);
+    let (client,_server)=std::os::unix::net::UnixStream::pair().unwrap();
+    let conn=Connection::from_socket(client).unwrap();
+    let mut queue=conn.new_event_queue::<State>();
+    let mut waits=0;
+    let mut full=0;
+    let mut wait=|| {super::super::latency::count("test_wait_checks",1);waits+=1;ensure!(waits<2,"cancelled while waiting");Ok(())};
+    let mut authoritative=|| {full+=1;Ok(())};
+    let checks=Checks {wait:&mut wait,full:&mut authoritative};
+    BLOCKING_POLLS.with(|count|count.set(0));
+    let error=sync(&conn,&mut queue,&mut State::default(),checks.wait).unwrap_err();
+    assert_eq!(error.to_string(),"cancelled while waiting");
+    assert_eq!(waits,2);
+    assert_eq!(full,0);
+    assert_eq!(BLOCKING_POLLS.with(|count|count.get()),1);
+    let metrics=metrics.finish();
+    assert_eq!(metrics.stages["keyboard_sync"].0,1);
+    assert_eq!(metrics.stages["keyboard_poll"].0,1);
+    assert_eq!(metrics.counters["test_wait_checks"],2);
+    assert_eq!(metrics.counters.get("keyboard_edges"),None);
+}
+
+#[test]
+fn authoritative_focus_loss_before_edge_does_not_touch_device() {
+    let (client,_server)=std::os::unix::net::UnixStream::pair().unwrap();
+    let conn=Connection::from_socket(client).unwrap();
+    let queue=conn.new_event_queue::<State>();
+    let original=original_layout("us");
+    let source=original.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let mut session=KeyboardSession {conn,queue,state:State::default(),original:original.clone(),source,group:0,
+        keyboard:None,file:None,held:Vec::new(),start:Instant::now(),failed:false,finished:false,pending_neutral:false,facts:KeyboardFailureFacts::default()};
+    let mut full_calls=0;
+    let mut wait_calls=0;
+    for down in [true,false] {
+        let mut cheap=|| {wait_calls+=1;Ok(())};
+        let mut full=|| {full_calls+=1;anyhow::bail!("foreground changed")};
+        let mut checks=Checks {wait:&mut cheap,full:&mut full};
+        let mut wire=CheckedStroke {session:&mut session,checks:&mut checks};
+        // An absent device deliberately makes any accidentally emitted request
+        // panic. Both press and release must fail at the authoritative gate.
+        let error=wire.stroke(38,down,&xkb::State::new(&original)).unwrap_err();
+        assert_eq!(error.to_string(),"foreground changed");
+    }
+    assert_eq!(full_calls,2);
+    assert_eq!(wait_calls,0);
+    assert!(session.held.is_empty());
+    assert_eq!(session.facts,KeyboardFailureFacts::default());
+    session.finish().unwrap();
+    assert!(session.finished && session.keyboard.is_none() && session.file.is_none());
 }

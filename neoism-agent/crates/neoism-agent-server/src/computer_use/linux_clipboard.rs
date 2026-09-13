@@ -28,6 +28,175 @@ const MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "text/plain"];
 const PENDING: u8 = 0;
 const CANCELLED: u8 = 1;
 const PUBLISHING: u8 = 2;
+const CONFIRMED: u8 = 3;
+
+/// Publication state, never a claim that the target accepted a paste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChangePhase {
+    Unchanged,
+    MayHaveChanged,
+    ConfirmedPublication,
+}
+#[derive(Debug)]
+pub(super) struct PublishError {
+    pub phase: ChangePhase,
+    source: anyhow::Error,
+}
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.phase == ChangePhase::Unchanged {
+            write!(f, "{}", self.source)
+        } else {
+            write!(
+                f,
+                "Clipboard publication {:?}; do not retry automatically: {:#}",
+                self.phase, self.source
+            )
+        }
+    }
+}
+impl std::error::Error for PublishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+/// Every error returned by publish carries this metadata (including validation).
+pub(super) fn change_phase(error: &anyhow::Error) -> Option<ChangePhase> {
+    error
+        .downcast_ref::<PublishError>()
+        .map(|error| error.phase)
+}
+
+fn endpoint() -> (Option<OsString>, Option<OsString>, Option<OsString>) {
+    (
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("WAYLAND_SOCKET"),
+    )
+}
+
+// A blocking AF_UNIX connect can wait indefinitely on a full accept backlog.
+// Fail closed instead: discovery has no implicit reconnect/retry.
+fn connect_probe(
+    endpoint: &(Option<OsString>, Option<OsString>, Option<OsString>),
+) -> anyhow::Result<Connection> {
+    use std::os::{
+        fd::IntoRawFd,
+        unix::{ffi::OsStrExt, net::UnixStream},
+    };
+    let display = std::path::PathBuf::from(
+        endpoint
+            .1
+            .as_deref()
+            .unwrap_or(std::ffi::OsStr::new("wayland-0")),
+    );
+    let path = if display.is_absolute() {
+        display
+    } else {
+        std::path::PathBuf::from(endpoint.0.as_ref().context("XDG_RUNTIME_DIR missing")?)
+            .join(display)
+    };
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: sockaddr_un is plain C storage; all fields start initialized.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    ensure!(
+        bytes.len() < address.sun_path.len() && !bytes.contains(&0),
+        "Invalid Wayland socket path"
+    );
+    address.sun_family = libc::AF_UNIX as _;
+    for (out, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *out = *byte as _;
+    }
+    // SAFETY: socket creates an owned descriptor, subsequently closed on all errors.
+    let raw = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        )
+    };
+    ensure!(
+        raw >= 0,
+        "Cannot create Wayland probe socket: {}",
+        io::Error::last_os_error()
+    );
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: initialized address with an in-bounds NUL-terminated pathname.
+    let rc = unsafe {
+        libc::connect(
+            fd.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as _,
+        )
+    };
+    ensure!(
+        rc == 0,
+        "Wayland probe connection unavailable: {}",
+        io::Error::last_os_error()
+    );
+    // SAFETY: ownership transfers once from OwnedFd into UnixStream.
+    Connection::from_socket(unsafe { UnixStream::from_raw_fd(fd.into_raw_fd()) })
+        .map_err(Into::into)
+}
+
+/// Read-only registry discovery: no data device, source, offer receive, or selection.
+/// No worker is started and no existing clipboard payload is requested.
+pub(super) fn preflight(
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    check()?;
+    let expected = endpoint();
+    {
+        let slot = SERVICE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Clipboard service lock poisoned"))?;
+        if let Some(service) = slot.as_ref().filter(|s| s.alive.load(Ordering::Acquire)) {
+            ensure!(
+                service.endpoint == expected,
+                "Clipboard service belongs to a different Wayland connection"
+            );
+        }
+    }
+    // connect_to_env consumes WAYLAND_SOCKET; do not steal an inherited connection
+    // for an observational probe or assume it can later be reopened by the worker.
+    ensure!(
+        expected.2.is_none(),
+        "Clipboard preflight requires a named Wayland endpoint, not WAYLAND_SOCKET"
+    );
+    let deadline = Instant::now() + LIMIT;
+    let conn = connect_probe(&expected)?;
+    let mut queue = conn.new_event_queue::<State>();
+    let mut state = State::default();
+    let waker = Waker::new()?;
+    conn.display().get_registry(&queue.handle(), ());
+    let done = Arc::new(AtomicBool::new(false));
+    conn.display().sync(&queue.handle(), done.clone());
+    while !done.load(Ordering::Acquire) {
+        check()?;
+        ensure!(Instant::now() < deadline, "Clipboard discovery timed out");
+        pump(
+            &conn,
+            &mut queue,
+            &mut state,
+            &waker,
+            Some(deadline.min(Instant::now() + Duration::from_millis(5))),
+        )?;
+    }
+    ensure!(
+        state.seats.len() == 1,
+        "Clipboard publication requires one unambiguous Wayland seat"
+    );
+    ensure!(
+        state.manager.is_some(),
+        "Explicit clipboard paste unavailable: compositor lacks wlr-data-control"
+    );
+    ensure!(
+        endpoint() == expected,
+        "Wayland endpoint changed during clipboard discovery"
+    );
+    check()
+}
 
 fn payload(text: &str) -> anyhow::Result<Arc<[u8]>> {
     ensure!(
@@ -136,13 +305,25 @@ pub(super) fn publish(
     text: &str,
     mut check: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    publish_inner(text, &mut check).map_err(|error| {
+        if error.downcast_ref::<PublishError>().is_some() {
+            error
+        } else {
+            PublishError {
+                phase: ChangePhase::Unchanged,
+                source: error,
+            }
+            .into()
+        }
+    })
+}
+fn publish_inner(
+    text: &str,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let text = payload(text)?;
     check()?;
-    let endpoint = (
-        std::env::var_os("XDG_RUNTIME_DIR"),
-        std::env::var_os("WAYLAND_DISPLAY"),
-        std::env::var_os("WAYLAND_SOCKET"),
-    );
+    let endpoint = endpoint();
     let (sender, waker) = {
         let mut slot = SERVICE
             .get_or_init(|| Mutex::new(None))
@@ -258,18 +439,25 @@ pub(super) fn publish(
         // Atomic arbitration closes the race between cancellation and set_selection.
         // Once PUBLISHING wins, callers must assume clipboard disclosure occurred.
         let changed = cancel(&phase);
-        return Err(error.context(if changed {
-            "Clipboard may already have changed; do not retry automatically or claim paste acceptance"
+        let phase = if phase.load(Ordering::Acquire) == CONFIRMED {
+            ChangePhase::ConfirmedPublication
+        } else if changed {
+            ChangePhase::MayHaveChanged
         } else {
-            "Clipboard publication cancelled before selection change"
-        }));
+            ChangePhase::Unchanged
+        };
+        return Err(PublishError {
+            phase,
+            source: error,
+        }
+        .into());
     }
     Ok(())
 }
 fn cancel(phase: &AtomicU8) -> bool {
     phase
         .compare_exchange(PENDING, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-        .is_err_and(|value| value == PUBLISHING)
+        .is_err_and(|value| value >= PUBLISHING)
 }
 fn authorize(phase: &AtomicU8) -> bool {
     phase
@@ -651,6 +839,7 @@ fn worker(receiver: mpsc::Receiver<Request>, waker: &Waker) {
                     request.deadline,
                     &request.phase,
                 )?;
+                request.phase.store(CONFIRMED, Ordering::Release);
                 Ok(true)
             })();
             match result {
@@ -829,6 +1018,27 @@ mod tests {
     fn guard_rejection_never_starts_service() {
         let error = publish("🦀", || anyhow::bail!("consent revoked")).unwrap_err();
         assert_eq!(error.to_string(), "consent revoked");
+        assert_eq!(change_phase(&error), Some(ChangePhase::Unchanged));
+    }
+    #[test]
+    fn preflight_guard_rejection_is_read_only() {
+        let error = preflight(&mut || anyhow::bail!("preflight cancelled")).unwrap_err();
+        assert_eq!(error.to_string(), "preflight cancelled");
+    }
+    #[test]
+    fn confirmed_publication_remains_confirmed_on_cancel() {
+        let phase = AtomicU8::new(CONFIRMED);
+        assert!(cancel(&phase));
+        assert_eq!(phase.load(Ordering::Acquire), CONFIRMED);
+        let error: anyhow::Error = PublishError {
+            phase: ChangePhase::ConfirmedPublication,
+            source: anyhow::anyhow!("guard cancelled after ACK"),
+        }
+        .into();
+        assert_eq!(
+            change_phase(&error.context("outer context")),
+            Some(ChangePhase::ConfirmedPublication)
+        );
     }
     #[test]
     fn offered_mime_only_and_owned_fd_closes() {

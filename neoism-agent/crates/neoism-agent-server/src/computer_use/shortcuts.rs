@@ -45,6 +45,8 @@ pub(super) fn resolve(keys: &[Key]) -> anyhow::Result<Vec<NativeKey>> {
 #[cfg(target_os="linux")]
 pub(super) fn read_map(file:&std::fs::File,size:u32)->anyhow::Result<xkbcommon::xkb::Keymap> { linux::read_keymap(file,size) }
 #[cfg(target_os="linux")]
+pub(super) fn read_map_source(file:&std::fs::File,size:u32)->anyhow::Result<String> { linux::read_keymap_source(file,size) }
+#[cfg(target_os="linux")]
 pub(super) fn resolve_in_map(map:&xkbcommon::xkb::Keymap,group:u32,keys:&[Key])->anyhow::Result<Vec<u16>> {
     keys.iter().map(|key|linux::resolve_key(map,group,*key)).collect()
 }
@@ -136,7 +138,7 @@ mod linux {
             }
         }
     }
-    pub(super) fn read_keymap(file: &std::fs::File, size: u32) -> anyhow::Result<xkb::Keymap> {
+    pub(super) fn read_keymap_source(file: &std::fs::File, size: u32) -> anyhow::Result<String> {
         ensure!(size > 0 && size <= 4 * 1024 * 1024, "Invalid/oversized Wayland keymap");
         let mut bytes = vec![0; size as usize];
         // SCM_RIGHTS duplicates share the open-file offset. Compositors may
@@ -145,7 +147,10 @@ mod linux {
         file.read_exact_at(&mut bytes, 0).context("Truncated/unreadable Wayland keymap FD")?;
         while bytes.last() == Some(&0) { bytes.pop(); }
         ensure!(!bytes.is_empty() && !bytes.contains(&0), "Empty or embedded-NUL Wayland keymap");
-        let source = String::from_utf8(bytes).context("Wayland keymap is not UTF-8")?;
+        String::from_utf8(bytes).context("Wayland keymap is not UTF-8")
+    }
+    pub(super) fn read_keymap(file: &std::fs::File, size: u32) -> anyhow::Result<xkb::Keymap> {
+        let source = read_keymap_source(file, size)?;
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         xkb::Keymap::new_from_string(&context, source, xkb::KEYMAP_FORMAT_TEXT_V1, xkb::KEYMAP_COMPILE_NO_FLAGS)
             .context("Invalid XKB keymap in compositor FD (read completely from offset zero)")

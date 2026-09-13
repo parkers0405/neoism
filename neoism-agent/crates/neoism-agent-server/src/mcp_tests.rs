@@ -161,7 +161,7 @@ async fn computer_use_picker_activation_needs_no_restart_and_preserves_boundarie
         let config = configured_servers(directory,Some(&state)).unwrap();
         assert!(!is_enabled(&config["computer"]));
         let initial_snapshot = state.refreshed_plugin_snapshot(directory).await;
-        let arguments = json!({"action":"text","text":"mock only"});
+        let arguments = json!({"action":"text","text":"mock only","target":"fixture"});
         let disabled = call_tool_in_session(directory,"computer","input",arguments.clone(),&store,state.clone(),&initial_snapshot,true,Arc::new(AtomicBool::new(false))).await;
         assert!(disabled.unwrap_err().to_string().contains("disabled"));
         assert_eq!(inputs.load(Ordering::SeqCst), 0);

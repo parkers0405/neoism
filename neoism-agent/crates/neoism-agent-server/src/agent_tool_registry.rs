@@ -377,6 +377,10 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
         ensure_tool_permission(permissions, "mcp", runtime_id)
             .map_err(|error| anyhow::anyhow!(error))?;
     }
+    let clipboard_authorized = if runtime_id.starts_with("mcp__computer__") && computer_clipboard_requested(&arguments) {
+        ensure_computer_clipboard_permission(permissions, runtime_id)?;
+        true
+    } else { false };
     let runtime_state = state
         .clone()
         .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
@@ -391,7 +395,7 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     let state =
         state.ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
     let auth_store = mcp_auth::McpAuthStore::local(state.services());
-    let call = mcp::call_tool_in_session(
+    let call = crate::computer_use::with_clipboard_authorization(clipboard_authorized, mcp::call_tool_in_session(
         directory,
         &tool.client,
         &tool.name,
@@ -401,8 +405,12 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
         snapshot,
         true,
         cancel.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
-    );
-    let result = if let Some(cancel) = cancel {
+    ));
+    // The bounded computer worker owns cancellation and effect accounting. Dropping
+    // it here would discard known dispatch/clipboard progress and recovery media.
+    let result = if tool.client == "computer" {
+        call.await?
+    } else if let Some(cancel) = cancel {
         tokio::select! {
             result = call => result?,
             _ = wait_for_cancellation(cancel) => {
@@ -433,6 +441,15 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
             }
         })),
     }))
+}
+
+fn computer_clipboard_requested(arguments:&Value)->bool {
+    arguments["action"]=="paste" || arguments["clipboard_policy"]=="replace" || arguments["method"]=="paste" ||
+        arguments["actions"].as_array().is_some_and(|actions|actions.iter().any(computer_clipboard_requested))
+}
+fn ensure_computer_clipboard_permission(permissions:&[PermissionRule],runtime_id:&str)->anyhow::Result<()> {
+    let rules=permissions.iter().filter(|rule|rule.action != PermissionAction::Allow || rule.permission=="computer_clipboard").cloned().collect::<Vec<_>>();
+    ensure_tool_permission(&rules,"computer_clipboard",runtime_id).map_err(Into::into)
 }
 
 fn ensure_computer_permission(permissions: &[PermissionRule], runtime_id: &str) -> anyhow::Result<()> {
@@ -862,6 +879,20 @@ mod tests {
         assert!(gateway.description.contains("- github: 80 tools"));
         assert!(gateway.description.contains("Catalog partial"));
         assert!(gateway.description.len() < MCP_CATALOG_BUDGET + 120);
+    }
+
+    #[test]
+    fn clipboard_requires_separate_explicit_consent_and_preserves_denies() {
+        let target="mcp__computer__batch";
+        let mut rules=vec![PermissionRule {permission:"*".into(),pattern:"*".into(),action:PermissionAction::Allow},PermissionRule {permission:"computer_use".into(),pattern:"*".into(),action:PermissionAction::Allow}];
+        assert!(ensure_computer_clipboard_permission(&rules,target).is_err());
+        rules.push(PermissionRule{permission:"computer_clipboard".into(),pattern:target.into(),action:PermissionAction::Allow});
+        assert!(ensure_computer_clipboard_permission(&rules,target).is_ok());
+        rules.push(PermissionRule{permission:"computer_clipboard".into(),pattern:target.into(),action:PermissionAction::Deny});
+        assert!(ensure_computer_clipboard_permission(&rules,target).is_err());
+        assert!(computer_clipboard_requested(&json!({"actions":[{"action":"click"},{"action":"type","clipboard_policy":"replace"}]})));
+        assert!(computer_clipboard_requested(&json!({"action":"paste"})));
+        assert!(!computer_clipboard_requested(&json!({"action":"type","text":"literal"})));
     }
 
     #[test]

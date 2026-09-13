@@ -127,6 +127,23 @@ impl Drop for Native {
 /// serialization and revocation; `check` is called before every input event.
 /// Button codes: Linux BTN_LEFT=0x110, BTN_RIGHT=0x111, BTN_MIDDLE=0x112.
 /// Success acknowledges compositor dispatch, NOT application consumption.
+// Registry/topology probe only: does not create a virtual pointer or send input.
+pub(super) fn preflight(display:&Display,mut check:impl FnMut()->anyhow::Result<()>)->anyhow::Result<()> {
+    check()?;
+    let conn=Connection::connect_to_env().context("Cannot connect native Wayland pointer")?;
+    let mut queue=conn.new_event_queue::<State>(); let mut state=State::default();
+    conn.display().get_registry(&queue.handle(),());
+    sync(&conn,&mut queue,&mut state,&mut check)?;
+    ensure!(state.outputs.len()==1 && state.seats.len()==1 && state.managers.len()==1,"Pointer requires one output, one seat and one supported virtual-pointer manager");
+    let xm=state.xmanager.as_ref().context("Pointer requires xdg-output name and logical geometry")?;
+    ensure!(xm.version()>=2,"xdg-output names unsupported");
+    for (i,(output,_)) in state.outputs.iter().enumerate() {xm.get_xdg_output(output,&queue.handle(),i);}
+    sync(&conn,&mut queue,&mut state,&mut check)?;
+    matching_output(display,&state.outputs.iter().map(|o|o.1.clone()).collect::<Vec<_>>())?;
+    ensure!(!state.removed,"Wayland topology changed"); check()?;
+    Ok(())
+}
+
 pub(super) fn send(display:&Display,command:Command,mut check:impl FnMut()->anyhow::Result<()>)->anyhow::Result<()> {
     match &command {
         Command::Move(p)=>p.validate()?,

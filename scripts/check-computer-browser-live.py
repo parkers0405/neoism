@@ -62,6 +62,16 @@ def client(run, browser):
         monitors = json.loads(subprocess.check_output(['hyprctl', '-i', signature, '-j', 'monitors']))
         assert len(monitors) == 1 and monitors[0]['name'] == 'BROWSER-TEST', monitors
         print('Private headless test output inside nested compositor; nested presentation output removed', flush=True)
+        # These are the outer Wayland backend's devices, created before any
+        # test injector or Fcitx. Do not forward host shortcuts into the fixture.
+        devices=json.loads(subprocess.check_output(['hyprctl','-i',signature,'-j','devices']))
+        (run/'outer-input-devices.json').write_text(json.dumps(devices))
+        for device in devices.get('keyboards',[])+devices.get('mice',[]):
+            name=device['name']
+            assert isinstance(name,str) and name.isprintable() and not any(c in name for c in '[]:'), 'Unsafe private device name'
+            reply=subprocess.check_output(['hyprctl','-i',signature,'keyword',f'device[{name}]:enabled','false'],text=True)
+            assert reply.strip()=='ok', f'Cannot disable outer input device: {reply}'
+        print('Outer input devices disabled before private applications start',flush=True)
     # A host-controlled nested window size need not divide evenly by 1.25.
     # Set and verify ONLY the explicit private compositor's output scale.
     subprocess.run(['hyprctl', '-i', signature, 'keyword', 'debug:disable_scale_checks', 'true'], check=True)
@@ -226,10 +236,10 @@ def main():
     target.mkdir(parents=True, exist_ok=True)
     sources = ROOT / 'neoism-agent/crates/neoism-agent-server/src/computer_use'
     (run / 'sources').mkdir()
-    for name in ('linux_text.rs', 'shortcuts.rs', 'linux_browser_live_tests.rs', 'linux_pointer.rs', 'linux_clipboard.rs'):
+    for name in ('latency.rs', 'linux_text.rs', 'layout_plan.rs', 'typing.rs', 'windows.rs', 'shortcuts.rs', 'linux_browser_live_tests.rs', 'linux_pointer.rs', 'linux_clipboard.rs'):
         shutil.copyfile(sources / name, run / 'sources' / name)
     (run / 'sources.sha256').write_text(''.join(f'{hashlib.sha256((run / "sources" / name).read_bytes()).hexdigest()}  {name}\n'
-        for name in ('linux_text.rs', 'shortcuts.rs', 'linux_browser_live_tests.rs', 'linux_pointer.rs', 'linux_clipboard.rs')))
+        for name in ('latency.rs', 'linux_text.rs', 'layout_plan.rs', 'typing.rs', 'windows.rs', 'shortcuts.rs', 'linux_browser_live_tests.rs', 'linux_pointer.rs', 'linux_clipboard.rs')))
     command = ['bwrap', '--die-with-parent', '--bind', '/', '/', '--dev', '/dev', '--tmpfs', '/mnt',
                '--', '/usr/bin/python3', str(pathlib.Path(__file__).resolve()), '--client', str(run), browser]
     child = run / 'client.sh'
@@ -274,7 +284,7 @@ misc {{
             proc.kill()  # PID namespace teardown also kills all fresh browser descendants.
             proc.wait()
     after = ''.join(f'{hashlib.sha256((sources / name).read_bytes()).hexdigest()}  {name}\n'
-                    for name in ('linux_text.rs', 'shortcuts.rs', 'linux_browser_live_tests.rs', 'linux_pointer.rs', 'linux_clipboard.rs'))
+                    for name in ('latency.rs', 'linux_text.rs', 'layout_plan.rs', 'typing.rs', 'windows.rs', 'shortcuts.rs', 'linux_browser_live_tests.rs', 'linux_pointer.rs', 'linux_clipboard.rs'))
     (run / 'sources-after.sha256').write_text(after)
     if after != (run / 'sources.sha256').read_text():
         print('WARNING: sources changed during run; do not label this as a frozen-source baseline.')
@@ -286,7 +296,7 @@ misc {{
     if not status.exists():
         print('BLOCKED: no test completion; inspect retained logs (not a claimed regression failure).')
         return 1
-    return int(status.read_text())
+    return int(status.read_text()) or int(after != (run / 'sources.sha256').read_text())
 
 
 if __name__ == '__main__':

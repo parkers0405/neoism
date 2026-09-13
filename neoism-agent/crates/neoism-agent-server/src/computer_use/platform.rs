@@ -13,11 +13,11 @@ pub const REQUIREMENTS: &str = "Run on the local Wayland desktop (Omarchy/Hyprla
 #[cfg(target_os = "macos")]
 pub const NAME: &str = "macOS (CoreGraphics capture and CGEvent input)";
 #[cfg(target_os = "macos")]
-pub const REQUIREMENTS: &str = "Grant Screen Recording and Accessibility to the process hosting Neoism Agent in System Settings. Run in the logged-in graphical session. Secure/password fields and protected content may reject input/capture.";
+pub const REQUIREMENTS: &str = "Grant Screen Recording and Accessibility to the process hosting Neoism Agent in System Settings. Run in the logged-in graphical session. Secure/password fields and protected content may reject input/capture. Literal typing uses explicit native Unicode CGEvents; forced existing-layout keyboard typing and clipboard paste are unsupported on macOS.";
 #[cfg(target_os = "windows")]
 pub const NAME: &str = "Windows (native capture + SendInput/SetCursorPos)";
 #[cfg(target_os = "windows")]
-pub const REQUIREMENTS: &str = "Run in the interactive user desktop. UIPI forbids controlling higher-integrity applications; UAC/secure desktop and protected content are unsupported. No elevation is attempted.";
+pub const REQUIREMENTS: &str = "Run in the interactive user desktop. UIPI forbids controlling higher-integrity applications; UAC/secure desktop and protected content are unsupported. No elevation is attempted. Literal typing uses explicit native Unicode SendInput; forced existing-layout keyboard typing and clipboard paste are unsupported on Windows.";
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub const NAME: &str = "unsupported";
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -127,57 +127,14 @@ fn scale(value:u32,from:u32,to:u32) -> anyhow::Result<i32> {
     ensure!(from > 0 && to > 0 && value < from, "Invalid image coordinate extent");
     Ok(i32::try_from(u64::from(value) * u64::from(to) / u64::from(from))?)
 }
-#[cfg(target_os = "windows")]
-pub fn type_character(input:&mut Enigo,ch:char) -> anyhow::Result<()> {
-    use enigo::{Keyboard, Key, Direction};
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
-    // Keep control characters out of the Unicode packet path. In particular,
-    // don't emit both a Return key and a second Unicode LF packet.
-    if matches!(ch, '\n' | '\r' | '\t') {
-        let key = if ch == '\t' { Key::Tab } else { Key::Return };
-        let pressed = input.key(key,Direction::Press);
-        let released = input.key(key,Direction::Release);
-        pressed?; released?;
-        return Ok(());
-    }
-    for unit in ch.encode_utf16(&mut [0;2]) {
-        let event = |flags| INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk:0,wScan:*unit,dwFlags:flags,time:0,dwExtraInfo:0 } },
-        };
-        let down = event(KEYEVENTF_UNICODE);
-        let up = event(KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
-        // Attempt key-up even after partial/rejected delivery. Do not send an
-        // unbounded text batch whose tail could be cut off before its releases.
-        let pressed = unsafe { SendInput(1,&down,std::mem::size_of::<INPUT>() as i32) };
-        let released = unsafe { SendInput(1,&up,std::mem::size_of::<INPUT>() as i32) };
-        ensure!(pressed == 1 && released == 1,"Unicode SendInput rejected (possibly UIPI or an inactive desktop)");
-    }
-    Ok(())
-}
-#[cfg(target_os = "macos")]
-pub fn type_character(input:&mut Enigo,ch:char) -> anyhow::Result<()> {
-    use enigo::{Keyboard, Key, Direction};
-    use core_graphics::{event::{CGEvent, CGEventFlags, CGEventTapLocation},event_source::{CGEventSource,CGEventSourceStateID}};
-    if matches!(ch, '\n' | '\r' | '\t') {
-        let key = if ch == '\t' { Key::Tab } else { Key::Return };
-        let pressed = input.key(key,Direction::Press);
-        let released = input.key(key,Direction::Release);
-        pressed?; released?;
-        return Ok(());
-    }
-    let source = CGEventSource::new(CGEventSourceStateID::Private).map_err(|_| anyhow::anyhow!("Cannot create CGEvent source"))?;
-    // Enigo's macOS fast_text only posts key-down. Construct both events
-    // before posting either, and always post key-up for our Unicode packet.
-    let down = CGEvent::new_keyboard_event(source.clone(),0,true).map_err(|_| anyhow::anyhow!("Cannot create Unicode key-down"))?;
-    let up = CGEvent::new_keyboard_event(source,0,false).map_err(|_| anyhow::anyhow!("Cannot create Unicode key-up"))?;
-    down.set_string(&ch.to_string());
-    up.set_string(&ch.to_string());
-    down.set_flags(CGEventFlags::CGEventFlagNull);
-    up.set_flags(CGEventFlags::CGEventFlagNull);
-    down.post(CGEventTapLocation::HID);
-    up.post(CGEventTapLocation::HID);
-    Ok(())
+#[path = "native_typing.rs"]
+mod native_typing;
+pub(super) use native_typing::{prepare_native, execute_native, NativePlan, NativeError, UnitKind};
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn type_character(_: &mut Enigo, ch: char) -> anyhow::Result<()> {
+    let plan = prepare_native(&ch.to_string())?;
+    execute_native(&plan, &mut || Ok(()), &mut |_| {})
 }
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub fn type_character(_: &mut Enigo,_:char) -> anyhow::Result<()> { anyhow::bail!(REQUIREMENTS) }

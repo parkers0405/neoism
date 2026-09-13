@@ -231,12 +231,12 @@ describe("application chrome and floating dock", () => {
         act(() => root.render(<Tabs />));
         const key = (value: string) => act(() => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true })));
         host.querySelector<HTMLButtonElement>('[role="tab"]')!.focus();
-        key("ArrowRight"); expect(document.activeElement?.textContent).toBe("b");
-        key("End"); expect(document.activeElement?.textContent).toBe("c");
-        key("Home"); expect(document.activeElement?.textContent).toBe("a");
+        key("ArrowRight"); expect(document.activeElement?.id).toBe("chat-tab-b");
+        key("End"); expect(document.activeElement?.id).toBe("chat-tab-c");
+        key("Home"); expect(document.activeElement?.id).toBe("chat-tab-a");
         key("Delete");
         expect(close).toHaveBeenCalledWith("a");
-        expect(document.activeElement?.textContent).toBe("b");
+        expect(document.activeElement?.id).toBe("chat-tab-b");
         expect(document.activeElement?.getAttribute("aria-selected")).toBe("true");
         expect(host.querySelectorAll('[role="tab"]')).toHaveLength(2);
     });

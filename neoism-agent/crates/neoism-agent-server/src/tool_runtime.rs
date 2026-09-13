@@ -1111,7 +1111,9 @@ pub(crate) async fn execute_tool_call_in_generation(
                 // parse as a permission-required error), so agent-level
                 // denies — e.g. `task` for sub-agents — keep denying even
                 // in skip-permissions mode.
-                if dangerously_skip_permissions_enabled(snapshot.config()) {
+                // Clipboard replacement requires its own human grant even when
+                // ordinary tool prompts are globally skipped.
+                if permission != "computer_clipboard" && dangerously_skip_permissions_enabled(snapshot.config()) {
                     one_time_rules.extend(patterns.into_iter().map(|pattern| {
                         PermissionRule {
                             permission: permission.clone(),

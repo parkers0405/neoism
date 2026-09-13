@@ -512,6 +512,10 @@ impl NeoismAgentPicker {
     }
 
     pub fn replace_options(&mut self, options: Vec<NeoismAgentPickerOption>) {
+        // MCP values include mutable enabled/runtime flags; identity is the name.
+        let previous_title = (self.kind == NeoismAgentPickerKind::Mcp)
+            .then(|| self.selected_option().map(|option| option.title.clone()))
+            .flatten();
         let previous_value = self
             .filtered_options
             .get(self.selected)
@@ -526,11 +530,11 @@ impl NeoismAgentPicker {
         // sessions…") rows after the real catalog arrived.
         self.rebuild_filtered_options();
         if let Some(value) = previous_value {
-            if let Some(index) = self
-                .filtered_options
-                .iter()
-                .position(|option| option.value == value)
-            {
+            if let Some(index) = self.filtered_options.iter().position(|option| {
+                previous_title
+                    .as_ref()
+                    .map_or_else(|| option.value == value, |title| &option.title == title)
+            }) {
                 self.selected = index;
             }
         }

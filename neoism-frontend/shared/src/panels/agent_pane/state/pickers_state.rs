@@ -43,14 +43,8 @@ impl NeoismAgentPane {
     }
 
     pub fn set_mcp_status(&mut self, status: Value) {
-        let options = mcp_options_from_status(&status);
-        if let Some(picker) = self
-            .picker
-            .as_mut()
-            .filter(|picker| picker.kind == NeoismAgentPickerKind::Mcp)
-        {
-            picker.loading = false;
-            picker.replace_options(options);
+        if let Some(picker) = self.picker.as_mut() {
+            picker.apply_mcp_status(&status);
         }
     }
 
@@ -64,7 +58,23 @@ impl NeoismAgentPane {
         ) {
             return;
         }
-        self.open_mcp_picker();
+        self.picker.as_mut().unwrap().set_loading(true);
+        self.push_outbound(OutboundAgentCommand::RefreshMcp {
+            directory: self.directory.clone(),
+        });
+    }
+
+    pub fn apply_mcp_failure(&mut self, name: Option<String>, error: String) {
+        if let Some(picker) = self.picker.as_mut().filter(|picker| {
+            matches!(
+                picker.kind,
+                NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
+            )
+        }) {
+            picker.set_loading(false);
+        }
+        // Retain confirmed state, never optimistically flip a failed toggle.
+        self.system_message(name.unwrap_or_else(|| "MCP".to_string()), error);
     }
 
     pub fn open_mcp_actions(&mut self, value: &str) {
@@ -515,6 +525,9 @@ impl NeoismAgentPane {
         if self.timeline_is_inertial() {
             return Some("timeline_inertia");
         }
+        if self.visible_user_orb_active() {
+            return Some("user_orb");
+        }
         // Interaction rects are deliberately omitted while timeline content
         // moves. Keep a bounded final repaint alive so the first settled frame
         // republishes authoritative click and wheel geometry.
@@ -571,6 +584,28 @@ impl NeoismAgentPane {
 
     pub fn session_id_str(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+}
+
+impl NeoismAgentPicker {
+    /// Apply authoritative data to the live picker, preserving query and selection.
+    /// Shared by the native desktop and web hosts.
+    pub fn apply_mcp_status(&mut self, status: &Value) {
+        let rows = mcp_options_from_status(status);
+        let options = match self.kind {
+            NeoismAgentPickerKind::Mcp => rows,
+            NeoismAgentPickerKind::McpActions => {
+                let name = self.title.strip_suffix(" actions").unwrap_or_default();
+                rows.iter()
+                    .find(|row| row.title == name)
+                    .and_then(|row| serde_json::from_str::<Value>(&row.value).ok())
+                    .map(|entry| mcp_action_options(&entry))
+                    .unwrap_or_default()
+            }
+            _ => return,
+        };
+        self.set_loading(false);
+        self.replace_options(options);
     }
 }
 
@@ -766,7 +801,7 @@ mod mcp_tests {
         pane.refresh_mcp_if_visible();
         assert_eq!(
             pane.picker.as_ref().map(|picker| picker.kind),
-            Some(NeoismAgentPickerKind::Mcp)
+            Some(NeoismAgentPickerKind::McpActions)
         );
         assert!(matches!(
             pane.drain_pending_outbound().as_slice(),
@@ -818,6 +853,92 @@ mod mcp_tests {
             [OutboundAgentCommand::McpSetEnabled { name, enabled: true, directory }]
                 if name == "webflow" && directory.as_deref() == Some("/tmp/project")
         ));
+    }
+
+    fn toggle_catalog(enabled: bool) -> Value {
+        json!({"webflow": {
+            "enabled": enabled,
+            "runtimeConnected": false,
+            "configWritable": true,
+            "status": {"status": if enabled { "failed" } else { "disabled" },
+                "error": "MCP client runtime is not connected yet"}
+        }})
+    }
+
+    #[test]
+    fn mcp_toggle_reply_refreshes_current_actions_in_both_directions() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.set_mcp_status(toggle_catalog(false));
+        pane.commit_picker();
+        for enabled in [true, false] {
+            assert!(pane.commit_picker());
+            assert!(matches!(pane.drain_pending_outbound().as_slice(),
+                [OutboundAgentCommand::McpSetEnabled { enabled: actual, .. }] if *actual == enabled));
+            let picker = pane.picker.as_ref().unwrap();
+            assert_eq!(picker.kind, NeoismAgentPickerKind::McpActions);
+            assert!(picker.loading);
+            // A repeated Enter cannot race another toggle against the pending request.
+            pane.commit_picker();
+            assert!(pane.drain_pending_outbound().is_empty());
+            pane.refresh_mcp_if_visible();
+            assert!(matches!(
+                pane.drain_pending_outbound().as_slice(),
+                [OutboundAgentCommand::RefreshMcp { .. }]
+            ));
+            pane.set_mcp_status(toggle_catalog(enabled));
+            let picker = pane.picker.as_ref().unwrap();
+            assert!(!picker.loading);
+            assert_eq!(picker.selected, 0);
+            assert_eq!(
+                picker.selected_option().unwrap().title,
+                if enabled { "Disable" } else { "Enable" }
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_failed_toggle_keeps_confirmed_state_and_allows_retry() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.set_mcp_status(toggle_catalog(false));
+        pane.commit_picker();
+        pane.commit_picker();
+        pane.drain_pending_outbound();
+        pane.apply_mcp_failure(Some("webflow".into()), "read-only config".into());
+        let picker = pane.picker.as_ref().unwrap();
+        assert!(!picker.loading);
+        assert_eq!(picker.selected_option().unwrap().title, "Enable");
+        pane.commit_picker();
+        assert!(matches!(
+            pane.drain_pending_outbound().as_slice(),
+            [OutboundAgentCommand::McpSetEnabled { enabled: true, .. }]
+        ));
+    }
+
+    #[test]
+    fn mcp_catalog_refresh_preserves_name_query_and_dismissal() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.set_mcp_status(toggle_catalog(false));
+        pane.picker.as_mut().unwrap().set_query("web".into());
+        let mut status = toggle_catalog(true);
+        status["a-web-server"] = status["webflow"].clone();
+        pane.refresh_mcp_if_visible();
+        pane.drain_pending_outbound();
+        pane.set_mcp_status(status);
+        let picker = pane.picker.as_ref().unwrap();
+        assert_eq!(picker.query, "web");
+        assert_eq!(picker.selected_option().unwrap().title, "webflow");
+        assert_eq!(picker.selected_option().unwrap().footer, "ready");
+        pane.picker = None;
+        pane.set_mcp_status(toggle_catalog(false));
+        pane.refresh_mcp_if_visible();
+        assert!(pane.picker.is_none());
+        assert!(pane.drain_pending_outbound().is_empty());
     }
 
     #[test]

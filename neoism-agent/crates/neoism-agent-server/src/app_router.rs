@@ -59,6 +59,8 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/capabilities", get(v2_capabilities))
         .route("/v2/plugins", get(v2_plugins))
         .route("/v2/plugins/:plugin_id/manifest", get(v2_plugin))
+        .route("/v2/execution-activity", get(crate::execution_activity::aggregate_snapshot))
+        .route("/v2/execution-activity/events", get(crate::execution_activity::aggregate_events))
         .route("/v2/events", get(v2_events))
         .route("/v2/artifacts", get(artifact_list).post(artifact_create))
         .route(
@@ -936,6 +938,17 @@ async fn authenticate_request(
                 "This global credential or configuration route is unavailable in hosted mode",
             );
         }
+        // Process-global observation is local-only. In particular a signed
+        // workspace credential must never expose another workspace's runs.
+        if request.uri().path().starts_with("/v2/execution-activity")
+            && !allows_global_execution_observation(&claims)
+        {
+            return auth_error(
+                StatusCode::FORBIDDEN,
+                "auth.aggregate_scope_forbidden",
+                "Global execution observation requires unscoped local access",
+            );
+        }
         let query_session_id = request_session_id(request.uri());
         if claims.hosted
             && request.uri().path() == "/v2/events"
@@ -1203,6 +1216,10 @@ fn interaction_id_from_path(path: &str) -> Option<&str> {
     parts.get(index + 1).copied()
 }
 
+fn allows_global_execution_observation(claims: &crate::caller::CallerClaims) -> bool {
+    !claims.hosted && claims.workspace_id.is_none() && claims.directory_prefixes.is_empty()
+}
+
 fn hosted_restricted_path(path: &str) -> bool {
     matches!(path, "/v2/config" | "/v2/config/validate")
         || (path.starts_with("/v2/providers/")
@@ -1367,6 +1384,19 @@ mod hosted_plugin_authorization_tests {
             requests_per_minute: None,
             max_in_flight: None,
         }
+    }
+
+    #[test]
+    fn global_execution_observation_never_accepts_hosted_or_scoped_claims() {
+        let mut claims = scoped_claims("/tmp/authorized".into(), "local");
+        assert!(!allows_global_execution_observation(&claims));
+        claims.directory_prefixes.clear();
+        assert!(allows_global_execution_observation(&claims));
+        claims.workspace_id = Some("workspace".into());
+        assert!(!allows_global_execution_observation(&claims));
+        claims.workspace_id = None;
+        claims.hosted = true;
+        assert!(!allows_global_execution_observation(&claims));
     }
 
     async fn session_route_fixture(

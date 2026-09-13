@@ -2,6 +2,11 @@ use super::*;
 
 impl NeoismAgentPane {
     pub fn commit_picker(&mut self) -> bool {
+        if self.picker.as_ref().is_some_and(|picker| {
+            picker.kind == NeoismAgentPickerKind::McpActions && picker.loading
+        }) {
+            return true;
+        }
         let Some(picker) = self.picker.take() else {
             return false;
         };
@@ -55,6 +60,8 @@ impl NeoismAgentPane {
                 self.open_mcp_actions(&option.value);
             }
             NeoismAgentPickerKind::McpActions => {
+                // Keep the surface alive for the asynchronous mutation/catalog reply.
+                self.picker = Some(picker);
                 let value =
                     serde_json::from_str::<Value>(&option.value).unwrap_or_default();
                 let name = value
@@ -65,6 +72,7 @@ impl NeoismAgentPane {
                 let directory = self.directory.clone();
                 match value.get("action").and_then(Value::as_str) {
                     Some("enable") => {
+                        self.picker.as_mut().unwrap().set_loading(true);
                         self.push_outbound(OutboundAgentCommand::McpSetEnabled {
                             name,
                             enabled: true,
@@ -72,6 +80,7 @@ impl NeoismAgentPane {
                         })
                     }
                     Some("disable") => {
+                        self.picker.as_mut().unwrap().set_loading(true);
                         self.push_outbound(OutboundAgentCommand::McpSetEnabled {
                             name,
                             enabled: false,

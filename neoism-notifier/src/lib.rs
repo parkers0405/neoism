@@ -1,3 +1,7 @@
+/// Linux process-wide StatusNotifierItem for agent activity.
+#[cfg(target_os = "linux")]
+pub mod agent_tray;
+
 /// Request notification authorization from the OS.
 /// On macOS this triggers the permission prompt on first call.
 /// No-op on other platforms.

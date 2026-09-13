@@ -416,7 +416,7 @@ fn tool_state_metadata(part: &ToolPart) -> Option<&Value> {
     match &part.state {
         ToolState::Completed { metadata, .. } => Some(metadata),
         ToolState::Pending { .. } | ToolState::Running { .. } => None,
-        ToolState::Error { .. } => None,
+        ToolState::Error { .. } => part.metadata.as_ref().and_then(|m|m.get("toolResult")),
     }
 }
 
@@ -444,7 +444,7 @@ fn truncate_tool_output(output: &str, max_chars: usize) -> String {
 }
 
 fn tool_attachments(part: &ToolPart) -> Vec<ProviderAttachment> {
-    let ToolState::Completed { metadata, .. } = &part.state else {
+    let Some(metadata) = tool_state_metadata(part) else {
         return Vec::new();
     };
     if tool_output_was_compacted(part) {

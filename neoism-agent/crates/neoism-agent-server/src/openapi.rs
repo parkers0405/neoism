@@ -505,6 +505,23 @@ pub fn canonical_openapi() -> Value {
             "responses": merge_responses(json!({ "200": json_response("Response", json!({})) }), errors())
         });
     }
+    paths.insert("/v2/execution-activity".into(), json!({ "get": {
+        "tags": ["events"], "operationId": "v2.executionActivity.snapshot",
+        "description": "Local unscoped access only. Current execution rows across all roots; finished is authoritative family quiescence, not session idle. Hosted and workspace/directory-scoped credentials are rejected.",
+        "responses": merge_responses(json!({ "200": json_response("Current executions", json!({
+            "type": "array", "items": { "type": "object", "additionalProperties": false,
+            "required": ["rootSessionId", "executionId", "revision", "finished"],
+            "properties": { "rootSessionId": { "type": "string" }, "executionId": { "type": "string" },
+                "revision": { "type": "integer", "minimum": 0 }, "finished": { "type": "boolean" } } }
+        })) }), errors())
+    }}));
+    paths.insert("/v2/execution-activity/events".into(), json!({ "get": {
+        "tags": ["events"], "operationId": "v2.executionActivity.subscribe",
+        "description": "Local unscoped access only. Subscribes before reading the initial snapshot, then sends execution.snapshot SSE events containing the same complete array as GET /v2/execution-activity. Refreshes at least every 15 seconds. On disconnect or lag reconnect as unknown; no Last-Event-ID is necessary because each connection reconciles the complete current projection.",
+        "responses": merge_responses(json!({ "200": { "description": "Execution snapshot stream", "content": {
+            "text/event-stream": { "schema": { "type": "string" } }
+        } } }), errors())
+    }}));
     paths.insert("/v2/events".into(), json!({ "get": {
         "tags": ["events"], "operationId": "v2.events.subscribe",
         "parameters": [

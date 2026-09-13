@@ -755,6 +755,7 @@ pub struct NeoismAgentPane {
     /// user sent renders their own presence orb + a "You" tooltip. `None`
     /// on hosts that don't publish presence (falls back to a generic orb).
     local_presence_name: Option<String>,
+    visible_user_orb_active: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1069,6 +1070,7 @@ impl Default for NeoismAgentPane {
             wordmark: NeoismWordmarkState::default(),
             side_panel: NeoismAgentSidePanel::default(),
             local_presence_name: None,
+            visible_user_orb_active: false,
         }
     }
 }
@@ -1193,6 +1195,14 @@ impl NeoismAgentPane {
     /// one — the fallback orb seed for authorless user messages.
     pub fn local_presence_name(&self) -> Option<&str> {
         self.local_presence_name.as_deref()
+    }
+
+    pub fn visible_user_orb_active(&self) -> bool {
+        self.visible_user_orb_active
+    }
+
+    pub fn set_visible_user_orb_active(&mut self, active: bool) {
+        self.visible_user_orb_active = active;
     }
 
     pub fn apply_snapshot(&mut self, snapshot: NeoismAgentPaneSnapshot) {

@@ -82,6 +82,7 @@ impl NeoismAgentPane {
                 ));
             }
             NeoismAgentPickerKind::McpActions => {
+                self.picker = Some(picker);
                 self.execute_mcp_action(
                     &serde_json::from_str(&option.value).unwrap_or_default(),
                 );

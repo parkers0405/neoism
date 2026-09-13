@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
 use tokio::process::Command;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,30 +45,53 @@ impl ShellRuntime {
         command: &str,
         login: bool,
     ) {
+        process.args(self.command_args(command, login));
+    }
+
+    pub(crate) fn command_args(&self, command: &str, login: bool) -> Vec<String> {
         match self.kind {
             ShellKind::Posix => {
-                process.args([if login { "-lc" } else { "-c" }, command]);
+                vec![
+                    if login { "-lc" } else { "-c" }.to_string(),
+                    command.to_string(),
+                ]
             }
             ShellKind::PowerShell => {
-                let command = format!(
+                // `-Command` goes through CreateProcess quoting, which eats JSON
+                // quotes/braces. `-EncodedCommand` is UTF-16LE base64 of the
+                // script, matching the interactive PTY hook, without `-NoExit`.
+                let script = format!(
                     "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); {command}"
                 );
-                process.args([
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    &command,
-                ]);
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-EncodedCommand".to_string(),
+                    encode_powershell_command(&script),
+                ]
             }
             ShellKind::Cmd => {
-                let command = format!("chcp 65001>nul & {command}");
-                process.args(["/d", "/s", "/c", &command]);
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    format!("chcp 65001>nul & {command}"),
+                ]
             }
         }
     }
+}
+
+fn encode_powershell_command(script: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn resolve(services: &neoism_agent_service_api::AgentServices) -> ShellRuntime {
@@ -129,6 +153,17 @@ pub(crate) fn program() -> String {
 mod tests {
     use super::*;
 
+    fn decode_powershell_command(encoded: &str) -> String {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("powershell encoded command is standard base64");
+        let units = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16(&units).expect("powershell encoded command is UTF-16LE")
+    }
+
     #[test]
     fn platform_shell_has_a_program_and_name() {
         let runtime = ShellRuntime::resolve(&crate::standard_services());
@@ -145,6 +180,60 @@ mod tests {
             }
             .display_name(),
             "PowerShell"
+        );
+    }
+
+    #[test]
+    fn powershell_uses_encoded_command_and_preserves_json() {
+        let runtime = ShellRuntime {
+            kind: ShellKind::PowerShell,
+            program: PathBuf::from("pwsh.exe"),
+        };
+        let command = r#"curl.exe -sS http://127.0.0.1:4096/mcp -H "Content-Type: application/json" --data-raw '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'"#;
+        let args = runtime.command_args(command, false);
+        assert_eq!(
+            &args[..6],
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "-Command" || arg == "-NoExit"));
+        let script = decode_powershell_command(&args[6]);
+        assert!(script.contains(command), "{script}");
+        assert!(script.contains("$OutputEncoding"));
+        assert_eq!(
+            runtime.command_args(command, true)[5],
+            "-EncodedCommand"
+        );
+    }
+
+    #[test]
+    fn posix_and_cmd_keep_plain_command_argv() {
+        let posix = ShellRuntime {
+            kind: ShellKind::Posix,
+            program: PathBuf::from("/bin/sh"),
+        };
+        assert_eq!(
+            posix.command_args("echo hi", true),
+            vec!["-lc".to_string(), "echo hi".to_string()]
+        );
+        let cmd = ShellRuntime {
+            kind: ShellKind::Cmd,
+            program: PathBuf::from("cmd.exe"),
+        };
+        assert_eq!(
+            cmd.command_args("echo hi", false),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "chcp 65001>nul & echo hi".to_string(),
+            ]
         );
     }
 }

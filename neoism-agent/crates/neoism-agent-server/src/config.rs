@@ -518,9 +518,13 @@ pub(crate) fn inject_builtin_mcp(
     info: &mut AgentConfigDocument,
     services: &neoism_agent_service_api::AgentServices,
 ) {
-    for (id, _) in services.builtin_mcp_services() {
-        info.mcp
-            .entry(id.to_string())
-            .or_insert_with(|| builtin_mcp_config(id));
+    for (id, service) in services.builtin_mcp_services() {
+        info.mcp.entry(id.to_string()).or_insert_with(|| {
+            let mut config = builtin_mcp_config(id);
+            if let McpConfig::Local { enabled, .. } = &mut config {
+                *enabled = Some(service.enabled_by_default());
+            }
+            config
+        });
     }
 }

@@ -141,6 +141,53 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
 }
 
 #[tokio::test]
+async fn computer_use_picker_activation_needs_no_restart_and_preserves_boundaries() {
+    use neoism_agent_service_api::{BuiltinMcpCallResult, BuiltinMcpContent};
+    let _revocation = crate::computer_use::TEST_REVOCATION_LOCK.lock().await;
+    let root = temp_dir("computer-use-boundary");
+    let state = crate::state::AppState::open_database_with_services(root.join("state.db"),crate::standard_services()).await.unwrap();
+    let directory = root.to_str().unwrap();
+    let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let inputs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backend_inputs = inputs.clone();
+    crate::computer_use::with_test_backend(Arc::new(move |tool, _arguments| {
+        assert_eq!(tool, "input");
+        backend_inputs.fetch_add(1, Ordering::SeqCst);
+        Ok(BuiltinMcpCallResult {
+            content: vec![BuiltinMcpContent::Text { text: "mock input delivered".into(), annotations: None }],
+            is_error: None,
+        })
+    }), async {
+        let config = configured_servers(directory,Some(&state)).unwrap();
+        assert!(!is_enabled(&config["computer"]));
+        let initial_snapshot = state.refreshed_plugin_snapshot(directory).await;
+        let arguments = json!({"action":"text","text":"mock only"});
+        let disabled = call_tool_in_session(directory,"computer","input",arguments.clone(),&store,state.clone(),&initial_snapshot,true,Arc::new(AtomicBool::new(false))).await;
+        assert!(disabled.unwrap_err().to_string().contains("disabled"));
+        assert_eq!(inputs.load(Ordering::SeqCst), 0);
+
+        // Change only persisted MCP enablement, as the picker does. Reuse the
+        // same server and old lease: no process restart or environment setup.
+        fs::create_dir_all(root.join(".agent")).unwrap();
+        fs::write(root.join(".agent/agent.json"),r#"{"mcp":{"computer":{"type":"local","command":["builtin","computer"],"enabled":true}}}"#).unwrap();
+        let enabled = call_tool_in_session(directory,"computer","input",arguments.clone(),&store,state.clone(),&initial_snapshot,true,Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert_eq!(tool_result_text(&enabled), "mock input delivered");
+        assert_eq!(inputs.load(Ordering::SeqCst), 1);
+        for tool in ["input","screenshot"] {
+            let result = call_tool_with_state(directory,"computer",tool,json!({}),&store,state.clone()).await;
+            assert!(result.unwrap_err().to_string().contains("session permission approval"));
+        }
+        assert_eq!(inputs.load(Ordering::SeqCst), 1);
+        let old_snapshot = state.refreshed_plugin_snapshot(directory).await;
+        fs::write(root.join(".agent/agent.json"),r#"{"mcp":{"computer":{"type":"local","command":["builtin","computer"],"enabled":false}}}"#).unwrap();
+        let result = call_tool_in_session(directory,"computer","input",arguments,&store,state.clone(),&old_snapshot,true,Arc::new(AtomicBool::new(false))).await;
+        assert!(result.unwrap_err().to_string().contains("disabled"));
+        assert_eq!(inputs.load(Ordering::SeqCst), 1);
+    }).await;
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn status_marks_remote_oauth_without_tokens_as_needs_auth() {
     let store = McpAuthStore::new(temp_auth_path("status"));
     let mut config = BTreeMap::new();

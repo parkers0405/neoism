@@ -25,6 +25,10 @@ const DESKTOP_MIME_TYPES: &str = "text/markdown;application/json;\
     text/x-go;text/x-c;text/x-c++;application/x-shellscript;application/toml;\
     text/html;text/css;text/plain;application/x-ipynb+json;";
 
+#[cfg(target_os = "linux")]
+#[path = "bootstrap_omarchy.rs"]
+mod omarchy;
+
 pub fn spawn() {
     // Development binaries must not rewrite the installed desktop launcher,
     // icon cache, or PATH integration while being tested alongside release.
@@ -35,6 +39,17 @@ pub fn spawn() {
     std::thread::Builder::new()
         .name("neoism-bootstrap".into())
         .spawn(install_desktop_entry)
+        .ok();
+    // Independent of launcher/path/Flatpak early returns above. Never focus or
+    // restart the shell; unavailable sessions are retried on the next launch.
+    #[cfg(target_os = "linux")]
+    std::thread::Builder::new()
+        .name("neoism-omarchy-bootstrap".into())
+        .spawn(|| {
+            if let Err(error) = omarchy::run_host() {
+                tracing::debug!(%error, "Omarchy bootstrap deferred");
+            }
+        })
         .ok();
 }
 

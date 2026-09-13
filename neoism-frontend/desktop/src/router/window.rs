@@ -369,6 +369,9 @@ impl<'a> RouteWindow<'a> {
     }
 
     pub fn record_frame_cadence(&mut self, now: Instant) {
+        self.screen
+            .sugarloaf
+            .set_frame_wait_timeout(self.vblank_interval.as_nanos() as u64);
         self.frame_cadence
             .record_frame_start(now, self.vblank_interval);
     }

@@ -29,6 +29,7 @@ pub(crate) fn from_state_cache(
                 measured: page.measured,
             })
             .collect(),
+        estimated_suffix_start: cache.rows.len(),
         rows: cache
             .rows
             .into_iter()
@@ -306,25 +307,49 @@ where
     )
 }
 
-/// Whether the exact-measured suffix of a lazy cache still comfortably covers
-/// the viewport (kept at least one viewport below the exact region's top). When
+/// Whether the exact-measured window of a lazy cache still comfortably covers
+/// the viewport (kept at least one viewport inside both estimated edges). When
 /// it stops covering, the caller rebuilds with a window centered on the new
-/// scroll position. A fully-exact cache (`estimated_prefix_rows == 0`) always
-/// covers.
+/// scroll position. A fully-exact cache always covers.
 fn lazy_cache_covers_viewport<M>(
     cache: &TimelineLayoutCache<M>,
     offset: f32,
     viewport_h: f32,
 ) -> bool {
-    if cache.estimated_prefix_rows == 0 {
+    let exact_start = cache.estimated_prefix_rows;
+    let exact_end = cache.estimated_suffix_start.min(cache.rows.len());
+    if exact_start == 0 && exact_end >= cache.rows.len() {
         return true;
     }
-    let Some(first_exact) = cache.rows.get(cache.estimated_prefix_rows) else {
-        return true;
-    };
     let max_scroll = (cache.content_height - viewport_h).max(0.0);
     let scroll_top = (max_scroll - offset).clamp(0.0, max_scroll);
-    scroll_top - viewport_h > first_exact.top
+    let viewport_bottom = scroll_top + viewport_h;
+    if exact_start > 0 {
+        let Some(first_exact) = cache.rows.get(exact_start) else {
+            return true;
+        };
+        if scroll_top - viewport_h <= first_exact.top {
+            return false;
+        }
+    }
+    if exact_end < cache.rows.len() {
+        let Some(last_exact) = cache.rows.get(exact_end.saturating_sub(1)) else {
+            return true;
+        };
+        if viewport_bottom + viewport_h >= last_exact.top + last_exact.height {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+pub(super) fn lazy_cache_covers_viewport_for_test<M>(
+    cache: &TimelineLayoutCache<M>,
+    offset: f32,
+    viewport_h: f32,
+) -> bool {
+    lazy_cache_covers_viewport(cache, offset, viewport_h)
 }
 
 fn mark_animating_tool_rows_dirty<P: AgentTimelinePane>(
@@ -359,15 +384,16 @@ where
     D: AgentTimelineDelegate<P>,
 {
     let mut rows: Vec<TimelineLayoutRow<P::Message>> = Vec::new();
-    let (content_height, estimated_prefix_rows) = if lazy {
+    let (content_height, estimated_prefix_rows, estimated_suffix_start) = if lazy {
         build_lazy_rows::<P, D>(
             sugarloaf, pane, width, theme, s, gap, viewport_h, offset, &mut rows,
         )
     } else {
         let height = append_timeline_rows::<P, D>(
-            sugarloaf, pane, width, theme, s, gap, 0, 0.0, false, &mut rows,
+            sugarloaf, pane, width, theme, s, gap, 0, None, 0.0, false, &mut rows,
         );
-        (height, 0)
+        let suffix = rows.len();
+        (height, 0, suffix)
     };
     let pages = build_timeline_layout_pages(&rows, pane.messages().len());
     TimelineLayoutCache {
@@ -380,14 +406,14 @@ where
         pages,
         rows,
         estimated_prefix_rows,
+        estimated_suffix_start,
     }
 }
 
 /// Viewport-only (lazy) layout. Cheaply estimates every row to locate the
-/// window, keeps the off-screen prefix estimated, and rebuilds the on-screen
-/// suffix (from just above the viewport down to the end) EXACTLY via the proven
-/// `append_timeline_rows` path — so grouping/skip/measure behaviour there is
-/// identical to the eager path. Returns `(content_height, estimated_prefix_rows)`.
+/// window, keeps off-screen prefix *and* suffix estimated, and rebuilds only
+/// the on-screen band (plus overscan) EXACTLY via `append_timeline_rows`.
+/// Returns `(content_height, estimated_prefix_rows, estimated_suffix_start)`.
 #[allow(clippy::too_many_arguments)]
 fn build_lazy_rows<P, D>(
     sugarloaf: &mut Sugarloaf,
@@ -399,7 +425,7 @@ fn build_lazy_rows<P, D>(
     viewport_h: f32,
     offset: f32,
     rows: &mut Vec<TimelineLayoutRow<P::Message>>,
-) -> (f32, usize)
+) -> (f32, usize, usize)
 where
     P: AgentTimelinePane,
     D: AgentTimelineDelegate<P>,
@@ -408,36 +434,49 @@ where
     append_estimated_rows::<P>(pane, width, s, gap, rows);
     let est_content_h = rows.last().map(|row| row.top + row.height).unwrap_or(0.0);
     if rows.is_empty() {
-        return (0.0, 0);
+        return (0.0, 0, 0);
     }
-    // Exact region = from ~overscan above the viewport top down to the end. A
-    // generous 2× viewport overscan absorbs estimate error (which only skews
-    // the scrollbar, never visible rows) and leaves ~1 viewport of lead before
-    // the reuse guard rebuilds. Estimates lean low (rich content under-counts),
-    // which only ever grows the exact region — safe.
+    // Exact region = viewport plus ~2× overscan on both sides. Estimates lean
+    // low (rich content under-counts), which only ever grows the exact region.
     let overscan = (viewport_h * 2.0).max(600.0 * s);
-    let threshold_top = (est_content_h - offset - viewport_h - overscan).max(0.0);
+    let max_scroll = (est_content_h - viewport_h).max(0.0);
+    let scroll_top = (max_scroll - offset).clamp(0.0, max_scroll);
+    let window_top = (scroll_top - overscan).max(0.0);
+    let window_bottom = scroll_top + viewport_h + overscan;
     let exact_start_row =
-        rows.partition_point(|row| row.top + row.height < threshold_top);
-    if exact_start_row == 0 || exact_start_row >= rows.len() {
-        // Window spans the whole transcript (short history, or scrolled to the
-        // very top): just lay it out fully exact — no estimated prefix.
+        rows.partition_point(|row| row.top + row.height < window_top);
+    let exact_end_row = exact_start_row
+        + rows[exact_start_row..].partition_point(|row| row.top <= window_bottom);
+    if exact_start_row == 0 && exact_end_row >= rows.len() {
         rows.clear();
         let height = append_timeline_rows::<P, D>(
-            sugarloaf, pane, width, theme, s, gap, 0, 0.0, false, rows,
+            sugarloaf, pane, width, theme, s, gap, 0, None, 0.0, false, rows,
         );
-        return (height, 0);
+        let suffix = rows.len();
+        return (height, 0, suffix);
     }
-    // Capture the boundary from the estimated prefix, drop the estimated suffix,
-    // then rebuild that suffix exactly. `append_timeline_rows` adds the leading
-    // gap itself (rows is non-empty), so hand it the prefix bottom, not the
-    // estimated suffix top.
-    let prev = &rows[exact_start_row - 1];
-    let start_source = prev.source_end_index.saturating_add(1);
-    let content_y = prev.top + prev.height;
-    let previous_visible_was_edit_tool = prev.is_edit_tool;
+    let estimated_suffix = if exact_end_row < rows.len() {
+        rows.split_off(exact_end_row)
+    } else {
+        Vec::new()
+    };
+    let end_source = rows
+        .last()
+        .map(|row| row.source_end_index.saturating_add(1));
+    let (start_source, content_y, previous_visible_was_edit_tool) =
+        if exact_start_row == 0 {
+            (0, 0.0, false)
+        } else {
+            let prev = &rows[exact_start_row - 1];
+            (
+                prev.source_end_index.saturating_add(1),
+                prev.top + prev.height,
+                prev.is_edit_tool,
+            )
+        };
+    let suffix_top = estimated_suffix.first().map(|row| row.top);
     rows.truncate(exact_start_row);
-    let content_height = append_timeline_rows::<P, D>(
+    append_timeline_rows::<P, D>(
         sugarloaf,
         pane,
         width,
@@ -445,11 +484,25 @@ where
         s,
         gap,
         start_source,
+        end_source,
         content_y,
         previous_visible_was_edit_tool,
         rows,
     );
-    (content_height, exact_start_row)
+    let exact_end = rows.len();
+    if let Some(old_suffix_top) = suffix_top {
+        let new_suffix_top = rows
+            .last()
+            .map(|row| row.top + row.height + gap)
+            .unwrap_or(0.0);
+        let shift = new_suffix_top - old_suffix_top;
+        for mut row in estimated_suffix {
+            row.top += shift;
+            rows.push(row);
+        }
+    }
+    let content_height = rows.last().map(|row| row.top + row.height).unwrap_or(0.0);
+    (content_height, exact_start_row, exact_end)
 }
 
 /// Pass-1 estimate loop for lazy layout: mirrors `append_timeline_rows`'
@@ -625,6 +678,7 @@ where
     // Rows from here down are re-measured exactly below, so no estimated row
     // survives at or past the patch start.
     cache.estimated_prefix_rows = cache.estimated_prefix_rows.min(start_pos);
+    cache.estimated_suffix_start = cache.rows.len();
     cache.content_height = append_timeline_rows::<P, D>(
         sugarloaf,
         pane,
@@ -633,10 +687,12 @@ where
         s,
         gap,
         scan_start,
+        None,
         content_y,
         previous_visible_was_edit_tool,
         &mut cache.rows,
     );
+    cache.estimated_suffix_start = cache.rows.len();
     cache.source_len = source_len;
     cache.pages = build_timeline_layout_pages(&cache.rows, source_len);
     true
@@ -884,6 +940,10 @@ where
         .unwrap_or(0.0);
     cache.source_len = source_len;
     cache.pages = build_timeline_layout_pages(&cache.rows, source_len);
+    // Prepend rebuilt the prefix exactly. Treat the whole cache as exact so
+    // the next scroll frame cannot reuse a stale estimated window.
+    cache.estimated_prefix_rows = 0;
+    cache.estimated_suffix_start = cache.rows.len();
     true
 }
 
@@ -928,6 +988,7 @@ fn append_timeline_rows<P, D>(
     s: f32,
     gap: f32,
     start_index: usize,
+    end_index: Option<usize>,
     mut content_y: f32,
     mut previous_visible_was_edit_tool: bool,
     rows: &mut Vec<TimelineLayoutRow<P::Message>>,
@@ -937,7 +998,9 @@ where
     D: AgentTimelineDelegate<P>,
 {
     let mut appended_any = false;
-    let source_len = pane.messages().len();
+    let source_len = end_index
+        .unwrap_or_else(|| pane.messages().len())
+        .min(pane.messages().len());
     let visibility =
         timeline_message_visibility(pane.messages(), pane.timeline_live_trace_start());
     let mut source_index = start_index;

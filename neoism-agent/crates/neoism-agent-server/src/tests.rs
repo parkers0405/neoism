@@ -26,6 +26,9 @@ mod interaction_tool_tests;
 mod session_queue_tests;
 #[path = "tests_session_undo.rs"]
 mod session_undo_tests;
+#[path = "tests_computer_pipeline.rs"]
+mod computer_pipeline_tests;
+
 #[path = "tests_tool_parts.rs"]
 mod tool_part_tests;
 

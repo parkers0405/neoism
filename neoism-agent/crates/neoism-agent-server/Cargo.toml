@@ -38,10 +38,29 @@ tracing.workspace = true
 url.workspace = true
 dirs = "6"
 dunce.workspace = true
+image_rs.workspace = true
+enigo = { version = "0.6.1", default-features = false, features = ["wayland"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libwayshot = { version = "0.8.0", default-features = false }
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+xkbcommon = "0.9"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.25"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+xcap = "0.9.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",

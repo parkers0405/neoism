@@ -586,6 +586,11 @@ pub struct BuiltinMcpPrompt {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BuiltinMcpContent {
+    Image {
+        data: String,
+        mime_type: String,
+        annotations: Option<Value>,
+    },
     Text {
         text: String,
         annotations: Option<Value>,
@@ -611,6 +616,8 @@ pub struct BuiltinMcpCallResult {
 
 pub trait BuiltinMcpService: Send + Sync {
     fn id(&self) -> &str;
+    /// Sensitive host services can require explicit configuration opt-in.
+    fn enabled_by_default(&self) -> bool { true }
     fn tools(&self) -> Vec<BuiltinMcpTool>;
     fn resources(&self) -> Vec<BuiltinMcpResource> {
         Vec::new()
@@ -624,6 +631,21 @@ pub trait BuiltinMcpService: Send + Sync {
         tool: &str,
         arguments: Value,
     ) -> Result<BuiltinMcpCallResult, ServiceError>;
+
+    /// Only the session tool executor may set `session_authorized`. Transport
+    /// routes must leave it false. Cancellation must stop subsequent input events.
+    fn call_tool_authorized_async<'a>(
+        &'a self,
+        working_directory: &'a Path,
+        tool: &'a str,
+        arguments: Value,
+        _session_authorized: bool,
+        _cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        // Captured before enablement is read, never refreshed after admission.
+        _revocation_generation: Option<u64>,
+    ) -> ServiceFuture<'a, Result<BuiltinMcpCallResult, ServiceError>> {
+        self.call_tool_async(working_directory, tool, arguments)
+    }
 
     fn call_tool_async<'a>(
         &'a self,

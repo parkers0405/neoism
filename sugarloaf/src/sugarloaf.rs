@@ -1533,6 +1533,11 @@ impl Sugarloaf<'_> {
     }
 
     #[inline]
+    pub fn set_frame_wait_timeout(&mut self, interval_ns: u64) {
+        self.ctx.set_frame_wait_timeout(interval_ns);
+    }
+
+    #[inline]
     pub fn resize(&mut self, width: u32, height: u32) {
         self.ctx.resize(width, height);
         self.renderer.resize(&mut self.ctx);

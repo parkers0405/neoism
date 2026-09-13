@@ -388,16 +388,15 @@ diff --git a/src/lib.rs b/src/lib.rs
             is_edit_tool: true,
         }],
         estimated_prefix_rows: 0,
+        estimated_suffix_start: 1,
     };
 
     let restored = from_state_cache(into_state_cache(cache));
     assert_eq!(
-        restored.rows[0]
-            .tool_diff_sections
-            .as_ref()
-            .map(|sections| sections.len()),
-        Some(sections.len())
+        restored.estimated_prefix_rows, 0,
+        "web/state round-trip stays fully exact"
     );
+    assert_eq!(restored.estimated_suffix_start, restored.rows.len());
 }
 
 #[test]
@@ -589,4 +588,60 @@ fn layout_row(
         tool_diff_sections: None,
         is_edit_tool: false,
     }
+}
+
+fn lazy_cache(
+    rows: Vec<TimelineLayoutRow<NeoismAgentMessage>>,
+    estimated_prefix_rows: usize,
+    estimated_suffix_start: usize,
+) -> TimelineLayoutCache<NeoismAgentMessage> {
+    let content_height = rows.last().map(|row| row.top + row.height).unwrap_or(0.0);
+    TimelineLayoutCache {
+        epoch: 1,
+        source_len: rows.len(),
+        width_bucket: 100,
+        scale_bucket: 4,
+        gap_bucket: 72,
+        content_height,
+        pages: Vec::new(),
+        rows,
+        estimated_prefix_rows,
+        estimated_suffix_start,
+    }
+}
+
+#[test]
+fn lazy_cache_covers_a_mid_history_exact_window() {
+    let rows = vec![
+        layout_row(0, 0.0, 100.0),
+        layout_row(1, 120.0, 100.0),
+        layout_row(2, 240.0, 100.0),
+        layout_row(3, 360.0, 100.0),
+        layout_row(4, 480.0, 100.0),
+        layout_row(5, 600.0, 100.0),
+    ];
+    let cache = lazy_cache(rows, 1, 5);
+    // content_h=700, viewport=100, offset=350 -> scroll_top=250.
+    // Exact rows [1..5) span 120..600, so both edges keep a viewport of lead.
+    assert!(super::layout::lazy_cache_covers_viewport_for_test(
+        &cache, 350.0, 100.0
+    ));
+}
+
+#[test]
+fn lazy_cache_rebuilds_when_scroll_nears_estimated_suffix() {
+    let rows = vec![
+        layout_row(0, 0.0, 100.0),
+        layout_row(1, 120.0, 100.0),
+        layout_row(2, 240.0, 100.0),
+        layout_row(3, 360.0, 100.0),
+        layout_row(4, 480.0, 100.0),
+        layout_row(5, 600.0, 100.0),
+    ];
+    let cache = lazy_cache(rows, 2, 4);
+    // Scrolling toward later messages (smaller offset) pushes the viewport
+    // into the estimated suffix, so the cache must rebuild.
+    assert!(!super::layout::lazy_cache_covers_viewport_for_test(
+        &cache, 20.0, 100.0
+    ));
 }

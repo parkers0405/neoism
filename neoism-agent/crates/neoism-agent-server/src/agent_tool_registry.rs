@@ -371,8 +371,12 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     if !runtime_id.starts_with("mcp__") {
         return Ok(None);
     }
-    ensure_tool_permission(permissions, "mcp", runtime_id)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    if runtime_id.starts_with("mcp__computer__") && !runtime_id.ends_with("__stop") && !runtime_id.ends_with("__capabilities") {
+        ensure_computer_permission(permissions, runtime_id)?;
+    } else {
+        ensure_tool_permission(permissions, "mcp", runtime_id)
+            .map_err(|error| anyhow::anyhow!(error))?;
+    }
     let runtime_state = state
         .clone()
         .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
@@ -387,7 +391,7 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     let state =
         state.ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
     let auth_store = mcp_auth::McpAuthStore::local(state.services());
-    let call = mcp::call_tool_with_snapshot(
+    let call = mcp::call_tool_in_session(
         directory,
         &tool.client,
         &tool.name,
@@ -395,6 +399,8 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
         &auth_store,
         state,
         snapshot,
+        true,
+        cancel.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
     );
     let result = if let Some(cancel) = cancel {
         tokio::select! {
@@ -407,13 +413,18 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
         call.await?
     };
     let output = mcp::tool_result_text(&result);
-    if result.is_error.unwrap_or(false) {
-        anyhow::bail!("MCP tool {} returned an error\n{}", tool.name, output);
-    }
+    // A protocol-level error is still a structured tool result: throwing here
+    // discards recovery images before the session/provider attachment path.
+    let is_error = result.is_error.unwrap_or(false);
+    let output = if is_error {
+        format!("MCP tool {} returned an error\n{}", tool.name, output)
+    } else { output };
     Ok(Some(tool::ToolExecutionResult {
         title: format!("MCP {}.{}", tool.client, tool.name),
         output,
         metadata: Some(json!({
+            "isError": is_error,
+            "attachments": mcp_image_attachments(&result),
             "mcp": {
                 "client": tool.client,
                 "tool": tool.name,
@@ -422,6 +433,29 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
             }
         })),
     }))
+}
+
+fn ensure_computer_permission(permissions: &[PermissionRule], runtime_id: &str) -> anyhow::Result<()> {
+    if permission::evaluate("mcp", runtime_id, permissions).action == PermissionAction::Deny {
+        ensure_tool_permission(permissions, "mcp", runtime_id)?;
+    }
+    // Generic MCP/agent wildcard allows are not desktop consent. Keep broad
+    // denies, and require an explicit computer_use grant (or the existing
+    // dangerouslySkipPermissions retry path's one-time grant).
+    let rules = permissions.iter().filter(|rule| rule.action != PermissionAction::Allow || rule.permission == "computer_use").cloned().collect::<Vec<_>>();
+    ensure_tool_permission(&rules, "computer_use", runtime_id).map_err(Into::into)
+}
+
+/// Normalize MCP media into the existing provider/UI attachment path.
+fn mcp_image_attachments(result: &neoism_agent_core::McpToolCallResult) -> Vec<Value> {
+    result.content.iter().filter_map(|content| {
+        if let neoism_agent_core::McpContent::Image { data, mime_type, .. } = content {
+            if matches!(mime_type.as_str(), "image/png" | "image/jpeg" | "image/webp") && data.len() <= 16 * 1024 * 1024 {
+                return Some(json!({"mime": mime_type, "url": format!("data:{mime_type};base64,{data}")}));
+            }
+        }
+        None
+    }).take(4).collect()
 }
 
 pub(crate) async fn execute_mcp_gateway(
@@ -828,6 +862,27 @@ mod tests {
         assert!(gateway.description.contains("- github: 80 tools"));
         assert!(gateway.description.contains("Catalog partial"));
         assert!(gateway.description.len() < MCP_CATALOG_BUDGET + 120);
+    }
+
+    #[test]
+    fn computer_use_requires_scoped_consent_and_preserves_denies() {
+        let target = "mcp__computer__input";
+        let mut rules = vec![PermissionRule { permission:"*".into(),pattern:"*".into(),action:PermissionAction::Allow }];
+        assert!(ensure_computer_permission(&rules,target).is_err());
+        rules.push(PermissionRule { permission:"computer_use".into(),pattern:target.into(),action:PermissionAction::Allow });
+        assert!(ensure_computer_permission(&rules,target).is_ok());
+        rules.push(PermissionRule { permission:"mcp".into(),pattern:target.into(),action:PermissionAction::Deny });
+        assert!(ensure_computer_permission(&rules,target).is_err());
+    }
+
+    #[test]
+    fn computer_use_images_enter_existing_attachment_path() {
+        let result = neoism_agent_core::McpToolCallResult {
+            content:vec![neoism_agent_core::McpContent::Image { data:"YWJj".into(),mime_type:"image/png".into(),annotations:None }],is_error:None,
+        };
+        let attachments = mcp_image_attachments(&result);
+        assert_eq!(attachments[0]["mime"],"image/png");
+        assert_eq!(attachments[0]["url"],"data:image/png;base64,YWJj");
     }
 
     #[test]

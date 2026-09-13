@@ -247,7 +247,12 @@ pub(super) async fn bash_tool(
     let exit = status.code();
     if !status.success() {
         let rendered = truncate::truncate_output(&rendered)?.output;
-        anyhow::bail!("bash command failed with status {:?}\n{}", exit, rendered);
+        anyhow::bail!(
+            "{} command failed with status {:?}\n{}",
+            runtime.display_name(),
+            exit,
+            rendered
+        );
     }
     let snapshots = crate::snapshot::bash_after(snapshot_before);
     let mut metadata = json!({

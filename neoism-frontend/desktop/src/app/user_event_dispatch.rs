@@ -43,13 +43,13 @@ use teletypewriter::WinsizeBuilder;
 
 impl Application<'_> {
     /// Schedule a follow-up [`RioEvent`] on the scheduler after
-    /// `delay_ms` milliseconds, but only if no other timer with the
-    /// same id is already pending. Shared by every `Prepare*` and
-    /// debounced `Render*` / `BlinkCursor*` arm.
+    /// `delay`, but only if no other timer with the same id is already
+    /// pending. Shared by every `Prepare*` and debounced `Render*` /
+    /// `BlinkCursor*` arm.
     pub(super) fn debounce_follow_up(
         scheduler: &mut Scheduler,
         timer_id: TimerId,
-        delay_ms: u64,
+        delay: Duration,
         follow_up_event: RioEvent,
         window_id: WindowId,
     ) {
@@ -57,7 +57,7 @@ impl Application<'_> {
             return;
         }
         let event = EventPayload::new(RioEventType::Rio(follow_up_event), window_id);
-        scheduler.schedule(event, Duration::from_millis(delay_ms), false, timer_id);
+        scheduler.schedule(event, delay, false, timer_id);
     }
 
     /// `RioEvent::Render` — repaint the route bound to `window_id`
@@ -168,7 +168,7 @@ impl Application<'_> {
             Self::debounce_follow_up(
                 &mut self.scheduler,
                 timer_id,
-                wait.as_millis().max(1) as u64,
+                wait,
                 RioEvent::Render,
                 window_id,
             );
@@ -317,6 +317,19 @@ impl Application<'_> {
         };
 
         self.config = config;
+
+        #[cfg(target_os = "linux")]
+        {
+            if !self.config.ui.agent_tray {
+                // Drop stops both the process observer and SNI worker; this is
+                // not tied to a focused/rendering pane or a live window.
+                self.agent_tray = None;
+            } else if self.agent_tray.is_none() {
+                self.agent_tray = super::agent_tray::Service::start()
+                    .map_err(|error| tracing::warn!("Agent tray unavailable: {error}"))
+                    .ok();
+            }
+        }
 
         let mut has_checked_adaptive_colors = false;
         for (_id, route) in self.router.routes.iter_mut() {

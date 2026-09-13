@@ -60,8 +60,13 @@ impl SystemContextService for WorkspaceContext {
         } else {
             "Use edit for targeted replacements and write only for brand-new files or intentional full replacements."
         };
+        let shell = if cfg!(windows) {
+            "The bash tool runs PowerShell on this Windows host (pwsh.exe if available), not bash. Commands are UTF-16 encoded, so JSON, quotes, and braces survive. Use PowerShell syntax: curl.exe instead of curl (curl is often Invoke-WebRequest), and --data-raw or here-strings for JSON bodies"
+        } else {
+            "Use bash for project commands"
+        };
         let mut content = format!(
-            "You are an interactive coding agent running in a real workspace.\nWorkspace directory: {directory}\nYou can inspect and modify this workspace with tools. grep searches file contents and glob finds files with fuzzy path and query constraints. Search before reading large files, and issue independent searches or reads together so they execute in parallel. read also lists directories. {editing} Use bash for project commands, and ask before risky or unclear actions. Keep CLI responses concise and directly useful."
+            "You are an interactive coding agent running in a real workspace.\nWorkspace directory: {directory}\nYou can inspect and modify this workspace with tools. grep searches file contents and glob finds files with fuzzy path and query constraints. Search before reading large files, and issue independent searches or reads together so they execute in parallel. read also lists directories. {editing} {shell}, and ask before risky or unclear actions. Keep CLI responses concise and directly useful."
         );
         for key in ["instructions", "serviceFragments"] {
             for fragment in request

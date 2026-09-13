@@ -72,6 +72,8 @@ fn ssh_server_id(workspace_id: &str) -> String {
 const NOTEBOOK_STATUS_TICK_MS: u64 = 500;
 const FRAME_WATCHDOG_NOTE_INTERVAL: Duration = Duration::from_secs(1);
 
+#[cfg(target_os = "linux")]
+pub(crate) mod agent_tray;
 pub mod bell;
 pub mod daemon_pump;
 pub mod freeze_watchdog;
@@ -85,6 +87,8 @@ pub mod window_server_session;
 use window_server_session::{ServerConnectionStatus, WindowServerSession};
 
 pub struct Application<'a> {
+    #[cfg(target_os = "linux")]
+    agent_tray: Option<agent_tray::Service>,
     config: neoism_backend::config::Config,
     event_proxy: EventProxy,
     router: Router<'a>,
@@ -201,6 +205,14 @@ impl Application<'_> {
         neoism_notifier::request_authorization();
 
         Application {
+            #[cfg(target_os = "linux")]
+            agent_tray: if config.ui.agent_tray {
+                agent_tray::Service::start()
+                    .map_err(|error| tracing::warn!("Agent tray unavailable: {error}"))
+                    .ok()
+            } else {
+                None
+            },
             config,
             event_proxy,
             router,
@@ -2016,7 +2028,7 @@ impl Application<'_> {
                 Self::debounce_follow_up(
                     &mut self.scheduler,
                     timer_id,
-                    NOTEBOOK_STATUS_TICK_MS,
+                    Duration::from_millis(NOTEBOOK_STATUS_TICK_MS),
                     RioEvent::NotebookStatusTick,
                     *window_id,
                 );
@@ -2105,7 +2117,7 @@ impl Application<'_> {
                         Self::debounce_follow_up(
                             &mut self.scheduler,
                             timer_id,
-                            wait.as_millis().max(1) as u64,
+                            wait,
                             RioEvent::Render,
                             *window_id,
                         );
@@ -2272,7 +2284,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 Self::debounce_follow_up(
                     &mut self.scheduler,
                     TimerId::new(Topic::UpdateConfig, 0),
-                    250,
+                    Duration::from_millis(250),
                     RioEvent::UpdateConfig,
                     window_id,
                 );
@@ -2356,7 +2368,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 Self::debounce_follow_up(
                     &mut self.scheduler,
                     TimerId::new(Topic::FileTreeGitStatus, 0),
-                    100,
+                    Duration::from_millis(100),
                     RioEvent::RefreshFileTreeGitStatus,
                     window_id,
                 );
@@ -2365,7 +2377,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 Self::debounce_follow_up(
                     &mut self.scheduler,
                     TimerId::new(Topic::FileTree, 0),
-                    200,
+                    Duration::from_millis(200),
                     RioEvent::RefreshFileTree,
                     window_id,
                 );
@@ -2473,7 +2485,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     Self::debounce_follow_up(
                         &mut self.scheduler,
                         TimerId::new(Topic::Render, route_id),
-                        millis,
+                        Duration::from_millis(millis),
                         RioEvent::Render,
                         window_id,
                     );
@@ -2483,7 +2495,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 Self::debounce_follow_up(
                     &mut self.scheduler,
                     TimerId::new(Topic::RenderRoute, route_id),
-                    millis,
+                    Duration::from_millis(millis),
                     RioEvent::RenderRoute(route_id),
                     window_id,
                 );
@@ -2492,7 +2504,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 Self::debounce_follow_up(
                     &mut self.scheduler,
                     TimerId::new(Topic::CursorBlinking, route_id),
-                    millis,
+                    Duration::from_millis(millis),
                     RioEvent::CursorBlinkingChangeOnRoute(route_id),
                     window_id,
                 );

@@ -298,6 +298,17 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Toggle,
         ),
         d(
+            "ui.agent-tray",
+            "Omarchy agent activity indicator",
+            "Show working and finished agent activity in Neoism's Omarchy bar plugin (Linux).",
+            Kind::Boolean,
+            json!(true),
+            &[],
+            false,
+            C::Ui,
+            Control::Toggle,
+        ),
+        d(
             "ui.window.opacity",
             "Window opacity",
             "Overall window opacity.",

@@ -431,6 +431,10 @@ pub(crate) async fn disconnect(
     directory: &str,
     name: &str,
 ) -> anyhow::Result<bool> {
+    if name == "computer" {
+        crate::computer_use::stop();
+        return Ok(true);
+    }
     state
         .workspace_runtime(directory)
         .await
@@ -637,19 +641,49 @@ pub(crate) async fn call_tool_with_snapshot(
     state: AppState,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> anyhow::Result<McpToolCallResult> {
+    call_tool_in_session(directory, client, tool, arguments, auth_store, state, snapshot, false,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await
+}
+
+pub(crate) async fn call_tool_in_session(
+    directory: &str,
+    client: &str,
+    tool: &str,
+    arguments: Value,
+    auth_store: &McpAuthStore,
+    state: AppState,
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    session_authorized: bool,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<McpToolCallResult> {
     let mut config = snapshot.config().clone();
+    let mut revocation_generation = None;
+    if client == "computer" {
+        // Capture BEFORE enablement: disabling during admission must invalidate
+        // the worker even when it has not been created yet.
+        let (generation, current) = crate::computer_use::admit(|| {
+            crate::config::load(state.services(), directory)
+        })?;
+        revocation_generation = Some(generation);
+        config = current.info;
+    }
     crate::config::inject_builtin_mcp(&mut config, state.services());
+    if client == "computer" && !config.mcp.get(client).is_some_and(is_enabled) {
+        crate::computer_use::stop();
+        anyhow::bail!("MCP server computer is disabled");
+    }
     if let Some(service) = builtin_service(Some(&state), client)
         .filter(|_| config.mcp.get(client).is_some_and(is_enabled))
     {
         let result = service
-            .call_tool_async(std::path::Path::new(directory), tool, arguments)
+            .call_tool_authorized_async(std::path::Path::new(directory), tool, arguments, session_authorized, cancel, revocation_generation)
             .await?;
         return Ok(McpToolCallResult {
             content: result
                 .content
                 .into_iter()
                 .map(|content| match content {
+                    neoism_agent_service_api::BuiltinMcpContent::Image { data, mime_type, annotations } => McpContent::Image { data, mime_type, annotations },
                     neoism_agent_service_api::BuiltinMcpContent::Text {
                         text,
                         annotations,

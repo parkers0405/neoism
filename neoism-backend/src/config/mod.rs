@@ -295,6 +295,9 @@ pub struct UiConfig {
     pub status_fps: bool,
     #[serde(default = "bool::default", rename = "confirm-before-quit")]
     pub confirm_before_quit: bool,
+    /// Agent activity in the Linux system tray (including Omarchy/Quickshell).
+    #[serde(default = "default_bool_true", rename = "agent-tray")]
+    pub agent_tray: bool,
 }
 
 impl Default for UiConfig {
@@ -307,6 +310,7 @@ impl Default for UiConfig {
             margin: default_margin(),
             status_fps: true,
             confirm_before_quit: false,
+            agent_tray: true,
         }
     }
 }
@@ -1164,6 +1168,16 @@ mod tests {
 
     fn parse(json: &str) -> Config {
         deserialize_config(json).expect("config should parse")
+    }
+
+    #[test]
+    fn agent_tray_is_grouped_enabled_by_default_and_can_be_disabled() {
+        assert!(parse("{}").ui.agent_tray);
+        let config = parse(r#"{"ui":{"agent-tray":false}}"#);
+        assert!(!config.ui.agent_tray);
+        let serialized = serde_json::to_value(config).unwrap();
+        assert_eq!(serialized["ui"]["agent-tray"], false);
+        assert!(serialized.get("agent-tray").is_none());
     }
 
     #[test]

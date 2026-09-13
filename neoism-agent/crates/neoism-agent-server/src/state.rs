@@ -621,6 +621,7 @@ impl AppState {
         defer_subtask_recovery: bool,
     ) -> anyhow::Result<Self> {
         let started = crate::perf::now();
+        let services = services.with_builtin_mcp(Arc::new(crate::computer_use::ComputerUse));
         tokio::fs::create_dir_all(&artifact_root).await?;
         // Single ordered bus for every event (live deltas + committed edges).
         // Capacity must absorb a full streaming burst per subscriber. A
@@ -2952,6 +2953,21 @@ impl SessionStore {
         ]).await?;
         let snapshot = self.get_execution_activity(root_session_id).await?;
         Ok(snapshot.filter(|snapshot| snapshot.root_message_id == root_message_id))
+    }
+
+    /// Current execution rows only: no session listing or transcript hydration.
+    pub(crate) async fn execution_activity_summaries(
+        &self,
+    ) -> anyhow::Result<Vec<crate::execution_activity::ExecutionSummary>> {
+        self.db.fetch_all(
+            "SELECT root_session_id, execution_id, revision, finished FROM execution_activity ORDER BY root_session_id",
+            vec![],
+        ).await?.into_iter().map(|row| Ok(crate::execution_activity::ExecutionSummary {
+            root_session_id: row.get_str("root_session_id")?,
+            execution_id: row.get_str("execution_id")?,
+            revision: row.get_i64("revision")?.max(0) as u64,
+            finished: row.get_i64("finished")? != 0,
+        })).collect()
     }
 
     pub(crate) async fn get_execution_activity(

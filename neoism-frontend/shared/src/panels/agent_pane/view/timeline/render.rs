@@ -19,6 +19,7 @@ pub fn render_timeline_with<P, D>(
     D: AgentTimelineDelegate<P>,
 {
     derivations::reset();
+    pane.set_visible_user_orb_active(false);
     let render_started = web_time::Instant::now();
     let [x, y, w, h] = rect;
     let viewport_h = h.max(0.0);
@@ -239,6 +240,7 @@ pub fn render_timeline_with<P, D>(
     }
     let mut rendered_rows = 0usize;
     let mut rendered_text_bytes = 0usize;
+    let mut visible_user_orb = false;
     for row in &layout.rows[row_range.clone()] {
         let card_h = row.height;
         let card_y = snap_px(y + row.top - render_scroll_top);
@@ -247,6 +249,17 @@ pub fn render_timeline_with<P, D>(
         if card_bottom < y - register_margin || card_y > y + viewport_h + register_margin
         {
             continue;
+        }
+        if card_bottom >= y && card_y <= y + viewport_h {
+            let kind = row.display_message.as_ref().map(|message| message.kind());
+            let kind = kind.or_else(|| {
+                pane.messages()
+                    .get(row.source_index)
+                    .map(|message| message.kind())
+            });
+            if kind == Some(AgentTimelineMessageKind::User) {
+                visible_user_orb = true;
+            }
         }
         let markdown_blocks =
             row.markdown_blocks.as_ref().map(|blocks| blocks.as_slice());
@@ -349,6 +362,7 @@ pub fn render_timeline_with<P, D>(
         }
     }
 
+    pane.set_visible_user_orb_active(visible_user_orb);
     render_timeline_scrollbar_with(sugarloaf, pane, [x, y, w, viewport_h], s);
     if cacheable_layout {
         pane.store_timeline_layout_cache(layout);

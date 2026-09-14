@@ -217,12 +217,26 @@ build_web() {
   run npm --prefix "$ROOT_DIR/neoism-frontend/web" run build
 }
 
+build_agent_gui() {
+  # The standalone agent GUI is part of the installed stack even with --no-web.
+  have npm || die "npm is required to build the agent GUI from source"
+  run npm --prefix "$ROOT_DIR/neoism-agent/sdk/typescript" ci
+  run npm --prefix "$ROOT_DIR/neoism-agent/sdk/typescript" run gui:build
+}
+
+install_agent_gui() {
+  run node "$ROOT_DIR/scripts/package-agent-gui.mjs" \
+    "$ROOT_DIR/neoism-agent/sdk/typescript/packages/gui/dist" "$BIN_DIR/web/agent-gui"
+}
+
 install_system_deps
 ensure_rust
 ensure_web_tools
+build_agent_gui
 build_binaries
 build_web
 install_web
+install_agent_gui
 
 cat <<EOF
 

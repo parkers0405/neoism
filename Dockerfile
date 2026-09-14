@@ -1,3 +1,12 @@
+# Build the standalone agent GUI without requiring Node in the runtime image.
+FROM node:22-bookworm-slim AS agent-gui
+WORKDIR /src
+COPY neoism-agent/sdk/typescript/ neoism-agent/sdk/typescript/
+COPY scripts/package-agent-gui.mjs scripts/package-agent-gui.mjs
+RUN npm --prefix neoism-agent/sdk/typescript ci \
+    && npm --prefix neoism-agent/sdk/typescript run gui:build \
+    && node scripts/package-agent-gui.mjs neoism-agent/sdk/typescript/packages/gui/dist /gui
+
 FROM rust:1.92-bookworm AS builder
 
 # The daemon links the sugarloaf renderer: shaderc-sys builds shaderc from
@@ -56,6 +65,7 @@ RUN useradd --system --create-home --home-dir /var/lib/neoism --shell /usr/sbin/
     && chown -R neoism:neoism /var/lib/neoism
 
 COPY --from=builder /src/target/release/neoism-workspace-daemon /usr/local/bin/neoism-workspace-daemon
+COPY --from=agent-gui /gui /usr/local/bin/web/agent-gui
 COPY --from=builder /src/target/release/neoism-agent /usr/local/bin/neoism-agent
 # Exercise the runtime loader in the slim image before publishing it. A builder
 # dependency alone does not provide the shared libraries needed at startup.

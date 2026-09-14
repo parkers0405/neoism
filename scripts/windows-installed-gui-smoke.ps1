@@ -139,7 +139,7 @@ public static class NeoismWindowProbe {
     if ($null -ne $p) {
         $p.Refresh()
         if ($p.HasExited) { "exit=$($p.ExitCode)" | Set-Content "$Evidence/gui-exit.txt" }
-        else { & taskkill.exe /PID $p.Id /T /F | Out-File "$Evidence/gui-cleanup.log" }
+        else { Stop-ValidationProcessTree -Process $p -Log "$Evidence/gui-cleanup.log" }
     }
     # Catch detached installed daemon/agent children on this dedicated CI runner before uninstall.
     Get-Process neoism, neoism-workspace-daemon, neoism-agent -ErrorAction SilentlyContinue |

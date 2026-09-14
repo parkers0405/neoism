@@ -1,4 +1,4 @@
-//! macOS bundle updates. Selection and filesystem transactions are testable on
+//! Unix loose-stack and macOS bundle updates. Filesystem transactions are testable on
 //! Linux; LaunchServices, codesign and process inspection stay in `native`.
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -293,6 +293,45 @@ fn replace_loose_with(
         };
     }
     Ok(())
+}
+
+/// Install the Linux loose stack using the same all-component transaction as
+/// macOS. Stage on the destination filesystem and retain recovery evidence on
+/// failure, including rollback failure. Old installs need not have an agent GUI.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn install_unix_loose(target: &Path, source: &Path) -> Result<(), Error> {
+    let parent = target.parent().ok_or("executable has no parent")?;
+    let _lock = UpdateLock::acquire(&parent.join("neoism"))?;
+    if !source.join("web/agent-gui/index.html").is_file() {
+        return Err("update payload is missing web/agent-gui/index.html".into());
+    }
+    let expected = loose_manifest(source, std::ffi::OsStr::new("neoism"))?;
+    let work = tempfile::Builder::new().prefix(".neoism-update-").tempdir_in(parent)?;
+    let staged = work.path().join("staged");
+    fs::create_dir(&staged)?;
+    for (relative, kind) in &expected {
+        let destination = staged.join(relative);
+        if kind == "directory" {
+            fs::create_dir_all(destination)?;
+        } else {
+            if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+            fs::copy(source.join(relative), destination)?;
+        }
+    }
+    if loose_manifest(&staged, std::ffi::OsStr::new("neoism"))? != expected {
+        return Err("staged update hashes differ from release payload".into());
+    }
+    let recovery = work.keep();
+    let result = replace_loose_with(target, &staged, &recovery.join("backup"), |from, to| fs::rename(from, to), || {
+        if loose_manifest(parent, target.file_name().ok_or("executable has no name")?)? != expected {
+            return Err("installed update hashes differ from release payload".into());
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) => { fs::remove_dir_all(recovery)?; Ok(()) }
+        Err(error) => Err(format!("{error}; recovery files: {}", recovery.display()).into()),
+    }
 }
 
 /// Hash the entire payload, not only the GUI. Reject links/special files instead
@@ -1254,6 +1293,9 @@ mod tests {
         }
         fs::write(app.join("Contents/Info.plist"), BUNDLE_ID).unwrap();
         fs::write(app.join("Contents/Resources/web/index.html"), "web").unwrap();
+        fs::create_dir_all(app.join("Contents/Resources/web/agent-gui/assets")).unwrap();
+        fs::write(app.join("Contents/Resources/web/agent-gui/index.html"), "agent GUI").unwrap();
+        fs::write(app.join("Contents/Resources/web/agent-gui/assets/app.js"), "agent JS").unwrap();
         fs::write(app.join("Contents/Resources/neoism.icns"), "icon").unwrap();
         app
     }
@@ -1279,6 +1321,9 @@ mod tests {
             }
         }
         fs::write(root.join("web/index.html"), version).unwrap();
+        fs::create_dir_all(root.join("web/agent-gui/assets")).unwrap();
+        fs::write(root.join("web/agent-gui/index.html"), version).unwrap();
+        fs::write(root.join("web/agent-gui/assets/app.js"), version).unwrap();
         root.join("neoism")
     }
 
@@ -1312,6 +1357,40 @@ mod tests {
             "",
         ] {
             assert!(check_compiled_version(bad, "neoism", "v0.7.8").is_err());
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_installer_validates_before_replacement_and_adds_gui_to_legacy_stack() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed");
+        let target = loose_fixture(&installed, "0.7.102");
+        fs::remove_dir_all(installed.join("web/agent-gui")).unwrap();
+        let staged = root.path().join("payload");
+        loose_fixture(&staged, "0.7.103");
+        fs::remove_file(staged.join("web/agent-gui/index.html")).unwrap();
+        assert!(install_unix_loose(&target, &staged).is_err());
+        assert_eq!(fs::read_to_string(installed.join("web/index.html")).unwrap(), "0.7.102");
+        fs::write(staged.join("web/agent-gui/index.html"), "GUI").unwrap();
+        install_unix_loose(&target, &staged).unwrap();
+        assert_eq!(fs::read_to_string(installed.join("web/agent-gui/assets/app.js")).unwrap(), "0.7.103");
+        assert_eq!(loose_manifest(&installed, std::ffi::OsStr::new("neoism")).unwrap(), loose_manifest(&staged, std::ffi::OsStr::new("neoism")).unwrap());
+    }
+
+    #[test]
+    fn loose_upgrade_adds_agent_gui_to_legacy_install_and_replaces_hashed_assets() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed");
+        let target = loose_fixture(&installed, "0.7.102");
+        fs::remove_dir_all(installed.join("web/agent-gui")).unwrap();
+        for version in ["0.7.103", "0.7.104"] {
+            let staged = root.path().join(version);
+            loose_fixture(&staged, version);
+            replace_loose_with(&target, &staged, &root.path().join(format!("backup-{version}")), |from, to| fs::rename(from, to), || Ok(())).unwrap();
+            assert_eq!(fs::read_to_string(installed.join("web/agent-gui/assets/app.js")).unwrap(), version);
+            assert!(!installed.join("web/agent-gui/assets/old-hash.js").exists());
+            fs::write(installed.join("web/agent-gui/assets/old-hash.js"), "old").unwrap();
         }
     }
 

@@ -34,7 +34,25 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }},wasm32-unknown-unknown
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Build both production web UIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix neoism-frontend/web ci
+          npm --prefix neoism-frontend/web run build
+          npm --prefix neoism-agent/sdk/typescript ci
+          npm --prefix neoism-agent/sdk/typescript run gui:build
+          node scripts/package-agent-gui.mjs neoism-agent/sdk/typescript/packages/gui/dist neoism-frontend/web/dist/agent-gui
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -63,6 +81,10 @@ jobs:
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object { $_.name -eq "neoism" }).version
           $bin = (Resolve-Path "target/${{ matrix.target }}/release").Path
+          Remove-Item (Join-Path $bin "web") -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item neoism-frontend/web/dist (Join-Path $bin "web") -Recurse
+          node scripts/package-agent-gui.mjs (Join-Path $bin "web/agent-gui")
+          if ($LASTEXITCODE -ne 0) { throw "agent GUI payload validation failed" }
           wix build misc/windows/neoism.wxs `
             -arch x64 -ext WixToolset.UI.wixext `
             -d "Version=$version" -d "BinaryDir=$bin" `
@@ -83,6 +105,7 @@ jobs:
           foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe")) {
             if (-not (Test-Path (Join-Path $installDir $binary))) { throw "$binary was not installed" }
           }
+          if (-not (Test-Path (Join-Path $installDir "web\agent-gui\index.html"))) { throw "agent GUI was not installed" }
           $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$installer`" /qn /norestart" -Wait -PassThru
           if ($uninstall.ExitCode -notin @(0, 3010, 1641)) { throw "uninstall failed: $($uninstall.ExitCode)" }
 
@@ -141,6 +164,8 @@ jobs:
           mkdir -p "stage/$OUT"
           BIN="target/${{ matrix.target }}/release"
           cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "stage/$OUT/"
+          cp -a neoism-frontend/web/dist "stage/$OUT/web"
+          node scripts/package-agent-gui.mjs "stage/$OUT/web/agent-gui"
           if [[ "${{ matrix.goos }}" == "darwin" ]]; then
             # Neoism.app: double-clickable + Finder "Open With" candidate for
             # code/markdown/json (CFBundleDocumentTypes in misc/macos/Info.plist).
@@ -150,6 +175,7 @@ jobs:
             mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
             cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$APP/Contents/MacOS/"
             cp misc/macos/neoism.icns "$APP/Contents/Resources/neoism.icns"
+            cp -a neoism-frontend/web/dist "$APP/Contents/Resources/web"
             VERSION="${GITHUB_REF_NAME#v}"
             case "$VERSION" in
               [0-9]*.[0-9]*) ;; # tag push: vX.Y.Z

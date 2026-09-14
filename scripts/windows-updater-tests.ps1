@@ -141,6 +141,12 @@ function New-Fixture([string]$Mode) {
     New-Item -ItemType Directory -Path (Join-Path $script:FixturePayload 'web'), (Join-Path $script:FixtureInstall 'web') | Out-Null
     [IO.File]::WriteAllText((Join-Path $script:FixturePayload 'web\index.html'), 'new web')
     [IO.File]::WriteAllText((Join-Path $script:FixtureInstall 'web\index.html'), 'old web')
+    foreach ($dir in @($script:FixturePayload, $script:FixtureInstall)) {
+        New-Item -ItemType Directory -Path (Join-Path $dir 'web\agent-gui\assets') -Force | Out-Null
+        $label = if ($dir -eq $script:FixturePayload) { 'new GUI' } else { 'old GUI' }
+        [IO.File]::WriteAllText((Join-Path $dir 'web\agent-gui\index.html'), $label)
+        [IO.File]::WriteAllText((Join-Path $dir 'web\agent-gui\assets\app.js'), $label)
+    }
     [IO.File]::WriteAllText((Join-Path $script:FixtureInstall 'unrelated.txt'), 'preserve me')
     $script:MsiPath = Join-Path $TempDir 'fixture.msi'
     [IO.File]::WriteAllText($MsiPath, 'not a real MSI; Invoke-Msi is mocked')
@@ -215,6 +221,7 @@ try {
         Assert (([IO.File]::ReadAllText((Join-Path $script:FixtureInstall $name))) -like '*0.1.0') 'Portable rollback must restore every original binary'
     }
     Assert (([IO.File]::ReadAllText((Join-Path $script:FixtureInstall 'web\index.html'))) -eq 'old web') 'Portable rollback must restore original web'
+    Assert (([IO.File]::ReadAllText((Join-Path $script:FixtureInstall 'web\agent-gui\assets\app.js'))) -eq 'old GUI') 'Portable rollback must restore original agent GUI assets'
     Assert ($script:Launches -eq 0) 'No launch following portable rollback'
     New-Fixture 'managed'
     $lock = [IO.File]::Open((Join-Path $env:LOCALAPPDATA 'Neoism\updates\update.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)

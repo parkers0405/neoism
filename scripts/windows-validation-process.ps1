@@ -8,6 +8,29 @@ function Test-InstalledProcess {
         $processPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
 }
 
+# Start-Process keeps taskkill's exit code out of the caller's LASTEXITCODE.
+# A disappearing child can make taskkill fail even after the parent is gone.
+function Stop-ValidationProcessTree {
+    param([Parameter(Mandatory)]$Process, [string]$Log)
+    $Process.Refresh()
+    if ($Process.HasExited) { return }
+    $options = @{
+        FilePath = 'taskkill.exe'
+        ArgumentList = @('/PID', $Process.Id, '/T', '/F')
+        PassThru = $true
+        Wait = $true
+        NoNewWindow = $true
+    }
+    if ($Log) {
+        $options.RedirectStandardOutput = $Log
+        $options.RedirectStandardError = "$Log.stderr.log"
+    }
+    $killer = Start-Process @options
+    if (-not $Process.WaitForExit(5000)) {
+        throw "Cleanup failed: process $($Process.Id) is still running (taskkill exit=$($killer.ExitCode))"
+    }
+}
+
 # Shared bounded process runner. stdout/stderr go directly to disk even on timeout.
 function Invoke-CheckedProcess {
     param([string]$File, [string]$Arguments, [string]$Log, [int]$Seconds = 300,
@@ -24,7 +47,7 @@ function Invoke-CheckedProcess {
         "exit=$($p.ExitCode)" | Set-Content "$Log.result.txt"
         if ($p.ExitCode -notin $AllowedExitCodes) { throw "$File exited $($p.ExitCode); see $Log" }
     } finally {
-        if (-not $p.HasExited) { & taskkill.exe /PID $p.Id /T /F | Out-Null }
+        if (-not $p.HasExited) { Stop-ValidationProcessTree -Process $p -Log "$Log.cleanup.log" }
         foreach ($stream in @('stdout', 'stderr')) {
             Get-Content "$Log.$stream.log" -Tail 100 -ErrorAction SilentlyContinue
         }

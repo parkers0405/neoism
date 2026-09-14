@@ -1,0 +1,7 @@
+.git
+.neoism
+.tmp
+target
+**/node_modules
+**/dist
+**/*.tsbuildinfo

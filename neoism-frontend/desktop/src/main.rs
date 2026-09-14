@@ -1038,6 +1038,42 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
+fn download_progress(downloaded: u64, total: u64, range: (u8, u8)) -> u8 {
+    let span = range.1.saturating_sub(range.0);
+    let offset = u128::from(downloaded.min(total)) * u128::from(span)
+        / u128::from(total.max(1));
+    range.0 + offset as u8
+}
+
+#[cfg(test)]
+mod download_progress_tests {
+    use super::download_progress;
+
+    #[test]
+    fn progress_is_monotonic_and_bounded_for_every_percentage() {
+        for range in [(0, 100), (5, 85), (10, 90), (0, 255)] {
+            let mut previous = range.0;
+            for downloaded in 0..=120 {
+                let progress = download_progress(downloaded, 100, range);
+                assert!(progress >= previous);
+                assert!((range.0..=range.1).contains(&progress));
+                previous = progress;
+            }
+            assert_eq!(previous, range.1);
+        }
+        assert_eq!(download_progress(50, 100, (5, 85)), 45);
+    }
+
+    #[test]
+    fn progress_handles_extreme_counts_and_degenerate_ranges() {
+        assert_eq!(download_progress(u64::MAX, u64::MAX, (5, 85)), 85);
+        assert_eq!(download_progress(u64::MAX / 2, u64::MAX, (0, 100)), 49);
+        assert_eq!(download_progress(100, 0, (5, 85)), 5);
+        assert_eq!(download_progress(50, 100, (85, 5)), 85);
+        assert_eq!(download_progress(50, 100, (85, 85)), 85);
+    }
+}
+
 fn download_update_file(
     url: &str,
     destination: &std::path::Path,
@@ -1074,12 +1110,7 @@ fn download_update_file(
             let chunk = chunk?;
             file.write_all(&chunk).await?;
             downloaded = downloaded.saturating_add(chunk.len() as u64);
-            let percent = total.map(|total| {
-                progress_range.0
-                    + ((downloaded.saturating_mul(100) / total).min(100) as u8
-                        * (progress_range.1 - progress_range.0)
-                        / 100)
-            });
+            let percent = total.map(|total| download_progress(downloaded, total, progress_range));
             if percent != last_percent {
                 last_percent = percent;
                 reporter.progress(percent, "Downloading Neoism");

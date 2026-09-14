@@ -19,7 +19,9 @@ beforeEach(() => {
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-const order = (article: Element) => [...article.children].map(node => node.querySelector("img")?.getAttribute("alt") || node.textContent);
+// The trailing avatar/tooltip is presentation, not a wire message part.
+const contentChildren = (article: Element) => [...article.children].filter(node => !node.classList.contains("user-message-avatar"));
+const order = (article: Element) => contentChildren(article).map(node => node.querySelector("img")?.getAttribute("alt") || node.textContent);
 
 it("presents image DOM above text in the same user bubble without mutating text-first wire parts", async () => {
     const message = row("u", "user", [text("t", "Describe this picture"), image("i", "clipboard.png")]);
@@ -33,7 +35,11 @@ it("presents image DOM above text in the same user bubble without mutating text-
     const img = article.querySelector("img")!;
     Object.defineProperties(img, { naturalWidth: { value: 640 }, naturalHeight: { value: 480 } });
     await act(async () => img.dispatchEvent(new Event("load")));
-    expect(article.textContent).toBe("Describe this picture");
+    expect(contentChildren(article).map(node => node.textContent).join("")).toBe("Describe this picture");
+    const avatar = article.querySelector(".user-message-avatar")!;
+    expect(article.lastElementChild).toBe(avatar);
+    expect(avatar.querySelector('[role="tooltip"]')?.textContent).toBe("You");
+    expect(avatar.querySelector('svg.avatar')).not.toBeNull();
     expect(article.innerHTML).not.toContain("data:image");
     expect(JSON.stringify(message)).toBe(original);
 });

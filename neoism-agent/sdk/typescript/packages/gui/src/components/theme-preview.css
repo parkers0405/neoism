@@ -1,0 +1,80 @@
+/* The list stays in the current app theme; only the sample uses the candidate. */
+.settings-theme-picker {
+    container-type: inline-size;
+    container-name: theme-picker;
+}
+.settings-theme-browser {
+    display: grid;
+    grid-template-columns: min(300px, 45%) minmax(0, 1fr);
+    gap: 14px;
+    position: relative;
+    min-width: 0;
+}
+.settings-theme-browser::before {
+    content: "";
+    position: absolute;
+    left: calc(min(300px, 45%) + 7px);
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--border);
+}
+.settings-theme-browser .settings-theme-results {
+    min-width: 0;
+    max-height: 320px;
+}
+.settings-theme-results button[data-preview="true"] {
+    background: var(--surface-3, #3a3a3a);
+    box-shadow: inset 2px 0 var(--accent, #fafafa);
+}
+.theme-preview {
+    min-width: 0;
+    align-self: start;
+    margin-block: 5px;
+    border: 1px solid;
+    border-radius: 7px;
+    padding: 16px;
+    overflow: hidden;
+}
+.theme-preview header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 4px 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid;
+}
+.theme-preview h3 {
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: inherit;
+    margin: 0;
+}
+.theme-preview header > span { font-size: 10px; }
+.theme-preview pre,
+.theme-preview code {
+    font-family: "Neoism JetBrains Mono", "JetBrains Mono", monospace;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 25px;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    white-space: pre;
+    tab-size: 4;
+}
+.theme-preview pre {
+    margin: 16px 0 0;
+    overflow: hidden;
+}
+.settings-theme-browser-empty { grid-template-columns: minmax(0, 1fr); }
+.settings-theme-browser-empty::before { display: none; }
+@container theme-picker (max-width: 560px) {
+    .settings-theme-browser { grid-template-columns: minmax(0, 1fr); }
+    .theme-preview,
+    .settings-theme-browser::before { display: none; }
+}

@@ -16,6 +16,46 @@ const rustPatch = { status: "completed", input: { patchText: "*** Begin Patch\n*
 let root: Root, el: HTMLDivElement;
 beforeEach(() => { (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true; el = document.createElement("div"); document.body.append(el); root = createRoot(el); });
 afterEach(() => { act(() => root.unmount()); el.remove(); });
+it.each(["bash", "task", "subtask"])("retains %s details and scroll offsets through rapid open/close reversals", name => {
+    act(() => root.render(<ToolPart part={tool(name, {status: "completed", input: {}, output: "line\n".repeat(4000)})} />));
+    expect(el.querySelector('pre')).toBeNull();
+    const toggle = el.querySelector<HTMLButtonElement>('.tc-tool-toggle')!;
+    act(() => toggle.click());
+    const pre = el.querySelector('pre')!;
+    const reveal = pre.closest('.tc-reveal')!;
+    act(() => { pre.scrollTop = 180; pre.scrollLeft = 12; });
+    for (let i = 0; i < 3; i++) {
+        act(() => toggle.click());
+        expect(reveal.getAttribute('data-open')).toBe('false');
+        expect(reveal.getAttribute('aria-hidden')).toBe('true');
+        expect(reveal.hasAttribute('inert')).toBe(true);
+        expect(el.querySelector('pre')).toBe(pre);
+        act(() => toggle.click());
+        expect(reveal.getAttribute('data-open')).toBe('true');
+        expect(reveal.hasAttribute('inert')).toBe(false);
+        expect(pre.scrollTop).toBe(180);
+        expect(pre.scrollLeft).toBe(12);
+    }
+});
+it("uses only a short grid reveal with reduced-motion opt-out, without changing output bounds", () => {
+    expect(toolStyles).toContain('grid-template-rows: 0fr');
+    expect(toolStyles).toContain('grid-template-rows: 1fr');
+    expect(toolStyles).toContain('grid-template-rows 160ms');
+    expect(toolStyles).toContain('visibility 0s linear 160ms');
+    expect(toolStyles).toContain('.tc-reveal-clip { min-height: 0; min-width: 0; overflow: hidden; }');
+    expect(toolStyles).toContain('@media (prefers-reduced-motion: reduce) { .tc-reveal { transition: none; } }');
+    expect(toolStyles).toContain('max-height: 400px; overflow: auto');
+});
+
+it("uses category outlines for ordinary tools and non-running tasks", () => {
+    for (const [name, icon] of [['read', 'file-text'], ['edit', 'pencil'], ['write', 'pencil'], ['apply_patch', 'pencil'], ['grep', 'search'], ['glob', 'search'], ['search', 'search'], ['bash', 'terminal'], ['shell', 'terminal'], ['task', 'git-branch'], ['task_result', 'git-branch'], ['subtask', 'git-branch'], ['websearch', 'globe'], ['webfetch', 'globe'], ['fetch', 'globe'], ['custom', 'wrench']]) {
+        act(() => root.render(<ToolPart part={tool(name, { status: 'completed', input: {} })} />));
+        expect(el.querySelector(`.tc-header .lucide-${icon}`), name).not.toBeNull();
+        expect(el.querySelector('.tc-task-orbit')).toBeNull();
+    }
+    expect(toolStyles).toContain('[data-task-status="completed"] .tc-category-icon { color: var(--tc-green); }');
+    expect(toolStyles).toContain('[data-task-status="error"] .tc-category-icon');
+});
 it("keeps raw edit arguments and cached diagnostics out of the diff view", () => {
     const part = tool("edit", {status:"completed",input:{filePath:"a.ts",oldString:"before",newString:"after",replaceAll:false},
         output:"Replaced 1 occurrence(s)",metadata:{diagnostics:[{message:"STALE_DIAGNOSTIC",freshness:"unknown"}]}});
@@ -44,7 +84,7 @@ it("uses Rust patch metadata for a compact preview and expandable parsed diff", 
     expect(el.querySelector(".tc-diff")).toBeNull();
     act(() => el.querySelector<HTMLButtonElement>(".tc-compact-diff")!.click());
     expect(el.textContent).toContain("+2"); expect(el.textContent).not.toContain("999");
-    expect(el.querySelectorAll(".tc-line-add")).toHaveLength(2); expect(el.querySelectorAll(".tc-line-remove")).toHaveLength(1);
+    expect(el.querySelectorAll('.tc-reveal[data-open="true"] .tc-line-add')).toHaveLength(2); expect(el.querySelectorAll('.tc-reveal[data-open="true"] .tc-line-remove')).toHaveLength(1);
 });
 it("supports replacement list inputs, snapshots and nested output without inventing write diffs", () => {
     expect(fileChanges(tool("replace_text", { input: [{ filePath: "a.rs", oldString: "before", newString: "after" }, { path: "b.rs", oldText: "a", newText: "b" }] }))).toHaveLength(2);
@@ -148,19 +188,28 @@ it("shows a small diff first, then exposes the complete scrollable diff without 
     expect(copy).toHaveBeenCalledWith(expect.stringContaining("+line 159\n"));
     act(() => el.querySelector<HTMLButtonElement>(".tc-tool-toggle")!.click());
     act(() => root.render(<ToolPart part={tool("apply_patch", { status: "completed", input: { patchText: patch } })} />));
-    expect(el.querySelector(".tc-diff")).toBeNull();
-    expect(el.querySelector(".tc-compact-diff")).not.toBeNull();
+    expect(el.querySelector('.tc-reveal[data-open="true"] .tc-diff')).toBeNull();
+    expect(el.querySelector('.tc-reveal[data-open="true"] .tc-compact-diff')).not.toBeNull();
+    expect(el.querySelector(".tc-diff")).toBe(viewport);
+    expect(viewport.closest('.tc-reveal')?.hasAttribute('inert')).toBe(true);
+    act(() => el.querySelector<HTMLButtonElement>(".tc-tool-toggle")!.click());
+    expect(el.querySelector(".tc-diff")).toBe(viewport);
+    expect(viewport.scrollTop).toBe(2480);
+    expect(viewport.style.height).toBe("400px");
+    expect(viewport.textContent).toContain("line 159");
+    expect(viewport.querySelectorAll('.tc-diff-row').length).toBeLessThanOrEqual(34);
     vi.restoreAllMocks();
 });
 it("Task is one clickable row plus direct session action, with only real output behind it", () => {
     const description = "Use compact expandable tool trees", navigate = vi.fn();
     const part = tool("task", { status: "completed", input: { description, subagent_type: "general" }, metadata: { sessionId: "ses_child", status: "running" }, output: "<unsafe>actual result</unsafe>" });
     act(() => root.render(<ToolPart part={part} onOpenSession={navigate} childStatus="outstanding" />));
-    expect(el.textContent).toBe(`Task(${description})Open session ↗╰─ Waiting for task output…`);
+    expect(el.textContent).toBe(`Task(${description}) runningOpen session ↗╰─ Waiting for task output…`);
     expect(toolStyles).toContain("animation: tc-square-orbit 1.2s linear infinite");
-    expect(toolStyles).toContain("@media (prefers-reduced-motion: reduce) { .tc-task-orbit-dot { animation: none; } }");
+    expect(toolStyles).not.toContain("tc-running-dots");
     expect(el.querySelectorAll(".tc-task-orbit circle")).toHaveLength(4);
-    expect(el.querySelector(".tc-task-orbit path, .tc-task-orbit rect")).toBeNull();
+    expect(el.querySelector(".tc-category-icon")).toBeNull();
+    expect(el.querySelector(".tc-state-word")?.textContent).toBe("running");
     expect(el.querySelector(".tc-task-row .tc-chevron")).toBeNull();
     expect(el.querySelectorAll("summary")).toHaveLength(0);
     act(() => el.querySelector<HTMLButtonElement>(".tc-open-session")!.click());
@@ -174,10 +223,11 @@ it("Task is one clickable row plus direct session action, with only real output 
     for (const childStatus of ["completed", "failed", "unknown"] as const) {
         act(() => root.render(<ToolPart part={part} onOpenSession={navigate} childStatus={childStatus} />));
         expect(el.querySelector(".tc-task-orbit")).toBeNull();
-        expect(el.querySelector(childStatus === "failed" ? ".lucide-circle-x, .lucide-x-circle" : ".lucide-check")).not.toBeNull();
+        expect(el.querySelector(".lucide-git-branch")).not.toBeNull();
+        expect(el.querySelector(".tc-state-word")?.textContent).toBe(childStatus === "failed" ? "error" : "completed");
     }
     act(() => root.render(<ToolPart part={tool("task", { status: "pending", input: { description } })} onOpenSession={navigate} />));
-    expect(el.querySelector(".tc-open-session")).toBeNull(); expect(el.querySelector(".tc-task-orbit")).not.toBeNull();
+    expect(el.querySelector(".tc-open-session")).toBeNull(); expect(el.querySelector(".lucide-git-branch")).not.toBeNull();
 });
 it("keeps failed calls compact and reveals the full error only on expansion", () => {
     const error = "bash command failed\n" + "source line\n".repeat(200) + "END_OF_OUTPUT";
@@ -196,14 +246,14 @@ it("ordinary read is one tree header without repeated path, labels or default ou
     expect(html.match(/src\/skeleton.css/g)).toHaveLength(1);
     expect(html).not.toContain("Output preview"); expect(html).not.toContain("Tool details"); expect(html).not.toContain("<pre"); expect(html).toContain('aria-expanded="false"');
     act(() => root.render(<ToolPart part={part} />));
-    expect(el.querySelector(".tc-status")?.textContent).toBe("");
+    expect(el.querySelector(".tc-category-icon.lucide-file-text")).not.toBeNull();
     act(() => el.querySelector<HTMLButtonElement>(".tc-tool-toggle")!.click());
     expect(el.querySelector(".tc-tree-body")).not.toBeNull(); expect(el.querySelector("script")).toBeNull();
     expect(el.querySelector("pre code")?.textContent).toBe("<script>unsafe()</script>\n  color: red;");
     expect(el.textContent?.match(/src\/skeleton.css/g)).toHaveLength(1);
     act(() => root.render(<ToolPart part={tool("read", { status: "error", input: { filePath: "x" }, error: "Denied" })} />));
     act(() => el.querySelector<HTMLButtonElement>(".tc-tool-toggle")!.click());
-    expect(el.textContent).toContain("Denied"); expect(el.querySelector(".tc-tree-body")).toBeNull();
+    expect(el.textContent).toContain("Denied"); expect(el.querySelector('.tc-reveal[data-open="true"] .tc-tree-body')).toBeNull();
 });
 it("uses streamed task descriptions immediately and separates background child activity from completed call status", () => {
     const description = "Implement native background task and queue popovers";
@@ -212,7 +262,7 @@ it("uses streamed task descriptions immediately and separates background child a
         expect(el.querySelector(".tc-title")?.textContent).toContain("Task(Implement native");
     }
     act(() => root.render(<ToolPart part={tool("functions.task", { status: "running", input: { description }, time: { start: 1 } })} />));
-    expect(el.querySelector(".tc-title")?.textContent).toBe(`Task(${description})`); expect(el.querySelector('[data-task-status="running"]')).not.toBeNull();
+    expect(el.querySelector(".tc-title")?.textContent).toBe(`Task(${description}) running`); expect(el.querySelector('[data-task-status="running"]')).not.toBeNull();
     act(() => root.render(<ToolPart part={tool("functions.task", { status: "completed", input: { description }, metadata: { sessionId: "ses_child", status: "running", background: true } })} />));
     expect(el.querySelector('[data-tool-status="completed"]')).not.toBeNull(); expect(el.querySelector('[data-task-status="running"]')).not.toBeNull();
 });

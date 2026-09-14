@@ -1,0 +1,18 @@
+.hover-title {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.hover-title-text { display: inline-block; }
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .hover-title[data-overflow="true"]:hover { text-overflow: clip; }
+    .hover-title[data-overflow="true"]:hover > .hover-title-text {
+        animation: title-reveal var(--title-duration) linear 600ms both alternate infinite;
+    }
+}
+@keyframes title-reveal {
+    0%, 15% { transform: translateX(0); }
+    85%, 100% { transform: translateX(var(--title-travel)); }
+}

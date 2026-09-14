@@ -22,7 +22,7 @@ export function modelChoices(catalog: ProviderListResult): Choice[] {
     };
     const choices = providers.flatMap(p => Object.values(p.models).sort((a, b) => Number(free(p.id, b)) - Number(free(p.id, a)) || a.name.toLowerCase().localeCompare(b.name.toLowerCase())).map(m => ({
         id: p.id + '/' + m.id, label: m.name, badge: free(p.id, m) ? 'Free' : undefined,
-        description: p.name + (connected.has(p.id) ? '' : ' · not connected'), section: p.name,
+        description: p.name + (connected.has(p.id) ? '' : ' · not connected'), section: p.name, sectionProviderId: p.id,
     })));
     catalogs.set(catalog, choices);
     return choices;

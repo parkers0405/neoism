@@ -54,6 +54,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/directories", get(crate::directory_routes::list))
         .route("/v2/health", get(global_health))
         .route("/v2/meta", get(v2_meta))
+        .route("/v2/identity", get(crate::identity::get))
         .route("/v2/openapi.json", get(canonical_openapi_doc))
         .route("/v2/audit", get(audit_list))
         .route("/v2/capabilities", get(v2_capabilities))
@@ -1221,7 +1222,7 @@ fn allows_global_execution_observation(claims: &crate::caller::CallerClaims) -> 
 }
 
 fn hosted_restricted_path(path: &str) -> bool {
-    matches!(path, "/v2/config" | "/v2/config/validate")
+    matches!(path, "/v2/config" | "/v2/config/validate" | "/v2/identity")
         || (path.starts_with("/v2/providers/")
             && (path.ends_with("/auth") || path.contains("/oauth/")))
 }
@@ -1277,6 +1278,7 @@ fn requires_directory_scope(path: &str) -> bool {
         && !path.starts_with("/v2/capabilities")
         // This handler resolves and authorizes its canonical path itself,
         // including the caller's default root before the first session exists.
+        && path != "/v2/identity"
         && path != "/v2/directories"
         && path != "/v2/health"
 }
@@ -1284,6 +1286,14 @@ fn requires_directory_scope(path: &str) -> bool {
 #[cfg(test)]
 mod hosted_plugin_authorization_tests {
     use super::*;
+
+    #[test]
+    fn identity_is_global_read_only_and_not_a_hosted_account_identity() {
+        assert!(hosted_restricted_path("/v2/identity"));
+        assert!(!requires_directory_scope("/v2/identity"));
+        let request = Request::get("/v2/identity").body(Body::empty()).unwrap();
+        assert_eq!(operation_class(&request), OperationClass::HostedUnsupported);
+    }
 
     struct NoopRoute;
     impl neoism_agent_plugin_api::RouteHandler for NoopRoute {

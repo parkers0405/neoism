@@ -162,6 +162,7 @@ pub fn router(state: AppState) -> Router {
         // and SSE event streams — this route makes them reachable over
         // the same tailnet surface as the daemon itself. Streaming
         // both ways so SSE flows live.
+        .route("/agent-workspaces", get(agent_workspaces))
         .route("/agent", any(agent_proxy_root))
         .route("/agent/", any(agent_proxy_root))
         .route(
@@ -179,6 +180,23 @@ pub fn router(state: AppState) -> Router {
         .route("/agent/*path", any(agent_proxy))
         .fallback(web_fallback)
         .with_state(state)
+}
+
+/// Chat-only discovery. Unlike /sessions (device administration), this exposes
+/// only explicitly shared workspaces, without paths, tabs, or terminal state.
+async fn agent_workspaces(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if headers.get(header::AUTHORIZATION).is_none() {
+        return (StatusCode::UNAUTHORIZED, "daemon credential required").into_response();
+    }
+    if let Err(response) = agent_proxy_principal(&state.auth, &headers) {
+        return response;
+    }
+    let workspaces: Vec<_> = state.workspaces.list_host_workspaces(None).into_iter()
+        .filter(|w| w.visibility == neoism_protocol::workspace::WorkspaceVisibility::Shared)
+        .filter(|w| agent_workspace_root(&state.workspaces, &w.id).is_some())
+        .map(|w| serde_json::json!({ "id": w.id, "title": w.title }))
+        .collect();
+    Json(serde_json::json!({ "workspaces": workspaces })).into_response()
 }
 
 async fn agent_proxy_root(
@@ -585,6 +603,34 @@ mod agent_proxy_auth_tests {
             crdt: CrdtSyncHub::default(),
             paired_hosts: PairedHostStore::in_memory(),
         }
+    }
+
+    #[tokio::test]
+    async fn chat_discovery_requires_auth_and_only_returns_shared_workspace_labels() {
+        let temp = tempfile::tempdir().unwrap();
+        let auth = AuthService::bootstrap(temp.path()).unwrap();
+        let issued = auth.registry.issue("chat guest", BTreeSet::new()).unwrap();
+        let state = test_state(auth);
+        for id in ["shared-chat", "private-chat"] {
+            let root = temp.path().join(id);
+            std::fs::create_dir_all(&root).unwrap();
+            state.workspaces.create_host_workspace("test-host".into(), Some(id.into()), Some(id.into()), Some(root));
+        }
+        state.workspaces.set_host_workspace_visibility("shared-chat", neoism_protocol::workspace::WorkspaceVisibility::Shared);
+        let app = router(state);
+        for bearer in [None, Some("invalid")] {
+            let mut request = axum::http::Request::get("/agent-workspaces");
+            if let Some(bearer) = bearer { request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}")); }
+            let response = app.clone().oneshot(request.body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = app.oneshot(axum::http::Request::get("/agent-workspaces")
+            .header(header::AUTHORIZATION, format!("Bearer {}", issued.raw_token))
+            .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body, serde_json::json!({ "workspaces": [{ "id": "shared-chat", "title": "shared-chat" }] }));
     }
 
     #[tokio::test]

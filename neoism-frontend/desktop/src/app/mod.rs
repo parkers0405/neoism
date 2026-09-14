@@ -622,12 +622,23 @@ impl Application<'_> {
         }
 
         if let Some(server_id) = server_request {
+            if let Err(error) = self.server_registry.reload() {
+                tracing::warn!(%error, "could not refresh saved server before connecting");
+                return;
+            }
             if server_id == "local" {
                 if let Some(endpoint) = self.home_daemon_endpoint.clone() {
                     self.switch_window_server(window_id, &endpoint, None, None);
                 }
             } else if let Some(server) = self.server_registry.server(&server_id).cloned()
             {
+                if server.agent_api {
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        route.window.screen.renderer.modal.open_message("Agent API connection", "This saved server supports agents and chats only. Open it in the Neoism chat GUI; it cannot attach terminals or editors.");
+                        route.request_redraw();
+                    }
+                    return;
+                }
                 let token = self.server_registry.token(&server_id).map(str::to_string);
                 self.switch_window_server(
                     window_id,
@@ -897,6 +908,9 @@ impl Application<'_> {
     }
 
     fn open_server_manager(&mut self, window_id: WindowId) {
+        if let Err(error) = self.server_registry.reload() {
+            tracing::warn!(%error, "could not refresh shared server registry");
+        }
         // The stripe marks where the CURRENT VIEW lives, not merely which
         // connection the window holds: a leftover local island viewed
         // while connected to a guest server still reads as Local.
@@ -982,6 +996,7 @@ impl Application<'_> {
 
     fn probe_saved_servers(&mut self, active_id: Option<&str>) {
         for server in self.server_registry.servers().to_vec() {
+            if server.agent_api { continue; }
             if active_id == Some(server.id.as_str())
                 || !self.server_health_inflight.insert(server.id.clone())
             {
@@ -1009,6 +1024,10 @@ impl Application<'_> {
     }
 
     fn open_edit_server_form(&mut self, window_id: WindowId, server_id: &str) {
+        if let Err(error) = self.server_registry.reload() {
+            tracing::warn!(%error, "could not refresh saved server for editing");
+            return;
+        }
         let Some(server) = self.server_registry.server(server_id).cloned() else {
             return;
         };

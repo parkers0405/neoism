@@ -11,7 +11,7 @@ import * as runtime from './components/runtimeMessages';
 import { responseMetadata } from './components/responseMetadata';
 import { filterChoices, indexChoices, layoutChoices, visibleChoices, revealChoice } from './pickerState';
 import { groupedModelChoices, rememberModel, saveRecentModels, loadRecentModels } from './modelRecents';
-import { messageUsage, deferredPersistence } from './controllerPerformance';
+import { modelChoices, messageUsage, deferredPersistence } from './controllerPerformance';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 afterEach(() => vi.unstubAllGlobals());
@@ -20,6 +20,19 @@ const choices = Array.from({ length: 10000 }, (_, i) => ({ id: `provider-${Math.
 const history = Array.from({ length: 500 }, (_, i) => ({ info: { id: `m${String(i).padStart(4, '0')}`, sessionId: 's', role: i % 2 ? 'assistant' : 'user', agent: 'build', modelId: 'model', providerId: 'provider', time: { created: i * 1000, completed: i * 1000 + 500 } }, parts: [{ id: `p${i}`, type: 'text', text: ('A representative history paragraph with **emphasis** and a [link](https://example.com).\n\n').repeat(4) }] })) as unknown as MessageWithParts[];
 
 describe('bounded grouped picker', () => {
+    it('carries provider artwork only into real provider headers without changing geometry', () => {
+        const models = modelChoices({ all: [{ id: 'openai', name: 'OpenAI', models: { m: { id: 'm', name: 'Model' } } }], connected: ['openai'], default: {} } as unknown as Parameters<typeof modelChoices>[0]);
+        expect(models[0].sectionProviderId).toBe('openai');
+        const grouped = groupedModelChoices(models, ['openai/m'], 'openai/m');
+        const headers = layoutChoices(grouped).rows.filter(row => !row.choice);
+        expect(headers.map(row => [row.section, row.sectionProviderId, row.height])).toEqual([
+            ['Current', undefined, 24], ['Recent', undefined, 24], ['OpenAI', 'openai', 24],
+        ]);
+        const html = renderToStaticMarkup(<Picker title="Models" choices={grouped} choose={noop} close={noop} />);
+        expect(html.match(/class="provider-mark"/g)).toHaveLength(1);
+        expect(html).toContain('#openai');
+        expect(models[0].sectionProviderId).toBe('openai');
+    });
     it('preserves case-insensitive multiword AND matches and excludes empty sections', () => {
         const matches = filterChoices(indexChoices(choices), 'PROVIDER 17 model-1701');
         expect(matches.map(c => c.id)).toEqual(['provider-17/model-1701']);

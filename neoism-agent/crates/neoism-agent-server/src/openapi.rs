@@ -791,6 +791,13 @@ fn apply_authoritative_contract(document: &mut Value) {
     );
     health["security"] = json!([]);
     add("/v2/health", "get", health);
+    let mut identity = op("v2.identity.get", "system", json!([]), None,
+        success("200", "Process-owner identity", json!({
+            "type": "object", "required": ["configuredName", "systemName"],
+            "properties": { "configuredName": { "type": ["string", "null"] }, "systemName": { "type": ["string", "null"] } }
+        })));
+    identity["description"] = json!("Server process-owner identity, not the authenticated caller. Unavailable in hosted multi-tenant mode. Advertised by neoism.identity.");
+    add("/v2/identity", "get", identity);
     add(
         "/v2/meta",
         "get",

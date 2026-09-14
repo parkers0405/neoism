@@ -1,6 +1,6 @@
 {
   "name": "@neoism/sdk-core",
-  "version": "0.7.55",
+  "version": "0.7.100",
   "description": "Transport-neutral client and generated contract for Neoism Agent",
   "license": "MIT",
   "repository": {

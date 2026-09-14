@@ -4,6 +4,13 @@ import { Picker } from "./components/Picker";
 import { ComposerPanel } from "./components/ComposerPanel";
 
 describe("above-composer follow-up panels", () => {
+    it("initially selects the current reasoning value, with unknown values falling back to none", () => {
+        const choices = [{ id: '', label: 'none' }, { id: 'high', label: 'high' }];
+        for (const [value, selected] of [['high', 'high'], ['legacy', 'none'], ['', 'none']]) {
+            const html = renderToStaticMarkup(<Picker title="Reasoning" choices={choices} initialSelectedId={value} choose={vi.fn()} close={vi.fn()} />);
+            expect(html).toMatch(new RegExp(`aria-selected="true"[^>]*><strong[^>]*>${selected}</strong>`));
+        }
+    });
     it("renders model choices as an anchored panel, not a centered modal", () => {
         const html = renderToStaticMarkup(<Picker title="Models" choices={[
             {id:"provider/model",label:"Model",description:"Provider"},

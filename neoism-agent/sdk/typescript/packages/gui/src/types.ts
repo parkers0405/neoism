@@ -19,7 +19,7 @@ export interface Preferences {
     codeFont?: string;
 }
 export const defaultPreferences: Preferences = {
-    name: "You",
+    name: "",
     server: import.meta.env.VITE_NEOISM_AGENT_URL || (
         import.meta.env.DEV || typeof location === "undefined"
             ? "http://127.0.0.1:4096"

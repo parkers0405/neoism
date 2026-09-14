@@ -10,13 +10,13 @@ export function filterChoices(index: ReturnType<typeof indexChoices>, query: str
     const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
     return index.filter(row => words.every(word => row.text.includes(word))).map(row => row.choice);
 }
-export interface PickerRow { top: number; height: number; section?: string; choice?: Choice; index: number }
+export interface PickerRow { top: number; height: number; section?: string; sectionProviderId?: string; choice?: Choice; index: number }
 export function layoutChoices(choices: Choice[]) {
     const rows: PickerRow[] = [], options: PickerRow[] = [];
     let height = 0;
     choices.forEach((choice, index) => {
-        if (choice.section && (index === 0 || choice.section !== choices[index - 1].section)) {
-            rows.push({ top: height, height: HEADER_HEIGHT, section: choice.section, index: -1 }); height += HEADER_HEIGHT;
+        if (choice.section && (index === 0 || choice.section !== choices[index - 1].section || choice.sectionProviderId !== choices[index - 1].sectionProviderId)) {
+            rows.push({ top: height, height: HEADER_HEIGHT, section: choice.section, sectionProviderId: choice.sectionProviderId, index: -1 }); height += HEADER_HEIGHT;
         }
         const row = { top: height, height: OPTION_HEIGHT, choice, index };
         rows.push(row); options.push(row); height += OPTION_HEIGHT;

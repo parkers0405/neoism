@@ -28,12 +28,15 @@
     border-radius: 18px;
 }
 .native-composer .native-composer-chips { position: absolute; bottom: 0; left: 11.75px; right: 11.75px; height: 23.75px; display: flex; align-items: center; gap: 18px; min-width: 0; }
-.native-composer .native-composer-chips > .native-footer-activity { margin-left: auto; overflow: visible; }
-.native-composer .native-composer-chips > button {
-    display: inline-flex; align-items: center; gap: 5px; padding: 0; min-width: 0; max-width: 50%; height: 23.75px;
+.native-composer .native-composer-controls { display: flex; flex: 1; flex-wrap: nowrap; align-items: center; gap: 18px; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; touch-action: pan-x; }
+.native-composer .native-composer-controls > * { flex-shrink: 0; }
+.native-composer .native-composer-chips button:focus-visible { outline-offset: -2px; }
+.native-composer .native-composer-chips > .native-footer-activity { flex-shrink: 0; margin-left: auto; overflow: visible; }
+.native-composer .native-composer-controls > button {
+    display: inline-flex; align-items: center; gap: 5px; padding: 0; min-width: max-content; max-width: none; height: 23.75px;
     background: transparent; border: 0; border-radius: 4px; font-family: var(--font-code, "Neoism JetBrains Mono", ui-monospace, monospace); font-weight: 700; font-size: 12px; line-height: 1;
 }
-.native-composer .native-composer-chips > button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.native-composer .native-composer-controls > button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .native-composer .native-composer-chips svg { color: var(--muted, #888); flex-shrink: 0; }
 .native-composer .native-composer-agent { color: var(--accent, #ad91ff); text-transform: capitalize; }
 .native-composer .native-composer-agent[data-agent="build"] { color: var(--theme-cyan); }
@@ -51,9 +54,30 @@
 .native-composer .native-composer-error { margin: 8px 0 0; color: var(--danger, #e59494); font-size: 12px; overflow-wrap: anywhere; }
 .native-composer button:focus-visible { outline: 2px solid var(--accent, #82aaff); outline-offset: 2px; }
 @media (max-width: 480px) {
-    .native-composer .native-composer-chips { gap: 10px; }
-    .native-composer .native-composer-chips > button { font-size: 11px; }
+    .native-composer .native-composer-chips, .native-composer .native-composer-controls { gap: 10px; }
+    .native-composer .native-composer-controls > button { font-size: 11px; }
     .native-composer-hints { gap: 10px; font-size: 10px; }
+}
+
+/* Animate real geometry so the dock ResizeObserver keeps timeline clearance in
+   sync. The same textarea stays mounted; never transform/scale the caret or text.
+   Expanded values above remain the native multiline visual. */
+.native-composer .native-composer-surface {
+    transition: padding-top 180ms cubic-bezier(.2, .8, .2, 1);
+}
+.native-composer .native-composer-surface textarea {
+    transition: margin 180ms cubic-bezier(.2, .8, .2, 1), width 180ms cubic-bezier(.2, .8, .2, 1);
+}
+.native-composer .native-composer-input-band {
+    transition: height 180ms cubic-bezier(.2, .8, .2, 1);
+}
+.native-composer[data-layout="compact"] .composer.native-composer-surface { padding-top: 10.75px; }
+.native-composer[data-layout="compact"] .native-composer-surface textarea { margin-inline: 45px; width: calc(100% - 90px); }
+.native-composer[data-layout="compact"] .native-composer-input-band { height: 10.75px; }
+@media (prefers-reduced-motion: reduce) {
+    .native-composer .native-composer-surface,
+    .native-composer .native-composer-surface textarea,
+    .native-composer .native-composer-input-band { transition: none; }
 }
 
 /* The footer is an uncapped sibling of the input, not a full-width backdrop. */

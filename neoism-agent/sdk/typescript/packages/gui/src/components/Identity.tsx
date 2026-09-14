@@ -5,11 +5,41 @@ import "./Wordmark.css";
 import { avatarCells, avatarGridSize } from "../generated/avatar";
 import { neoismLogoPath, neoismLogoViewBox } from "../generated/logo";
 export function Avatar({ seed }: { seed: string }) {
+    const svg = useRef<SVGSVGElement>(null);
+    useEffect(() => {
+        const node = svg.current!;
+        const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+        const rects = Array.from(node.querySelectorAll('rect'));
+        let frame = 0;
+        let visible = true;
+        const paint = (now: number) => {
+            // Shared monotonic browser clock keeps every copy of a seed in sync.
+            // Paint SVG fills directly: animation must not rerender the transcript.
+            avatarCells(seed, media.matches ? 0.6 : now / 1000).forEach((cell, i) => rects[i]?.setAttribute('fill', cell.color));
+            if (!media.matches && !document.hidden && visible) frame = requestAnimationFrame(paint);
+        };
+        const restart = () => { cancelAnimationFrame(frame); paint(performance.now()); };
+        const observer = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver(entries => {
+            visible = entries.some(entry => entry.isIntersecting);
+            restart();
+        });
+        observer?.observe(node);
+        restart();
+        media.addEventListener('change', restart);
+        document.addEventListener('visibilitychange', restart);
+        return () => {
+            cancelAnimationFrame(frame);
+            observer?.disconnect();
+            media.removeEventListener('change', restart);
+            document.removeEventListener('visibilitychange', restart);
+        };
+    }, [seed]);
     const cells = avatarCells(seed);
     const width = avatarGridSize(seed);
     const height = width;
     return (
         <svg
+            ref={svg}
             className="avatar"
             viewBox={`0 0 ${width} ${height}`}
             role="img"

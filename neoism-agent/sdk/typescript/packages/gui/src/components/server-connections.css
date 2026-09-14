@@ -1,0 +1,33 @@
+.server-picker { min-width: 0; }
+.server-search { display: flex; align-items: center; gap: 9px; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0 4px 12px; }
+.settings-dialog .server-search input { flex: 1; min-width: 0; border: 0; background: transparent; padding: 4px 0; }
+.server-list { padding: 8px 0; }
+.server-row { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 4px 8px; border-radius: 6px; }
+.server-row[data-selected="true"] { background: var(--surface-2, #ffffff0c); }
+.settings-dialog .server-select { flex: 1; min-width: 0; justify-content: flex-start; gap: 12px; border: 0; background: transparent; padding: 4px 0; font-weight: 440; text-align: left; }
+.settings-dialog .server-select:hover { background: transparent; }
+.server-name { flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server-address { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server-dot { flex: 0 0 8px; width: 8px; height: 8px; border: 1px solid var(--muted); border-radius: 50%; }
+.server-dot[data-status="Connected"] { background: var(--green, #85c88a); border-color: var(--green, #85c88a); }
+.server-dot[data-status="Connecting"] { background: var(--yellow, #e3c777); border-color: var(--yellow, #e3c777); }
+.server-dot[data-status="Connection failed"] { background: var(--red, #eb8686); border-color: var(--red, #eb8686); }
+.server-actions { display: flex; flex-shrink: 0; gap: 6px; }
+.settings-dialog .server-actions button { min-height: 26px; font-size: 11px; padding: 0 9px; }
+.settings-dialog .server-add { justify-content: flex-start; width: 100%; border: 0; border-top: 1px solid var(--border); border-radius: 0; padding: 12px 8px; background: transparent; font-weight: 440; }
+.settings-dialog .server-back { border: 0; padding: 0; background: transparent; color: var(--muted); margin-bottom: 20px; }
+.server-form { display: flex; flex-direction: column; gap: 16px; max-width: 460px; }
+.server-form h3, .server-form p { margin: 0; }
+.server-form form, .server-form label { display: flex; flex-direction: column; gap: 8px; }
+.server-form form { gap: 16px; }
+.settings-dialog .server-form input, .settings-dialog .server-form select { width: 100%; min-width: 0; }
+.server-fields { display: flex; flex-direction: column; gap: 16px; border: 0; padding: 0; margin: 0; min-width: 0; }
+.server-form footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.server-error { color: var(--red, #eb8686); overflow-wrap: anywhere; }
+@media (max-width: 639px) {
+    .server-row { padding-inline: 2px; gap: 6px; }
+    .settings-dialog .server-select { display: grid; grid-template-columns: 8px minmax(0, 1fr); column-gap: 10px; row-gap: 2px; }
+    .server-select .server-dot { grid-row: 1 / 3; }
+    .server-select .server-name { max-width: 100%; }
+    .server-select .server-address { grid-column: 2; }
+}

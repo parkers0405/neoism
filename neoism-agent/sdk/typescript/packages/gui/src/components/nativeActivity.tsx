@@ -20,6 +20,19 @@ const EMPTY: MessageWithParts[] = [];
 const WORD_FONT = 'bold 12px "Press Start 2P", monospace';
 const UI_FONT = '"Neoism Geist Mono", "Geist Mono", monospace';
 
+/** Wrap only between words; the width comes from the pane, not the window. */
+export function activityLines(text: string, available: number, measure: (text: string) => number): string[] {
+    const lines: string[] = [];
+    let line = "";
+    for (const word of text.split(/\s+/)) {
+        const next = line ? `${line} ${word}` : word;
+        if (line && measure(next) > available) { lines.push(line); line = word; }
+        else line = next;
+    }
+    if (line) lines.push(line);
+    return lines;
+}
+
 /** Canvas owns every animation frame; neither React nor the transcript updates at 60 Hz. */
 export const NativeActivity = memo(function NativeActivity({ busy, messages = EMPTY, runtime, activity, palette: themePalette, sessionId, sessionActivity }: NativeActivityProps) {
     const [popover, setPopover] = useState<{ kind: "queue" | "background"; anchor: HTMLButtonElement; scope: SessionActivity["scope"] }>();
@@ -63,19 +76,23 @@ export const NativeActivity = memo(function NativeActivity({ busy, messages = EM
         function draw(now: number) {
             if (disposed || !ctx || !el) return;
             const phase = phaseSeconds(now), transition = (now - start) / 1000;
-            ctx.font = WORD_FONT;
-            const available = Math.max(ACTIVITY.minWidth, width - ACTIVITY.reserve);
-            const lines: string[] = []; let line = "";
-            // Native wrap_input_text: wrap at words, splitting an overlong word at glyph boundaries.
-            for (const word of label.split(" ")) {
-                if (line && ctx.measureText(`${line} ${word}`).width > available) { lines.push(line); line = ""; }
-                for (const ch of (line ? " " : "") + word) {
-                    if (line && ctx.measureText(line + ch).width > available) { lines.push(line); line = ""; }
-                    line += ch;
-                }
+            const c = clock.current, current = live.current;
+            if (c.sample !== current.runtime) {
+                c.sample = current.runtime; c.sampleAt = now;
+                c.elapsed = runtimeElapsed(current.runtime, Date.now()) ?? (now - c.started) / 1000;
             }
-            if (line) lines.push(line);
-            const height = Math.max(1, lines.length) * ACTIVITY.lineHeight;
+            const e = current.runtime?.execution;
+            const rate = e ? Object.keys(e.activeSegments).length : 1;
+            const elapsed = current.state.elapsedSeconds ?? (e ? c.elapsed + (now - c.sampleAt) / 1000 * rate : (now - c.started) / 1000);
+            const metadata = `· ${elapsedLabel(elapsed)} model · ${STATUS[current.state.status][1]}`;
+            // Reserve no side-by-side metadata space in narrow split panes.
+            const stacked = width < 520;
+            ctx.font = WORD_FONT;
+            const available = Math.max(1, width - (stacked ? 40 : ACTIVITY.reserve));
+            const lines = activityLines(label, available, text => ctx.measureText(text).width);
+            ctx.font = `italic 13px ${uiFont}`;
+            const metadataLines = stacked ? activityLines(metadata, Math.max(1, width - 8), text => ctx.measureText(text).width) : [];
+            const height = Math.max(1, lines.length + metadataLines.length) * ACTIVITY.lineHeight;
             const dpr = window.devicePixelRatio || 1;
             if (el.width !== Math.round(width * dpr) || el.height !== Math.round(height * dpr)) {
                 el.width = Math.round(width * dpr); el.height = Math.round(height * dpr); el.style.height = `${height}px`;
@@ -108,16 +125,9 @@ export const NativeActivity = memo(function NativeActivity({ busy, messages = EM
                 ctx.fillStyle = rgb(trailing, dot.alpha); ctx.fillText(".", x + dot.x, y + dot.y);
                 x += ctx.measureText(".").width + 2;
             }
-            const c = clock.current, current = live.current;
-            if (c.sample !== current.runtime) {
-                c.sample = current.runtime; c.sampleAt = now;
-                c.elapsed = runtimeElapsed(current.runtime, Date.now()) ?? (now - c.started) / 1000;
-            }
-            const e = current.runtime?.execution;
-            const rate = e ? Object.keys(e.activeSegments).length : 1;
-            const elapsed = current.state.elapsedSeconds ?? (e ? c.elapsed + (now - c.sampleAt) / 1000 * rate : (now - c.started) / 1000);
             ctx.font = `italic 13px ${uiFont}`; ctx.fillStyle = rgb(palette.muted);
-            ctx.fillText(`· ${elapsedLabel(elapsed)} model · ${STATUS[current.state.status][1]}`, x + 8, y);
+            if (stacked) metadataLines.forEach((text, row) => ctx.fillText(text, ACTIVITY.inset, baseline + (lines.length + row) * ACTIVITY.lineHeight));
+            else ctx.fillText(metadata, x + 8, y);
         }
         function tick(now: number) { if (disposed) return; draw(now); frame = requestAnimationFrame(tick); }
         function schedule() {

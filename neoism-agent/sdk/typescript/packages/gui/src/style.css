@@ -144,13 +144,15 @@ small,
 .left-nav {
     grid-area: nav;
     min-height: 0;
-    background: var(--surface-1);
+    background: var(--bg);
     width: 240px;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
     padding: 8px;
     border-right: 0;
+    border-radius: 0 12px 12px 0;
+    box-shadow: inset -1px 0 0 var(--border);
 }
 .brand {
     display: flex;
@@ -590,31 +592,27 @@ kbd {
     min-width: 0;
     margin-left: auto;
     max-width: min(75%, 38rem);
-    background: #007aff;
+    --bubble-blue: #007aff;
+    background: var(--bubble-blue);
     color: #fff;
-    border-radius: 20px 20px 6px 20px;
+    border-radius: 20px 20px 16px 20px;
     padding: 12px 16px;
     font-family: var(--font);
 }
+/* One curved silhouette, overlapping the rounded corner. Only 5px projects
+ * beyond the bubble; no background-colored cutout or pointed border triangle. */
 .message.user:not(.runtime-message)::before {
     content: "";
     position: absolute;
     bottom: 0;
-    right: -7px;
-    width: 14px;
+    right: -5px;
+    width: 16px;
     height: 18px;
-    background: #007aff;
-    border-bottom-left-radius: 14px;
-}
-.message.user:not(.runtime-message)::after {
-    content: "";
-    position: absolute;
-    bottom: 0;
-    right: -10px;
-    width: 10px;
-    height: 18px;
-    background: var(--bg);
-    border-bottom-left-radius: 10px;
+    background: var(--bubble-blue);
+    pointer-events: none;
+    --bubble-tail: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 18'%3E%3Cpath fill='white' d='M0 0H8V7C8 11 10 14 15 16Q16 16.5 15 17C8 18 2 15 0 10Z'/%3E%3C/svg%3E");
+    -webkit-mask: var(--bubble-tail) center / 100% 100% no-repeat;
+    mask: var(--bubble-tail) center / 100% 100% no-repeat;
 }
 .message.user:not(.runtime-message) .markdown {
     font-family: var(--font);
@@ -792,11 +790,20 @@ details pre {
         opacity: 0.3;
     }
 }
+/* Panel shells retain their fixed-width scrollers while the chat reflows. */
+.navigation-panel { grid-area: nav; min-width: 0; min-height: 0; overflow: hidden; visibility: visible; transition: visibility 0s; }
+.navigation-panel > .left-nav { height: 100%; }
+.details-panel { width: 0; min-width: 0; flex-shrink: 0; overflow: hidden; visibility: hidden; transition: width 180ms cubic-bezier(.2, 0, 0, 1), visibility 0s linear 180ms; }
+.details-panel[data-open="true"] { width: 240px; visibility: visible; transition-delay: 0s; }
+.details-panel > .right-sidebar { height: 100%; }
 .right-sidebar {
     width: 240px;
     font-size: 13px;
     flex-shrink: 0;
-    border-left: 1px solid var(--border);
+    border-left: 0;
+    border-radius: 12px 0 0 12px;
+    background: var(--bg);
+    box-shadow: inset 1px 0 0 var(--border);
     padding: 4px 16px;
     overflow: auto;
 }
@@ -1073,14 +1080,16 @@ select option {
     color: var(--muted);
 }
 @media (min-width: 641px) {
+    .app, .app-chrome { transition: grid-template-columns 180ms cubic-bezier(.2, 0, 0, 1); }
     .app.nav-hidden { grid-template-columns: 0 minmax(0, 1fr); }
-    .nav-hidden .left-nav { display: none; }
-    .nav-hidden .app-chrome { grid-template-columns: auto minmax(0, 1fr); }
+    .nav-hidden .navigation-panel { visibility: hidden; transition-delay: 180ms; }
+    /* 19px icon + 16px button padding + 16px chrome padding: same former auto width. */
+    .nav-hidden .app-chrome { grid-template-columns: 51px minmax(0, 1fr); }
 }
 @media (max-width: 640px) {
     .desktop-nav-toggle { display: none; }
-    .left-nav { visibility: hidden; }
-    .nav-open .left-nav { visibility: visible; }
+    .navigation-panel { visibility: hidden; }
+    .nav-open .navigation-panel { visibility: visible; transition-delay: 0s; }
     .app { grid-template: "chrome" var(--chrome-height) "main" minmax(0, 1fr) / minmax(0, 1fr); }
     .app-chrome { grid-template-columns: auto minmax(0, 1fr); }
     .navigation-chrome { gap: 2px; padding-inline: 4px; }
@@ -1088,17 +1097,18 @@ select option {
     .nav-open .app-chrome { position: relative; z-index: 31; }
     .chat-main { --chat-side-gutter: clamp(32px, calc(14vw - 16px), 128px); }
     .chat-main { --composer-gutter: max(16px, env(safe-area-inset-bottom)); }
-    .left-nav {
+    .navigation-panel {
         position: fixed;
         inset: var(--chrome-height) auto auto 0;
         height: calc(var(--app-viewport-height, 100dvh) - var(--chrome-height));
         width: 240px;
         max-width: calc(100vw - 32px);
         transform: translateX(-100%);
-        transition: transform 0.2s;
+        transition: transform 180ms cubic-bezier(.2, 0, 0, 1), visibility 0s linear 180ms;
         z-index: 30;
     }
-    .nav-open .left-nav {
+    .navigation-panel > .left-nav { width: 100%; }
+    .nav-open .navigation-panel {
         transform: translateX(0);
     }
     .nav-scrim {
@@ -1213,16 +1223,21 @@ select option {
     margin-bottom: 10px;
 }
 @media (max-width: 850px) {
-    .right-sidebar {
-        display: block;
+    .details-panel {
         position: absolute;
         right: 0;
         top: 0;
         bottom: 0;
         width: 240px;
+        transform: translateX(100%);
+        transition: transform 180ms cubic-bezier(.2, 0, 0, 1), visibility 0s linear 180ms;
         background: var(--bg);
         z-index: 12;
         box-shadow: var(--overlay-shadow);
-        padding: 4px 16px;
     }
+    .details-panel[data-open="true"] { transform: translateX(0); transition-delay: 0s; }
+    .details-panel > .right-sidebar { position: static; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .app, .app-chrome, .navigation-panel, .details-panel { transition: none !important; }
 }

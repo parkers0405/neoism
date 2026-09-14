@@ -1,3 +1,4 @@
+import { UserAvatar } from "./UserAvatar";
 import { ArrowUp } from "lucide-react";
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
 import { NativeActivity, type NativeActivityProps } from "./nativeActivity";
@@ -59,7 +60,7 @@ export function PartView({ part, childStatus, onOpenSession, client }: { client?
 
 // Reducer deltas preserve all other message identities. A footer may change with
 // turn context, so compare it too; never ignore a callback/runtime prop globally.
-const MessageRow = memo(function MessageRow({ message, footer, todo, liveParts, livePending, outstandingIds, taskStates, onOpenSession, client }: { todo?: ReactNode; client?: NeoismClient; message: MessageWithParts; footer?: string; liveParts?: ReadonlySet<string>; livePending?: boolean; outstandingIds?: string; taskStates?: string; onOpenSession?(id: string): void }) {
+const MessageRow = memo(function MessageRow({ localName, message, footer, todo, liveParts, livePending, outstandingIds, taskStates, onOpenSession, client }: { localName: string; todo?: ReactNode; client?: NeoismClient; message: MessageWithParts; footer?: string; liveParts?: ReadonlySet<string>; livePending?: boolean; outstandingIds?: string; taskStates?: string; onOpenSession?(id: string): void }) {
     const { runtime: notice, remainingParts } = useMemo(() => normalizeMessages([message])[0], [message]);
     const outstanding = useMemo(() => outstandingIds ? new Set<string>(JSON.parse(outstandingIds)) : undefined, [outstandingIds]);
     const childStates = useMemo(() => new Map<string, TaskChildStatus>(taskStates ? JSON.parse(taskStates) : []), [taskStates]);
@@ -81,11 +82,13 @@ const MessageRow = memo(function MessageRow({ message, footer, todo, liveParts, 
             {!notice && index === lastText && footer && <ResponseFooter value={footer} />}
         </Fragment>)}
         {todo}
+        {message.info.role === "user" && !notice && <UserAvatar info={{ author: message.info.author }} localName={localName} />}
     </article>;
 });
 
 type Anchor = ScrollSnapshot & { anchorId?: string; offset?: number };
-export const Timeline = memo(function Timeline({ messages, busy, activityBusy, older, loading, loadOlder, sessionId, runtime, showActivity = true, activity, sessionActivity, activityPalette, liveParts, onOpenSession, client }: {
+export const Timeline = memo(function Timeline({ localName = "You", messages, busy, activityBusy, older, loading, loadOlder, sessionId, runtime, showActivity = true, activity, sessionActivity, activityPalette, liveParts, onOpenSession, client }: {
+    localName?: string;
     activityBusy?: boolean;
     showActivity?: boolean;
     client?: NeoismClient;
@@ -151,11 +154,26 @@ export const Timeline = memo(function Timeline({ messages, busy, activityBusy, o
     }, [messages, busy, loading, older, session]);
     useEffect(() => {
         if (typeof ResizeObserver === "undefined" || !transcript.current) return;
+        let width = viewport.current?.clientWidth;
         const observer = new ResizeObserver(() => {
-            if (follow.current && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight;
+            const el = viewport.current;
+            if (!el) return;
+            const resized = width !== el.clientWidth;
+            width = el.clientWidth;
+            if (follow.current) el.scrollTop = el.scrollHeight;
+            else if (resized) {
+                // Panel width transitions rewrap history. Preserve the reader's message
+                // offset rather than following the tail; no React work on animation frames.
+                const before = previous.current;
+                const anchor = [...el.querySelectorAll<HTMLElement>("[data-message-id]")].find(node => node.dataset.messageId === before?.anchorId);
+                if (anchor && before?.offset !== undefined) {
+                    el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - before.offset;
+                }
+            }
             capture();
         });
         observer.observe(transcript.current);
+        if (viewport.current) observer.observe(viewport.current);
         return () => observer.disconnect();
     }, []);
     return <div className="timeline chat-timeline" ref={viewport} onWheel={pagination.onWheel} onTouchStart={pagination.onTouchStart} onTouchMove={pagination.onTouchMove} onKeyDown={pagination.onKeyDown} onScroll={e => {
@@ -170,7 +188,7 @@ export const Timeline = memo(function Timeline({ messages, busy, activityBusy, o
             {older && !loading && <button type="button" className="history-page-control" aria-label="Load earlier messages" onClick={() => {
                 follow.current = false; capture(); loadOlder();
             }}><ArrowUp size={15} aria-hidden="true" /></button>}
-            {messages.map((message, index) => <MessageRow client={client} key={message.info.id} message={message} footer={footers[index]} todo={message.info.id === todoAnchor.current.id ? todoContent : undefined} liveParts={liveParts?.get(message.info.id)} livePending={message.info.id === pendingMessage} outstandingIds={outstanding.get(message.info.id)} taskStates={childStates.get(message.info.id)} onOpenSession={onOpenSession} />)}
+            {messages.map((message, index) => <MessageRow localName={localName} client={client} key={message.info.id} message={message} footer={footers[index]} todo={message.info.id === todoAnchor.current.id ? todoContent : undefined} liveParts={liveParts?.get(message.info.id)} livePending={message.info.id === pendingMessage} outstandingIds={outstanding.get(message.info.id)} taskStates={childStates.get(message.info.id)} onOpenSession={onOpenSession} />)}
             {showActivity && <NativeActivity sessionActivity={sessionActivity} messages={messages} busy={activityBusy ?? busy} runtime={runtime} activity={activity} palette={activityPalette} sessionId={session} />}
         </div>
     </div>;

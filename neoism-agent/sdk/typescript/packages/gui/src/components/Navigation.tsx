@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { ChatRow } from "./ChatRow";
 import { SkeletonRows } from "./Skeleton";
+import { resolveIdentity } from "../identity";
 import { Avatar } from "./Identity";
 import { isSessionPinned } from "../sessionPins";
 import type { Session } from "@neoism/sdk";
@@ -23,6 +24,7 @@ export function Navigation({
 }: {
     app: ReturnType<typeof useAppController> & { loading?: boolean };
 }) {
+    const name = a.identityName || resolveIdentity(a.prefs.name);
     // Controller's initial/replacement loading flag is distinct from pagination.
     const initialLoading = a.loading ?? (a.listBusy && !a.sessions.length);
     const scroller = useRef<HTMLDivElement>(null);
@@ -131,9 +133,9 @@ export function Navigation({
                 )}
             </div>
             <button className="profile" onClick={() => a.setSettings(true)}>
-                <Avatar seed={a.prefs.name} />
+                <Avatar seed={name} />
                 <span>
-                    <strong>{a.prefs.name || "You"}</strong>
+                    <strong>{name}</strong>
                 </span>
                 <Settings size={16} />
             </button>

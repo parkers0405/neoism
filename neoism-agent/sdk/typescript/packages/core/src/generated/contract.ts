@@ -238,6 +238,7 @@ export interface ApiOperations {
   "v2.directories.list": { method: "GET"; path: "/v2/directories"; input: { query?: { path?: string; }; signal?: AbortSignal; }; responses: { "200": { entries: Array<{ name: string; path: string; }>; parent: string | null; path: string; }; }; response: { entries: Array<{ name: string; path: string; }>; parent: string | null; path: string; }; };
   "v2.events.subscribe": { method: "GET"; path: "/v2/events"; input: { query?: { since?: number; tail?: boolean; limit?: number; sessionId?: string; }; headers?: { "Last-Event-ID"?: number; }; signal?: AbortSignal; }; responses: { "200": string; }; response: string; };
   "v2.health": { method: "GET"; path: "/v2/health"; input: { signal?: AbortSignal; }; responses: { "200": HealthResponse; }; response: HealthResponse; };
+  "v2.identity.get": { method: "GET"; path: "/v2/identity"; input: { signal?: AbortSignal; }; responses: { "200": { configuredName: string | null; systemName: string | null; }; }; response: { configuredName: string | null; systemName: string | null; }; };
   "v2.interactions.permissions.list": { method: "GET"; path: "/v2/interactions/permissions"; input: { query?: { sessionId?: string; }; signal?: AbortSignal; }; responses: { "200": Array<PermissionRequest>; }; response: Array<PermissionRequest>; };
   "v2.interactions.permissions.reply": { method: "POST"; path: "/v2/interactions/permissions/{request_id}/reply"; input: { path: { request_id: string; }; body: PermissionReply; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.interactions.questions.list": { method: "GET"; path: "/v2/interactions/questions"; input: { query?: { sessionId?: string; }; signal?: AbortSignal; }; responses: { "200": Array<QuestionRequest>; }; response: Array<QuestionRequest>; };
@@ -428,6 +429,7 @@ export const operationDescriptors = {
   "v2.directories.list": {"method":"GET","path":"/v2/directories","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.events.subscribe": {"method":"GET","path":"/v2/events","transport":"sse","responses":{"200":["text/event-stream"]}},
   "v2.health": {"method":"GET","path":"/v2/health","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.identity.get": {"method":"GET","path":"/v2/identity","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.interactions.permissions.list": {"method":"GET","path":"/v2/interactions/permissions","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.interactions.permissions.reply": {"method":"POST","path":"/v2/interactions/permissions/{request_id}/reply","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.interactions.questions.list": {"method":"GET","path":"/v2/interactions/questions","transport":"http","response":"json","responses":{"200":["application/json"]}},

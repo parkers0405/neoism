@@ -267,6 +267,13 @@ impl Default for NeoismConfigSourceService {
 }
 
 impl ConfigSourceService for NeoismConfigSourceService {
+    fn display_name(&self) -> Result<Option<String>, ServiceError> {
+        let document = Self::read(&self.gui_path)?;
+        Ok(document.pointer("/presence/display-name").and_then(Value::as_str)
+            .map(str::trim).filter(|name| !name.is_empty())
+            .map(|name| name.chars().take(32).collect()))
+    }
+
     fn snapshot(
         &self,
         request: &ConfigSnapshotRequest,
@@ -515,6 +522,21 @@ fn strip_trailing_commas(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn profile_name_reads_only_native_presence_config() {
+        use neoism_agent_service_api::ConfigSourceService;
+        let root = std::env::temp_dir().join(format!("neoism-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        std::fs::write(&path, r#"{ // native JSONC
+            "presence": {"display-name": "  Fern  ",}, "agent": {"name": "Not a person"}
+        }"#).unwrap();
+        let config = super::NeoismConfigSourceService::at(path.clone());
+        assert_eq!(config.display_name().unwrap().as_deref(), Some("Fern"));
+        std::fs::write(&path, r#"{"presence":{"display-name":" "},"agent":{"name":"Not a person"}}"#).unwrap();
+        assert_eq!(config.display_name().unwrap(), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
 
     struct MigrationFixture(PathBuf);

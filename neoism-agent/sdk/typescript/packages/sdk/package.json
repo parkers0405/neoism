@@ -1,6 +1,6 @@
 {
   "name": "@neoism/sdk",
-  "version": "0.7.55",
+  "version": "0.7.100",
   "description": "Official TypeScript SDK for the Neoism Agent API",
   "type": "module",
   "sideEffects": false,
@@ -22,9 +22,9 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@neoism/sdk-core": "0.7.55",
-    "@neoism/sdk-http": "0.7.55",
-    "@neoism/sdk-plugin-builtins": "0.7.55",
-    "@neoism/sdk-plugin-subagents": "0.7.55"
+    "@neoism/sdk-core": "0.7.100",
+    "@neoism/sdk-http": "0.7.100",
+    "@neoism/sdk-plugin-builtins": "0.7.100",
+    "@neoism/sdk-plugin-subagents": "0.7.100"
   }
 }

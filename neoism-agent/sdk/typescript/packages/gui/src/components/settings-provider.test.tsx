@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { NeoismClient, OperationResponse } from "@neoism/sdk";
@@ -24,7 +25,18 @@ const catalog = {
     default: {},
 } as OperationResponse<"v2.providers.list">;
 
-describe("OpenCode-shaped settings and provider views", () => {
+describe("responsive settings and provider views", () => {
+    it("scopes drilldown visibility to mobile and retains the desktop split", () => {
+        const css = readFileSync(new URL("./settings-provider.css", import.meta.url), "utf8");
+        const desktop = css.split("@media (min-width: 640px)")[1].split("@media (max-width: 639px)")[0];
+        const mobile = css.split("@media (max-width: 639px)")[1];
+        expect(desktop).toContain("grid-template-columns: minmax(200px, 240px) minmax(0, 1fr)");
+        expect(desktop).toContain(".settings-back:not(.settings-theme-back) { display: none; }");
+        expect(desktop).not.toContain(".settings-landing .settings-content");
+        expect(mobile).toContain(".settings-detail .settings-nav,");
+        expect(mobile).toContain(".settings-landing .settings-content { display: none; }");
+        expect(mobile).toContain("100dvh");
+    });
     it("owns a dialog with grouped real navigation, not the shared full-width modal header", () => {
         const html = renderToStaticMarkup(
             <Settings
@@ -37,15 +49,20 @@ describe("OpenCode-shaped settings and provider views", () => {
         );
         expect(html).toContain('class="settings-dialog"');
         expect(html).toContain('aria-label="Settings"');
-        expect(html).toContain("Desktop");
+        expect(html).not.toContain("<h3>Desktop</h3>");
+        expect(html).not.toContain("<h3>Server</h3>");
         for (const page of ["General", "Appearance", "Servers", "Providers"])
             expect(html).toContain(page);
         expect(html).not.toContain("Shortcuts");
         expect(html).not.toContain(">Models<");
         expect(html).toContain("Display name");
         expect(html).toContain("Save settings");
+        expect(html).toContain('aria-label="Settings categories"');
+        expect(html).toContain('aria-label="Close settings"');
         expect(html).not.toContain('class="modal"');
+        expect(html).toContain("settings-landing");
         expect(html.match(/<form\b/g)).toHaveLength(1);
+        expect(html.match(/<dialog\b/g)).toHaveLength(1);
     });
     it("opens an initial provider in a separate compact settings view, with no save form", () => {
         const html = renderToStaticMarkup(

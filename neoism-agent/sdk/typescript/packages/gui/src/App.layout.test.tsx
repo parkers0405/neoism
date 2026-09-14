@@ -7,6 +7,16 @@ import { readFileSync } from "node:fs";
 const styles = readFileSync("src/style.css", "utf8");
 const tabStyles = readFileSync("src/tabs.css", "utf8");
 
+it("rounds only the sidebar's right edge without consuming layout width", () => {
+    const nav = styles.match(/\.left-nav\s*\{([^}]+)\}/)![1];
+    expect(nav).toContain('width: 240px');
+    expect(nav).toContain('background: var(--bg)');
+    expect(nav).toContain('border-radius: 0 12px 12px 0');
+    expect(nav).toContain('box-shadow: inset -1px 0 0 var(--border)');
+    expect(nav).toContain('border-right: 0');
+    expect(styles.match(/\.navigation-chrome\s*\{([^}]+)\}/)![1]).not.toContain('border-radius');
+});
+
 const state = vi.hoisted(() => ({ app: {} as any, composer: {} as any, footer: {} as any, library: {} as any }));
 vi.mock("./components/Library", () => ({ Library: (props: any) => { state.library = props; return <div className="test-library" data-directory={props.directory} />; } }));
 vi.mock("./components/ChatDetails", () => ({ ChatDetails: () => <aside className="test-chat-details" /> }));
@@ -44,7 +54,7 @@ beforeEach(() => {
         return this.classList.contains("composer-content") ? height : 1000;
     });
     state.app = {
-        active: { id: "session" }, openSession: vi.fn(),
+        active: { id: "session" }, openSession: vi.fn(), openChildSession: vi.fn(),
         effect: "none", nav: false, id: "session", view: "chat", tabKey: "a",
         tabs: [{ key: "a", draft: "Meaningful title", explicit: {} }],
         prefs: { name: "You", server: "http://localhost:7980", directory: "/repo" },
@@ -117,6 +127,62 @@ describe("application chrome and floating dock", () => {
         expect(host.querySelector(".app.nav-hidden")).toBeNull();
         expect(localStorage.getItem("neoism.desktop-nav-visible")).toBe("true");
     });
+    it("retains panel scrollers and restores focus while toggles reverse without timers", () => {
+        state.app.sidebar = false;
+        state.app.setSidebar = (update: (value: boolean) => boolean) => { state.app.sidebar = update(state.app.sidebar); render(); };
+        render();
+        const navigation = host.querySelector<HTMLElement>('.navigation-panel')!;
+        const recents = host.querySelector<HTMLElement>('.recents')!;
+        recents.scrollTop = 140;
+        const navToggle = host.querySelector<HTMLButtonElement>('.desktop-nav-toggle')!;
+        host.querySelector<HTMLButtonElement>('.left-nav button')!.focus();
+        act(() => navToggle.click());
+        expect(navigation.hasAttribute('inert')).toBe(true);
+        expect(navigation.getAttribute('aria-hidden')).toBe('true');
+        expect(document.activeElement).toBe(navToggle);
+        act(() => navToggle.click());
+        expect(navigation.hasAttribute('inert')).toBe(false);
+        expect(host.querySelector('.recents')).toBe(recents);
+        expect(recents.scrollTop).toBe(140);
+        const detailsToggle = host.querySelector<HTMLButtonElement>('[aria-controls="chat-details-panel"]')!;
+        expect(host.querySelector('.test-chat-details')).toBeNull();
+        act(() => detailsToggle.click());
+        const panel = host.querySelector<HTMLElement>('#chat-details-panel')!;
+        const details = host.querySelector<HTMLElement>('.test-chat-details')!;
+        details.scrollTop = 75;
+        details.tabIndex = 0; details.focus();
+        act(() => detailsToggle.click());
+        expect(panel.hasAttribute('inert')).toBe(true);
+        expect(detailsToggle.getAttribute('aria-expanded')).toBe('false');
+        expect(document.activeElement).toBe(detailsToggle);
+        expect(host.querySelector('.test-chat-details')).toBe(details);
+        act(() => detailsToggle.click());
+        expect(panel.hasAttribute('inert')).toBe(false);
+        expect(details.scrollTop).toBe(75);
+        expect(styles).toContain('grid-template-columns 180ms');
+        expect(styles).toContain('width 180ms');
+        expect(styles).toContain('visibility 0s linear 180ms');
+        expect(styles).not.toContain('.nav-hidden .left-nav { display: none; }');
+        expect(styles).toContain('.app, .app-chrome, .navigation-panel, .details-panel { transition: none !important; }');
+    });
+    it("keeps mobile drawer accessibility independent from the persisted desktop state", () => {
+        const media = Object.assign(new EventTarget(), { matches: true });
+        vi.stubGlobal('matchMedia', (query: string) => query === '(max-width: 640px)' ? media : Object.assign(new EventTarget(), {matches: false}));
+        localStorage.setItem('neoism.desktop-nav-visible', 'false');
+        state.app.nav = true;
+        render();
+        const panel = host.querySelector('.navigation-panel')!;
+        expect(panel.hasAttribute('inert')).toBe(false);
+        host.querySelector<HTMLButtonElement>('.left-nav button')!.focus();
+        state.app.nav = false; render();
+        expect(panel.hasAttribute('inert')).toBe(true);
+        expect(document.activeElement).toBe(host.querySelector('.mobile-menu'));
+        state.app.nav = true; render();
+        act(() => { media.matches = false; media.dispatchEvent(new Event('change')); });
+        expect(panel.hasAttribute('inert')).toBe(true);
+        expect(localStorage.getItem('neoism.desktop-nav-visible')).toBe('false');
+        expect(styles).toContain('.details-panel[data-open="true"] { transform: translateX(0); transition-delay: 0s; }');
+    });
     it("restores the desktop preference without hiding the mobile drawer", () => {
         localStorage.setItem("neoism.desktop-nav-visible", "false");
         state.app.nav = true;
@@ -136,7 +202,7 @@ describe("application chrome and floating dock", () => {
         node.className = "message user remote-user";
         expect(node.matches(selector)).toBe(true);
         const bubble = styles.slice(styles.indexOf(selector), styles.indexOf("}", styles.indexOf(selector)));
-        for (const rule of ["width: fit-content", "margin-left: auto", "max-width: min(75%, 38rem)", "padding: 12px 16px", "font-family: var(--font)", "background: #007aff", "color: #fff"]) {
+        for (const rule of ["width: fit-content", "margin-left: auto", "max-width: min(75%, 38rem)", "padding: 12px 16px", "font-family: var(--font)", "--bubble-blue: #007aff", "background: var(--bubble-blue)", "color: #fff"]) {
             expect(bubble).toContain(rule);
         }
         expect(styles).not.toMatch(/\.message\.user\s*\{/);
@@ -152,8 +218,9 @@ describe("application chrome and floating dock", () => {
     });
     it("pins only the user identity and settings, not connection status", () => {
         state.app.connected = true;
+        state.app.identityName = "Native Name";
         render();
-        expect(host.querySelector(".profile")?.textContent).toBe("You");
+        expect(host.querySelector(".profile")?.textContent).toBe("Native Name");
         expect(host.querySelector(".profile small")).toBeNull();
     });
 
@@ -305,7 +372,8 @@ describe("subagent read-only layout", () => {
         expect(hint.querySelector("button")?.textContent).toBe("Back to main chat");
         expect(hint.textContent).toContain("Subagent");
         act(() => hint.querySelector<HTMLButtonElement>("button")!.click());
-        expect(state.app.openSession).toHaveBeenCalledExactlyOnceWith("root");
+        expect(state.app.openChildSession).toHaveBeenCalledExactlyOnceWith("root");
+        expect(state.app.openSession).not.toHaveBeenCalled();
         expect(state.app.closeTab).not.toHaveBeenCalled();
         const css = readFileSync("src/subagent-view.css", "utf8");
         expect(css).toContain("padding-bottom: calc(var(--composer-clearance, 0px) + max(24px, env(safe-area-inset-bottom)))");
@@ -326,7 +394,8 @@ describe("subagent read-only layout", () => {
         const back = host.querySelector<HTMLButtonElement>(".subagent-view-hint button")!;
         expect(back.textContent).toBe("Back to parent chat");
         act(() => back.click());
-        expect(state.app.openSession).toHaveBeenCalledWith("nested-parent");
+        expect(state.app.openChildSession).toHaveBeenCalledWith("nested-parent");
+        expect(state.app.openSession).not.toHaveBeenCalled();
         state.app.active = { id: "session", agent: "explore" }; render();
         expect(host.querySelector("textarea")).not.toBeNull();
     });

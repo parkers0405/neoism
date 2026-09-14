@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Check, Ellipsis, Pencil, Pin, Trash2, X } from "lucide-react";
 import type { Session } from "@neoism/sdk";
 import { isSessionPinned } from "../sessionPins";
+import { HoverTitle } from "./HoverTitle";
 import "./chat-menu.css";
 
 export function ChatRow({ session: s, selected, open, pin, rename, remove }: {
@@ -14,13 +15,25 @@ export function ChatRow({ session: s, selected, open, pin, rename, remove }: {
     const [editing, setEditing] = useState(false);
     const [title, setTitle] = useState(s.title);
     const [busy, setBusy] = useState(false);
+    const [menuWithPin, setMenuWithPin] = useState(false);
+    const longPress = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    const pressStart = useRef<{ x: number; y: number } | undefined>(undefined);
+    const suppressTap = useRef(false);
+    const cancelPress = () => { clearTimeout(longPress.current); longPress.current = undefined; pressStart.current = undefined; };
+    useEffect(() => cancelPress, []);
+    const showMenu = (node: HTMLElement, withPin: boolean) => {
+        const rect = node.getBoundingClientRect();
+        setMenuWithPin(withPin);
+        setAnchor({ top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - (withPin ? 136 : 96))), right: Math.max(8, window.innerWidth - rect.right) });
+    };
+    const rowTitle = useRef<HTMLButtonElement>(null);
     const trigger = useRef<HTMLButtonElement>(null);
     const menu = useRef<HTMLDivElement>(null);
     const input = useRef<HTMLInputElement>(null);
     const menuId = useId();
     const pinned = isSessionPinned(s);
     const label = s.title || "Untitled chat";
-    const close = (restore = true) => { setAnchor(undefined); if (restore) trigger.current?.focus(); };
+    const close = (restore = true) => { setAnchor(undefined); if (restore) (menuWithPin ? rowTitle : trigger).current?.focus(); };
     useEffect(() => {
         if (!anchor) return;
         menu.current?.querySelector<HTMLButtonElement>("button")?.focus();
@@ -40,27 +53,42 @@ export function ChatRow({ session: s, selected, open, pin, rename, remove }: {
     }, [anchor]);
     useEffect(() => { if (editing) { input.current?.focus(); input.current?.select(); } }, [editing]);
     const togglePin = async () => { setBusy(true); try { await pin(!pinned); } finally { setBusy(false); } };
-    const cancelRename = () => { setEditing(false); trigger.current?.focus(); };
+    const cancelRename = () => { setEditing(false); requestAnimationFrame(() => (menuWithPin ? rowTitle : trigger).current?.focus()); };
     const save = async () => {
         if (!title.trim() || busy) return;
         setBusy(true);
         try { await rename(title.trim()); cancelRename(); } finally { setBusy(false); }
     };
-    return <div className={`recent${selected ? " selected" : ""}`}>
+    return <div className={`recent${selected ? " selected" : ""}${anchor ? " menu-open" : ""}`}>
         {editing ? <form className="chat-rename" onSubmit={e => { e.preventDefault(); void save(); }}>
             <input ref={input} aria-label="Chat name" value={title} disabled={busy}
                 onChange={e => setTitle(e.target.value)} onKeyDown={e => { if (e.key === "Escape") { e.preventDefault(); cancelRename(); } }} />
             <button type="submit" aria-label="Save chat name" disabled={busy || !title.trim()}><Check size={14} /></button>
             <button type="button" aria-label="Cancel rename" onClick={cancelRename}><X size={14} /></button>
-        </form> : <button className="recent-title" title={s.title} onClick={open}>{label}</button>}
+        </form> : <button ref={rowTitle} className="recent-title" title={s.title} aria-haspopup="menu" aria-expanded={!!anchor && menuWithPin} aria-controls={anchor && menuWithPin ? menuId : undefined} onClick={() => {
+            if (suppressTap.current) { suppressTap.current = false; return; }
+            open();
+        }} onPointerDown={event => {
+            if (event.pointerType !== "touch" || !event.isPrimary) return;
+            cancelPress(); suppressTap.current = false;
+            pressStart.current = { x: event.clientX, y: event.clientY };
+            const node = event.currentTarget;
+            longPress.current = setTimeout(() => { cancelPress(); suppressTap.current = true; showMenu(node, true); }, 500);
+        }} onPointerMove={event => {
+            const start = pressStart.current;
+            if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) cancelPress();
+        }} onPointerUp={cancelPress} onPointerCancel={cancelPress} onPointerLeave={cancelPress}
+        onContextMenu={event => { event.preventDefault(); cancelPress(); suppressTap.current = true; showMenu(event.currentTarget, true); }}
+        onKeyDown={event => {
+            if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); showMenu(event.currentTarget, true); }
+        }}><HoverTitle text={label} /></button>}
         <button className={`recent-action chat-pin${pinned ? " is-pinned" : ""}`} disabled={busy}
             aria-label={`${pinned ? "Unpin" : "Pin"} ${label}`} aria-pressed={pinned} onClick={() => void togglePin()}><Pin size={15} /></button>
         <button ref={trigger} className="recent-action chat-menu-trigger" aria-label={`Actions for ${label}`}
             aria-haspopup="menu" aria-expanded={!!anchor} aria-controls={anchor ? menuId : undefined}
             onClick={() => {
                 if (anchor) { close(); return; }
-                const rect = trigger.current!.getBoundingClientRect();
-                setAnchor({ top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 96)), right: Math.max(8, window.innerWidth - rect.right) });
+                showMenu(trigger.current!, false);
             }}><Ellipsis size={16} /></button>
         {anchor && createPortal(<div className="chat-actions-menu" id={menuId} ref={menu} role="menu" aria-label={`Actions for ${label}`}
             style={{ top: anchor.top, right: anchor.right }} onBlur={event => {
@@ -73,6 +101,7 @@ export function ChatRow({ session: s, selected, open, pin, rename, remove }: {
                 const index = event.key === "ArrowDown" ? (i + 1) % items.length : event.key === "ArrowUp" ? (i - 1 + items.length) % items.length : event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : -1;
                 if (index >= 0) { event.preventDefault(); items[index]?.focus(); }
             }}>
+            {menuWithPin && <button role="menuitem" disabled={busy} onClick={() => { close(); void togglePin(); }}><Pin size={14} />{pinned ? "Unpin" : "Pin"}</button>}
             <button role="menuitem" onClick={() => { close(); setTitle(s.title); setEditing(true); }}><Pencil size={14} />Rename</button>
             <button role="menuitem" onClick={() => { close(); if (confirm(`Delete “${label}”? This cannot be undone.`)) void remove(); }}><Trash2 size={14} />Delete</button>
         </div>, document.body)}

@@ -1,13 +1,17 @@
-/* Chat-row actions only; no changes to the chat content width or gutters. */
+/* Hidden controls are out of flow so the title uses the full row. */
+.recent { position: relative; }
 .recent .recent-action {
     display: flex;
+    position: absolute;
+    right: 0;
     opacity: 0;
     pointer-events: none;
     background: transparent;
 }
 .recent:hover .recent-action,
 .recent:focus-within .recent-action,
-.recent .recent-action[aria-expanded="true"] {
+.recent.menu-open .recent-action {
+    position: static;
     opacity: 1;
     pointer-events: auto;
 }
@@ -36,4 +40,7 @@
 .chat-rename { display: flex; flex: 1; min-width: 0; gap: 2px; }
 .chat-rename input { width: 0; min-width: 0; flex: 1; padding: 4px; font-size: 13px; }
 .chat-rename button { padding: 4px; }
-@media (hover: none) { .recent .recent-action { opacity: 1; pointer-events: auto; } }
+@media (hover: none), (pointer: coarse) {
+    .recent .recent-action { display: none; }
+    .recent-title { -webkit-touch-callout: none; user-select: none; touch-action: pan-y; }
+}

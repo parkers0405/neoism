@@ -1,3 +1,4 @@
+import { useIdentity } from "./identity";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     createNeoismClient,
@@ -9,6 +10,7 @@ import { fonts, systemFontOptions } from "./generated/fonts";
 import { themeOptions, appearanceTokens, DEFAULT_GUI_THEME, resolveTheme } from "./appearance";
 import { isFxKind, scheduleFx } from "./fx";
 import type { ProviderConnectionSelection } from "./providerConnections";
+import { joinedDaemon, scopedAgentFetch } from "./serverConnections";
 import { loadAccounts, saveAccounts, loadPreferences, rememberedSession, rememberSession, errorMessage, type SlashCommand, type Preferences, serverScope, loadDeletedAccounts, saveDeletedAccounts } from "./types";
 import { SessionPinIndex, hydrateSessionPins, isSessionPinned } from "./sessionPins";
 import { mergePage, nextCursor } from "./state";
@@ -45,11 +47,29 @@ export function useAppController() {
         credentials.current.set(credentialScope, value);
         credentialsChanged(n => n + 1);
     };
+    const serverCredential = (server: string) => {
+        const endpoint = serverScope(server);
+        if (credentials.current.has(endpoint)) return credentials.current.get(endpoint)!;
+        for (const [scope, credential] of credentials.current) {
+            if (joinedDaemon(scope) === endpoint) return credential;
+        }
+        return "";
+    };
+    const forgetServer = (server: string) => {
+        const endpoint = serverScope(server);
+        for (const scope of credentials.current.keys()) {
+            if (scope === endpoint || joinedDaemon(scope) === endpoint) credentials.current.delete(scope);
+        }
+        credentialsChanged(n => n + 1);
+    };
     const saveSettings = (next: Preferences, suppliedToken: string) => {
         const destination = serverScope(next.server);
         // Defend old/batched hosts as well as the Settings UI: an unchanged
         // source credential is not consent to send it to a different endpoint.
-        if (destination === credentialScope || suppliedToken !== token || !suppliedToken)
+        // Explicit workspace selection on the SAME daemon is the exception:
+        // both scoped proxy paths authenticate that daemon's device bearer.
+        const sameDaemon = joinedDaemon(destination) !== undefined && joinedDaemon(destination) === joinedDaemon(credentialScope);
+        if (destination === credentialScope || sameDaemon || suppliedToken !== token || !suppliedToken)
             credentials.current.set(destination, suppliedToken);
         setPrefs(next);
         credentialsChanged(n => n + 1);
@@ -153,10 +173,12 @@ export function useAppController() {
                 createHttpTransport({
                     baseUrl: prefs.server,
                     token: token || undefined,
+                    ...(joinedDaemon(prefs.server) ? { fetch: scopedAgentFetch(prefs.server) } : {}),
                 }),
             ),
         [prefs.server, token],
     );
+    const identityName = useIdentity(client, prefs.name);
     const pinIndex = useMemo(() => new SessionPinIndex(prefs.server), [client]);
     const pinFlights = useMemo(() => new Set<string>(), [client]);
     const deletedSessions = useMemo(() => new Set<string>(), [client]);
@@ -422,6 +444,9 @@ export function useAppController() {
     };
     const metadataFlights = useRef(new Map<string, Promise<void>>());
     const creations = useRef(new Map<string, Promise<string>>());
+    // Session-local state for drill-downs belongs to the existing tab, not a new
+    // tab. Keep the actual objects so pending updates and File attachments survive.
+    const transcriptVisits = useRef(new Map<TabState, Map<string, Map<string | undefined, ChatTab>>>());
     const activateTab = (key: string, push = true) => {
         const target = tabState.tabs.find(t => t.key === key);
         if (!target) return;
@@ -451,6 +476,22 @@ export function useAppController() {
         }
         activateTab(target.key, push);
     });
+    const openChildSession = useEventCallback((sessionId: string, push: boolean = true) => {
+        const index = tabState.tabs.findIndex(t => t.key === tabState.active);
+        const current = tabState.tabs[index];
+        if (!current || current.sessionId === sessionId) return;
+        let visits = transcriptVisits.current.get(tabState);
+        if (!visits) transcriptVisits.current.set(tabState, visits = new Map());
+        let history = visits.get(current.key);
+        if (!history) visits.set(current.key, history = new Map());
+        history.set(current.sessionId, current);
+        const target = history.get(sessionId) || {
+            ...localTab(), key: current.key, sessionId,
+            metadata: sessions.find(s => s.id === sessionId) || children.find(s => s.id === sessionId),
+        };
+        tabState.tabs[index] = target;
+        activateTab(target.key, push);
+    });
     useEffect(() => {
         const restore = (fromHistory = false) => {
             const params = new URLSearchParams(window.location.hash.slice(1));
@@ -462,7 +503,11 @@ export function useAppController() {
                 return;
             }
             const key = destination === prefs.server ? params.get('tab') : null;
-            if (key && tabState.tabs.some(t => t.key === key)) activateTab(key, false);
+            if (key && tabState.tabs.some(t => t.key === key)) {
+                activateTab(key, false);
+                const session = params.get('session');
+                if (session) openChildSession(session, false);
+            }
             else { const session = rememberedSession(prefs.server); if (session) openSession(session, false); else activateTab(tabState.active, false); }
         };
         const onHistory = () => restore(true);
@@ -471,6 +516,7 @@ export function useAppController() {
     }, [client]);
     const newChat = () => { const target = localTab(); tabState.tabs.push(target); activateTab(target.key); };
     const closeTab = (key: string) => {
+        transcriptVisits.current.get(tabState)?.delete(key);
         const next = removeTab(tabState, key); tabState.tabs = next.tabs;
         if (tabState.active !== next.active) activateTab(next.active);
         else persistTabs();
@@ -497,7 +543,7 @@ export function useAppController() {
             target.sessionId = s.id; target.metadata = s; persistTabs();
             if (currentClient.current === client) {
                 setSessions(old => recentSessions([...old.filter(x => x.id !== s.id), s], recentFilter.current.directory, recentFilter.current.search));
-                if (tabState.active === target.key) { chat.markCreatedSession(s.id); selectedId.current = s.id; updateId(s.id); setActive(s); rememberSession(prefs.server, s.id, false, target.key); }
+                if (tabState.tabs.find(t => t.key === tabState.active) === target) { chat.markCreatedSession(s.id); selectedId.current = s.id; updateId(s.id); setActive(s); rememberSession(prefs.server, s.id, false, target.key); }
             }
             return s.id;
         }).finally(() => creations.current.delete(target.key));
@@ -516,11 +562,11 @@ export function useAppController() {
             const updated = await client.sessions.update(session, patch);
             if (!current()) return;
             target.metadata = mergeSession(target.metadata, updated); persistTabs();
-            if (tabState.active === target.key) setActive(old => mergeSession(old, updated));
+            if (tabState.tabs.find(t => t.key === tabState.active) === target) setActive(old => mergeSession(old, updated));
             setSessions(old => recentSessions([...old.filter(s => s.id !== updated.id), updated], recentFilter.current.directory, recentFilter.current.search));
         });
         patchQueues.current.set(target.key, request);
-        return request.catch(e => { if (current() && tabState.active === target.key) notify(errorMessage(e)); if (rethrow) throw e; });
+        return request.catch(e => { if (current() && tabState.tabs.find(t => t.key === tabState.active) === target) notify(errorMessage(e)); if (rethrow) throw e; });
     };
     const setDirectory = async (value: string): Promise<void> => {
         const target = tab;
@@ -533,7 +579,7 @@ export function useAppController() {
         }
         const dir = tabDirectory(target);
         await hydrate(dir).promise;
-        if (currentClient.current === client && tabState.active === target.key && tabDirectory(target) === dir) applySelection(target, dir);
+        if (currentClient.current === client && tabState.tabs.find(t => t.key === tabState.active) === target && tabDirectory(target) === dir) applySelection(target, dir);
     };
     const select = (key: "model" | "agent" | "thinking" | "connectionId", value: string) => {
         tab.explicit[key] = value;
@@ -665,12 +711,12 @@ export function useAppController() {
         const slash = model.indexOf('/');
         await client.sessions.prompt(session, {
             messageId: chat.beginPrompt(session),
-            ...(parts.length ? { parts: [{ type: 'text' as const, text }, ...parts] } : { prompt: text }), agent: agent || undefined, author: prefs.name, variant: wireVariant(target, thinking),
+            ...(parts.length ? { parts: [{ type: 'text' as const, text }, ...parts] } : { prompt: text }), agent: agent || undefined, author: identityName === "You" ? undefined : identityName, variant: wireVariant(target, thinking),
             ...(slash > 0 ? { model: { providerId: model.slice(0, slash), modelId: model.slice(slash + 1), variant: wireVariant(target, thinking), connectionId: connectionId || undefined } } : {}),
         });
         if (target.draft === originalDraft) target.draft = '';
         target.files = target.files?.filter(f => !files.includes(f)); persistTabs();
-        if (currentClient.current === client && tabState.active === target.key) chat.setState(s => ({ ...s, busy: true }), session);
+        if (currentClient.current === client && tabState.tabs.find(t => t.key === tabState.active) === target) chat.setState(s => ({ ...s, busy: true }), session);
     };
     useEffect(() => {
         if (!isFxKind(effect)) return;
@@ -928,9 +974,14 @@ export function useAppController() {
             : picker === "agent"
               ? (catalogPending.scope === catalogScope ? agents : [])
               : picker === "thinking"
-                ? ["", "minimal", "low", "medium", "high", "xhigh", ...(model.endsWith("/gpt-5.6") ? ["ultra"] : [])].map(
-                      (v) => ({ id: v, label: v || "Provider default" }),
-                  )
+                ? [
+                      { id: "", label: "none", description: "Use model default reasoning" },
+                      { id: "low", label: "low", description: "Fastest reasoning" },
+                      { id: "medium", label: "medium", description: "Balanced reasoning" },
+                      { id: "high", label: "high", description: "More reasoning" },
+                      { id: "xhigh", label: "xhigh", description: "Maximum reasoning" },
+                      ...(model.includes("gpt-5.6") ? [{ id: "ultra", label: "ultra", description: "Multi-agent reasoning (GPT-5.6)" }] : []),
+                  ]
                 : (picker === "subagents" ? children : sessions)
                       .map((s) => ({
                           id: s.id,
@@ -967,12 +1018,15 @@ export function useAppController() {
         onDraftChange: (text: string) => { tab.draft = text; persistTabs(); },
         onCycleAgent: () => { if (agents.length) setAgent(agents[(agents.findIndex(a => a.id === agent) + 1) % agents.length].id); },
         providerCatalog,
+        identityName,
         activityPalette: resolveTheme(prefs.theme).colors,
         prefs,
         setPrefs,
         token,
         setToken,
         saveSettings,
+        forgetServer,
+        serverCredential,
         settings,
         setSettings,
         view,
@@ -1017,6 +1071,7 @@ export function useAppController() {
         renameSession,
         deleteSession,
         openSession,
+        openChildSession,
         newChat,
         perform,
         send,

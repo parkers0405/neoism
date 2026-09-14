@@ -41,8 +41,12 @@ an HTML GUI response carrying the server's `X-Neoism-Agent-Gui: 1` marker.
 
 ## Asset installation
 
-Build the frontend separately (see the GUI package's build scripts). The Rust
-server never installs npm packages or builds frontend sources automatically.
+Official releases include the built GUI; standard installs and self-updates
+need neither Node/npm nor `NEOISM_AGENT_GUI_ROOT`. Release CI builds the SDK and
+GUI with `npm ci` and `npm run gui:build`, then validates and stages the entire
+dist using `scripts/package-agent-gui.mjs`. Source `./install.sh` builds and
+installs it automatically, including when the workspace web UI is disabled.
+The Rust server never installs npm packages or builds frontend sources at runtime.
 It serves `index.html`, static assets with known inert MIME types, and the SPA
 index for extensionless client routes. Missing asset files return 404.
 
@@ -50,10 +54,13 @@ Asset discovery order:
 
 1. `NEOISM_AGENT_GUI_ROOT` — explicit dist directory containing `index.html`.
    An invalid override is an error, never silently replaced by another root.
-2. Relative to the running executable: `agent-gui`,
+2. Managed resources relative to the executable: `web/agent-gui`,
+   `../Resources/web/agent-gui` (macOS `.app`),
+   `../share/neoism/web/agent-gui` (prefix installs).
+3. Legacy standalone locations relative to the executable: `agent-gui`,
    `share/neoism-agent/agent-gui`, `../share/neoism-agent/agent-gui`,
    `../share/agent-gui`.
-3. Source checkout: `neoism-agent/sdk/typescript/packages/gui/dist` (relative
+4. Source checkout: `neoism-agent/sdk/typescript/packages/gui/dist` (relative
    to the server crate's compile-time manifest directory).
 
 Normal `serve` and the library's standard `listen()` also discover assets
@@ -64,6 +71,34 @@ Only point the override at a trusted **built dist**, never a workspace or home
 directory: its supported static files are deliberately public. Canonical-path
 checks reject symlinks outside the root, dotfiles, traversal, and ambiguous
 encoded/platform paths. GUI assets are not embedded in the Rust executable.
+
+### Packaging/update contract
+
+- Linux/macOS archives: `web/agent-gui/index.html` beside all three executables.
+- macOS app/DMG: `Neoism.app/Contents/Resources/web/agent-gui/index.html`.
+- Windows MSI: `web/agent-gui/**` is included by the existing WiX recursive
+  `web/**` file group. `install.ps1` installs that MSI; it does not copy an
+  allowlist of individual resources.
+- Docker: a Node build stage supplies `/usr/local/bin/web/agent-gui`; the
+  runtime image contains only built static resources, not Node or sources.
+
+The GUI deliberately lives **inside `web`**: existing Unix loose-stack updates
+already copy that whole tree; macOS bundle updates replace the whole app;
+Windows MSI and portable self-updates also include the recursive web tree.
+Linux now uses the shared staged, hash-verified, rollback-capable loose-stack
+transaction instead of replacing executables before validating resources.
+This works even when the update is initiated by a pre-fix executable.
+Do not move it to a new sibling component without upgrading those transactions.
+The download installer validates both indexes before replacement and rolls back
+all moved components on ordinary installation failure. A hard kill or power
+loss can leave `.neoism-install.*` recovery directories; it is not a globally
+atomic multi-file operation.
+
+After updating, restart the existing agent supervisor/full Neoism stack so the
+new resolver runs. Releases through v0.7.102 omitted the agent GUI; rerunning an
+old installer against the same incomplete archive cannot repair that omission.
+New download installers reject incomplete archives before changing an existing
+installation. A corrected release must contain both the resolver and resources.
 
 ## Authentication, management, and skill writes
 

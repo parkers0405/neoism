@@ -25,7 +25,7 @@ mod host;
 mod input;
 mod ipc;
 mod layout;
-#[cfg(any(target_os = "macos", all(test, unix)))]
+#[cfg(unix)]
 mod macos_update;
 mod mashup;
 mod neoism;
@@ -1288,8 +1288,6 @@ fn self_update(
     let repo =
         std::env::var("NEOISM_REPO").unwrap_or_else(|_| "parkers0405/neoism".to_string());
     let repo = repo.as_str();
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    const BINS: [&str; 3] = ["neoism", "neoism-workspace-daemon", "neoism-agent"];
 
     let goos = match std::env::consts::OS {
         "linux" => "linux",
@@ -1420,11 +1418,6 @@ fn self_update(
     // same dir -> same filesystem -> rename works even over the running bin).
     #[cfg(all(not(windows), not(target_os = "macos")))]
     let exe = std::env::current_exe()?;
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let dir = exe
-        .parent()
-        .ok_or("cannot resolve install directory")?
-        .to_path_buf();
     #[cfg(not(windows))]
     let extracted = tmp.join(format!("neoism-{goos}-{goarch}"));
 
@@ -1456,41 +1449,9 @@ fn self_update(
     #[cfg(all(not(windows), not(target_os = "macos")))]
     reporter.progress(Some(85), "Installing Neoism");
     #[cfg(all(not(windows), not(target_os = "macos")))]
-    for bin in BINS {
-        let src = extracted.join(bin);
-        if !src.exists() {
-            return Err(format!("`{bin}` missing from {asset}").into());
-        }
-        let dst = dir.join(bin);
-        let staged = dir.join(format!(".{bin}.new"));
-        std::fs::copy(&src, &staged).map_err(|e| {
-            format!(
-                "cannot write to {} ({e}) — try `sudo neoism update`",
-                dir.display()
-            )
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
-        }
-        std::fs::rename(&staged, &dst)?;
-        println!("  ✓ {}", dst.display());
-    }
-
-    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
-        let web_src = extracted.join("web");
-        if !web_src.join("index.html").is_file() {
-            return Err(format!("`web/index.html` missing from {asset}").into());
-        }
-        let staged = dir.join(".web.new");
-        let _ = std::fs::remove_dir_all(&staged);
-        copy_directory(&web_src, &staged)?;
-        let destination = dir.join("web");
-        let _ = std::fs::remove_dir_all(&destination);
-        std::fs::rename(&staged, &destination)?;
-        println!("  ✓ {}", destination.display());
+        macos_update::install_unix_loose(&exe, &extracted)?;
+        println!("  ✓ installed complete stack and web resources");
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1522,24 +1483,6 @@ fn self_update(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?;
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn copy_directory(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> std::io::Result<()> {
-    std::fs::create_dir_all(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let target = destination.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_directory(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), target)?;
-        }
     }
     Ok(())
 }

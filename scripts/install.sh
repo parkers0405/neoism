@@ -80,27 +80,57 @@ fi
 
 say "Extracting to ${BIN_DIR}"
 tar -xzf "$tmp/$asset" -C "$tmp"
-mkdir -p "$BIN_DIR"
+payload="$tmp/neoism-${goos}-${goarch}"
+# Validate the complete payload before touching any installed file. Do not find
+# arbitrary binaries inside the .app or mix them with another resource tree.
 for b in "${BINARIES[@]}"; do
-  src="$(find "$tmp" -type f -name "$b" -perm -u+x | head -1)"
-  [ -n "$src" ] || err "binary '$b' not found in $asset"
-  # Stage beside the destination, then rename. This never leaves a partially
-  # written executable if the download/install is interrupted, and Unix can
-  # safely replace the path while an older process still has its image mapped.
-  staged="$BIN_DIR/.$b.new"
-  install -m 0755 "$src" "$staged"
-  mv -f "$staged" "$BIN_DIR/$b"
-  printf '   %s\n' "$BIN_DIR/$b"
+  [ -f "$payload/$b" ] && [ -x "$payload/$b" ] || err "binary '$b' not found in $asset"
 done
-
-web_index="$(find "$tmp" -type f -path '*/web/index.html' | head -1)"
-[ -n "$web_index" ] || err "web/index.html not found in $asset"
-web_src="$(dirname "$web_index")"
-rm -rf "$BIN_DIR/.web.new"
-cp -R "$web_src" "$BIN_DIR/.web.new"
-rm -rf "$BIN_DIR/web"
-mv "$BIN_DIR/.web.new" "$BIN_DIR/web"
-printf '   %s\n' "$BIN_DIR/web"
+[ -f "$payload/web/index.html" ] || err "web/index.html not found in $asset"
+[ -f "$payload/web/agent-gui/index.html" ] || err "agent GUI missing from $asset; this release is incomplete"
+mkdir -p "$BIN_DIR"
+transaction="$(mktemp -d "$BIN_DIR/.neoism-install.XXXXXX")"
+mkdir "$transaction/new" "$transaction/old"
+components=("${BINARIES[@]}" web)
+moved=()
+committed=0
+cleanup_install() {
+  local result=$? i component
+  trap - EXIT INT TERM
+  if [ "$committed" -eq 0 ]; then
+    for ((i=${#moved[@]}-1; i>=0; i--)); do
+      component="${moved[$i]}"
+      if [ -e "$transaction/old/$component" ] || [ -L "$transaction/old/$component" ]; then
+        rm -rf "$BIN_DIR/$component"
+        mv "$transaction/old/$component" "$BIN_DIR/$component" || {
+          warn "Rollback failed; recovery files remain in $transaction"
+          exit 1
+        }
+      elif [ ! -e "$transaction/new/$component" ]; then
+        rm -rf "$BIN_DIR/$component"
+      fi
+    done
+  fi
+  rm -rf "$transaction" "$tmp"
+  exit "$result"
+}
+trap cleanup_install EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+for b in "${BINARIES[@]}"; do
+  install -m 0755 "$payload/$b" "$transaction/new/$b"
+done
+# Includes agent-gui and every hashed/static asset; never merge old/new trees.
+cp -R "$payload/web" "$transaction/new/web"
+for component in "${components[@]}"; do
+  moved+=("$component")
+  if [ -e "$BIN_DIR/$component" ] || [ -L "$BIN_DIR/$component" ]; then
+    mv "$BIN_DIR/$component" "$transaction/old/$component"
+  fi
+  mv "$transaction/new/$component" "$BIN_DIR/$component"
+  printf '   %s\n' "$BIN_DIR/$component"
+done
+committed=1
 
 say "Done. Neoism ${VERSION} installed."
 case ":$PATH:" in

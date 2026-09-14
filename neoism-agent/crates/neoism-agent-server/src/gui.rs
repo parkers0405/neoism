@@ -22,10 +22,7 @@ impl GuiRoot {
         let mut candidates = Vec::new();
         if let Ok(exe) = std::env::current_exe() {
             if let Some(bin) = exe.parent() {
-                candidates.push(bin.join("agent-gui"));
-                candidates.push(bin.join("share/neoism-agent/agent-gui"));
-                candidates.push(bin.join("../share/neoism-agent/agent-gui"));
-                candidates.push(bin.join("../share/agent-gui"));
+                candidates.extend(Self::installed_candidates(bin));
             }
         }
         candidates.push(
@@ -37,7 +34,21 @@ impl GuiRoot {
                 return Ok(root);
             }
         }
-        anyhow::bail!("GUI dist not found. Build neoism-agent/sdk/typescript/packages/gui, or set NEOISM_AGENT_GUI_ROOT to its dist directory (containing index.html). Searched: {}", candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "))
+        anyhow::bail!("GUI dist not found. Reinstall a complete Neoism release and restart the agent supervisor. For source builds, build neoism-agent/sdk/typescript/packages/gui, or set NEOISM_AGENT_GUI_ROOT to its dist directory (containing index.html). Searched: {}", candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "))
+    }
+
+    fn installed_candidates(bin: &Path) -> Vec<PathBuf> {
+        // Keep the GUI inside the existing recursively installed/updated web
+        // resource tree, including updates performed by older executables.
+        [
+            "web/agent-gui",
+            "../Resources/web/agent-gui", // macOS app bundle
+            "../share/neoism/web/agent-gui", // source/prefix installs
+            "agent-gui",
+            "share/neoism-agent/agent-gui",
+            "../share/neoism-agent/agent-gui",
+            "../share/agent-gui",
+        ].into_iter().map(|path| bin.join(path)).collect()
     }
 
     fn validate(path: PathBuf) -> anyhow::Result<Self> {
@@ -208,6 +219,32 @@ async fn serve_gui(
 mod tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn installed_layouts_serve_gui_without_source_checkout_or_override() {
+        for (bin_dir, gui_dir) in [
+            ("bin", "bin/web/agent-gui"),
+            ("Neoism.app/Contents/MacOS", "Neoism.app/Contents/Resources/web/agent-gui"),
+            ("bin", "share/neoism/web/agent-gui"),
+        ] {
+            let temp = std::env::temp_dir().join(format!("neoism-gui-layout-{}", rand::random::<u64>()));
+            let bin = temp.join(bin_dir);
+            let gui = temp.join(gui_dir);
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(gui.join("assets")).unwrap();
+            std::fs::write(gui.join("index.html"), "<!doctype html>installed GUI").unwrap();
+            std::fs::write(gui.join("assets/app.js"), "export default 'installed';").unwrap();
+            let root = GuiRoot::installed_candidates(&bin).into_iter()
+                .find_map(|path| GuiRoot::validate(path).ok()).expect("installed GUI must resolve");
+            assert_eq!(root.0, gui.canonicalize().unwrap());
+            let app = with_gui(Router::new().fallback(|| async { StatusCode::UNAUTHORIZED }), root);
+            for (path, expected) in [("/", 200), ("/sessions/abc", 200), ("/assets/app.js", 200), ("/assets/missing.js", 404), ("/v2/unknown", 401)] {
+                let response = app.clone().oneshot(Request::builder().uri(path).body(Body::empty()).unwrap()).await.unwrap();
+                assert_eq!(response.status().as_u16(), expected, "{bin_dir}: {path}");
+            }
+            std::fs::remove_dir_all(temp).unwrap();
+        }
+    }
 
     #[test]
     fn paths_are_unambiguous() {

@@ -91,7 +91,7 @@ try {
         Assert-NoFixtureProcesses $directory
         # Managed: same installed ProductCode/version must really repair files.
         # Portable: installing only into the managed path must never pass.
-        foreach ($name in @($script:BinaryNames) + @('web\index.html')) {
+        foreach ($name in @($script:BinaryNames) + @('web\index.html', 'web\agent-gui\index.html')) {
             [IO.File]::AppendAllText((Join-Path $directory $name), 'native-updater-old-copy-fixture')
         }
         $before = Get-PayloadManifest $directory
@@ -100,7 +100,7 @@ try {
         [IO.File]::WriteAllText($marker, $markerText)
         $markers += $marker
         $receipt = Invoke-NativeWorker $mode $directory
-        foreach ($name in @($script:BinaryNames) + @('web\index.html')) {
+        foreach ($name in @($script:BinaryNames) + @('web\index.html', 'web\agent-gui\index.html')) {
             $hash = (Get-FileHash -LiteralPath (Join-Path $directory $name) -Algorithm SHA256).Hash
             Assert-Native ($hash -ne $before[$name] -and $hash -eq $script:CandidateManifest[$name]) "$mode $name was not restored in place"
         }

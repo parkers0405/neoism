@@ -195,6 +195,16 @@ jobs:
           fi
           test -f neoism-frontend/web/dist/index.html
 
+      - name: Build and validate the production agent GUI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix neoism-agent/sdk/typescript ci
+          npm --prefix neoism-agent/sdk/typescript run gui:build
+          node scripts/package-agent-gui.mjs neoism-agent/sdk/typescript/packages/gui/dist neoism-frontend/web/dist/agent-gui
+          node --test scripts/package-agent-gui.test.mjs
+          if [ "$RUNNER_OS" = "Linux" ]; then python3 scripts/test-install.py; fi
+
       - name: Build the stack (release)
         # Unset CI: `fff-search`'s build script demands Zig when CI is set,
         # but it builds fine natively (exactly like the local build).
@@ -261,7 +271,10 @@ jobs:
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object { $_.name -eq "neoism" }).version
           $bin = (Resolve-Path "target/${{ matrix.target }}/release").Path
+          Remove-Item (Join-Path $bin "web") -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item neoism-frontend/web/dist (Join-Path $bin "web") -Recurse
+          node scripts/package-agent-gui.mjs (Join-Path $bin "web/agent-gui")
+          if ($LASTEXITCODE -ne 0) { throw "agent GUI payload validation failed" }
           $fixtureBin = Join-Path $env:RUNNER_TEMP "neoism-upgrade-fixture"
           New-Item -ItemType Directory -Force $fixtureBin | Out-Null
           Copy-Item "$bin\neoism.exe", "$bin\neoism-workspace-daemon.exe", "$bin\neoism-agent.exe" $fixtureBin
@@ -351,6 +364,7 @@ jobs:
           cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "stage/$OUT/"
           cp -a neoism-frontend/web/dist "stage/$OUT/web"
           test -f "stage/$OUT/web/index.html"
+          node scripts/package-agent-gui.mjs "stage/$OUT/web/agent-gui"
           if [[ "${{ matrix.goos }}" == "darwin" ]]; then
             # Neoism.app: double-clickable + Finder "Open With" candidate for
             # code/markdown/json (CFBundleDocumentTypes in misc/macos/Info.plist).

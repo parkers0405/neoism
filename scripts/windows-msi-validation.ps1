@@ -39,6 +39,7 @@ foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent
   if (-not (Test-Path (Join-Path $installDir $binary))) { throw "$binary was not installed" }
 }
 if (-not (Test-Path (Join-Path $installDir "web\index.html"))) { throw "web UI was not installed" }
+if (-not (Test-Path (Join-Path $installDir "web\agent-gui\index.html"))) { throw "agent GUI was not installed" }
 Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--version' "$evidence/version" 30
 $version = (Get-Content "$evidence/version.stdout.log" | Out-String).Trim()
 if ($version -notmatch "neoism") { throw "installed executable did not report its version" }

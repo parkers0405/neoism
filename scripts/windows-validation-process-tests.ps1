@@ -24,4 +24,32 @@ Assert-Equal $script:reads 1 'getter read once'
 $inaccessible = [pscustomobject]@{}
 $inaccessible | Add-Member ScriptProperty Path { throw 'Process exited or access denied' }
 Assert-Equal (Test-InstalledProcess $inaccessible $root) $false 'unavailable getter'
+# Mock only process launching; exercise cleanup's real exit-code/identity logic.
+$script:launches = 0
+function Start-Process {
+    param($FilePath, $ArgumentList, [switch]$PassThru, [switch]$Wait,
+          [switch]$NoNewWindow, $RedirectStandardOutput, $RedirectStandardError)
+    $script:launches++
+    Assert-Equal $FilePath 'taskkill.exe' 'cleanup executable'
+    return [pscustomobject]@{ ExitCode = 1 }
+}
+$process = [pscustomobject]@{ Id = 123; HasExited = $false; Exits = $true }
+$process | Add-Member ScriptMethod Refresh {}
+$process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $this.Exits }
+$global:LASTEXITCODE = 0
+Stop-ValidationProcessTree -Process $process
+Assert-Equal $global:LASTEXITCODE 0 'taskkill failure does not leak into CI exit'
+Assert-Equal $script:launches 1 'cleanup launched once'
+$process.HasExited = $true
+Stop-ValidationProcessTree -Process $process
+Assert-Equal $script:launches 1 'already exited process needs no taskkill'
+$process.HasExited = $false
+$process.Exits = $false
+$failed = $false
+try { Stop-ValidationProcessTree -Process $process } catch {
+    if ($_ -notmatch 'still running') { throw }
+    $failed = $true
+}
+Assert-Equal $failed $true 'surviving process fails cleanup'
+Remove-Item Function:Start-Process
 'PASS: installed process cleanup regression tests'

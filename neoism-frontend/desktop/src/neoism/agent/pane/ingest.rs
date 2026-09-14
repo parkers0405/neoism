@@ -543,6 +543,7 @@ impl NeoismAgentPane {
                     changed = true;
                 }
                 AgentSessionUpdate::SessionMetadataUpdated {
+                    title,
                     agent,
                     model,
                     connection_id,
@@ -553,6 +554,9 @@ impl NeoismAgentPane {
                             .session_cache
                             .entry(stream_session_id.clone())
                             .or_insert_with(CachedAgentSession::live_only);
+                        if let Some(title) = title {
+                            cached.state.title = Some(title);
+                        }
                         if let Some(agent) = agent {
                             cached.state.agent = Some(agent);
                         }
@@ -566,6 +570,9 @@ impl NeoismAgentPane {
                             cached.state.thinking = thinking;
                         }
                         continue;
+                    }
+                    if let Some(title) = title {
+                        self.session_title = Some(title);
                     }
                     if let Some(agent) = agent {
                         self.agent = Some(agent);
@@ -1298,6 +1305,7 @@ impl NeoismAgentPane {
             remaining -= 1;
             match self.background_rx.try_recv() {
                 Ok(NeoismAgentBackgroundUpdate::PromptDispatched {
+                    session_title,
                     origin_session_id,
                     origin_draft_id,
                     session_id,
@@ -1320,6 +1328,7 @@ impl NeoismAgentPane {
                     if is_active_origin {
                         if origin_session_id.is_none() {
                             self.session_id = Some(session_id.clone());
+                            self.session_title = session_title;
                             self.parent_session_id = None;
                             self.session_tree_root_id = Some(session_id.clone());
                             self.side_panel
@@ -1346,6 +1355,7 @@ impl NeoismAgentPane {
                             .entry(cache_session_id)
                             .or_insert_with(CachedAgentSession::live_only);
                         if origin_session_id.is_none() {
+                            cached.state.title = session_title;
                             cached.state.parent_id = None;
                         }
                         if let Some(echo) = transcript_echo {
@@ -1669,6 +1679,7 @@ impl NeoismAgentPane {
                         std::mem::take(&mut cached.timeline_history);
                     timeline_history.oldest_loaded_cursor = oldest_cursor;
                     if active {
+                        self.session_title = state.title;
                         self.messages = merged;
                         self.timeline_history = timeline_history;
                         self.rebase_current_turn_trace();

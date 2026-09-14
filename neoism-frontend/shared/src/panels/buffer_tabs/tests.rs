@@ -109,6 +109,49 @@ fn neoism_agent_tabs_use_short_product_title() {
 }
 
 #[test]
+fn agent_session_titles_update_by_route_and_reset_hover() {
+    let mut tabs = BufferTabs::<()>::new();
+    let first = tabs.open_neoism_agent(41);
+    let second = tabs.open_neoism_agent(42);
+    tabs.set_visible(true);
+    tabs.set_hover(Some(TabHit::Activate(first)));
+    assert!(tabs.set_neoism_agent_title(41, "  Fix the\nworkspace tabs  "));
+    assert_eq!(tabs.tabs()[first].title, "Fix the workspace tabs");
+    assert_eq!(tabs.tabs()[second].title, "Neoism 2");
+    assert!(!tabs.set_neoism_agent_title(41, "Fix the workspace tabs"));
+    assert!(!tabs.set_neoism_agent_title(99, "Missing"));
+    tabs.title_hover_overflow = true;
+    assert!(tabs.is_animating());
+    tabs.clear_hover_immediate();
+    assert!(!tabs.is_animating());
+    assert!(tabs.title_hover_started.is_none());
+    assert!(tabs.set_neoism_agent_title(41, ""));
+    assert_eq!(tabs.tabs()[first].title, "Neoism");
+}
+
+#[test]
+fn agent_titles_are_compact_without_restricting_file_titles() {
+    assert_eq!(BufferTabs::<()>::agent_title_width(400.0, true, 1.0), 140.0);
+    assert_eq!(BufferTabs::<()>::agent_title_width(400.0, true, 2.0), 280.0);
+    assert_eq!(
+        BufferTabs::<()>::agent_title_width(400.0, false, 1.0),
+        400.0
+    );
+    assert_eq!(BufferTabs::<()>::agent_title_width(30.0, true, 1.0), 30.0);
+}
+
+#[test]
+fn title_hover_matches_web_delay_and_alternating_travel() {
+    let offset = |elapsed| BufferTabs::<()>::title_hover_offset(elapsed, 70.0, 1.0);
+    assert_eq!(offset(0.59), None);
+    assert_eq!(offset(0.6), Some(0.0));
+    assert!((offset(1.6).unwrap() - 35.0).abs() < 0.001);
+    assert_eq!(offset(2.5), Some(70.0));
+    assert!((offset(3.6).unwrap() - 35.0).abs() < 0.001);
+    assert_eq!(offset(4.5), Some(0.0));
+}
+
+#[test]
 fn long_tab_title_is_ellipsized_within_its_pixel_budget() {
     let fitted = BufferTabs::<()>::fit_title(
         "A very long Monocraft EPUB filename that must stay inside its tab.epub",

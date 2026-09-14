@@ -21,6 +21,8 @@ impl<A> BufferTabs<A> {
             tear_out_anim: None,
             hover: None,
             hover_anim_started: None,
+            title_hover_started: None,
+            title_hover_overflow: false,
             hover_from: None,
             hover_to: None,
             focused: false,
@@ -74,6 +76,14 @@ impl<A> BufferTabs<A> {
         }) {
             return true;
         }
+        if self.visible
+            && self.hover.is_some()
+            && self.title_hover_overflow
+            && self.title_hover_started.is_some()
+            && self.drag.is_none()
+        {
+            return true;
+        }
         self.drag.as_ref().is_some_and(|d| d.active)
     }
 
@@ -86,7 +96,11 @@ impl<A> BufferTabs<A> {
     pub fn set_path_icon(&mut self, path: &Path, icon: Option<String>) {
         let icon = icon.filter(|glyph| !glyph.trim().is_empty());
         for tab in &mut self.tabs {
-            if tab.path.as_ref().is_some_and(|p| p.as_os_str() == path.as_os_str()) {
+            if tab
+                .path
+                .as_ref()
+                .is_some_and(|p| p.as_os_str() == path.as_os_str())
+            {
                 tab.custom_icon = icon.clone();
             }
         }
@@ -111,6 +125,8 @@ impl<A> BufferTabs<A> {
         if !v {
             self.hover = None;
             self.hover_anim_started = None;
+            self.title_hover_started = None;
+            self.title_hover_overflow = false;
             self.hover_from = None;
             self.hover_to = None;
             self.focused = false;
@@ -130,6 +146,8 @@ impl<A> BufferTabs<A> {
         self.drag = None;
         self.hover = None;
         self.hover_anim_started = None;
+        self.title_hover_started = None;
+        self.title_hover_overflow = false;
         self.hover_from = None;
         self.hover_to = None;
         self.focused_index = self.active;
@@ -154,6 +172,8 @@ impl<A> BufferTabs<A> {
             self.hover_to = new_ix;
             self.hover_anim_started = Some(Instant::now());
         }
+        self.title_hover_started = hover.map(|_| Instant::now());
+        self.title_hover_overflow = false;
         self.hover = hover;
         true
     }
@@ -169,6 +189,8 @@ impl<A> BufferTabs<A> {
             || self.hover_to.is_some();
         self.hover = None;
         self.hover_anim_started = None;
+        self.title_hover_started = None;
+        self.title_hover_overflow = false;
         self.hover_from = None;
         self.hover_to = None;
         changed
@@ -201,6 +223,36 @@ impl<A> BufferTabs<A> {
         } else {
             false
         }
+    }
+
+    /// Update the session label without changing the route identity.
+    pub fn set_neoism_agent_title(&mut self, route_id: usize, title: &str) -> bool {
+        let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.neoism_agent_route_id == Some(route_id))
+        else {
+            return false;
+        };
+        if self.tabs[ix].title == title {
+            return false;
+        }
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        let title = if title.is_empty() {
+            "Neoism".to_owned()
+        } else {
+            title
+        };
+        if self.tabs[ix].title == title {
+            return false;
+        }
+        self.tabs[ix].title = title;
+        self.layout.clear();
+        if self.hover.map(tab_hit_index) == Some(ix) {
+            self.title_hover_started = Some(Instant::now());
+            self.title_hover_overflow = false;
+        }
+        true
     }
 
     /// Restore presentation-only state after a tab is recreated in another
@@ -417,9 +469,11 @@ impl<A> BufferTabs<A> {
     }
 
     pub fn find_path(&self, path: &Path) -> Option<usize> {
-        self.tabs
-            .iter()
-            .position(|t| t.path.as_ref().is_some_and(|p| p.as_os_str() == path.as_os_str()))
+        self.tabs.iter().position(|t| {
+            t.path
+                .as_ref()
+                .is_some_and(|p| p.as_os_str() == path.as_os_str())
+        })
     }
 
     pub fn active_path(&self) -> Option<&Path> {
@@ -533,6 +587,29 @@ impl<A> BufferTabs<A> {
         }
     }
 
+    pub(super) fn agent_title_width(title_width: f32, is_agent: bool, scale: f32) -> f32 {
+        if is_agent {
+            title_width.min(140.0 * scale)
+        } else {
+            title_width
+        }
+    }
+
+    /// Matches HoverTitle's delay, endpoint holds, and alternating travel.
+    pub(super) fn title_hover_offset(
+        elapsed: f32,
+        distance: f32,
+        scale: f32,
+    ) -> Option<f32> {
+        if elapsed < 0.6 || distance <= 0.0 {
+            return None;
+        }
+        let duration = (distance / (35.0 * scale)).max(2.0);
+        let phase = ((elapsed - 0.6) / duration) % 2.0;
+        let progress = if phase <= 1.0 { phase } else { 2.0 - phase };
+        Some(distance * ((progress - 0.15) / 0.7).clamp(0.0, 1.0))
+    }
+
     fn estimated_widths(&self) -> Vec<f32> {
         use unicode_width::UnicodeWidthStr;
         self.tabs
@@ -544,7 +621,11 @@ impl<A> BufferTabs<A> {
                     * self.scale
                     * 0.58;
                 Self::visual_tab_width(
-                    title_width,
+                    Self::agent_title_width(
+                        title_width,
+                        tab.neoism_agent_route_id.is_some(),
+                        self.scale,
+                    ),
                     !self.is_root_terminal_at(ix),
                     self.scale,
                 )
@@ -848,6 +929,8 @@ impl<A> BufferTabs<A> {
         self.drag = None;
         self.hover = None;
         self.hover_anim_started = None;
+        self.title_hover_started = None;
+        self.title_hover_overflow = false;
         self.hover_from = None;
         self.hover_to = None;
         self.tabs.remove(ix);
@@ -874,7 +957,11 @@ impl<A> BufferTabs<A> {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| new.display().to_string());
         for tab in &mut self.tabs {
-            if tab.path.as_ref().is_some_and(|p| p.as_os_str() == old.as_os_str()) {
+            if tab
+                .path
+                .as_ref()
+                .is_some_and(|p| p.as_os_str() == old.as_os_str())
+            {
                 tab.path = Some(new.clone());
                 tab.title = title.clone();
             }
@@ -960,6 +1047,8 @@ impl<A> BufferTabs<A> {
         self.drag = None;
         self.hover = None;
         self.hover_anim_started = None;
+        self.title_hover_started = None;
+        self.title_hover_overflow = false;
         self.hover_from = None;
         self.hover_to = None;
         let result = apply_buffer_tab_policy(
@@ -1075,6 +1164,8 @@ impl<A> BufferTabs<A> {
         let local_x = mouse_x - x_left + self.scroll_x;
         let slot_left: f32 = widths[..ix.min(widths.len())].iter().sum();
         let grab_offset = (local_x - slot_left).clamp(0.0, tab_width);
+        self.title_hover_started = Some(Instant::now());
+        self.title_hover_overflow = false;
         self.drag = Some(DragState {
             current_ix: ix,
             press_local_x: local_x,

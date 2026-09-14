@@ -194,7 +194,11 @@ impl<A: Copy> BufferTabs<A> {
                         .max(consts::ICON_FONT_SIZE * scale)
                 };
                 Self::visual_tab_geometry(
-                    title_width,
+                    Self::agent_title_width(
+                        title_width,
+                        tab.neoism_agent_route_id.is_some(),
+                        scale,
+                    ),
                     icon_width,
                     !self.is_root_terminal_at(ix),
                     scale,
@@ -551,9 +555,36 @@ impl<A: Copy> BufferTabs<A> {
             let icon_w = geometry.icon_width;
             let title_max_width = geometry.title_clip_width;
 
-            let title = Self::fit_title(&tab.title, title_max_width, |c| {
-                sugarloaf.char_advance(c, attrs, tab_font_size)
-            });
+            let full_title_width: f32 = tab
+                .title
+                .chars()
+                .map(|c| sugarloaf.char_advance(c, attrs, tab_font_size))
+                .sum();
+            let distance = (full_title_width - title_max_width).max(0.0);
+            let title_hovered = self.hover == Some(TabHit::Activate(ix))
+                && tab.neoism_agent_route_id.is_some()
+                && self.drag.is_none();
+            if self.hover.map(tab_hit_index) == Some(ix) {
+                self.title_hover_overflow = title_hovered && distance > 0.5;
+            }
+            let offset = if title_hovered && distance > 0.5 {
+                self.title_hover_started.and_then(|started| {
+                    Self::title_hover_offset(
+                        started.elapsed().as_secs_f32(),
+                        distance,
+                        scale,
+                    )
+                })
+            } else {
+                None
+            };
+            let title = if offset.is_some() {
+                std::borrow::Cow::Borrowed(tab.title.as_str())
+            } else {
+                Self::fit_title(&tab.title, title_max_width, |c| {
+                    sugarloaf.char_advance(c, attrs, tab_font_size)
+                })
+            };
 
             let text_x = icon_x + icon_w + icon_gap;
             let text_y = y_top + (strip_h - tab_font_size) / 2.0;
@@ -585,7 +616,7 @@ impl<A: Copy> BufferTabs<A> {
             let first_title_instance = sugarloaf.text_mut().instances().len();
             draw_text_with_occlusion(
                 sugarloaf,
-                text_x,
+                text_x - offset.unwrap_or(0.0),
                 text_y,
                 &title,
                 &title_opts,

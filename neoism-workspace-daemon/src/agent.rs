@@ -147,13 +147,12 @@ pub fn ensure_agent_server_started_with_services(
                     }
                 };
                 match tokio::time::timeout(Duration::from_secs(120), boot).await {
-                    Ok(Some(_)) => {
-                        tracing::warn!(target: "neoism_workspace_daemon::agent", "embedded Neoism Agent exited during startup; retrying");
+                    Ok(Some(result)) => {
+                        log_agent_server_exit("startup", result);
                     }
                     Ok(None) => {
                         tracing::info!(target: "neoism_workspace_daemon::agent", "embedded Neoism Agent ready");
-                        let _ = task.await;
-                        tracing::warn!(target: "neoism_workspace_daemon::agent", "embedded Neoism Agent exited; retrying");
+                        log_agent_server_exit("serving", task.await);
                     }
                     Err(_) => {
                         task.abort();
@@ -165,6 +164,27 @@ pub fn ensure_agent_server_started_with_services(
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
+}
+
+type AgentServerExit = Result<anyhow::Result<std::net::SocketAddr>, tokio::task::JoinError>;
+
+fn agent_server_exit_detail(result: AgentServerExit) -> String {
+    match result {
+        Ok(Ok(address)) => format!("serve loop returned normally ({address})"),
+        // Display alone drops the source chain (e.g. the actual Turso lock
+        // error underneath 'failed to open database'). Keep the whole chain.
+        Ok(Err(error)) => format!("{error:#}"),
+        Err(error) => format!("listen task failed: {error}"),
+    }
+}
+
+fn log_agent_server_exit(phase: &str, result: AgentServerExit) {
+    tracing::warn!(
+        target: "neoism_workspace_daemon::agent",
+        phase,
+        error = %agent_server_exit_detail(result),
+        "embedded Neoism Agent exited; retrying"
+    );
 }
 
 async fn agent_health_ready(client: &reqwest::Client, url: &str) -> bool {
@@ -387,6 +407,33 @@ mod readiness_tests {
     use super::*;
 
     #[test]
+    fn server_exit_preserves_database_error_chain() {
+        let error = anyhow::anyhow!("File is locked by another process")
+            .context("failed to open turso database /state/agent.turso.db");
+        let detail = agent_server_exit_detail(Ok(Err(error)));
+        assert!(detail.contains("failed to open turso database"));
+        assert!(detail.contains("File is locked by another process"));
+    }
+
+    #[tokio::test]
+    async fn server_exit_reports_panics_and_cancellation() {
+        let panic = tokio::spawn(async { panic!("listen startup panic") })
+            .await
+            .unwrap_err();
+        assert!(agent_server_exit_detail(Err(panic)).contains("listen startup panic"));
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let cancelled = task.await.unwrap_err();
+        assert!(agent_server_exit_detail(Err(cancelled)).contains("cancelled"));
+    }
+
+    #[test]
+    fn server_exit_reports_normal_return() {
+        let detail = agent_server_exit_detail(Ok(Ok("127.0.0.1:4096".parse().unwrap())));
+        assert!(detail.contains("returned normally (127.0.0.1:4096)"));
+    }
+
+    #[test]
     fn only_root_local_agent_urls_are_owned() {
         assert_eq!(
             local_bind_target("http://127.0.0.1:4096"),
@@ -400,6 +447,34 @@ mod readiness_tests {
         assert!(local_bind_target("https://host.example/agent").is_none());
         assert!(local_bind_target("http://secret@localhost:4096").is_none());
         assert!(local_bind_target("http://localhost:4096?token=secret").is_none());
+    }
+
+    #[tokio::test]
+    async fn existing_healthy_agent_is_reusable() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Both released spellings identify an existing shared agent owner.
+        for credential_field in ["provider_credential_store", "providerCredentialStore"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/v2/health", listener.local_addr().unwrap());
+            let body = serde_json::json!({
+                "healthy": true,
+                "version": "0.7.104",
+                (credential_field): "test"
+            }).to_string();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 1024];
+                let _ = stream.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            assert!(agent_health_ready(&client, &url).await);
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

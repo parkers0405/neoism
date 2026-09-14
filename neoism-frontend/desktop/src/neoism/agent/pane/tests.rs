@@ -1501,7 +1501,10 @@ fn background_authority_survives_completion_and_delayed_launch_parts() {
     .with_id("old-launch");
     pane.upsert_part_message(stale.clone());
     pane.apply_running_background_tasks("server-a", 10, &[("latest-check".into(), 100)]);
-    assert_eq!(pane.active_background_task_summaries(), vec!["latest-check · running"]);
+    assert_eq!(
+        pane.active_background_task_summaries(),
+        vec!["latest-check · running"]
+    );
     pane.apply_running_background_tasks("server-a", 11, &[]);
     // Production finish ordering: authoritative empty, then completion card.
     pane.upsert_part_message(client_background_completion_card("latest-check"));
@@ -1891,6 +1894,51 @@ fn older_pages_stay_visible_for_ongoing_child_inspector() {
 }
 
 #[test]
+fn session_titles_follow_cached_switches_and_reset_for_new_drafts() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("titled".into());
+    pane.session_title = Some("Server title".into());
+    let mut untitled = CachedAgentSession::live_only();
+    untitled.hydrated = true;
+    pane.session_cache.insert("untitled".into(), untitled);
+
+    pane.activate_cached_session("untitled");
+    assert_eq!(pane.session_title(), None);
+    pane.activate_cached_session("titled");
+    assert_eq!(pane.session_title(), Some("Server title"));
+    pane.create_new_session();
+    assert_eq!(pane.session_title(), None);
+}
+
+#[test]
+fn live_session_title_changes_and_blank_resets_are_authoritative() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.session_title = Some("Old title".into());
+    for title in [Some("Updated title"), None, Some("")] {
+        pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+            "root",
+            [AgentSessionUpdate::SessionMetadataUpdated {
+                title: title.map(str::to_string),
+                agent: None,
+                model: None,
+                connection_id: None,
+                thinking: None,
+            }],
+        ));
+        assert!(pane.drain_live_session_updates());
+        assert_eq!(
+            pane.session_title(),
+            if title == Some("") {
+                None
+            } else {
+                Some("Updated title")
+            }
+        );
+    }
+}
+
+#[test]
 fn offscreen_root_stream_is_live_before_switching_back() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("child".to_string());
@@ -1919,6 +1967,7 @@ fn offscreen_root_stream_is_live_before_switching_back() {
                 version: 9,
             },
             AgentSessionUpdate::SessionMetadataUpdated {
+                title: Some("Root conversation".to_string()),
                 agent: Some("plan".to_string()),
                 model: Some("openai/gpt-5.6".to_string()),
                 connection_id: Some(Some("conn-work".to_string())),
@@ -1952,6 +2001,7 @@ fn offscreen_root_stream_is_live_before_switching_back() {
     assert_eq!(pane.model, "openai/gpt-5.6");
     assert_eq!(pane.connection_id.as_deref(), Some("conn-work"));
     assert_eq!(pane.thinking.as_deref(), Some("high"));
+    assert_eq!(pane.session_title(), Some("Root conversation"));
     assert!(pane.runtime_status_requests.get("root").is_none());
 }
 
@@ -2485,6 +2535,7 @@ fn inactive_prompt_success_reconciles_server_echo_without_duplicate_user() {
     pane.prompt_dispatch_in_flight = true;
     pane.background_sender()
         .send(NeoismAgentBackgroundUpdate::PromptDispatched {
+            session_title: None,
             origin_session_id: Some("root".to_string()),
             origin_draft_id: 0,
             session_id: "root".to_string(),
@@ -2643,6 +2694,7 @@ fn completed_prompt_does_not_attach_to_a_replaced_draft() {
     pane.create_new_session();
     pane.background_sender()
         .send(NeoismAgentBackgroundUpdate::PromptDispatched {
+            session_title: None,
             origin_session_id: None,
             origin_draft_id: original_draft_id,
             session_id: "old-draft-session".to_string(),

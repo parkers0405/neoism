@@ -78,7 +78,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run(cli))
+    let result = runtime.block_on(run(cli));
+    // Runtime::drop waits forever for spawn_blocking workers. Long-lived
+    // agent/tool workers can outlive the accept loops, leaving a listenerless
+    // daemon holding the shared agent database's exclusive lock. Persistence
+    // is flushed by run() before this point. Bound the final runtime teardown
+    // so this dedicated process can exit and release its file locks.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    result
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {

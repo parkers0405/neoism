@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Session } from "@neoism/sdk";
+import { readFileSync } from 'node:fs';
 import { ChatRow } from "./ChatRow";
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, root: Root;
@@ -17,6 +18,38 @@ beforeEach(async () => {
     await act(async () => root.render(<ChatRow session={s} selected={false} open={open} pin={pin} rename={rename} remove={remove} />));
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
+it('gives the idle title full width, reserves desktop actions only on interaction, and hides touch controls', async () => {
+    const css = readFileSync('src/components/chat-menu.css', 'utf8');
+    expect(css).toMatch(/\.recent \.recent-action\s*\{[^}]*position: absolute/);
+    expect(css).toMatch(/\.recent:hover \.recent-action,[\s\S]*?\.recent:focus-within \.recent-action,[\s\S]*?\.recent.menu-open \.recent-action\s*\{[^}]*position: static/);
+    expect(css).toContain('@media (hover: none), (pointer: coarse)');
+    expect(css).toContain('.recent .recent-action { display: none; }');
+    expect(host.querySelector('.recent-title .hover-title')).not.toBeNull();
+    await menu(); expect(host.querySelector('.recent.menu-open')).not.toBeNull();
+    await key(document.activeElement as HTMLElement, 'Escape'); expect(host.querySelector('.menu-open')).toBeNull();
+});
+it('long press opens touch actions without opening chat; tap and vertical scrolling stay independent', async () => {
+    vi.useFakeTimers();
+    const title = host.querySelector<HTMLButtonElement>('.recent-title')!;
+    const pointer = (type: string, y = 10) => act(() => title.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerType: 'touch', isPrimary: true, clientX: 10, clientY: y })));
+    try {
+        pointer('pointerdown'); pointer('pointerup'); act(() => title.click()); expect(open).toHaveBeenCalledOnce(); open.mockClear();
+        pointer('pointerdown'); pointer('pointermove', 30); act(() => vi.advanceTimersByTime(600)); expect(document.querySelector('[role=menu]')).toBeNull();
+        pointer('pointerdown'); pointer('pointercancel'); act(() => vi.advanceTimersByTime(600)); expect(document.querySelector('[role=menu]')).toBeNull();
+        pointer('pointerdown'); act(() => vi.advanceTimersByTime(500)); pointer('pointerup'); act(() => title.click());
+        expect(open).not.toHaveBeenCalled();
+        const popover = document.querySelector('[role=menu]')!;
+        expect([...popover.querySelectorAll('button')].map(b => b.textContent)).toEqual(['Pin', 'Rename', 'Delete']);
+        await key(document.activeElement as HTMLElement, 'Escape'); expect(document.activeElement).toBe(title);
+        pointer('pointerdown'); act(() => root.render(null)); act(() => vi.advanceTimersByTime(600)); expect(document.querySelector('[role=menu]')).toBeNull();
+    } finally { vi.useRealTimers(); }
+});
+it('offers all touch actions from the keyboard context-menu key too', async () => {
+    const title = host.querySelector<HTMLButtonElement>('.recent-title')!;
+    await key(title, 'ContextMenu');
+    expect([...document.querySelectorAll('[role=menuitem]')].map(b => b.textContent)).toEqual(['Pin', 'Rename', 'Delete']);
+    await click(document.querySelector<HTMLButtonElement>('[role=menuitem]')!); expect(pin).toHaveBeenCalledWith(true);
+});
 it('shows only pin and ellipsis actions; clicking pin never opens a chat', async () => {
     expect(host.querySelectorAll('.recent-action')).toHaveLength(2);
     expect(button('Actions for Chat A').getAttribute('aria-expanded')).toBe('false');

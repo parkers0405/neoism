@@ -1,5 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { ToolTreePreview } from "./ToolTreePreview";
+import { ToolActivityIcon } from "./ToolActivityIcon";
+import "./tool-cards.css";
 import "./runtime-messages.css";
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -98,9 +100,9 @@ export function RuntimeNotice({ notice, children }: { notice: RuntimeMessage; ch
     const status = ["completed", "running", "cancelled", "error", "timed_out"].includes(notice.status) ? notice.status : "unknown";
     const preview = notice.output.split("\n").map(line => line.trim()).filter(Boolean).slice(0, 2).join(" ").slice(0, 180)
         || (status === "running" || status === "unknown" ? "Waiting for task output…" : "No output returned.");
-    return <section className={`neo-runtime-notice tc-card ${status}`} aria-label={notice.kind === "shell" ? "Background task completion" : "Subagent completion"}>
+    return <section className={`neo-runtime-notice tc-card ${status}`} data-tool-status={status === "timed_out" ? "error" : status} aria-label={notice.kind === "shell" ? "Background task completion" : "Subagent completion"}>
         <button type="button" className="neo-runtime-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-            <span className="neo-runtime-dot" aria-hidden="true" /><span className="neo-runtime-title">{notice.title}</span><small>{notice.status.replaceAll("_", " ")}</small>
+            <ToolActivityIcon name={notice.kind === "subagent" ? "task" : "shell"} running={status === "running"} /><span className="neo-runtime-title">{notice.title}</span><small className="tc-state-word">{notice.status.replaceAll("_", " ")}</small>
         </button>
         {!expanded && <ToolTreePreview text={preview} toggle={() => setExpanded(true)} />}
         {expanded && <div className="tc-tree-body"><pre aria-label="Task output" onScroll={event => {

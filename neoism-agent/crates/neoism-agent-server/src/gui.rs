@@ -12,7 +12,7 @@ use axum::{
 };
 
 #[derive(Clone)]
-pub struct GuiRoot(PathBuf);
+pub struct GuiRoot(PathBuf, Option<crate::local_gui::LocalGui>);
 
 impl GuiRoot {
     pub fn discover() -> anyhow::Result<Self> {
@@ -51,7 +51,17 @@ impl GuiRoot {
             root.is_dir() && index.is_file() && index.starts_with(&root),
             "GUI index.html must be a file inside the GUI root"
         );
-        Ok(Self(root))
+        Ok(Self(root, None))
+    }
+
+    pub(crate) fn for_listener(mut self, address: std::net::SocketAddr) -> Self {
+        // Hosted deployments never acquire local operator preferences through
+        // their public GUI, even when an upstream proxy talks over loopback.
+        if std::env::var_os("NEOISM_AGENT_AUTH_CONFIG").is_none() {
+            self.1 = crate::local_gui::LocalGui::new(address, neoism_agent_service_api::server_registry::registry_directory())
+                .map(|local| local.with_local_token(std::env::var("NEOISM_AGENT_TOKEN").ok()));
+        }
+        self
     }
 }
 
@@ -116,6 +126,17 @@ async fn serve_gui(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    if request.uri().path() == "/__neoism/gui/launch" || request.uri().path().starts_with("/__neoism/gui/launch/") {
+        return match &root.1 { Some(local) => local.launch(request), None => StatusCode::NOT_FOUND.into_response() };
+    }
+    if request.uri().path() == crate::local_gui::REGISTRY_PATH {
+        return match &root.1 {
+            Some(local) => local.registry(request).await,
+            None => StatusCode::NOT_FOUND.into_response(),
+        };
+    }
+    if request.uri().path().starts_with("/__neoism/") { return StatusCode::NOT_FOUND.into_response(); }
+    let navigation_cookie = root.1.as_ref().and_then(|local| local.navigation_cookie(&request));
     // Preserve even malformed/unknown API paths and their existing auth/fallback.
     if is_api(request.uri().path()) {
         return next.run(request).await;
@@ -173,6 +194,13 @@ async fn serve_gui(
     response
         .headers_mut()
         .insert("x-neoism-agent-gui", "1".parse().unwrap());
+    response.headers_mut().insert("x-frame-options", "DENY".parse().unwrap());
+    response.headers_mut().insert("content-security-policy", "frame-ancestors 'none'".parse().unwrap());
+    response.headers_mut().insert("referrer-policy", "same-origin".parse().unwrap());
+    if mime.starts_with("text/html") {
+        response.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        if let Some(cookie) = navigation_cookie { response.headers_mut().insert(header::SET_COOKIE, cookie.parse().unwrap()); }
+    }
     response
 }
 
@@ -201,6 +229,95 @@ mod tests {
             Some("/assets/app.js")
         );
         assert!(is_api(&decoded_path("/%76%32/unknown").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn local_navigation_automatically_bootstraps_shared_registry_without_exposing_secrets() {
+        use axum::extract::ConnectInfo;
+        use neoism_agent_service_api::server_registry::ServerRegistry;
+        let dir = std::env::temp_dir().join(format!("neoism-gui-registry-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), "<!doctype html>GUI").unwrap();
+        let mut native = ServerRegistry::load(dir.join("registry")).unwrap();
+        let row = native.add("wss://saved.example/session", Some("Native saved"), Some("native-password")).unwrap();
+        let mut root = GuiRoot::validate(dir.clone()).unwrap();
+        root.1 = crate::local_gui::LocalGui::new("127.0.0.1:4096".parse().unwrap(), dir.join("registry"));
+        let app = with_gui(Router::new().fallback(|| async { StatusCode::UNAUTHORIZED }), root);
+        let make = |path: &str, site: &str, cookie: Option<&str>, method: Method, body: String| {
+            let mut builder = Request::builder().uri(path).method(method).header("host", "127.0.0.1:4096")
+                .header("sec-fetch-site", site).header("sec-fetch-mode", if path == "/" { "navigate" } else { "cors" })
+                .header("sec-fetch-dest", if path == "/" { "document" } else { "empty" }).header("x-neoism-gui", "1");
+            if let Some(cookie) = cookie { builder = builder.header(header::COOKIE, cookie); }
+            let mut request = builder.body(Body::from(body)).unwrap();
+            request.extensions_mut().insert(ConnectInfo("127.0.0.1:55555".parse::<std::net::SocketAddr>().unwrap())); request
+        };
+        let response = app.clone().oneshot(make("/", "none", None, Method::GET, String::new())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+        let set_cookie = response.headers()[header::SET_COOKIE].to_str().unwrap().to_owned();
+        assert!(set_cookie.contains("HttpOnly; SameSite=Strict"));
+        let cookie = set_cookie.split(';').next().unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        assert_eq!(&body[..], b"<!doctype html>GUI");
+        let path = crate::local_gui::REGISTRY_PATH;
+        let response = app.clone().oneshot(make(path, "same-origin", Some(cookie), Method::GET, String::new())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let mut json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["servers"][0]["name"], "Native saved");
+        assert!(!String::from_utf8_lossy(&body).contains("native-password"));
+        let expected = json["servers"][0].take(); let mut entry = expected.clone(); entry["name"] = "GUI edit".into();
+        let update = serde_json::json!({"entry":entry,"expected":expected}).to_string();
+        let response = app.clone().oneshot(make(path, "same-origin", Some(cookie), Method::POST, update.clone())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(app.clone().oneshot(make(path, "same-origin", Some(cookie), Method::POST, update)).await.unwrap().status(), StatusCode::CONFLICT);
+        native.reload().unwrap(); assert_eq!(native.server(&row.id).unwrap().name, "GUI edit"); assert_eq!(native.token(&row.id), Some("native-password"));
+        for site in ["cross-site", "same-site", "none"] {
+            assert_eq!(app.clone().oneshot(make(path, site, Some(cookie), Method::GET, String::new())).await.unwrap().status(), StatusCode::FORBIDDEN);
+        }
+        assert_eq!(app.clone().oneshot(make(path, "same-origin", None, Method::GET, String::new())).await.unwrap().status(), StatusCode::FORBIDDEN);
+        let mut guest = make(path, "same-origin", Some(cookie), Method::GET, String::new());
+        guest.headers_mut().insert(header::AUTHORIZATION, "Bearer guest-token".parse().unwrap());
+        assert_eq!(app.clone().oneshot(guest).await.unwrap().status(), StatusCode::FORBIDDEN);
+        let remote = app.clone().oneshot(make("/", "cross-site", None, Method::GET, String::new())).await.unwrap();
+        assert!(!remote.headers().contains_key(header::SET_COOKIE));
+        assert_eq!(app.oneshot(make("/v2/sessions", "same-origin", Some(cookie), Method::GET, String::new())).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_api_auth_requires_authenticated_one_use_local_launch() {
+        use axum::extract::ConnectInfo;
+        let dir = std::env::temp_dir().join(format!("neoism-gui-launch-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap(); std::fs::write(dir.join("index.html"), "GUI").unwrap();
+        let mut root = GuiRoot::validate(dir.clone()).unwrap();
+        root.1 = crate::local_gui::LocalGui::new("127.0.0.1:4096".parse().unwrap(), dir.join("registry")).map(|local| local.with_local_token(Some("configured-api-key".into())));
+        let app = with_gui(Router::new().fallback(|| async { StatusCode::UNAUTHORIZED }), root);
+        let make = |path: &str, method: Method, token: Option<&str>| {
+            let mut builder = Request::builder().uri(path).method(method).header("host", "127.0.0.1:4096")
+                .header("sec-fetch-site", "none").header("sec-fetch-mode", "navigate").header("sec-fetch-dest", "document").header("x-neoism-launcher", "1");
+            if let Some(token) = token { builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}")); }
+            let mut req = builder.body(Body::empty()).unwrap(); req.extensions_mut().insert(ConnectInfo("127.0.0.1:5678".parse::<std::net::SocketAddr>().unwrap())); req
+        };
+        let public = app.clone().oneshot(make("/", Method::GET, None)).await.unwrap();
+        assert_eq!(public.status(), StatusCode::OK); assert!(!public.headers().contains_key(header::SET_COOKIE));
+        assert_eq!(app.clone().oneshot(make("/__neoism/gui/launch", Method::POST, Some("guest-token"))).await.unwrap().status(), StatusCode::FORBIDDEN);
+        let launch = app.clone().oneshot(make("/__neoism/gui/launch", Method::POST, Some("configured-api-key"))).await.unwrap();
+        assert_eq!(launch.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(launch.into_body(), 65536).await.unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("configured-api-key"));
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap(); let path = json["path"].as_str().unwrap();
+        let redeemed = app.clone().oneshot(make(path, Method::GET, None)).await.unwrap();
+        assert_eq!(redeemed.status(), StatusCode::SEE_OTHER); assert_eq!(redeemed.headers()[header::LOCATION], "/");
+        assert!(redeemed.headers()[header::SET_COOKIE].to_str().unwrap().contains("HttpOnly"));
+        assert_eq!(app.oneshot(make(path, Method::GET, None)).await.unwrap().status(), StatusCode::FORBIDDEN);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nonloopback_listeners_never_acquire_local_registry_context() {
+        assert!(crate::local_gui::LocalGui::new("0.0.0.0:4096".parse().unwrap(), PathBuf::from("unused")).is_none());
     }
 
     #[tokio::test]

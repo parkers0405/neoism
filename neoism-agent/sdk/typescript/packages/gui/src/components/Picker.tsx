@@ -3,14 +3,16 @@ import { filterChoices, indexChoices, layoutChoices, visibleChoices, revealChoic
 import { ComposerPanel } from "./ComposerPanel";
 import { ChoiceSkeleton } from "./Skeleton";
 import { moveSelection } from "../commands";
+import { ProviderMark } from "./ProviderDirectory";
 import type { Choice } from "./Composer";
 
-export function Picker({ title, choices, choose, close, onSearch, loading = false }: {
+export function Picker({ title, choices, choose, close, onSearch, loading = false, initialSelectedId }: {
+    initialSelectedId?: string;
     title: string; choices: Choice[]; choose(id: string): void; close(): void;
     onSearch?(query: string): void; loading?: boolean;
 }) {
     const [query, setQuery] = useState("");
-    const [index, setIndex] = useState(0);
+    const [index, setIndex] = useState(() => Math.max(0, choices.findIndex(choice => choice.id === initialSelectedId)));
     const [top, setTop] = useState(0);
     const [viewport, setViewport] = useState(PICKER_HEIGHT);
     const list = useRef<HTMLDivElement>(null);
@@ -57,7 +59,7 @@ export function Picker({ title, choices, choose, close, onSearch, loading = fals
                     <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.choice.label}</strong>
                     <small style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.choice.description || row.choice.id}{row.choice.badge && <span> · {row.choice.badge}</span>}</small>
                 </button> : <div key={`header-${row.top}`} role="presentation" className="choice-section"
-                    style={{ position: 'absolute', top: row.top, left: 0, height: row.height, lineHeight: `${row.height}px`, overflow: 'hidden' }}>{row.section}</div>)}
+                    style={{ position: 'absolute', top: row.top, left: 0, right: 0, height: row.height, lineHeight: `${row.height}px`, display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>{row.sectionProviderId && <ProviderMark id={row.sectionProviderId} />}<span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.section}</span></div>)}
             </div>
             {!filtered.length && !loading && <p className="empty">No matches. Check the server's configured providers.</p>}
         </div>

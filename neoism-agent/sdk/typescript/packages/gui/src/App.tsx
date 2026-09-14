@@ -13,6 +13,7 @@ import "./subagent-view.css";
 import { useAppController } from "./useAppController";
 import { Navigation } from "./components/Navigation";
 import { ChatDetails } from "./components/ChatDetails";
+import { PanelShell, useMobileNavigation } from "./components/PanelShell";
 import { Wordmark } from "./components/Identity";
 import { Settings } from "./components/Settings";
 import { Composer, ComposerFooter } from "./components/Composer";
@@ -39,14 +40,15 @@ export function dockingTranslation(before: DockPosition | undefined, after: Dock
 export function App() {
     const a = useAppController();
     const { canCompose, metadataLoading, isChild, returnId, backLabel } = subagentView(a.id, a.active, a.chat.state.runtime);
-    const sessionOpener = useRef(a.openSession);
-    useLayoutEffect(() => { sessionOpener.current = a.openSession; }, [a.openSession]);
+    const sessionOpener = useRef(a.openChildSession);
+    useLayoutEffect(() => { sessionOpener.current = a.openChildSession; }, [a.openChildSession]);
     const openTranscriptSession = useCallback((id: string) => sessionOpener.current(id), []);
     // Controller nav is the mobile drawer; desktop collapse must survive chat navigation.
     const [desktopNavVisible, setDesktopNavVisible] = useState(() => {
         try { return localStorage.getItem("neoism.desktop-nav-visible") !== "false"; }
         catch { return true; }
     });
+    const mobileNavigation = useMobileNavigation();
     const toggleDesktopNav = () => {
         const visible = !desktopNavVisible;
         setDesktopNavVisible(visible);
@@ -179,6 +181,8 @@ export function App() {
                     {a.id && a.view === "chat" && (
                         <button
                             aria-label="Toggle chat details"
+                            aria-expanded={!!a.sidebar}
+                            aria-controls="chat-details-panel"
                             onClick={() => a.setSidebar((x) => !x)}
                         >
                             <PanelRight size={19} />
@@ -186,7 +190,10 @@ export function App() {
                     )}
                 </div>
             </header>
-            <Navigation app={a} />
+            <PanelShell className="navigation-panel" open={mobileNavigation ? a.nav : desktopNavVisible}
+                returnFocus={mobileNavigation ? ".mobile-menu" : ".desktop-nav-toggle"}>
+                <Navigation app={a} />
+            </PanelShell>
             {a.nav && (
                 <button className="nav-scrim" aria-label="Close navigation" onClick={() => a.setNav(false)} />
             )}
@@ -238,7 +245,7 @@ export function App() {
                             ) : metadataLoading ? (
                                 <div className="timeline chat-timeline"><div className="transcript"><ConversationSkeleton /></div></div>
                             ) : (
-                                <Timeline client={a.client}
+                                <Timeline localName={a.identityName} client={a.client}
                                     activityBusy={a.chat.activityBusy ?? false}
                                     sessionId={a.id}
                                     runtime={a.chat.state.runtime}
@@ -258,8 +265,9 @@ export function App() {
                                 {a.picker && a.picker !== "connect" && a.picker !== "directory" && (
                                     <Picker
                                         key={a.picker}
-                                        title={a.picker === "skill" ? "Skills" : a.picker === "model" ? "Models" : a.picker === "thinking" ? "Thinking effort" : a.picker === "agent" ? "Agents" : a.picker === "subagents" ? "Subagents" : "Sessions"}
+                                        title={a.picker === "skill" ? "Skills" : a.picker === "model" ? "Models" : a.picker === "thinking" ? "Reasoning" : a.picker === "agent" ? "Agents" : a.picker === "subagents" ? "Subagents" : "Sessions"}
                                         choices={a.choices}
+                                        initialSelectedId={a.picker === "thinking" ? a.thinking : undefined}
                                         loading={a.pickerLoading}
                                         close={() => a.setPicker(undefined)}
                                         choose={a.choose}
@@ -273,6 +281,7 @@ export function App() {
                                 {a.picker === "connect" && (
                                     <ComposerPanel title="Connect provider account" close={() => a.setPicker(undefined)}>
                                         <ProviderConnections
+                                            shared={/\/agent\/workspaces\/[^/]+\/?$/.test(a.prefs.server)}
                                             key={`${a.prefs.server}:${a.token}:${a.id}:${a.directory}`}
                                             client={a.client}
                                             directory={a.directory}
@@ -336,6 +345,7 @@ export function App() {
                                     }
                                     thinking={a.thinking}
                                     openPicker={a.togglePicker}
+                                    pickerOpen={!!a.picker || a.info?.title === "MCP servers"}
                                 />
                                 </div>
                                 </div>
@@ -357,7 +367,10 @@ export function App() {
                                 />
                             </div>}
                         </div>
-                        {a.id && a.sidebar && <ChatDetails app={a} />}
+                        <PanelShell className="details-panel" id="chat-details-panel" open={!!a.id && !!a.sidebar}
+                            returnFocus={'[aria-controls="chat-details-panel"]'} lazy>
+                            {a.id && <ChatDetails app={a} />}
+                        </PanelShell>
                     </div>
                 )}
             </main>
@@ -377,6 +390,9 @@ export function App() {
                     client={a.client}
                     value={a.prefs}
                     token={a.token}
+                    connected={a.connected}
+                    forgetServer={a.forgetServer}
+                    serverCredential={a.serverCredential}
                     onSelectConnection={a.onSelectConnection}
                     selectedConnection={a.selectedConnection}
                     workspaceId={a.active?.workspaceId}

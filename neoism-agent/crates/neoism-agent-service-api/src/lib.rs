@@ -1,3 +1,5 @@
+pub mod server_registry;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -277,6 +279,10 @@ pub struct ConfigUpdateRequest {
 /// by synchronous LSP/tool paths; writes use the crate's boxed-future service
 /// convention so remote/deployment-backed sources remain possible.
 pub trait ConfigSourceService: Send + Sync {
+    /// Product-owned display name only; never expose the raw product config.
+    /// Generic Agent hosts need not implement a product profile.
+    fn display_name(&self) -> Result<Option<String>, ServiceError> { Ok(None) }
+
     fn snapshot(
         &self,
         request: &ConfigSnapshotRequest,

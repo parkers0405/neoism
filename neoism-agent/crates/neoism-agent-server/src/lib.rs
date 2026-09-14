@@ -32,6 +32,7 @@ mod interaction;
 pub mod language_server;
 mod lsp;
 mod lsp_routes;
+mod local_gui;
 pub mod gui;
 mod management;
 mod mcp;
@@ -95,6 +96,7 @@ mod tool_routes;
 mod tool_runtime;
 mod tool_selection;
 mod utility_runtime;
+mod identity;
 mod v2_routes;
 pub(crate) mod windows_process;
 mod hosting;
@@ -338,10 +340,10 @@ pub async fn listen_with_gui(
     state.start_session_list_backfill();
     let api = app_router::app_with_cors(state.clone(), &options.cors);
     let app = match gui {
-        Some(root) => gui::with_gui(api, root),
+        Some(root) => gui::with_gui(api, root.for_listener(actual)),
         None => api,
     };
-    let result = axum::serve(listener, app).await;
+    let result = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
     state.shutdown().await?;
     tracing::warn!(
         target: "neoism_agent::perf",

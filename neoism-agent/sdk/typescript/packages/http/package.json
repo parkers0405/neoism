@@ -1,6 +1,6 @@
 {
   "name": "@neoism/sdk-http",
-  "version": "0.7.55",
+  "version": "0.7.100",
   "description": "HTTP, SSE, and WebSocket transport for the Neoism SDK",
   "license": "MIT",
   "repository": {
@@ -22,6 +22,6 @@
     "dist"
   ],
   "dependencies": {
-    "@neoism/sdk-core": "0.7.55"
+    "@neoism/sdk-core": "0.7.100"
   }
 }

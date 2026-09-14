@@ -1,6 +1,6 @@
 {
   "name": "@neoism/sdk-plugin-builtins",
-  "version": "0.7.55",
+  "version": "0.7.100",
   "description": "Typed clients for Neoism's optional built-in plugins",
   "repository": {
     "type": "git",
@@ -17,9 +17,11 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "license": "MIT",
   "dependencies": {
-    "@neoism/sdk-core": "0.7.55"
+    "@neoism/sdk-core": "0.7.100"
   }
 }

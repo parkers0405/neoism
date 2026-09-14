@@ -67,13 +67,33 @@ async fn verify_gui(client: &reqwest::Client, url: &reqwest::Url) -> anyhow::Res
     Ok(())
 }
 
+fn local_origin(url: &reqwest::Url) -> bool {
+    matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+}
+
+async fn launch_url(client: &reqwest::Client, url: &reqwest::Url) -> anyhow::Result<reqwest::Url> {
+    if !local_origin(url) { return Ok(url.clone()); }
+    let response = client.post(url.join("__neoism/gui/launch")?).header("x-neoism-launcher", "1").send().await?;
+    if matches!(response.status(), reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED) {
+        // Old/agent-only deployments remain usable; do not invent registry sync.
+        return Ok(url.clone());
+    }
+    anyhow::ensure!(response.status().is_success(), "local GUI launch was not authorized ({})", response.status());
+    let value: serde_json::Value = response.json().await?;
+    let path = value["path"].as_str().context("invalid local GUI launch response")?;
+    let ticket = path.strip_prefix("/__neoism/gui/launch/").context("invalid local GUI launch path")?;
+    anyhow::ensure!(ticket.len() == 64 && ticket.bytes().all(|b| b.is_ascii_hexdigit()), "invalid local GUI launch ticket");
+    Ok(url.join(path)?)
+}
+
 fn report(url: &reqwest::Url, no_open: bool) {
     println!("Neoism agent GUI: {url}");
     if no_open {
         return;
     }
-    // No shell interpolation or tokens in the URL. Missing desktop launchers
-    // are non-fatal: the verified URL remains usable manually.
+    // No shell interpolation or API credentials in the URL. A local URL may
+    // carry a one-use, short-lived GUI launch ticket; the server redeems it to
+    // an HttpOnly session and redirects to the clean root URL.
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(url.as_str()).spawn();
     #[cfg(target_os = "windows")]
@@ -112,14 +132,23 @@ pub(crate) async fn run(
         };
         format!("http://{host}:{port}")
     }))?;
+    let mut headers = reqwest::header::HeaderMap::new();
+    // Reuse configured local API auth only for a literal loopback destination.
+    // Never send a local credential to an arbitrary --server target.
+    if local_origin(&url) {
+        if let Ok(token) = std::env::var("NEOISM_AGENT_TOKEN") {
+            headers.insert(reqwest::header::AUTHORIZATION, format!("Bearer {token}").parse().context("invalid local Agent credential")?);
+        }
+    }
     let client = reqwest::Client::builder()
+        .default_headers(headers)
         .timeout(Duration::from_secs(3))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()?;
     if health(&client, &url).await? {
         verify_gui(&client, &url).await?;
-        report(&url, no_open);
+        report(&launch_url(&client, &url).await?, no_open);
         return Ok(());
     }
     anyhow::ensure!(!explicit_server, "no agent is listening at {url}; --server attaches only. Start it with `neoism-agent serve --web`");
@@ -146,18 +175,18 @@ pub(crate) async fn run(
             // may time out. The outer deadline bounds these startup retries.
             if matches!(health(&client, &url).await, Ok(true)) {
                 verify_gui(&client, &url).await?;
-                return Ok::<_, anyhow::Error>(());
+                return launch_url(&client, &url).await;
             }
         }
         anyhow::bail!("agent startup timed out; GUI was not opened")
     };
-    tokio::select! {
+    let launch = tokio::select! {
         result = &mut serving => { result?; anyhow::bail!("agent exited before GUI became ready"); }
         result = tokio::time::timeout(Duration::from_secs(30), ready) => {
-            result.context("agent startup timed out; GUI was not opened")??;
+            result.context("agent startup timed out; GUI was not opened")??
         }
-    }
-    report(&url, no_open);
+    };
+    report(&launch, no_open);
     println!("Serving in foreground; Ctrl-C to stop.");
     serving.await?;
     Ok(())

@@ -58,6 +58,24 @@ describe("runtime notification projection", () => {
         expect(result[0].message).toBe(ordinary); expect(result[0].remainingParts).toBe(ordinary.parts);
         expect(result[1].remainingParts).toEqual([runtime.parts[1]]); expect(runtime.parts).toHaveLength(2);
     });
+    it("uses semantic task/shell icons for runtime cards and the shared square loop only while running", () => {
+        for (const kind of ["subagent", "shell"] as const) for (const status of ["completed", "error", "timed_out", "cancelled", "unknown", "running"]) {
+            const notice = { ...decodeRuntimeMessage(row(shell))!, kind, status, title: "Restructure settings page navigation" };
+            const html = renderToStaticMarkup(<RuntimeNotice notice={notice} />);
+            expect(html).not.toContain("neo-runtime-dot");
+            expect(html).toContain(notice.title);
+            expect(html).toContain(`data-tool-status="${status === "timed_out" ? "error" : status}"`);
+            expect(html).toContain('class="tc-state-word"');
+            if (status === "running") {
+                expect(html.match(/class="tc-task-orbit-dot"/g)).toHaveLength(4);
+                expect(html).not.toContain("tc-category-icon");
+            } else {
+                expect(html).toContain(kind === "subagent" ? "lucide-git-branch" : "lucide-terminal");
+                expect(html).toContain("tc-category-icon");
+                expect(html).not.toContain("tc-task-orbit");
+            }
+        }
+    });
     it("renders a collapsed escaped preview without raw notification submenus", () => {
         const html = renderToStaticMarkup(<RuntimeNotice notice={decodeRuntimeMessage(row(shell))!} />);
         expect(html).not.toContain("<script>"); expect(html).not.toContain("\x1b");

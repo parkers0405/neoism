@@ -1,7 +1,8 @@
 import { defineConfig } from "vite";
+import { localRegistryProxy } from './scripts/localRegistryProxy';
 import react from "@vitejs/plugin-react";
 export default defineConfig({
-    plugins: [react()],
+    plugins: [localRegistryProxy(), react()],
     // web-tree-sitter contains conditional dynamic imports; preserve module workers.
     worker: { format: "es" },
     server: { port: 5174 },

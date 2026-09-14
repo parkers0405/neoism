@@ -13,7 +13,22 @@ import {
     type ProviderConnectionPickerProps,
 } from "../providerConnections";
 
-export function ProviderConnections({
+export function ProviderConnections(props: Parameters<typeof ProviderConnectionsInner>[0] & { shared?: boolean }) {
+    const [access, setAccess] = useState<{ client: NeoismClient; directory: string; allowed: boolean }>();
+    useEffect(() => {
+        if (!props.shared) return;
+        let active = true;
+        void props.client.capabilities.list(props.directory).then(caps => {
+            if (active) setAccess({ client: props.client, directory: props.directory, allowed: caps.some(c => c.id === 'neoism.providers.manage' && c.enabled) });
+        }).catch(() => { /* Guests fail closed. */ });
+        return () => { active = false; };
+    }, [props.client, props.directory, props.shared]);
+    if (props.shared && !(access?.client === props.client && access.directory === props.directory && access.allowed))
+        return <p role="status">Provider management is unavailable for this shared workspace. Ask the host to configure providers.</p>;
+    return <ProviderConnectionsInner {...props} />;
+}
+
+function ProviderConnectionsInner({
     client,
     directory,
     initialProviderId,

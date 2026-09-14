@@ -17,7 +17,7 @@ export function saveRecentModels(server: string, recent: string[]) {
 export function groupedModelChoices(models: Choice[], recent: string[], current: string): Choice[] {
     const byId = new Map(models.map(m => [m.id, m]));
     const choice = (id: string): Choice => byId.get(id) || { id, label: id.split('/').slice(1).join('/') || id, description: id.split('/')[0], badge: 'Unavailable' };
-    return [current ? { ...choice(current), section: 'Current', badge: byId.has(current) ? 'Selected' : 'Selected · unavailable' }
+    return [current ? { ...choice(current), section: 'Current', sectionProviderId: undefined, badge: byId.has(current) ? 'Selected' : 'Selected · unavailable' }
         : { id: '', label: 'Server default', description: 'Use Neoism default', badge: 'Selected', section: 'Current' },
-        ...recent.map(id => ({ ...choice(id), section: 'Recent' })), ...models];
+        ...recent.map(id => ({ ...choice(id), section: 'Recent', sectionProviderId: undefined })), ...models];
 }

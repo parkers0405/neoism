@@ -59,6 +59,7 @@ pub(crate) async fn v2_meta(
 pub(crate) async fn v2_capabilities(
     State(state): State<AppState>,
     Query(query): Query<crate::workflow::WorkflowQuery>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CapabilityInfo>>, ApiError> {
     let directory = match query.scope {
@@ -68,8 +69,20 @@ pub(crate) async fn v2_capabilities(
     let snapshot = state.plugin_snapshot(&directory).await;
     let mut capabilities = crate::plugins::capabilities(snapshot.as_ref());
     capabilities.push(CapabilityInfo {
+        id: "neoism.providers.manage".into(), version: "1.0.0".into(),
+        enabled: !claims.as_ref().is_some_and(|Extension(c)| c.hosted),
+        disableable: false, source: "server".into(), plugin_id: None,
+        api_prefix: None, reason: None,
+    });
+    capabilities.push(CapabilityInfo {
         id: "neoism.resources.installation".into(), version: "1.0.0".into(), enabled: true,
         disableable: false, source: "server".into(), plugin_id: None, api_prefix: None, reason: None,
+    });
+    capabilities.push(CapabilityInfo {
+        id: "neoism.identity".into(), version: "1.0.0".into(),
+        enabled: !claims.as_ref().is_some_and(|Extension(c)| c.hosted),
+        disableable: false, source: "server".into(), plugin_id: None,
+        api_prefix: Some("/v2/identity".into()), reason: None,
     });
     if state.management_enabled() {
         capabilities.push(CapabilityInfo {

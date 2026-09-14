@@ -8517,6 +8517,76 @@
         ]
       }
     },
+    "/v2/identity": {
+      "get": {
+        "description": "Server process-owner identity, not the authenticated caller. Unavailable in hosted multi-tenant mode. Advertised by neoism.identity.",
+        "operationId": "v2.identity.get",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "configuredName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "systemName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "configuredName",
+                    "systemName"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Process-owner identity"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/v2/interactions/permissions": {
       "get": {
         "operationId": "v2.interactions.permissions.list",

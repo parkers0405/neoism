@@ -386,7 +386,7 @@ fn allows_session_scope(claims: &CallerClaims, tenant_id: &str, directory: &str)
     tenant_id == claims.tenant_id && allows_directory(claims, directory)
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }

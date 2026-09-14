@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { NativeActivity } from "./nativeActivity";
+import { NativeActivity, activityLines } from "./nativeActivity";
 let root: Root, container: HTMLDivElement;
 let reduced = false;
 let callbacks: Map<number, FrameRequestCallback>, next: number;
@@ -21,6 +21,26 @@ beforeEach(() => {
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); paint.mockClear(); });
+it("stacks activity and word-wrapped metadata using pane width, preserving background rows below", () => {
+    reduced = true;
+    let resize: ResizeObserverCallback = () => {};
+    vi.stubGlobal('ResizeObserver', class { constructor(callback: ResizeObserverCallback) { resize = callback; } observe() {} disconnect() {} });
+    for (const status of ['waitingSubagents', 'generating', 'thinking'] as const) {
+        act(() => root.render(<NativeActivity busy activity={{ status, elapsedSeconds: 120, backgroundCount: 1 }} />));
+        paint.mockClear();
+        act(() => resize([{ contentRect: { width: 320 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+        const metadata = paint.mock.calls.filter(([text]) => text.length > 1);
+        expect(metadata.length).toBeGreaterThan(0);
+        expect(metadata.every(([, x, y]) => x === 3.3 && y >= 45)).toBe(true);
+        expect(container.querySelector('canvas')?.style.height).toBe(`${26 * (metadata.length + 1)}px`);
+        expect(container.querySelector('canvas')?.nextElementSibling?.className).toBe('native-activity-background');
+        paint.mockClear();
+        act(() => resize([{ contentRect: { width: 900 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+        expect(paint.mock.calls.filter(([text]) => text.length > 1).every(([, , y]) => y === 19)).toBe(true);
+    }
+    expect(activityLines('Sub-agents working', 100, text => text.length * 12)).toEqual(['Sub-agents', 'working']);
+    expect(activityLines('Crafting', 30, text => text.length * 12)).toEqual(['Crafting']);
+});
 it("isolates frames on canvas, changes reasoning status, and cancels on idle/unmount", () => {
     act(() => root.render(<NativeActivity busy activity={{ status: "thinking" }} sessionId="one" />));
     expect(container.textContent).toBe("Pondering");

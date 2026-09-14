@@ -24,7 +24,7 @@ function useSubagents(client: NeoismClient, id: string | undefined) {
     }, [client, id]);
     return { data: state?.client === client && state.id === id ? state.data : emptySubagents() };
 }
-type SidebarApp = Pick<ReturnType<typeof useAppController>, "client" | "id" | "usage" | "active" | "prefs" | "model" | "agent" | "thinking" | "openSession"> & SidebarUsageSource & Partial<Pick<ReturnType<typeof useAppController>, "chat">>;
+type SidebarApp = Pick<ReturnType<typeof useAppController>, "client" | "id" | "usage" | "active" | "prefs" | "model" | "agent" | "thinking" | "openChildSession"> & SidebarUsageSource & Partial<Pick<ReturnType<typeof useAppController>, "chat">>;
 
 export function ChatDetails({ app: a }: { app: SidebarApp }) {
     const tasks = useSubagents(a.client, a.id);
@@ -45,7 +45,7 @@ export function ChatDetails({ app: a }: { app: SidebarApp }) {
             </div>
             <p className="sidebar-context-caption">{caption}</p>
         </section>
-        <SidebarSubagents data={tasks.data} parentId={a.id} open={a.openSession} />
+        <SidebarSubagents data={tasks.data} parentId={a.id} open={a.openChildSession} />
         <TodoPanel key={`${a.prefs.server}:${a.id}`} todos={todos.todos} />
     </aside>;
 }

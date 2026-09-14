@@ -88,6 +88,9 @@ import {
     PROVIDER_WINDOW,
 } from "./ProviderDirectory";
 import { Settings, ThemePicker } from "./Settings";
+import { ThemePreview } from "./ThemePreview";
+import { themeOptions } from "../appearance";
+import { ProviderConnections } from "./ProviderConnections";
 import { defaultPreferences } from "../types";
 
 function nodes(node: any): any[] {
@@ -296,6 +299,149 @@ describe("provider directory lifecycle", () => {
     });
 });
 
+describe("responsive settings navigation", () => {
+    const labelled = (label: string) => find(tree, n => n.type === "button" && n.props["aria-label"] === label);
+    const layout = () => find(tree, n => n.props?.className?.includes("settings-layout"));
+    const start = (extra = {}) => {
+        component = Settings;
+        props = { client: {}, value: defaultPreferences, token: "secret", save: vi.fn(), close: vi.fn(), ...extra };
+        render();
+    };
+    it("starts with mobile categories and desktop General, retains selection and drafts through Back", () => {
+        start();
+        expect(layout().props.className).toContain("settings-landing");
+        expect(labelled("General").props["aria-current"]).toBe("page");
+        for (const category of ["General", "Appearance", "Servers", "Providers"]) {
+            labelled(category).props.onClick(); render();
+            expect(layout().props.className).toContain("settings-detail");
+            expect(find(tree, n => n.type === "h2" && nodesText(n) === category)).toBeDefined();
+            expect(labelled(category).props["aria-current"]).toBe("page");
+            expect(nodes(tree).filter(n => n.type === "dialog")).toHaveLength(1);
+            if (category === "General") {
+                find(tree, n => n.type === "input" && n.props.maxLength === 80).props.onChange({ target: { value: "New name" } });
+                render();
+            }
+            focus.mockClear();
+            labelled("Back to settings categories").props.onClick(); render();
+            expect(layout().props.className).toContain("settings-landing");
+            // The same detail stays mounted for desktop/resizing; only CSS changes visibility.
+            expect(labelled(category).props["aria-current"]).toBe("page");
+            expect(focus).toHaveBeenCalledTimes(1);
+            expect(props.save).not.toHaveBeenCalled();
+            expect(props.close).not.toHaveBeenCalled();
+        }
+        labelled("General").props.onClick(); render();
+        expect(find(tree, n => n.type === "input" && n.props.maxLength === 80).props.value).toBe("New name");
+        find(tree, n => n.type === "form").props.onSubmit({ preventDefault: noop });
+        expect(props.save).toHaveBeenCalledWith({ ...defaultPreferences, name: "New name" }, "secret");
+    });
+    it("uses the top-left back control for themes without exiting the category or saving", () => {
+        start();
+        labelled("Appearance").props.onClick(); render();
+        button(tree, "Theme").props.onClick(); render();
+        expect(find(tree, n => n.type === ThemePicker).props.showBack).toBe(false);
+        labelled("Back to Appearance").props.onClick(); render();
+        expect(find(tree, n => n.type === ThemePicker)).toBeUndefined();
+        expect(layout().props.className).toContain("settings-detail");
+        expect(props.close).not.toHaveBeenCalled();
+        expect(props.save).not.toHaveBeenCalled();
+    });
+    it("preserves direct provider entry, selection context and inline auth ownership", () => {
+        const onSelectConnection = vi.fn();
+        const selectedConnection = { providerId: "openai", connectionId: "work" };
+        start({ initialProviderId: "openai", workspaceId: "workspace", selectedConnection, onSelectConnection });
+        const provider = () => find(tree, n => n.type === ProviderConnections);
+        expect(tree.props.className).toContain("settings-connecting");
+        expect(provider().props).toMatchObject({ initialProviderId: "openai", workspaceId: "workspace", selectedConnection, onSelectConnection });
+        expect(find(tree, n => n.type === "form")).toBeUndefined();
+        expect(labelled("Back to settings categories")).toBeUndefined();
+        provider().props.onFlowChange(false); render();
+        labelled("Back to settings categories").props.onClick(); render();
+        labelled("Providers").props.onClick(); render();
+        expect(provider().props.initialProviderId).toBeUndefined();
+        expect(tree.props.className).not.toContain("settings-connecting");
+        labelled("Close settings").props.onClick();
+        expect(props.close).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("theme preview candidates", () => {
+    const preview = () => find(tree, n => n.type === ThemePreview)?.props.theme;
+    const searchInput = () => find(tree, n => n.props?.["aria-label"] === "Search themes");
+    const results = () => find(tree, n => n.props?.className === "settings-theme-results");
+    const start = () => {
+        component = ThemePicker;
+        props = { selected: "pastelbeans", query: "", search: vi.fn((query: string) => { props.query = query; }), choose: vi.fn(), back: vi.fn() };
+        render();
+    };
+    const key = (target: any, key: string, extra = {}) => {
+        const event = { key, nativeEvent: { isComposing: false }, preventDefault: vi.fn(), ...extra };
+        target.props.onKeyDown(event); render();
+        return event;
+    };
+    it("previews hover and focus independently of the selected draft; clicks apply only the clicked candidate", () => {
+        start();
+        expect(preview().id).toBe("pastelbeans");
+        button(tree, "Github Light").props.onMouseEnter(); render();
+        expect(preview().id).toBe("github_light");
+        expect(button(tree, "Github Light").props["data-preview"]).toBe(true);
+        expect(button(tree, "Github Light").props["aria-pressed"]).toBe(false);
+        expect(button(tree, "Pastelbeans").props["aria-pressed"]).toBe(true);
+        button(tree, "Github Dark").props.onFocus(); render();
+        expect(preview().id).toBe("github_dark");
+        expect(props.choose).not.toHaveBeenCalled();
+        button(tree, "Github Dark").props.onClick();
+        expect(props.choose).toHaveBeenCalledExactlyOnceWith("github_dark");
+    });
+    it("arrows from search preview without applying; Enter chooses the candidate", () => {
+        start();
+        const index = themeOptions.findIndex(t => t.id === props.selected);
+        expect(key(searchInput(), "ArrowDown").preventDefault).toHaveBeenCalled();
+        expect(preview().id).toBe(themeOptions[index + 1].id);
+        key(searchInput(), "ArrowUp");
+        expect(preview().id).toBe("pastelbeans");
+        key(searchInput(), "ArrowDown");
+        expect(props.choose).not.toHaveBeenCalled();
+        key(searchInput(), "Enter");
+        expect(props.choose).toHaveBeenCalledExactlyOnceWith(themeOptions[index + 1].id);
+    });
+    it("wraps arrow navigation, focuses and scrolls list rows, and ignores composition/modifier keys", () => {
+        start();
+        button(tree, themeOptions[0].name).props.onFocus(); render();
+        const scrollIntoView = vi.fn(), rowFocus = vi.fn();
+        results().props.ref.current = { querySelectorAll: () => themeOptions.map(() => ({ focus: rowFocus, scrollIntoView })) };
+        key(results(), "ArrowUp");
+        expect(preview().id).toBe(themeOptions.at(-1)!.id);
+        expect(rowFocus).toHaveBeenCalledWith({ preventScroll: true });
+        expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+        key(results(), "ArrowDown");
+        expect(preview().id).toBe(themeOptions[0].id);
+        expect(key(searchInput(), "ArrowDown", { altKey: true }).preventDefault).not.toHaveBeenCalled();
+        expect(preview().id).toBe(themeOptions[0].id);
+        key(searchInput(), "Enter", { nativeEvent: { isComposing: true } });
+        expect(props.choose).not.toHaveBeenCalled();
+        key(results(), "Enter");
+        expect(props.choose).toHaveBeenCalledExactlyOnceWith(themeOptions[0].id);
+    });
+    it("filters the candidate and Enter target together, with no stale preview for zero matches", () => {
+        start();
+        const filter = (query: string) => { searchInput().props.onChange({ target: { value: query } }); render(); };
+        filter("github_light");
+        expect(preview().id).toBe("github_light");
+        filter("no-such-theme");
+        expect(preview()).toBeUndefined();
+        expect(nodesText(tree)).toContain("No matching themes.");
+        key(searchInput(), "ArrowDown"); key(searchInput(), "Enter");
+        expect(props.choose).not.toHaveBeenCalled();
+        filter("");
+        expect(preview().id).toBe(themeOptions[0].id);
+        expect(nodes(tree).filter(n => n.type === "button" && n.props["aria-pressed"] !== undefined)).toHaveLength(101);
+        button(tree, "Back to Appearance").props.onClick();
+        expect(props.back).toHaveBeenCalledTimes(1);
+        expect(props.choose).not.toHaveBeenCalled();
+    });
+});
+
 describe("theme draft navigation", () => {
     it("saves the code font independently from the interface font", () => {
         const save = vi.fn();
@@ -323,6 +469,7 @@ describe("theme draft navigation", () => {
         render();
         button(tree, "Appearance").props.onClick();
         render();
+        focus.mockClear();
         const open = () => {
             button(tree, "Theme").props.onClick();
             render();

@@ -1,5 +1,6 @@
 import { memo, useMemo, useState, type ReactNode } from "react";
-import { Check, Circle, Clock, Code2, XCircle } from "lucide-react";
+import { Code2 } from "lucide-react";
+import { ToolActivityIcon } from "./ToolActivityIcon";
 import { duration } from "./chatSupport";
 import { cardData, clean, field, fileChanges, isFileTool, prettyPreview, taskActivityStatus, taskIdentity, toolName, type TaskChildStatus, type CardPart, type FileChange } from "./toolCardData";
 import { stripTerminalControls } from "./runtimeMessages";
@@ -16,7 +17,16 @@ export interface ToolPartProps {
     /** Supply only when backed by the SDK task stop operation. IDs are task IDs, not session IDs. */
     onStopTask?: (taskId: string) => Promise<unknown>;
 }
-/** Only mounted beneath an expanded tool header. Reveal remains bounded and inline. */
+/** Lazy on first open, then retained so inner scroll offsets and virtual windows survive closing.
+ * The empty grid shell exists before first open; CSS handles both directions without measuring output. */
+function ToolReveal({ open, children }: { open: boolean; children: ReactNode }) {
+    const [visited, setVisited] = useState(open);
+    if (open && !visited) setVisited(true);
+    return <div className="tc-reveal" data-open={open} aria-hidden={!open} inert={!open}>
+        <div className="tc-reveal-clip">{(open || visited) && children}</div>
+    </div>;
+}
+/** Mounted only after the first expansion. Reveal remains bounded and inline. */
 function ValueView({ value }: { value: unknown }) {
     const [limit, setLimit] = useState(8000);
     const raw = useMemo(() => {
@@ -34,9 +44,8 @@ function ValueView({ value }: { value: unknown }) {
         {more && <button type="button" onClick={() => setLimit(n => n + 8000)}>Show more</button>}
     </div></div>;
 }
-function Status({ status, compact = false }: { status: string; compact?: boolean }) {
-    const Icon = compact && status !== "error" ? Circle : status === "completed" ? Check : status === "error" ? XCircle : status === "running" ? Clock : Circle;
-    return <span className={`tc-status tc-${status}`} aria-hidden={compact || undefined} title={status}>{compact && status === "completed" ? <span className="tc-status-dot" /> : compact && status === "running" ? <span className="tc-running-dots" aria-hidden="true">•••</span> : <Icon size={13} aria-hidden="true" />}{!compact && status}</span>;
+function ToolIcon({ part }: { part: CardPart }) {
+    return <ToolActivityIcon name={toolName(part)} />;
 }
 function toolPreview(part: CardPart, shown = ""): string {
     const { input, state, status, error } = cardData(part);
@@ -63,13 +72,13 @@ function Frame({ part, title, preview, compact, children }: { part: CardPart; ti
     const toggle = () => setExpanded(value => !value);
     return <section className={`tc-card tc-edit${expanded ? " tc-expanded" : ""}`} data-tool-status={status} aria-label={`${part.type === "tool" ? clean(part.tool) : "Task"}: ${status}`}>
         <button type="button" className="tc-header tc-tool-toggle" aria-expanded={expanded} onClick={toggle}>
-            <Status status={status} compact /><span className="tc-title">{title} <span className="tc-state-word">{status}</span></span>{elapsed && <time className="tc-hover-time">{elapsed}</time>}
+            <ToolIcon part={part} /><span className="tc-title">{title} <span className="tc-state-word">{status}</span></span>{elapsed && <time className="tc-hover-time">{elapsed}</time>}
         </button>
-        {!expanded && (compact && !error ? compact(toggle) : <TreePreview text={error ? toolPreview(part) : preview || toolPreview(part)} toggle={toggle} />)}
-        {expanded && <div className="tc-tree-body">
+        <ToolReveal open={!expanded}>{compact && !error ? compact(toggle) : <TreePreview text={error ? toolPreview(part) : preview || toolPreview(part)} toggle={toggle} />}</ToolReveal>
+        <ToolReveal open={expanded}><div className="tc-tree-body">
             {error && <div className="tc-error"><ValueView value={state.error || error} /></div>}
             {children}
-        </div>}
+        </div></ToolReveal>
     </section>;
 }
 export function TaskToolCard({ part, childStatus, onOpenSession, onStopTask }: ToolPartProps) {
@@ -81,21 +90,21 @@ export function TaskToolCard({ part, childStatus, onOpenSession, onStopTask }: T
     return <section className={`tc-card tc-task${expanded ? " tc-expanded" : ""}`} data-tool-status={status} data-task-status={activity}>
         <div className="tc-task-row">
             <button type="button" className="tc-header tc-tool-toggle" aria-expanded={expanded} onClick={() => setExpanded(v => !v)}>
-                <span className={`tc-task-indicator tc-${activity}`} aria-label={`Subagent ${activity}`}>
-                    {active ? <svg className="tc-task-orbit" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">{[1, .7, .45, .2].map((opacity, i) => <circle className="tc-task-orbit-dot" key={i} cx="3" cy="3" r="1.4" fill="currentColor" opacity={opacity} style={{ animationDelay: `${-i * .12}s` }} />)}</svg> : activity === "completed" ? <Check size={15} aria-hidden="true" /> : activity === "error" ? <XCircle size={15} aria-hidden="true" /> : <Circle size={13} aria-hidden="true" />}
-                </span>
-                <span className="tc-title">Task({identity.description || cardData(part).title || "Delegated task"})</span>
+                <ToolActivityIcon name={toolName(part)} running={activity === "running"} />
+                <span className="tc-title">Task({identity.description || cardData(part).title || "Delegated task"}) <span className="tc-state-word">{activity}</span></span>
                 {elapsed && <time className="tc-hover-time">{elapsed}</time>}
             </button>
             {identity.sessionId && onOpenSession && <button type="button" className="tc-open-session" onClick={event => { event.stopPropagation(); onOpenSession(identity.sessionId); }}>Open session ↗</button>}
             {identity.taskId && onStopTask && active && <button type="button" disabled={stopping} onClick={async event => { event.stopPropagation(); setStopping(true); setStopError(""); try { await onStopTask(identity.taskId); } catch (e) { setStopError(clean(e instanceof Error ? e.message : "Unable to stop task")); } finally { setStopping(false); } }}>{stopping ? "Stopping…" : "Stop task"}</button>}
         </div>
-        {active && !expanded && <p className="tc-waiting"><span aria-hidden="true">╰─</span> Waiting for task output…</p>}
-        {!expanded && (error || activity === "error") && <TreePreview text={clean(error.split("\n")[0] || "Subagent failed.", 180)} toggle={() => setExpanded(true)} />}
+        <ToolReveal open={!expanded}>
+            {active && <p className="tc-waiting"><span aria-hidden="true">╰─</span> Waiting for task output…</p>}
+            {(error || activity === "error") && <TreePreview text={clean(error.split("\n")[0] || "Subagent failed.", 180)} toggle={() => setExpanded(true)} />}
+        </ToolReveal>
         {stopError && <p className="tc-error" role="status">{stopError}</p>}
-        {expanded && <div className="tc-tree-body">
+        <ToolReveal open={expanded}><div className="tc-tree-body">
             {error || activity === "error" ? <div className="tc-error"><ValueView value={state.error || error || "Subagent failed."} /></div> : active ? <p className="tc-summary">Waiting for task output…</p> : output !== undefined && output !== "" ? <ValueView value={output} /> : null}
-        </div>}
+        </div></ToolReveal>
     </section>;
 }
 function CompactDiff({ changes, toggle }: { changes: FileChange[]; toggle(): void }) {
@@ -159,17 +168,17 @@ function CommonToolCard({ part }: ToolPartProps) {
     const elapsed = duration(state.time);
     return <section className={`tc-card tc-ordinary${expanded ? " tc-expanded" : ""}`} data-tool-status={status}>
         <button type="button" className="tc-header tc-tool-toggle" aria-expanded={expanded} onClick={() => setExpanded(v => !v)}>
-            <Status status={status} compact />
+            <ToolIcon part={part} />
             <span className="tc-call"><strong className="tc-verb">{verb}</strong>{summary && <span className="tc-argument">({clean(summary, 480)}{summary.length > 480 ? "…" : ""})</span>} <span className="tc-state-word">{status}</span></span>
             {elapsed && <time className="tc-hover-time">{elapsed}</time>}
         </button>
-        {!expanded && <TreePreview text={toolPreview(part, summary)} toggle={() => setExpanded(true)} />}
-        {expanded && <div className="tc-tree-body">
+        <ToolReveal open={!expanded}><TreePreview text={toolPreview(part, summary)} toggle={() => setExpanded(true)} /></ToolReveal>
+        <ToolReveal open={expanded}><div className="tc-tree-body">
             {error ? <div className="tc-error"><ValueView value={state.error || error} /></div> :
                 state.output !== undefined && state.output !== "" ? <ValueView value={state.output} /> :
                 <p className="tc-summary">{status === "pending" || status === "running" ? "Waiting for tool output…" : "No output returned."}</p>}
             {summary.length > 480 && <ValueView value={summary} />}
-        </div>}
+        </div></ToolReveal>
     </section>;
 }
 /** PartView integration: case "tool": case "subtask": return <ToolPart part={part} ...callbacks />. */

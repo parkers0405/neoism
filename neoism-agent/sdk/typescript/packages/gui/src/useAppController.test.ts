@@ -10,7 +10,7 @@ const host = vi.hoisted(() => {
     const equal = (a?: unknown[], b?: unknown[]) => !!a && !!b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
     return {
         clients: new Map<string, any>(),
-        transports: [] as { baseUrl: string; token?: string }[],
+        transports: [] as { baseUrl: string; token?: string; fetch?: typeof fetch }[],
         chat: { state: { messages: [], busy: false }, setState: vi.fn(), markCreatedSession: vi.fn(), beginPrompt: vi.fn(() => 'msg_local_prompt') },
         reset() { slots = []; cursor = 0; effects = []; dirty = false; this.transports.length = 0; },
         begin() { cursor = 0; dirty = false; },
@@ -37,6 +37,7 @@ vi.mock("@neoism/sdk", () => ({ createHttpTransport: (input: any) => { host.tran
 vi.mock("./useChat", () => ({ useChat: () => host.chat }));
 vi.mock("./nativeCommands", () => ({ nativeCommand: vi.fn(async (_name, _args, context) => { if (_name === "goal") await context.sendPrompt(context.id, _args); return true; }) }));
 import { SessionPinIndex } from "./sessionPins";
+import { subagentView } from "./subagent-view";
 import { useAppController } from "./useAppController";
 import { recentSessions, mergeSession } from "./useSessionEvents";
 import { rememberedSession, rememberSession, serverScope, loadDeletedAccounts, loadPreferences } from "./types";
@@ -85,6 +86,82 @@ beforeEach(() => {
     server = client(); host.clients.set("http://127.0.0.1:4096", server); render();
 });
 afterEach(() => { host.cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+describe("in-tab subagent navigation", () => {
+    it("returns from child and nested child without adding tabs or losing parent state", async () => {
+        server.sessions.get.mockImplementation(async id => session(id, {
+            parentId: id === 'child' ? 'parent' : id === 'nested' ? 'child' : undefined,
+        }));
+        app.openSession('parent'); await settle();
+        app.onDraftChange('unfinished parent prompt');
+        const files = [{ name: 'attachment.txt' } as File];
+        app.onFilesChange(files); render();
+        const parent = app.tabs.find(t => t.key === app.tabKey)!;
+        const keys = app.tabs.map(t => t.key);
+        app.openChildSession('child'); render();
+        expect(subagentView(app.id, app.active).canCompose).toBe(false);
+        await settle();
+        expect(app.id).toBe('child');
+        expect(app.tabKey).toBe(parent.key);
+        expect(app.tabs.map(t => t.key)).toEqual(keys);
+        expect(app.draft).toBe('');
+        expect(app.files).toEqual([]);
+        expect(subagentView(app.id, app.active)).toMatchObject({ isChild: true, canCompose: false, returnId: 'parent' });
+        app.openChildSession('nested'); await settle();
+        expect(subagentView(app.id, app.active).returnId).toBe('child');
+        app.openChildSession(subagentView(app.id, app.active).returnId!); await settle();
+        expect(app.id).toBe('child');
+        app.openChildSession('nested'); await settle();
+        // Runtime root intentionally offers a direct Back to main chat.
+        app.openChildSession(subagentView(app.id, app.active, { rootSessionId: 'parent' }).returnId!); await settle();
+        expect(app.tabs.map(t => t.key)).toEqual(keys);
+        expect(app.tabs.find(t => t.key === app.tabKey)).toBe(parent);
+        expect(app.id).toBe('parent');
+        expect(app.draft).toBe('unfinished parent prompt');
+        expect(app.files).toBe(files);
+        expect(subagentView(app.id, app.active).canCompose).toBe(true);
+        app.openChildSession('parent'); render();
+        expect(app.tabs.map(t => t.key)).toEqual(keys);
+        app.openSession('other'); await settle();
+        expect(app.tabs).toHaveLength(keys.length + 1);
+        app.openSession('parent'); await settle();
+        expect(app.tabKey).toBe(parent.key);
+        expect(app.tabs).toHaveLength(keys.length + 1);
+        expect(app.draft).toBe('unfinished parent prompt');
+    });
+
+    it("restores parent/child history entries within the same tab", async () => {
+        app.openSession('parent'); await settle();
+        app.onDraftChange('saved draft'); render();
+        const parentUrl = window.location.href;
+        const keys = app.tabs.map(t => t.key);
+        app.openChildSession('child'); await settle();
+        const childUrl = window.location.href;
+        const pop = vi.mocked(window.addEventListener).mock.calls.find(([name]) => name === 'popstate')![1] as () => void;
+        window.location.href = parentUrl; pop(); await settle();
+        expect(app.id).toBe('parent');
+        expect(app.draft).toBe('saved draft');
+        window.location.href = childUrl; pop(); await settle();
+        expect(app.id).toBe('child');
+        expect(app.tabs.map(t => t.key)).toEqual(keys);
+    });
+
+    it("does not apply late parent metadata to the child sharing its tab key", async () => {
+        app.openSession('parent'); await settle();
+        const late = deferred<Session>();
+        server.sessions.update.mockReturnValueOnce(late.promise);
+        const updating = app.setDirectory('/updated');
+        app.openChildSession('child'); render();
+        server.sessions.get.mockResolvedValue(session('child', { parentId: 'parent' }));
+        await settle();
+        late.resolve(session('parent', { directory: '/updated' }));
+        await updating; await settle();
+        expect(app.id).toBe('child');
+        expect(app.active?.id).toBe('child');
+        app.openChildSession('parent'); render();
+        expect(app.active?.directory).toBe('/updated');
+    });
+});
 
 describe("native session pins", () => {
     it("handles native unpin responses with the metadata key removed", async () => {
@@ -330,6 +407,22 @@ describe("controller parity", () => {
         await app.send("/skill review"); render(); expect(app.draftInsertion?.text).toBe("$review "); expect(server.sessions.prompt).not.toHaveBeenCalled(); expect(server.sessions.create).not.toHaveBeenCalled();
         await app.send("/skill"); await settle(); expect(app.picker).toBe("skill"); app.choose("review"); render(); expect(app.draftInsertion?.revision).toBe(2);
     });
+    it("matches Rust Reasoning options and clears the variant with none", async () => {
+        app.openSession("a"); await settle(); app.setModel("openai/gpt-5"); await settle();
+        app.setPicker("thinking"); render();
+        expect(app.choices).toEqual([
+            { id: "", label: "none", description: "Use model default reasoning" },
+            { id: "low", label: "low", description: "Fastest reasoning" },
+            { id: "medium", label: "medium", description: "Balanced reasoning" },
+            { id: "high", label: "high", description: "More reasoning" },
+            { id: "xhigh", label: "xhigh", description: "Maximum reasoning" },
+        ]);
+        app.choose(""); await settle();
+        expect(app.thinking).toBe("");
+        expect(server.sessions.update).toHaveBeenCalledWith("a", { model: expect.objectContaining({ variant: "" }) });
+        app.setModel("openai/gpt-5.6-preview"); await settle(); app.setPicker("thinking"); render();
+        expect(app.choices.at(-1)).toEqual({ id: "ultra", label: "ultra", description: "Multi-agent reasoning (GPT-5.6)" });
+    });
     it("patches active choices and offers ultra for gpt-5.6", async () => {
         app.openSession("a"); await settle(); app.setModel("openai/gpt-5.6"); app.setThinking("ultra"); app.setConnectionId("acct"); app.setAgent("plan"); await settle();
         expect(server.sessions.update).toHaveBeenCalledWith("a", { model: { providerId: "openai", id: "gpt-5.6", variant: "ultra", connectionId: "acct" } });
@@ -565,6 +658,19 @@ describe('server-scoped volatile credentials', () => {
         app.saveSettings({ ...app.prefs, server: serverB }, 'intentional-B'); render(); expect(app.token).toBe('intentional-B'); expect(transportsFor(serverB).at(-1)?.token).toBe('intentional-B');
         app.setPrefs(p => ({ ...p, server: serverA })); render(); expect(app.token).toBe('secret-A'); expect(transportsFor(serverA).every(t => t.token !== 'intentional-B')).toBe(true);
     });
+    it('reuses a daemon bearer only for an explicit workspace switch on that same daemon', () => {
+        const first = 'https://daemon.example/agent/workspaces/first';
+        const second = 'https://daemon.example/agent/workspaces/second';
+        const other = 'https://other.example/agent/workspaces/second';
+        for (const endpoint of [first, second, other]) host.clients.set(endpoint, client());
+        app.saveSettings({ ...app.prefs, server: first }, 'paired-device'); render();
+        expect(app.token).toBe('paired-device');
+        app.saveSettings({ ...app.prefs, server: second }, 'paired-device'); render();
+        expect(app.token).toBe('paired-device');
+        expect(transportsFor(second).at(-1)?.fetch).toBeTypeOf('function');
+        app.saveSettings({ ...app.prefs, server: other }, 'paired-device'); render();
+        expect(app.token).toBe('');
+    });
     it('keeps a captured setToken scoped to its source even when batched with a server switch', () => {
         const other = client(); host.clients.set(serverB, other); const setAToken = app.setToken;
         app.setPrefs(p => ({ ...p, server: serverB })); setAToken('A-only'); render(); expect(app.token).toBe(''); expect(transportsFor(serverB).every(t => !t.token)).toBe(true);
@@ -575,24 +681,17 @@ describe('server-scoped volatile credentials', () => {
         expect(serverScope('https://example.com/api/')).not.toBe(serverScope('https://example.com/other/'));
         host.clients.set(serverA + '/', server); app.setToken('normalized-A'); render(); app.setPrefs(p => ({ ...p, server: serverA + '/' })); render(); expect(app.token).toBe('normalized-A');
     });
-    it('clears Settings bearer immediately for endpoint edits but not directory edits', async () => {
-        const { Settings } = await import('./components/Settings');
-        const value = app.prefs; host.cleanup(); host.reset(); vi.stubGlobal('HTMLElement', class {});
-        const nodes = (node: any): any[] => !node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(nodes) : [node, ...nodes(node.props?.children)];
-        const draw = () => {
-            let tree: any, again = true;
-            while (again) {
-                host.begin(); tree = Settings({ client: server as any, value, token: 'secret-A', save: () => {}, close: () => {} });
-                nodes(tree).forEach(n => { if (n.props?.ref && typeof n.props.ref === 'object') n.props.ref.current = { showModal() {}, close() {}, focus() {} }; });
-                again = host.flush();
-            }
-            return nodes(tree);
-        };
-        let tree = draw(); tree.find(n => n.type === 'button' && Array.isArray(n.props.children) && n.props.children.includes('Servers')).props.onClick(); tree = draw();
-        const password = () => tree.find(n => n.type === 'input' && n.props.type === 'password');
-        const directory = tree.find(n => n.type === 'input' && n.props.placeholder === 'Server default');
-        directory.props.onChange({ target: { value: '/changed' } }); tree = draw(); expect(password().props.value).toBe('secret-A');
-        tree.find(n => n.type === 'input' && n.props.type === 'url').props.onChange({ target: { value: serverB } }); tree = draw(); expect(password().props.value).toBe('');
+    it('forgets every workspace credential on a removed daemon without clearing local auth', () => {
+        const remote = 'https://daemon.example/agent/workspaces/team';
+        host.clients.set(remote, client());
+        app.setToken('local-secret'); render();
+        app.saveSettings({ ...app.prefs, server: remote }, 'device-secret'); render();
+        expect(app.serverCredential('https://daemon.example')).toBe('device-secret');
+        expect(app.serverCredential(serverA)).toBe('local-secret');
+        app.forgetServer('https://daemon.example'); render();
+        expect(app.token).toBe('');
+        expect(app.serverCredential('https://daemon.example')).toBe('');
+        expect(app.serverCredential(serverA)).toBe('local-secret');
     });
 });
 describe('connection-specific deletion blocking', () => {

@@ -46,7 +46,7 @@ describe("native sidebar usage", () => {
 function app(): ComponentProps<typeof ChatDetails>["app"] {
     return { client: {} as ComponentProps<typeof ChatDetails>["app"]["client"], id: "private-session-id", active: undefined,
         prefs: { directory: "/workspace" } as ComponentProps<typeof ChatDetails>["app"]["prefs"], model: "provider/model/variant", agent: "build", thinking: "high",
-        usage: [step(9000, 5), step(32022, .1)], providerCatalog: catalog, openSession: async () => {} };
+        usage: [step(9000, 5), step(32022, .1)], providerCatalog: catalog, openChildSession: async () => {} };
 }
 const row = (status: string): TaskRow => ({ id: "private-task-id", sessionId: "private-child-id", title: "private-child-id", agent: "explore", status, nested: false, stoppable: true });
 const children = (rows: TaskRow[], loading = false) => renderToStaticMarkup(<SidebarSubagents parentId="parent" data={{ ...emptySubagents(), rows, loading, errors: ["private-error-id"], canStop: true }} open={() => {}} />);

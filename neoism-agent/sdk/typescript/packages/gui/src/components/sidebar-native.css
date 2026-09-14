@@ -34,3 +34,18 @@
 .sidebar-native .sidebar-context-caption { margin: 6px 0 14px; font-variant-numeric: tabular-nums; }
 .sidebar-native .chat-subagent-heading h3 { margin: 0; }
 .sidebar-native .chat-subagent-heading { margin-bottom: 12px; }
+/* Override global button flex centering for both short and wrapped titles. */
+.sidebar-native .sidebar-subagents .chat-subagent-open {
+    display: flex;
+    justify-content: flex-start;
+    align-items: flex-start;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    padding: 6px 0;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.5;
+}

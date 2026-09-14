@@ -6,7 +6,7 @@ import { ProjectPicker, type ProjectPickerProps } from "./ProjectPicker";
 import "./composer-native.css";
 import { NativeFooterActivity } from "./NativeFooterActivity";
 import { AttachmentPreview } from "./AttachmentPreview";
-export interface Choice { id: string; label: string; description?: string; section?: string; badge?: string }
+export interface Choice { id: string; label: string; description?: string; section?: string; sectionProviderId?: string; badge?: string }
 export interface ComposerProps extends ProjectPickerProps {
     busy: boolean;
     commands: SlashCommand[];
@@ -16,6 +16,8 @@ export interface ComposerProps extends ProjectPickerProps {
     agent: string;
     thinking: string;
     openPicker(type: string): void;
+    /** Host-owned panels may take focus outside the composer. */
+    pickerOpen?: boolean;
     draftInsertion?: { text: string; revision: number };
     tabKey?: string;
     draft?: string;
@@ -32,7 +34,7 @@ type TabDraft = { text: string; files: File[]; pending: boolean; error: string; 
 const empty = (): TabDraft => ({ text: "", files: [], pending: false, error: "" });
 const sizeLabel = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
 
-export function Composer({ busy, commands, send, abort, model, agent, thinking, openPicker,
+export function Composer({ busy, commands, send, abort, model, agent, thinking, openPicker, pickerOpen = false,
     draftInsertion, tabKey = "legacy", draft, onDraftChange, files: controlledFiles,
     onFilesChange, directory, client, sessionId, recentDirectories, projectStorageScope, onDirectoryChange, onCycleAgent, showHints = true, showFooter = true }: ComposerProps) {
     // Unkeyed hosts retain local drafts/attachments across tab switches. Keyed hosts
@@ -52,10 +54,21 @@ export function Composer({ busy, commands, send, abort, model, agent, thinking, 
     const update = () => { if (alive.current) redraw(n => n + 1); };
     const setText = (value: string) => { state.text = value; onDraftChange?.(value); update(); };
     const setFiles = (value: File[]) => { state.files = value; onFilesChange?.(value); update(); };
+    const [focused, setFocused] = useState(false);
+    // Native file dialogs temporarily move focus out of the document. Keep the
+    // surface expanded until either selection or cancellation, not window blur.
+    const [filePickerOpen, setFilePickerOpen] = useState(false);
+    const expanded = focused || text.length > 0 || files.length > 0 || state.pending || pickerOpen || filePickerOpen;
     const [index, setIndex] = useState(0);
     const [dismissed, setDismissed] = useState(false);
     const ref = useRef<HTMLTextAreaElement>(null);
     const fileInput = useRef<HTMLInputElement>(null);
+    useEffect(() => {
+        const input = fileInput.current;
+        const cancel = () => setFilePickerOpen(false);
+        input?.addEventListener("cancel", cancel);
+        return () => input?.removeEventListener("cancel", cancel);
+    }, []);
     const menu = useRef<HTMLDivElement>(null);
     const menuId = useId();
     useEffect(() => {
@@ -98,7 +111,9 @@ export function Composer({ busy, commands, send, abort, model, agent, thinking, 
             if (alive.current && currentKey.current === tabKey && !ref.current?.closest(".composer-anchor")?.querySelector(".composer-panel")) ref.current?.focus();
         }
     };
-    return <div className="composer-wrap native-composer">
+    return <div className="composer-wrap native-composer" data-layout={expanded ? "expanded" : "compact"}
+        onFocusCapture={() => setFocused(true)}
+        onBlurCapture={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false); }}>
         {visible && <div className="slash-picker" role="listbox" aria-label="Commands" id={menuId} ref={menu}>
             <header>Commands <small>↑ ↓ / Tab navigate · Enter run</small></header>
             {filtered.map((c, i) => <button type="button" key={c.name} id={`${menuId}-${i}`} role="option" aria-selected={selected === i}
@@ -108,7 +123,9 @@ export function Composer({ busy, commands, send, abort, model, agent, thinking, 
             </button>)}
         </div>}
         <div className="native-composer-island">
-            <div className="composer native-composer-surface">
+            <div className="composer native-composer-surface" onClick={e => {
+                if (e.target === e.currentTarget) ref.current?.focus();
+            }}>
                 {!!files.length && <ul className="native-composer-attachments" aria-label="Selected attachments">
                     {files.map((file, i) => <li key={`${file.name}-${i}`} title={`${file.name} · ${sizeLabel(file.size)}`}>
                         <AttachmentPreview key={tabKey} file={file} />
@@ -117,7 +134,7 @@ export function Composer({ busy, commands, send, abort, model, agent, thinking, 
                 </ul>}
                 <textarea ref={ref} aria-label="Message Neoism" aria-controls={visible ? menuId : undefined} aria-expanded={visible}
                     aria-activedescendant={visible ? `${menuId}-${selected}` : undefined}
-                    placeholder="Ask anything, or build something…" value={text} rows={1}
+                    placeholder="Ask Neoism" value={text} rows={1}
                     onChange={e => setText(e.target.value)} onKeyDown={e => {
                         if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                         if (visible && ["ArrowDown", "ArrowUp", "Tab", "Enter", "Escape"].includes(e.key)) {
@@ -131,19 +148,22 @@ export function Composer({ busy, commands, send, abort, model, agent, thinking, 
                     }} />
                 <div className="native-composer-input-band">
                     <input ref={fileInput} type="file" multiple hidden aria-label="Attach files" onChange={e => {
+                        setFilePickerOpen(false);
                         const added = Array.from(e.target.files ?? []);
                         setFiles([...files, ...added]); state.error = ""; e.target.value = "";
                     }} />
-                    <button type="button" className="native-composer-add" title="Attach files" aria-label="Add attachments" onClick={() => fileInput.current?.click()}><Plus size={20} /></button>
+                    <button type="button" className="native-composer-add" title="Attach files" aria-label="Add attachments" onClick={() => { setFilePickerOpen(true); fileInput.current?.click(); }}><Plus size={20} /></button>
                     {busy ? <button type="button" className="send native-composer-send" aria-label="Stop response" onClick={abort}><Square size={16} /></button>
                         : <button type="button" className="send native-composer-send" aria-label="Send message" disabled={(!text.trim() && !files.length) || state.pending} onClick={() => void submit()}><ArrowUp size={18} /></button>}
                 </div>
             </div>
             <div className="native-composer-skirt">
                 <div className="native-composer-chips">
+                    <div className="native-composer-controls">
                     <button type="button" data-agent={agent.toLowerCase()} className="native-composer-agent" onClick={() => openPicker("agent")} title={`Agent: ${agent}`} aria-label={`Choose agent: ${agent}`}><span>{agent}</span><ChevronDown size={12} /></button>
                     <button type="button" className="native-composer-model" onClick={() => openPicker("model")} title={`Model: ${model || "Select model"}`} aria-label={`Choose model: ${model || "Select model"}`}><span>{model || "Select model"}</span><ChevronDown size={12} /></button>
                     <button type="button" className="native-composer-effort" onClick={() => openPicker("thinking")} title={`Thinking: ${thinking || "Default"}`} aria-label={`Choose thinking: ${thinking || "Default"}`}><span>{thinking || "Thinking"}</span><ChevronDown size={12} /></button>
+                    </div>
                     <NativeFooterActivity busy={busy && !!sessionId} />
                 </div>
             </div>

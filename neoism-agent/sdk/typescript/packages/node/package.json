@@ -1,6 +1,6 @@
 {
   "name": "@neoism/sdk-node",
-  "version": "0.7.55",
+  "version": "0.7.100",
   "description": "Node.js compatibility entry point for the Neoism SDK",
   "license": "MIT",
   "repository": {
@@ -22,7 +22,7 @@
     "dist"
   ],
   "dependencies": {
-    "@neoism/sdk-core": "0.7.55",
-    "@neoism/sdk-http": "0.7.55"
+    "@neoism/sdk-core": "0.7.100",
+    "@neoism/sdk-http": "0.7.100"
   }
 }

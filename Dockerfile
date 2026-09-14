@@ -3,9 +3,11 @@ FROM rust:1.92-bookworm AS builder
 # The daemon links the sugarloaf renderer: shaderc-sys builds shaderc from
 # source (cmake + python3), and sugarloaf's build.rs shells out to a GLSL →
 # SPIR-V compiler (glslangValidator from glslang-tools).
+# Agent computer-use backends also link GBM (libwayshot) and xkbcommon.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         cmake python3 ninja-build glslang-tools \
+        libgbm-dev libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -31,6 +33,8 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        libgbm1 \
+        libxkbcommon0 \
         openssh-client \
         tini \
     && rm -rf /var/lib/apt/lists/*
@@ -51,6 +55,9 @@ RUN useradd --system --create-home --home-dir /var/lib/neoism --shell /usr/sbin/
 
 COPY --from=builder /src/target/release/neoism-workspace-daemon /usr/local/bin/neoism-workspace-daemon
 COPY --from=builder /src/target/release/neoism-agent /usr/local/bin/neoism-agent
+# Exercise the runtime loader in the slim image before publishing it. A builder
+# dependency alone does not provide the shared libraries needed at startup.
+RUN neoism-workspace-daemon --version && neoism-agent --version
 USER neoism
 ENV NEOISM_DAEMON_ADDR=0.0.0.0:9876 \
     NEOISM_DAEMON_DATA_DIR=/var/lib/neoism/data \

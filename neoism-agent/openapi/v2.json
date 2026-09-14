@@ -3984,6 +3984,16 @@
       "McpCatalogEntry": {
         "additionalProperties": false,
         "properties": {
+          "configScope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/McpConfigScope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "configWritable": {
             "type": "boolean"
           },
@@ -4009,7 +4019,8 @@
           "runtimeConnected",
           "oauthCapable",
           "hasCredentials",
-          "configWritable"
+          "configWritable",
+          "configScope"
         ],
         "type": "object"
       },
@@ -4040,6 +4051,13 @@
           "enabled"
         ],
         "type": "object"
+      },
+      "McpConfigScope": {
+        "enum": [
+          "global",
+          "workspace"
+        ],
+        "type": "string"
       },
       "McpPrompt": {
         "additionalProperties": false,

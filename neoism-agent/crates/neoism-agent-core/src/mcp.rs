@@ -107,6 +107,13 @@ pub enum McpStatus {
     NeedsClientRegistration { error: String },
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpConfigScope {
+    Global,
+    Workspace,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpCatalogEntry {
@@ -116,6 +123,9 @@ pub struct McpCatalogEntry {
     pub oauth_capable: bool,
     pub has_credentials: bool,
     pub config_writable: bool,
+    /// None only when the configuration source could not be read.
+    #[serde(default)]
+    pub config_scope: Option<McpConfigScope>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

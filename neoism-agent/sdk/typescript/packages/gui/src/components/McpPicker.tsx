@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { NeoismClient } from "@neoism/sdk";
 import { getMcp, runMcpAction, type McpCatalog, type McpAction } from "../mcpActions";
 
+function ownerLabel(entry: McpCatalog[string]): string {
+    return entry.configScope === "global" ? "Global" : entry.configScope === "workspace" ? "Workspace" : "Unknown scope";
+}
+
 export function McpPicker({ client, directory }: { client: NeoismClient; directory: string }) {
     const [catalog, setCatalog] = useState<McpCatalog>({});
     const [busy, setBusy] = useState(true);
@@ -53,11 +57,11 @@ export function McpPicker({ client, directory }: { client: NeoismClient; directo
         {!busy && !Object.keys(catalog).length && <p>No MCP servers configured in this workspace.</p>}
         {Object.entries(catalog).map(([name, entry]) => <article key={name}>
             <h3>{name}</h3>
-            <p>{entry.enabled ? "Enabled" : "Disabled"} · {entry.runtimeConnected ? "Connected" : "Disconnected"} · {entry.status.status}</p>
+            <p>{ownerLabel(entry)}{!entry.configWritable ? " (read-only)" : ""} · {entry.enabled ? "Enabled" : "Disabled"} · {entry.runtimeConnected ? "Connected" : "Disconnected"} · {entry.status.status}</p>
             {"error" in entry.status && <p role="status">{String(entry.status.error)}</p>}
             {!entry.configWritable && <small>Read-only configuration; runtime connections and credentials can still be managed.</small>}
             <div className="mcp-actions">
-                <button disabled={busy || !entry.configWritable} onClick={() => void act(name, entry.enabled ? "disable" : "enable")}>{entry.enabled ? "Disable" : "Enable"}</button>
+                <button title={`Persist enabled: ${!entry.enabled} in ${ownerLabel(entry)} config`} disabled={busy || !entry.configWritable} onClick={() => void act(name, entry.enabled ? "disable" : "enable")}>{entry.enabled ? "Disable" : "Enable"}</button>
                 <button disabled={busy || (!entry.enabled && !entry.runtimeConnected)} onClick={() => void act(name, entry.runtimeConnected ? "disconnect" : "connect")}>{entry.runtimeConnected ? "Disconnect" : "Connect"}</button>
                 {entry.oauthCapable && <button disabled={busy} onClick={() => void act(name, "auth")}>Authenticate</button>}
                 {entry.hasCredentials && <button disabled={busy} onClick={() => void act(name, "logout")}>Log out</button>}

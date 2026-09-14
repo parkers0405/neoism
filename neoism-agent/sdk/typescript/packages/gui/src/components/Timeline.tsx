@@ -7,7 +7,7 @@ import { normalizeMessages, RuntimeNotice } from "./runtimeMessages";
 import { ResponseFooter } from "./semanticMarkdown";
 import "./message-presentation.css";
 import { AttachmentPreview } from "./AttachmentPreview";
-import { rasterMime } from "./attachmentPreview";
+import { rasterMime } from "./attachmentPreviewUtils";
 import type { NeoismClient, MessageWithParts, Part } from "@neoism/sdk";
 import { ConversationSkeleton } from "./Skeleton";
 import { Markdown } from "./Markdown";

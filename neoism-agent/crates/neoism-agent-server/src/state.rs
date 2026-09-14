@@ -907,6 +907,21 @@ impl AppState {
         snapshot
     }
 
+    /// Publish persisted configuration before replying to a mutation. Unlike a
+    /// normal read, this deliberately bypasses both the request's generation
+    /// pin and the registry's polling interval. Existing leases remain pinned;
+    /// only subsequent requests and this mutation's response use the publication.
+    pub(crate) async fn publish_config_mutation(
+        &self,
+        directory: &str,
+    ) -> Result<crate::workspace_runtime::PluginGenerationLease, String> {
+        let runtime = self.try_workspace_runtime(directory).await?;
+        crate::workspace_runtime::refresh_plugins(&runtime, self).await?;
+        let snapshot = runtime.published_snapshot();
+        self.reconcile_workspace_plugins(&runtime, &snapshot).await;
+        Ok(snapshot)
+    }
+
     pub(crate) async fn workspace_runtime(
         &self,
         directory: &str,

@@ -221,6 +221,8 @@ impl ConfigSnapshotRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigLayer {
     pub source_id: String,
+    /// Owner scope is supplied by the host; source IDs are opaque to consumers.
+    pub scope: ConfigDiscoveryScope,
     pub document: Value,
     pub writable: bool,
 }
@@ -998,11 +1000,12 @@ impl ConfigSourceService for StandardConfigSourceService {
         if request.installation {
             let mut layers = vec![ConfigLayer {
                 source_id: "standard:user".into(),
+                scope: ConfigDiscoveryScope::Installation,
                 document: Self::read_layer(&self.user_root.join(STANDARD_AGENT_CONFIG_FILENAME))?,
                 writable: true,
             }];
             layers.extend(self.memory_layers.iter().map(|(id, document)| ConfigLayer {
-                source_id: id.clone(), document: document.clone(), writable: false,
+                source_id: id.clone(), scope: ConfigDiscoveryScope::Installation, document: document.clone(), writable: false,
             }));
             return Ok(ConfigSnapshot {
                 identity: snapshot_identity(&layers), workspace: self.user_root.clone(), layers,
@@ -1015,6 +1018,7 @@ impl ConfigSourceService for StandardConfigSourceService {
         let mut layers = vec![
             ConfigLayer {
                 source_id: "standard:user".into(),
+                scope: ConfigDiscoveryScope::Installation,
                 document: Self::read_layer(
                     &self.user_root.join(STANDARD_AGENT_CONFIG_FILENAME),
                 )?,
@@ -1022,6 +1026,7 @@ impl ConfigSourceService for StandardConfigSourceService {
             },
             ConfigLayer {
                 source_id: "standard:project".into(),
+                scope: ConfigDiscoveryScope::Workspace,
                 document: Self::read_layer(
                     &project_root.join(STANDARD_AGENT_CONFIG_FILENAME),
                 )?,
@@ -1030,6 +1035,7 @@ impl ConfigSourceService for StandardConfigSourceService {
         ];
         layers.extend(self.memory_layers.iter().map(|(id, document)| ConfigLayer {
             source_id: id.clone(),
+            scope: ConfigDiscoveryScope::Installation,
             document: document.clone(),
             writable: false,
         }));

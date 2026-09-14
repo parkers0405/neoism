@@ -49,6 +49,7 @@ impl DesktopNotesConfig {
     fn decorate(&self, mut snapshot: ConfigSnapshot) -> ConfigSnapshot {
         let layer = ConfigLayer {
             source_id: CONFIG_SOURCE.into(),
+            scope: neoism_agent_service_api::ConfigDiscoveryScope::Installation,
             document: json!({
                 "mcp": {
                     "notes": {
@@ -592,16 +593,19 @@ mod tests {
 
     #[test]
     fn desktop_config_injects_notes_as_a_read_only_mcp() {
-        let services = install(neoism_agent_neoism_adapter::neoism_services());
         let root = std::env::temp_dir()
             .join(format!("neoism-notes-config-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
+        let services = install(neoism_agent_neoism_adapter::neoism_services().with_config(
+            Arc::new(neoism_agent_service_api::StandardConfigSourceService::new(root.join("user"))),
+        ));
         let snapshot = services
             .config
             .snapshot(&ConfigSnapshotRequest::new(&root))
             .unwrap();
         let layer = snapshot.layers.last().unwrap();
         assert_eq!(layer.source_id, CONFIG_SOURCE);
+        assert_eq!(layer.scope, neoism_agent_service_api::ConfigDiscoveryScope::Installation);
         assert!(!layer.writable);
         assert_eq!(layer.document["mcp"]["notes"]["type"], "local");
         assert_eq!(layer.document["mcp"]["notes"]["command"][1], INTERNAL_ARG);

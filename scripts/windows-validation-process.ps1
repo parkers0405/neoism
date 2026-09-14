@@ -1,3 +1,13 @@
+# Read the live Process.Path getter only once: a process can exit between reads.
+# Compare with a directory separator so a sibling such as Neoism-old is excluded.
+function Test-InstalledProcess {
+    param($Process, [Parameter(Mandatory)][string]$InstallDir)
+    try { $processPath = $Process.Path } catch { return $false }
+    $prefix = $InstallDir.TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
+    return -not [string]::IsNullOrEmpty($processPath) -and
+        $processPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
 # Shared bounded process runner. stdout/stderr go directly to disk even on timeout.
 function Invoke-CheckedProcess {
     param([string]$File, [string]$Arguments, [string]$Log, [int]$Seconds = 300,

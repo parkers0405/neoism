@@ -312,6 +312,7 @@ jobs:
           [void][System.Management.Automation.Language.Parser]::ParseFile(
             (Resolve-Path "install.ps1"), [ref]$tokens, [ref]$errors)
           if ($errors.Count -ne 0) { $errors | Format-List; throw "install.ps1 has parse errors" }
+          ./scripts/windows-validation-process-tests.ps1
 
       - name: Smoke-test Windows install, upgrade, and uninstall
         if: matrix.goos == 'windows'

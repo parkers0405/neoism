@@ -418,6 +418,7 @@ impl NeoismAgentPane {
             return;
         };
         let state = crate::panels::agent_pane::api_mapping::SessionState {
+            title: None,
             agent: self.agent.clone(),
             model: (!self.model.is_empty()).then(|| self.model.clone()),
             connection_id: self.connection_id.clone(),

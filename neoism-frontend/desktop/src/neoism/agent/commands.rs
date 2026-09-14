@@ -677,6 +677,7 @@ impl NeoismAgentPane {
             return;
         };
         let state = neoism_ui::panels::agent_pane::api_mapping::SessionState {
+            title: self.session_title.clone(),
             agent: self.agent.clone(),
             model: (!self.model.is_empty()).then(|| self.model.clone()),
             connection_id: self.connection_id.clone(),
@@ -784,6 +785,7 @@ impl NeoismAgentPane {
                 .unwrap_or_else(|| session_id.to_string()),
         );
         self.session_id = Some(session_id.to_string());
+        self.session_title = state.title.clone();
         self.parent_session_id = parent_id;
         self.side_panel
             .set_viewed_session_id(Some(session_id.to_string()));
@@ -987,8 +989,9 @@ impl NeoismAgentPane {
                 let origin_draft_id = request.origin_draft_id;
                 let transcript_echo = request.transcript_echo.clone();
                 let update = match dispatch_prompt_request(request) {
-                    Ok((session_id, event_stream)) => {
+                    Ok((session_id, session_title, event_stream)) => {
                         NeoismAgentBackgroundUpdate::PromptDispatched {
+                            session_title,
                             origin_session_id,
                             origin_draft_id,
                             session_id,
@@ -1779,6 +1782,7 @@ impl NeoismAgentPane {
         self.close_connect();
         self.prompt_draft_id = self.prompt_draft_id.wrapping_add(1);
         self.session_id = None;
+        self.session_title = None;
         self.parent_session_id = None;
         self.side_panel.set_viewed_session_id(None);
         // A fresh chat must not inherit the previous conversation's
@@ -1869,6 +1873,7 @@ impl NeoismAgentPane {
             .ok_or_else(|| "server did not return session id".to_string())?
             .to_string();
         self.session_id = Some(id.clone());
+        self.session_title = neoism_ui::panels::agent_pane::api_mapping::session_state_from_json(&response).title;
         self.parent_session_id = None;
         self.session_tree_root_id = Some(id.clone());
         self.side_panel.set_viewed_session_id(Some(id.clone()));
@@ -1901,11 +1906,14 @@ mod native_prompt_author_tests {
 
 fn dispatch_prompt_request(
     request: PendingPromptDispatch,
-) -> Result<(String, Option<AgentSessionEventStream>), String> {
-    let (session_id, event_stream) = match request.origin_session_id.as_deref() {
-        Some(session_id) => (session_id.to_string(), None),
+) -> Result<(String, Option<String>, Option<AgentSessionEventStream>), String> {
+    let (session_id, session_title, event_stream) = match request
+        .origin_session_id
+        .as_deref()
+    {
+        Some(session_id) => (session_id.to_string(), None, None),
         None => {
-            let session_id = create_prompt_session(&request)?;
+            let (session_id, session_title) = create_prompt_session(&request)?;
             // Subscribe before admitting the first prompt. The receiver can
             // queue updates while this worker waits for the POST response, so
             // a fast provider cannot emit the beginning of the turn before
@@ -1915,7 +1923,7 @@ fn dispatch_prompt_request(
             if let Some(wake) = request.event_wake.clone() {
                 event_stream.set_wake(wake);
             }
-            (session_id, Some(event_stream))
+            (session_id, session_title, Some(event_stream))
         }
     };
     let body = json!({
@@ -1938,10 +1946,12 @@ fn dispatch_prompt_request(
         &format!("/v2/sessions/{session_id}/prompt"),
         Some(&body),
     )?;
-    Ok((session_id, event_stream))
+    Ok((session_id, session_title, event_stream))
 }
 
-fn create_prompt_session(request: &PendingPromptDispatch) -> Result<String, String> {
+fn create_prompt_session(
+    request: &PendingPromptDispatch,
+) -> Result<(String, Option<String>), String> {
     let path = request
         .directory
         .as_deref()
@@ -1957,12 +1967,16 @@ fn create_prompt_session(request: &PendingPromptDispatch) -> Result<String, Stri
     });
     let response = api_request_json(&request.server, "POST", &path, Some(&body))?
         .ok_or_else(|| "server did not return session".to_string())?;
-    response
+    let session_id = response
         .get("id")
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| "server did not return session id".to_string())
+        .ok_or_else(|| "server did not return session id".to_string())?;
+    Ok((
+        session_id,
+        neoism_ui::panels::agent_pane::api_mapping::session_state_from_json(&response).title,
+    ))
 }
 
 pub(super) fn slash_options() -> Vec<NeoismAgentPickerOption> {

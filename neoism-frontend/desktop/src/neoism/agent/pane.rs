@@ -581,6 +581,7 @@ pub enum NeoismAgentUiEvent {
 
 pub(crate) enum NeoismAgentBackgroundUpdate {
     PromptDispatched {
+        session_title: Option<String>,
         origin_session_id: Option<String>,
         origin_draft_id: u64,
         session_id: String,
@@ -815,6 +816,7 @@ pub struct NeoismAgentPane {
     pub(super) pending_account_model: Option<String>,
     pub(super) thinking: Option<String>,
     pub(super) session_id: Option<String>,
+    pub(super) session_title: Option<String>,
     pub(super) parent_session_id: Option<String>,
     pub(super) directory: Option<String>,
     pub(super) server: String,
@@ -1126,6 +1128,7 @@ impl Default for NeoismAgentPane {
             pending_account_model: None,
             thinking: None,
             session_id: None,
+            session_title: None,
             parent_session_id: None,
             directory: None,
             server: neoism_agent_server(),

@@ -1138,6 +1138,8 @@ pub struct BufferTabs<A> {
     pub tear_out_anim: Option<TearOutAnim>,
     pub hover: Option<TabHit>,
     pub hover_anim_started: Option<Instant>,
+    pub title_hover_started: Option<Instant>,
+    pub title_hover_overflow: bool,
     pub hover_from: Option<usize>,
     pub hover_to: Option<usize>,
     pub focused: bool,

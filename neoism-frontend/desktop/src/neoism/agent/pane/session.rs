@@ -166,6 +166,14 @@ impl NeoismAgentPane {
         &mut self.side_panel
     }
 
+    /// The viewed session's server-owned title, never an optimistic prompt label.
+    pub fn session_title(&self) -> Option<&str> {
+        self.session_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+    }
+
     pub fn session_id_str(&self) -> Option<&str> {
         self.session_id.as_deref()
     }

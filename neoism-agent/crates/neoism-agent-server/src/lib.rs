@@ -320,7 +320,9 @@ pub async fn listen_with_gui(
         "server listen starting"
     );
     let bind_started = crate::perf::now();
-    let listener = TcpListener::bind(address).await?;
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("failed to bind agent listener {address}"))?;
     let actual = listener.local_addr()?;
     tracing::info!(
         target: "neoism_agent::perf",
@@ -329,7 +331,9 @@ pub async fn listen_with_gui(
         "server socket bound"
     );
     let state_started = crate::perf::now();
-    let state = AppState::open_default_for_server(services).await?;
+    let state = AppState::open_default_for_server(services)
+        .await
+        .context("agent listener bound but state initialization failed")?;
     tracing::info!(
         target: "neoism_agent::perf",
         listen_addr = %actual,

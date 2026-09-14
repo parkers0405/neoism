@@ -198,6 +198,7 @@ pub(super) enum AgentSessionUpdate {
         version: u64,
     },
     SessionMetadataUpdated {
+        title: Option<String>,
         agent: Option<String>,
         model: Option<String>,
         connection_id: Option<Option<String>>,
@@ -1137,11 +1138,13 @@ fn send_event_updates(
                 tx.send(AgentSessionUpdate::GoalUpdated { goal, version })?;
             }
             SessionEventUpdate::SessionMetadataUpdated {
+                title,
                 agent,
                 model,
                 connection_id,
                 thinking,
             } => tx.send(AgentSessionUpdate::SessionMetadataUpdated {
+                title,
                 agent,
                 model,
                 connection_id,
@@ -1351,7 +1354,7 @@ mod tests {
 
         assert!(rx.try_iter().any(|update| matches!(
             update,
-            AgentSessionUpdate::SessionMetadataUpdated { agent, model, connection_id, thinking }
+            AgentSessionUpdate::SessionMetadataUpdated { agent, model, connection_id, thinking, .. }
                 if agent.as_deref() == Some("plan")
                     && model.as_deref() == Some("openai/gpt-5.6")
                     && connection_id.as_ref().and_then(|value| value.as_deref()) == Some("conn-work")

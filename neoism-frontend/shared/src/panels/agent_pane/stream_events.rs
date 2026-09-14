@@ -323,6 +323,8 @@ pub enum SessionEventUpdate {
     /// double-optional: the outer `Some` means a model object was present and
     /// the inner value is its variant (`None` clears a previous variant).
     SessionMetadataUpdated {
+        /// Missing title leaves existing metadata unchanged; blank resets it.
+        title: Option<String>,
         agent: Option<String>,
         model: Option<String>,
         /// Outer `Some` means a model object was present; inner `None`
@@ -415,6 +417,10 @@ pub fn classify_session_event(
             } else if let Some(info) = properties.get("info") {
                 let model_metadata = session_model_metadata(info);
                 out.push(SessionEventUpdate::SessionMetadataUpdated {
+                    title: info
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     agent: session_agent_label(info),
                     model: model_metadata.as_ref().map(|(model, _, _)| model.clone()),
                     connection_id: model_metadata
@@ -1969,6 +1975,28 @@ mod tests {
     }
 
     #[test]
+    fn session_title_only_events_preserve_titles_and_blank_resets() {
+        let mut state = SessionEventUpdateState::default();
+        for event_type in ["session.created", "session.updated"] {
+            for title in ["Server title", ""] {
+                let updates = classify_session_event(
+                    json!({
+                        "type": event_type,
+                        "properties": { "sessionId": "root", "info": { "id": "root", "title": title } }
+                    }),
+                    "root",
+                    &mut state,
+                );
+                assert!(updates.iter().any(|update| matches!(
+                    update,
+                    SessionEventUpdate::SessionMetadataUpdated { title: Some(actual), .. }
+                        if actual == title
+                )));
+            }
+        }
+    }
+
+    #[test]
     fn session_updated_emits_authoritative_model_and_thinking() {
         let mut state = SessionEventUpdateState::default();
         let updates = classify_session_event(
@@ -1995,7 +2023,7 @@ mod tests {
 
         assert!(updates.iter().any(|update| matches!(
             update,
-            SessionEventUpdate::SessionMetadataUpdated { agent, model, connection_id, thinking }
+            SessionEventUpdate::SessionMetadataUpdated { agent, model, connection_id, thinking, .. }
                 if agent.as_deref() == Some("plan")
                     && model.as_deref() == Some("openai/gpt-5.6")
                     && connection_id.as_ref().and_then(|value| value.as_deref()) == Some("conn-work")

@@ -649,6 +649,7 @@ impl Screen<'_> {
         let mut agent_animating = false;
         let mut agent_animating_reason = None;
         let mut agent_ui_events = Vec::new();
+        let mut agent_tab_titles = Vec::new();
         let agent_event_wake = crate::neoism::agent::AgentEventWake::new(
             self.context_manager.event_proxy(),
             self.context_manager.window_id(),
@@ -687,6 +688,10 @@ impl Screen<'_> {
                     .into_iter()
                     .map(|event| (route_id, event)),
             );
+            agent_tab_titles.push((
+                route_id,
+                agent.session_title().unwrap_or_default().to_string(),
+            ));
             // Conversation stores stay live independently of which split/tab
             // is painted. This prevents a hidden pane from accumulating an
             // unbounded token backlog that must be replayed on activation.
@@ -724,6 +729,20 @@ impl Screen<'_> {
             let animation_reason = agent.animation_reason();
             agent_animating |= animation_reason.is_some();
             agent_animating_reason = agent_animating_reason.or(animation_reason);
+        }
+        // Synchronize by agent route, not the active tab index or strip owner:
+        // a hidden agent can share a strip with an active editor/terminal tab.
+        for (route_id, title) in agent_tab_titles {
+            agent_animating |= self
+                .renderer
+                .buffer_tabs
+                .set_neoism_agent_title(route_id, &title);
+            for tabs in self.renderer.pane_tabs.values_mut() {
+                agent_animating |= tabs.set_neoism_agent_title(route_id, &title);
+            }
+            for tabs in self.workspace_buffer_tabs.values_mut() {
+                agent_animating |= tabs.set_neoism_agent_title(route_id, &title);
+            }
         }
         // Publish to the renderer so `needs_redraw` keeps the event
         // loop rolling on the next about_to_wait. Setting only the

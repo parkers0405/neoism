@@ -121,6 +121,8 @@ pub struct ConfigDefaults {
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct SessionState {
+    /// Authoritative server session title; absent/blank uses the host fallback.
+    pub title: Option<String>,
     pub agent: Option<String>,
     pub model: Option<String>,
     /// Opaque provider credential selection. Kept separate from the model ref
@@ -375,6 +377,10 @@ pub fn session_state_from_json(value: &Value) -> SessionState {
         .map(str::to_string)
         .filter(|s| !s.is_empty());
     SessionState {
+        title: value
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         agent,
         model: model_ref,
         connection_id,
@@ -1266,6 +1272,23 @@ mod tests {
         assert_eq!(session.thinking.as_deref(), Some("xhigh"));
         assert_eq!(session.parent_id.as_deref(), Some("ses-parent"));
         assert_eq!(session.directory.as_deref(), Some("/tmp/project"));
+    }
+
+    #[test]
+    fn session_title_mapping_preserves_server_metadata() {
+        assert_eq!(
+            session_state_from_json(&json!({"title": "Server title"}))
+                .title
+                .as_deref(),
+            Some("Server title")
+        );
+        assert_eq!(
+            session_state_from_json(&json!({"title": ""}))
+                .title
+                .as_deref(),
+            Some("")
+        );
+        assert_eq!(session_state_from_json(&json!({})).title, None);
     }
 
     #[test]

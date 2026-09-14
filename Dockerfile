@@ -26,13 +26,15 @@ RUN CARGO_BUILD_JOBS=4 \
 FROM debian:bookworm-slim AS runtime
 
 # bash: bare `sh` gets no block-prompt integration, so commands look
-# perpetually running to joined clients.
+# perpetually running to joined clients. Fontconfig (including its FreeType
+# dependency) is linked by the daemon renderer even on a headless host.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
         curl \
         git \
+        libfontconfig1 \
         libgbm1 \
         libxkbcommon0 \
         openssh-client \

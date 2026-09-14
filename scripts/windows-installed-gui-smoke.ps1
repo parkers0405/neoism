@@ -1,6 +1,7 @@
 # Starts only the unmodified installed executable; no synthetic keyboard input.
 param([Parameter(Mandatory)][string]$InstallDir, [Parameter(Mandatory)][string]$Evidence)
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/windows-validation-process.ps1"
 $started = Get-Date
 $oldConfig = $env:NEOISM_CONFIG_HOME
 $p = $null
@@ -142,7 +143,7 @@ public static class NeoismWindowProbe {
     }
     # Catch detached installed daemon/agent children on this dedicated CI runner before uninstall.
     Get-Process neoism, neoism-workspace-daemon, neoism-agent -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -and $_.Path.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } |
+        Where-Object { Test-InstalledProcess -Process $_ -InstallDir $InstallDir } |
         Stop-Process -Force -ErrorAction Continue
     Start-Sleep -Seconds 2
     Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction SilentlyContinue |

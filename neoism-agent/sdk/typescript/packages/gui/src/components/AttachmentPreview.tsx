@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { NeoismClient, Part } from "@neoism/sdk";
 import { Skeleton } from "./Skeleton";
-import { artifactId, downloadAttachment, MAX_ATTACHMENT_BYTES, MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE, rasterData, rasterMime } from "./attachmentPreview";
+import { artifactId, downloadAttachment, MAX_ATTACHMENT_BYTES, MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE, rasterData, rasterMime } from "./attachmentPreviewUtils";
 import "./attachment-preview.css";
 
 type Props = { file?: File; part?: Extract<Part, { type: "file" }>; client?: NeoismClient };

@@ -74,6 +74,8 @@ pub(crate) async fn catalog_with_state(
     state: Option<&AppState>,
 ) -> anyhow::Result<BTreeMap<String, McpCatalogEntry>> {
     let config = configured_servers(directory, state)?;
+    let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
+    let sources = crate::config::snapshot(&services, directory).ok();
     let mut catalog = BTreeMap::new();
     for (name, entry) in &config {
         let oauth_capable = matches!(
@@ -97,6 +99,7 @@ pub(crate) async fn catalog_with_state(
         .is_some_and(|entry| {
             entry.tokens.is_some() || entry.client_registration.is_some()
         });
+        let (config_writable, config_scope) = config_source_metadata(sources.as_ref(), name);
         catalog.insert(
             name.clone(),
             McpCatalogEntry {
@@ -105,7 +108,8 @@ pub(crate) async fn catalog_with_state(
                 status,
                 oauth_capable,
                 has_credentials,
-                config_writable: config_source_writable(directory, name, state),
+                config_writable,
+                config_scope,
             },
         );
     }
@@ -147,6 +151,7 @@ pub(crate) async fn catalog_with_snapshot(
     state: &AppState,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> BTreeMap<String, McpCatalogEntry> {
+    let sources = crate::config::snapshot(state.services(), directory).ok();
     let statuses = status_with_snapshot(directory, auth_store, state, snapshot).await;
     let mut config = snapshot.config().clone();
     crate::config::inject_builtin_mcp(&mut config, state.services());
@@ -166,6 +171,7 @@ pub(crate) async fn catalog_with_snapshot(
         .is_some_and(|entry| {
             entry.tokens.is_some() || entry.client_registration.is_some()
         });
+        let (config_writable, config_scope) = config_source_metadata(sources.as_ref(), name);
         catalog.insert(
             name.clone(),
             McpCatalogEntry {
@@ -174,35 +180,29 @@ pub(crate) async fn catalog_with_snapshot(
                 status,
                 oauth_capable,
                 has_credentials,
-                config_writable: config_source_writable(directory, name, Some(state)),
+                config_writable,
+                config_scope,
             },
         );
     }
     catalog
 }
 
-fn config_source_writable(directory: &str, name: &str, state: Option<&AppState>) -> bool {
-    let services = state
-        .map(|state| state.services().clone())
-        .unwrap_or_else(crate::standard_services);
-    crate::config::snapshot(&services, directory)
-        .ok()
-        .map(|snapshot| {
-            snapshot
-                .layers
-                .iter()
-                .rev()
-                .find(|layer| {
-                    layer
-                        .document
-                        .get("mcp")
-                        .and_then(|mcp| mcp.get(name))
-                        .is_some()
-                })
-                .map(|layer| layer.writable)
-                .unwrap_or(true)
-        })
-        .unwrap_or(false)
+fn config_source_metadata(
+    snapshot: Option<&neoism_agent_service_api::ConfigSnapshot>,
+    name: &str,
+) -> (bool, Option<neoism_agent_core::McpConfigScope>) {
+    use neoism_agent_core::McpConfigScope;
+    use neoism_agent_service_api::ConfigDiscoveryScope;
+    let Some(snapshot) = snapshot else { return (false, None); };
+    match crate::config::mcp_owner(snapshot, name) {
+        Some(owner) => (owner.writable, Some(match owner.scope {
+            ConfigDiscoveryScope::Installation => McpConfigScope::Global,
+            ConfigDiscoveryScope::Workspace => McpConfigScope::Workspace,
+        })),
+        // Unpersisted builtins use the existing workspace-default write policy.
+        None => (true, Some(McpConfigScope::Workspace)),
+    }
 }
 
 #[cfg(test)]

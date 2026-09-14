@@ -69,6 +69,15 @@ pub(crate) async fn set_mcp_enabled(
     set_mcp_enabled_with_default(services, directory, name, enabled, None).await
 }
 
+pub(crate) fn mcp_owner<'a>(
+    snapshot: &'a ConfigSnapshot,
+    name: &str,
+) -> Option<&'a neoism_agent_service_api::ConfigLayer> {
+    snapshot.layers.iter().rev().find(|layer| {
+        layer.document.get("mcp").and_then(|mcp| mcp.get(name)).is_some()
+    })
+}
+
 pub(crate) async fn set_mcp_enabled_with_default(
     services: &AgentServices,
     directory: &str,
@@ -77,17 +86,7 @@ pub(crate) async fn set_mcp_enabled_with_default(
     default: Option<McpConfig>,
 ) -> anyhow::Result<()> {
     let snapshot = snapshot(services, directory)?;
-    let source = snapshot
-        .layers
-        .iter()
-        .rev()
-        .find(|layer| {
-            layer
-                .document
-                .get("mcp")
-                .and_then(|mcp| mcp.get(name))
-                .is_some()
-        })
+    let source = mcp_owner(&snapshot, name)
         .map(|layer| {
             if layer.writable {
                 Ok(layer.source_id.clone())
@@ -189,6 +188,7 @@ mod service_boundary_tests {
                 workspace: request.workspace.clone(),
                 layers: vec![ConfigLayer {
                     source_id: "fake".into(),
+                    scope: neoism_agent_service_api::ConfigDiscoveryScope::Installation,
                     document: self.0.clone(),
                     writable: false,
                 }],

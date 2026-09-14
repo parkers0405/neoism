@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createHttpClient, type NeoismClient, type Part } from "@neoism/sdk";
 import { AttachmentPreview } from "./AttachmentPreview";
-import { artifactId, MAX_ATTACHMENT_BYTES, rasterData } from "./attachmentPreview";
+import { artifactId, MAX_ATTACHMENT_BYTES, rasterData } from "./attachmentPreviewUtils";
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root, host: HTMLDivElement;
 let intersect: (entries: { isIntersecting: boolean }[]) => void;

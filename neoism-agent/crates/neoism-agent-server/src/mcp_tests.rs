@@ -69,9 +69,12 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
 {
     let root = temp_dir("builtin-registry");
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let fixture_services = crate::standard_services().with_config(Arc::new(
+        neoism_agent_service_api::StandardConfigSourceService::new(root.join("user")),
+    ));
     let absent = crate::state::AppState::open_database_with_services(
         root.join("absent.db"),
-        crate::standard_services(),
+        fixture_services.clone(),
     )
     .await
     .unwrap();
@@ -83,7 +86,7 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
         .unwrap_err();
     assert!(error.to_string().contains("not configured"));
 
-    let services = crate::standard_services().with_builtin_mcp(Arc::new(FakeBuiltinMcp));
+    let services = fixture_services.with_builtin_mcp(Arc::new(FakeBuiltinMcp));
     let state = crate::state::AppState::open_database_with_services(
         root.join("present.db"),
         services,
@@ -93,6 +96,8 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
     let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state))
         .await
         .unwrap();
+    assert_eq!(catalog["fake-service"].config_scope, Some(neoism_agent_core::McpConfigScope::Workspace));
+    assert!(catalog["fake-service"].config_writable);
     assert!(matches!(
         catalog["fake-service"].status,
         McpStatus::Connected

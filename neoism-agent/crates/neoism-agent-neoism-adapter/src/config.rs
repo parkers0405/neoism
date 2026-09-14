@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use neoism_agent_service_api::{
-    ConfigDiscoveryRoot, ConfigLayer, ConfigSnapshot, ConfigSnapshotRequest,
+    ConfigDiscoveryRoot, ConfigDiscoveryScope, ConfigLayer, ConfigSnapshot, ConfigSnapshotRequest,
     ConfigSourceService, ConfigUpdate, ConfigUpdateRequest, ConfigWritableTarget,
     ServiceError, ServiceFuture,
 };
@@ -280,8 +280,8 @@ impl ConfigSourceService for NeoismConfigSourceService {
     ) -> Result<ConfigSnapshot, ServiceError> {
         if request.installation {
             let layers = vec![
-                ConfigLayer { source_id: GUI_SOURCE.into(), document: Self::project_gui(&Self::read(&self.gui_path)?), writable: true },
-                ConfigLayer { source_id: MCP_SOURCE.into(), document: Self::mcp_document(&Self::read(&self.user_root().join("mcp.json"))?), writable: true },
+                ConfigLayer { source_id: GUI_SOURCE.into(), scope: ConfigDiscoveryScope::Installation, document: Self::project_gui(&Self::read(&self.gui_path)?), writable: true },
+                ConfigLayer { source_id: MCP_SOURCE.into(), scope: ConfigDiscoveryScope::Installation, document: Self::mcp_document(&Self::read(&self.user_root().join("mcp.json"))?), writable: true },
             ];
             return Ok(ConfigSnapshot {
                 identity: layers.iter().map(|layer| format!("{}\0{}", layer.source_id, layer.document)).collect::<Vec<_>>().join("\0"),
@@ -299,21 +299,25 @@ impl ConfigSourceService for NeoismConfigSourceService {
         let layers = vec![
             ConfigLayer {
                 source_id: GUI_SOURCE.into(),
+                scope: ConfigDiscoveryScope::Installation,
                 document: Self::project_gui(&gui),
                 writable: true,
             },
             ConfigLayer {
                 source_id: MCP_SOURCE.into(),
+                scope: ConfigDiscoveryScope::Installation,
                 document: Self::mcp_document(&mcp),
                 writable: true,
             },
             ConfigLayer {
                 source_id: PROJECT_SOURCE.into(),
+                scope: ConfigDiscoveryScope::Workspace,
                 document: Self::project_gui(&project_config),
                 writable: true,
             },
             ConfigLayer {
                 source_id: PROJECT_MCP_SOURCE.into(),
+                scope: ConfigDiscoveryScope::Workspace,
                 document: Self::mcp_document(&project_mcp),
                 writable: true,
             },
@@ -363,6 +367,17 @@ impl ConfigSourceService for NeoismConfigSourceService {
                 } => set_value(&mut document, &prefix, replacement.clone()),
                 ConfigUpdate::SetValue { path, value } => {
                     let mut full = prefix;
+                    // Dedicated MCP sources project a bare map as {"mcp": map}.
+                    // Translate canonical paths back to that representation;
+                    // adding a wrapper beside bare entries hides every sibling
+                    // on the next read. Existing wrapped documents stay wrapped.
+                    let bare_mcp = matches!(request.source_id.as_str(), MCP_SOURCE | PROJECT_MCP_SOURCE)
+                        && document.get("mcp").and_then(Value::as_object).is_none();
+                    let path = if bare_mcp && path.first().is_some_and(|key| key == "mcp") {
+                        &path[1..]
+                    } else {
+                        path.as_slice()
+                    };
                     full.extend(path.iter().cloned());
                     set_value(&mut document, &full, value.clone());
                 }
@@ -591,6 +606,7 @@ mod tests {
         assert_eq!(snapshot.discovery_roots[0].path, global);
         assert_eq!(snapshot.discovery_roots[0].scope, neoism_agent_service_api::ConfigDiscoveryScope::Installation);
         assert_eq!(snapshot.layers[0].document["model"], "global/model");
+        assert!(snapshot.layers.iter().all(|layer| layer.scope == ConfigDiscoveryScope::Installation));
         assert!(!snapshot.layers.iter().any(|layer| layer.source_id == PROJECT_SOURCE));
     }
 
@@ -858,6 +874,10 @@ mod tests {
             .snapshot(&ConfigSnapshotRequest::new(&root))
             .unwrap();
         assert_eq!(snapshot.layers[2].source_id, PROJECT_SOURCE);
+        assert_eq!(snapshot.layers.iter().map(|layer| &layer.scope).collect::<Vec<_>>(), vec![
+            &ConfigDiscoveryScope::Installation, &ConfigDiscoveryScope::Installation,
+            &ConfigDiscoveryScope::Workspace, &ConfigDiscoveryScope::Workspace,
+        ]);
         assert_eq!(snapshot.layers[2].document["model"], "workspace/model");
         assert_eq!(snapshot.layers[2].document["smallModel"], "old/small");
         assert_eq!(snapshot.layers[2].document["defaultAgent"], "build");
@@ -868,6 +888,43 @@ mod tests {
         assert_eq!(snapshot.writable_target.source_id, PROJECT_SOURCE);
         assert!(!root.join("neoism.json").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dedicated_mcp_updates_preserve_representation_and_siblings() {
+        for source in [MCP_SOURCE, PROJECT_MCP_SOURCE] {
+            for wrapped in [false, true] {
+                let fixture = MigrationFixture::new(&format!("mcp-{}-{wrapped}", source.replace(':', "-")));
+                let service = fixture.service();
+                let (path, _) = service.update_path(&fixture.0, source).unwrap();
+                let servers = json!({
+                    "alpha": {"type":"remote", "url":"https://alpha.invalid", "enabled":true},
+                    "beta": {"type":"remote", "url":"https://beta.invalid", "enabled":true}
+                });
+                let original = if wrapped { json!({"mcp": servers, "unrelated": {"keep":42}}) } else { servers };
+                NeoismConfigSourceService::write(&path, &original).unwrap();
+                // The existing writer reserializes JSON (it does not retain
+                // comments), but JSONC input and all unrelated values must work.
+                let text = std::fs::read_to_string(&path).unwrap();
+                std::fs::write(&path, format!("// fixture MCP configuration\n{text}")).unwrap();
+                for enabled in [false, true] {
+                    let mut selected = original.pointer(if wrapped {"/mcp/alpha"} else {"/alpha"}).unwrap().clone();
+                    selected["enabled"] = json!(enabled);
+                    let snapshot = service.update(&ConfigUpdateRequest {
+                        workspace: fixture.0.clone(), source_id: source.into(),
+                        update: ConfigUpdate::SetValue {path: vec!["mcp".into(), "alpha".into()], value: selected},
+                    }).await.unwrap();
+                    let layer = snapshot.layers.iter().find(|layer| layer.source_id == source).unwrap();
+                    assert_eq!(layer.document["mcp"]["beta"]["enabled"], true, "sibling lost: {source}, wrapped={wrapped}");
+                    assert_eq!(layer.document["mcp"]["alpha"]["enabled"], enabled);
+                    assert_eq!(layer.scope, if source == MCP_SOURCE { ConfigDiscoveryScope::Installation } else { ConfigDiscoveryScope::Workspace });
+                    let written = NeoismConfigSourceService::read(&path).unwrap();
+                    let mut expected = original.clone();
+                    *expected.pointer_mut(if wrapped {"/mcp/alpha/enabled"} else {"/alpha/enabled"}).unwrap() = json!(enabled);
+                    assert_eq!(written, expected);
+                }
+            }
+        }
     }
 
     #[tokio::test]

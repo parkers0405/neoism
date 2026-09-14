@@ -4898,3 +4898,6 @@ async fn disabled_workspace_tools_do_not_warm_search() {
     cleanup_sqlite_files(&db);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[path = "tests_mcp_config.rs"]
+mod mcp_config_tests;

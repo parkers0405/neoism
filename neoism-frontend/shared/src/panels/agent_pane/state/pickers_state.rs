@@ -655,8 +655,12 @@ pub fn mcp_options_from_status(status: &Value) -> Vec<NeoismAgentPickerOption> {
                 }
                 _ => (error.to_string(), "failed"),
             };
+            let scope = mcp_scope_label(entry);
+            let writable = entry.get("configWritable").and_then(Value::as_bool).unwrap_or(true);
+            let description = format!("{scope}{} · {description}", if writable { "" } else { " (read-only)" });
             let value = json!({
                 "name": name,
+                "configScope": entry.get("configScope"),
                 "enabled": entry.get("enabled").and_then(Value::as_bool).unwrap_or(status != "disabled"),
                 "connected": entry.get("runtimeConnected").and_then(Value::as_bool).unwrap_or(status == "connected"),
                 "oauthCapable": oauth_capable,
@@ -666,6 +670,14 @@ pub fn mcp_options_from_status(status: &Value) -> Vec<NeoismAgentPickerOption> {
             NeoismAgentPickerOption::new(name, &description, footer, &value.to_string())
         })
         .collect()
+}
+
+fn mcp_scope_label(entry: &Value) -> &'static str {
+    match entry.get("configScope").and_then(Value::as_str) {
+        Some("global") => "Global",
+        Some("workspace") => "Workspace",
+        _ => "Unknown scope",
+    }
 }
 
 pub fn mcp_action_options(entry: &Value) -> Vec<NeoismAgentPickerOption> {
@@ -703,17 +715,18 @@ pub fn mcp_action_options(entry: &Value) -> Vec<NeoismAgentPickerOption> {
     };
     let mut options = Vec::new();
     if writable {
+        let scope = mcp_scope_label(entry);
         options.push(if enabled {
             action(
                 "Disable",
-                "Persist enabled: false and stop the runtime",
+                &format!("Persist enabled: false in {scope} config and stop the runtime"),
                 "config",
                 "disable",
             )
         } else {
             action(
                 "Enable",
-                "Persist enabled: true in the owning config",
+                &format!("Persist enabled: true in {scope} config"),
                 "config",
                 "enable",
             )
@@ -808,6 +821,31 @@ mod mcp_tests {
             [OutboundAgentCommand::RefreshMcp { directory }]
                 if directory.as_deref() == Some("/tmp/project")
         ));
+    }
+
+    #[test]
+    fn mcp_picker_exposes_owner_scope_and_read_only() {
+        for scope in ["global", "workspace"] {
+            for writable in [true, false] {
+                let rows = mcp_options_from_status(&json!({"alpha": {
+                    "status":{"status":"disabled"}, "enabled":false,
+                    "configScope":scope, "configWritable":writable
+                }}));
+                let label = if scope == "global" { "Global" } else { "Workspace" };
+                assert!(rows[0].description.contains(label), "{}", rows[0].description);
+                assert_eq!(rows[0].description.contains("read-only"), !writable);
+                let mut entry: Value = serde_json::from_str(&rows[0].value).unwrap();
+                for (enabled, title) in [(false, "Enable"), (true, "Disable")] {
+                    entry["enabled"] = json!(enabled);
+                    let actions = mcp_action_options(&entry);
+                    if writable {
+                        assert!(actions.iter().any(|row| row.title == title && row.description.contains(label)));
+                    } else {
+                        assert!(!actions.iter().any(|row| row.title == title));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

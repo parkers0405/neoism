@@ -5,7 +5,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite --host 127.0.0.1",
-        "build": "tsc --noEmit && vite build",
+        "build": "node --test scripts/check-module-paths.test.mjs && node scripts/check-module-paths.mjs && tsc --noEmit && vite build",
         "preview": "vite preview",
         "test": "vitest run",
         "assets:generate": "node scripts/generate-parity-assets.mjs && node scripts/generate-font-assets.mjs && node scripts/generate-wordmark.mjs",

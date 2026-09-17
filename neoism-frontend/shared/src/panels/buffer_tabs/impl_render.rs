@@ -194,9 +194,9 @@ impl<A: Copy> BufferTabs<A> {
                         .max(consts::ICON_FONT_SIZE * scale)
                 };
                 Self::visual_tab_geometry(
-                    Self::agent_title_width(
+                    Self::compact_title_width(
                         title_width,
-                        tab.neoism_agent_route_id.is_some(),
+                        tab.neoism_agent_route_id.is_some() || tab.markdown,
                         scale,
                     ),
                     icon_width,
@@ -562,7 +562,7 @@ impl<A: Copy> BufferTabs<A> {
                 .sum();
             let distance = (full_title_width - title_max_width).max(0.0);
             let title_hovered = self.hover == Some(TabHit::Activate(ix))
-                && tab.neoism_agent_route_id.is_some()
+                && (tab.neoism_agent_route_id.is_some() || tab.markdown)
                 && self.drag.is_none();
             if self.hover.map(tab_hit_index) == Some(ix) {
                 self.title_hover_overflow = title_hovered && distance > 0.5;

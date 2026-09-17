@@ -52,6 +52,8 @@ pub(super) struct ParsedRenderLine<'a> {
 
 pub(super) struct ParsedTable {
     pub(super) header: Vec<String>,
+    /// Horizontal alignment factors: 0 = left, 0.5 = center, 1 = right.
+    pub(super) alignments: Vec<f32>,
     pub(super) rows: Vec<Vec<String>>,
     pub(super) end_line: usize,
 }

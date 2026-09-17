@@ -30,10 +30,13 @@ use crate::daemon_client::DaemonClientHandle;
 /// session id from the daemon's `PtyCreated` reply).
 pub struct RemoteRouteShared {
     pub session_id: Option<String>,
-    failed: bool,
+    pub failed: bool,
     /// Existing session awaiting AttachPty validation. Unlike first creation,
     /// input in this state must be rejected, not queued for later execution.
-    awaiting_attach: Option<String>,
+    pub awaiting_attach: Option<String>,
+    /// Socket generation that last validated this existing session. Input
+    /// is gated until bind_session records a matching generation.
+    pub attach_generation: Option<u64>,
     /// Ops issued before initial creation, or safe geometry changes while
     /// awaiting attach. Reattach never retains queued input.
     pub queued: Vec<RemotePtyOp>,
@@ -83,6 +86,7 @@ pub fn prepare(
         session_id: None,
         failed: false,
         awaiting_attach: None,
+        attach_generation: None,
         queued: Vec::new(),
         transport: Some(RemotePtyTransport { handle, runtime }),
     }));
@@ -99,11 +103,8 @@ pub fn prepare(
             if let Some(id) = guard.awaiting_attach.clone() {
                 match &op {
                     RemotePtyOp::Input(_) => {
-                        // Fence a racing successful attach immediately, before
-                        // its UI-thread failure event arrives. Never send these
-                        // bytes even if the connection opens in the meantime.
-                        guard.failed = true;
-                        guard.queued.clear();
+                        // Reject uncertain mutations without poisoning the
+                        // binding: AttachPty ack must still restore input.
                         guard
                             .transport
                             .clone()
@@ -121,7 +122,30 @@ pub fn prepare(
                 }
             } else {
                 match (guard.session_id.clone(), guard.transport.clone()) {
-                    (Some(id), Some(transport)) => Some((id, transport, false)),
+                    (Some(id), Some(transport)) => {
+                        if let Some(generation) = guard.attach_generation {
+                            if transport.handle.generation() != generation {
+                                match &op {
+                                    RemotePtyOp::Input(_) => {
+                                        Some((id, transport, true))
+                                    }
+                                    RemotePtyOp::Resize { .. } => {
+                                        guard.queued.push(op.clone());
+                                        None
+                                    }
+                                    RemotePtyOp::Close => {
+                                        guard.failed = true;
+                                        guard.queued.clear();
+                                        None
+                                    }
+                                }
+                            } else {
+                                Some((id, transport, false))
+                            }
+                        } else {
+                            Some((id, transport, false))
+                        }
+                    }
                     _ => {
                         // Intentional first-ever creation queue only.
                         guard.queued.push(op.clone());
@@ -162,6 +186,16 @@ pub fn bind_session(
     handle: DaemonClientHandle,
     runtime: tokio::runtime::Handle,
 ) {
+    bind_session_for_generation(binding, session_id, handle, runtime, None);
+}
+
+pub fn bind_session_for_generation(
+    binding: &RemotePtyBinding,
+    session_id: &str,
+    handle: DaemonClientHandle,
+    runtime: tokio::runtime::Handle,
+    generation: Option<u64>,
+) {
     let queued = {
         let mut guard = match binding.shared.lock() {
             Ok(guard) => guard,
@@ -170,8 +204,16 @@ pub fn bind_session(
         if guard.failed {
             return;
         }
+        if let (Some(expected), Some(got)) = (guard.attach_generation, generation) {
+            if expected != got {
+                return;
+            }
+        }
         guard.session_id = Some(session_id.to_string());
         guard.awaiting_attach = None;
+        if let Some(generation) = generation {
+            guard.attach_generation = Some(generation);
+        }
         guard.transport = Some(RemotePtyTransport {
             handle: handle.clone(),
             runtime: runtime.clone(),
@@ -227,6 +269,7 @@ pub fn invalidate(binding: &RemotePtyBinding) {
     let mut guard = binding.shared.lock().unwrap_or_else(|e| e.into_inner());
     guard.failed = true;
     guard.awaiting_attach = None;
+    guard.attach_generation = None;
     guard.session_id = None;
     guard.transport = None;
     guard.queued.clear();
@@ -242,37 +285,49 @@ pub fn await_attach(
     handle: DaemonClientHandle,
     runtime: tokio::runtime::Handle,
 ) {
+    await_attach_for_generation(binding, session_id, handle, runtime, None);
+}
+
+pub fn await_attach_for_generation(
+    binding: &RemotePtyBinding,
+    session_id: &str,
+    handle: DaemonClientHandle,
+    runtime: tokio::runtime::Handle,
+    generation: Option<u64>,
+) {
     let mut guard = binding.shared.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.failed {
+        return;
+    }
     guard.session_id = None;
     guard.awaiting_attach = Some(session_id.to_string());
+    if let Some(generation) = generation {
+        guard.attach_generation = Some(generation);
+    }
     guard.transport = Some(RemotePtyTransport {
         handle: handle.clone(),
         runtime: runtime.clone(),
     });
-    let rejected_input = std::mem::take(&mut guard.queued)
-        .into_iter()
-        .find_map(|op| {
-            if let RemotePtyOp::Input(bytes) = op {
-                Some(bytes)
-            } else {
-                None
-            }
+    let (kept, rejected_input): (Vec<_>, Vec<_>) =
+        std::mem::take(&mut guard.queued).into_iter().partition(|op| {
+            !matches!(op, RemotePtyOp::Input(_))
         });
-    if rejected_input.is_some() {
-        guard.failed = true;
-    }
+    guard.queued = kept;
     drop(guard);
-    if let Some(bytes) = rejected_input {
-        let session_id = session_id.to_string();
-        tracing::warn!(target: "neoism::remote_pty", %session_id,
-            "discarding queued input at attach boundary; not delivered, no replay");
-        runtime.spawn(async move {
-            handle
-                .reject_pty_with_reason(
-                    PtyClientMessage::PtyInput { session_id, bytes },
-                    "not delivered: queued input discarded at remote attach boundary",
-                )
-                .await;
-        });
+    for op in rejected_input {
+        if let RemotePtyOp::Input(bytes) = op {
+            let session_id = session_id.to_string();
+            tracing::warn!(target: "neoism::remote_pty", %session_id,
+                "discarding queued input at attach boundary; not delivered, no replay");
+            let handle = handle.clone();
+            runtime.spawn(async move {
+                handle
+                    .reject_pty_with_reason(
+                        PtyClientMessage::PtyInput { session_id, bytes },
+                        "not delivered: queued input discarded at remote attach boundary",
+                    )
+                    .await;
+            });
+        }
     }
 }

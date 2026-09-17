@@ -503,6 +503,7 @@ impl CrdtSyncHub {
     fn apply_update(&self, update: CrdtBufferUpdate) -> Option<CrdtServerMessage> {
         let origin_peer_id = update.origin_client_id.to_string();
         let origin_state_vector = update.state_vector_v1.clone();
+        let buffer_id = update.buffer_id.clone();
         match self.buffers.apply_client_update(update) {
             Ok(accepted) => {
                 if self
@@ -518,7 +519,7 @@ impl CrdtSyncHub {
                 Some(self.broadcast_accepted(accepted))
             }
             Err(err) => Some(CrdtServerMessage::Error {
-                buffer_id: None,
+                buffer_id: Some(buffer_id),
                 message: err.to_string(),
             }),
         }

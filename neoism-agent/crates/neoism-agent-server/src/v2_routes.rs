@@ -154,15 +154,20 @@ pub(crate) async fn v2_events(
     // part snapshot from ever overtaking (doubled text) or lagging behind
     // (out-of-order timeline rows) the deltas around it. Subscribe BEFORE the
     // catch-up replay so nothing slips between them.
-    let mut receiver = state.subscribe();
+    let (mut receiver, live_messages) = state.subscribe_with_messages();
+    let live_message_ids: HashSet<String> = live_messages
+        .iter()
+        .filter(|event| event.kind == neoism_agent_core::event_type::MESSAGE_UPDATED)
+        .filter_map(|event| event.properties["info"]["id"].as_str().map(str::to_owned))
+        .collect();
     let mut session_family = if let Some(root) = family_root.as_deref() {
         Some(session_family_ids(&state, root).await)
     } else {
         None
     };
-    // A cursor (`since` / Last-Event-ID) asks for durable catch-up first; the
-    // default `tail=true` connection is live-only and reconciles state over
-    // REST through the same ordered event stream.
+    // A cursor (`since` / Last-Event-ID) asks for durable catch-up first.
+    // A live tail starts with the atomic in-memory baseline; REST supplies
+    // completed history, never the missing prefix of an active response.
     let replay_from = if explicit_cursor.is_none() && query.tail.unwrap_or(false) {
         None
     } else {
@@ -210,6 +215,15 @@ pub(crate) async fn v2_events(
                     if replayed_ids.len() >= 16_384 {
                         replayed_ids.clear();
                     }
+                    // The atomic live baseline supersedes durable edges for
+                    // these unfinished messages. In particular, do not replay
+                    // a final edge committed during catch-up and then dedupe
+                    // its queued live copy after installing an older baseline.
+                    if message_event_id(&event.payload)
+                        .is_some_and(|id| live_message_ids.contains(id))
+                    {
+                        continue;
+                    }
                     replayed_ids.insert(event.payload.id.to_string());
                     let matched = event_matches_family(&event.payload, session_family.as_ref());
                     let deleted_session =
@@ -228,6 +242,13 @@ pub(crate) async fn v2_events(
                 if replayed < page_size {
                     break;
                 }
+            }
+        }
+        // These connection-local snapshots have fresh event IDs and no resume
+        // cursor. They are replacements, followed only by post-snapshot deltas.
+        for event in live_messages {
+            if event_matches_family(&event, session_family.as_ref()) {
+                yield Ok(v2_live_sse_event(event));
             }
         }
         loop {
@@ -388,6 +409,18 @@ fn event_session_id(event: &neoism_agent_core::EventPayload) -> Option<&str> {
         .or_else(|| event.properties.get("sessionId"))
         .or_else(|| event.properties.get("session_id"))
         .and_then(Value::as_str)
+}
+
+fn message_event_id(event: &neoism_agent_core::EventPayload) -> Option<&str> {
+    if !event.kind.starts_with("message.") {
+        return None;
+    }
+    let p = &event.properties;
+    p["messageID"]
+        .as_str()
+        .or_else(|| p["info"]["id"].as_str())
+        .or_else(|| p["part"]["messageID"].as_str())
+        .or_else(|| p["part"]["messageId"].as_str())
 }
 
 fn event_matches_family(

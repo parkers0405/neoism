@@ -299,16 +299,6 @@ impl NeoismAgentPane {
             // additionally calls `note_streaming_from_part` right after.
             self.retain_current_turn_trace();
         }
-        if message.kind == NeoismAgentMessageKind::Assistant
-            && message.text.is_empty()
-            && !message.id.is_empty()
-            && self
-                .messages
-                .iter()
-                .any(|existing| existing.id == message.id)
-        {
-            return;
-        }
         // Text and image fragments are broadcast independently. Fold both
         // into the optimistic local card, including the image-first ordering
         // where a server-id row already exists before text arrives.
@@ -363,7 +353,8 @@ impl NeoismAgentPane {
                 .iter()
                 .position(|existing| existing.id == message.id)
             {
-                let merged = merge_part_message(self.messages[index].clone(), message);
+                let merged =
+                    merge_stream_part_message(self.messages[index].clone(), message);
                 self.messages[index] = merged;
                 if self.messages[index].kind == NeoismAgentMessageKind::Reasoning {
                     self.move_previous_assistant_after_reasoning(index);

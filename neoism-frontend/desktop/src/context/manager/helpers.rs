@@ -316,7 +316,7 @@ pub(crate) fn context_workspace_tab_kind_and_path<T: EventListener>(
         return ("editor".to_string(), Some(code.path.clone()));
     }
     if let Some(markdown) = context.markdown.as_ref() {
-        return ("markdown".to_string(), Some(markdown.path.clone()));
+        return ("markdown".to_string(), Some(markdown.tab_path().to_path_buf()));
     }
     if let Some(draw) = context.draw.as_ref() {
         return ("drawing".to_string(), Some(draw.path.clone()));

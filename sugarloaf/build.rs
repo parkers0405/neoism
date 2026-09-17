@@ -52,6 +52,18 @@ const SHADER_DIRS: &[&str] = &[
 ];
 
 fn main() {
+    // Validate the shared UI shader on every host, including cross-checks where
+    // no GPU is available. Rust vertex-layout edits must not ship broken WGSL.
+    println!("cargo:rerun-if-changed=src/text_shader.wgsl");
+    let shader = include_str!("src/text_shader.wgsl");
+    let module = naga::front::wgsl::parse_str(shader)
+        .unwrap_or_else(|error| panic!("{}", error.emit_to_string(shader)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Invalid UI text shader: {error}"));
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "linux" {
         // Vulkan backend is Linux-only; nothing to compile. We still

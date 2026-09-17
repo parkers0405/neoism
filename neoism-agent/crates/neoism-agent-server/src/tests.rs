@@ -1,3 +1,5 @@
+mod live_messages;
+
 use super::*;
 use crate::state::SessionStore;
 use crate::tool_selection::provider_tool_map;

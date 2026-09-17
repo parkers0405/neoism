@@ -97,12 +97,15 @@ pub struct MarkdownTableCellRect {
     pub cell_width: f32,
     pub line_height: f32,
     pub(super) hit_rows: Vec<MarkdownWrapHitRow>,
+    pub(super) source_revealed: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) enum MarkdownTableAction {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownTableAction {
     AddRowBelow { after_line: usize },
     AddColumn { start_line: usize, col_ix: usize },
+    DeleteColumn { start_line: usize, col_ix: usize },
+    ColumnMenu { start_line: usize, col_ix: usize },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -353,6 +356,8 @@ pub(super) struct MarkdownVirtualRenderState {
     /// renders RAW (Live Preview) and can wrap to a different row count than
     /// the rendered view, so the nodes the cursor leaves/enters re-measure.
     pub(super) measured_cursor_line: Option<usize>,
+    pub(super) measured_reveal_line: Option<usize>,
+    pub(super) measured_table_cell: Option<(usize, usize)>,
     /// When the cursor line last changed, and whether that change was part of a
     /// fast key-repeat stream. While streaming we measure the cursor line as
     /// rendered (no raw reveal) so its height stays put and the blocks below
@@ -393,6 +398,8 @@ impl Default for MarkdownVirtualRenderState {
             font_scale_bucket: i32::MIN,
             md_font_id: None,
             measured_cursor_line: None,
+            measured_reveal_line: None,
+            measured_table_cell: None,
             last_cursor_change_at: None,
             cursor_reveal_suppressed: false,
             source: String::new(),
@@ -422,6 +429,7 @@ pub(super) struct MarkdownVirtualMeasureKey {
     /// line + 1 — the revealed line wraps differently, so its measurement
     /// must not be shared with the rendered (cursor-less) layout.
     pub(super) cursor_token: u32,
+    pub(super) table_cell: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -545,7 +553,11 @@ pub struct MarkdownPane {
     pub cursor_line: usize,
     pub cursor_col: usize,
     pub(super) visual_anchor: Option<MarkdownPosition>,
+    pub documentation_notebook: Option<crate::editor::documentation_notebook::NotebookBinding>,
     pub(super) mouse_select_anchor: Option<MarkdownPosition>,
+    pub(super) selection_pointer: Option<[f32; 2]>,
+    pub(super) selection_scroll_at: Option<Instant>,
+    pub(super) viewport_bounds: [f32; 2],
     pub(super) touch_word_edges: Option<(MarkdownPosition, MarkdownPosition)>,
     pub cursor_rect: Option<[f32; 4]>,
     pub(super) follow_cursor: bool,
@@ -685,6 +697,7 @@ pub struct MarkdownTitleEdit {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownDecorationKey {
+    Property,
     Icon,
     Cover,
 }

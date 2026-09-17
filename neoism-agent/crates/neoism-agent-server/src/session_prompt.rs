@@ -11,6 +11,7 @@ use neoism_agent_core::{
 use serde_json::{json, Value};
 use tokio_stream::StreamExt;
 
+use crate::ensure_session;
 use crate::error::ApiError;
 use crate::message_part_mutation::{
     set_tool_completed, set_tool_error, set_tool_running,
@@ -427,26 +428,7 @@ pub(crate) async fn append_prompt(
         provider_id: reply_model.provider_id.clone(),
         model_id: reply_model.model_id.clone(),
     };
-    let mut history = state.inner.store.list_messages(&session_id_text).await?;
-    // Compact before the first step if the session already exceeds the model's
-    // usable context, so a new turn on a large session is summarized rather than
-    // rejected with a context-overflow error.
-    let compacted_before_first_step;
-    (info, compacted_before_first_step) = maybe_auto_compact_before_step(
-        state,
-        &session_id_text,
-        info,
-        &reply_model,
-        &history,
-    )
-    .await?;
-    // If we just compacted, refresh history so the prompt reflects the
-    // post-compaction state. Otherwise `provider_messages`
-    // would be rebuilt from the stale pre-compaction history — the full,
-    // uncompacted conversation — and immediately trip a second compaction.
-    if compacted_before_first_step {
-        history = state.inner.store.list_messages(&session_id_text).await?;
-    }
+    let history = state.inner.store.list_messages(&session_id_text).await?;
     let provider_service = plugin_snapshot
         .provider_services_by_priority()
         .into_iter()
@@ -461,9 +443,6 @@ pub(crate) async fn append_prompt(
         run_system.as_deref(),
         goals_enabled,
     );
-    if compacted_before_first_step {
-        push_compaction_continuation(&mut provider_messages, &history);
-    }
     let step_limit = agent_info
         .steps
         .filter(|steps| *steps > 0)
@@ -483,22 +462,6 @@ pub(crate) async fn append_prompt(
         &mut provider_messages,
     )
     .map_err(|error| ApiError::internal(error.to_string()))?;
-    let started = start_assistant_step(
-        state,
-        &session_id,
-        &session_id_text,
-        &parent_message_id,
-        &info.directory,
-        now,
-        agent_info.mode.clone(),
-        agent_info.name.clone(),
-        reply_model.model_id.clone(),
-        reply_model.provider_id.clone(),
-    )
-    .await?;
-    let assistant_id = started.assistant_id;
-    let text_part_id = started.text_part_id;
-    let live_message = started.live_message;
     let mut tool_permissions = permission::from_config_map(&agent_info.permission);
     // Session-scoped rules (e.g. `subtask_permission`'s `task: deny` written
     // onto every sub-agent session) are appended AFTER the agent config so
@@ -509,54 +472,26 @@ pub(crate) async fn append_prompt(
         tool_permissions.extend(session_rules);
     }
     apply_turn_tool_restrictions(&mut tool_permissions, turn_tools.as_ref());
-    let provider_tools = provider_tools_for_agent(
-        state,
-        &info.directory,
-        &plugin_snapshot,
-        &tool_permissions,
-        &reply_model.model_id,
-    )
-    .await?;
-    let provider_tool_map = provider_tool_map(&provider_tools);
-    let mut final_assistant_message = run_provider_stream_step_with_retry(
+    let mut final_assistant_message = run_assistant_step(
         &provider_service,
-        &ProviderStreamEventContext {
-            state,
-            session_id: &session_id,
-            session_id_text: &session_id_text,
-            run_id: &run_id,
-            assistant_id: &assistant_id,
-            text_part_id: &text_part_id,
-            live_message: &live_message,
-            directory: &info.directory,
-            model: &reply_model,
-            model_id: &reply_model.model_id,
-            provider_tools: &provider_tool_map,
-            tool_permissions: &tool_permissions,
-            plugin_snapshot: &plugin_snapshot,
-            max_steps_reached,
-        },
-        build_provider_generation_request(
-            state,
-            &provider_service,
-            &reply_model,
-            Some(&session_id_text),
-            provider_messages,
-            provider_tools,
-            Some(&plugin_snapshot),
-            Some(&chat_hook_ctx),
-        )
-        .await,
-        &cancellation,
-    )
-    .await?;
-    let mut compacted_before_followup = maybe_auto_compact_after_step(
         state,
+        &session_id,
         &session_id_text,
-        &mut info,
-        &final_assistant_message,
+        &run_id,
+        &parent_message_id,
+        &info,
+        &agent_info,
+        &reply_model,
+        &plugin_snapshot,
+        provider_messages,
+        cancellation.clone(),
+        max_steps_reached,
+        tool_permissions.clone(),
+        run_system.as_deref(),
+        goals_enabled,
     )
     .await?;
+
     loop {
         let steered =
             Box::pin(crate::session_queue::drain_queued_prompts_into_active_run(
@@ -590,6 +525,7 @@ pub(crate) async fn append_prompt(
             break;
         }
         step_number += 1;
+        info = ensure_session(state, &session_id_text).await?;
         let mut history = state.inner.store.list_messages(&session_id_text).await?;
         // A Neoism run can stay alive across queued user steering and active-goal
         // continuations. Waiting until the entire run exits means the OpenCode
@@ -614,9 +550,6 @@ pub(crate) async fn append_prompt(
             run_system.as_deref(),
             goals_enabled,
         );
-        if compacted_before_followup {
-            push_compaction_continuation(&mut provider_messages, &history);
-        }
         let max_steps_reached = step_number >= step_limit;
         if max_steps_reached {
             provider_messages.push(ProviderMessage::text(
@@ -643,7 +576,7 @@ pub(crate) async fn append_prompt(
             &mut provider_messages,
         )
         .map_err(|error| ApiError::internal(error.to_string()))?;
-        final_assistant_message = run_followup_assistant_step(
+        final_assistant_message = run_assistant_step(
             &provider_service,
             state,
             &session_id,
@@ -658,13 +591,8 @@ pub(crate) async fn append_prompt(
             cancellation.clone(),
             max_steps_reached,
             tool_permissions.clone(),
-        )
-        .await?;
-        compacted_before_followup = maybe_auto_compact_after_step(
-            state,
-            &session_id_text,
-            &mut info,
-            &final_assistant_message,
+            run_system.as_deref(),
+            goals_enabled,
         )
         .await?;
     }
@@ -732,6 +660,19 @@ async fn prune_old_tool_outputs_in_messages(
     session_id: &str,
     messages: &mut [MessageWithParts],
 ) -> Result<(), ApiError> {
+    let info = ensure_session(state, session_id).await?;
+    let snapshot = state.plugin_snapshot(&info.directory).await;
+    let model = info
+        .model
+        .as_ref()
+        .map(user_model_from_model_ref)
+        .unwrap_or_else(default_user_model);
+    if !resolved_compaction_policy(snapshot.config(), &model, info.agent.as_deref())
+        .prune
+        .unwrap_or(true)
+    {
+        return Ok(());
+    }
     let mut total = 0_u64;
     let mut pruned = 0_u64;
     let mut selected = Vec::new();
@@ -1296,7 +1237,15 @@ fn push_compaction_continuation(
     provider_messages: &mut Vec<ProviderMessage>,
     history: &[MessageWithParts],
 ) {
-    if let Some(replay) = last_real_user_message_for_replay(history) {
+    if let Some(replay) = last_real_user_message_for_replay(history).filter(|replay| {
+        // Do not undo compaction by replaying a huge user paste or duplicate
+        // a user turn already retained in the protected tail.
+        estimated_provider_prompt_tokens(std::slice::from_ref(replay)) <= 8_000
+            && !provider_messages.iter().any(|message| {
+                matches!(message.role, ProviderRole::User)
+                    && message.content == replay.content
+            })
+    }) {
         provider_messages.push(replay);
         return;
     }
@@ -1336,70 +1285,6 @@ fn finish_requires_text_continuation(message: &MessageWithParts) -> bool {
     )
 }
 
-/// Compact the session in place when the latest step pushed token usage past
-/// the model's threshold. Runs after every step — including mid-tool-loop steps
-/// that still need a followup — because a coding agent accumulates most of its
-/// context inside a single multi-step turn, and that is exactly when it would
-/// otherwise overflow the model's context window. Returns `true` when it
-/// compacted so the caller can give the next step a user turn to continue from.
-async fn maybe_auto_compact_after_step(
-    state: &AppState,
-    session_id: &str,
-    info: &mut SessionInfo,
-    message: &MessageWithParts,
-) -> Result<bool, ApiError> {
-    if auto_compaction_disabled() {
-        return Ok(false);
-    }
-    let MessageInfo::Assistant(assistant) = &message.info else {
-        return Ok(false);
-    };
-    let token_total = token_usage_total(&assistant.tokens);
-    let threshold = match auto_compaction_threshold_override() {
-        Some(threshold) => threshold,
-        None => auto_compaction_threshold_for_model(state, info, assistant)
-            .await
-            .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD),
-    };
-    if threshold == 0 || token_total < threshold {
-        return Ok(false);
-    }
-    // Non-fatal: see maybe_auto_compact_before_step. Killing the run here
-    // leaves the session over threshold and permanently stuck.
-    match compact_session_context_for_run(state, session_id).await {
-        Ok(compacted) => {
-            *info = compacted;
-            Ok(true)
-        }
-        Err(error) => {
-            tracing::warn!(session_id, %error, "auto-compaction failed after step; continuing uncompacted");
-            Ok(false)
-        }
-    }
-}
-
-async fn auto_compaction_threshold_for_model(
-    state: &AppState,
-    info: &SessionInfo,
-    assistant: &AssistantMessage,
-) -> Option<u64> {
-    let variant = info.model.as_ref().and_then(|model| {
-        (model.provider_id == assistant.provider_id && model.id == assistant.model_id)
-            .then(|| model.variant.clone())
-            .flatten()
-    });
-    let model = UserModel {
-        provider_id: assistant.provider_id.clone(),
-        model_id: assistant.model_id.clone(),
-        connection_id: info
-            .model
-            .as_ref()
-            .and_then(|model| model.connection_id.clone()),
-        variant,
-    };
-    auto_compaction_threshold_for_user_model(state, &info.directory, &model).await
-}
-
 async fn auto_compaction_threshold_for_user_model(
     state: &AppState,
     directory: &str,
@@ -1415,21 +1300,6 @@ async fn auto_compaction_threshold_for_user_model(
     let limit = metadata.limit?;
     let usable = usable_context_tokens(&limit);
     (usable > 0).then_some(usable)
-}
-
-/// Resolves the auto-compaction threshold for a model, honoring the env
-/// override and falling back to [`FALLBACK_AUTO_COMPACTION_THRESHOLD`].
-async fn resolved_auto_compaction_threshold(
-    state: &AppState,
-    directory: &str,
-    model: &UserModel,
-) -> u64 {
-    match auto_compaction_threshold_override() {
-        Some(threshold) => threshold,
-        None => auto_compaction_threshold_for_user_model(state, directory, model)
-            .await
-            .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD),
-    }
 }
 
 fn estimated_prompt_compaction_threshold(usable_context: u64) -> u64 {
@@ -1456,11 +1326,21 @@ pub(crate) async fn compaction_preserve_recent_token_budget(
     state: &AppState,
     directory: &str,
     model: &UserModel,
+    agent: Option<&str>,
 ) -> u64 {
-    auto_compaction_threshold_for_user_model(state, directory, model)
-        .await
-        .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD)
-        / 4
+    let snapshot = state.plugin_snapshot(directory).await;
+    let policy = resolved_compaction_policy(snapshot.config(), model, agent);
+    let limit = match snapshot.provider_services_by_priority().first() {
+        Some(provider) => provider
+            .model_metadata(model)
+            .await
+            .ok()
+            .and_then(|metadata| metadata.limit),
+        None => None,
+    };
+    let threshold = compaction_trigger_tokens(&policy, limit.as_ref());
+    // A user-selected small trigger must still leave space for the summary.
+    policy.keep.tokens.unwrap_or(8_000).min(threshold / 4)
 }
 
 pub(crate) fn estimated_provider_prompt_tokens(messages: &[ProviderMessage]) -> u64 {
@@ -1491,36 +1371,24 @@ pub(crate) fn estimated_provider_prompt_tokens(messages: &[ProviderMessage]) -> 
                         })
                         .sum::<u64>(),
                 )
-                .saturating_add(message.attachments.len() as u64 * 256)
+                .saturating_add(
+                    message
+                        .attachments
+                        .iter()
+                        .map(|attachment| {
+                            // Images are modality input, not base64 text tokens. Keep a
+                            // conservative image allowance independent of encoding size.
+                            if attachment.mime.starts_with("image/") {
+                                4_096
+                            } else {
+                                256
+                            }
+                        })
+                        .sum::<u64>(),
+                )
                 .saturating_add(6)
         })
         .sum()
-}
-
-/// Token usage reported by the most recent assistant message that carries any —
-/// the best available estimate of how full the context currently is before the
-/// next request is sent.
-fn last_known_token_total(messages: &[MessageWithParts]) -> u64 {
-    for message in messages.iter().rev() {
-        // Stop at a compaction boundary: usage recorded before the summary
-        // describes the discarded pre-compaction context, and scanning past
-        // it re-trips auto-compaction with a stale total right after a
-        // compaction (the summary message itself carries zero usage).
-        if message
-            .parts
-            .iter()
-            .any(|part| matches!(part, Part::Compaction(_)))
-        {
-            return 0;
-        }
-        if let MessageInfo::Assistant(assistant) = &message.info {
-            let total = token_usage_total(&assistant.tokens);
-            if total > 0 {
-                return total;
-            }
-        }
-    }
-    0
 }
 
 /// Whether the stored summary already covers every message in `messages`, i.e.
@@ -1545,53 +1413,7 @@ fn summary_covers_all_messages(
         == Some(through)
 }
 
-/// Compacts *before* sending a step when the session is already over the
-/// model's usable-context threshold, so a fresh turn on an already-large
-/// session is summarized instead of overflowing the provider. The reactive
-/// [`maybe_auto_compact_after_step`] handles growth *within* a turn; this
-/// handles a turn that starts over budget. Returns the (possibly compacted)
-/// session info.
-async fn maybe_auto_compact_before_step(
-    state: &AppState,
-    session_id: &str,
-    info: SessionInfo,
-    model: &UserModel,
-    messages: &[MessageWithParts],
-) -> Result<(SessionInfo, bool), ApiError> {
-    if auto_compaction_disabled() {
-        return Ok((info, false));
-    }
-    // Nothing new since the last summary → nothing to compact (and avoids a
-    // recompaction loop right after a compaction).
-    if summary_covers_all_messages(&info, messages) {
-        return Ok((info, false));
-    }
-    // Match opencode v2: compaction decisions use the provider-reported usage
-    // from the latest completed step. A char/4 prompt estimate is useful for
-    // bounding the compaction request itself, but using it as an early trigger
-    // made ordinary sessions compact at 75% of the usable context window.
-    let token_total = last_known_token_total(messages);
-    if token_total == 0 {
-        return Ok((info, false));
-    }
-    let threshold =
-        resolved_auto_compaction_threshold(state, &info.directory, model).await;
-    if threshold == 0 || token_total < threshold {
-        return Ok((info, false));
-    }
-    // A failed compaction must never abort the run: the session stays over
-    // threshold, so a fatal error here re-fires on every subsequent prompt and
-    // bricks the session permanently. Proceed uncompacted instead — the step
-    // either still fits or fails with a visible, retryable provider error.
-    match compact_session_context_for_run(state, session_id).await {
-        Ok(compacted) => Ok((compacted, true)),
-        Err(error) => {
-            tracing::warn!(session_id, %error, "auto-compaction failed before step; continuing uncompacted");
-            Ok((info, false))
-        }
-    }
-}
-
+#[cfg(test)]
 fn token_usage_total(tokens: &TokenUsage) -> u64 {
     // Exact opencode v2 overflow formula. Provider total wins when non-zero;
     // otherwise its fallback uses normalized input/output/cache buckets and
@@ -1805,6 +1627,10 @@ fn strip_think_blocks(raw: &str) -> String {
     }
     output
 }
+
+#[cfg(test)]
+#[path = "session_prompt/compaction_tests.rs"]
+mod compaction_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2234,69 +2060,80 @@ mod tests {
 
     #[tokio::test]
     async fn in_run_pruning_clears_old_tool_output_before_followup_replay() {
-        let root = std::env::temp_dir().join(format!(
-            "neoism-agent-in-run-prune-{}",
-            Id::ascending(IdKind::Event)
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let state = AppState::open_database(root.join("state.sqlite3"))
-            .await
+        for prune in [true, false] {
+            let root = std::env::temp_dir().join(format!(
+                "neoism-agent-in-run-prune-{}",
+                Id::ascending(IdKind::Event)
+            ));
+            std::fs::create_dir_all(root.join(".agent")).unwrap();
+            std::fs::write(
+                root.join(".agent/agent.json"),
+                json!({"compaction": {"prune": prune}}).to_string(),
+            )
             .unwrap();
-        let info = test_session_info(None);
-        state.inner.store.insert_session(&info).await.unwrap();
-
-        let user1 = user_message(info.id.clone(), "old turn");
-        let old = assistant_tool_message(
-            info.id.as_str(),
-            crate::session_helpers::message_id_of(&user1).as_str(),
-            "old-read",
-            "x".repeat(260_000),
-        );
-        let user2 = user_message(info.id.clone(), "middle turn");
-        let middle = assistant_tool_message(
-            info.id.as_str(),
-            crate::session_helpers::message_id_of(&user2).as_str(),
-            "middle-read",
-            "y".repeat(160_000),
-        );
-        let user3 = user_message(info.id.clone(), "latest turn");
-        let latest = assistant_tool_message(
-            info.id.as_str(),
-            crate::session_helpers::message_id_of(&user3).as_str(),
-            "latest-read",
-            "z".repeat(4_000),
-        );
-        for message in [&user1, &old, &user2, &middle, &user3, &latest] {
-            state
-                .inner
-                .store
-                .append_message(info.id.as_str(), message)
+            let state = AppState::open_database(root.join("state.sqlite3"))
                 .await
                 .unwrap();
+            let mut info = test_session_info(None);
+            info.directory = root.to_string_lossy().into_owned();
+            state.inner.store.insert_session(&info).await.unwrap();
+
+            let user1 = user_message(info.id.clone(), "old turn");
+            let old = assistant_tool_message(
+                info.id.as_str(),
+                crate::session_helpers::message_id_of(&user1).as_str(),
+                "old-read",
+                "x".repeat(260_000),
+            );
+            let user2 = user_message(info.id.clone(), "middle turn");
+            let middle = assistant_tool_message(
+                info.id.as_str(),
+                crate::session_helpers::message_id_of(&user2).as_str(),
+                "middle-read",
+                "y".repeat(160_000),
+            );
+            let user3 = user_message(info.id.clone(), "latest turn");
+            let latest = assistant_tool_message(
+                info.id.as_str(),
+                crate::session_helpers::message_id_of(&user3).as_str(),
+                "latest-read",
+                "z".repeat(4_000),
+            );
+            for message in [&user1, &old, &user2, &middle, &user3, &latest] {
+                state
+                    .inner
+                    .store
+                    .append_message(info.id.as_str(), message)
+                    .await
+                    .unwrap();
+            }
+
+            let mut messages = state
+                .inner
+                .store
+                .list_messages(info.id.as_str())
+                .await
+                .unwrap();
+            prune_old_tool_outputs_in_messages(&state, info.id.as_str(), &mut messages)
+                .await
+                .unwrap();
+
+            let replay = crate::message_model::provider_messages(&messages)
+                .into_iter()
+                .map(|message| message.content)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                replay
+                    .iter()
+                    .any(|text| text == "[Old tool result content cleared]"),
+                prune
+            );
+            assert!(replay.iter().any(|text| text.starts_with('y')));
+            assert!(replay.iter().any(|text| text.starts_with('z')));
+
+            drop(state);
+            let _ = std::fs::remove_dir_all(root);
         }
-
-        let mut messages = state
-            .inner
-            .store
-            .list_messages(info.id.as_str())
-            .await
-            .unwrap();
-        prune_old_tool_outputs_in_messages(&state, info.id.as_str(), &mut messages)
-            .await
-            .unwrap();
-
-        let replay = crate::message_model::provider_messages(&messages)
-            .into_iter()
-            .map(|message| message.content)
-            .collect::<Vec<_>>();
-        assert!(replay
-            .iter()
-            .any(|text| text == "[Old tool result content cleared]"));
-        assert!(replay.iter().any(|text| text.starts_with('y')));
-        assert!(replay.iter().any(|text| text.starts_with('z')));
-
-        drop(state);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2472,7 +2309,90 @@ mod tests {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_followup_assistant_step(
+pub(crate) fn resolved_compaction_policy(
+    config: &neoism_agent_core::AgentConfigDocument,
+    model: &UserModel,
+    agent: Option<&str>,
+) -> neoism_agent_core::CompactionConfig {
+    let mut policy = config.compaction.clone();
+    if let Some(model) = config
+        .provider
+        .get(&model.provider_id)
+        .and_then(|provider| provider.models.get(&model.model_id))
+    {
+        policy.overlay(&model.compaction);
+    }
+    if let Some(name) = agent {
+        for profiles in [&config.mode, &config.agent] {
+            if let Some(agent) = profiles.get(name).or_else(|| {
+                profiles
+                    .values()
+                    .find(|agent| agent.name.as_deref() == Some(name))
+            }) {
+                policy.overlay(&agent.compaction);
+            }
+        }
+    }
+    policy
+}
+
+fn compaction_trigger_tokens(
+    policy: &neoism_agent_core::CompactionConfig,
+    limit: Option<&ModelLimit>,
+) -> u64 {
+    limit
+        .filter(|limit| limit.context > 0)
+        .map(|limit| policy.threshold(limit.context, usable_context_tokens(limit)))
+        .unwrap_or_else(|| {
+            policy.threshold(
+                FALLBACK_AUTO_COMPACTION_THRESHOLD,
+                FALLBACK_AUTO_COMPACTION_THRESHOLD,
+            )
+        })
+}
+
+fn estimated_request_tokens(request: &ProviderGenerationRequest) -> u64 {
+    // Use the same modality-aware estimate for triggering and tail retention.
+    // Serializing the entire request counted screenshot base64 as text, causing
+    // spurious compactions while the provider reported only ~16k actual tokens.
+    estimated_provider_prompt_tokens(&request.messages).saturating_add(estimate_tokens(
+        &serde_json::to_string(&request.tools).unwrap_or_default(),
+    ))
+}
+
+async fn rebuilt_compaction_messages(
+    state: &AppState,
+    session_id: &str,
+    info: &SessionInfo,
+    model: &UserModel,
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    hook: &plugin::ChatHookContext,
+    run_system: Option<&str>,
+    goals_enabled: bool,
+    max_steps_reached: bool,
+) -> Result<Vec<ProviderMessage>, ApiError> {
+    let history = state.inner.store.list_messages(session_id).await?;
+    let mut messages = provider_messages_for_session_with_plugins(
+        snapshot,
+        info,
+        &history,
+        &model.model_id,
+        run_system,
+        goals_enabled,
+    );
+    push_compaction_continuation(&mut messages, &history);
+    if max_steps_reached {
+        messages.push(ProviderMessage::text(
+            ProviderRole::Assistant,
+            MAX_STEPS_REMINDER,
+        ));
+    }
+    plugin::chat_messages_transform(snapshot, hook, &mut messages)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(messages)
+}
+
+async fn run_assistant_step(
     provider: &Arc<dyn neoism_agent_plugin_api::ProviderService>,
     state: &AppState,
     session_id: &Id,
@@ -2487,23 +2407,9 @@ async fn run_followup_assistant_step(
     cancellation: Arc<AtomicBool>,
     max_steps_reached: bool,
     tool_permissions: Vec<PermissionRule>,
+    run_system: Option<&str>,
+    goals_enabled: bool,
 ) -> Result<MessageWithParts, ApiError> {
-    let started = start_assistant_step(
-        state,
-        session_id,
-        session_id_text,
-        parent_id,
-        &info.directory,
-        now_millis(),
-        agent_info.mode.clone(),
-        agent_info.name.clone(),
-        reply_model.model_id.clone(),
-        reply_model.provider_id.clone(),
-    )
-    .await?;
-    let assistant_id = started.assistant_id;
-    let text_part_id = started.text_part_id;
-    let live_message = started.live_message;
     let provider_tools = provider_tools_for_agent(
         state,
         &info.directory,
@@ -2519,38 +2425,157 @@ async fn run_followup_assistant_step(
         provider_id: reply_model.provider_id.clone(),
         model_id: reply_model.model_id.clone(),
     };
-    run_provider_stream_step_with_retry(
+    let policy = resolved_compaction_policy(
+        plugin_snapshot.config(),
+        reply_model,
+        Some(&agent_info.name),
+    );
+    let limit = provider
+        .model_metadata(reply_model)
+        .await
+        .ok()
+        .and_then(|metadata| metadata.limit);
+    let threshold = compaction_trigger_tokens(&policy, limit.as_ref());
+    let threshold = auto_compaction_threshold_override().unwrap_or(threshold);
+    let enabled = policy.enabled()
+        && !auto_compaction_disabled()
+        && auto_compaction_threshold_override() != Some(0);
+    let mut request = build_provider_generation_request(
+        state,
         provider,
-        &ProviderStreamEventContext {
+        reply_model,
+        Some(session_id_text),
+        provider_messages,
+        provider_tools,
+        Some(plugin_snapshot),
+        Some(&chat_hook_ctx),
+    )
+    .await;
+    let history = state.inner.store.list_messages(session_id_text).await?;
+    let mut compacted = false;
+    if enabled
+        && !summary_covers_all_messages(info, &history)
+        && estimated_request_tokens(&request) >= threshold
+        && !cancellation.load(Ordering::SeqCst)
+    {
+        match compact_session_context_for_run(state, session_id_text).await {
+            Ok(info) => {
+                request.messages = rebuilt_compaction_messages(
+                    state,
+                    session_id_text,
+                    &info,
+                    reply_model,
+                    plugin_snapshot,
+                    &chat_hook_ctx,
+                    run_system,
+                    goals_enabled,
+                    max_steps_reached,
+                )
+                .await?;
+                compacted = true;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "proactive compaction failed; continuing uncompacted")
+            }
+        }
+    }
+    loop {
+        if cancellation.load(Ordering::SeqCst) {
+            finish_session_run(state, session_id_text, run_id).await;
+            let _ = state
+                .inner
+                .store
+                .finish_run(run_id, "interrupted", None)
+                .await;
+            return Err(ApiError::conflict("Session aborted"));
+        }
+        let started = start_assistant_step(
             state,
             session_id,
             session_id_text,
-            run_id,
-            assistant_id: &assistant_id,
-            text_part_id: &text_part_id,
-            live_message: &live_message,
-            directory: &info.directory,
-            model: reply_model,
-            model_id: &reply_model.model_id,
-            provider_tools: &provider_tool_map,
-            tool_permissions: &tool_permissions,
-            plugin_snapshot,
-            max_steps_reached,
-        },
-        build_provider_generation_request(
-            state,
-            provider,
-            reply_model,
-            Some(session_id_text),
-            provider_messages,
-            provider_tools,
-            Some(plugin_snapshot),
-            Some(&chat_hook_ctx),
+            parent_id,
+            &info.directory,
+            now_millis(),
+            agent_info.mode.clone(),
+            agent_info.name.clone(),
+            reply_model.model_id.clone(),
+            reply_model.provider_id.clone(),
         )
-        .await,
-        &cancellation,
-    )
-    .await
+        .await?;
+        let assistant_id = started.assistant_id;
+        let text_part_id = started.text_part_id;
+        let live_message = started.live_message;
+        let result = run_provider_stream_step_with_retry(
+            provider,
+            &ProviderStreamEventContext {
+                state,
+                session_id,
+                session_id_text,
+                run_id,
+                assistant_id: &assistant_id,
+                text_part_id: &text_part_id,
+                live_message: &live_message,
+                directory: &info.directory,
+                model: reply_model,
+                model_id: &reply_model.model_id,
+                provider_tools: &provider_tool_map,
+                tool_permissions: &tool_permissions,
+                plugin_snapshot,
+                max_steps_reached,
+                recover_context_overflow: enabled && !compacted,
+            },
+            request.clone(),
+            &cancellation,
+        )
+        .await;
+        match result {
+            Err(error) if enabled && !compacted && error.is_context_overflow() => {
+                // The failed step is finalized before the compaction boundary.
+                // Never replay tools or recursively retry an oversized summary.
+                let recovered = async {
+                    if cancellation.load(Ordering::SeqCst) {
+                        return Err(ApiError::conflict("Session aborted"));
+                    }
+                    let info =
+                        compact_session_context_for_run(state, session_id_text).await?;
+                    rebuilt_compaction_messages(
+                        state,
+                        session_id_text,
+                        &info,
+                        reply_model,
+                        plugin_snapshot,
+                        &chat_hook_ctx,
+                        run_system,
+                        goals_enabled,
+                        max_steps_reached,
+                    )
+                    .await
+                }
+                .await;
+                match recovered {
+                    Ok(messages) if !cancellation.load(Ordering::SeqCst) => {
+                        request.messages = messages;
+                        compacted = true;
+                    }
+                    _ => {
+                        finish_provider_stream_with_error(
+                            state,
+                            session_id,
+                            session_id_text,
+                            run_id,
+                            false,
+                            text_part_id.as_str(),
+                            &live_message,
+                            error.to_string(),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                }
+            }
+            result => return result,
+        }
+    }
 }
 
 async fn build_provider_generation_request(
@@ -2661,6 +2686,7 @@ async fn run_provider_stream_step_with_retry(
                             ctx.session_id,
                             ctx.session_id_text,
                             ctx.run_id,
+                            ctx.recover_context_overflow,
                             ctx.text_part_id.as_str(),
                             ctx.live_message,
                             "Session aborted".to_string(),
@@ -2676,6 +2702,7 @@ async fn run_provider_stream_step_with_retry(
                     ctx.session_id,
                     ctx.session_id_text,
                     ctx.run_id,
+                    ctx.recover_context_overflow,
                     ctx.text_part_id.as_str(),
                     ctx.live_message,
                     message.clone(),
@@ -2723,6 +2750,7 @@ async fn run_provider_stream_step_with_retry(
                         ctx.session_id,
                         ctx.session_id_text,
                         ctx.run_id,
+                        ctx.recover_context_overflow,
                         ctx.text_part_id.as_str(),
                         ctx.live_message,
                         "Session aborted".to_string(),
@@ -2750,6 +2778,7 @@ async fn run_provider_stream_step_with_retry(
                     ctx.session_id,
                     ctx.session_id_text,
                     ctx.run_id,
+                    ctx.recover_context_overflow,
                     ctx.text_part_id.as_str(),
                     ctx.live_message,
                     error.message.clone(),

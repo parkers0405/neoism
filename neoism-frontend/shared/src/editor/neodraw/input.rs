@@ -9,7 +9,7 @@
 use super::edit::Handle;
 use super::geometry::Bounds;
 use super::pane::{DrawPane, Tool};
-use super::scene::{Shape, ShapeKind, Vec2};
+use super::scene::{Shape, ShapeId, ShapeKind, Vec2};
 
 /// Click tolerance in screen pixels when hit-testing shapes/handles.
 const PICK_TOLERANCE_PX: f32 = 6.0;
@@ -22,7 +22,13 @@ pub enum DrawGesture {
     /// Panning the viewport; tracks the last window-space position.
     Pan { last: Vec2 },
     /// Rubber-band selection rectangle (world coords).
-    Marquee { start: Vec2, current: Vec2 },
+    Marquee {
+        start: Vec2,
+        current: Vec2,
+        initial: Vec<ShapeId>,
+        additive: bool,
+        text_click: bool,
+    },
     /// Dragging (or about to click) a graph node; tracks the press point
     /// so a release without movement counts as a click (open note).
     GraphNode { idx: usize, start: Vec2 },
@@ -35,6 +41,7 @@ pub enum DrawGesture {
     Resize {
         handle: Handle,
         start_bounds: Bounds,
+        grab_offset: Vec2,
         snapshot: Vec<Shape>,
     },
 }
@@ -112,23 +119,10 @@ impl DrawPane {
             return true;
         }
 
-        if self.tool == Tool::Text {
-            // If the cursor is over an existing shape, grab/move it
-            // instead of dropping new text (double-click still edits).
-            if let Some(id) = self.pick_top(world, tol) {
-                if self.editing() {
-                    self.commit_text();
-                }
-                if !self.selection.contains(&id) {
-                    self.selection = vec![id];
-                }
-                self.checkpoint();
-                self.gesture = DrawGesture::Move { last: world };
-                return true;
-            }
-            self.begin_text_at(world, tol);
+        if matches!(self.tool, Tool::Select | Tool::Text) && self.begin_resize_at(x, y) {
             return true;
         }
+        let text_click = self.tool == Tool::Text;
         // Any other click ends an in-progress text edit.
         if self.editing() {
             self.commit_text();
@@ -139,62 +133,66 @@ impl DrawPane {
             return true;
         }
 
-        // Select tool. Try a resize handle first, then shape picking.
-        if self.has_selection() {
-            if let Some(rect) = self.last_rect {
-                let cam = self.placed_camera(rect);
-                if let Some(handle) = self.hit_handle(
-                    Vec2::new(x, y),
-                    &cam,
-                    super::render::HANDLE_HALF_PX + 3.0,
-                ) {
-                    if let Some(start_bounds) = self.selection_bounds() {
-                        let snapshot = self
-                            .scene
-                            .shapes
-                            .iter()
-                            .filter(|s| self.selection.contains(&s.id))
-                            .cloned()
-                            .collect();
-                        self.checkpoint();
-                        self.gesture = DrawGesture::Resize {
-                            handle,
-                            start_bounds,
-                            snapshot,
-                        };
-                        return true;
-                    }
-                }
-            }
-        }
-
         let hit = self.pick_top(world, tol);
-        // Empty click *inside* the current selection's box drags the
-        // whole group — so multi-selections move together even when the
-        // click lands between shapes.
-        if hit.is_none()
-            && !additive
-            && self.has_selection()
-            && self
-                .selection_bounds()
-                .is_some_and(|b| b.contains(world, tol.max(2.0)))
-        {
-            self.checkpoint();
-            self.gesture = DrawGesture::Move { last: world };
-            return true;
-        }
-
+        let initial = self.selection.clone();
         self.select_at(world, tol, additive);
-        if hit.is_some() && self.has_selection() {
+        if hit.is_some_and(|id| self.selection.contains(&id)) {
             self.checkpoint();
             self.gesture = DrawGesture::Move { last: world };
+        } else if hit.is_some() {
+            self.gesture = DrawGesture::Idle;
         } else {
-            // Empty space: start a rubber-band selection.
+            // Empty space always selects, even between already-selected objects.
             self.gesture = DrawGesture::Marquee {
                 start: world,
                 current: world,
+                initial,
+                additive,
+                text_click,
             };
         }
+        true
+    }
+
+    fn begin_resize_at(&mut self, x: f32, y: f32) -> bool {
+        let Some(rect) = self.last_rect else {
+            return false;
+        };
+        let Some(start_bounds) = self.selection_bounds() else {
+            return false;
+        };
+        let camera = self.placed_camera(rect);
+        let Some(handle) = self.hit_handle(
+            Vec2::new(x, y),
+            &camera,
+            super::render::HANDLE_HALF_PX + 3.0,
+        ) else {
+            return false;
+        };
+        let snapshot = self
+            .scene
+            .shapes
+            .iter()
+            .filter(|shape| self.selection.contains(&shape.id))
+            .map(|shape| {
+                let mut snapshot = shape.clone();
+                if let ShapeKind::Text { width, .. } = &mut snapshot.kind {
+                    if width.is_none() {
+                        *width = Some(self.shape_bounds(shape).width());
+                    }
+                }
+                snapshot
+            })
+            .collect();
+        self.checkpoint();
+        let pointer = camera.screen_to_world(Vec2::new(x, y));
+        let anchor = handle.world_pos(start_bounds);
+        self.gesture = DrawGesture::Resize {
+            handle,
+            start_bounds,
+            grab_offset: Vec2::new(pointer.x - anchor.x, pointer.y - anchor.y),
+            snapshot,
+        };
         true
     }
 
@@ -232,10 +230,41 @@ impl DrawPane {
                 self.mark_erase_at(world, tol);
                 true
             }
-            DrawGesture::Marquee { start, .. } => {
+            DrawGesture::Marquee {
+                start,
+                initial,
+                additive,
+                text_click,
+                ..
+            } => {
+                let selecting = (world.x - start.x).hypot(world.y - start.y)
+                    * self.camera.zoom
+                    >= 3.0;
+                if selecting {
+                    if text_click {
+                        self.tool = Tool::Select;
+                    }
+                    self.select_in_rect(start, world);
+                    if additive {
+                        for id in &initial {
+                            if !self.selection.contains(id) {
+                                self.selection.push(*id);
+                            }
+                        }
+                    }
+                } else {
+                    self.selection = if additive {
+                        initial.clone()
+                    } else {
+                        Vec::new()
+                    };
+                }
                 self.gesture = DrawGesture::Marquee {
                     start,
                     current: world,
+                    initial,
+                    additive,
+                    text_click: text_click && !selecting,
                 };
                 true
             }
@@ -247,10 +276,15 @@ impl DrawPane {
             DrawGesture::Resize {
                 handle,
                 start_bounds,
+                grab_offset,
                 snapshot,
             } => {
                 self.restore_shapes(&snapshot);
-                self.resize_selection(handle, start_bounds, world);
+                self.resize_selection(
+                    handle,
+                    start_bounds,
+                    Vec2::new(world.x - grab_offset.x, world.y - grab_offset.y),
+                );
                 true
             }
             DrawGesture::Idle => false,
@@ -264,9 +298,35 @@ impl DrawPane {
             self.commit_draft();
             return true;
         }
-        if let DrawGesture::Marquee { start, current } = self.gesture {
-            self.select_in_rect(start, current);
+        if let DrawGesture::Marquee {
+            start,
+            current,
+            initial,
+            additive,
+            text_click,
+        } = self.gesture.clone()
+        {
             self.gesture = DrawGesture::Idle;
+            let dragged = (current.x - start.x).hypot(current.y - start.y)
+                * self.camera.zoom
+                >= 3.0;
+            if dragged {
+                self.select_in_rect(start, current);
+                if additive {
+                    for id in initial {
+                        if !self.selection.contains(&id) {
+                            self.selection.push(id);
+                        }
+                    }
+                }
+                if text_click {
+                    self.tool = Tool::Select;
+                }
+            } else if text_click && !additive {
+                self.begin_text_at(start, PICK_TOLERANCE_PX / self.camera.zoom.max(0.01));
+            } else {
+                self.selection = if additive { initial } else { Vec::new() };
+            }
             return true;
         }
         if matches!(self.gesture, DrawGesture::Erase) {
@@ -407,6 +467,11 @@ impl DrawPane {
             self.cancel_draft();
             return true;
         }
+        if let DrawGesture::Marquee { initial, .. } = &self.gesture {
+            self.selection = initial.clone();
+            self.gesture = DrawGesture::Idle;
+            return true;
+        }
         if !matches!(self.gesture, DrawGesture::Idle) {
             self.gesture = DrawGesture::Idle;
             self.erasing.clear();
@@ -499,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn group_move_from_inside_selection_box() {
+    fn empty_space_inside_selection_starts_a_new_marquee() {
         let mut p = pane_with(vec![
             rect(1, 0.0, 0.0, 50.0, 50.0),
             rect(2, 200.0, 0.0, 50.0, 50.0),
@@ -507,15 +572,45 @@ mod tests {
         p.selection = vec![ShapeId(1), ShapeId(2)];
         // Click empty space between the two shapes but inside their box.
         assert!(p.begin_pointer(120.0, 25.0, false));
-        assert!(
-            matches!(p.gesture, DrawGesture::Move { .. }),
-            "grabs the group"
-        );
-        assert_eq!(p.selection.len(), 2, "selection preserved");
-        p.drag_pointer(140.0, 25.0); // +20 x
+        assert!(matches!(p.gesture, DrawGesture::Marquee { .. }));
+        p.drag_pointer(260.0, 100.0);
+        assert_eq!(p.selection, vec![ShapeId(2)]);
         p.end_pointer();
-        assert_eq!(p.scene.shapes[0].bounds().xywh()[0], 20.0);
-        assert_eq!(p.scene.shapes[1].bounds().xywh()[0], 220.0);
+        assert_eq!(p.scene.shapes[0].bounds().xywh()[0], 0.0);
+        assert_eq!(p.scene.shapes[1].bounds().xywh()[0], 200.0);
+    }
+
+    #[test]
+    fn shift_marquee_keeps_original_selection_and_updates_live() {
+        let mut p = pane_with(vec![
+            rect(1, 0.0, 0.0, 50.0, 50.0),
+            rect(2, 200.0, 0.0, 50.0, 50.0),
+        ]);
+        p.selection = vec![ShapeId(1)];
+        p.begin_pointer(300.0, 200.0, true);
+        p.drag_pointer(150.0, -10.0);
+        assert!(p.selection.contains(&ShapeId(1)) && p.selection.contains(&ShapeId(2)));
+        p.drag_pointer(280.0, 180.0);
+        assert_eq!(p.selection, vec![ShapeId(1)]);
+        p.cancel();
+        assert_eq!(p.selection, vec![ShapeId(1)]);
+    }
+
+    #[test]
+    fn text_tool_drag_selects_without_creating_a_stray_text_shape() {
+        let mut p = pane_with(vec![rect(1, 0.0, 0.0, 100.0, 100.0)]);
+        p.tool = Tool::Text;
+        p.begin_pointer(500.0, 500.0, false);
+        p.drag_pointer(-10.0, -10.0);
+        p.end_pointer();
+        assert_eq!(p.scene.shapes.len(), 1);
+        assert_eq!(p.selection, vec![ShapeId(1)]);
+        assert_eq!(p.tool, Tool::Select);
+        p.tool = Tool::Text;
+        p.begin_pointer(500.0, 500.0, false);
+        p.end_pointer();
+        assert!(p.editing());
+        assert_eq!(p.scene.shapes.len(), 2);
     }
 
     #[test]

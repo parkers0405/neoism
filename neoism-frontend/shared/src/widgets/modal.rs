@@ -63,6 +63,12 @@ pub enum ModalAction {
         command: String,
         value: String,
     },
+    MarkdownFileLink { document: std::path::PathBuf, value: String },
+    DocumentationNotebook {
+        kind: crate::editor::documentation_notebook::NotebookInput,
+        notebook: Option<std::path::PathBuf>,
+        value: String,
+    },
     /// Add a durable EPUB highlight carrying the note entered in the modal.
     EpubAddNote {
         value: String,
@@ -152,6 +158,7 @@ pub enum ModalAction {
     FileTreePromptNewFile {
         dir: String,
     },
+    NotesNewNotebook { dir: String },
     NotesPromptNewFile {
         dir: String,
     },
@@ -301,6 +308,8 @@ impl ModalAction {
             ModalAction::RunEditorCommandWithInput { command, .. } => {
                 ModalAction::RunEditorCommandWithInput { command, value }
             }
+            ModalAction::MarkdownFileLink { document, .. } => ModalAction::MarkdownFileLink { document, value },
+            ModalAction::DocumentationNotebook { kind, notebook, .. } => ModalAction::DocumentationNotebook { kind, notebook, value },
             ModalAction::EpubAddNote { .. } => ModalAction::EpubAddNote { value },
             ModalAction::EpubUpdateAnnotation { id, .. } => {
                 ModalAction::EpubUpdateAnnotation { id, value }
@@ -583,6 +592,8 @@ impl UniversalModal {
             self.buttons.first().map(|button| &button.action),
             Some(
                 ModalAction::EpubUpdateAnnotation { .. }
+                    | ModalAction::MarkdownFileLink { .. }
+                    | ModalAction::DocumentationNotebook { .. }
                     | ModalAction::EpubAddNote { .. }
             )
         );

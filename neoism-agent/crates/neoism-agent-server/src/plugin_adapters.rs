@@ -702,6 +702,10 @@ impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {
                 ConfigAdminAction::Update => {
                     let config: neoism_agent_core::AgentConfigDocument =
                         serde_json::from_value(request.body).map_err(runtime_error)?;
+                    let disabling_typesafe = crate::computer_use::typesafe::enabled(
+                        &crate::config::load(self.0.services(), &directory).map_err(runtime_error)?.info,
+                    ) && !crate::computer_use::typesafe::enabled(&config);
+                    if disabling_typesafe { crate::computer_use::stop(); }
                     let snapshot = crate::config::snapshot(self.0.services(), &directory)
                         .map_err(runtime_error)?;
                     self.0
@@ -718,6 +722,7 @@ impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {
                         })
                         .await
                         .map_err(runtime_error)?;
+                    if disabling_typesafe { crate::computer_use::stop(); }
                     serde_json::to_value(config)
                 }
             }

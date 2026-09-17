@@ -368,6 +368,7 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     state: Option<AppState>,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> anyhow::Result<Option<tool::ToolExecutionResult>> {
+    let execution_started = std::time::Instant::now();
     if !runtime_id.starts_with("mcp__") {
         return Ok(None);
     }
@@ -432,6 +433,10 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
         output,
         metadata: Some(json!({
             "isError": is_error,
+            "executionTiming": {
+                "serverMs": execution_started.elapsed().as_secs_f64() * 1000.0,
+                "scope": "MCP executor including permission evaluation, catalog lookup, dispatch and result conversion; excludes human approval wait, model inference and client transport"
+            },
             "attachments": mcp_image_attachments(&result),
             "mcp": {
                 "client": tool.client,

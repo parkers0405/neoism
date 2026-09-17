@@ -4,6 +4,41 @@ use super::helpers::*;
 use super::types::*;
 use crate::widgets::markdown::web_link_at;
 
+/// Build a standard Markdown link, using a relative reference for files in the
+/// source folder and a file URL for other locations (including outside vaults).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn markdown_file_link(source: &Path, target: &Path) -> Option<String> {
+    let label = target
+        .file_stem()?
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
+    let destination = if let Some(relative) = source
+        .parent()
+        .and_then(|parent| target.strip_prefix(parent).ok())
+    {
+        relative
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('%', "%25")
+            .replace(' ', "%20")
+            .replace('#', "%23")
+            .replace('?', "%3F")
+            .replace('(', "%28")
+            .replace(')', "%29")
+            .replace('<', "%3C")
+            .replace('>', "%3E")
+    } else {
+        url::Url::from_file_path(target)
+            .ok()?
+            .to_string()
+            .replace('(', "%28")
+            .replace(')', "%29")
+    };
+    Some(format!("[{label}]({destination})"))
+}
+
 pub fn markdown_contact_value(target: &str) -> Option<&str> {
     target
         .strip_prefix("mailto:")
@@ -215,10 +250,14 @@ impl MarkdownPane {
     }
 
     pub fn resolve_markdown_link(&self, inner: &str) -> Option<MarkdownLinkTarget> {
-        if let Some(cached) = self.link_target_cache.borrow().get(inner).cloned() {
-            return cached;
-        }
         let parsed = parse_markdown_link_parts(inner)?;
+        // Headings can change while the page remains open; do not reuse a disk-
+        // based destination after the in-memory document has been edited.
+        if parsed.heading.is_none() {
+            if let Some(cached) = self.link_target_cache.borrow().get(inner).cloned() {
+                return cached;
+            }
+        }
         let path = if parsed.target.is_empty() {
             self.path.clone()
         } else {
@@ -235,9 +274,11 @@ impl MarkdownPane {
             line,
             code_ref: parsed.code_ref,
         });
-        self.link_target_cache
-            .borrow_mut()
-            .insert(inner.to_string(), target.clone());
+        if parsed.heading.is_none() {
+            self.link_target_cache
+                .borrow_mut()
+                .insert(inner.to_string(), target.clone());
+        }
         target
     }
 
@@ -246,10 +287,29 @@ impl MarkdownPane {
         // and web URLs must survive resolution verbatim. Treating them as a
         // relative filesystem path destroys the scheme and prevents the host
         // from dispatching the click.
+        #[cfg(not(target_arch = "wasm32"))]
+        if target.starts_with("file://") {
+            if let Some(path) = url::Url::parse(target)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
+            {
+                return path;
+            }
+        }
         if target.contains("://") || is_external_markdown_target(target) {
             return PathBuf::from(target);
         }
-        let target = PathBuf::from(target);
+        let decoded = decode_link_path(target);
+        #[cfg(not(target_arch = "wasm32"))]
+        let target = if let Some(suffix) = decoded.strip_prefix("~/") {
+            dirs::home_dir()
+                .map(|home| home.join(suffix))
+                .unwrap_or_else(|| PathBuf::from(&decoded))
+        } else {
+            PathBuf::from(decoded)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let target = PathBuf::from(decoded);
         let base = if target.is_absolute() {
             target
         } else {
@@ -258,6 +318,7 @@ impl MarkdownPane {
                 .unwrap_or_else(|| Path::new(""))
                 .join(target)
         };
+        let base = crate::editor::documentation_notebook::normalize_path(&base);
         let mut candidates = vec![base.clone()];
         if base.extension().is_none() {
             for ext in ["md", "markdown", "mdx"] {
@@ -286,8 +347,14 @@ impl MarkdownPane {
         path: &Path,
         heading: &str,
     ) -> Option<usize> {
+        let heading = decode_link_path(heading);
+        if super::super::documentation_notebook::normalize_path(path)
+            == super::super::documentation_notebook::normalize_path(&self.path)
+        {
+            return markdown_heading_line(&self.lines.join("\n"), &heading);
+        }
         let source = std::fs::read_to_string(path).ok()?;
-        markdown_heading_line(&source, heading)
+        markdown_heading_line(&source, &heading)
     }
 
     pub(super) fn wiki_link_bounds_before_cursor(
@@ -317,6 +384,25 @@ impl MarkdownPane {
             close_start,
         })
     }
+}
+
+fn decode_link_path(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = |byte: u8| (byte as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                decoded.push((hi * 16 + lo) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
 }
 
 fn wiki_link_at_byte(line: &str, byte_col: usize) -> Option<&str> {

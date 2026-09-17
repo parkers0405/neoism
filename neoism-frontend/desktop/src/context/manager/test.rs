@@ -24,6 +24,9 @@ fn attach_unconnected_daemon(
     options.reconnect = ReconnectBackoff {
         initial: Duration::from_secs(60 * 60),
         max: Duration::from_secs(60 * 60),
+        heartbeat: Duration::from_secs(15),
+        liveness: Duration::from_secs(4),
+        handshake: Duration::from_secs(4),
     };
     let client = runtime
         .block_on(DaemonClient::connect_with_options(options))
@@ -743,6 +746,88 @@ fn remote_attach_error_invalidates_binding_and_late_success_cannot_revive_it() {
     pty.write(b"never replay\n").unwrap();
     assert!(binding.shared.lock().unwrap().queued.is_empty());
     // Close after invalidation must not send ClosePty to a possibly live shell.
+    pty.close();
+}
+
+#[test]
+fn transport_loss_gates_input_without_killing_session_identity() {
+    use crate::context::remote_pty;
+    use crate::daemon_client::PtyFailureClass;
+    let mut manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
+            .unwrap();
+    let runtime = attach_unconnected_daemon(&mut manager);
+    let (handle, _) = manager
+        .daemon
+        .link
+        .as_ref()
+        .unwrap()
+        .handle_and_runtime()
+        .unwrap();
+    let prepared = remote_pty::prepare(handle.clone(), runtime.handle().clone());
+    let (mut pty, feed) = neoism_terminal_pty::PtySession::remote(prepared.sink);
+    let binding = remote_pty::RemotePtyBinding {
+        feed,
+        shared: prepared.shared,
+    };
+    let route = 42;
+    remote_pty::bind_session(
+        &binding,
+        "live-shell",
+        handle,
+        runtime.handle().clone(),
+    );
+    manager
+        .daemon
+        .cache
+        .remote_routes
+        .insert(route, binding.clone());
+    manager
+        .daemon
+        .cache
+        .route_sessions
+        .insert(route, "live-shell".into());
+    manager
+        .daemon
+        .cache
+        .session_routes
+        .insert("live-shell".into(), route);
+    assert!(!manager.apply_remote_pty_failure(
+        7,
+        Some("live-shell"),
+        "connection lost before PTY acknowledgment",
+        PtyFailureClass::Transport,
+    ));
+    assert_eq!(
+        manager
+            .daemon
+            .cache
+            .route_sessions
+            .get(&route)
+            .map(String::as_str),
+        Some("live-shell")
+    );
+    assert!(pty.exit_code().is_none());
+    pty.write(b"must-not-run\n").unwrap();
+    assert!(binding.shared.lock().unwrap().queued.is_empty());
+    assert!(!binding.shared.lock().unwrap().failed);
+    assert!(manager.resync_after_daemon_reconnect(3));
+    assert!(!manager.resync_after_daemon_reconnect(3));
+    assert!(manager.apply_pty_server_message(
+        manager
+            .daemon
+            .cache
+            .pending_pty_attaches
+            .keys()
+            .copied()
+            .next()
+            .unwrap_or(0),
+        neoism_protocol::pty::ServerMessage::PtyCreated {
+            session_id: "live-shell".into(),
+            shell: None,
+            workspace_root: None
+        }
+    ) || manager.daemon.cache.pending_pty_attaches.is_empty());
     pty.close();
 }
 

@@ -226,6 +226,14 @@ impl Screen<'_> {
                 item.layout_rect[2] / scale,
                 item.layout_rect[3] / scale,
             ];
+            let rect = if let Some(binding) = &markdown.documentation_notebook {
+                if let Ok(mut book) = binding.session.lock() {
+                    neoism_ui::editor::documentation_notebook::render_navigation(
+                        &mut self.sugarloaf, &mut book, rect, &theme,
+                        markdown_mouse, &text_occlusions,
+                    )
+                } else { rect }
+            } else { rect };
             // Always render the rich markdown (checkboxes, headings, etc.) —
             // it scrolls as normal. The ink layer composites OVER it below.
             crate::editor::markdown::render::render(
@@ -314,6 +322,7 @@ impl Screen<'_> {
                 "markdown panels recorded"
             );
         }
+        self.constrain_markdown_completion_menu();
         markdown_needs_redraw
     }
 
@@ -803,6 +812,12 @@ impl Screen<'_> {
         target: crate::editor::markdown::state::MarkdownLinkTarget,
     ) {
         let path = target.path.clone();
+        if self.follow_documentation_notebook_link(&path, target.line) { return; }
+        if neoism_ui::editor::documentation_notebook::is_manifest(&path)
+            || (path.is_dir() && path.join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME).is_file()) {
+            self.open_documentation_notebook(path);
+            return;
+        }
         let raw_target = path.display().to_string();
         if let Some(target) = raw_target.strip_prefix("neoism-reader://") {
             let mut parts = target.splitn(2, '/');

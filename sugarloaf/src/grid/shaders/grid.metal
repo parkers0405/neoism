@@ -382,6 +382,11 @@ fragment float4 grid_text_fragment(
         }
     }
 
+    if ((in.atlas & 2u) != 0u) {
+        constexpr sampler smooth_sampler(coord::pixel, address::clamp_to_edge, filter::linear);
+        if ((in.atlas & 1u) == 0u) { return in.color * atlas_grayscale.sample(smooth_sampler, in.tex_coord).r; }
+        return atlas_color.sample(smooth_sampler, in.tex_coord);
+    }
     constexpr sampler atlas_sampler(
         coord::pixel,
         address::clamp_to_edge,
@@ -419,6 +424,7 @@ struct TextVertexIn {
     uchar4  color      [[attribute(4)]];
     uchar   atlas      [[attribute(5)]];
     float4  clip_rect  [[attribute(6)]];
+    float   raster_scale [[attribute(7)]];
 };
 
 vertex CellTextVertexOut text_vertex(
@@ -433,8 +439,9 @@ vertex CellTextVertexOut text_vertex(
     corner.y = float(vid == 2 || vid == 3);
 
     float2 size    = float2(in.glyph_size);
-    float2 origin  = in.pos + float2(in.bearings);
-    float2 quad_px = origin + size * corner;
+    float scale = in.raster_scale > 0.0 ? in.raster_scale : 1.0;
+    float2 origin = in.pos + float2(in.bearings) * scale;
+    float2 quad_px = origin + size * corner * scale;
 
  // Pixel → NDC (y-flip so `pos.y` grows downward in screen space).
     float2 ndc = float2(
@@ -445,7 +452,7 @@ vertex CellTextVertexOut text_vertex(
     CellTextVertexOut out;
     out.position  = float4(ndc, 0.0, 1.0);
     out.tex_coord = float2(in.glyph_pos) + size * corner;
-    out.atlas     = uint(in.atlas);
+    out.atlas = uint(in.atlas) | (in.raster_scale > 0.0 ? 2u : 0u);
     out.clip_rect = in.clip_rect;
 
  // Premultiplied RGBA. Matches the grid text path's blend model.

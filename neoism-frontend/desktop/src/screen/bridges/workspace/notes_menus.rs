@@ -227,12 +227,32 @@ impl Screen<'_> {
                 "f",
                 ContextMenuAction::Modal(
                     ModalAction::FileTreePromptNewFolder {
-                        dir: target_dir_string,
+                        dir: target_dir_string.clone(),
                     }
                     .into(),
                 ),
             ),
         ];
+        let notebooks_available = !self.context_manager.current_workspace_is_remote_joined();
+        if notebooks_available {
+            items.insert(1, ContextMenuItem::new(
+                "New Drawing", "",
+                ContextMenuAction::Modal(ModalAction::NotesNewDrawing {
+                    dir: target_dir_string.clone(),
+                }.into()),
+            ));
+        }
+        if notebooks_available && target.join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME).is_file() {
+            use neoism_ui::editor::documentation_notebook::NotebookInput;
+            items.push(ContextMenuItem::new(
+                "Open Notebook", "",
+                ContextMenuAction::Modal(ModalAction::DocumentationNotebook {
+                    kind: NotebookInput::Open,
+                    notebook: None,
+                    value: target.to_string_lossy().into_owned(),
+                }.into()),
+            ));
+        }
         if self
             .renderer
             .notes_sidebar

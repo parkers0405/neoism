@@ -75,6 +75,62 @@ pub struct AgentConfigDocument {
     pub instructions: Vec<String>,
     #[serde(default)]
     pub experimental: ExperimentalConfig,
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+}
+
+/// Optional fields allow model and agent policies to inherit individual settings.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct CompactionConfig {
+    pub auto: Option<bool>,
+    pub prune: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_compaction_percent")]
+    pub threshold_percent: Option<f64>,
+    pub buffer: Option<u64>,
+    #[serde(default)]
+    pub keep: CompactionKeep,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct CompactionKeep {
+    pub tokens: Option<u64>,
+}
+
+fn deserialize_compaction_percent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    let value = Option::<f64>::deserialize(deserializer)?;
+    if value.is_some_and(|value| !value.is_finite() || !(1.0..=100.0).contains(&value)) {
+        return Err(serde::de::Error::custom(
+            "threshold-percent must be between 1 and 100",
+        ));
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+#[path = "compaction_tests.rs"]
+mod compaction_tests;
+
+impl CompactionConfig {
+    pub fn overlay(&mut self, other: &Self) {
+        self.auto = other.auto.or(self.auto);
+        self.prune = other.prune.or(self.prune);
+        self.threshold_percent = other.threshold_percent.or(self.threshold_percent);
+        self.buffer = other.buffer.or(self.buffer);
+        self.keep.tokens = other.keep.tokens.or(self.keep.tokens);
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.auto.unwrap_or(true)
+    }
+
+    pub fn threshold(&self, context: u64, safe_input: u64) -> u64 {
+        ((context as f64 * self.threshold_percent.unwrap_or(65.0) / 100.0) as u64)
+            .min(safe_input)
+            .min(context.saturating_sub(self.buffer.unwrap_or(20_000)))
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -117,6 +173,8 @@ pub struct ProviderConfigOptions {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelConfig {
+    #[serde(default)]
+    pub compaction: CompactionConfig,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -316,6 +374,8 @@ pub struct PluginStatusInfo {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
+    #[serde(default)]
+    pub compaction: CompactionConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

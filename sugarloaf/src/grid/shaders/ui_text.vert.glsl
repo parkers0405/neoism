@@ -7,7 +7,7 @@
 // `sugarloaf::text::Text`.
 //
 // Per-instance vertex layout matches `TextInstance` in
-// `sugarloaf/src/text.rs` (52 bytes):
+// `sugarloaf/src/text.rs` (56 bytes):
 //   loc 0  R32G32_SFLOAT    pos         (offset 0)   text-box top-left
 //   loc 1  R32G32_UINT      glyph_pos   (offset 8)
 //   loc 2  R32G32_UINT      glyph_size  (offset 16)
@@ -15,6 +15,7 @@
 //   loc 4  R8G8B8A8_UNORM   color       (offset 28)
 //   loc 5  R8_UINT          atlas       (offset 32)
 //   loc 6  R32G32B32A32_SFLOAT clip_rect (offset 36)
+//   loc 7  R32_SFLOAT      raster_scale (offset 52; zero means unscaled)
 //
 // 4-vertex triangle strip per instance (`vkCmdDraw(4, N, ..)`).
 //
@@ -34,6 +35,7 @@ layout(location = 3) in ivec2 in_bearings;
 layout(location = 4) in vec4  in_color;     // unorm8 → vec4 0..1
 layout(location = 5) in uint  in_atlas;
 layout(location = 6) in vec4  in_clip_rect;
+layout(location = 7) in float in_raster_scale;
 
 layout(location = 0) flat out uint out_atlas;
 layout(location = 1) flat out vec4 out_color;
@@ -47,8 +49,9 @@ void main() {
     corner.y = float(gl_VertexIndex == 2 || gl_VertexIndex == 3);
 
     vec2 size    = vec2(in_glyph_size);
-    vec2 origin  = in_pos + vec2(in_bearings);
-    vec2 quad_px = origin + size * corner;
+    float scale = in_raster_scale > 0.0 ? in_raster_scale : 1.0;
+    vec2 origin = in_pos + vec2(in_bearings) * scale;
+    vec2 quad_px = origin + size * corner * scale;
 
     // Pixel → NDC (y-up convention). The Vulkan render pass uses a
     // negative-height viewport (set in `Sugarloaf::render_vulkan`)
@@ -64,7 +67,7 @@ void main() {
     // Atlas tex coord in PIXEL space — fragment shader uses
     // `texelFetch` (nearest filter, no normalization needed).
     out_tex_coord = vec2(in_glyph_pos) + size * corner;
-    out_atlas = in_atlas;
+    out_atlas = in_atlas | (in_raster_scale > 0.0 ? 2u : 0u);
     out_clip_rect = in_clip_rect;
 
     // Premultiplied RGBA. Color path's atlas already returns

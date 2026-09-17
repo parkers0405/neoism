@@ -327,6 +327,7 @@ impl Screen<'_> {
             Ok(()) => {
                 self.renderer.modal.close();
                 self.rebind_current_epub_path(&path, target.clone());
+                self.rebind_documentation_notebook_paths(&path, &target);
                 let label = self.file_tree_display_path(&target);
                 if notes {
                     if let Some(pane) =
@@ -401,6 +402,7 @@ impl Screen<'_> {
         match fs::rename(&source, &target) {
             Ok(()) => {
                 self.rebind_current_epub_path(&source, target.clone());
+                self.rebind_documentation_notebook_paths(&source, &target);
                 let label = self.file_tree_display_path(&target);
                 self.refresh_file_tree_entries();
                 // Reveal the destination folder so the moved item shows.

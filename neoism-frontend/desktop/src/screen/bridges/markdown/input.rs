@@ -93,7 +93,11 @@ impl Screen<'_> {
         self.context_manager
             .current()
             .active_markdown()
-            .is_some_and(|markdown| markdown.link_at(x, y).is_some())
+            .is_some_and(|markdown| {
+                markdown.link_at(x, y).is_some() || markdown.table_column_menu_at(x, y).is_some() || markdown.documentation_notebook.as_ref().is_some_and(|binding| {
+                    binding.session.lock().ok().is_some_and(|book| book.action_at(x, y).is_some())
+                })
+            })
     }
 
     pub fn markdown_notebook_action_hovered(&self) -> bool {
@@ -219,6 +223,7 @@ impl Screen<'_> {
             }
             return true;
         }
+        if self.handle_documentation_notebook_click(x, y) { return true; }
         // Wave 7G: roster dots draw above everything in the pane's
         // top-right corner, so they win the hit-test. A hit queues a
         // centered reveal of that collaborator's cursor line.
@@ -251,6 +256,13 @@ impl Screen<'_> {
         {
             self.renderer.trail_cursor.reset();
             self.open_markdown_block_menu(Some(rect));
+            return true;
+        }
+        if let Some((start, column, count)) = self.context_manager.current().active_markdown().and_then(|pane| pane.table_column_menu_at(x, y)) {
+            let size = self.sugarloaf.window_size();
+            let height = self.context_menu_logical_height();
+            self.renderer.context_menu.open_table_column(start, column, count, x, y, size.width as f32 / self.sugarloaf.scale_factor(), height);
+            self.mark_dirty();
             return true;
         }
         let Some(markdown) = self.context_manager.current_mut().active_markdown_mut()
@@ -975,7 +987,7 @@ impl Screen<'_> {
                             snap_cursor = true;
                         }
                         Key::Named(NamedKey::Enter) => {
-                            if !(mods.shift_key() && markdown.insert_table_row(false)) {
+                            if !(mods.shift_key() && markdown.insert_table_line_break()) {
                                 markdown.insert_newline();
                             }
                             snap_cursor = true;
@@ -993,7 +1005,7 @@ impl Screen<'_> {
                                 && !mods.alt_key()
                                 && !mods.super_key() =>
                         {
-                            if markdown.move_table_cell(mods.shift_key()) {
+                            if markdown.tab_table_cell(mods.shift_key()) {
                                 snap_cursor = true;
                             } else if markdown.indent_list_item(mods.shift_key()) {
                                 snap_cursor = true;
@@ -1011,7 +1023,7 @@ impl Screen<'_> {
                         Key::Named(NamedKey::Home) => markdown.move_line_start(),
                         Key::Named(NamedKey::End) => markdown.move_line_end(),
                         _ if plain && text == "\t" => {
-                            if markdown.move_table_cell(mods.shift_key()) {
+                            if markdown.tab_table_cell(mods.shift_key()) {
                                 snap_cursor = true;
                             } else if markdown.indent_list_item(mods.shift_key()) {
                                 snap_cursor = true;
@@ -1023,14 +1035,9 @@ impl Screen<'_> {
                             }
                         }
                         Key::Character(ch) if plain && ch == "/" => {
-                            // Inside a wiki link (`[[…]]`) a slash is part of
-                            // the path being typed — the link-completion menu
-                            // owns the popup there, not the `/` block menu.
-                            let in_wiki_link =
-                                markdown.wiki_link_query_before_cursor().is_some();
                             markdown.insert_text("/");
                             snap_cursor = true;
-                            if !in_wiki_link {
+                            if markdown.slash_block_query_before_cursor().is_some() {
                                 open_block_menu = true;
                                 open_block_menu_at = markdown.cursor_rect;
                             }
@@ -1058,7 +1065,7 @@ impl Screen<'_> {
                                 && !mods.alt_key()
                                 && !mods.super_key() =>
                         {
-                            if markdown.move_table_cell(mods.shift_key())
+                            if markdown.tab_table_cell(mods.shift_key())
                                 || markdown.indent_list_item(mods.shift_key())
                             {
                                 snap_cursor = true;
@@ -1988,7 +1995,7 @@ fn context_has_rich_document_path<T: neoism_backend::event::EventListener>(
     context
         .markdown
         .as_ref()
-        .is_some_and(|pane| pane.path.as_path() == path)
+        .is_some_and(|pane| pane.is_active_tab_path(path))
         || context
             .notebook
             .as_ref()

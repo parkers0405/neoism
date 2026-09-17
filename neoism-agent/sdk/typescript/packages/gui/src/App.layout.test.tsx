@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 const styles = readFileSync("src/style.css", "utf8");
 const tabStyles = readFileSync("src/tabs.css", "utf8");
+const composerStyles = readFileSync("src/components/composer-native.css", "utf8");
 
 it("rounds only the sidebar's right edge without consuming layout width", () => {
     const nav = styles.match(/\.left-nav\s*\{([^}]+)\}/)![1];
@@ -26,7 +27,7 @@ vi.mock("./components/Composer", () => ({ Composer: (props: any) => {
     return <div className="native-composer"><textarea aria-label="Message" /></div>;
 }, ComposerFooter: (props: any) => { state.footer = props; return <div className="native-composer-footer">Project · tab agents / commands</div>; } }));
 vi.mock("./components/Interactions", () => ({ Interactions: () => <div className="test-interactions">Question</div> }));
-vi.mock("./components/Identity", () => ({ Avatar: () => <span />, Wordmark: () => <span>Wordmark</span> }));
+vi.mock("./components/Identity", () => ({ Avatar: () => <span />, Logo: () => <svg aria-label="Neoism" />, Wordmark: () => <span>Wordmark</span> }));
 import { App, dockingTranslation, type DockPosition } from "./App";
 
 let root: Root, host: HTMLDivElement;
@@ -231,6 +232,7 @@ describe("application chrome and floating dock", () => {
         expect(app.querySelector(":scope > .app-chrome img")).toBeNull();
         expect(app.querySelector(":scope > .app-chrome .desktop-nav-toggle")).not.toBeNull();
         expect(app.querySelector(":scope > .app-chrome [role=tablist]")).not.toBeNull();
+        expect(app.querySelector(":scope > .app-chrome [aria-label='Open this chat on a phone']")).toBeNull();
         expect(app.querySelector("main .topbar")).toBeNull();
         expect(app.querySelector(".left-nav .brand")).toBeNull();
         expect(app.querySelector(".left-nav .profile")).not.toBeNull();
@@ -264,15 +266,109 @@ describe("application chrome and floating dock", () => {
         expect(main.style.getPropertyValue("--composer-clearance")).toBe("380px");
         expect(observers.some(o => o.disconnect.mock.calls.length)).toBe(true);
     });
-    it("tracks the visual viewport for the software keyboard", () => {
-        const viewport = Object.assign(new EventTarget(), { height: 800, scale: 1 });
+    it("selects a real workspace before showing local phone sharing", async () => {
+        render();
+        expect(host.querySelector("[aria-label='Open this chat on a phone']")).toBeNull();
+        vi.stubGlobal("location", { href: "http://127.0.0.1:5174/" });
+        vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ workspaces: [
+            { id: 'daemon-workspace', title: 'Neoism', directory: '/work', shared: false },
+        ] }))));
+        state.app.prefs.server = "http://127.0.0.1:4096";
+        state.app.directory = '';
+        state.app.selectWorkspace = vi.fn((directory: string) => { state.app.directory = directory; });
+        await act(async () => { root.render(<App />); });
+        expect(host.querySelector(".workspace-home")).not.toBeNull();
+        expect(host.querySelector(".workspace-home")?.textContent).toContain('Wordmark');
+        expect(host.querySelector("[aria-label='Open this chat on a phone']")).toBeNull();
+        act(() => host.querySelector<HTMLButtonElement>('.workspace-home-row')!.click());
+        render();
+        expect(state.app.selectWorkspace).toHaveBeenCalledWith('/work');
+        expect(host.querySelector(".workspace-home")).toBeNull();
+        expect(host.querySelector('.navigation-chrome > :first-child')?.getAttribute('aria-label')).toBe('Workspaces');
+        expect(host.querySelector('.navigation-chrome > :nth-child(2)')?.classList.contains('desktop-nav-toggle')).toBe(true);
+        expect(host.querySelector("[aria-label='Open this chat on a phone']")).not.toBeNull();
+        state.app.prefs.server = "http://100.64.0.7:7878/agent/workspaces/ws-1";
+        vi.stubGlobal("location", { href: "http://100.64.0.7:7878/agent-gui/" });
+        await act(async () => { root.render(<App />); });
+        expect(host.querySelector("[aria-label='Open this chat on a phone']")).toBeNull();
+        expect(host.querySelector(".workspace-home-list")).toBeNull();
+    });
+    it("tracks visual viewport offset and keyboard focus, batches events, handles blur ordering, and cleans up", () => {
+        const viewport = Object.assign(new EventTarget(), { height: 800, width: 390, offsetTop: 0, offsetLeft: 0, scale: 1 });
+        const add = vi.spyOn(viewport, "addEventListener"), remove = vi.spyOn(viewport, "removeEventListener");
+        const frames: FrameRequestCallback[] = [];
+        const raf = vi.fn((callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+        const cancel = vi.fn();
+        vi.stubGlobal("requestAnimationFrame", raf); vi.stubGlobal("cancelAnimationFrame", cancel);
         vi.stubGlobal("visualViewport", viewport);
+        vi.stubGlobal("innerHeight", 800); vi.stubGlobal("innerWidth", 390);
+        const flush = () => act(() => { const pending = frames.splice(0); pending.forEach(callback => callback(0)); });
+        state.app.id = undefined;
         render();
         const app = host.querySelector<HTMLElement>(".app")!;
         expect(app.style.getPropertyValue("--app-viewport-height")).toBe("800px");
-        viewport.height = 400;
-        act(() => viewport.dispatchEvent(new Event("resize")));
+        const textarea = host.querySelector<HTMLTextAreaElement>("textarea")!;
+        act(() => textarea.focus()); flush();
+        viewport.height = 400; viewport.offsetTop = 96;
+        act(() => { viewport.dispatchEvent(new Event("resize")); viewport.dispatchEvent(new Event("scroll")); });
+        expect(raf).toHaveBeenCalledTimes(2); // focus plus one coalesced viewport frame
+        flush();
         expect(app.style.getPropertyValue("--app-viewport-height")).toBe("400px");
+        expect(app.style.getPropertyValue("--app-viewport-top")).toBe("96px");
+        expect(app.classList.contains("keyboard-open")).toBe(true);
+        expect(host.querySelector(".home-heading")).not.toBeNull();
+
+        act(() => textarea.blur()); flush();
+        expect(app.classList.contains("keyboard-open")).toBe(true);
+        viewport.height = 800; viewport.offsetTop = 0;
+        act(() => viewport.dispatchEvent(new Event("resize"))); flush();
+        expect(app.classList.contains("keyboard-open")).toBe(false);
+
+        act(() => { viewport.height = 700; viewport.dispatchEvent(new Event("scroll")); });
+        expect(frames).toHaveLength(1);
+        act(() => root.unmount());
+        expect(cancel).toHaveBeenCalled();
+        expect(remove).toHaveBeenCalledWith("resize", expect.any(Function));
+        expect(remove).toHaveBeenCalledWith("scroll", expect.any(Function));
+        expect(add).toHaveBeenCalledWith("scroll", expect.any(Function));
+        host.remove(); host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+    });
+    it("does not treat pinch zoom or mobile browser chrome as a keyboard", () => {
+        const viewport = Object.assign(new EventTarget(), { height: 800, width: 390, offsetTop: 0, offsetLeft: 0, scale: 1 });
+        let pending: FrameRequestCallback | undefined;
+        vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { pending = callback; return 1; });
+        vi.stubGlobal("cancelAnimationFrame", vi.fn()); vi.stubGlobal("visualViewport", viewport);
+        vi.stubGlobal("innerHeight", 800); vi.stubGlobal("innerWidth", 390);
+        state.app.id = undefined; render();
+        const app = host.querySelector<HTMLElement>(".app")!, textarea = host.querySelector<HTMLTextAreaElement>("textarea")!;
+        act(() => textarea.focus()); act(() => pending?.(0));
+        viewport.height = 360; viewport.width = 195; viewport.offsetTop = 80; viewport.offsetLeft = 20; viewport.scale = 2;
+        act(() => viewport.dispatchEvent(new Event("resize"))); act(() => pending?.(0));
+        expect(app.classList.contains("keyboard-open")).toBe(false);
+        expect(app.style.getPropertyValue("--app-viewport-height")).toBe("");
+        expect(app.style.getPropertyValue("--app-viewport-top")).toBe("");
+        viewport.scale = 1; viewport.height = 690; viewport.width = 390; viewport.offsetTop = 0; viewport.offsetLeft = 0;
+        act(() => viewport.dispatchEvent(new Event("resize"))); act(() => pending?.(0));
+        expect(app.classList.contains("keyboard-open")).toBe(false);
+        vi.stubGlobal("innerWidth", 800); vi.stubGlobal("innerHeight", 390);
+        viewport.height = 390; viewport.width = 800;
+        act(() => window.dispatchEvent(new Event("resize"))); act(() => pending?.(0));
+        expect(app.classList.contains("keyboard-open")).toBe(false);
+    });
+    it("contains document scrolling and only bottom-docks the mobile home composer while the keyboard is open", () => {
+        expect(styles).toContain("html,\nbody,\n#root {");
+        expect(styles).toContain("overflow: hidden;");
+        const appRule = styles.match(/\.app \{([\s\S]*?)\n\}/)![1];
+        expect(appRule).toContain("position: fixed");
+        expect(appRule).toContain("top: var(--app-viewport-top, 0px)");
+        expect(appRule).not.toContain("transform");
+        expect(styles).toContain(".app.keyboard-open .chat-main.home {");
+        expect(styles).toContain("justify-content: flex-end");
+        expect(styles).toContain(".app.keyboard-open .chat-main.home .composer-footer-dock");
+        expect(styles).toContain(".chat-main:not(.home) > .composer-dock {\n    position: absolute;");
+        expect(composerStyles).toContain("font-size: 16px");
+        expect(styles).toContain(".navigation-panel {\n        position: absolute;");
+        expect(styles).toContain(".nav-scrim {\n        display: block;\n        position: absolute;");
     });
     it("keeps external pickers outside the height-capped scroll child", () => {
         state.app.picker = "model";

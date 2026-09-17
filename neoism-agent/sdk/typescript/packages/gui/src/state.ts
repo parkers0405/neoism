@@ -17,8 +17,21 @@ export function runtimeWorking(runtime?: SessionRuntimeSnapshot): boolean {
         !!runtime.runningBackgroundTasks?.length
     );
 }
+export function runtimeIsOlder(current: SessionRuntimeSnapshot | undefined, incoming: SessionRuntimeSnapshot): boolean {
+    if (!current || current.rootSessionId !== incoming.rootSessionId) return false;
+    const a = current.execution, b = incoming.execution;
+    if (a && b) {
+        if (a.executionId !== b.executionId) return a.executionId > b.executionId;
+        if (a.revision !== b.revision) return a.revision > b.revision;
+    }
+    // Current servers separate branch revisions from execution timer revisions;
+    // `revision` is the field used by previously shipped SDK/server versions.
+    const family = (runtime: SessionRuntimeSnapshot) =>
+        (runtime as SessionRuntimeSnapshot & { familyRevision?: number }).familyRevision ?? runtime.revision ?? 0;
+    return family(current) > family(incoming);
+}
 export function applyRuntime(state: ChatState, runtime: SessionRuntimeSnapshot): ChatState {
-    if (state.runtime && state.runtime.revision > runtime.revision) return state;
+    if (runtimeIsOlder(state.runtime, runtime)) return state;
     return { ...state, runtime };
 }
 export function mergePage<T>(
@@ -145,7 +158,16 @@ export function reconcileRecent(
     // No SSE watermark: never overwrite live bytes with a racing snapshot.
     // Only admit provably older, previously unseen rows; IDs prove no age.
     const removed = new Set(state.removedMessages);
-    const snapshot = messages.filter((m) => !removed.has(m.info.id));
+    const snapshot = messages.filter((m) => !removed.has(m.info.id)).map((incoming) => {
+        if (incoming.info.role !== "assistant" || typeof incoming.info.time?.completed === "number") return incoming;
+        const live = state.messages.find((m) => m.info.id === incoming.info.id);
+        if (!live) return incoming;
+        // Quiet does not mean current: unfinished REST rows are persisted only
+        // at semantic boundaries. SSE owns live text, even between tokens.
+        const parts = mergePage(incoming.parts, live.parts.filter((part) =>
+            part.type === "text" || part.type === "reasoning"), (part) => part.id);
+        return { ...incoming, parts };
+    });
     if (concurrentEvents) {
         const times = state.messages.map(messageCreated).filter((t): t is number => t !== undefined);
         const firstLive = times.length ? times.reduce((a, b) => Math.min(a, b)) : undefined;

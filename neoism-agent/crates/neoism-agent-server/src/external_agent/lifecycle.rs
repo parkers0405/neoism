@@ -418,6 +418,7 @@ async fn run_external_subtask_prompt_with_cancel(
                     &child.id,
                     child.id.as_str(),
                     &run.id,
+                    false,
                     step.text_part_id.as_str(),
                     &step.live_message,
                     message.clone(),

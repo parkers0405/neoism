@@ -21,6 +21,7 @@ mod render;
 mod scene;
 mod sidecar;
 mod text;
+mod text_layout;
 mod toolbar;
 
 pub use create::Draft;

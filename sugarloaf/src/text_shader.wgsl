@@ -33,6 +33,7 @@ struct TextInstanceIn {
     @location(4) color:      vec4<f32>,   // Unorm8x4 → 0..1
     @location(5) atlas_pack: vec4<u32>,   // Uint8x4; only .x used
     @location(6) clip_rect:  vec4<f32>,
+    @location(7) raster_scale: f32,
 };
 
 struct TextVsOut {
@@ -54,8 +55,9 @@ fn text_vertex(
     corner.y = select(0.0, 1.0, vid == 2u || vid == 3u);
 
     let size    = vec2<f32>(in.glyph_size);
-    let origin  = in.pos + vec2<f32>(in.bearings);
-    let quad_px = origin + size * corner;
+    let scale = select(1.0, in.raster_scale, in.raster_scale > 0.0);
+    let origin = in.pos + vec2<f32>(in.bearings) * scale;
+    let quad_px = origin + size * corner * scale;
 
     // Pixel → NDC (y-flip).
     let vp = text_uniforms.viewport.xy;
@@ -67,7 +69,7 @@ fn text_vertex(
     var out: TextVsOut;
     out.position  = vec4<f32>(ndc, 0.0, 1.0);
     out.tex_coord = vec2<f32>(in.glyph_pos) + size * corner;
-    out.atlas     = in.atlas_pack.x;
+    out.atlas = in.atlas_pack.x | select(0u, 2u, in.raster_scale > 0.0);
     out.clip_rect = in.clip_rect;
 
     // Premultiply RGB by alpha. Blend state is
@@ -76,6 +78,18 @@ fn text_vertex(
     color = vec4<f32>(color.rgb * color.a, color.a);
     out.color = color;
     return out;
+}
+
+fn sample_scaled(atlas: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
+    let p = uv - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(p));
+    let f = fract(p);
+    let hi = vec2<i32>(textureDimensions(atlas)) - vec2<i32>(1);
+    let a = textureLoad(atlas, clamp(base, vec2<i32>(0), hi), 0);
+    let b = textureLoad(atlas, clamp(base + vec2<i32>(1, 0), vec2<i32>(0), hi), 0);
+    let c = textureLoad(atlas, clamp(base + vec2<i32>(0, 1), vec2<i32>(0), hi), 0);
+    let d = textureLoad(atlas, clamp(base + vec2<i32>(1, 1), vec2<i32>(0), hi), 0);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 @fragment
@@ -91,6 +105,10 @@ fn text_fragment(in: TextVsOut) -> @location(0) vec4<f32> {
         }
     }
 
+    if ((in.atlas & 2u) != 0u) {
+        if ((in.atlas & 1u) == 0u) { return in.color * sample_scaled(atlas_grayscale, in.tex_coord).r; }
+        return sample_scaled(atlas_color, in.tex_coord);
+    }
     let ic = vec2<i32>(in.tex_coord);
     if (in.atlas == ATLAS_GRAYSCALE) {
         let a = textureLoad(atlas_grayscale, ic, 0).r;

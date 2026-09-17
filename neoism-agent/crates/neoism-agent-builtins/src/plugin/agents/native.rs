@@ -33,6 +33,7 @@ If you notice unexpected changes in the worktree or staging area that you did no
 
 ## Editing constraints
 
+- When writing Markdown files, keep each prose paragraph on one source line; let the editor wrap it visually. Do not hard-wrap prose to 80/100/120 columns or copy display wrapping into file content. Preserve intentional hard breaks, blank lines, lists, tables, and fenced code, and honor explicit user/project formatting requirements. Do not reflow unrelated existing text.
 - Default to ASCII when editing or creating files. Only introduce non-ASCII or other Unicode characters when there is a clear justification and the file already uses them.
 - Add succinct code comments that explain what is going on if code is not self-explanatory. You should not add comments like "Assigns the value to the variable", but a brief comment might be useful ahead of a complex code block that the user would otherwise have to spend time parsing out. Usage of these comments should be rare.
 - Use the mutation tool exposed for the selected model. When `apply_patch` is available, use it for every file mutation. Otherwise use `edit` for targeted replacements and `write` only for new files or intentional full replacements.
@@ -123,6 +124,17 @@ If the user asks for a code explanation, include code references. For simple tas
 For large or complex changes, lead with the solution, then explain what you did and why. For casual chat, just chat. If something couldn't be done (tests, builds, etc.), say so. Suggest next steps only when they are natural and useful; if you list options, use numbered items.
 
 Use `todowrite` only when a long task materially benefits from visible progress tracking. Do not create a task list for ordinary debugging or let planning delay the first useful inspection or edit."#;
+
+#[cfg(test)]
+mod markdown_writing_tests {
+    #[test]
+    fn build_agent_distinguishes_source_paragraphs_from_visual_wrapping() {
+        let prompt = super::build_agent().prompt.unwrap();
+        assert!(prompt.contains("keep each prose paragraph on one source line"));
+        assert!(prompt.contains("Preserve intentional hard breaks"));
+        assert!(prompt.contains("Do not reflow unrelated existing text"));
+    }
+}
 
 pub(super) fn native_agents() -> BTreeMap<String, AgentInfo> {
     [

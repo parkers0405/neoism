@@ -324,6 +324,18 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Code,
     },
     Command {
+        title: "Link to Markdown File",
+        shortcut: "",
+        action: PaletteAction::LinkMarkdownFile,
+        service: CommandService::Code,
+    },
+    Command {
+        title: "Open Documentation Notebook",
+        shortcut: "",
+        action: PaletteAction::OpenDocumentationNotebook,
+        service: CommandService::Code,
+    },
+    Command {
         title: "Run Current Cell",
         shortcut: "Ctrl+Enter",
         action: PaletteAction::RunNotebookCell,

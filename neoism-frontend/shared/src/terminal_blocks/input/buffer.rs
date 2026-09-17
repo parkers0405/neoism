@@ -986,23 +986,6 @@ impl TerminalInputBuffer {
                 && self.accept_suggestion();
         }
 
-        let replacements = candidates
-            .iter()
-            .map(|candidate| candidate.replacement.as_str())
-            .collect::<Vec<_>>();
-        let common = common_prefix_case_insensitive(&replacements);
-        if !common.is_empty() && (common.len() > token_len || !common.starts_with(&token))
-        {
-            self.text.replace_range(start..self.cursor, &common);
-            self.cursor = start + common.len();
-            if candidates.len() > 1 {
-                self.set_completion_cycle(start, self.cursor, candidates, None);
-            } else {
-                self.set_completion_display(&candidates, Some(0));
-            }
-            return true;
-        }
-
         if candidates.len() == 1 {
             let replacement = &candidates[0].replacement;
             self.set_completion_display(&candidates, Some(0));

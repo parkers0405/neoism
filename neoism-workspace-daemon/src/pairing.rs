@@ -41,6 +41,12 @@ pub struct PendingPairing {
     pub code: String,
     pub expires_at: SystemTime,
     pub requested_permissions: BTreeSet<Permission>,
+    /// Shared workspace this phone-share code may join. Unscoped codes
+    /// (operator mint) stay daemon-wide for existing pairing.
+    pub workspace_id: Option<String>,
+    /// Operator already confirmed this mint (phone-share QR). Claim may
+    /// grant the requested set without a second approval prompt.
+    pub preapproved: bool,
 }
 
 #[derive(Clone, Default)]
@@ -60,15 +66,44 @@ impl PairingCodeStore {
     /// `permissions::evaluate`). Passing an empty set is fine — claims can
     /// still ask for permissions, they just won't have been pre-declared.
     pub fn mint(&self, requested: BTreeSet<Permission>) -> PairingCodeResponse {
+        self.mint_with(requested, false, None)
+    }
+
+    /// Mint a code the operator already approved by starting phone-share.
+    pub fn mint_preapproved(
+        &self,
+        requested: BTreeSet<Permission>,
+        workspace_id: String,
+    ) -> PairingCodeResponse {
+        self.mint_with(requested, true, Some(workspace_id))
+    }
+
+    fn mint_with(
+        &self,
+        requested: BTreeSet<Permission>,
+        preapproved: bool,
+        workspace_id: Option<String>,
+    ) -> PairingCodeResponse {
         let code = generate_code();
         let expires_at = SystemTime::now() + PAIRING_TTL;
         let entry = PendingPairing {
             code: code.clone(),
             expires_at,
             requested_permissions: requested,
+            workspace_id,
+            preapproved,
         };
         {
             let mut guard = self.lock();
+            let now = SystemTime::now();
+            guard.retain(|_, v| now <= v.expires_at);
+            if guard.len() >= 32 {
+                tracing::warn!("pairing code store full; refusing mint");
+                return PairingCodeResponse {
+                    code: String::new(),
+                    expires_at: 0,
+                };
+            }
             guard.insert(code.clone(), entry);
         }
         let expires_unix = expires_at
@@ -120,6 +155,8 @@ impl PairingCodeStore {
                     );
                     ClaimOutcome::Ok {
                         requested_permissions: entry.requested_permissions,
+                        workspace_id: entry.workspace_id,
+                        preapproved: entry.preapproved,
                     }
                 }
             }
@@ -145,6 +182,8 @@ impl PairingCodeStore {
 pub enum ClaimOutcome {
     Ok {
         requested_permissions: BTreeSet<Permission>,
+        workspace_id: Option<String>,
+        preapproved: bool,
     },
     Expired,
     /// Either never minted or already claimed — we collapse these so we

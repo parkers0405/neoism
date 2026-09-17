@@ -13,7 +13,7 @@ function fixture(t) {
     mkdirSync(join(src, dir), { recursive: true });
     writeFileSync(join(src, dir, 'fixture.js'), 'fixture');
   }
-  writeFileSync(join(src, 'index.html'), '<script type="module" src="/assets/fixture.js"></script>');
+  writeFileSync(join(src, 'index.html'), '<script type="module" src="./assets/fixture.js"></script>');
   return { root, src };
 }
 
@@ -43,7 +43,9 @@ test('rejects unbuilt index and traversal', t => {
   const { src } = fixture(t);
   writeFileSync(join(src, 'index.html'), '<script src="/src/main.tsx"></script>');
   assert.throws(() => validateGui(src), /production/);
-  writeFileSync(join(src, 'index.html'), '<script src="/assets/fixture.js"></script><link href="/../secret">');
+  writeFileSync(join(src, 'index.html'), '<script src="./assets/fixture.js"></script><link href="/assets/fixture.js">');
+  assert.throws(() => validateGui(src), /Root-absolute/);
+  writeFileSync(join(src, 'index.html'), '<script src="./assets/fixture.js"></script><link href="../secret">');
   assert.throws(() => validateGui(src), /Unsafe/);
 });
 

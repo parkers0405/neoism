@@ -382,6 +382,15 @@ impl Screen<'_> {
     }
 
     pub(crate) fn activate_file_tree_selection(&mut self) {
+        if !self.renderer.file_tree.is_remote() {
+            let notebook = self.selected_file_tree_path().filter(|path| path.is_dir()
+                && path.join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME).is_file());
+            if let Some(path) = notebook {
+                self.renderer.file_tree.set_focused(false);
+                self.open_documentation_notebook(path);
+                return;
+            }
+        }
         let action = neoism_ui::panels::file_tree::activation_for_selection(
             self.renderer.file_tree.selected(),
             self.renderer.file_tree.selected_index(),
@@ -572,6 +581,20 @@ impl Screen<'_> {
             .map(|path| self.file_tree_display_path(path))
             .unwrap_or_else(|| selected.label.clone());
         let mut items = Vec::new();
+        if !self.renderer.file_tree.is_remote() {
+            if let Some(folder) = path.as_ref().filter(|path| path.join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME).is_file()) {
+                use neoism_ui::editor::documentation_notebook::NotebookInput;
+                items.push(ContextMenuItem::new(
+                    "Open Notebook",
+                    "",
+                    ContextMenuAction::Modal(ModalAction::DocumentationNotebook {
+                        kind: NotebookInput::Open,
+                        notebook: None,
+                        value: folder.to_string_lossy().into_owned(),
+                    }.into()),
+                ));
+            }
+        }
         if let Some(path) = path.as_ref() {
             let path = path.display().to_string();
             items.push(ContextMenuItem::new(
@@ -611,6 +634,12 @@ impl Screen<'_> {
                     .into(),
                 ),
             ));
+            if !self.renderer.file_tree.is_remote() && !self.context_manager.current_workspace_is_remote_joined() {
+                items.push(ContextMenuItem::new(
+                    "New Drawing", "",
+                    ContextMenuAction::Modal(ModalAction::NotesNewDrawing { dir: dest_dir.clone() }.into()),
+                ));
+            }
             items.push(ContextMenuItem::new(
                 "New Folder",
                 "f",

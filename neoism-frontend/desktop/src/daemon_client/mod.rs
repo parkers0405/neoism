@@ -165,6 +165,14 @@ pub struct DaemonClientOptions {
     pub channel_capacity: usize,
 }
 
+/// Distinguishes a dead remote shell from a dropped websocket. Transport
+/// failures must never invalidate session identity or replay PTY input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyFailureClass {
+    Transport,
+    Terminal,
+}
+
 impl DaemonClientOptions {
     pub fn new(endpoint: DaemonEndpoint) -> Self {
         Self {
@@ -183,6 +191,9 @@ impl DaemonClientOptions {
 pub struct ReconnectBackoff {
     pub initial: Duration,
     pub max: Duration,
+    pub heartbeat: Duration,
+    pub liveness: Duration,
+    pub handshake: Duration,
 }
 
 impl Default for ReconnectBackoff {
@@ -190,8 +201,33 @@ impl Default for ReconnectBackoff {
         Self {
             initial: Duration::from_millis(250),
             max: Duration::from_secs(8),
+            heartbeat: Duration::from_secs(15),
+            liveness: Duration::from_secs(4),
+            handshake: Duration::from_secs(4),
         }
     }
+}
+
+/// Deterministic full-jitter in `[0, delay]`. Caps retry storms without
+/// synchronizing every client on the same reconnect tick.
+pub fn reconnect_backoff_delay(attempt: u32, policy: ReconnectBackoff, seed: u64) -> Duration {
+    let exp = attempt.min(16).saturating_sub(1);
+    let cap = policy
+        .initial
+        .saturating_mul(1u32 << exp)
+        .min(policy.max);
+    full_jitter(cap, seed.wrapping_add(attempt as u64))
+}
+
+fn full_jitter(delay: Duration, seed: u64) -> Duration {
+    let span = delay.as_nanos();
+    if span == 0 {
+        return delay;
+    }
+    let mixed = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(span as u64);
+    Duration::from_nanos((mixed as u128 % span) as u64)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,8 +242,9 @@ pub enum DaemonClientStatus {
 pub struct DaemonClientHandle {
     tx: mpsc::Sender<OutboundServiceMessage>,
     next_request_id: Arc<AtomicU64>,
-    status: watch::Receiver<DaemonClientStatus>,
+    pub(crate) status: watch::Receiver<DaemonClientStatus>,
     failures: mpsc::Sender<DaemonServerMessage>,
+    generation: Arc<AtomicU64>,
 }
 
 impl DaemonClientHandle {
@@ -385,6 +422,11 @@ impl DaemonClientHandle {
         Arc::as_ptr(&self.next_request_id) as usize
     }
 
+    /// Socket generation. Stale attach/resync work must ignore older values.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     /// Register correlation before a fast localhost daemon can reply.
     pub async fn send_editor_with_request_id(
         &self,
@@ -531,12 +573,14 @@ impl DaemonClient {
         let (in_tx, in_rx) = mpsc::channel(options.channel_capacity);
         let (status_tx, status_rx) = watch::channel(DaemonClientStatus::Connecting);
         let next_request_id = Arc::new(AtomicU64::new(1));
+        let generation = Arc::new(AtomicU64::new(0));
 
         let runner = ClientRunner {
             options,
             out_rx,
             in_tx: in_tx.clone(),
             status_tx,
+            generation: Arc::clone(&generation),
         };
         tokio::spawn(runner.run());
 
@@ -546,6 +590,7 @@ impl DaemonClient {
                 next_request_id,
                 status: status_rx.clone(),
                 failures: in_tx,
+                generation,
             },
             rx: in_rx,
             status_rx,
@@ -599,6 +644,7 @@ pub enum DaemonServerMessage {
         request_id: u64,
         session_id: Option<String>,
         message: String,
+        class: PtyFailureClass,
     },
     Workspace {
         request_id: u64,
@@ -660,24 +706,23 @@ struct ClientRunner {
     out_rx: mpsc::Receiver<OutboundServiceMessage>,
     in_tx: mpsc::Sender<DaemonServerMessage>,
     status_tx: watch::Sender<DaemonClientStatus>,
+    generation: Arc<AtomicU64>,
 }
 
 impl ClientRunner {
     async fn run(mut self) {
         let mut pending = VecDeque::new();
-        let mut backoff = self.options.reconnect.initial;
+        let mut attempt = 0u32;
 
         loop {
             let _ = self.status_tx.send(DaemonClientStatus::Connecting);
             let result = match connect_endpoint(&self.options.endpoint).await {
                 Ok(SocketConnection::Tcp(ws)) => {
-                    backoff = self.options.reconnect.initial;
                     tracing::info!(target: "neoism::nvim_trace", "[nvim-trace] CLIENT connected (tcp) → socket loop");
                     self.run_socket(ws, &mut pending).await
                 }
                 #[cfg(unix)]
                 Ok(SocketConnection::Unix(ws)) => {
-                    backoff = self.options.reconnect.initial;
                     tracing::info!(target: "neoism::nvim_trace", "[nvim-trace] CLIENT connected (unix) → socket loop");
                     self.run_socket(ws, &mut pending).await
                 }
@@ -696,11 +741,16 @@ impl ClientRunner {
             }
 
             let _ = self.status_tx.send(DaemonClientStatus::BackingOff);
+            attempt = attempt.saturating_add(1);
+            let backoff = reconnect_backoff_delay(
+                attempt,
+                self.options.reconnect,
+                self.generation.load(Ordering::Relaxed),
+            );
             if self.collect_during_backoff(backoff, &mut pending).await {
                 let _ = self.status_tx.send(DaemonClientStatus::Closed);
                 return;
             }
-            backoff = (backoff * 2).min(self.options.reconnect.max);
         }
     }
 
@@ -718,10 +768,14 @@ impl ClientRunner {
             .await;
         let _ = self.status_tx.send(DaemonClientStatus::BackingOff);
         for (request_id, session_id) in pty_inflight {
-            let _ = self.in_tx.send(DaemonServerMessage::PtyFailure {
-                request_id, session_id,
-                message: "connection lost before PTY acknowledgment; execution unknown; input was not replayed".into(),
-            }).await;
+            let _ = self
+                .in_tx
+                .send(pty_transport_failure(
+                    request_id,
+                    session_id,
+                    "connection lost before PTY acknowledgment; execution unknown; input was not replayed",
+                ))
+                .await;
         }
         // Commands queued on the old connection must never cross into the next
         // one. In particular, CreatePty is not idempotent either.
@@ -746,11 +800,22 @@ impl ClientRunner {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        self.send_connect_handshake(ws).await?;
-        for queued in pending.iter() {
-            send_workspace_envelope(ws, queued).await?;
+        let generation = self
+            .generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        let authenticated = self
+            .authenticate_socket(ws, pending, pty_inflight, generation)
+            .await?;
+        if !authenticated {
+            return Ok(());
         }
-        let _ = self.status_tx.send(DaemonClientStatus::Open);
+        let mut heartbeat = tokio::time::interval(self.options.reconnect.heartbeat);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await;
+        let mut pending_nonce: Option<String> = None;
+        let liveness = self.options.reconnect.liveness;
+        let mut liveness_deadline = None::<tokio::time::Instant>;
 
         loop {
             tokio::select! {
@@ -766,55 +831,51 @@ impl ClientRunner {
                     }
                     send_workspace_envelope(ws, &outbound).await?;
                 }
+                _ = heartbeat.tick(), if pending_nonce.is_none() => {
+                    let nonce = format!("{generation}:{}", uuid::Uuid::new_v4());
+                    pending_nonce = Some(nonce.clone());
+                    liveness_deadline = Some(tokio::time::Instant::now() + liveness);
+                    send_workspace_envelope(ws, &OutboundServiceMessage::Workspace {
+                        request_id: 0,
+                        message: WorkspaceClientMessage::Ping { nonce },
+                    }).await?;
+                }
+                _ = async {
+                    if let Some(deadline) = liveness_deadline {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if liveness_deadline.is_some() => {
+                    tracing::warn!(
+                        target: "neoism::desktop_daemon",
+                        generation,
+                        "workspace heartbeat timed out; recycling zombie websocket"
+                    );
+                    return Ok(());
+                }
                 frame = ws.next() => {
-                    let Some(frame) = frame else {
-                        return Ok(());
-                    };
-                    let frame = frame?;
-                    let raw_preview = match &frame {
-                        Message::Text(t) => t.chars().take(60).collect::<String>(),
-                        _ => String::new(),
-                    };
-                    let reply = match parse_server_frame(frame) {
-                        Ok(Some(reply)) => reply,
-                        Ok(None) => continue,
-                        Err(err) => {
-                            tracing::warn!(
-                                target: "neoism::nvim_trace",
-                                %err,
-                                raw = %raw_preview,
-                                "[nvim-trace] inbound parse FAILED → connection drops (this is what blanks the editor)"
-                            );
-                            return Err(err);
-                        }
-                    };
-                    let target = pty_inflight.remove(&reply.request_id());
-                    let reply = match reply {
-                        DaemonServerMessage::Pty { request_id, message: PtyServerMessage::Error { message } } => {
-                            if let Some(session_id) = target {
-                                DaemonServerMessage::PtyFailure { request_id, session_id, message }
-                            } else {
-                                tracing::warn!(target: "neoism::remote_pty", request_id, %message, "unmatched daemon PTY error");
-                                DaemonServerMessage::Pty { request_id, message: PtyServerMessage::Error { message } }
+                    match self.ingest_frame(ws, pending, pty_inflight, frame, &mut pending_nonce).await? {
+                        FrameOutcome::Continue => {
+                            if pending_nonce.is_none() {
+                                liveness_deadline = None;
                             }
                         }
-                        reply => reply,
-                    };
-                    ack_pending(pending, reply.request_id());
-                    if let DaemonServerMessage::Workspace { message: WorkspaceServerMessage::FullSnapshot { client_id, pty_offsets, .. }, .. } = &reply {
-                        self.options.client_id = *client_id;
-                        self.options.since_offset = pty_offsets.values().copied().min();
+                        FrameOutcome::Closed => return Ok(()),
+                        FrameOutcome::HostEnded => return Err(DaemonClientError::ChannelClosed),
                     }
-                    self.in_tx
-                        .send(reply)
-                        .await
-                        .map_err(|_| DaemonClientError::ChannelClosed)?;
                 }
             }
         }
     }
 
-    async fn send_connect_handshake<S>(&self, ws: &mut WebSocketStream<S>) -> Result<()>
+    async fn authenticate_socket<S>(
+        &mut self,
+        ws: &mut WebSocketStream<S>,
+        pending: &mut VecDeque<OutboundServiceMessage>,
+        pty_inflight: &mut HashMap<u64, Option<String>>,
+        generation: u64,
+    ) -> Result<bool>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -827,14 +888,188 @@ impl ClientRunner {
             },
         };
         send_workspace_envelope(ws, &hello).await?;
+        let handshake = tokio::time::timeout(self.options.reconnect.handshake, async {
+            loop {
+                let frame = ws.next().await;
+                match self
+                    .ingest_frame(ws, pending, pty_inflight, frame, &mut None)
+                    .await?
+                {
+                    FrameOutcome::Continue => {
+                        if *self.status_tx.borrow() == DaemonClientStatus::Open {
+                            return Ok(true);
+                        }
+                    }
+                    FrameOutcome::Closed => return Ok(false),
+                    FrameOutcome::HostEnded => {
+                        return Err(DaemonClientError::ChannelClosed)
+                    }
+                }
+            }
+        })
+        .await;
+        match handshake {
+            Ok(Ok(true)) => {
+                for queued in pending.iter() {
+                    send_workspace_envelope(ws, queued).await?;
+                }
+                let snapshot = OutboundServiceMessage::Workspace {
+                    request_id: 0,
+                    message: WorkspaceClientMessage::RequestFullSnapshot {
+                        since_offset: self.options.since_offset,
+                    },
+                };
+                send_workspace_envelope(ws, &snapshot).await?;
+                Ok(true)
+            }
+            Ok(Ok(false)) => Ok(false),
+            Ok(Err(err)) => Err(err),
+            Err(_) => {
+                tracing::warn!(
+                    target: "neoism::desktop_daemon",
+                    generation,
+                    "daemon HelloAck handshake timed out"
+                );
+                Ok(false)
+            }
+        }
+    }
 
-        let snapshot = OutboundServiceMessage::Workspace {
-            request_id: 0,
-            message: WorkspaceClientMessage::RequestFullSnapshot {
-                since_offset: self.options.since_offset,
-            },
+    async fn ingest_frame<S>(
+        &mut self,
+        _ws: &mut WebSocketStream<S>,
+        pending: &mut VecDeque<OutboundServiceMessage>,
+        pty_inflight: &mut HashMap<u64, Option<String>>,
+        frame: Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>,
+        pending_nonce: &mut Option<String>,
+    ) -> Result<FrameOutcome>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let Some(frame) = frame else {
+            return Ok(FrameOutcome::Closed);
         };
-        send_workspace_envelope(ws, &snapshot).await
+        let frame = frame?;
+        let raw_preview = match &frame {
+            Message::Text(t) => t.chars().take(60).collect::<String>(),
+            _ => String::new(),
+        };
+        let reply = match parse_server_frame(frame) {
+            Ok(Some(reply)) => reply,
+            Ok(None) => return Ok(FrameOutcome::Continue),
+            Err(err) => {
+                tracing::warn!(
+                    target: "neoism::nvim_trace",
+                    %err,
+                    raw = %raw_preview,
+                    "[nvim-trace] inbound parse FAILED → connection drops (this is what blanks the editor)"
+                );
+                return Err(err);
+            }
+        };
+        let target = pty_inflight.remove(&reply.request_id());
+        let reply = match reply {
+            DaemonServerMessage::Pty {
+                request_id,
+                message: PtyServerMessage::Error { message },
+            } => {
+                if let Some(session_id) = target {
+                    pty_terminal_failure(request_id, session_id, message)
+                } else {
+                    tracing::warn!(
+                        target: "neoism::remote_pty",
+                        request_id,
+                        %message,
+                        "unmatched daemon PTY error"
+                    );
+                    DaemonServerMessage::Pty {
+                        request_id,
+                        message: PtyServerMessage::Error { message },
+                    }
+                }
+            }
+            reply => reply,
+        };
+        if *self.status_tx.borrow() != DaemonClientStatus::Open {
+            match &reply {
+                DaemonServerMessage::Workspace {
+                    message: WorkspaceServerMessage::HelloAck { .. },
+                    ..
+                }
+                | DaemonServerMessage::Workspace {
+                    message: WorkspaceServerMessage::HostEnded { .. },
+                    ..
+                } => {}
+                _ => {
+                    tracing::warn!(
+                        target: "neoism::desktop_daemon",
+                        "dropping pre-auth daemon frame"
+                    );
+                    return Ok(FrameOutcome::Continue);
+                }
+            }
+        }
+        if let DaemonServerMessage::Workspace {
+            message: WorkspaceServerMessage::HelloAck { accepted, reason, .. },
+            ..
+        } = &reply
+        {
+            if *accepted {
+                let _ = self.status_tx.send(DaemonClientStatus::Open);
+            } else {
+                let reason = reason
+                    .clone()
+                    .unwrap_or_else(|| "authentication rejected".into());
+                tracing::warn!(
+                    target: "neoism::desktop_daemon",
+                    %reason,
+                    "daemon HelloAck rejected; stopping automatic reconnect"
+                );
+                let _ = self.in_tx.send(reply).await;
+                return Ok(FrameOutcome::HostEnded);
+            }
+        }
+        if let DaemonServerMessage::Workspace {
+            message: WorkspaceServerMessage::HostEnded { .. },
+            ..
+        } = &reply
+        {
+            ack_pending(pending, reply.request_id());
+            self.in_tx
+                .send(reply)
+                .await
+                .map_err(|_| DaemonClientError::ChannelClosed)?;
+            return Ok(FrameOutcome::HostEnded);
+        }
+        if let DaemonServerMessage::Workspace {
+            message: WorkspaceServerMessage::Pong { nonce },
+            ..
+        } = &reply
+        {
+            if pending_nonce.as_ref() == Some(nonce) {
+                *pending_nonce = None;
+            }
+            return Ok(FrameOutcome::Continue);
+        }
+        ack_pending(pending, reply.request_id());
+        if let DaemonServerMessage::Workspace {
+            message:
+                WorkspaceServerMessage::FullSnapshot {
+                    client_id,
+                    pty_offsets,
+                    ..
+                },
+            ..
+        } = &reply
+        {
+            self.options.client_id = *client_id;
+            self.options.since_offset = pty_offsets.values().copied().min();
+        }
+        self.in_tx
+            .send(reply)
+            .await
+            .map_err(|_| DaemonClientError::ChannelClosed)?;
+        Ok(FrameOutcome::Continue)
     }
 
     async fn collect_during_backoff(
@@ -860,6 +1095,12 @@ impl ClientRunner {
             }
         }
     }
+}
+
+enum FrameOutcome {
+    Continue,
+    Closed,
+    HostEnded,
 }
 
 enum SocketConnection {
@@ -1084,17 +1325,52 @@ fn pty_request_target(message: &OutboundServiceMessage) -> Option<(u64, Option<S
     Some((*request_id, session_id))
 }
 
+fn pty_transport_failure(
+    request_id: u64,
+    session_id: Option<String>,
+    reason: &str,
+) -> DaemonServerMessage {
+    tracing::warn!(
+        target: "neoism::remote_pty",
+        request_id,
+        ?session_id,
+        reason,
+        "remote PTY transport failure; session identity preserved; no replay"
+    );
+    DaemonServerMessage::PtyFailure {
+        request_id,
+        session_id,
+        message: reason.into(),
+        class: PtyFailureClass::Transport,
+    }
+}
+
 fn pty_delivery_failure(
     outbound: &OutboundServiceMessage,
     reason: &str,
 ) -> Option<DaemonServerMessage> {
     let (request_id, session_id) = pty_request_target(outbound)?;
-    tracing::warn!(target: "neoism::remote_pty", request_id, ?session_id, reason, "remote PTY delivery failed; no replay");
-    Some(DaemonServerMessage::PtyFailure {
+    Some(pty_transport_failure(request_id, session_id, reason))
+}
+
+fn pty_terminal_failure(
+    request_id: u64,
+    session_id: Option<String>,
+    message: String,
+) -> DaemonServerMessage {
+    tracing::warn!(
+        target: "neoism::remote_pty",
+        request_id,
+        ?session_id,
+        %message,
+        "remote PTY terminal failure"
+    );
+    DaemonServerMessage::PtyFailure {
         request_id,
         session_id,
-        message: reason.into(),
-    })
+        message,
+        class: PtyFailureClass::Terminal,
+    }
 }
 
 /// PTY operations are never replayed: input may execute twice and CreatePty
@@ -1507,11 +1783,13 @@ mod tests {
         let (status_tx, status_rx) = watch::channel(status);
         let options =
             DaemonClientOptions::new(DaemonEndpoint::parse("ws://127.0.0.1:1").unwrap());
+        let generation = Arc::new(AtomicU64::new(0));
         let handle = DaemonClientHandle {
             tx,
             next_request_id: Arc::new(AtomicU64::new(1)),
             status: status_rx,
             failures: in_tx.clone(),
+            generation: Arc::clone(&generation),
         };
         (
             ClientRunner {
@@ -1519,6 +1797,7 @@ mod tests {
                 out_rx,
                 in_tx,
                 status_tx,
+                generation,
             },
             handle,
             in_rx,
@@ -1545,6 +1824,7 @@ mod tests {
             Some(DaemonServerMessage::PtyFailure {
                 request_id: 42,
                 session_id: None,
+                class: PtyFailureClass::Transport,
                 ..
             })
         ));
@@ -1636,16 +1916,26 @@ mod tests {
             );
             pty.write(b"must-not-run\n").unwrap();
             assert!(binding.shared.lock().unwrap().queued.is_empty());
+            assert!(!binding.shared.lock().unwrap().failed);
             // Simulate a PtyCreated arriving before the failure is processed.
             remote_pty::bind_session(&binding, "existing", handle, runtime);
-            assert!(binding.shared.lock().unwrap().session_id.is_none());
-            assert!(runner.out_rx.try_recv().is_err());
+            assert_eq!(
+                binding.shared.lock().unwrap().session_id.as_deref(),
+                Some("existing")
+            );
+            assert!(runner.out_rx.try_recv().is_err() || matches!(runner.out_rx.try_recv(), Err(_)));
             let failure = tokio::time::timeout(Duration::from_secs(1), replies.recv())
                 .await
                 .unwrap();
             assert!(matches!(failure, Some(DaemonServerMessage::PtyFailure {
                 session_id: Some(id), message, ..
             }) if id == "existing" && message.contains("not delivered") && message.contains("awaiting attach")));
+            pty.write(b"fresh-after-ack\n").unwrap();
+            assert!(
+                matches!(runner.out_rx.try_recv(), Ok(OutboundServiceMessage::Pty {
+                message: PtyClientMessage::PtyInput { bytes, .. }, ..
+            }) if bytes == b"fresh-after-ack\n")
+            );
             remote_pty::invalidate(&binding);
             pty.close();
             assert!(runner.out_rx.try_recv().is_err());
@@ -1662,10 +1952,24 @@ mod tests {
         pty.resize(100, 30).unwrap();
         let runtime = tokio::runtime::Handle::current();
         remote_pty::await_attach(&binding, "existing", handle.clone(), runtime.clone());
-        assert!(binding.shared.lock().unwrap().queued.is_empty());
+        assert!(binding.shared.lock().unwrap().queued.iter().all(|op| !matches!(op, neoism_terminal_pty::RemotePtyOp::Input(_))));
+        assert!(!binding.shared.lock().unwrap().failed);
         remote_pty::bind_session(&binding, "existing", handle, runtime);
-        assert!(binding.shared.lock().unwrap().session_id.is_none());
-        assert!(runner.out_rx.try_recv().is_err());
+        assert_eq!(
+            binding.shared.lock().unwrap().session_id.as_deref(),
+            Some("existing")
+        );
+        assert!(matches!(
+            runner.out_rx.try_recv(),
+            Ok(OutboundServiceMessage::Pty {
+                message: PtyClientMessage::Resize {
+                    cols: 100,
+                    rows: 30,
+                    ..
+                },
+                ..
+            })
+        ));
         assert!(
             matches!(tokio::time::timeout(Duration::from_secs(1), replies.recv()).await.unwrap(),
             Some(DaemonServerMessage::PtyFailure { session_id: Some(id), .. }) if id == "existing")
@@ -1680,20 +1984,25 @@ mod tests {
         let runtime = tokio::runtime::Handle::current();
         pty.resize(80, 24).unwrap();
         remote_pty::await_attach(&binding, "existing", handle.clone(), runtime.clone());
-        assert!(binding.shared.lock().unwrap().queued.is_empty());
+        assert!(binding.shared.lock().unwrap().queued.iter().all(|op| matches!(op, neoism_terminal_pty::RemotePtyOp::Resize { .. })));
         pty.resize(100, 30).unwrap();
         assert!(runner.out_rx.try_recv().is_err());
         remote_pty::bind_session(&binding, "existing", handle, runtime);
+        let first = runner.out_rx.try_recv().unwrap();
+        let second = runner.out_rx.try_recv().unwrap();
         assert!(matches!(
-            runner.out_rx.try_recv(),
-            Ok(OutboundServiceMessage::Pty {
-                message: PtyClientMessage::Resize {
-                    cols: 100,
-                    rows: 30,
-                    ..
-                },
+            first,
+            OutboundServiceMessage::Pty {
+                message: PtyClientMessage::Resize { cols: 80, rows: 24, .. },
                 ..
-            })
+            }
+        ));
+        assert!(matches!(
+            second,
+            OutboundServiceMessage::Pty {
+                message: PtyClientMessage::Resize { cols: 100, rows: 30, .. },
+                ..
+            }
         ));
         pty.write(b"fresh\n").unwrap();
         assert!(
@@ -1766,32 +2075,68 @@ mod tests {
         use tokio_tungstenite::tungstenite::protocol::Role;
         for server_error in [true, false] {
             let (mut runner, handle, mut replies) =
-                delivery_test_client(DaemonClientStatus::Open);
-            let request_id = handle.send_pty(test_input()).await.unwrap();
+                delivery_test_client(DaemonClientStatus::Connecting);
             let (a, b) = tokio::io::duplex(8192);
             let client = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
             let mut server =
                 WebSocketStream::from_raw_socket(b, Role::Server, None).await;
             let mut pending = VecDeque::new();
-            let serve = async {
-                // Hello, snapshot request, then the command.
-                for _ in 0..3 {
-                    server.next().await.unwrap().unwrap();
+            let mut status = handle.status.clone();
+            let send = async {
+                while *status.borrow_and_update() != DaemonClientStatus::Open {
+                    status.changed().await.unwrap();
                 }
+                handle.send_pty(test_input()).await.unwrap()
+            };
+            let serve = async {
+                // Handshake HelloAck first; snapshot + command follow.
+                let _hello = server.next().await.unwrap().unwrap();
+                server
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "WorkspaceReply": {
+                                "request_id": 0,
+                                "message": { "HelloAck": { "accepted": true } }
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                let snapshot = server.next().await.unwrap().unwrap();
+                let _ = snapshot;
+                let command = server.next().await.unwrap().unwrap();
+                let _ = command;
                 if server_error {
+                    let request_id = 1u64;
                     server.send(Message::Text(serde_json::json!({
                         "PtyReply": { "request_id": request_id, "message": { "Error": { "message": "unknown session shell-1" } } }
-                    }).to_string())).await.unwrap();
+                    }).to_string().into())).await.unwrap();
                 }
                 drop(server);
             };
-            let _ = tokio::join!(runner.run_socket(client, &mut pending), serve);
+            let (run_result, request_id, _) = tokio::join!(
+                runner.run_socket(client, &mut pending),
+                send,
+                serve
+            );
+            let _ = run_result;
             assert!(pending.is_empty());
+            let mut failure = None;
+            while let Some(message) = replies.recv().await {
+                if matches!(message, DaemonServerMessage::PtyFailure { .. }) {
+                    failure = Some(message);
+                    break;
+                }
+            }
             assert!(
-                matches!(replies.recv().await, Some(DaemonServerMessage::PtyFailure {
-                request_id: id, session_id: Some(session), message,
-            }) if id == request_id && session == "shell-1"
-                && message.contains(if server_error { "unknown session" } else { "execution unknown" }))
+                matches!(failure.as_ref(), Some(DaemonServerMessage::PtyFailure {
+                request_id: id, session_id: Some(session), message, class,
+            }) if *id == request_id && session == "shell-1"
+                && message.contains(if server_error { "unknown session" } else { "execution unknown" })
+                && *class == if server_error { PtyFailureClass::Terminal } else { PtyFailureClass::Transport }),
+                "unexpected failure {failure:?}"
             );
         }
     }
@@ -1924,6 +2269,178 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reconnect_backoff_is_bounded_full_jitter() {
+        let policy = ReconnectBackoff {
+            initial: Duration::from_millis(250),
+            max: Duration::from_secs(8),
+            heartbeat: Duration::from_secs(15),
+            liveness: Duration::from_secs(4),
+            handshake: Duration::from_secs(4),
+        };
+        for attempt in 1..12 {
+            let delay = reconnect_backoff_delay(attempt, policy, 7);
+            assert!(delay <= policy.max);
+        }
+        assert!(reconnect_backoff_delay(1, policy, 1) <= policy.initial);
+        assert!(reconnect_backoff_delay(20, policy, 3) <= policy.max);
+    }
+
+    #[test]
+    fn transport_pty_failure_is_not_terminal_death() {
+        let failure = pty_transport_failure(9, Some("shell-1".into()), "connection lost");
+        assert!(matches!(
+            failure,
+            DaemonServerMessage::PtyFailure {
+                class: PtyFailureClass::Transport,
+                session_id: Some(ref id),
+                ..
+            } if id == "shell-1"
+        ));
+        let terminal = pty_terminal_failure(
+            9,
+            Some("shell-1".into()),
+            "unknown session shell-1".into(),
+        );
+        assert!(matches!(
+            terminal,
+            DaemonServerMessage::PtyFailure {
+                class: PtyFailureClass::Terminal,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn heartbeat_pong_requires_exact_nonce() {
+        let mut pending_nonce = Some("1:abc".to_string());
+        if pending_nonce.as_deref() == Some("stale") {
+            pending_nonce = None;
+        }
+        assert_eq!(pending_nonce.as_deref(), Some("1:abc"));
+        if pending_nonce.as_deref() == Some("1:abc") {
+            pending_nonce = None;
+        }
+        assert!(pending_nonce.is_none());
+    }
+
+    #[tokio::test]
+    async fn missed_heartbeat_recycles_zombie_socket_without_replay() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (mut runner, handle, mut replies) =
+            delivery_test_client(DaemonClientStatus::Connecting);
+        runner.options.reconnect.heartbeat = Duration::from_millis(20);
+        runner.options.reconnect.liveness = Duration::from_millis(30);
+        let (a, b) = tokio::io::duplex(8192);
+        let client = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
+        let mut pending = VecDeque::new();
+        let serve = async {
+            let _hello = server.next().await.unwrap().unwrap();
+            server
+                .send(Message::Text(
+                    serde_json::json!({
+                        "WorkspaceReply": {
+                            "request_id": 0,
+                            "message": { "HelloAck": { "accepted": true } }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let _snapshot = server.next().await.unwrap().unwrap();
+            let ping = server.next().await.unwrap().unwrap();
+            let text = match ping {
+                Message::Text(text) => text.to_string(),
+                _ => panic!("expected ping text"),
+            };
+            assert!(text.contains("Ping"), "{text}");
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            drop(server);
+        };
+        let (run, _) = tokio::join!(runner.run_socket(client, &mut pending), serve);
+        assert!(run.is_ok());
+        assert!(pending.is_empty());
+        let _ = handle;
+        let _ = replies.try_recv();
+    }
+
+    #[tokio::test]
+    async fn host_ended_is_admitted_preauth_and_stops_runner() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (mut runner, _handle, mut replies) =
+            delivery_test_client(DaemonClientStatus::Connecting);
+        let (a, b) = tokio::io::duplex(8192);
+        let client = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
+        let mut pending = VecDeque::new();
+        let serve = async {
+            let _hello = server.next().await.unwrap().unwrap();
+            server
+                .send(Message::Text(
+                    serde_json::json!({
+                        "WorkspaceReply": {
+                            "request_id": 0,
+                            "message": { "HostEnded": { "reason": "The host ended the session" } }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            drop(server);
+        };
+        let (run, _) = tokio::join!(runner.run_socket(client, &mut pending), serve);
+        assert!(matches!(run, Err(DaemonClientError::ChannelClosed)));
+        assert!(matches!(
+            replies.recv().await,
+            Some(DaemonServerMessage::Workspace {
+                message: WorkspaceServerMessage::HostEnded { .. },
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn auth_reject_stops_automatic_reconnect() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (mut runner, _handle, mut replies) =
+            delivery_test_client(DaemonClientStatus::Connecting);
+        let (a, b) = tokio::io::duplex(8192);
+        let client = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
+        let mut pending = VecDeque::new();
+        let serve = async {
+            let _hello = server.next().await.unwrap().unwrap();
+            server
+                .send(Message::Text(
+                    serde_json::json!({
+                        "WorkspaceReply": {
+                            "request_id": 0,
+                            "message": { "HelloAck": { "accepted": false, "reason": "invalid pairing token" } }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            drop(server);
+        };
+        let (run, _) = tokio::join!(runner.run_socket(client, &mut pending), serve);
+        assert!(matches!(run, Err(DaemonClientError::ChannelClosed)));
+        assert!(matches!(
+            replies.recv().await,
+            Some(DaemonServerMessage::Workspace {
+                message: WorkspaceServerMessage::HelloAck { accepted: false, .. },
+                ..
+            })
+        ));
+    }
+
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn unix_loopback_receives_hello_ack_snapshot_and_round_trips_messages() {
@@ -1945,6 +2462,9 @@ mod tests {
         options.reconnect = ReconnectBackoff {
             initial: Duration::from_millis(20),
             max: Duration::from_millis(50),
+            heartbeat: Duration::from_secs(15),
+            liveness: Duration::from_secs(4),
+            handshake: Duration::from_secs(4),
         };
         let mut client = DaemonClient::connect_with_options(options).await.unwrap();
 

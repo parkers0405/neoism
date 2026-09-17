@@ -178,6 +178,34 @@ describe("session-scoped async interaction lifecycle", () => {
 });
 
 describe("task endpoints and independent lifecycle", () => {
+    it("shows runtime children without waiting for slow task and child-list requests", async () => {
+        const tasks = deferred<SubagentTask[]>(), children = deferred<{ items: Session[] }>();
+        const { client } = mockClient(op => op.endsWith("tasks.list") ? tasks.promise : op.endsWith("children") ? children.promise : runtime());
+        let snapshot = emptySubagents();
+        const store = createSubagentController(client, "s", () => true, value => { snapshot = value; });
+        const pending = store.refresh();
+        await flush();
+        expect(snapshot.rows[0]).toMatchObject({ sessionId: "child", status: "outstanding" });
+        expect(snapshot.loading).toBe(true);
+        tasks.resolve([task()]); children.resolve({ items: [child] }); await pending;
+        expect(snapshot.rows).toHaveLength(1);
+        expect(snapshot.rows[0]).toMatchObject({ id: "t", title: "Read sources", stoppable: true });
+        store.dispose();
+    });
+    it("paints a runtime event immediately and rejects older REST lifecycle state", async () => {
+        const tasks = deferred<SubagentTask[]>();
+        const { client } = mockClient(op => op.endsWith("tasks.list") ? tasks.promise : op.endsWith("children") ? { items: [] } : runtime(), [
+            { id: "new", type: "session.execution.updated", data: { sessionID: "s", runtime: { ...runtime("completed"), revision: 2 } } },
+        ]);
+        let snapshot = emptySubagents();
+        const store = createSubagentController(client, "s", () => true, value => { snapshot = value; });
+        const pending = store.refresh();
+        await flush(); await store.events();
+        expect(snapshot.rows[0].status).toBe("completed");
+        tasks.resolve([task()]); await pending; await flush();
+        expect(snapshot.rows[0].status).toBe("completed");
+        store.dispose();
+    });
     it("uses actual scoped SDK tasks, children and runtime rather than root Recents", async () => {
         const { client, request } = mockClient(op => op.endsWith("tasks.list") ? [task()] : op.endsWith("children") ? { items: [child] } : runtime());
         const snapshot = await fetchSubagents(client, "s", new AbortController().signal);

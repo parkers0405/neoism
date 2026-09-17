@@ -41,7 +41,11 @@ mod tests {
             cursor_line: 0,
             cursor_col: 0,
             visual_anchor: None,
+            documentation_notebook: None,
             mouse_select_anchor: None,
+            selection_pointer: None,
+            selection_scroll_at: None,
+            viewport_bounds: [0.0; 2],
             touch_word_edges: None,
             cursor_rect: None,
             follow_cursor: false,
@@ -448,6 +452,119 @@ mod tests {
 
         assert_eq!(pane.lines[0], "See [[@notes/page.md]]");
         assert_eq!(pane.cursor_col, "See [[@notes/page.md".len());
+    }
+
+    #[test]
+    fn notebook_tab_identity_does_not_replace_page_documents() {
+        use crate::editor::documentation_notebook::{
+            DocumentationNotebook, NotebookBinding, NotebookManifest, NotebookPage,
+        };
+        let manifest_path = std::env::temp_dir()
+            .join("notebook-test")
+            .join("notebook.json");
+        let book = DocumentationNotebook::new(
+            manifest_path.clone(),
+            NotebookManifest {
+                title: "Code Notes".into(),
+                pages: vec![
+                    NotebookPage::Path("first.md".into()),
+                    NotebookPage::Path("second.md".into()),
+                ],
+            },
+        )
+        .unwrap();
+        let first_path = book.page_path(0).unwrap();
+        let second_path = book.page_path(1).unwrap();
+        let binding = NotebookBinding {
+            path: manifest_path.clone(),
+            session: std::sync::Arc::new(std::sync::Mutex::new(book)),
+        };
+        let mut first = pane_for_test();
+        first.path = first_path.clone();
+        first.documentation_notebook = Some(binding.clone());
+        first.insert_text("unsaved page one");
+        let contents = first.lines.clone();
+        let caret = first.cursor_position();
+        first.set_content_height(2000.0, 400.0);
+        first.restore_scroll_position(120.0);
+        let mut second = pane_for_test();
+        second.path = second_path;
+        second.documentation_notebook = Some(binding.clone());
+        assert!(first.is_active_tab_path(&manifest_path));
+        assert!(!second.is_active_tab_path(&manifest_path));
+        binding.session.lock().unwrap().navigate(1);
+        assert!(!first.is_active_tab_path(&manifest_path));
+        assert!(second.is_active_tab_path(&manifest_path));
+        assert!(first.is_active_tab_path(&first_path));
+        assert_eq!(first.tab_path(), second.tab_path());
+        assert_eq!(first.lines, contents);
+        assert_eq!(first.cursor_position(), caret);
+        assert_eq!(first.scroll_y, 120.0);
+        assert!(first.is_dirty());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn links_use_unsaved_headings_and_decode_file_paths() {
+        let mut pane = pane_for_test();
+        pane.path = std::env::temp_dir()
+            .join("neoism-link-test")
+            .join("overview.md");
+        pane.lines = vec![
+            "# Overview".into(),
+            "".into(),
+            "## Prompt admission and API".into(),
+        ];
+        let target = pane
+            .resolve_markdown_link("#prompt-admission-and-api")
+            .unwrap();
+        assert_eq!(target.path, pane.path);
+        assert_eq!(target.line, Some(3));
+        pane.lines.insert(1, "An unsaved paragraph".into());
+        assert_eq!(
+            pane.resolve_markdown_link("#prompt-admission-and-api")
+                .unwrap()
+                .line,
+            Some(4)
+        );
+        let outside = pane
+            .resolve_markdown_link("../Prompt%20admission.md")
+            .unwrap();
+        assert_eq!(
+            outside.path,
+            std::env::temp_dir().join("Prompt admission.md")
+        );
+        let absolute = std::env::temp_dir().join("Prompt admission.md");
+        let url = url::Url::from_file_path(&absolute).unwrap();
+        assert_eq!(
+            pane.resolve_markdown_link(url.as_str()).unwrap().path,
+            absolute
+        );
+        let own_url = format!(
+            "{}#prompt-admission-and-api",
+            url::Url::from_file_path(&pane.path).unwrap()
+        );
+        assert_eq!(pane.resolve_markdown_link(&own_url).unwrap().line, Some(4));
+        let bracketed = pane
+            .resolve_markdown_link("<../Prompt admission.md>")
+            .unwrap();
+        assert_eq!(bracketed.path, outside.path);
+        let generated =
+            super::super::links::markdown_file_link(&pane.path, &absolute).unwrap();
+        let destination = generated.split_once("](").unwrap().1.trim_end_matches(')');
+        assert_eq!(
+            pane.resolve_markdown_link(destination).unwrap().path,
+            absolute
+        );
+        let sibling = pane.path.parent().unwrap().join("Prompt (admission) #1.md");
+        let generated =
+            super::super::links::markdown_file_link(&pane.path, &sibling).unwrap();
+        assert!(generated.contains("%28admission%29%20%231.md"));
+        let destination = generated.split_once("](").unwrap().1.trim_end_matches(')');
+        assert_eq!(
+            pane.resolve_markdown_link(destination).unwrap().path,
+            sibling
+        );
     }
 
     #[test]
@@ -1500,25 +1617,132 @@ mod tests {
     #[test]
     fn wiki_link_template_consumes_slash_trigger() {
         let mut pane = pane_for_test();
-        pane.lines = vec!["before / after".to_string()];
-        pane.cursor_col = "before /".len();
+        pane.lines = vec!["/".to_string()];
+        pane.cursor_col = 1;
 
         pane.apply_block_template(MarkdownBlockTemplate::WikiLink);
 
-        assert_eq!(pane.lines, vec!["before [[]] after".to_string()]);
-        assert_eq!(pane.cursor_col, "before [[".len());
+        assert_eq!(pane.lines, vec!["[[]]".to_string()]);
+        assert_eq!(pane.cursor_col, 2);
     }
 
     #[test]
     fn code_link_template_consumes_slash_trigger() {
         let mut pane = pane_for_test();
-        pane.lines = vec!["before / after".to_string()];
-        pane.cursor_col = "before /".len();
+        pane.lines = vec!["/".to_string()];
+        pane.cursor_col = 1;
 
         pane.apply_block_template(MarkdownBlockTemplate::CodeLink);
 
-        assert_eq!(pane.lines, vec!["before [[@]] after".to_string()]);
-        assert_eq!(pane.cursor_col, "before [[@".len());
+        assert_eq!(pane.lines, vec!["[[@]]".to_string()]);
+        assert_eq!(pane.cursor_col, 3);
+    }
+
+    #[test]
+    fn frontmatter_completion_only_offers_supported_properties_in_insert_mode() {
+        let mut pane = MarkdownPane::from_source("props.md".into(), "---\n\n---\nBody");
+        pane.cursor_line = 1;
+        pane.mode = MarkdownMode::Normal;
+        pane.refresh_value_picker();
+        assert!(pane.value_picker.is_none());
+        assert!(!pane.reveals_source_line(1));
+        pane.mode = MarkdownMode::Insert;
+        pane.refresh_value_picker();
+        let candidates = pane.value_picker_candidates();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|(_, label)| label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["title", "icon", "cover", "tags"]
+        );
+        pane.value_picker_move(1);
+        assert!(pane.value_picker_accept());
+        assert_eq!(pane.lines[1], "icon: ");
+        pane.mode = MarkdownMode::Normal;
+        pane.refresh_value_picker();
+        assert!(pane.value_picker.is_none());
+        assert!(!pane.reveals_source_line(1));
+    }
+
+    #[test]
+    fn extensionless_markdown_links_resolve_beside_the_document() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("LICENSE"), "MIT License").unwrap();
+        let pane = MarkdownPane::from_source(
+            root.path().join("README.md"),
+            "[MIT License](LICENSE)",
+        );
+        assert_eq!(
+            pane.resolve_markdown_link("LICENSE").unwrap().path,
+            root.path().join("LICENSE")
+        );
+    }
+
+    #[test]
+    fn triple_backticks_pair_the_fence_and_keep_the_language_cursor() {
+        let mut pane = MarkdownPane::from_source("fence.md".into(), "");
+        pane.mode = MarkdownMode::Insert;
+        for _ in 0..3 { pane.insert_text("`"); }
+        assert_eq!(pane.lines, vec!["```", "```"]);
+        assert_eq!((pane.cursor_line, pane.cursor_col), (0, 3));
+        pane.insert_text("rust");
+        assert_eq!(pane.lines, vec!["```rust", "```"]);
+        pane.insert_newline();
+        assert_eq!(pane.lines, vec!["```rust", "", "```"]);
+        assert_eq!(pane.cursor_line, 1);
+        pane.insert_text("let x = 1;");
+        assert_eq!(pane.lines[2], "```");
+    }
+
+    #[test]
+    fn fence_pairing_is_undoable_and_ignores_inline_or_existing_code() {
+        let mut pane = MarkdownPane::from_source("fence.md".into(), "");
+        pane.mode = MarkdownMode::Insert;
+        pane.insert_text("```python");
+        assert_eq!(pane.lines, vec!["```python", "```"]);
+        assert!(pane.undo());
+        assert_eq!(pane.lines, vec![""]);
+        pane.set_source("prose ");
+        pane.mode = MarkdownMode::Insert;
+        pane.cursor_col = 6;
+        pane.insert_text("```");
+        assert_eq!(pane.lines.len(), 1);
+        pane.set_source("```rust\n\n```");
+        pane.mode = MarkdownMode::Insert;
+        pane.cursor_line = 1;
+        pane.cursor_col = 0;
+        pane.insert_text("```");
+        assert_eq!(pane.lines.len(), 3);
+    }
+
+    #[test]
+    fn ordinary_slashes_are_not_block_commands() {
+        let mut pane = pane_for_test();
+        for line in [
+            "text /",
+            "https://",
+            "/tmp/path",
+            "//",
+            "[[notes/",
+            "`/",
+            "/task ",
+            "/(regex)",
+        ] {
+            pane.lines = vec![line.to_string()];
+            pane.cursor_line = 0;
+            pane.cursor_col = line.len();
+            assert_eq!(pane.slash_block_query_before_cursor(), None, "{line}");
+            assert!(!pane.remove_slash_trigger_before_cursor());
+            assert_eq!(pane.lines[0], line);
+        }
+        pane.lines = vec!["/existing text".into()];
+        pane.cursor_col = 1;
+        assert!(pane.slash_block_query_before_cursor().is_none());
+        pane.set_source("```rust\n/\n```");
+        pane.cursor_line = 1;
+        pane.cursor_col = 1;
+        assert!(pane.slash_block_query_before_cursor().is_none());
     }
 
     #[test]
@@ -1568,6 +1792,185 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_fences_are_not_normal_mode_cursor_stops() {
+        let mut pane = MarkdownPane::from_source(
+            "meta.md".into(),
+            "---\ntitle: Notes\nicon: book\n---\nBody",
+        );
+        pane.vim_enabled = true;
+        pane.mode = MarkdownMode::Normal;
+        assert_eq!(pane.nearest_editable_line(0), 1);
+        assert_eq!(pane.previous_editable_line(1), None);
+        assert_eq!(pane.next_editable_line(2), Some(4));
+        assert_eq!(pane.previous_editable_line(4), Some(2));
+        pane.mode = MarkdownMode::Insert;
+        assert!(pane.is_editable_line(0));
+        assert!(pane.is_editable_line(3));
+    }
+
+    #[test]
+    fn table_column_delete_preserves_other_cells_alignment_and_undo() {
+        let source = "| A | B | C |\n| :--- | :---: | ---: |\n| a \\| b | `x|y` | Unicode \u{03b1} |\n| --- | --- | --- |";
+        let mut pane = MarkdownPane::from_source("table.md".into(), source);
+        pane.mode = MarkdownMode::Normal;
+        assert_eq!(parse_table_cell_bounds(&pane.lines[2]).unwrap().len(), 3);
+        assert_eq!(pane.table_range_from_start(0), Some(0..4));
+        assert!(pane.delete_table_column(0, 1));
+        assert_eq!(parse_table_cells(&pane.lines[0]).unwrap(), vec!["A", "C"]);
+        assert_eq!(
+            parse_table_cells(&pane.lines[1]).unwrap(),
+            vec![":---", "---:"]
+        );
+        assert_eq!(
+            parse_table_cells(&pane.lines[2]).unwrap(),
+            vec!["a \\| b", "Unicode \u{03b1}"]
+        );
+        assert_eq!(pane.mode, MarkdownMode::Normal);
+        assert!(pane.is_editable_line(3));
+        assert!(pane.undo());
+        assert_eq!(pane.lines.join("\n"), source);
+        assert!(pane.redo());
+        assert_eq!(parse_table_cells(&pane.lines[0]).unwrap(), vec!["A", "C"]);
+        pane.read_only = true;
+        assert!(!pane.delete_table_column(0, 0));
+    }
+
+    #[test]
+    fn single_column_tables_survive_editing_and_delete_as_one_undoable_block() {
+        let source = "| A |\n| --- |\n| B |";
+        let mut pane = MarkdownPane::from_source("one.md".into(), source);
+        assert_eq!(pane.table_range_from_start(0), Some(0..3));
+        assert!(pane.insert_table_column(0, 1));
+        assert!(pane.delete_table_column(0, 1));
+        assert_eq!(pane.table_range_from_start(0), Some(0..3));
+        let before = pane.lines.clone();
+        assert!(pane.delete_table_column(0, 0));
+        assert_eq!(pane.lines, vec![String::new()]);
+        assert!(pane.undo());
+        assert_eq!(pane.lines, before);
+    }
+
+    #[test]
+    fn table_cell_modes_use_consistent_projections_for_editing_and_rendering() {
+        let mut pane = MarkdownPane::from_source(
+            "mode.md".into(),
+            "| A | B |\n| --- | --- |\n| **bold**<br>next | `x|y` |",
+        );
+        pane.cursor_line = 2;
+        let cells = parse_table_cell_bounds(&pane.lines[2]).unwrap();
+        pane.cursor_col = cells[0].content_start;
+        pane.mode = MarkdownMode::Normal;
+        assert_eq!(
+            pane.table_source_map(2, 0, "**bold**<br>next")
+                .visible_text(),
+            "bold\nnext"
+        );
+        pane.mode = MarkdownMode::Insert;
+        assert_eq!(
+            pane.table_source_map(2, 0, "**bold**<br>next")
+                .visible_text(),
+            "**bold**\nnext"
+        );
+        assert_eq!(pane.table_source_map(2, 1, "`x|y`").visible_text(), "x|y");
+        pane.cursor_col = cells[0].content_start + "**bold**<br>".len();
+        pane.backspace();
+        assert!(pane.lines[2].contains("**bold**next"));
+        assert!(pane.undo());
+        assert!(pane.lines[2].contains("**bold**<br>next"));
+    }
+
+    #[test]
+    fn deleting_selected_table_text_preserves_grid_delimiters_and_undo() {
+        let source = "| A | B |\n| --- | --- |\n| first | second |\n| third | fourth |";
+        let mut pane = MarkdownPane::from_source("selection.md".into(), source);
+        let start = parse_table_cell_bounds(&pane.lines[2]).unwrap()[0].content_start;
+        let end = parse_table_cell_bounds(&pane.lines[3]).unwrap()[1].content_end;
+        pane.mode = MarkdownMode::Visual;
+        pane.visual_anchor = Some(MarkdownPosition {
+            line: 2,
+            col: start,
+        });
+        pane.cursor_line = 3;
+        pane.cursor_col = end;
+        assert!(pane.delete_selection().is_some());
+        assert_eq!(pane.lines.len(), 4);
+        assert_eq!(pane.lines[1], "| --- | --- |");
+        assert_eq!(parse_table_cells(&pane.lines[2]).unwrap(), vec!["", ""]);
+        assert_eq!(parse_table_cells(&pane.lines[3]).unwrap(), vec!["", ""]);
+        assert!(pane.undo());
+        assert_eq!(pane.lines.join("\n"), source);
+    }
+
+    #[test]
+    fn table_home_end_and_tab_stay_in_cells_and_extend_the_grid() {
+        let mut pane = MarkdownPane::from_source(
+            "keys.md".into(),
+            "| A | B |\n| --- | --- |\n| aa | bb |",
+        );
+        pane.vim_enabled = true;
+        pane.mode = MarkdownMode::Normal;
+        pane.set_cursor_to_table_cell(2, 1, 0);
+        pane.move_line_end();
+        pane.enter_insert();
+        pane.insert_text("!");
+        pane.move_line_start();
+        pane.insert_text("x");
+        assert_eq!(
+            parse_table_cells(&pane.lines[2]).unwrap(),
+            vec!["aa", "xbb!"]
+        );
+        pane.move_line_end();
+        assert!(pane.tab_table_cell(false));
+        assert_eq!(pane.lines.len(), 4);
+        assert_eq!(pane.cursor_line, 3);
+        assert_eq!(pane.table_cursor().unwrap().cell_ix, 0);
+        assert!(pane.tab_table_cell(true));
+        assert_eq!(pane.cursor_line, 2);
+        assert_eq!(pane.table_cursor().unwrap().cell_ix, 1);
+    }
+
+    #[test]
+    fn table_parser_preserves_unicode_empty_cells_and_code_pipes() {
+        let source = "|\u{3000}| `left|right` | escaped \\| pipe |";
+        let cells = parse_table_cell_bounds(source).unwrap();
+        assert_eq!(cells.len(), 3);
+        assert_eq!(&source[cells[0].content_start..cells[0].content_end], "");
+        assert_eq!(
+            &source[cells[1].content_start..cells[1].content_end],
+            "`left|right`"
+        );
+        assert_eq!(
+            &source[cells[2].content_start..cells[2].content_end],
+            "escaped \\| pipe"
+        );
+        assert!(parse_table_cell_bounds("`left|right`").is_none());
+    }
+
+    #[test]
+    fn table_cell_paste_preserves_pipes_and_line_breaks_without_creating_columns_or_rows()
+    {
+        let mut pane = MarkdownPane::from_source(
+            "paste.md".into(),
+            "| A | B |\n| --- | --- |\n|  | stay |",
+        );
+        pane.mode = MarkdownMode::Insert;
+        pane.set_cursor_to_table_cell(2, 0, 0);
+        pane.insert_text("left | right\nnext");
+        assert_eq!(pane.lines.len(), 3);
+        let cells = parse_table_cells(&pane.lines[2]).unwrap();
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[1], "stay");
+        assert_eq!(
+            super::super::source_map::InlineSourceMap::for_table(cells[0]).visible_text(),
+            "left | right\nnext"
+        );
+        assert!(pane.insert_table_line_break());
+        pane.insert_text("last");
+        assert_eq!(pane.lines.len(), 3);
+        assert!(pane.lines[2].contains("next<br>last"));
+    }
+
+    #[test]
     fn table_separator_row_is_skipped_by_navigation() {
         let mut pane = pane_for_test();
         pane.lines = vec![
@@ -1585,7 +1988,7 @@ mod tests {
     }
 
     #[test]
-    fn table_horizontal_scroll_moves_cursor_column() {
+    fn table_horizontal_scroll_preserves_the_edit_position() {
         let mut pane = pane_for_test();
         pane.lines = vec![
             "| Recipient | Job |".to_string(),
@@ -1597,11 +2000,12 @@ mod tests {
         pane.register_table_rect(0, [0.0, 0.0, 100.0, 100.0], 100.0, 500.0);
 
         assert!(pane.scroll_table_at(10.0, 10.0, 260.0));
-        let right_col = pane.cursor_col;
-        assert!(right_col > 0);
-
+        assert_eq!(pane.cursor_col, 0);
+        assert!(!pane.follow_cursor);
+        assert_eq!(pane.table_scroll_x(0), 260.0);
         assert!(pane.scroll_table_at(10.0, 10.0, -260.0));
-        assert!(pane.cursor_col < right_col);
+        assert_eq!(pane.cursor_col, 0);
+        assert_eq!(pane.table_scroll_x(0), 0.0);
     }
 
     #[test]
@@ -1809,6 +2213,7 @@ mod tests {
         ];
         let first_cell = parse_table_cell_bounds(&pane.lines[2]).unwrap()[0];
         let cell = MarkdownTableCellRect {
+            source_revealed: false,
             line: 2,
             cell_ix: 0,
             rect: [0.0, 0.0, 200.0, 40.0],
@@ -1826,7 +2231,7 @@ mod tests {
     }
 
     #[test]
-    fn table_cell_bounds_preserve_extra_trailing_space() {
+    fn table_cell_bounds_exclude_formatting_padding_without_changing_source() {
         let padded = "| foo | bar |";
         let edited = "| foo  | bar |";
 
@@ -1839,7 +2244,11 @@ mod tests {
         );
         assert_eq!(
             &edited[edited_first.content_start..edited_first.content_end],
-            "foo "
+            "foo"
+        );
+        assert_eq!(
+            &edited[edited_first.raw_start..edited_first.raw_end],
+            " foo  "
         );
     }
 
@@ -2249,6 +2658,62 @@ mod tests {
         assert!(pane.end_drag());
         assert_eq!(pane.selection_for_line(0), Some((8, 12)));
         assert_eq!(pane.yank_selection().as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn mouse_selection_scrolls_only_outside_viewport() {
+        for mode in [
+            MarkdownMode::Normal,
+            MarkdownMode::Insert,
+            MarkdownMode::Visual,
+        ] {
+            let mut pane = pane_for_test();
+            pane.lines = vec!["alpha omega".to_string()];
+            pane.mode = mode;
+            pane.viewport_bounds = [100.0, 500.0];
+            pane.set_content_height(2000.0, 400.0);
+            pane.restore_scroll_position(500.0);
+            pane.register_block_rect(
+                0,
+                [0.0, 100.0, 200.0, 400.0],
+                [-30.0, 100.0, 20.0, 20.0],
+                0.0,
+                100.0,
+                0,
+                10.0,
+                20.0,
+                200.0,
+                None,
+            );
+            measured_text_line(&mut pane, 0, 11, 10.0);
+            assert!(pane.click_at(0.0, 110.0));
+            for y in [100.0, 101.0, 300.0, 499.0, 500.0] {
+                assert!(pane.update_drag(30.0, y));
+                assert!(!pane.follow_cursor);
+                pane.tick_scroll();
+                assert_eq!(pane.scroll_y, 500.0);
+                assert_eq!(pane.target_scroll_y, 500.0);
+            }
+            assert!(pane.update_drag(30.0, 520.0));
+            assert!(pane.tick_scroll());
+            let after = pane.scroll_y;
+            assert!(after > 500.0);
+            pane.selection_scroll_at =
+                Some(web_time::Instant::now() - web_time::Duration::from_millis(16));
+            assert!(pane.tick_scroll());
+            assert!(pane.scroll_y > after, "held pointer keeps scrolling");
+            assert!(pane.update_drag(30.0, 499.0));
+            let stopped = pane.scroll_y;
+            pane.tick_scroll();
+            assert_eq!(pane.scroll_y, stopped);
+            assert!(pane.update_drag(30.0, 80.0));
+            assert!(pane.tick_scroll());
+            assert!(pane.scroll_y < stopped);
+            assert!(pane.end_drag());
+            let released = pane.scroll_y;
+            pane.tick_scroll();
+            assert_eq!(pane.scroll_y, released);
+        }
     }
 
     #[test]

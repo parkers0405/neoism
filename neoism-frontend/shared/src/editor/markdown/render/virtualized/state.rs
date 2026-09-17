@@ -50,6 +50,16 @@ mod tests {
     use crate::editor::markdown::{MarkdownMode, MarkdownPane};
 
     #[test]
+    fn explicit_extensionless_links_render_labels_and_keep_targets() {
+        let source = "Neoism is open source under the [MIT License](LICENSE). See [NOTICE](NOTICE) for attribution.";
+        let runs = super::inline_runs_for_text(source);
+        let text: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(text, "Neoism is open source under the MIT License. See NOTICE for attribution.");
+        assert!(runs.iter().any(|run| run.text == "MIT License" && run.style == super::InlineRunStyle::Link("LICENSE".into())));
+        assert!(runs.iter().any(|run| run.text == "NOTICE" && run.style == super::InlineRunStyle::Link("NOTICE".into())));
+    }
+
+    #[test]
     fn inline_word_tokenizers_keep_trailing_whitespace() {
         // A just-typed trailing space must reach the wrap rows or the
         // caret can't advance past it until the next char lands.
@@ -148,7 +158,11 @@ mod tests {
             cursor_line: 1,
             cursor_col: 5,
             visual_anchor: None,
+            documentation_notebook: None,
             mouse_select_anchor: None,
+            selection_pointer: None,
+            selection_scroll_at: None,
+            viewport_bounds: [0.0; 2],
             touch_word_edges: None,
             cursor_rect: None,
             follow_cursor: false,

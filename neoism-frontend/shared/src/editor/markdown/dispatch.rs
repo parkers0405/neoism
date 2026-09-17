@@ -514,7 +514,7 @@ pub fn dispatch_markdown_pane_key(
                 snap_cursor = true;
             }
             K::Named(N::Enter) => {
-                if !(mods.shift && pane.insert_table_row(false)) {
+                if !(mods.shift && pane.insert_table_line_break()) {
                     pane.insert_newline();
                 }
                 snap_cursor = true;
@@ -528,7 +528,7 @@ pub fn dispatch_markdown_pane_key(
                 snap_cursor = true;
             }
             K::Named(N::Tab) if plain => {
-                if pane.move_table_cell(mods.shift) {
+                if pane.tab_table_cell(mods.shift) {
                     snap_cursor = true;
                 } else if pane.indent_list_item(mods.shift) {
                     snap_cursor = true;
@@ -550,13 +550,9 @@ pub fn dispatch_markdown_pane_key(
                 snap_cursor = true;
             }
             K::Char("/") if plain => {
-                // Inside a wiki link (`[[…]]`) a slash is part of the
-                // path being typed — the link-completion menu owns the
-                // popup there, not the `/` block menu.
-                let in_wiki_link = pane.wiki_link_query_before_cursor().is_some();
                 pane.insert_text("/");
                 snap_cursor = true;
-                if !in_wiki_link {
+                if pane.slash_block_query_before_cursor().is_some() {
                     fx.open_block_menu = true;
                     fx.open_block_menu_at = pane.cursor_rect;
                 }
@@ -578,7 +574,7 @@ pub fn dispatch_markdown_pane_key(
             K::Named(N::Home) => pane.move_line_start(),
             K::Named(N::End) => pane.move_line_end(),
             K::Named(N::Tab) if plain => {
-                if pane.move_table_cell(mods.shift) || pane.indent_list_item(mods.shift) {
+                if pane.tab_table_cell(mods.shift) || pane.indent_list_item(mods.shift) {
                     snap_cursor = true;
                 } else if !mods.shift {
                     pane.insert_text("  ");

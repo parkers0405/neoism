@@ -882,6 +882,19 @@ pub fn classify_session_event(
                 updates.push(SessionEventUpdate::ExecutionUpdated(snapshot));
             }
             if let Some(runtime) = properties.get("runtime").cloned() {
+                // Attachment baselines arrive before child transcripts. Admit
+                // their family immediately rather than waiting for a UI/tree
+                // round trip while the socket queues unknown-child events.
+                if let Some(branches) = runtime.get("branches").and_then(Value::as_array)
+                {
+                    state.track_child_sessions(branches.iter().filter_map(|branch| {
+                        branch
+                            .get("sessionId")
+                            .or_else(|| branch.get("sessionID"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    }));
+                }
                 updates.push(SessionEventUpdate::RuntimeUpdated(runtime));
             }
             updates
@@ -1337,6 +1350,31 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn live_baseline_registers_children_before_their_text_arrives() {
+        let mut state = SessionEventUpdateState::default();
+        classify_session_event(
+            json!({
+                "type": "session.execution.updated", "properties": {
+                    "sessionID": "root", "runtime": {"branches": [{"sessionId": "child", "status": "outstanding"}]}
+                }
+            }),
+            "root",
+            &mut state,
+        );
+        assert!(state.child_session_ids().contains("child"));
+        let updates = classify_session_event(
+            json!({
+                "type": "message.part.delta", "properties": {
+                    "sessionID": "child", "messageID": "m", "partID": "p", "partType": "text", "field": "text", "delta": "hello"
+                }
+            }),
+            "root",
+            &mut state,
+        );
+        assert!(!updates.is_empty());
+    }
 
     #[test]
     fn execution_event_keeps_legacy_snapshot_when_runtime_is_malformed() {

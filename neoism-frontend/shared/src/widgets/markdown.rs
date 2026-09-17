@@ -589,7 +589,18 @@ pub struct WebLinkSpan {
 /// label and target slices plus how many bytes the whole link consumed.
 pub fn parse_markdown_link(value: &str) -> Option<MarkdownLink<'_>> {
     let rest = value.strip_prefix('[')?;
-    let label_end = rest.find(']')?;
+    let mut depth = 1usize;
+    let mut escaped = false;
+    let label_end = rest.char_indices().find_map(|(index, ch)| {
+        if escaped { escaped = false; return None; }
+        match ch {
+            '\\' => escaped = true,
+            '[' => depth += 1,
+            ']' => { depth -= 1; if depth == 0 { return Some(index); } }
+            _ => {}
+        }
+        None
+    })?;
     let label = &rest[..label_end];
     let rest = &rest[label_end + 1..];
     let rest = rest.strip_prefix('(')?;
@@ -681,13 +692,11 @@ pub fn file_uri_target(value: &str) -> Option<&str> {
     (!path.is_empty() && !value.chars().any(char::is_whitespace)).then_some(value)
 }
 
-/// Target accepted by rendered Markdown links. This deliberately remains
-/// conservative for bare prose tokens while allowing explicit Markdown links
-/// to point at web URLs, `file://` URIs, or recognizable local paths.
+/// Explicit Markdown destinations can be extensionless files or fragments.
+/// Bare prose still uses the conservative URL/file-reference recognizers.
 pub fn rendered_link_target(value: &str) -> Option<&str> {
-    web_url_target(value)
-        .or_else(|| file_uri_target(value))
-        .or_else(|| looks_like_file_ref(value).then_some(value))
+    let value = value.trim();
+    (!value.is_empty() && !value.chars().any(char::is_control)).then_some(value)
 }
 
 /// CommonMark backslash escape at byte zero. ASCII punctuation is the exact
@@ -1105,6 +1114,18 @@ pub fn point_in_rect(x: f32, y: f32, rect: [f32; 4]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linked_image_uses_outer_destination_and_consumes_nested_brackets() {
+        let source = "[![Neoism](https://raw.example/terminal.png)](https://github.com/parkers0405/neoism)";
+        let parsed = super::parse_markdown_link(source).unwrap();
+        assert_eq!(parsed.label, "![Neoism](https://raw.example/terminal.png)");
+        assert_eq!(parsed.target, "https://github.com/parkers0405/neoism");
+        assert_eq!(parsed.consumed, source.len());
+        let escaped = super::parse_markdown_link(r"[a\]b](target.md)").unwrap();
+        assert_eq!(escaped.label, r"a\]b");
+        assert_eq!(escaped.target, "target.md");
+    }
+
     use super::*;
 
     #[test]

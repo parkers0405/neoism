@@ -52,6 +52,10 @@ fn resolve_from(tokens:&[Token],token:&str,epoch:u64)->anyhow::Result<Window> {
     tokens.iter().find(|t|t.token==token && t.epoch==epoch).map(|t|t.window.clone()).context("Unknown/stale window target; list windows again")
 }
 fn same_identity(a:&Window,b:&Window)->bool { identity_id(a)==identity_id(b) && a.pid==b.pid && a.app==b.app }
+pub(super) fn process_birth(w:&Window)->anyhow::Result<String> { process_start(w.pid) }
+pub(super) fn same_process(a:&Window,b:&Window)->anyhow::Result<bool> {
+    Ok(a.pid==b.pid && a.app==b.app && process_birth(a)?==process_birth(b)?)
+}
 fn bounds(w:&Window)->(i32,i32,u32,u32) { (w.x,w.y,w.width,w.height) }
 pub(super) fn same_target(a:Option<&Window>,b:Option<&Window>)->bool {
     match (a,b) {
@@ -73,9 +77,9 @@ pub(super) fn validate(target:&Window, foreground:bool)->anyhow::Result<Window> 
 }
 pub(super) fn validate_list(target:&Window,foreground:bool,windows:Vec<Window>)->anyhow::Result<Window> {
     let mut current=windows.into_iter().find(|w|same_identity(w,target)).context("Target window disappeared or identity changed")?;
+    ensure!(bounds(&current)==bounds(target),"Target window moved/resized; list windows and take another screenshot");
     if foreground {
         ensure!(current.focused,"Target is not foreground; observe/focus explicitly before input");
-        ensure!(bounds(&current)==bounds(target),"Target window moved/resized; list windows and take another screenshot");
     }
     // Preserve the observation nonce for screenshot/selector binding.
     current.id=target.id.clone();
@@ -223,6 +227,9 @@ fn validate_active_with(target:&Window,mut ipc:impl FnMut(&str)->anyhow::Result<
 #[cfg(any(target_os="linux",test))]
 fn validate_active_snapshot(target:&Window,reply:&str,identity:impl FnOnce(&serde_json::Value)->anyhow::Result<String>)->anyhow::Result<Window> {
     let active:serde_json::Value=serde_json::from_str(reply)?;
+    // Another focused window does not prove the selected target disappeared.
+    // Do not revoke its token; explicit focus still checks the target lifetime.
+    ensure!(active["address"].as_str()==Some(native_id(target)), "Target is not foreground; call computer.focus with this target before observation or input");
     // Fresh exact active object per edge; never a cached foreground verdict.
     let current=hypr_window(&active,true,identity(&active)?)?;
     if native_id(&current)==native_id(target) && (!same_identity(&current,target) || bounds(&current)!=bounds(target)) { revoke(target); }
@@ -284,6 +291,8 @@ fn process_start(pid:u32)->anyhow::Result<String> {
     ensure!(read==size && info.pbi_pid==pid,"Cannot query process lifetime: {}",std::io::Error::last_os_error());
     Ok(format!("{}:{}",info.pbi_start_tvsec,info.pbi_start_tvusec))
 }
+#[cfg(not(any(target_os="linux",target_os="macos",target_os="windows")))]
+fn process_start(_:u32)->anyhow::Result<String> { anyhow::bail!("Process lifetime identity unsupported on this platform") }
 #[cfg(any(target_os="macos",target_os="windows"))]
 fn native_list()->anyhow::Result<Vec<Window>> {
     #[cfg(target_os="windows")] let _dpi=super::platform::DpiGuard::new()?;
@@ -471,6 +480,32 @@ fn native_focus(_: &Window,_:&mut impl FnMut()->anyhow::Result<()>)->anyhow::Res
         assert!(validate_active_snapshot(&target,&v.to_string(),|v|hypr_identity_with(v,|_|Ok("birth2".into()))).is_err());
         let mut renamed=v.clone(); renamed["title"]=serde_json::json!("new");
         assert!(validate_active_snapshot(&target,&renamed.to_string(),fixture_identity).is_ok());
+    }
+    #[test] fn another_active_window_is_focus_loss_not_identity_loss() {
+        let target=window();
+        let error=validate_active_snapshot(&target,r#"{"address":"0x999"}"#,|_| panic!("unrelated window identity must not be inspected")).unwrap_err();
+        assert!(error.to_string().contains("not foreground"));
+        assert!(!error.to_string().contains("disappeared"));
+    }
+    #[test] fn background_guard_preserves_lifetime_and_bounds_without_requiring_focus() {
+        let mut tokens=Vec::new();
+        let mut listed=window(); listed.focused=false;
+        let listed=reconcile(&mut tokens,vec![listed],9);
+        let target=resolve_from(&tokens,&listed[0].0,9).unwrap();
+
+        assert!(validate_list(&target,false,vec![target.clone()]).is_ok());
+        assert!(validate_list(&target,true,vec![target.clone()]).unwrap_err().to_string().contains("not foreground"));
+
+        let mut moved=target.clone(); moved.x+=1;
+        assert!(validate_list(&target,false,vec![moved]).unwrap_err().to_string().contains("moved/resized"));
+        let mut reused=target.clone(); reused.id="0x123|5|birth2|stable2".into();
+        assert!(validate_list(&target,false,vec![reused]).unwrap_err().to_string().contains("disappeared or identity changed"));
+        assert!(validate_list(&target,false,vec![]).unwrap_err().to_string().contains("disappeared or identity changed"));
+
+        reconcile(&mut tokens,vec![],9);
+        assert!(resolve_from(&tokens,&listed[0].0,9).is_err());
+        let reopened=reconcile(&mut tokens,vec![window()],9);
+        assert_ne!(listed[0].0,reopened[0].0,"close/reopen must not resurrect the listed target");
     }
     #[cfg(target_os="linux")]
     #[test] fn each_focused_validation_uses_one_fresh_ipc_request() {

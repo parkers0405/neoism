@@ -11,6 +11,7 @@ import { themeOptions, appearanceTokens, DEFAULT_GUI_THEME, resolveTheme } from 
 import { isFxKind, scheduleFx } from "./fx";
 import type { ProviderConnectionSelection } from "./providerConnections";
 import { joinedDaemon, scopedAgentFetch } from "./serverConnections";
+import { type PhoneConnection } from "./phoneShare";
 import { loadAccounts, saveAccounts, loadPreferences, rememberedSession, rememberSession, errorMessage, type SlashCommand, type Preferences, serverScope, loadDeletedAccounts, saveDeletedAccounts } from "./types";
 import { SessionPinIndex, hydrateSessionPins, isSessionPinned } from "./sessionPins";
 import { mergePage, nextCursor } from "./state";
@@ -23,8 +24,9 @@ import { deferredPersistence, messageUsage, modelChoices, useEventCallback } fro
 import { groupedModelChoices, loadRecentModels, rememberModel, saveRecentModels } from "./modelRecents";
 import { resolveSelection } from "./selection";
 import { localTab, loadTabs, saveTabs, closeTab as removeTab, type ChatTab, type TabState } from "./tabs";
-export function useAppController() {
-    const [prefs, setPrefs] = useState(loadPreferences);
+export function useAppController(connection?: PhoneConnection) {
+    const [prefs, setPrefs] = useState(() => connection
+        ? { ...loadPreferences(), server: connection.server, directory: '' } : loadPreferences());
     const tabStores = useRef(new Map<string, TabState>());
     if (!tabStores.current.has(prefs.server)) tabStores.current.set(prefs.server, loadTabs(prefs.server));
     const [, refreshTabs] = useState(0);
@@ -39,7 +41,7 @@ export function useAppController() {
     const persistTabs = (server = prefs.server) => { persistence.schedule(server, tabStores.current.get(server)!); refreshTabs(n => n + 1); };
     // Resolve synchronously before constructing any transport. An effect that
     // clears a global token would already have leaked it to the new endpoint.
-    const credentials = useRef(new Map<string, string>());
+    const credentials = useRef(new Map<string, string>(connection ? [[serverScope(connection.server), connection.token]] : []));
     const [, credentialsChanged] = useState(0);
     const credentialScope = serverScope(prefs.server);
     const token = credentials.current.get(credentialScope) || "";
@@ -62,21 +64,22 @@ export function useAppController() {
         }
         credentialsChanged(n => n + 1);
     };
-    const saveSettings = (next: Preferences, suppliedToken: string) => {
+    const saveSettings = (next: Preferences, suppliedToken: string, sessionId?: string) => {
         const destination = serverScope(next.server);
-        // Defend old/batched hosts as well as the Settings UI: an unchanged
-        // source credential is not consent to send it to a different endpoint.
-        // Explicit workspace selection on the SAME daemon is the exception:
-        // both scoped proxy paths authenticate that daemon's device bearer.
         const sameDaemon = joinedDaemon(destination) !== undefined && joinedDaemon(destination) === joinedDaemon(credentialScope);
         if (destination === credentialScope || sameDaemon || suppliedToken !== token || !suppliedToken)
             credentials.current.set(destination, suppliedToken);
+        if (sessionId) {
+            phoneSession.current = sessionId;
+            rememberSession(destination, sessionId, true);
+        }
         setPrefs(next);
         credentialsChanged(n => n + 1);
     };
     const [settings, setSettings] = useState(false);
     const [view, setView] = useState<"chat" | "skills" | "workflows">("chat");
     const [id, updateId] = useState<string>();
+    const phoneSession = useRef<string | undefined>(connection?.sessionId);
     const selectedId = useRef<string | undefined>(undefined);
     const selectionEpoch = useRef(0);
     const [active, setActive] = useState<Session>();
@@ -178,7 +181,7 @@ export function useAppController() {
             ),
         [prefs.server, token],
     );
-    const identityName = useIdentity(client, prefs.name);
+    const identityName = useIdentity(client, prefs.name, !joinedDaemon(prefs.server));
     const pinIndex = useMemo(() => new SessionPinIndex(prefs.server), [client]);
     const pinFlights = useMemo(() => new Set<string>(), [client]);
     const deletedSessions = useMemo(() => new Set<string>(), [client]);
@@ -236,7 +239,7 @@ export function useAppController() {
             setChildren((old) => old.map((s) => s.id === session.id ? mergeSession(s, session) : s));
         }
     }, [setId, prefs.server, prefs.directory, client]);
-    useSessionEvents(client, prefs.directory, search, setSessions, notify, onSession);
+    useSessionEvents(client, prefs.directory, search, setSessions, notify, onSession, !!joinedDaemon(prefs.server), joinedDaemon(prefs.server) ? id : undefined);
     const chat = useChat(client, id, notify);
     const listEpoch = useRef(0);
     const listFlight = useRef(false);
@@ -508,13 +511,30 @@ export function useAppController() {
                 const session = params.get('session');
                 if (session) openChildSession(session, false);
             }
-            else { const session = rememberedSession(prefs.server); if (session) openSession(session, false); else activateTab(tabState.active, false); }
+            else {
+                const session = phoneSession.current || rememberedSession(prefs.server);
+                phoneSession.current = undefined;
+                if (session) openSession(session, false); else activateTab(tabState.active, false);
+            }
         };
         const onHistory = () => restore(true);
         restore(); window.addEventListener('popstate', onHistory);
         return () => window.removeEventListener('popstate', onHistory);
     }, [client]);
-    const newChat = () => { const target = localTab(); tabState.tabs.push(target); activateTab(target.key); };
+    const selectWorkspace = (directory: string) => {
+        // Keep drafts for other workspaces, but never carry their active chat across.
+        let target = tabState.tabs.find(t => (t.metadata?.directory ?? t.directory) === directory);
+        if (!target) {
+            target = { ...localTab(), directory };
+            tabState.tabs.push(target);
+        }
+        setPrefs(prior => ({ ...prior, directory }));
+        setSearch('');
+        setView('chat');
+        setNav(false);
+        activateTab(target.key);
+    };
+    const newChat = () => { const target = { ...localTab(), directory: prefs.directory || undefined }; tabState.tabs.push(target); activateTab(target.key); };
     const closeTab = (key: string) => {
         transcriptVisits.current.get(tabState)?.delete(key);
         const next = removeTab(tabState, key); tabState.tabs = next.tabs;
@@ -1011,7 +1031,8 @@ export function useAppController() {
     }, [picker, id, client, active?.directory, prefs.directory, directoryQuery, notify]);
     const usage = useMemo(() => messageUsage(chat.state.messages), [chat.state.messages]);
     return {
-        tabs: tabState.tabs, tabKey, activateTab, closeTab,
+        tabs: tabState.tabs.filter(t => !prefs.directory || t.key === tabState.active || (t.metadata?.directory ?? t.directory) === prefs.directory), tabKey, activateTab, closeTab,
+        selectWorkspace,
         draft: tab.draft,
         files: tab.files || [],
         onFilesChange: (files: File[]) => { tab.files = files; persistTabs(); },

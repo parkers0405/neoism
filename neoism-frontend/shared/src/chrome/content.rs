@@ -655,6 +655,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .file_tree
                 .as_ref()
                 .is_some_and(|tree| tree.is_animating())
+            || self.context_menu.is_animating()
             || self.command_palette.is_animating()
             || self.command_composer.is_animating(&self.terminal_input)
             || self.completion_menu.is_animating()

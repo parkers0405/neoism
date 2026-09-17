@@ -1152,6 +1152,13 @@ impl Screen<'_> {
             PaletteAction::SaveDocument => {
                 self.save_current_document();
             }
+            PaletteAction::LinkMarkdownFile => self.open_markdown_file_link_prompt(),
+            PaletteAction::CreateDocumentationNotebook => {
+                self.open_documentation_notebook_prompt(neoism_ui::editor::documentation_notebook::NotebookInput::Create);
+            }
+            PaletteAction::OpenDocumentationNotebook => {
+                self.open_documentation_notebook_prompt(neoism_ui::editor::documentation_notebook::NotebookInput::Open);
+            }
             PaletteAction::RunNotebookCell => {
                 self.run_current_notebook_cell();
             }

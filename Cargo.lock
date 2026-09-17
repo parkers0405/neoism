@@ -1290,7 +1290,7 @@ checksum = "9885fa71e26b8ab7855e2ec7cae6e9b380edff76cd052e07c683a0319d51b3a2"
 
 [[package]]
 name = "copa"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "arrayvec",
  "criterion",
@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "corcovado"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "bytes",
  "cfg-if 0.1.10",
@@ -1789,6 +1789,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "dictgen"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "241177aa78d646ea2434aed987729780e4792918d309cedab8859133745c64e7"
+dependencies = [
+ "phf 0.13.1",
+ "phf_shared 0.13.1",
+ "unicase",
 ]
 
 [[package]]
@@ -4997,7 +5008,7 @@ checksum = "7a2f6120a8da26bea3587731072111062c5d8c51ca3a3a75a716bd8b735d5882"
 
 [[package]]
 name = "neoism"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "ahash",
  "axum",
@@ -5079,7 +5090,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -5103,7 +5114,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-builtins"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5128,7 +5139,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-core"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "getrandom 0.2.17",
  "rand 0.8.5",
@@ -5139,7 +5150,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-neoism-adapter"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "neoism-agent-service-api",
  "neoism-agent-workspace-search-fff",
@@ -5154,7 +5165,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-plugin-api"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "futures-core",
  "neoism-agent-core",
@@ -5166,7 +5177,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-server"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5202,6 +5213,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tungstenite",
  "turso",
  "url",
  "wayland-client",
@@ -5215,7 +5227,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-service-api"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "base64",
  "dirs 6.0.0",
@@ -5231,7 +5243,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-workspace-search-fff"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -5246,7 +5258,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-backend"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "base64",
  "bitflags 2.13.2",
@@ -5289,7 +5301,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-extensions"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "bzip2",
  "dirs 5.0.1",
@@ -5311,7 +5323,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-grapheme-width"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "phf 0.13.1",
  "ucd-trie",
@@ -5319,7 +5331,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-neoworld"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "anyhow",
  "neoism-neoworld-core",
@@ -5331,11 +5343,11 @@ dependencies = [
 
 [[package]]
 name = "neoism-neoworld-core"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 
 [[package]]
 name = "neoism-notifier"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "async-channel",
  "async-io",
@@ -5351,7 +5363,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-proc-macros"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5359,11 +5371,11 @@ dependencies = [
 
 [[package]]
 name = "neoism-product-docs"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 
 [[package]]
 name = "neoism-protocol"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5374,7 +5386,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-remarkable"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "neoism-sync",
  "neoism-ui",
@@ -5383,14 +5395,14 @@ dependencies = [
 
 [[package]]
 name = "neoism-rm-agent"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "neoism-sync",
 ]
 
 [[package]]
 name = "neoism-sync"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "loro",
  "mdns-sd",
@@ -5401,7 +5413,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-core"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "base64",
  "bitflags 2.13.2",
@@ -5431,7 +5443,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-pty"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "base64",
  "corcovado",
@@ -5444,7 +5456,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-wasm"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",
@@ -5468,7 +5480,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-ui"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "base64",
  "bitflags 2.13.2",
@@ -5511,6 +5523,8 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
+ "typos-dict",
+ "unicase",
  "unicode-segmentation",
  "unicode-width-16",
  "url",
@@ -5523,7 +5537,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-window"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "ahash",
  "atomic-waker",
@@ -5578,7 +5592,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-daemon"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -5605,6 +5619,7 @@ dependencies = [
  "neoism-workspace-index",
  "notify 8.2.0",
  "parking_lot",
+ "qrcode",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -5628,7 +5643,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-index"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "dirs 6.0.0",
  "dunce",
@@ -6661,7 +6676,7 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
 dependencies = [
- "phf_macros",
+ "phf_macros 0.11.3",
  "phf_shared 0.11.3",
 ]
 
@@ -6680,6 +6695,7 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
+ "phf_macros 0.13.1",
  "phf_shared 0.13.1",
  "serde",
 ]
@@ -6695,16 +6711,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "phf_generator"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737"
+dependencies = [
+ "fastrand",
+ "phf_shared 0.13.1",
+]
+
+[[package]]
 name = "phf_macros"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
 dependencies = [
- "phf_generator",
+ "phf_generator 0.11.3",
  "phf_shared 0.11.3",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "phf_macros"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef"
+dependencies = [
+ "phf_generator 0.13.1",
+ "phf_shared 0.13.1",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "unicase",
 ]
 
 [[package]]
@@ -6732,6 +6772,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher",
+ "unicase",
 ]
 
 [[package]]
@@ -8656,7 +8697,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sugarloaf"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "approx",
  "ash",
@@ -9010,7 +9051,7 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "teletypewriter"
-version = "0.7.105"
+version = "0.7.106-nightly.20260917.1"
 dependencies = [
  "corcovado",
  "dirs 6.0.0",
@@ -9996,6 +10037,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "typos-dict"
+version = "0.13.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64725d452f2656c7e8b8341721c261a8e33c2c7fb9f9061666403f63693abde7"
+dependencies = [
+ "dictgen",
+ "phf 0.13.1",
 ]
 
 [[package]]

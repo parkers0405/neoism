@@ -5,7 +5,9 @@ use super::super::*;
 
 mod completion_menus;
 mod document;
+mod documentation_notebook;
 mod input;
 mod link_suggestions;
+mod file_links;
 mod notebook;
 mod render;

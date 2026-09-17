@@ -88,36 +88,13 @@ pub fn render_pane(
         return;
     }
 
-    // On first render after open, scale the scene to fit the pane.
+    // Layout is world-space and must be ready before fitting the camera.
+    prepare_text_layouts(sugarloaf, pane);
     if pane.fit_pending {
         pane.fit_to_view(rect);
         pane.fit_pending = false;
     }
-    // Place the document camera so world-origin lands at the pane corner.
     let cam = pane.placed_camera(rect);
-
-    // Measure each text shape's real size (world units) so selection
-    // frames / hit-testing match the glyphs exactly.
-    let mut dims = std::collections::HashMap::new();
-    let zoom = cam.zoom.max(0.001);
-    for shape in &pane.scene.shapes {
-        if let ShapeKind::Text { content, size, .. } = &shape.kind {
-            let fs = (size * zoom).clamp(1.0, 1000.0);
-            let opts = DrawOpts {
-                font_size: fs,
-                ..DrawOpts::default()
-            };
-            let max_px = content
-                .split('\n')
-                .map(|l| sugarloaf.text_mut().measure(l, &opts))
-                .fold(0.0_f32, f32::max);
-            let w_world = (max_px / zoom).max(size * 0.3);
-            let lines = content.split('\n').count().max(1) as f32;
-            let h_world = lines * size * 1.25;
-            dims.insert(shape.id, Vec2::new(w_world, h_world));
-        }
-    }
-    pane.text_dims = dims;
 
     // Canvas background fill.
     sugarloaf.rect(
@@ -139,6 +116,7 @@ pub fn render_pane(
         DEPTH,
         ORDER_SCENE,
         &pane.erasing,
+        Some(&pane.text_layouts),
     );
 
     // In-progress creation preview.
@@ -151,6 +129,7 @@ pub fn render_pane(
             rect,
             DEPTH,
             ORDER_SCENE,
+            None,
         );
     }
 
@@ -176,26 +155,7 @@ pub fn render_pane_overlay(
     pane.last_rect = Some(rect);
     let cam = pane.placed_camera(rect);
 
-    let mut dims = std::collections::HashMap::new();
-    let zoom = cam.zoom.max(0.001);
-    for shape in &pane.scene.shapes {
-        if let ShapeKind::Text { content, size, .. } = &shape.kind {
-            let fs = (size * zoom).clamp(1.0, 1000.0);
-            let opts = DrawOpts {
-                font_size: fs,
-                ..DrawOpts::default()
-            };
-            let max_px = content
-                .split('\n')
-                .map(|l| sugarloaf.text_mut().measure(l, &opts))
-                .fold(0.0_f32, f32::max);
-            let w_world = (max_px / zoom).max(size * 0.3);
-            let lines = content.split('\n').count().max(1) as f32;
-            let h_world = lines * size * 1.25;
-            dims.insert(shape.id, Vec2::new(w_world, h_world));
-        }
-    }
-    pane.text_dims = dims;
+    prepare_text_layouts(sugarloaf, pane);
 
     // No canvas fill — strokes composite over the host surface.
     render_scene_dimmed(
@@ -206,6 +166,7 @@ pub fn render_pane_overlay(
         DEPTH,
         scene_order,
         &pane.erasing,
+        Some(&pane.text_layouts),
     );
     if let Some(preview) = pane.draft_preview() {
         draw_shape(
@@ -216,6 +177,7 @@ pub fn render_pane_overlay(
             rect,
             DEPTH,
             scene_order,
+            None,
         );
     }
     render_marquee(sugarloaf, pane, &cam, rect, theme);
@@ -232,11 +194,11 @@ fn render_marquee(
     clip: [f32; 4],
     theme: &IdeTheme,
 ) {
-    let super::input::DrawGesture::Marquee { start, current } = pane.gesture else {
+    let super::input::DrawGesture::Marquee { start, current, .. } = &pane.gesture else {
         return;
     };
-    let a = cam.world_to_screen(start);
-    let b = cam.world_to_screen(current);
+    let a = cam.world_to_screen(*start);
+    let b = cam.world_to_screen(*current);
     let (x, y) = (a.x.min(b.x), a.y.min(b.y));
     let (w, h) = ((a.x - b.x).abs(), (a.y - b.y).abs());
     if w < 1.0 && h < 1.0 {
@@ -271,6 +233,41 @@ fn render_marquee(
     }
 }
 
+fn measure_text(
+    sugarloaf: &mut Sugarloaf,
+    content: &str,
+    size: f32,
+    width: Option<f32>,
+) -> super::text_layout::TextLayout {
+    let size = super::text_layout::font_size(size);
+    let opts = DrawOpts {
+        font_size: super::text_layout::TEXT_RASTER_SIZE,
+        ..DrawOpts::default()
+    };
+    let factor = size / super::text_layout::TEXT_RASTER_SIZE;
+    super::text_layout::layout_text(content, size, width, |text| {
+        sugarloaf.text_mut().measure(text, &opts) * factor
+    })
+}
+
+fn prepare_text_layouts(sugarloaf: &mut Sugarloaf, pane: &mut DrawPane) {
+    pane.text_layouts.clear();
+    pane.text_dims.clear();
+    for shape in &pane.scene.shapes {
+        if let ShapeKind::Text {
+            content,
+            size,
+            width,
+            ..
+        } = &shape.kind
+        {
+            let layout = measure_text(sugarloaf, content, *size, *width);
+            pane.text_dims.insert(shape.id, layout.bounds);
+            pane.text_layouts.insert(shape.id, layout);
+        }
+    }
+}
+
 /// A caret at the end of the text shape currently being edited, so it's
 /// obvious which text has focus and where typing lands.
 fn render_text_caret(
@@ -286,13 +283,7 @@ fn render_text_caret(
     let Some(shape) = pane.scene.shapes.iter().find(|s| s.id == id) else {
         return;
     };
-    let ShapeKind::Text {
-        x,
-        y,
-        content,
-        size,
-    } = &shape.kind
-    else {
+    let ShapeKind::Text { x, y, .. } = &shape.kind else {
         return;
     };
     // Faint focus box around the text being edited, so it's obvious
@@ -301,32 +292,31 @@ fn render_text_caret(
     let bmin = cam.world_to_screen(b.min);
     let bmax = cam.world_to_screen(b.max);
     let pad = 2.0;
-    sugarloaf.rounded_rect(
-        None,
-        bmin.x - pad,
-        bmin.y - pad,
-        (bmax.x - bmin.x) + 2.0 * pad,
-        (bmax.y - bmin.y) + 2.0 * pad,
-        theme.f32_alpha(theme.accent, 0.10),
-        DEPTH,
-        4.0,
-        ORDER_SCENE + 1,
-    );
-    let font_size = (size * cam.zoom).clamp(1.0, 1000.0);
-    let opts = DrawOpts {
-        font_size,
-        color: theme.u8(theme.fg),
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
+    let left = (bmin.x - pad).max(clip[0]);
+    let top = (bmin.y - pad).max(clip[1]);
+    let right = (bmax.x + pad).min(clip[0] + clip[2]);
+    let bottom = (bmax.y + pad).min(clip[1] + clip[3]);
+    if right > left && bottom > top {
+        sugarloaf.rounded_rect(
+            None,
+            left,
+            top,
+            right - left,
+            bottom - top,
+            theme.f32_alpha(theme.accent, 0.10),
+            DEPTH,
+            4.0,
+            ORDER_SCENE + 1,
+        );
+    }
+    let Some(layout) = pane.text_layouts.get(&id) else {
+        return;
     };
-    // Caret sits after the last line's text.
-    let last_line = content.rsplit('\n').next().unwrap_or("");
-    let line_count = content.matches('\n').count();
-    let advance = sugarloaf.text_mut().measure(last_line, &opts);
     let origin = cam.world_to_screen(Vec2::new(*x, *y));
-    let line_h = font_size * 1.25;
-    let caret_x = origin.x + advance;
-    let caret_y = origin.y + line_count as f32 * line_h;
+    let caret_x = origin.x + layout.rows.last().map_or(0.0, |row| row.advance) * cam.zoom;
+    let caret_y = origin.y
+        + layout.rows.len().saturating_sub(1) as f32 * layout.line_height * cam.zoom;
+    let font_size = layout.font_size * cam.zoom;
     let accent = theme.f32(theme.accent);
     draw_line_clipped(
         sugarloaf,
@@ -537,6 +527,17 @@ fn render_selection(
     clip: [f32; 4],
     theme: &IdeTheme,
 ) {
+    if matches!(pane.gesture, super::input::DrawGesture::Marquee { .. }) {
+        for shape in pane.scene.shapes.iter().filter(|shape| pane.selection.contains(&shape.id)) {
+            let bounds = pane.shape_bounds(shape);
+            let a = cam.world_to_screen(bounds.min);
+            let b = cam.world_to_screen(bounds.max);
+            for (x0, y0, x1, y1) in [(a.x, a.y, b.x, a.y), (b.x, a.y, b.x, b.y), (b.x, b.y, a.x, b.y), (a.x, b.y, a.x, a.y)] {
+                draw_line_clipped(sugarloaf, clip, x0, y0, x1, y1, 1.0, DEPTH, theme.f32(theme.accent));
+            }
+        }
+        return;
+    }
     let Some(bounds) = pane.selection_bounds() else {
         return;
     };
@@ -555,16 +556,10 @@ fn render_selection(
     for (a, b, c, d) in edges {
         draw_line_clipped(sugarloaf, clip, a, b, c, d, 1.0, DEPTH, accent);
     }
-    // Minimal corner handles: small white squares with a thin accent ring.
+    // Draw the same handles hit-testing uses; text exposes width controls.
     let half = HANDLE_HALF_PX;
     let fill = theme.f32(theme.bg);
-    let corners = [
-        Vec2::new(x0, y0),
-        Vec2::new(x1, y0),
-        Vec2::new(x1, y1),
-        Vec2::new(x0, y1),
-    ];
-    for p in corners {
+    for (_, p) in pane.selection_handle_positions(cam) {
         if !point_in_rect(p, clip, half + 2.0) {
             continue;
         }
@@ -621,12 +616,13 @@ pub fn render_scene(
         depth,
         order,
         &HashSet::new(),
+        None,
     );
 }
 
 /// Like [`render_scene`] but shapes in `dimmed` are drawn translucent —
 /// used for the eraser's drag preview before the shapes are removed.
-pub fn render_scene_dimmed(
+fn render_scene_dimmed(
     sugarloaf: &mut Sugarloaf,
     scene: &Scene,
     camera: &Camera,
@@ -634,12 +630,23 @@ pub fn render_scene_dimmed(
     depth: f32,
     order: u8,
     dimmed: &HashSet<ShapeId>,
+    layouts: Option<&std::collections::HashMap<ShapeId, super::text_layout::TextLayout>>,
 ) {
     for shape in &scene.shapes {
+        let text_layout = layouts.and_then(|layouts| layouts.get(&shape.id));
         if dimmed.contains(&shape.id) {
             let mut s = shape.style.clone();
             s.opacity *= 0.25;
-            draw_shape(sugarloaf, &shape.kind, &s, camera, clip, depth, order);
+            draw_shape(
+                sugarloaf,
+                &shape.kind,
+                &s,
+                camera,
+                clip,
+                depth,
+                order,
+                text_layout,
+            );
         } else {
             draw_shape(
                 sugarloaf,
@@ -649,6 +656,7 @@ pub fn render_scene_dimmed(
                 clip,
                 depth,
                 order,
+                text_layout,
             );
         }
     }
@@ -662,6 +670,7 @@ fn draw_shape(
     clip: [f32; 4],
     depth: f32,
     order: u8,
+    text_layout: Option<&super::text_layout::TextLayout>,
 ) {
     match kind {
         ShapeKind::Rect { x, y, w, h, corner } => {
@@ -762,18 +771,37 @@ fn draw_shape(
             y,
             content,
             size,
+            width,
         } => {
-            let p = camera.world_to_screen(Vec2::new(*x, *y));
-            // Cap on-screen font size: huge glyphs blow the text atlas
-            // (they render as a black block) — clamp instead.
-            let font_size = (size * camera.zoom).clamp(1.0, 1000.0);
+            let measured;
+            let layout = if let Some(layout) = text_layout {
+                layout
+            } else {
+                measured = measure_text(sugarloaf, content, *size, *width);
+                &measured
+            };
+            let origin = camera.world_to_screen(Vec2::new(*x, *y));
+            let scale =
+                layout.font_size / super::text_layout::TEXT_RASTER_SIZE * camera.zoom;
             let opts = DrawOpts {
-                font_size,
+                font_size: super::text_layout::TEXT_RASTER_SIZE,
                 color: text_color(style),
                 clip_rect: Some(clip),
                 ..DrawOpts::default()
             };
-            sugarloaf.text_mut().draw(p.x, p.y, content, &opts);
+            for (index, row) in layout.rows.iter().enumerate() {
+                let row_y = origin.y + index as f32 * layout.line_height * camera.zoom;
+                if row_y + layout.line_height * camera.zoom < clip[1]
+                    || row_y > clip[1] + clip[3]
+                    || origin.x + layout.bounds.x * camera.zoom < clip[0]
+                    || origin.x > clip[0] + clip[2]
+                {
+                    continue;
+                }
+                sugarloaf
+                    .text_mut()
+                    .draw_scaled(origin.x, row_y, &row.text, &opts, scale);
+            }
         }
     }
 }

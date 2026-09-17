@@ -73,7 +73,13 @@ impl Screen<'_> {
     /// it in the sketch editor (the ⋮ create menu in the notes sidebar).
     pub(crate) fn create_neoism_drawing_in(&mut self, note_dir: PathBuf) {
         use neoism_ui::panels::notifications::NotificationLevel;
+        use std::io::Write;
 
+        if self.context_manager.current_workspace_is_remote_joined() {
+            self.renderer.notifications.push("Drawing creation currently requires a local folder", NotificationLevel::Warn);
+            self.mark_dirty();
+            return;
+        }
         let mut target = note_dir.join("Drawing.neodraw");
         let mut n = 2;
         while target.exists() {
@@ -87,7 +93,9 @@ impl Screen<'_> {
             }
             // Seed with an empty, valid scene so it opens cleanly.
             let scene = neoism_ui::editor::neodraw::Scene::empty();
-            std::fs::write(&target, scene.to_json())?;
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)?;
+            file.write_all(scene.to_json().as_bytes())?;
+            file.sync_all()?;
             Ok(())
         })();
         match result {

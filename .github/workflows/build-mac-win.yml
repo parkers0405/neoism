@@ -181,7 +181,8 @@ jobs:
               [0-9]*.[0-9]*) ;; # tag push: vX.Y.Z
               *) VERSION="$(cargo pkgid -p neoism | sed 's/.*[@#]//')" ;; # dispatch/dry run
             esac
-            sed "s/{{VERSION}}/$VERSION/g" misc/macos/Info.plist > "$APP/Contents/Info.plist"
+            BUNDLE_VERSION="${VERSION%%[-+]*}"
+            sed -e "s/{{VERSION}}/$BUNDLE_VERSION/g" -e "s/{{RELEASE_VERSION}}/$VERSION/g" misc/macos/Info.plist > "$APP/Contents/Info.plist"
             codesign --force --deep -s - "$APP" # ad-hoc; real signing needs an Apple Dev account
           fi
           tar -C stage -czf "$OUT.tar.gz" "$OUT"

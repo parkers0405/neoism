@@ -216,6 +216,9 @@ pub enum ShapeKind {
         y: f32,
         content: String,
         size: f32,
+        /// None keeps legacy auto-sized labels; resizing sets a world-space wrap width.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<f32>,
     },
 }
 
@@ -272,6 +275,21 @@ impl Scene {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_text_loads_and_resized_width_round_trips() {
+        let source = r#"{"version":1,"shapes":[{"id":1,"type":"text","x":10,"y":20,"content":"old drawing","size":28}]}"#;
+        let mut scene = super::Scene::from_json(source).unwrap();
+        match &mut scene.shapes[0].kind {
+            super::ShapeKind::Text { width, .. } => {
+                assert_eq!(*width, None);
+                *width = Some(160.0);
+            }
+            _ => panic!(),
+        }
+        let loaded = super::Scene::from_json(&scene.to_json()).unwrap();
+        assert_eq!(loaded, scene);
+    }
+
     use super::*;
 
     #[test]
@@ -314,6 +332,7 @@ mod tests {
                 Shape {
                     id: ShapeId(3),
                     kind: ShapeKind::Text {
+                        width: None,
                         x: 5.0,
                         y: 5.0,
                         content: "Ambiguity".into(),

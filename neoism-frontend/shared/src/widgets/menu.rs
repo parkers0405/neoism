@@ -93,7 +93,9 @@ impl<A> Menu<A> {
     }
 
     pub fn set_max_visible(&mut self, max: usize) {
-        self.max_visible = max.max(1);
+        let max = max.max(1);
+        if self.max_visible == max { return; }
+        self.max_visible = max;
         self.ensure_selection_visible();
     }
 
@@ -164,6 +166,13 @@ impl<A> Menu<A> {
                 return;
             }
         }
+    }
+
+    pub fn set_hovered_index(&mut self, index: usize) -> bool {
+        if self.items.get(index).is_some_and(|item| item.enabled) {
+            self.selected = index;
+            true
+        } else { false }
     }
 
     pub fn set_selected_index(&mut self, idx: usize) -> bool {
@@ -259,7 +268,16 @@ impl<A> Menu<A> {
                 .saturating_add(rows as usize)
                 .min(max_offset)
         };
-        self.ensure_selection_visible();
+        let end = (self.scroll_offset + visible).min(self.items.len());
+        if self.selected < self.scroll_offset || self.selected >= end {
+            let rows = &self.items[self.scroll_offset..end];
+            let candidate = if self.selected < self.scroll_offset {
+                rows.iter().position(|item| item.enabled)
+            } else {
+                rows.iter().rposition(|item| item.enabled)
+            };
+            self.selected = self.scroll_offset + candidate.unwrap_or(0);
+        }
     }
 
     /// Iterate the slice of items currently in view (post-scroll).

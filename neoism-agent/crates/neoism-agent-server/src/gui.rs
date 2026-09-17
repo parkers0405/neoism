@@ -37,7 +37,7 @@ impl GuiRoot {
         anyhow::bail!("GUI dist not found. Reinstall a complete Neoism release and restart the agent supervisor. For source builds, build neoism-agent/sdk/typescript/packages/gui, or set NEOISM_AGENT_GUI_ROOT to its dist directory (containing index.html). Searched: {}", candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "))
     }
 
-    fn installed_candidates(bin: &Path) -> Vec<PathBuf> {
+    pub fn installed_candidates(bin: &Path) -> Vec<PathBuf> {
         // Keep the GUI inside the existing recursively installed/updated web
         // resource tree, including updates performed by older executables.
         [
@@ -140,6 +140,12 @@ async fn serve_gui(
     if request.uri().path() == "/__neoism/gui/launch" || request.uri().path().starts_with("/__neoism/gui/launch/") {
         return match &root.1 { Some(local) => local.launch(request), None => StatusCode::NOT_FOUND.into_response() };
     }
+    if request.uri().path() == crate::local_gui::SHARE_TARGET_PATH {
+        return match &root.1 {
+            Some(local) => local.share_target(&request),
+            None => StatusCode::NOT_FOUND.into_response(),
+        };
+    }
     if request.uri().path() == crate::local_gui::REGISTRY_PATH {
         return match &root.1 {
             Some(local) => local.registry(request).await,
@@ -183,11 +189,28 @@ async fn serve_gui(
     let Ok(bytes) = tokio::fs::read(file).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let len = bytes.len();
+    let mut body = bytes;
+    if mime.starts_with("text/html") {
+        if let Some(port) = std::env::var("NEOISM_DAEMON_TCP_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+        {
+            if let Ok(html) = std::str::from_utf8(&body) {
+                let origin = format!("http://127.0.0.1:{port}");
+                let script = format!(
+                    "<head><script>window.__NEOISM_DAEMON_HTTP__={};</script>",
+                    serde_json::to_string(&origin).unwrap_or_else(|_| "\"\"".into())
+                );
+                body = html.replacen("<head>", &script, 1).into_bytes();
+            }
+        }
+    }
+    let len = body.len();
     let mut response = if request.method() == Method::HEAD {
         Body::empty()
     } else {
-        Body::from(bytes)
+        Body::from(body)
     }
     .into_response();
     response
@@ -211,6 +234,11 @@ async fn serve_gui(
     if mime.starts_with("text/html") {
         response.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
         if let Some(cookie) = navigation_cookie { response.headers_mut().insert(header::SET_COOKIE, cookie.parse().unwrap()); }
+        if let Some(port) = std::env::var("NEOISM_DAEMON_TCP_PORT").ok().and_then(|value| value.parse::<u16>().ok()).filter(|port| *port != 0) {
+            if let Ok(value) = format!("http://127.0.0.1:{port}").parse() {
+                response.headers_mut().insert("x-neoism-daemon-http", value);
+            }
+        }
     }
     response
 }

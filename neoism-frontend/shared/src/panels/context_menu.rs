@@ -1,7 +1,7 @@
 //! Right-click context menu. Thin shell around `Popover<Menu<...>>` —
 //! the popover owns visibility + dismissal, the menu owns selection and
 //! scrolling. This file is only responsible for visuals (rounded body,
-//! accent strip, row layout) and for translating call-sites' API
+//! border, row layout) and for translating call-sites' API
 //! (`open(title, items, x, y, ...)`, `hover()`, `hit_test()`, etc.).
 //!
 //! Lifted verbatim from
@@ -28,6 +28,8 @@ use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::MarkdownBlockTemplate;
 
+use crate::animation::CriticallyDampedSpring;
+use web_time::Instant;
 use crate::primitives::IdeTheme;
 // TODO(wave6-cutover): pending widget lift — see module docstring.
 use super::command_palette::PaletteAction;
@@ -79,6 +81,7 @@ pub enum ContextMenuAction {
     Workspace(WorkspaceContextAction),
     Notebook(NotebookContextAction),
     Epub(EpubContextAction),
+    MarkdownTable(crate::editor::markdown::MarkdownTableAction),
     MarkdownBlock(MarkdownBlockTemplate),
     MarkdownLinkCompletion(String),
     MarkdownSpellingReplace {
@@ -261,6 +264,8 @@ pub struct ContextMenu {
     query: String,
     mode: ContextMenuMode,
     wheel_accumulator: f32,
+    scroll: CriticallyDampedSpring,
+    last_scroll_frame: Instant,
     x: f32,
     y: f32,
     scale: f32,
@@ -271,6 +276,7 @@ pub struct ContextMenu {
     /// menu glued to the row — bottom-anchored when flipped — instead of
     /// drifting away as it shrinks.
     row_anchor: Option<(f32, f32, bool)>,
+    viewport: Option<[f32; 4]>,
 }
 
 impl ContextMenu {
@@ -284,12 +290,15 @@ impl ContextMenu {
             query: String::new(),
             mode: ContextMenuMode::Generic,
             wheel_accumulator: 0.0,
+            scroll: CriticallyDampedSpring::new(),
+            last_scroll_frame: Instant::now(),
             x: 0.0,
             y: 0.0,
             scale: 1.0,
             last_rect: [0.0; 4],
             selected_cursor_rect: None,
             row_anchor: None,
+            viewport: None,
         }
     }
 
@@ -344,12 +353,15 @@ impl ContextMenu {
         self.title = title.into();
         self.mode = ContextMenuMode::Generic;
         self.row_anchor = None;
+        self.viewport = None;
         self.query.clear();
         self.source_items = items;
-        let empty = self.rebuild_menu_items(false);
+        let empty = self.rebuild_menu_items();
         self.update_visible_limit(window_height);
         self.fit_visible_limit(window_height);
         self.wheel_accumulator = 0.0;
+        self.scroll = CriticallyDampedSpring::new();
+        self.last_scroll_frame = Instant::now();
         self.selected_cursor_rect = None;
 
         let (w, h) = self.dimensions();
@@ -373,6 +385,62 @@ impl ContextMenu {
             // menu as latency.
             self.popover.open_instant();
         }
+    }
+
+    pub fn set_viewport(&mut self, viewport: [f32; 4]) {
+        self.viewport = Some(viewport);
+        if self.is_visible() { self.layout_in_bounds(viewport); }
+    }
+
+    fn layout_in_bounds(&mut self, bounds: [f32; 4]) {
+        let [left, top, width, height] = bounds;
+        let min_x = left + MENU_MARGIN;
+        let min_y = top + MENU_MARGIN;
+        let bottom = top + height - MENU_MARGIN;
+        let shell = MENU_PADDING * 2.0 * self.scale + self.header_height() + self.swatch_height();
+        let minimum = shell + ITEM_HEIGHT * self.scale;
+        let mut available = (height - MENU_MARGIN * 2.0).max(0.0);
+        let mut anchor_y = None;
+        if let Some((row_top, row_bottom, preferred_above)) = self.row_anchor {
+            let above_space = (row_top - 6.0 - min_y).max(0.0);
+            let below_space = (bottom - row_bottom - 6.0).max(0.0);
+            let above = if preferred_above && above_space >= minimum {
+                true
+            } else {
+                below_space < self.dimensions().1 && above_space > below_space
+            };
+            available = if above { above_space } else { below_space }.min(available);
+            anchor_y = Some((row_top, row_bottom, above));
+        }
+        if available < minimum || width < MENU_PADDING * 2.0 * self.scale + MENU_MARGIN * 2.0 {
+            self.close();
+            return;
+        }
+        self.update_visible_limit(available + MENU_MARGIN * 2.0);
+        self.fit_visible_limit(available + MENU_MARGIN * 2.0);
+        let (desired_w, h) = self.dimensions();
+        let w = desired_w.min(width - MENU_MARGIN * 2.0);
+        self.x = self.x.clamp(min_x, (left + width - MENU_MARGIN - w).max(min_x));
+        if let Some((row_top, row_bottom, above)) = anchor_y {
+            self.row_anchor = Some((row_top, row_bottom, above));
+            self.y = if above { row_top - 6.0 - h } else { row_bottom + 6.0 };
+        }
+        self.y = self.y.clamp(min_y, (bottom - h).max(min_y));
+        self.last_rect = [self.x, self.y, w, h];
+        self.popover.set_anchor(PopoverAnchor::Point([self.x, self.y]));
+    }
+
+    pub fn is_table_column_menu(&self) -> bool {
+        self.is_visible() && self.source_items.first().is_some_and(|item| matches!(item.action, ContextMenuAction::MarkdownTable(_)))
+    }
+
+    pub fn open_table_column(&mut self, start_line: usize, col_ix: usize, count: usize, x: f32, y: f32, window_w: f32, window_h: f32) {
+        use crate::editor::markdown::MarkdownTableAction as Action;
+        self.open(format!("Column {}", col_ix + 1), vec![
+            ContextMenuItem::new("Insert column before", "", ContextMenuAction::MarkdownTable(Action::AddColumn { start_line, col_ix })),
+            ContextMenuItem::new("Insert column after", "", ContextMenuAction::MarkdownTable(Action::AddColumn { start_line, col_ix: col_ix + 1 })),
+            ContextMenuItem::new(if count == 1 { "Delete table" } else { "Delete column" }, "", ContextMenuAction::MarkdownTable(Action::DeleteColumn { start_line, col_ix })),
+        ], x, y, window_w, window_h);
     }
 
     pub fn open_notebook_kernel(
@@ -433,6 +501,7 @@ impl ContextMenu {
     /// the row (a shrinking top-anchored flipped menu drifted upward, away
     /// from the line being typed).
     fn reapply_row_anchor(&mut self) {
+        if let Some(viewport) = self.viewport { self.layout_in_bounds(viewport); return; }
         let Some((row_top, row_bottom, above)) = self.row_anchor else {
             return;
         };
@@ -461,13 +530,15 @@ impl ContextMenu {
         self.title = title.into();
         self.mode = ContextMenuMode::MarkdownBlock;
         self.row_anchor = None;
+        self.viewport = None;
         self.query = query.into();
         self.source_items = items;
-        let source_empty = self.source_items.is_empty();
-        self.rebuild_menu_items(true);
+        let source_empty = self.rebuild_menu_items();
         self.update_visible_limit(window_height);
         self.fit_visible_limit(window_height);
         self.wheel_accumulator = 0.0;
+        self.scroll = CriticallyDampedSpring::new();
+        self.last_scroll_frame = Instant::now();
         self.selected_cursor_rect = None;
 
         let (w, h) = self.dimensions();
@@ -499,7 +570,7 @@ impl ContextMenu {
             return false;
         }
         self.query = query;
-        self.rebuild_menu_items(true);
+        if self.rebuild_menu_items() { self.close(); return true; }
         self.reapply_row_anchor();
         true
     }
@@ -514,9 +585,12 @@ impl ContextMenu {
         self.query.clear();
         self.mode = ContextMenuMode::Generic;
         self.wheel_accumulator = 0.0;
+        self.scroll = CriticallyDampedSpring::new();
+        self.last_scroll_frame = Instant::now();
         self.last_rect = [0.0; 4];
         self.selected_cursor_rect = None;
         self.row_anchor = None;
+        self.viewport = None;
         self.popover
             .content_mut()
             .set_max_visible(MAX_VISIBLE_ITEMS);
@@ -526,8 +600,29 @@ impl ContextMenu {
         self.popover.content().selected_action().cloned()
     }
 
+    fn push_scroll_lag(&mut self, old: usize) {
+        let next = self.popover.content().scroll_offset();
+        if old != next {
+            if self.scroll.position == 0.0 { self.last_scroll_frame = Instant::now(); }
+            self.scroll.position += (next as f32 - old as f32) * ITEM_HEIGHT * self.scale;
+        }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.is_visible() && self.scroll.position != 0.0
+    }
+
+    fn tick_scroll(&mut self) {
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(self.last_scroll_frame).as_secs_f32().min(0.05);
+        self.last_scroll_frame = now;
+        self.scroll.update(dt, 0.30);
+    }
+
     pub fn move_selection(&mut self, delta: i32) {
+        let old = self.popover.content().scroll_offset();
         self.popover.content_mut().move_selection(delta);
+        self.push_scroll_lag(old);
     }
 
     pub fn select_shortcut(&mut self, ch: char) -> Option<ContextMenuAction> {
@@ -547,7 +642,7 @@ impl ContextMenu {
                 let already_selected = index == menu.selected_index();
                 let enabled = menu.items().get(index).is_some_and(|it| it.enabled);
                 if enabled && !already_selected {
-                    self.popover.content_mut().set_selected_index(index);
+                    self.popover.content_mut().set_hovered_index(index);
                     return true;
                 }
                 false
@@ -591,24 +686,27 @@ impl ContextMenu {
         if mouse_y < rows_y {
             return Ok(None);
         }
-        let row = ((mouse_y - rows_y) / row_h).floor() as usize;
         let menu = self.popover.content();
         let list_visible = menu.visible_count().saturating_sub(swatches);
-        let index = swatches + menu.scroll_offset() + row;
-        if row < list_visible && index < menu.len() {
-            Ok(Some(index))
+        if mouse_y >= rows_y + list_visible as f32 * row_h { return Ok(None); }
+        let row = ((mouse_y - rows_y - self.scroll.position) / row_h).floor() as isize;
+        let index = swatches as isize + menu.scroll_offset() as isize + row;
+        if index >= swatches as isize && (index as usize) < menu.len() {
+            Ok(Some(index as usize))
         } else {
             Ok(None)
         }
     }
 
     pub fn scroll_pixels(&mut self, delta_pixels: f32) {
+        let old = self.popover.content().scroll_offset();
         let row_h = (ITEM_HEIGHT * self.scale).max(1.0);
         let mut acc = self.wheel_accumulator;
         self.popover
             .content_mut()
             .scroll_pixels(delta_pixels, row_h, &mut acc);
         self.wheel_accumulator = acc;
+        self.push_scroll_lag(old);
     }
 
     pub fn render(
@@ -624,38 +722,22 @@ impl ContextMenu {
         let s = self.scale;
         let window_w = dimensions.0 / scale_factor;
         let window_h = dimensions.1 / scale_factor;
-        self.update_visible_limit(window_h);
-        self.fit_visible_limit(window_h);
-        let (desired_w, h) = self.dimensions();
-        let w = desired_w.min((window_w - MENU_MARGIN * 2.0).max(1.0));
-        self.x = self
-            .x
-            .clamp(MENU_MARGIN, (window_w - w - MENU_MARGIN).max(MENU_MARGIN));
-        self.y = self
-            .y
-            .clamp(MENU_MARGIN, (window_h - h - MENU_MARGIN).max(MENU_MARGIN));
-        self.last_rect = [self.x, self.y, w, h];
+        let bounds = self.viewport.unwrap_or([0.0, 0.0, window_w, window_h]);
+        let left = bounds[0].max(0.0);
+        let top = bounds[1].max(0.0);
+        self.layout_in_bounds([left, top, (bounds[0] + bounds[2]).min(window_w) - left, (bounds[1] + bounds[3]).min(window_h) - top]);
+        if !self.is_visible() { return; }
+        let [_, _, w, h] = self.last_rect;
 
         sugarloaf.rounded_rect(
-            None,
-            self.x,
-            self.y,
-            w,
-            h,
-            theme.f32(theme.panel_bg()),
-            DEPTH_BG,
-            MENU_RADIUS * s,
-            ORDER,
+            None, self.x, self.y, w, h,
+            theme.f32(theme.border), DEPTH_BG, MENU_RADIUS * s, ORDER,
         );
-        sugarloaf.rect(
-            None,
-            self.x,
-            self.y,
-            3.0 * s,
-            h,
-            theme.f32(theme.accent),
-            DEPTH_ELEMENT,
-            ORDER + 1,
+        let border = s.max(1.0);
+        sugarloaf.rounded_rect(
+            None, self.x + border, self.y + border, w - border * 2.0, h - border * 2.0,
+            theme.f32(theme.panel_bg()), DEPTH_ELEMENT,
+            (MENU_RADIUS * s - border).max(0.0), ORDER + 1,
         );
 
         let pad = MENU_PADDING * s;
@@ -737,6 +819,7 @@ impl ContextMenu {
             y += SWATCH_ROW_HEIGHT * s;
         }
 
+        self.tick_scroll();
         let row_h = ITEM_HEIGHT * s;
         let menu = self.popover.content();
         let visible_count = menu.visible_count().saturating_sub(swatches);
@@ -765,12 +848,14 @@ impl ContextMenu {
             ..DrawOpts::default()
         };
 
-        for (display_index, (index, item)) in menu
-            .visible_items()
-            .filter(|(index, _)| *index >= swatches)
-            .enumerate()
-        {
-            let row_y = y + display_index as f32 * row_h;
+        let visual_top = scroll_offset as f32 - self.scroll.position / row_h;
+        let first = visual_top.floor().max(0.0) as usize + swatches;
+        let last = ((visual_top + visible_count as f32).ceil().max(0.0) as usize + swatches).min(items_len);
+        for (index, item) in menu.items().iter().enumerate().take(last).skip(first) {
+            let row_y = y + (index as f32 - swatches as f32 - visual_top) * row_h;
+            let visible_y = row_y.max(list_clip[1]);
+            let visible_bottom = (row_y + row_h).min(list_clip[1] + list_clip[3]);
+            if visible_bottom <= visible_y { continue; }
             let selected = index == selected_index && item.enabled;
             let hint = self.hints.get(index).map(String::as_str).unwrap_or("");
             let preview = self.previews.get(index).map(String::as_str).unwrap_or("");
@@ -780,9 +865,9 @@ impl ContextMenu {
                 sugarloaf.rounded_rect(
                     None,
                     inner_x,
-                    row_y,
+                    visible_y,
                     inner_w,
-                    row_h,
+                    visible_bottom - visible_y,
                     theme.f32(theme.hover),
                     DEPTH_ELEMENT,
                     4.0 * s,
@@ -792,8 +877,11 @@ impl ContextMenu {
                 let cursor_h = (row_h - 8.0 * s).max(ITEM_FONT_SIZE * s).min(row_h);
                 let cursor_x = (label_x - cursor_w - 4.0 * s).max(inner_x);
                 let cursor_y = row_y + (row_h - cursor_h) * 0.5;
-                next_selected_cursor_rect =
-                    Some([cursor_x, cursor_y, cursor_w, cursor_h]);
+                let cursor_top = cursor_y.max(list_clip[1]);
+                let cursor_bottom = (cursor_y + cursor_h).min(list_clip[1] + list_clip[3]);
+                if cursor_bottom > cursor_top {
+                    next_selected_cursor_rect = Some([cursor_x, cursor_top, cursor_w, cursor_bottom - cursor_top]);
+                }
             }
 
             let hint_w = if hint.is_empty() {
@@ -854,7 +942,7 @@ impl ContextMenu {
             let normalized = if max_offset == 0 {
                 0.0
             } else {
-                scroll_offset as f32 / max_offset as f32
+                (visual_top / max_offset as f32).clamp(0.0, 1.0)
             };
             if let Some((thumb_y, thumb_h)) = scrollbar::compute_thumb(
                 visible_count,
@@ -924,8 +1012,10 @@ impl ContextMenu {
         }
     }
 
-    fn rebuild_menu_items(&mut self, keep_empty_markdown_block_open: bool) -> bool {
-        let mut items = match self.mode {
+    fn rebuild_menu_items(&mut self) -> bool {
+        self.scroll = CriticallyDampedSpring::new();
+        self.last_scroll_frame = Instant::now();
+        let items = match self.mode {
             ContextMenuMode::Generic | ContextMenuMode::NotebookKernel => {
                 self.source_items.clone()
             }
@@ -934,23 +1024,6 @@ impl ContextMenu {
             }
         };
         let empty = items.is_empty();
-        if empty && keep_empty_markdown_block_open {
-            if let Some(fallback) = self.source_items.first().cloned() {
-                let label = if self.query.trim().is_empty() {
-                    "No blocks".to_string()
-                } else {
-                    format!("No matches for /{}", self.query.trim())
-                };
-                items.push(ContextMenuItem {
-                    label,
-                    hint: String::new(),
-                    preview: String::new(),
-                    action: fallback.action,
-                    enabled: false,
-                    swatch: None,
-                });
-            }
-        }
 
         self.hints = items.iter().map(|i| i.hint.clone()).collect();
         self.previews = items.iter().map(|i| i.preview.clone()).collect();
@@ -1055,6 +1128,67 @@ fn filtered_markdown_block_items(
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
     scored.into_iter().map(|(_, _, item)| item).collect()
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    fn items() -> Vec<ContextMenuItem> {
+        crate::editor::markdown::menus::markdown_block_menu_entries().iter().map(|entry| {
+            ContextMenuItem::new(entry.label, entry.hint, ContextMenuAction::MarkdownBlock(entry.template)).with_preview(entry.preview)
+        }).collect()
+    }
+
+    #[test]
+    fn unmatched_slash_query_dismisses_instead_of_trapping_typing() {
+        let mut menu = ContextMenu::new();
+        menu.open_markdown_block("Add block", items(), "", 100.0, 150.0, 800.0, 800.0);
+        assert!(menu.is_visible());
+        assert!(menu.set_markdown_block_query("h1"));
+        assert_eq!(menu.popover.content().len(), 1);
+        assert!(menu.set_markdown_block_query("tmp/ordinary-path"));
+        assert!(!menu.is_visible());
+    }
+
+    #[test]
+    fn completion_stays_inside_editor_and_away_from_its_text_row() {
+        for (row_top, row_bottom) in [(110.0, 130.0), (250.0, 270.0)] {
+            let mut menu = ContextMenu::new();
+            menu.open_markdown_block("Add block", items(), "", 25.0, row_bottom + 6.0, 800.0, 800.0);
+            menu.set_viewport([20.0, 100.0, 320.0, 180.0]);
+            menu.avoid_row(row_top, row_bottom);
+            let [x, y, w, h] = menu.rect().expect("some rows should fit");
+            assert!(x >= 20.0 && x + w <= 340.0);
+            assert!(y >= 100.0 && y + h <= 280.0);
+            assert!(y >= row_bottom + 6.0 || y + h <= row_top - 6.0);
+            menu.set_markdown_block_query("h1");
+            let [_, y, _, h] = menu.rect().unwrap();
+            assert!(y >= 100.0 && y + h <= 280.0);
+        }
+    }
+
+    #[test]
+    fn wheel_scroll_is_not_undone_by_the_next_layout() {
+        let mut menu = ContextMenu::new();
+        menu.open_markdown_block("Add block", items(), "", 20.0, 100.0, 800.0, 800.0);
+        menu.set_viewport([0.0, 80.0, 800.0, 600.0]);
+        menu.scroll_pixels(-120.0);
+        let offset = menu.popover.content().scroll_offset();
+        assert!(offset > 0);
+        assert!(menu.is_animating());
+        assert!((menu.scroll.position - offset as f32 * ITEM_HEIGHT).abs() < 0.01);
+        let rect = menu.rect().unwrap();
+        let first_row_y = rect[1] + MENU_PADDING + menu.header_height() + ITEM_HEIGHT * 0.5;
+        assert_eq!(menu.hit_test(rect[0] + 20.0, first_row_y), Ok(Some(0)));
+        menu.scroll.update(1.0, 0.30);
+        for _ in 0..100 { menu.scroll.update(0.05, 0.30); }
+        assert!(!menu.is_animating());
+        assert_eq!(menu.hit_test(rect[0] + 20.0, first_row_y), Ok(Some(offset)));
+        menu.layout_in_bounds([0.0, 80.0, 800.0, 600.0]);
+        assert_eq!(menu.popover.content().scroll_offset(), offset);
+        assert!(menu.popover.content().selected_index() >= offset);
+    }
 }
 
 fn truncate_to_fit(

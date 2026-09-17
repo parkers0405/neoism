@@ -3365,7 +3365,18 @@ fn authoritative_schemas() -> Value {
         "HealthResponse": { "type": "object", "additionalProperties": false, "required": ["healthy", "version", "providerCredentialStore"], "properties": {
             "healthy": { "type": "boolean", "const": true }, "version": { "type": "string" }, "executablePath": { "type": "string" }, "providerCredentialStore": { "type": "string" }
         }},
-        "ConfigDocument": { "type": "object", "additionalProperties": true, "description": "Canonical agent configuration; extension/plugin keys are preserved." },
+        "CompactionConfig": {
+            "type": "object",
+            "description": "Automatic compaction policy. Also accepted on provider models and agent profiles; agent fields override model fields, then global fields.",
+            "properties": {
+                "auto": { "type": "boolean", "default": true, "description": "Enable proactive compaction and bounded context-overflow recovery. Manual compaction remains available when false." },
+                "prune": { "type": "boolean", "default": true, "description": "Prune older tool output independently of automatic summarization." },
+                "threshold-percent": { "type": "number", "minimum": 1, "maximum": 100, "default": 65 },
+                "buffer": { "type": "integer", "minimum": 0, "default": 20000 },
+                "keep": { "type": "object", "properties": { "tokens": { "type": "integer", "minimum": 0, "default": 8000 } } }
+            }
+        },
+        "ConfigDocument": { "type": "object", "additionalProperties": true, "description": "Canonical agent configuration; extension/plugin keys are preserved.", "properties": { "compaction": r("CompactionConfig") } },
         "ConfigDefaults": {
             "type": "object",
             "additionalProperties": false,

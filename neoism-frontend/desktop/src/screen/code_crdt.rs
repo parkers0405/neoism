@@ -95,6 +95,59 @@ impl Screen<'_> {
         (std::mem::take(&mut state.outbound), pane_changed)
     }
 
+    /// After a same-runner reconnect, flush local pane edits into the
+    /// replica and ship a full Yrs update (idempotent) so in-flight
+    /// ApplySync lost on the old socket is not dropped. Then request a
+    /// snapshot against the replica SV.
+    pub fn request_code_crdt_resync(&mut self) {
+        if !self.context_manager.daemon_client_attached() {
+            return;
+        }
+        let owned_grids = (0..self.context_manager.len())
+            .filter(|index| self.context_manager.grid_uses_attached_daemon(*index))
+            .collect::<Vec<_>>();
+        let mut buffer_ids = Vec::new();
+        for index in owned_grids {
+            let grid = &mut self.context_manager.contexts_mut()[index];
+            for item in grid.contexts_mut().values_mut() {
+                let Some(code) = item.context_mut().code.as_mut() else {
+                    continue;
+                };
+                if code.workspace_sync_ready() {
+                    buffer_ids.push(buffer_id_for_markdown_path(&code.path));
+                }
+            }
+        }
+        for buffer_id in buffer_ids {
+            let Some(code) = find_code_pane_mut(&mut self.context_manager, &buffer_id)
+            else {
+                continue;
+            };
+            let Some(binding) = self.code_crdt.bindings.get_mut(&buffer_id) else {
+                continue;
+            };
+            if !binding.is_seeded() {
+                continue;
+            }
+            if let Some(update) = binding.flush_local(&code.buffer) {
+                self.code_crdt
+                    .outbound
+                    .push(make_apply_sync(&buffer_id, update));
+            }
+            let full = binding.encode_full_update_v1();
+            let sv = binding.state_vector_v1();
+            self.code_crdt
+                .outbound
+                .push(make_apply_sync(&buffer_id, full));
+            self.code_crdt
+                .outbound
+                .push(CrdtClientMessage::RequestSnapshot {
+                    buffer_id,
+                    state_vector_v1: sv,
+                });
+        }
+    }
+
     /// Daemon-owned save for the CURRENT code pane. Returns false when
     /// the pane isn't doc-bound yet (caller falls back to the local
     /// write path).
@@ -157,6 +210,12 @@ impl Screen<'_> {
             CrdtServerMessage::Saved { buffer_id, .. } => {
                 self.apply_code_crdt_saved(buffer_id)
             }
+            CrdtServerMessage::Error {
+                buffer_id: Some(buffer_id),
+                message,
+            } if message.contains("unknown CRDT buffer") => {
+                self.reopen_code_crdt_without_clobber(buffer_id)
+            }
             _ => false,
         }
     }
@@ -210,6 +269,27 @@ impl Screen<'_> {
                 }
             }
         }
+    }
+
+    fn reopen_code_crdt_without_clobber(&mut self, buffer_id: &str) -> bool {
+        let Some(code) = find_code_pane_mut(&mut self.context_manager, buffer_id) else {
+            return false;
+        };
+        if !code.workspace_sync_ready() {
+            return false;
+        }
+        let Some(binding) = self.code_crdt.bindings.get(buffer_id) else {
+            return false;
+        };
+        if !binding.is_seeded() {
+            return false;
+        }
+        let initial_text = binding.doc_text();
+        self.code_crdt.outbound.push(CrdtClientMessage::OpenBuffer {
+            buffer_id: buffer_id.to_string(),
+            initial_text,
+        });
+        true
     }
 
     fn apply_code_crdt_sync(

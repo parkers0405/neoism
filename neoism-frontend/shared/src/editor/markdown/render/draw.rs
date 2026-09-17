@@ -463,35 +463,6 @@ pub(super) fn draw_list_guides(
     );
 }
 
-pub(super) fn cursor_position_for_prefix(
-    sugarloaf: &mut Sugarloaf,
-    x: f32,
-    y: f32,
-    line_h: f32,
-    wrap_width: f32,
-    opts: &DrawOpts,
-    prefix: &str,
-) -> (f32, f32) {
-    if prefix.is_empty() {
-        return (x, y);
-    }
-    let wrapped = wrap_lines(sugarloaf, prefix, wrap_width, opts);
-    let mut visual_line = wrapped.len().saturating_sub(1);
-    let current = wrapped.last().map(String::as_str).unwrap_or("");
-    let trailing_space = prefix.ends_with(char::is_whitespace);
-    let mut width = sugarloaf.text_mut().measure(current, opts);
-    if trailing_space {
-        let space_w = sugarloaf.text_mut().measure(" ", opts);
-        if !current.is_empty() && width + space_w > wrap_width.max(space_w) {
-            visual_line += 1;
-            width = space_w;
-        } else {
-            width += space_w;
-        }
-    }
-    (x + width, y + visual_line as f32 * line_h)
-}
-
 pub(super) fn cursor_position_for_text_prefix(
     sugarloaf: &mut Sugarloaf,
     x: f32,

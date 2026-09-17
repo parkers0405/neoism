@@ -32,6 +32,9 @@ pub enum Permission {
     PtyCreate,
     /// Manage other devices (list, revoke, issue new pairing codes).
     DeviceManage,
+    /// Use Agent (chat/tools) inside a device-bound workspace. Not a
+    /// daemon-wide file grant and not device administration.
+    AgentUse,
 }
 
 /// Response to a request for a new short-lived pairing code.

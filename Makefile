@@ -83,7 +83,7 @@ $(APP_NAME)-%: $(TARGET)-%
 	@mkdir -p $(APP_EXTRAS_DIR)
 	@rm -rf "$(TARGET_DIR_OSX)/$(APP_NAME)"
 	@mkdir -p $(APP_BINARY_DIR) $(APP_EXTRAS_DIR)
-	@sed 's/{{VERSION}}/$(APP_VERSION)/g' $(APP_PLIST) > "$(TARGET_DIR_OSX)/$(APP_NAME)/Contents/Info.plist"
+	@sed -e 's/{{VERSION}}/$(firstword $(subst -, ,$(subst +, ,$(APP_VERSION))))/g' -e 's/{{RELEASE_VERSION}}/$(APP_VERSION)/g' $(APP_PLIST) > "$(TARGET_DIR_OSX)/$(APP_NAME)/Contents/Info.plist"
 	@cp -fp $(APP_ICNS) $(APP_EXTRAS_DIR)/
 	@cp -fp $(APP_BINARY) $(APP_BINARY_DIR)
 	@touch -r "$(APP_BINARY)" "$(TARGET_DIR_OSX)/$(APP_NAME)"

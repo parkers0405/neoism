@@ -1,9 +1,29 @@
 use super::*;
+
+#[test]
+fn live_baseline_replaces_cached_text_before_following_deltas() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages
+        .push(NeoismAgentMessage::assistant("prefix old attempt").with_id("p"));
+    pane.upsert_part_message(NeoismAgentMessage::assistant("prefix ").with_id("p"));
+    pane.apply_part_delta(None, Some("p".into()), Some("text".into()), "new");
+    assert_eq!(pane.messages[0].text, "prefix new");
+    pane.upsert_part_message(NeoismAgentMessage::assistant("").with_id("p"));
+    pane.apply_part_delta(None, Some("p".into()), Some("text".into()), "retry");
+    assert_eq!(pane.messages[0].text, "retry");
+    let mut cached = vec![NeoismAgentMessage::assistant("old").with_id("p")];
+    session_cache::upsert_cached_part_message(
+        &mut cached,
+        NeoismAgentMessage::assistant("").with_id("p"),
+    );
+    session_cache::apply_cached_part_delta(&mut cached, Some("p"), Some("text"), "fresh");
+    assert_eq!(cached[0].text, "fresh");
+}
 use crate::panels::agent_pane::outbound::OutboundAgentCommand;
+use crate::panels::agent_pane::state::side_panel::STATUS_LABEL_GRACE;
 use crate::panels::agent_pane::state::side_panel::{
     NeoismAgentSemanticMatch, NeoismAgentSessionEntry, SidePanelMode,
 };
-use crate::panels::agent_pane::state::side_panel::STATUS_LABEL_GRACE;
 
 #[test]
 fn ordered_live_parts_promote_neutral_busy_state_by_semantic_evidence() {
@@ -3078,7 +3098,10 @@ fn background_authority_survives_completion_and_delayed_launch_parts() {
     .with_id("old-launch");
     pane.upsert_part_message(stale.clone());
     pane.apply_running_background_tasks("server-a", 10, &[("latest-check".into(), 100)]);
-    assert_eq!(pane.active_background_task_summaries(), vec!["latest-check · running"]);
+    assert_eq!(
+        pane.active_background_task_summaries(),
+        vec!["latest-check · running"]
+    );
     pane.apply_running_background_tasks("server-a", 11, &[]);
     pane.upsert_part_message(
         NeoismAgentMessage::tool(

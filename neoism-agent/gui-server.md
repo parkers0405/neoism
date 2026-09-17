@@ -115,6 +115,13 @@ a token in a URL or injects it into HTML/assets. For full Neoism, the daemon's
 flow; this direct-origin launcher neither mints nor replaces those credentials.
 Use an appropriate credential for the direct agent endpoint.
 
+Phone share is a daemon surface on `:7878`, not Agent `:4096`. The local
+operator GUI POSTs `/agent-gui/share` (loopback-only). That mints a 60s
+pairing code and returns a Tailscale `/agent-gui/?pair=&workspace=` URL plus
+QR SVG. The phone claims `/pair/claim`, then uses `/agent/workspaces/:id`.
+Local Agent `:4096` and `/__neoism/gui` operator routes stay loopback-only.
+Device tokens never enter the URL or hash.
+
 Management is **not enabled by `web` or `--web`**. To enable GUI skill writes,
 explicitly set `NEOISM_AGENT_MANAGEMENT_API=1` in the environment of the process
 that actually starts the agent, and configure authenticated local-operator

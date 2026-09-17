@@ -17,8 +17,6 @@ use crate::state::{AppState, SessionRun};
 use crate::{ensure_session, message_model, now_millis, use_apply_patch_for_model};
 
 const DEFAULT_COMPACTION_TAIL_TURNS: usize = 2;
-const MIN_PRESERVE_RECENT_TOKENS: u64 = 2_000;
-const MAX_PRESERVE_RECENT_TOKENS: u64 = 8_000;
 const MANUAL_COMPACTION_REASON: &str = "manual";
 
 const COMPACTION_PROMPT_TEMPLATE: &str = r#"Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
@@ -176,6 +174,7 @@ async fn run_compaction(
         &info.directory,
         &model,
         &existing_messages,
+        info.agent.as_deref(),
     )
     .await;
     let user_message = compaction_user_message(
@@ -861,12 +860,15 @@ async fn protected_tail_start_message_id(
     directory: &str,
     model: &neoism_agent_core::UserModel,
     messages: &[MessageWithParts],
+    agent: Option<&str>,
 ) -> Option<String> {
     let budget = crate::session_prompt::compaction_preserve_recent_token_budget(
-        state, directory, model,
+        state, directory, model, agent,
     )
-    .await
-    .clamp(MIN_PRESERVE_RECENT_TOKENS, MAX_PRESERVE_RECENT_TOKENS);
+    .await;
+    if budget == 0 {
+        return None;
+    }
     let user_starts = messages
         .iter()
         .enumerate()

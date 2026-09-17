@@ -87,6 +87,43 @@ beforeEach(() => {
 });
 afterEach(() => { host.cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+describe('paired phone initialization', () => {
+    it('starts with the scoped credential and never requests an unscoped event stream', async () => {
+        host.cleanup(); host.reset();
+        const base = 'https://host/agent/workspaces/ws-1';
+        host.clients.set(base, server);
+        const events = vi.spyOn(server.events, 'subscribe');
+        host.begin();
+        app = useAppController({ server: base, token: 'phone-secret' });
+        host.flush(); await settle();
+        expect(host.transports.every(t => t.baseUrl === base && t.token === 'phone-secret')).toBe(true);
+        expect(events).not.toHaveBeenCalled();
+        app.openSession('chat-9'); await settle();
+        expect(events).toHaveBeenCalled();
+        expect(events.mock.calls.every(([options]) => (options as any).sessionId === 'chat-9')).toBe(true);
+    });
+});
+
+describe('workspace home selection', () => {
+    it('scopes recents and tabs without losing another workspace draft', async () => {
+        app.selectWorkspace('/work'); await settle();
+        app.onDraftChange('keep this draft'); render();
+        const original = app.tabKey;
+        app.selectWorkspace('/other'); await settle();
+        expect(app.prefs.directory).toBe('/other');
+        expect(app.directory).toBe('/other');
+        expect(app.id).toBeUndefined();
+        expect(app.tabs.some(t => t.key === original)).toBe(false);
+        expect(app.draft).toBe('');
+        app.newChat(); await settle();
+        expect(app.directory).toBe('/other');
+        app.selectWorkspace('/work'); await settle();
+        expect(app.tabKey).toBe(original);
+        expect(app.draft).toBe('keep this draft');
+        expect(app.tabs.every(t => (t.metadata?.directory ?? t.directory) === '/work')).toBe(true);
+    });
+});
+
 describe("in-tab subagent navigation", () => {
     it("returns from child and nested child without adding tabs or losing parent state", async () => {
         server.sessions.get.mockImplementation(async id => session(id, {
@@ -506,6 +543,17 @@ describe("live Recents and persistence", () => {
         rememberSession("http://one", "a / b", true); expect(rememberedSession("http://one")).toBe("a / b"); expect(rememberedSession("http://two")).toBeUndefined();
         rememberSession("http://two", "c", true); expect(rememberedSession("http://one")).toBe("a / b");
         rememberSession("http://two", undefined, true); expect(rememberedSession("http://two")).toBeUndefined();
+    });
+    it("opens the phone-share session after join commits the workspace server", async () => {
+        const remote = client();
+        host.clients.set("http://100.64.0.7:7878/agent/workspaces/ws-1", remote);
+        remote.sessions.get.mockImplementation(async id => session(id));
+        app.saveSettings({ ...app.prefs, server: "http://100.64.0.7:7878/agent/workspaces/ws-1", directory: "" }, "device-secret", "chat-9");
+        await settle();
+        expect(app.prefs.server).toBe("http://100.64.0.7:7878/agent/workspaces/ws-1");
+        expect(app.id).toBe("chat-9");
+        expect(rememberedSession("http://100.64.0.7:7878/agent/workspaces/ws-1")).toBe("chat-9");
+        expect(rememberedSession("http://127.0.0.1:4096")).not.toBe("chat-9");
     });
 });
 

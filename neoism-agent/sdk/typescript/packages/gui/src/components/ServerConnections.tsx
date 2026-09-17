@@ -7,11 +7,14 @@ import type { Preferences } from '../types';
 import './server-connections.css';
 
 type Step = { type: 'edit'; row: SavedServer; fresh: boolean } | { type: 'auth' | 'workspaces'; row: SavedServer } | { type: 'remove'; row: SavedServer };
-export function ServerConnections({ value, token, connected = false, join, forget, credentialFor }: {
+export function ServerConnections({ value, token, connected = false, join, forget, credentialFor, initialAdd = false, registryChanged, joined }: {
     value: Preferences; token: string; connected?: boolean;
     join(server: string, token: string, directory?: string): void;
     forget?(server: string): void;
     credentialFor?(server: string): string;
+    initialAdd?: boolean;
+    registryChanged?(): void;
+    joined?(): void;
 }) {
     const [rows, setRows] = useState<SavedServer[]>([]);
     const [registryReady, setRegistryReady] = useState(false);
@@ -20,7 +23,8 @@ export function ServerConnections({ value, token, connected = false, join, forge
     const registryRequest = useRef<AbortController | null>(null);
     const bridge = useRef<NativeServerRegistry | null>(null);
     const [query, setQuery] = useState('');
-    const [step, setStep] = useState<Step>();
+    const [step, setStep] = useState<Step | undefined>(() => initialAdd ? { type: 'edit', fresh: true,
+        row: { id: crypto.randomUUID(), name: '', address: '', kind: 'daemon', directory: '' } } : undefined);
     const [authMethod, setAuthMethod] = useState<'pair' | 'token'>('pair');
     const [secret, setSecret] = useState('');
     const [workspaces, setWorkspaces] = useState<SharedWorkspace[]>([]);
@@ -96,6 +100,7 @@ export function ServerConnections({ value, token, connected = false, join, forge
         serverCredentials.set(credentialKey(row), credential);
         setStep(undefined); setSecret('');
         join(server, credential, row.kind === 'agent' ? row.directory : '');
+        joined?.();
     };
     const verifyWorkspace = async (row: SavedServer, id: string, credential: string, signal: AbortSignal) => {
         await new DaemonConnection(row.address).verify(id, credential, signal);
@@ -149,6 +154,7 @@ export function ServerConnections({ value, token, connected = false, join, forge
             if (signal.aborted) return;
             const changedEndpoint = previous && (previous.address !== saved.address || previous.kind !== saved.kind || previous.directory !== saved.directory);
             setRows(previous ? rows.map(r => r.id === row.id ? saved : r) : [...rows, saved]); cancel();
+            registryChanged?.();
             if (changedEndpoint) { forgetRow(previous); if (matchesServer(previous, value)) fallback(); }
         });
     };

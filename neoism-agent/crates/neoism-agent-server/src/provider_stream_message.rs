@@ -361,6 +361,7 @@ pub(crate) async fn finish_provider_stream_with_error(
     session_id: &Id,
     session_id_text: &str,
     run_id: &str,
+    recover_context_overflow: bool,
     text_part_id: &str,
     live_message: &Arc<tokio::sync::Mutex<MessageWithParts>>,
     message: String,
@@ -434,6 +435,13 @@ pub(crate) async fn finish_provider_stream_with_error(
             event_type::MESSAGE_PART_UPDATED,
             json!({ "sessionID": session_id, "part": part, "time": now_millis() }),
         ));
+    }
+    if recover_context_overflow
+        && neoism_agent_builtins::provider_error::is_context_overflow(&message)
+    {
+        // Finalize this failed attempt, not the owning run. Compaction and
+        // the replacement step must keep its cancellation/coordinator lease.
+        return Ok(());
     }
     finish_session_run(state, session_id_text, run_id).await;
     let _ = state

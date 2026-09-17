@@ -70,7 +70,38 @@ impl MarkdownPane {
     }
 
     pub fn delete_selection(&mut self) -> Option<String> {
+        if self.read_only { return None; }
         let (start, end) = self.normalized_visual_range()?;
+        if !self.vim.visual_linewise {
+            if let Some(table) = self.table_range_containing(start.line).filter(|range| range.contains(&end.line)) {
+                let removed = self.text_for_range(start, end);
+                let undo_end = end.line + 1;
+                let undo = self.save_local_undo(start.line, undo_end);
+                for line in start.line..=end.line {
+                    if line == table.start + 1 { continue; }
+                    let low = if line == start.line { start.col } else { 0 };
+                    let high = if line == end.line { end.col } else { self.lines[line].len() };
+                    if let Some(cells) = parse_table_cell_bounds(&self.lines[line]) {
+                        for cell in cells.into_iter().rev() {
+                            let a = low.max(cell.content_start).min(cell.content_end);
+                            let b = high.max(cell.content_start).min(cell.content_end);
+                            if a < b {
+                                self.lines[line].replace_range(a..b, "");
+                                self.adjust_source_len(-((b - a) as isize));
+                            }
+                        }
+                    }
+                }
+                self.cursor_line = start.line;
+                self.cursor_col = start.col.min(self.lines[start.line].len());
+                self.enter_normal();
+                self.follow_cursor = true;
+                self.pending_line_edit = Some(MarkdownPendingLineEdit::Complex);
+                self.rebuild_blocks();
+                self.commit_local_undo(undo, start.line, undo_end);
+                return Some(removed);
+            }
+        }
         let removed = self.text_for_range(start, end);
         let undo_start = start.line;
         let undo_end = end.line.saturating_add(1).min(self.lines.len());

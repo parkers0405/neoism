@@ -587,8 +587,8 @@ impl<A> BufferTabs<A> {
         }
     }
 
-    pub(super) fn agent_title_width(title_width: f32, is_agent: bool, scale: f32) -> f32 {
-        if is_agent {
+    pub(super) fn compact_title_width(title_width: f32, compact: bool, scale: f32) -> f32 {
+        if compact {
             title_width.min(140.0 * scale)
         } else {
             title_width
@@ -621,9 +621,9 @@ impl<A> BufferTabs<A> {
                     * self.scale
                     * 0.58;
                 Self::visual_tab_width(
-                    Self::agent_title_width(
+                    Self::compact_title_width(
                         title_width,
-                        tab.neoism_agent_route_id.is_some(),
+                        tab.neoism_agent_route_id.is_some() || tab.markdown,
                         self.scale,
                     ),
                     !self.is_root_terminal_at(ix),
@@ -1154,6 +1154,12 @@ impl<A> BufferTabs<A> {
         _available_width: f32,
     ) {
         if ix >= self.tabs.len() || !self.visible {
+            return;
+        }
+        // A folder notebook owns several live contexts. Moving only its active
+        // page would strand the others; group transfer needs a dedicated payload.
+        if matches!(self.target_at(ix), Some(BufferTabTarget::Markdown(path))
+            if crate::editor::documentation_notebook::is_manifest(&path)) {
             return;
         }
         let widths = self.geometry_widths();

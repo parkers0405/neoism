@@ -1,7 +1,14 @@
 import runtime from "web-tree-sitter/tree-sitter.wasm?url";
 import { SyntaxEngine } from "./engine";
 import type { Span } from "./tokens";
-const base = `${import.meta.env.BASE_URL}syntax/`;
+const base = (() => {
+    const configured = import.meta.env.BASE_URL;
+    if (configured.startsWith("/") || configured.startsWith("http")) {
+        const prefix = configured.endsWith("/") ? configured : `${configured}/`;
+        return new URL(`${prefix}syntax/`, self.location.origin).href;
+    }
+    return new URL("../syntax/", import.meta.url).href;
+})();
 async function asset(path: string) {
     const response = await fetch(base + path);
     if (!response.ok) throw new Error(`Syntax asset unavailable: ${path}`);

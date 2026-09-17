@@ -38,10 +38,14 @@ pub struct TextInstance {
     pub _pad: [u8; 3],
     /// `[x, y, width, height]` in physical pixels. `width <= 0` disables clipping.
     pub clip_rect: [f32; 4],
+    /// Uniform geometry scale for canvas text; zero preserves normal UI text.
+    pub raster_scale: f32,
 }
 
-// 52 bytes (4-aligned). f32 pos (vs grid's u16 grid_pos) adds 4 bytes.
-const _: () = assert!(std::mem::size_of::<TextInstance>() == 52);
+// 56 bytes (4-aligned); the final float is optional canvas glyph scaling.
+const _: () = assert!(std::mem::size_of::<TextInstance>() == 56);
+
+mod canvas;
 
 //  Public draw options
 
@@ -163,10 +167,11 @@ fn instances_ink_bounds_px(instances: &[TextInstance]) -> Option<[f32; 4]> {
         .iter()
         .filter(|instance| instance.glyph_size[0] > 0 && instance.glyph_size[1] > 0)
     {
-        let left = instance.pos[0] + f32::from(instance.bearings[0]);
-        let top = instance.pos[1] + f32::from(instance.bearings[1]);
-        let right = left + instance.glyph_size[0] as f32;
-        let bottom = top + instance.glyph_size[1] as f32;
+        let scale = if instance.raster_scale > 0.0 { instance.raster_scale } else { 1.0 };
+        let left = instance.pos[0] + f32::from(instance.bearings[0]) * scale;
+        let top = instance.pos[1] + f32::from(instance.bearings[1]) * scale;
+        let right = left + instance.glyph_size[0] as f32 * scale;
+        let bottom = top + instance.glyph_size[1] as f32 * scale;
         bounds = Some(match bounds {
             Some([x0, y0, x1, y1]) => {
                 [x0.min(left), y0.min(top), x1.max(right), y1.max(bottom)]
@@ -513,6 +518,25 @@ impl Text {
 
     /// Draw `text` at logical top-left `(x, y)` with `opts`. Returns
     /// rendered width in **logical** pixels.
+    /// Draw canvas text from a bounded raster size, scaling glyph geometry and
+    /// advances together. Normal UI text remains on the unscaled draw path.
+    pub fn draw_scaled(&mut self, x: f32, y: f32, text: &str, opts: &DrawOpts, scale: f32) -> f32 {
+        if !scale.is_finite() || scale <= 0.0 { return 0.0; }
+        let first = self.instances.len();
+        let mut raster_opts = *opts;
+        raster_opts.clip_rect = None;
+        let advance = self.draw(x, y, text, &raster_opts);
+        let origin = [x * self.scale_factor, y * self.scale_factor];
+        let clip = opts.clip_rect.map(|rect| rect.map(|value| value * self.scale_factor)).unwrap_or([0.0; 4]);
+        for glyph in &mut self.instances[first..] {
+            glyph.pos[0] = origin[0] + (glyph.pos[0] - origin[0]) * scale;
+            glyph.pos[1] = origin[1] + (glyph.pos[1] - origin[1]) * scale;
+            glyph.raster_scale = scale;
+            glyph.clip_rect = clip;
+        }
+        advance * scale
+    }
+
     pub fn draw(&mut self, x: f32, y: f32, text: &str, opts: &DrawOpts) -> f32 {
         if text.is_empty() {
             return 0.0;
@@ -839,6 +863,7 @@ impl Text {
                 atlas: atlas_tag,
                 _pad: [0; 3],
                 clip_rect,
+                raster_scale: 0.0,
             };
             if opts.extrude && !is_color {
                 let mut far = foreground;
@@ -1208,6 +1233,11 @@ impl Text {
         let color_side = state.atlas_color.side() as usize;
 
         for inst in &self.instances {
+            if inst.raster_scale > 0.0 {
+                let (atlas, side) = if inst.atlas == 1 { (color_atlas, color_side) } else { (mask, mask_side) };
+                canvas::draw_scaled_cpu(inst, atlas, side, buf, buf_w_i, buf_h_i);
+                continue;
+            }
             let gw = inst.glyph_size[0] as i32;
             let gh = inst.glyph_size[1] as i32;
             if gw <= 0 || gh <= 0 {
@@ -1738,6 +1768,10 @@ fn build_text_pipeline_metal(device: &metal::Device) -> metal::RenderPipelineSta
     a.set_format(MTLVertexFormat::Float4);
     a.set_buffer_index(0);
     a.set_offset(36);
+    let a = attrs.object_at(7).unwrap();
+    a.set_format(MTLVertexFormat::Float);
+    a.set_buffer_index(0);
+    a.set_offset(52);
 
     let layout = vd.layouts().object_at(0).unwrap();
     layout.set_stride(std::mem::size_of::<TextInstance>() as u64);
@@ -1909,6 +1943,11 @@ fn build_text_pipeline_wgpu(
             format: wgpu::VertexFormat::Float32x4,
             offset: 36,
             shader_location: 6,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32,
+            offset: 52,
+            shader_location: 7,
         },
     ];
     let vbuf = wgpu::VertexBufferLayout {
@@ -2185,7 +2224,7 @@ fn build_ui_text_pipeline_vulkan(
             .name(entry),
     ];
 
-    // Vertex input mirrors `TextInstance` (52 bytes).
+    // Vertex input mirrors `TextInstance` (56 bytes).
     let bindings = [vk::VertexInputBindingDescription::default()
         .binding(0)
         .stride(std::mem::size_of::<TextInstance>() as u32)
@@ -2233,6 +2272,11 @@ fn build_ui_text_pipeline_vulkan(
             .binding(0)
             .format(vk::Format::R32G32B32A32_SFLOAT)
             .offset(36),
+        vk::VertexInputAttributeDescription::default()
+            .location(7)
+            .binding(0)
+            .format(vk::Format::R32_SFLOAT)
+            .offset(52),
     ];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&bindings)

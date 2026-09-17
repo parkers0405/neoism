@@ -146,7 +146,9 @@ After authorization, Neoism exchanges the code, stores the credentials, and disp
 
 ## Built-in servers
 
-Neoism bundles MCP extensions for Notes, Memory, and immutable product Docs. They appear as normal tool families and can be disabled or re-enabled through the MCP or extension lifecycle.
+Neoism bundles MCP extensions for Notes, Memory, immutable product Docs, and Computer Use. They appear as normal tool families and can be disabled or re-enabled through the MCP or extension lifecycle.
+
+The **computer** MCP supports native desktop interaction and browser-aware tools for **Firefox (WebDriver BiDi)** and **Chromium (CDP)**. Call `computer.capabilities` for attachment commands, endpoint configuration, permissions and cleanup instructions; it works before computer-use approval and does not connect to a browser. See [[Computer Use]] for the full Firefox/Chromium setup guide, or read `Neoism Agent/Computer Use.md` through the Docs tool.
 
 ## Security
 

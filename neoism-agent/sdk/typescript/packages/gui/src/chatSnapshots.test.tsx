@@ -50,6 +50,26 @@ describe('session-scoped history snapshots', () => {
             expect(renders[0]).toEqual({ id: 'a', messages: [], loading: true });
         } finally { await act(async () => root.unmount()); }
     });
+    it('refreshes an unfinished cached response immediately when returning to its workspace', async () => {
+        const api = client(); let completed = false;
+        const original = vi.mocked(api.operations.request).getMockImplementation()!;
+        vi.mocked(api.operations.request).mockImplementation(((op: string, input: any) => {
+            if (op !== 'v2.sessions.messages' || input.path.session_id !== 'a') return original(op as any, input);
+            return Promise.resolve({ items: [{
+                info: { id: 'm', sessionId: 'a', role: 'assistant', time: { created: 1, ...(completed ? { completed: 2 } : {}) } },
+                parts: [{ id: 'p', messageId: 'm', sessionId: 'a', type: 'text', text: completed ? 'complete answer' : '' }],
+            }], cursor: {} });
+        }) as any);
+        const root = createRoot(document.createElement('div')); let chat!: ReturnType<typeof useChat>;
+        function Host({ id }: { id: string }) { chat = useChat(api, id, notify); return null; }
+        try {
+            await act(async () => root.render(<Host id="a" />));
+            await act(async () => root.render(<Host id="b" />));
+            completed = true;
+            await act(async () => root.render(<Host id="a" />));
+            expect(chat.state.messages[0].parts[0].text).toBe('complete answer');
+        } finally { await act(async () => root.unmount()); }
+    });
     it('keeps live SSE detail provenance through polling but resets it before rendering a cached return', async () => {
         const api = client(), queue: any[] = []; let wake = () => {};
         api.events.subscribe = (async function* ({ signal }: { signal: AbortSignal }) {

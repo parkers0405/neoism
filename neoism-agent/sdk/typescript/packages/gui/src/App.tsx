@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChatTabs } from "./components/ChatTabs";
 import { FolderPicker } from "./components/FolderPicker";
 import { serverScope } from "./types";
@@ -6,7 +6,13 @@ import { ProviderConnections } from "./components/ProviderConnections";
 import { McpPicker } from "./components/McpPicker";
 import { FxScene } from "./components/FxScene";
 import { isFxKind } from "./fx";
-import { ArrowLeft, Menu, PanelLeft, PanelRight, X } from "lucide-react";
+import { ArrowLeft, House, Menu, PanelLeft, PanelRight, X } from "lucide-react";
+import { PhoneShareButton, PhoneShareModal } from "./components/PhoneShare";
+import { PhoneEntry } from "./components/PhoneEntry";
+import type { PhoneConnection } from "./phoneShare";
+import { DaemonConnection, joinedWorkspace, type LocalWorkspace } from "./serverConnections";
+import { localOperatorShareAvailable, operatorShareTarget } from "./phoneShare";
+import { WorkspaceHome } from "./components/WorkspaceHome";
 import { subagentView } from "./subagent-view";
 import { ConversationSkeleton } from "./components/Skeleton";
 import "./subagent-view.css";
@@ -23,14 +29,18 @@ import { Timeline } from "./components/Timeline";
 import { Modal } from "./components/Modal";
 import { Library } from "./components/Library";
 import { Interactions } from "./components/Interactions";
+import { localServer, matchesServer, type SavedServer } from "./serverRegistry";
 export interface DockPosition {
     top: number; left: number; width: number; viewportHeight: number; viewportWidth: number;
+    viewportTop?: number; viewportLeft?: number;
     home: boolean; tabKey: string;
 }
 /** Only dock a newly sent home tab; navigation/viewport changes are not motion. */
 export function dockingTranslation(before: DockPosition | undefined, after: DockPosition, reducedMotion: boolean) {
     if (reducedMotion || !before?.home || after.home || before.tabKey !== after.tabKey ||
         before.viewportWidth !== after.viewportWidth || before.viewportHeight !== after.viewportHeight ||
+        (before.viewportTop ?? 0) !== (after.viewportTop ?? 0) ||
+        (before.viewportLeft ?? 0) !== (after.viewportLeft ?? 0) ||
         ![before.viewportWidth, before.viewportHeight, before.width, after.width].every(Number.isFinite) ||
         before.width <= 0 || after.width <= 0) return undefined;
     const x = before.left - after.left, y = before.top - after.top;
@@ -38,12 +48,47 @@ export function dockingTranslation(before: DockPosition | undefined, after: Dock
 }
 
 export function App() {
-    const a = useAppController();
+    return <PhoneEntry>{connection => <AgentApp connection={connection} />}</PhoneEntry>;
+}
+function AgentApp({ connection }: { connection?: PhoneConnection }) {
+    const a = useAppController(connection);
     const { canCompose, metadataLoading, isChild, returnId, backLabel } = subagentView(a.id, a.active, a.chat.state.runtime);
     const sessionOpener = useRef(a.openChildSession);
     useLayoutEffect(() => { sessionOpener.current = a.openChildSession; }, [a.openChildSession]);
     const openTranscriptSession = useCallback((id: string) => sessionOpener.current(id), []);
     // Controller nav is the mobile drawer; desktop collapse must survive chat navigation.
+    const [phoneShare, setPhoneShare] = useState(false);
+    const workspaceDaemon = operatorShareTarget(a.prefs.server);
+    const [workspaceHome, setWorkspaceHome] = useState(false);
+    const [workspaceRevision, setWorkspaceRevision] = useState(0);
+    const [workspaceState, setWorkspaceState] = useState<{ daemon?: string; rows: LocalWorkspace[]; loading: boolean; error: string }>({ rows: [], loading: true, error: '' });
+    const [chosenWorkspace, setChosenWorkspace] = useState('');
+    const localWorkspaces = workspaceState.daemon === workspaceDaemon ? workspaceState.rows : [];
+    const directoryWorkspaces = localWorkspaces.filter(row => row.directory === a.directory);
+    const selectedWorkspace = directoryWorkspaces.find(row => row.id === chosenWorkspace) || (directoryWorkspaces.length === 1 ? directoryWorkspaces[0] : undefined);
+    const localAgentActive = (() => {
+        if (matchesServer(localServer(), a.prefs) || joinedWorkspace(a.prefs.server)) return matchesServer(localServer(), a.prefs);
+        try { return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(a.prefs.server).hostname); } catch { return false; }
+    })();
+    const showWorkspaceHome = !!workspaceDaemon && (workspaceHome || (localAgentActive && !selectedWorkspace));
+    useEffect(() => {
+        if (!workspaceDaemon) return;
+        const controller = new AbortController();
+        setWorkspaceState({ daemon: workspaceDaemon, rows: [], loading: true, error: '' });
+        void new DaemonConnection(workspaceDaemon).localWorkspaces(controller.signal)
+            .then(rows => { if (!controller.signal.aborted) setWorkspaceState({ daemon: workspaceDaemon, rows, loading: false, error: '' }); })
+            .catch(error => { if (!controller.signal.aborted) setWorkspaceState({ daemon: workspaceDaemon, rows: [], loading: false,
+                error: String(error).includes('(405)') || String(error).includes('(404)')
+                    ? 'Restart the updated Neoism debug app to load workspaces.' : 'Could not load workspaces. Try again.' }); });
+        return () => controller.abort();
+    }, [workspaceDaemon, workspaceRevision]);
+    const selectWorkspace = (workspace: LocalWorkspace, server: SavedServer, credential: string) => {
+        if (localAgentActive) a.selectWorkspace(workspace.directory);
+        else a.saveSettings({ ...a.prefs, server: server.address, directory: workspace.directory }, credential);
+        setChosenWorkspace(workspace.id);
+        setWorkspaceHome(false);
+        setPhoneShare(false);
+    };
     const [desktopNavVisible, setDesktopNavVisible] = useState(() => {
         try { return localStorage.getItem("neoism.desktop-nav-visible") !== "false"; }
         catch { return true; }
@@ -57,16 +102,75 @@ export function App() {
     };
     const appRoot = useRef<HTMLDivElement>(null);
     const chatMain = useRef<HTMLDivElement>(null);
+    const [keyboardOpen, setKeyboardOpen] = useState(false);
     useLayoutEffect(() => {
         const viewport = window.visualViewport;
         const root = appRoot.current;
         if (!viewport || !root) return;
-        const resize = () => {
-            if (viewport.scale === 1) root.style.setProperty("--app-viewport-height", `${viewport.height}px`);
+        let frame = 0;
+        let keyboardActive = false;
+        let baselineHeight = Math.max(window.innerHeight, viewport.height);
+        let baselineWidth = window.innerWidth;
+        const properties = ["--app-viewport-height", "--app-viewport-width", "--app-viewport-top", "--app-viewport-left"];
+        const composerFocused = () => {
+            const node = document.activeElement;
+            if (!(node instanceof HTMLElement) || !node.closest(".native-composer")) return false;
+            return node instanceof HTMLTextAreaElement ||
+                (node instanceof HTMLInputElement && !["button", "checkbox", "file", "radio", "range", "submit"].includes(node.type)) ||
+                node.isContentEditable;
         };
-        resize();
-        viewport.addEventListener("resize", resize);
-        return () => viewport.removeEventListener("resize", resize);
+        const update = () => {
+            frame = 0;
+            const scale = Number.isFinite(viewport.scale) ? viewport.scale : 1;
+            // Pinch zoom must zoom the existing layout, not trigger a responsive reflow.
+            if (Math.abs(scale - 1) > 0.02) {
+                for (const property of properties) root.style.removeProperty(property);
+                keyboardActive = false;
+                setKeyboardOpen(false);
+                return;
+            }
+            const height = Math.max(0, viewport.height);
+            const width = Math.max(0, viewport.width);
+            const top = Math.max(0, viewport.offsetTop || 0);
+            const left = Math.max(0, viewport.offsetLeft || 0);
+            if (Math.abs(window.innerWidth - baselineWidth) > Math.max(40, baselineWidth * 0.15)) {
+                // A rotation is a new layout viewport, not a keyboard reduction.
+                baselineWidth = window.innerWidth;
+                baselineHeight = Math.max(window.innerHeight, height);
+                keyboardActive = false;
+            }
+            root.style.setProperty("--app-viewport-height", `${height}px`);
+            root.style.setProperty("--app-viewport-width", `${width}px`);
+            root.style.setProperty("--app-viewport-top", `${top}px`);
+            root.style.setProperty("--app-viewport-left", `${left}px`);
+
+            const threshold = Math.max(120, baselineHeight * 0.18);
+            const reduced = baselineHeight - height >= threshold;
+            const fullWidth = Math.abs(width - window.innerWidth) <= Math.max(2, window.innerWidth * 0.03);
+            const focused = composerFocused();
+            // Keep the dock stable for the common blur-before-keyboard-close ordering.
+            keyboardActive = fullWidth && reduced && (focused || keyboardActive);
+            setKeyboardOpen(keyboardActive);
+            if (!focused && !reduced) baselineHeight = Math.max(window.innerHeight, height);
+        };
+        const schedule = () => {
+            if (!frame) frame = requestAnimationFrame(update);
+        };
+        update();
+        viewport.addEventListener("resize", schedule);
+        viewport.addEventListener("scroll", schedule);
+        window.addEventListener("resize", schedule);
+        document.addEventListener("focusin", schedule);
+        document.addEventListener("focusout", schedule);
+        return () => {
+            if (frame) cancelAnimationFrame(frame);
+            viewport.removeEventListener("resize", schedule);
+            viewport.removeEventListener("scroll", schedule);
+            window.removeEventListener("resize", schedule);
+            document.removeEventListener("focusin", schedule);
+            document.removeEventListener("focusout", schedule);
+            for (const property of properties) root.style.removeProperty(property);
+        };
     }, []);
     const composerDock = useRef<HTMLDivElement>(null);
     const composerContent = useRef<HTMLDivElement>(null);
@@ -80,6 +184,8 @@ export function App() {
         return { top: rect.top, left: rect.left, width: rect.width,
             viewportHeight: window.visualViewport?.height ?? window.innerHeight,
             viewportWidth: window.visualViewport?.width ?? window.innerWidth,
+            viewportTop: window.visualViewport?.offsetTop ?? 0,
+            viewportLeft: window.visualViewport?.offsetLeft ?? 0,
             home: !a.id, tabKey: a.tabKey };
     };
     useLayoutEffect(() => {
@@ -90,11 +196,13 @@ export function App() {
         const motion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
         window.addEventListener("resize", cancel);
         window.visualViewport?.addEventListener("resize", cancel);
+        window.visualViewport?.addEventListener("scroll", cancel);
         motion?.addEventListener("change", cancel);
         return () => {
             cancel();
             window.removeEventListener("resize", cancel);
             window.visualViewport?.removeEventListener("resize", cancel);
+            window.visualViewport?.removeEventListener("scroll", cancel);
             motion?.removeEventListener("change", cancel);
         };
     }, []);
@@ -135,7 +243,7 @@ export function App() {
             main.style.removeProperty("--composer-footer-height");
             content?.classList.remove("is-overflowing");
         };
-    }, [a.id, a.tabKey, a.view, a.skipPermissions, canCompose, metadataLoading]);
+    }, [a.id, a.tabKey, a.view, a.skipPermissions, canCompose, metadataLoading, showWorkspaceHome]);
     useLayoutEffect(() => {
         // Measure actual laid-out endpoints. No remount, timeout, synthetic layout,
         // or height/scale animation touching the textarea's caret and IME.
@@ -156,10 +264,11 @@ export function App() {
         dockPosition.current = next;
     }, [a.id, a.tabKey, a.view, canCompose]);
     return (
-        <div ref={appRoot} className={`app ${a.nav ? "nav-open" : ""} ${desktopNavVisible ? "" : "nav-hidden"} effect-${a.effect}`}>
-            {isFxKind(a.effect) && <FxScene key={`${a.effect}:${a.effectRevision}:${a.id}:${a.prefs.server}:${a.directory}`} kind={a.effect} />}
+        <div ref={appRoot} className={`app ${keyboardOpen ? "keyboard-open" : ""} ${showWorkspaceHome ? 'workspace-home-open' : ''} ${a.nav ? "nav-open" : ""} ${desktopNavVisible ? "" : "nav-hidden"} effect-${a.effect}`}>
+            {!showWorkspaceHome && isFxKind(a.effect) && <FxScene key={`${a.effect}:${a.effectRevision}:${a.id}:${a.prefs.server}:${a.directory}`} kind={a.effect} />}
             <header className="app-chrome">
                 <div className="navigation-chrome">
+                    {workspaceDaemon && !showWorkspaceHome && <button type="button" className="workspace-home-button" aria-label="Workspaces" title={selectedWorkspace?.title || 'Workspaces'} onClick={() => { setWorkspaceHome(true); a.setNav(false); }}><House size={18} /></button>}
                     <button type="button" className="desktop-nav-toggle"
                         aria-label={desktopNavVisible ? "Hide navigation" : "Show navigation"}
                         aria-expanded={desktopNavVisible} aria-controls="app-navigation"
@@ -177,8 +286,9 @@ export function App() {
                     </button>
                 </div>
                 <div className="topbar">
-                    {a.view === "chat" ? <ChatTabs tabs={a.tabs} active={a.tabKey} activate={a.activateTab} close={a.closeTab} add={a.newChat} /> : <><span>{a.view === "skills" ? "Skills" : "Workflows"}</span><span className="spacer" /></>}
-                    {a.id && a.view === "chat" && (
+                    {showWorkspaceHome ? <span className="spacer" /> : a.view === "chat" ? <ChatTabs tabs={a.tabs} active={a.tabKey} activate={a.activateTab} close={a.closeTab} add={a.newChat} /> : <><span>{a.view === "skills" ? "Skills" : "Workflows"}</span><span className="spacer" /></>}
+                    {!showWorkspaceHome && localOperatorShareAvailable(a.prefs.server) && <PhoneShareButton onOpen={() => selectedWorkspace ? setPhoneShare(true) : setWorkspaceHome(true)} />}
+                    {!showWorkspaceHome && a.id && a.view === "chat" && (
                         <button
                             aria-label="Toggle chat details"
                             aria-expanded={!!a.sidebar}
@@ -190,15 +300,15 @@ export function App() {
                     )}
                 </div>
             </header>
-            <PanelShell className="navigation-panel" open={mobileNavigation ? a.nav : desktopNavVisible}
+            {!showWorkspaceHome && <PanelShell className="navigation-panel" open={mobileNavigation ? a.nav : desktopNavVisible}
                 returnFocus={mobileNavigation ? ".mobile-menu" : ".desktop-nav-toggle"}>
                 <Navigation app={a} />
-            </PanelShell>
-            {a.nav && (
+            </PanelShell>}
+            {!showWorkspaceHome && a.nav && (
                 <button className="nav-scrim" aria-label="Close navigation" onClick={() => a.setNav(false)} />
             )}
             <main>
-                {(a.error || a.chat.state.error) && (
+                {!showWorkspaceHome && (a.error || a.chat.state.error) && (
                     <div className="error-banner" role="alert">
                         <span>{a.error || a.chat.state.error}</span>
                         <button onClick={() => a.setSettings(true)}>
@@ -218,7 +328,10 @@ export function App() {
                         </button>
                     </div>
                 )}
-                {a.view !== "chat" ? (
+                {showWorkspaceHome ? <WorkspaceHome workspaces={localWorkspaces} loading={workspaceState.loading} error={workspaceState.error}
+                    select={selectWorkspace} refresh={() => setWorkspaceRevision(n => n + 1)} value={a.prefs} token={a.token}
+                    join={(server, token, directory) => { a.saveSettings({ ...a.prefs, server, directory: directory || '' }, token); setWorkspaceHome(false); }}
+                    credentialFor={a.serverCredential} forget={a.forgetServer} /> : a.view !== "chat" ? (
                     <Library
                         key={[
                             a.view,
@@ -398,6 +511,15 @@ export function App() {
                     workspaceId={a.active?.workspaceId}
                     save={a.saveSettings}
                     close={() => a.setSettings(false)}
+                />
+            )}
+            {phoneShare && (
+                <PhoneShareModal
+                    server={a.prefs.server}
+                    workspaceId={joinedWorkspace(a.prefs.server) || selectedWorkspace?.id}
+                    sessionId={a.id}
+                    directory={a.directory}
+                    close={() => setPhoneShare(false)}
                 />
             )}
             {a.info && a.info.title !== "MCP servers" && (

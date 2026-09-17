@@ -644,6 +644,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             );
         }
         if content_available && self.context_menu.is_visible() {
+            if self.context_menu.is_markdown_block_completion() {
+                let rect = layout.terminal;
+                self.context_menu.set_viewport([rect.x, rect.y, rect.w, rect.h]);
+            }
             let window_w = [
                 layout.buffer_tabs.x + layout.buffer_tabs.w,
                 layout.status_line.x + layout.status_line.w,

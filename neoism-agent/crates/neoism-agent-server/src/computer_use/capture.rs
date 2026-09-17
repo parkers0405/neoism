@@ -12,6 +12,20 @@ use std::{
 
 const MAX_PIXELS: u64 = 64_000_000;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Region { pub x:u32, pub y:u32, pub width:u32, pub height:u32 }
+impl Region {
+    pub fn validate(&self, width:u32, height:u32)->Result<()> {
+        ensure!(self.width>0 && self.height>0 && self.x.checked_add(self.width).is_some_and(|x|x<=width) && self.y.checked_add(self.height).is_some_and(|y|y<=height),"Crop must be a nonempty rectangle inside the native display image");
+        Ok(())
+    }
+    pub fn point(&self,x:u32,y:u32,image_width:u32,image_height:u32)->(u32,u32) {
+        (self.x+(u64::from(x)*u64::from(self.width)/u64::from(image_width)) as u32,
+         self.y+(u64::from(y)*u64::from(self.height)/u64::from(image_height)) as u32)
+    }
+}
+
 const MAX_EDGE: u32 = 1600;
 
 #[derive(Debug, Default)]

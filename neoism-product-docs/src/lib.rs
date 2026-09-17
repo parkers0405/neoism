@@ -42,6 +42,8 @@ pub static BUNDLED_DOCS: &[BundledDoc] = docs![
     "Neoism Agent/Scheduled Workflows.md",
     "Neoism Agent/Instructions.md",
     "Neoism Agent/MCP Servers.md",
+    "Neoism Agent/Computer Use.md",
+    "Neoism Agent/TypeSafe Browser Mode.md",
     "Neoism Agent/Attachments.md",
     "Neoism Agent/Compaction.md",
     "Neoism Agent/Tools and Background Tasks.md",
@@ -70,4 +72,45 @@ pub fn title(doc: &BundledDoc) -> &str {
         .lines()
         .find_map(|line| line.strip_prefix("# ").map(str::trim))
         .unwrap_or_else(|| doc.path.trim_end_matches(".md"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typesafe_mode_setup_and_privacy_are_bundled() {
+        let page = bundled_doc("Neoism Agent/TypeSafe Browser Mode.md").unwrap();
+        for required in ["off-by-default", "TYPESAFE_API_KEY", "computer.browser_step", "server credential store", "external provider", "preview", "false"] {
+            assert!(page.body.contains(required), "missing TypeSafe guidance: {required}");
+        }
+        assert!(bundled_doc("Neoism Agent/Computer Use.md").unwrap().body.contains("[[TypeSafe Browser Mode]]"));
+    }
+
+    #[test]
+    fn computer_use_attachment_guide_is_bundled_and_linked() {
+        let page = bundled_doc("Neoism Agent/Computer Use.md")
+            .expect("computer MCP setup must be available through Docs");
+        assert_eq!(title(page), "Computer Use");
+        for required in [
+            "computer.capabilities",
+            "Firefox",
+            "NEOISM_BROWSER_BIDI_URL",
+            "Chromium",
+            "NEOISM_BROWSER_CDP_URL",
+            "computer.browser_disconnect",
+            "computer.browser_attach",
+            "no Neoism restart",
+            "agent server",
+        ] {
+            assert!(
+                page.body.contains(required),
+                "missing attachment guidance: {required}"
+            );
+        }
+        assert!(bundled_doc("Neoism Agent/MCP Servers.md")
+            .unwrap()
+            .body
+            .contains("[[Computer Use]]"));
+    }
 }

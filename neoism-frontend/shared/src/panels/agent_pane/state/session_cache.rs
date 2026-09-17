@@ -359,7 +359,7 @@ pub(in crate::panels::agent_pane::state) fn upsert_cached_part_message(
             .iter()
             .position(|existing| same_streamed_part_identity(existing, &message))
         {
-            messages[index] = merge_part_message(messages[index].clone(), message);
+            messages[index] = merge_stream_part_message(messages[index].clone(), message);
             return;
         }
     }

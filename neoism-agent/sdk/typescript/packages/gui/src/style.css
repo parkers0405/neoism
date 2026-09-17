@@ -24,6 +24,13 @@
 * {
     box-sizing: border-box;
 }
+html,
+body,
+#root {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
 body {
     margin: 0;
 }
@@ -124,6 +131,10 @@ small,
     --nav-width: 240px;
     display: grid;
     grid-template: "chrome chrome" var(--chrome-height) "nav main" minmax(0, 1fr) / var(--nav-width) minmax(0, 1fr);
+    position: fixed;
+    top: var(--app-viewport-top, 0px);
+    left: var(--app-viewport-left, 0px);
+    width: var(--app-viewport-width, 100vw);
     height: var(--app-viewport-height, 100dvh);
     overflow: hidden;
 }
@@ -942,6 +953,14 @@ dialog::backdrop {
     gap: 8px;
     margin-top: 24px;
 }
+.phone-share-qr {
+    width: min(240px, 70vw);
+    margin: 16px auto;
+    background: #fff;
+    padding: 12px;
+    border-radius: 8px;
+}
+.phone-share-qr svg { width: 100%; height: auto; display: block; }
 select option {
     background: var(--panel);
     color: var(--fg);
@@ -1097,10 +1116,18 @@ select option {
     .nav-open .app-chrome { position: relative; z-index: 31; }
     .chat-main { --chat-side-gutter: clamp(32px, calc(14vw - 16px), 128px); }
     .chat-main { --composer-gutter: max(16px, env(safe-area-inset-bottom)); }
+    .app.keyboard-open .chat-main.home {
+        justify-content: flex-end;
+        padding-block: 12px max(12px, env(safe-area-inset-bottom));
+    }
+    .app.keyboard-open .chat-main.home .home-heading,
+    .app.keyboard-open .chat-main.home .composer-footer-dock {
+        display: none;
+    }
     .navigation-panel {
-        position: fixed;
+        position: absolute;
         inset: var(--chrome-height) auto auto 0;
-        height: calc(var(--app-viewport-height, 100dvh) - var(--chrome-height));
+        height: calc(100% - var(--chrome-height));
         width: 240px;
         max-width: calc(100vw - 32px);
         transform: translateX(-100%);
@@ -1113,7 +1140,7 @@ select option {
     }
     .nav-scrim {
         display: block;
-        position: fixed;
+        position: absolute;
         inset: 0;
         background: #0008;
         z-index: 20;
@@ -1161,7 +1188,7 @@ select option {
     }
 }
 .fx-scene {
-    position: fixed;
+    position: absolute;
     inset: auto 0 130px;
     z-index: 45;
     pointer-events: none;

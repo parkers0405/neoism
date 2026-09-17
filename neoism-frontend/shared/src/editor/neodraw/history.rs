@@ -65,6 +65,8 @@ impl DrawPane {
         let current = self.scene.clone();
         if let Some(prev) = self.history.undo(&current) {
             self.scene = prev;
+            self.text_dims.clear();
+            self.text_layouts.clear();
             self.selection.clear();
             self.editing_text = None;
             self.dirty = true;
@@ -78,6 +80,8 @@ impl DrawPane {
         let current = self.scene.clone();
         if let Some(next) = self.history.redo(&current) {
             self.scene = next;
+            self.text_dims.clear();
+            self.text_layouts.clear();
             self.selection.clear();
             self.editing_text = None;
             self.dirty = true;

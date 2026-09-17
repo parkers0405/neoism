@@ -16,8 +16,8 @@ use serde_json::json;
 
 use crate::error::ApiError;
 use crate::message_part_mutation::{
-    append_text_delta, append_tool_input_delta_in_place, finish_text_part, set_tool_completed,
-    set_tool_error, set_tool_running, upsert_part,
+    append_text_delta, append_tool_input_delta_in_place, finish_text_part,
+    set_tool_completed, set_tool_error, set_tool_running, upsert_part,
 };
 use crate::now_millis;
 use crate::provider::ProviderStream;
@@ -133,6 +133,7 @@ pub(crate) struct ProviderStreamEventContext<'a> {
     pub tool_permissions: &'a [PermissionRule],
     pub plugin_snapshot: &'a crate::workspace_runtime::PluginGenerationLease,
     pub max_steps_reached: bool,
+    pub recover_context_overflow: bool,
 }
 
 #[derive(Debug)]
@@ -219,6 +220,7 @@ pub(crate) async fn run_provider_stream_step(
                     ctx.session_id,
                     ctx.session_id_text,
                     ctx.run_id,
+                    ctx.recover_context_overflow,
                     ctx.text_part_id.as_str(),
                     ctx.live_message,
                     message.clone(),
@@ -235,6 +237,7 @@ pub(crate) async fn run_provider_stream_step(
                     ctx.session_id,
                     ctx.session_id_text,
                     ctx.run_id,
+                    ctx.recover_context_overflow,
                     ctx.text_part_id.as_str(),
                     ctx.live_message,
                     "Session aborted".to_string(),
@@ -273,6 +276,7 @@ pub(crate) async fn run_provider_stream_step(
                     ctx.session_id,
                     ctx.session_id_text,
                     ctx.run_id,
+                    ctx.recover_context_overflow,
                     ctx.text_part_id.as_str(),
                     ctx.live_message,
                     message.clone(),
@@ -290,6 +294,7 @@ pub(crate) async fn run_provider_stream_step(
                 ctx.session_id,
                 ctx.session_id_text,
                 ctx.run_id,
+                ctx.recover_context_overflow,
                 ctx.text_part_id.as_str(),
                 ctx.live_message,
                 "Session aborted".to_string(),
@@ -321,6 +326,7 @@ pub(crate) async fn run_provider_stream_step(
                     ctx.session_id,
                     ctx.session_id_text,
                     ctx.run_id,
+                    ctx.recover_context_overflow,
                     ctx.text_part_id.as_str(),
                     ctx.live_message,
                     message.clone(),
@@ -344,6 +350,7 @@ pub(crate) async fn run_provider_stream_step(
                 ctx.session_id,
                 ctx.session_id_text,
                 ctx.run_id,
+                ctx.recover_context_overflow,
                 ctx.text_part_id.as_str(),
                 ctx.live_message,
                 message.clone(),
@@ -400,6 +407,7 @@ pub(crate) async fn run_provider_stream_step(
             ctx.session_id,
             ctx.session_id_text,
             ctx.run_id,
+            ctx.recover_context_overflow,
             ctx.text_part_id.as_str(),
             ctx.live_message,
             "Session aborted".to_string(),
@@ -645,7 +653,11 @@ pub(crate) async fn process_provider_stream_event(
             let part = {
                 let mut message = ctx.live_message.lock().await;
                 stream.tool_input_snapshots.append(
-                    &mut message.parts, &id, part_id.as_str(), &delta, Instant::now(),
+                    &mut message.parts,
+                    &id,
+                    part_id.as_str(),
+                    &delta,
+                    Instant::now(),
                 )
             };
             // Pending input is rendered by both native and SDK clients. Previously
@@ -653,7 +665,8 @@ pub(crate) async fn process_provider_stream_event(
             // until ToolCall. Publish the existing full-part wire shape, not a new
             // nested delta field that older reducers would put at the top level.
             if let Some(part) = part {
-                ctx.state.publish_live(tool_input_update_event(ctx.session_id, part));
+                ctx.state
+                    .publish_live(tool_input_update_event(ctx.session_id, part));
             }
         }
         ProviderStreamEvent::ToolInputEnd { id } => {
@@ -662,10 +675,13 @@ pub(crate) async fn process_provider_stream_event(
             };
             let part = {
                 let message = ctx.live_message.lock().await;
-                stream.tool_input_snapshots.end(&message.parts, &id, part_id.as_str())
+                stream
+                    .tool_input_snapshots
+                    .end(&message.parts, &id, part_id.as_str())
             };
             if let Some(part) = part {
-                ctx.state.publish_live(tool_input_update_event(ctx.session_id, part));
+                ctx.state
+                    .publish_live(tool_input_update_event(ctx.session_id, part));
             }
         }
         ProviderStreamEvent::ToolCall { id, name, input } => {
@@ -934,6 +950,7 @@ pub(crate) async fn process_provider_stream_event(
                 ctx.session_id,
                 ctx.session_id_text,
                 ctx.run_id,
+                ctx.recover_context_overflow,
                 ctx.text_part_id.as_str(),
                 ctx.live_message,
                 message.clone(),
@@ -1083,15 +1100,25 @@ mod tests {
         let session_id = Id::ascending(IdKind::Session);
         let part_id = Id::ascending(IdKind::Part);
         let mut parts = vec![Part::Tool(ToolPart {
-            id: part_id.clone(), session_id: session_id.clone(),
-            message_id: Id::ascending(IdKind::Message), call_id: "call_patch".into(),
-            tool: "functions.apply_patch".into(), metadata: None,
-            state: ToolState::Pending { input: json!({}), raw: String::new() },
+            id: part_id.clone(),
+            session_id: session_id.clone(),
+            message_id: Id::ascending(IdKind::Message),
+            call_id: "call_patch".into(),
+            tool: "functions.apply_patch".into(),
+            metadata: None,
+            state: ToolState::Pending {
+                input: json!({}),
+                raw: String::new(),
+            },
         })];
         let mut accumulated = String::new();
-        for delta in [r#"{"patchText":"*** Begin Patch\n"#, r#"*** Add File: a.rs\n+fn main() {}"#] {
+        for delta in [
+            r#"{"patchText":"*** Begin Patch\n"#,
+            r#"*** Add File: a.rs\n+fn main() {}"#,
+        ] {
             accumulated.push_str(delta);
-            let part = append_tool_input_delta(&mut parts, part_id.as_str(), delta).unwrap();
+            let part =
+                append_tool_input_delta(&mut parts, part_id.as_str(), delta).unwrap();
             let event = tool_input_update_event(&session_id, part);
             assert_eq!(event.kind, event_type::MESSAGE_PART_UPDATED);
             assert_eq!(event.properties["sessionID"], json!(session_id));
@@ -1110,19 +1137,30 @@ mod tests {
             id: Id::ascending(IdKind::Part),
             session_id: Id::ascending(IdKind::Session),
             message_id: Id::ascending(IdKind::Message),
-            call_id: call.into(), tool: "functions.apply_patch".into(), metadata: None,
-            state: ToolState::Pending { input: serde_json::json!({}), raw: String::new() },
+            call_id: call.into(),
+            tool: "functions.apply_patch".into(),
+            metadata: None,
+            state: ToolState::Pending {
+                input: serde_json::json!({}),
+                raw: String::new(),
+            },
         })
     }
 
     fn part_key(part: &super::Part) -> String {
-        let super::Part::Tool(tool) = part else { panic!("not tool") };
+        let super::Part::Tool(tool) = part else {
+            panic!("not tool")
+        };
         tool.id.to_string()
     }
 
     fn raw(part: &super::Part) -> &str {
-        let super::Part::Tool(tool) = part else { panic!("not tool") };
-        let super::ToolState::Pending { raw, .. } = &tool.state else { panic!("not pending") };
+        let super::Part::Tool(tool) = part else {
+            panic!("not tool")
+        };
+        let super::ToolState::Pending { raw, .. } = &tool.state else {
+            panic!("not pending")
+        };
         raw
     }
 
@@ -1155,7 +1193,13 @@ mod tests {
         let now = super::Instant::now();
         let mut published = 0;
         for ms in 0..=1000 {
-            if let Some(part) = pacing.append(&mut parts, "a", &id, "x", now + super::Duration::from_millis(ms)) {
+            if let Some(part) = pacing.append(
+                &mut parts,
+                "a",
+                &id,
+                "x",
+                now + super::Duration::from_millis(ms),
+            ) {
                 assert_eq!(ms % 45, 0);
                 assert_eq!(raw(&part).len(), ms as usize + 1);
                 published += 1;
@@ -1173,10 +1217,20 @@ mod tests {
         let now = super::Instant::now();
         assert!(pacing.append(&mut parts, "a", &id, "", now).is_none());
         assert!(pacing.end(&parts, "a", &id).is_none());
-        assert!(pacing.append(&mut parts, "a", "missing", "x", now).is_none());
+        assert!(pacing
+            .append(&mut parts, "a", "missing", "x", now)
+            .is_none());
         assert!(pacing.last_publish.is_empty());
         assert!(pacing.append(&mut parts, "a", &id, "x", now).is_some());
-        assert!(pacing.append(&mut parts, "a", &id, "", now + super::Duration::from_secs(1)).is_none());
+        assert!(pacing
+            .append(
+                &mut parts,
+                "a",
+                &id,
+                "",
+                now + super::Duration::from_secs(1)
+            )
+            .is_none());
     }
 
     #[test]
@@ -1184,17 +1238,24 @@ mod tests {
         let mut pacing = super::ToolInputSnapshots::default();
         let mut parts = vec![pending_part("a")];
         let id = part_key(&parts[0]);
-        let super::Part::Tool(tool) = &mut parts[0] else { unreachable!() };
+        let super::Part::Tool(tool) = &mut parts[0] else {
+            unreachable!()
+        };
         tool.state = super::ToolState::Running {
             input: serde_json::json!({"patchText":"complete"}),
-            time: super::PartTime { start: 0, end: None },
+            time: super::PartTime {
+                start: 0,
+                end: None,
+            },
         };
         for error in [false, true] {
             if error {
                 super::set_tool_error(&mut parts, &id, "failed".into());
             }
             let before = serde_json::to_value(&parts).unwrap();
-            assert!(pacing.append(&mut parts, "a", &id, "ignored", super::Instant::now()).is_none());
+            assert!(pacing
+                .append(&mut parts, "a", &id, "ignored", super::Instant::now())
+                .is_none());
             assert!(pacing.end(&parts, "a", &id).is_none());
             assert_eq!(serde_json::to_value(&parts).unwrap(), before);
             assert!(pacing.last_publish.is_empty());

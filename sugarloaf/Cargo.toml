@@ -145,6 +145,9 @@ shaderc = "0.10.1"
 # par with Linux's previous (no-cascade) state plus codepoint discovery
 # from the installed font set, which is the win we actually care about.
 
+[build-dependencies]
+naga = { version = "28.0.0", default-features = false, features = ["wgsl-in"] }
+
 [dev-dependencies]
 neoism-window = { workspace = true }
 png = "0.17.16"

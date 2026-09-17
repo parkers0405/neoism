@@ -16,8 +16,7 @@ use neoism_ui::panels::agent_pane::stream_events::{
 };
 
 use super::api::{
-    fetch_session_messages_page, fetch_session_statuses, open_event_stream, part_block,
-    EventStreamConnection,
+    fetch_session_messages_page, open_event_stream, part_block, EventStreamConnection,
 };
 use super::pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentPendingPermission,
@@ -524,54 +523,14 @@ fn run_event_stream(
                     if tx.send(AgentSessionUpdate::EventStreamReconnected).is_err() {
                         return;
                     }
-                    let statuses = fetch_session_statuses(&server).ok();
-                    // An idle session is absent from `/session/status`. Recover
-                    // the terminal signal after reconnect; otherwise a dropped
-                    // final status event can leave Crafting painted forever.
-                    let session_is_idle = statuses.as_ref().is_some_and(|statuses| {
-                        statuses.get(&session_id).is_none_or(|status| {
-                            !matches!(status.kind.as_str(), "busy" | "retry")
-                        })
-                    });
-                    if session_is_idle
-                        && tx.send(AgentSessionUpdate::SessionIdle).is_err()
-                    {
-                        return;
-                    }
+                    // The pane handles EventStreamReconnected with revision-
+                    // guarded background status/family hydration. Never block
+                    // reading the new live baseline on a duplicate REST call.
                     let known_children = known_child_session_ids
                         .lock()
                         .map(|known| known.iter().cloned().collect::<Vec<_>>())
                         .unwrap_or_default();
-                    for child_id in &known_children {
-                        if let Some(statuses) = statuses.as_ref() {
-                            // `/session/status` is the live run set. A known
-                            // child omitted from a successful snapshot is idle.
-                            let (status, started_at) =
-                                reconnect_child_status(statuses, child_id)
-                                    .unwrap_or_else(|| ("completed".to_string(), None));
-                            if tx
-                                .send(AgentSessionUpdate::SubagentStatus {
-                                    session_id: child_id.to_string(),
-                                    status,
-                                    started_at,
-                                    title: None,
-                                    agent: None,
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                    }
                     wake_event_loop(&wake);
-
-                    // Message REST reads can take ten seconds while the store
-                    // is busy (especially around provider retries). Never do
-                    // them on the one thread draining the SSE socket: that
-                    // creates a healthy-looking activity pill with no token
-                    // delivery. The stream is already subscribed, and pane
-                    // reconciliation preserves any text that arrives before
-                    // these snapshots complete.
                     let mut refreshes = Vec::with_capacity(known_children.len() + 1);
                     refreshes.push((session_id.clone(), None));
                     refreshes.extend(known_children.into_iter().map(|id| (id, None)));
@@ -613,15 +572,6 @@ fn run_event_stream(
             return;
         }
     }
-}
-
-fn reconnect_child_status(
-    statuses: &HashMap<String, super::api::SessionStatusSnapshot>,
-    child_id: &str,
-) -> Option<(String, Option<u64>)> {
-    statuses
-        .get(child_id)
-        .map(|status| (status.kind.clone(), status.started_at))
 }
 
 fn sleep_until_reconnect(stop: &AtomicBool) -> bool {
@@ -1822,25 +1772,6 @@ mod tests {
         wake.lock().unwrap().as_ref().unwrap().begin_drain();
         wake_event_loop(&wake);
         assert_eq!(wake_count.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn reconnect_status_omission_is_unknown_not_completion() {
-        let statuses = HashMap::new();
-        assert_eq!(reconnect_child_status(&statuses, "active-child"), None);
-
-        let statuses = HashMap::from([(
-            "active-child".to_string(),
-            super::super::api::SessionStatusSnapshot {
-                kind: "busy".to_string(),
-                started_at: Some(42),
-                ..Default::default()
-            },
-        )]);
-        assert_eq!(
-            reconnect_child_status(&statuses, "active-child"),
-            Some(("busy".to_string(), Some(42)))
-        );
     }
 
     #[test]

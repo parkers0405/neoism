@@ -73,9 +73,8 @@ impl Bounds {
 }
 
 impl ShapeKind {
-    /// World-space bounds. `text_advance` estimates the per-character
-    /// width as a fraction of font size (callers may pass a measured
-    /// value later; the default is a reasonable monospace-ish guess).
+    /// World-space bounds. Text shares the renderer's wrapping rules, with
+    /// estimated advances until the renderer supplies measured dimensions.
     pub fn bounds(&self) -> Bounds {
         match self {
             ShapeKind::Rect { x, y, w, h, .. } | ShapeKind::Ellipse { x, y, w, h } => {
@@ -95,18 +94,17 @@ impl ShapeKind {
                 y,
                 content,
                 size,
+                width,
             } => {
-                let longest = content
-                    .lines()
-                    .map(|l| l.chars().count())
-                    .max()
-                    .unwrap_or(0) as f32;
-                let lines = content.lines().count().max(1) as f32;
-                // Fallback estimate (used until the renderer measures the
-                // real width). Small trailing pad only.
-                let w = longest * size * TEXT_ADVANCE + size * 0.12;
-                let h = lines * size * TEXT_LINE_HEIGHT;
-                Bounds::new(Vec2::new(*x, *y), Vec2::new(x + w, y + h))
+                let size = super::text_layout::font_size(*size);
+                let layout =
+                    super::text_layout::layout_text(content, size, *width, |text| {
+                        text.chars().count() as f32 * size * TEXT_ADVANCE
+                    });
+                Bounds::new(
+                    Vec2::new(*x, *y),
+                    Vec2::new(x + layout.bounds.x, y + layout.bounds.y),
+                )
             }
         }
     }
@@ -162,13 +160,26 @@ impl ShapeKind {
                     p.y = sp(p.y, anchor.y, sy);
                 }
             }
-            ShapeKind::Text { x, y, .. } => {
-                // Handle-dragging only *moves* text (so it travels with a
-                // group resize); it never changes the font size — that was
-                // the source of the runaway-zoom bug. Font size is driven
-                // by Ctrl +/- instead (`change_text_size`).
-                *x = sp(*x, anchor.x, sx);
+            ShapeKind::Text {
+                x,
+                y,
+                content,
+                size,
+                width,
+            } => {
+                let old_width = width.unwrap_or_else(|| {
+                    content
+                        .split('\n')
+                        .map(|line| {
+                            line.chars().count() as f32 * size.abs() * TEXT_ADVANCE
+                        })
+                        .fold(size.abs() * 0.3, f32::max)
+                });
+                let left = sp(*x, anchor.x, sx);
+                let right = sp(*x + old_width, anchor.x, sx);
+                *x = left.min(right);
                 *y = sp(*y, anchor.y, sy);
+                *width = Some((right - left).abs().max(16.0));
             }
         }
     }
@@ -252,8 +263,6 @@ impl Shape {
 
 /// Estimated per-character advance as a fraction of font size.
 const TEXT_ADVANCE: f32 = 0.6;
-/// Estimated line height as a fraction of font size.
-const TEXT_LINE_HEIGHT: f32 = 1.25;
 
 fn near_rect_outline(p: Vec2, b: Bounds, tol: f32) -> bool {
     let corners = [

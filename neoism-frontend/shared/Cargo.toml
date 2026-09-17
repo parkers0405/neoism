@@ -24,6 +24,8 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = "1.13.2"
+typos-dict = "0.13"
+unicase = "2.9"
 rustc-hash = "2.1.2"
 web-time = "1.1"
 image_rs = { workspace = true }

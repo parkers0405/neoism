@@ -1,0 +1,31 @@
+.workspace-home { min-height: 100%; display: grid; place-items: center; padding: 64px 24px; overflow: auto; }
+.workspace-home-content { width: min(100%, 480px); margin: auto; }
+.workspace-home .neoism-home-wordmark { width: 100%; height: auto; margin: 0 auto 64px; color: var(--fg); }
+.workspace-home-label { display: flex; align-items: center; justify-content: space-between; margin: 0 10px 12px; }
+.workspace-home-label h1 { font: inherit; font-weight: 550; margin: 0; }
+.workspace-home-footer { display: flex; justify-content: flex-end; margin: 28px 10px 0; padding-top: 18px; border-top: 1px solid var(--border); }
+.workspace-home-footer label { min-width: 0; max-width: 100%; }
+.workspace-home-footer select { max-width: 100%; border: 0; border-radius: 8px; padding: 7px 28px 7px 8px; background-color: transparent; color: var(--muted); font: inherit; font-size: 12px; }
+.workspace-home-footer select:hover, .workspace-home-footer select:focus-visible { background-color: var(--neutral-button); }
+.workspace-home-label button { color: var(--muted); padding: 8px; }
+.workspace-home-list { display: flex; flex-direction: column; gap: 4px; }
+.workspace-home-row { width: 100%; min-height: 64px; text-align: left; justify-content: flex-start; gap: 14px; padding: 12px 14px; border-radius: 10px; }
+.workspace-home-row > svg { flex: 0 0 auto; color: var(--muted); }
+.workspace-home-row > span { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.workspace-home-row strong { font-weight: 500; }
+.workspace-home-row small { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-home-row > svg:last-child { opacity: 0; transition: opacity .15s; }
+.workspace-home-row:hover > svg:last-child, .workspace-home-row:focus-visible > svg:last-child { opacity: 1; }
+.workspace-home-status { padding: 12px 10px; color: var(--muted); font-size: 13px; }
+.workspace-home-connect { margin: 2px 8px 10px; color: var(--accent); }
+.app.workspace-home-open, .app.workspace-home-open.nav-hidden { grid-template: "main" minmax(0, 1fr) / minmax(0, 1fr); }
+@media (min-width: 641px) {
+    .app.nav-hidden .app-chrome:has(.workspace-home-button) { grid-template-columns: 85px minmax(0, 1fr); }
+}
+.workspace-home-open > .app-chrome { display: none; }
+.workspace-home-open > main { grid-area: main; }
+@media (max-width: 600px) {
+    .workspace-home { padding: 40px 20px; }
+    .workspace-home .neoism-home-wordmark { margin-bottom: 44px; }
+    .workspace-home-row > svg:last-child { opacity: .5; }
+}

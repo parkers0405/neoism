@@ -660,6 +660,8 @@ impl Screen<'_> {
                 );
                 if !is_dir {
                     if let Some(vault_root) = notes_create_vault {
+                        self.renderer.notes_sidebar.set_focused(false);
+                        self.renderer.file_tree.set_focused(false);
                         self.open_path_in_markdown(host_join(&vault_root, path));
                     }
                 }

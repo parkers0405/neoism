@@ -29,12 +29,15 @@ export function useSessionEvents(
     setSessions: Dispatch<SetStateAction<Session[]>>,
     notify: (error: string) => void,
     onSession: (session: Session | string) => void,
+    scoped = false,
+    sessionId?: string,
 ) {
     useEffect(() => {
+        if (scoped && !sessionId) return;
         const abort = new AbortController();
         void (async () => {
             try {
-                for await (const event of subscribeGuiEvents(client, { signal: abort.signal, tail: true })) {
+                for await (const event of subscribeGuiEvents(client, { signal: abort.signal, tail: true, ...(scoped ? { sessionId } : {}) })) {
                     if (abort.signal.aborted) break;
                     if (event.type === "session.updated" || event.type === "session.created" || event.type === "session.compacted") {
                         const session = event.data.info;
@@ -53,5 +56,5 @@ export function useSessionEvents(
             }
         })();
         return () => abort.abort();
-    }, [client, directory, search, setSessions, notify, onSession]);
+    }, [client, directory, search, setSessions, notify, onSession, scoped, sessionId]);
 }

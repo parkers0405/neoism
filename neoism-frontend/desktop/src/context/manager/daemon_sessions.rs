@@ -28,10 +28,14 @@ use neoism_terminal_pty::{PtySession, PtySessionConfig};
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
     pub(super) fn rehydrate_remote_routes_for_attached_daemon(&mut self) {
+        self.attach_existing_remote_routes(None);
+    }
+
+    fn attach_existing_remote_routes(&mut self, generation: Option<u64>) {
         let Some(endpoint) = self.daemon_endpoint().map(str::to_string) else {
             return;
         };
-        let routes = self
+        let mut routes = self
             .contexts
             .iter()
             .filter(|grid| {
@@ -39,20 +43,47 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                     self.adopted_workspaces
                         .get(&stable)
                         .is_some_and(|binding| binding.endpoint == endpoint)
-                })
+                }) || !self.daemon.link_is_peer
             })
             .flat_map(|grid| grid.contexts().values())
             .filter_map(|item| {
                 let context = item.context();
                 let binding = context.remote_pty.as_ref()?.clone();
-                let session_id = binding
-                    .shared
-                    .lock()
-                    .ok()
-                    .and_then(|shared| shared.session_id.clone())?;
+                let session_id = {
+                    let shared = binding.shared.lock().ok()?;
+                    shared
+                        .session_id
+                        .clone()
+                        .or_else(|| shared.awaiting_attach.clone())
+                }?;
                 Some((context.route_id, session_id, binding))
             })
             .collect::<Vec<_>>();
+        if routes.is_empty() {
+            routes = self
+                .daemon
+                .cache
+                .remote_routes
+                .iter()
+                .filter_map(|(route_id, binding)| {
+                    let session_id = self
+                        .daemon
+                        .cache
+                        .route_sessions
+                        .get(route_id)
+                        .cloned()
+                        .or_else(|| {
+                            binding.shared.lock().ok().and_then(|shared| {
+                                shared
+                                    .session_id
+                                    .clone()
+                                    .or_else(|| shared.awaiting_attach.clone())
+                            })
+                        })?;
+                    Some((*route_id, session_id, binding.clone()))
+                })
+                .collect();
+        }
 
         let Some((handle, runtime)) = self
             .daemon
@@ -63,11 +94,12 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             return;
         };
         for (route_id, session_id, binding) in routes {
-            crate::context::remote_pty::await_attach(
+            crate::context::remote_pty::await_attach_for_generation(
                 &binding,
                 &session_id,
                 handle.clone(),
                 runtime.clone(),
+                generation,
             );
             self.daemon
                 .cache
@@ -92,6 +124,89 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 .insert(session_id, route_id);
             self.daemon.cache.remote_routes.insert(route_id, binding);
         }
+    }
+
+    fn gate_all_remote_pty_routes(
+        &mut self,
+        generation: u64,
+        handle: DaemonClientHandle,
+        runtime: tokio::runtime::Handle,
+    ) {
+        let routes = self
+            .daemon
+            .cache
+            .remote_routes
+            .iter()
+            .filter_map(|(route_id, binding)| {
+                let session_id = self
+                    .daemon
+                    .cache
+                    .route_sessions
+                    .get(route_id)
+                    .cloned()
+                    .or_else(|| {
+                        binding.shared.lock().ok().and_then(|shared| {
+                            shared
+                                .session_id
+                                .clone()
+                                .or_else(|| shared.awaiting_attach.clone())
+                        })
+                    })?;
+                Some((*route_id, session_id, binding.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (_route_id, session_id, binding) in routes {
+            crate::context::remote_pty::await_attach_for_generation(
+                &binding,
+                &session_id,
+                handle.clone(),
+                runtime.clone(),
+                Some(generation),
+            );
+        }
+    }
+
+    /// Same-runner websocket recovery: keep existing PTY identities, gate
+    /// input until AttachPty validates, and ignore stale generations.
+    pub fn begin_daemon_generation_gate(&mut self, generation: u64) -> bool {
+        if generation == 0 || generation == self.daemon.cache.last_resync_generation {
+            return false;
+        }
+        let Some((handle, runtime)) = self
+            .daemon
+            .link
+            .as_ref()
+            .and_then(|link| link.handle_and_runtime())
+        else {
+            return false;
+        };
+        self.gate_all_remote_pty_routes(generation, handle, runtime);
+        true
+    }
+
+    pub fn resync_after_daemon_reconnect(&mut self, generation: u64) -> bool {
+        if generation == 0 || generation == self.daemon.cache.last_resync_generation {
+            return false;
+        }
+        self.daemon.cache.last_resync_generation = generation;
+        let first_handshake = !self.daemon.cache.handshake_complete;
+        self.daemon.cache.handshake_complete = true;
+        if first_handshake {
+            self.rehydrate_remote_routes_for_attached_daemon();
+        } else {
+            self.rehydrate_remote_routes_for_generation(generation);
+        }
+        if let Some(link) = self.daemon.link.as_ref() {
+            link.send(WorkspaceClientMessage::RequestHostWorkspaceTree);
+            link.send(WorkspaceClientMessage::RequestFullSnapshot {
+                since_offset: self.daemon.cache.pty_offsets.values().copied().min(),
+            });
+        }
+        true
+    }
+
+    fn rehydrate_remote_routes_for_generation(&mut self, generation: u64) {
+        self.attach_existing_remote_routes(Some(generation));
     }
 
     /// Whether operations for the CURRENT workspace belong on the daemon link

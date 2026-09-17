@@ -936,6 +936,7 @@ fn resolve_daemon(daemon_url: Option<&str>) -> Option<ResolvedDaemon> {
 /// swaps the three binaries in place. Returns true if it handled the args.
 #[derive(Default)]
 struct SelfUpdateOptions {
+    nightly: bool,
     force: bool,
     gui: bool,
     relaunch: bool,
@@ -994,6 +995,11 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
     let mut index = 1;
     while index < args.len() {
         match args[index].to_str() {
+            Some("--nightly") => options.nightly = true,
+            Some("--help" | "-h") => {
+                println!("Usage: neoism update [--nightly] [--force]\n\n  neoism update             Install the latest stable release\n  neoism update --nightly   Install the latest published nightly prerelease\n  --target-version <tag>    Install an explicit release instead\n  --force                   Allow reinstalling or downgrading");
+                return Ok(true);
+            }
             Some("--force") => options.force = true,
             Some("--gui") => options.gui = true,
             Some("--relaunch") => options.relaunch = true,
@@ -1019,6 +1025,9 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
             None => return Err("update options must be valid UTF-8".into()),
         }
         index += 1;
+    }
+    if options.nightly && options.target_version.is_some() {
+        return Err("--nightly and --target-version cannot be combined".into());
     }
     if options.relaunch && (!options.gui || options.parent_pid.is_none()) {
         return Err("--relaunch requires --gui and --parent-pid".into());
@@ -1308,11 +1317,12 @@ fn self_update(
     let current = concat!("v", env!("CARGO_PKG_VERSION"));
     println!("neoism {current} ({goos}/{goarch}) — checking for updates…");
     println!("Installation: {}", std::env::current_exe()?.display());
-    reporter.progress(Some(5), "Checking the latest Neoism release");
+    reporter.progress(Some(5), if options.nightly { "Checking the latest Neoism nightly" } else { "Checking the latest stable Neoism release" });
 
     // The modal pins its displayed release. CLI invocations resolve latest once.
     let latest = match &options.target_version {
         Some(version) => version.clone(),
+        None if options.nightly => crate::update::latest_nightly_release(repo)?,
         None => crate::update::latest_release(repo)?,
     };
 

@@ -121,6 +121,7 @@ fn permission_variants_serialize_stably() {
         Permission::GitWrite,
         Permission::PtyCreate,
         Permission::DeviceManage,
+        Permission::AgentUse,
     ];
     for v in variants {
         let json = serde_json::to_string(&v).unwrap();

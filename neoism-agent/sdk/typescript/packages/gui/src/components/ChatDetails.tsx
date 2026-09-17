@@ -19,8 +19,10 @@ function useSubagents(client: NeoismClient, id: string | undefined) {
         void store.events(); void store.refresh();
         const timer = setInterval(() => { if (!document.hidden) void store.refresh(); }, 15000);
         const focus = () => void store.refresh();
+        const visible = () => { if (!document.hidden) void store.refresh(); };
         window.addEventListener("focus", focus);
-        return () => { store.dispose(); clearInterval(timer); window.removeEventListener("focus", focus); };
+        document.addEventListener("visibilitychange", visible);
+        return () => { store.dispose(); clearInterval(timer); window.removeEventListener("focus", focus); document.removeEventListener("visibilitychange", visible); };
     }, [client, id]);
     return { data: state?.client === client && state.id === id ? state.data : emptySubagents() };
 }

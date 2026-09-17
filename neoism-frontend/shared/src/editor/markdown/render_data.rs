@@ -17,6 +17,8 @@ fn notebook_image_preview_display_size(
 }
 
 impl MarkdownPane {
+    pub fn viewport_vertical_bounds(&self) -> [f32; 2] { self.viewport_bounds }
+
     pub fn begin_block_layout(&mut self) {
         self.block_rects.clear();
         self.block_wrap_rows.clear();
@@ -158,6 +160,7 @@ impl MarkdownPane {
             cell_width,
             line_height,
             hit_rows,
+            source_revealed: self.table_cell_revealed(line, cell_ix),
         });
     }
 
@@ -466,6 +469,7 @@ impl MarkdownPane {
         !self.read_only
             && self.cursor_line == line
             && (!self.vim_enabled || self.mode == MarkdownMode::Insert)
+            && self.cursor_reveal_active()
     }
 
     pub fn block_rect_for_source_line(&self, line: usize) -> Option<MarkdownBlockRect> {

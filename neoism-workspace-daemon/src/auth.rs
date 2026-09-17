@@ -40,6 +40,9 @@ pub struct DeviceRecord {
     pub created_at: i64,
     pub last_seen: i64,
     pub granted_permissions: BTreeSet<Permission>,
+    /// When set, Agent proxy may only mint into this workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 impl DeviceRecord {
@@ -115,6 +118,15 @@ impl DeviceRegistry {
         device_label: &str,
         granted_permissions: BTreeSet<Permission>,
     ) -> Result<IssuedDevice, RegistryError> {
+        self.issue_for_workspace(device_label, granted_permissions, None)
+    }
+
+    pub fn issue_for_workspace(
+        &self,
+        device_label: &str,
+        granted_permissions: BTreeSet<Permission>,
+        workspace_id: Option<String>,
+    ) -> Result<IssuedDevice, RegistryError> {
         let raw_token = generate_token();
         let token_hash = hash_token(&raw_token);
         let device_id = uuid::Uuid::new_v4().to_string();
@@ -126,6 +138,7 @@ impl DeviceRegistry {
             created_at: now,
             last_seen: now,
             granted_permissions: granted_permissions.clone(),
+            workspace_id,
         };
         {
             let mut guard = self.lock();
@@ -407,6 +420,7 @@ fn perm_name(p: Permission) -> &'static str {
         Permission::GitWrite => "GitWrite",
         Permission::PtyCreate => "PtyCreate",
         Permission::DeviceManage => "DeviceManage",
+        Permission::AgentUse => "AgentUse",
     }
 }
 
@@ -451,7 +465,19 @@ impl AuthService {
         &self,
         requested: BTreeSet<Permission>,
     ) -> PairingCodeResponse {
-        let resp = self.pairing.mint(requested);
+        self.record_mint(self.pairing.mint(requested))
+    }
+
+    /// Operator-confirmed phone share: claim can grant without a second UI.
+    pub fn mint_preapproved_pairing_code(
+        &self,
+        requested: BTreeSet<Permission>,
+        workspace_id: String,
+    ) -> PairingCodeResponse {
+        self.record_mint(self.pairing.mint_preapproved(requested, workspace_id))
+    }
+
+    fn record_mint(&self, resp: PairingCodeResponse) -> PairingCodeResponse {
         let _ = self.audit.record_now(
             None,
             "pair_mint",
@@ -466,16 +492,25 @@ impl AuthService {
     pub fn claim_pairing(&self, req: PairClaimRequest) -> PairClaimResponse {
         let code_id = crate::pairing::code_id(&req.code);
         let outcome = self.pairing.claim(&req.code);
-        let requested = match outcome {
+        let (requested, preapproved, workspace_id) = match outcome {
             ClaimOutcome::Ok {
                 requested_permissions,
+                workspace_id,
+                preapproved,
             } => {
                 // Merge what the mint side declared with what the claim is
                 // asking for. The eventual grant is the *intersection* with
-                // the operator's decision below.
-                let mut merged = requested_permissions;
-                merged.extend(req.requested_permissions.iter().copied());
-                merged
+                // the operator's decision below. Preapproved phone-share
+                // codes ignore extra claim-side permissions so a QR cannot
+                // escalate past the operator-confirmed set.
+                let merged = if preapproved {
+                    requested_permissions
+                } else {
+                    let mut merged = requested_permissions;
+                    merged.extend(req.requested_permissions.iter().copied());
+                    merged
+                };
+                (merged, preapproved, workspace_id)
             }
             ClaimOutcome::Expired => {
                 let _ = self.audit.record_now(
@@ -501,9 +536,17 @@ impl AuthService {
             }
         };
 
-        match evaluate_approval(&requested) {
+        match if preapproved {
+            ApprovalDecision::Granted(requested.clone())
+        } else {
+            evaluate_approval(&requested)
+        } {
             ApprovalDecision::Granted(granted) => {
-                match self.registry.issue(&req.device_label, granted.clone()) {
+                match self.registry.issue_for_workspace(
+                    &req.device_label,
+                    granted.clone(),
+                    workspace_id,
+                ) {
                     Ok(issued) => {
                         let _ = self.audit.record_now(
                             Some(&issued.device_id),
@@ -676,6 +719,36 @@ mod service_tests {
         };
         let rec = svc.authenticate_bearer(&token).expect("verifies");
         assert!(rec.granted_permissions.contains(&Permission::ReadFiles));
+    }
+
+    #[test]
+    fn preapproved_phone_share_grants_without_auto_approve() {
+        let _g = AutoApproveGuard::disable();
+        let dir = TempDir::new().unwrap();
+        let svc = AuthService::bootstrap(dir.path()).unwrap();
+        let code = svc.mint_preapproved_pairing_code(
+            BTreeSet::from([Permission::AgentUse]),
+            "ws-1".into(),
+        );
+        let resp = svc.claim_pairing(PairClaimRequest {
+            code: code.code,
+            device_label: "phone".into(),
+            requested_permissions: BTreeSet::from([Permission::DeviceManage]),
+        });
+        match resp {
+            PairClaimResponse::Granted {
+                device_token,
+                granted_permissions,
+                ..
+            } => {
+                assert!(granted_permissions.contains(&Permission::AgentUse));
+                assert!(!granted_permissions.contains(&Permission::DeviceManage));
+                assert!(!granted_permissions.contains(&Permission::ReadFiles));
+                let rec = svc.authenticate_bearer(&device_token).expect("verifies");
+                assert_eq!(rec.workspace_id.as_deref(), Some("ws-1"));
+            }
+            other => panic!("expected Granted, got {other:?}"),
+        }
     }
 
     #[test]

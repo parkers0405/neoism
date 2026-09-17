@@ -27,6 +27,10 @@ fn append_epub_toc_buttons(
 
 impl Screen<'_> {
     pub(crate) fn activate_rich_document_path(&mut self, path: PathBuf) {
+        if neoism_ui::editor::documentation_notebook::is_manifest(&path) {
+            self.open_documentation_notebook(path);
+            return;
+        }
         if is_epub_path(&path) {
             self.activate_epub_path(path);
         } else if crate::editor::notebook::is_notebook_path(&path) {

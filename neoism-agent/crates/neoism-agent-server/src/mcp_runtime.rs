@@ -19,6 +19,10 @@ use super::mcp_transport::{
 };
 use super::mcp_wire::{parse_prompts, parse_resources, parse_tools};
 
+#[cfg(test)]
+#[path = "mcp_runtime_tests.rs"]
+mod tests;
+
 pub(crate) const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 #[derive(Default)]
@@ -32,7 +36,15 @@ enum McpRuntimeEntry {
     Remote(RemoteMcpRuntime),
 }
 
+#[derive(Clone, Copy, Default)]
+struct McpCapabilities {
+    tools: bool,
+    resources: bool,
+    prompts: bool,
+}
+
 struct LocalMcpRuntime {
+    capabilities: McpCapabilities,
     spec: LocalMcpRuntimeSpec,
     client: Arc<StdioJsonRpcClient>,
     tools: Vec<McpToolInfo>,
@@ -41,6 +53,7 @@ struct LocalMcpRuntime {
 }
 
 struct RemoteMcpRuntime {
+    capabilities: McpCapabilities,
     spec: Option<RemoteMcpRuntimeSpec>,
     url: String,
     client: Option<Arc<HttpJsonRpcClient>>,
@@ -121,8 +134,8 @@ impl McpRuntimeManager {
             .await
             .with_context(|| format!("failed to start MCP server {name}"))?,
         );
-        let snapshot = load_local_snapshot(name, &client).await;
-        let (tools, resources, prompts) = match snapshot {
+        let snapshot = load_snapshot(name, &client, false).await;
+        let (capabilities, (tools, resources, prompts)) = match snapshot {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 client.shutdown().await;
@@ -131,6 +144,7 @@ impl McpRuntimeManager {
         };
 
         let runtime = Arc::new(McpRuntimeEntry::Local(LocalMcpRuntime {
+            capabilities,
             spec,
             client,
             tools,
@@ -189,9 +203,11 @@ impl McpRuntimeManager {
             request_timeout,
             notification_handler(directory, name, state, Arc::downgrade(self)),
         )?);
-        let (tools, resources, prompts) = load_remote_snapshot(name, &client).await?;
+        let (capabilities, (tools, resources, prompts)) =
+            load_snapshot(name, &client, true).await?;
 
         let runtime = Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
+            capabilities,
             spec: Some(spec),
             url: url.to_string(),
             client: Some(client.clone()),
@@ -228,6 +244,7 @@ impl McpRuntimeManager {
             return;
         }
         let runtime = Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
+            capabilities: McpCapabilities::default(),
             spec: None,
             url: url.to_string(),
             client: None,
@@ -390,30 +407,10 @@ impl McpRuntimeManager {
         };
         let refreshed = match runtime.as_ref() {
             McpRuntimeEntry::Local(local) => {
-                let tools = parse_tools(
-                    name,
-                    local.client.request("tools/list", json!({})).await?,
-                );
-                let resources = match local
-                    .client
-                    .request("resources/list", json!({}))
-                    .await
-                {
-                    Ok(value) => parse_resources(name, value),
-                    Err(error) => {
-                        tracing::debug!(mcp = name, error = %error, "failed to refresh MCP resources");
-                        Vec::new()
-                    }
-                };
-                let prompts = match local.client.request("prompts/list", json!({})).await
-                {
-                    Ok(value) => parse_prompts(name, value),
-                    Err(error) => {
-                        tracing::debug!(mcp = name, error = %error, "failed to refresh MCP prompts");
-                        Vec::new()
-                    }
-                };
+                let (tools, resources, prompts) =
+                    read_snapshot(name, &local.client, local.capabilities).await?;
                 Arc::new(McpRuntimeEntry::Local(LocalMcpRuntime {
+                    capabilities: local.capabilities,
                     spec: local.spec.clone(),
                     client: local.client.clone(),
                     tools,
@@ -428,23 +425,10 @@ impl McpRuntimeManager {
                 let Some(client) = remote.client.as_ref() else {
                     return Ok(());
                 };
-                let tools =
-                    parse_tools(name, client.request("tools/list", json!({})).await?);
-                let resources = match client.request("resources/list", json!({})).await {
-                    Ok(value) => parse_resources(name, value),
-                    Err(error) => {
-                        tracing::debug!(mcp = name, error = %error, "failed to refresh remote MCP resources");
-                        Vec::new()
-                    }
-                };
-                let prompts = match client.request("prompts/list", json!({})).await {
-                    Ok(value) => parse_prompts(name, value),
-                    Err(error) => {
-                        tracing::debug!(mcp = name, error = %error, "failed to refresh remote MCP prompts");
-                        Vec::new()
-                    }
-                };
+                let (tools, resources, prompts) =
+                    read_snapshot(name, client, remote.capabilities).await?;
                 Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
+                    capabilities: remote.capabilities,
                     spec: remote.spec.clone(),
                     url: remote.url.clone(),
                     client: remote.client.clone(),
@@ -522,50 +506,51 @@ fn canonical_directory(directory: &str) -> String {
 
 type McpSnapshot = (Vec<McpToolInfo>, Vec<McpResource>, Vec<McpPromptInfo>);
 
-async fn load_local_snapshot(
+async fn load_snapshot<C: JsonRpcClient + Sync>(
     name: &str,
-    client: &Arc<StdioJsonRpcClient>,
-) -> anyhow::Result<McpSnapshot> {
-    initialize_client(name, client, false).await?;
-    let tools = parse_tools(name, client.request("tools/list", json!({})).await?);
-    let resources = match client.request("resources/list", json!({})).await {
-        Ok(value) => parse_resources(name, value),
-        Err(error) => {
-            tracing::debug!(mcp = name, error = %error, "MCP resources/list failed during local connect");
-            Vec::new()
-        }
-    };
-    let prompts = match client.request("prompts/list", json!({})).await {
-        Ok(value) => parse_prompts(name, value),
-        Err(error) => {
-            tracing::debug!(mcp = name, error = %error, "MCP prompts/list failed during local connect");
-            Vec::new()
-        }
-    };
-    Ok((tools, resources, prompts))
+    client: &C,
+    remote: bool,
+) -> anyhow::Result<(McpCapabilities, McpSnapshot)> {
+    let capabilities = initialize_client(name, client, remote).await?;
+    Ok((
+        capabilities,
+        read_snapshot(name, client, capabilities).await?,
+    ))
 }
 
-async fn load_remote_snapshot(
+async fn read_snapshot<C: JsonRpcClient + Sync>(
     name: &str,
-    client: &Arc<HttpJsonRpcClient>,
+    client: &C,
+    capabilities: McpCapabilities,
 ) -> anyhow::Result<McpSnapshot> {
-    initialize_client(name, client, true).await?;
-    let tools = parse_tools(name, client.request("tools/list", json!({})).await?);
-    let resources = match client.request("resources/list", json!({})).await {
-        Ok(value) => parse_resources(name, value),
-        Err(error) => {
-            tracing::debug!(mcp = name, error = %error, "MCP resources/list failed during remote connect");
-            Vec::new()
+    // Initialization is complete before these independent catalog reads. Never
+    // probe unadvertised methods: an unsupported optional catalog can otherwise
+    // put a network timeout on every external application's first model turn.
+    let list = async |method, enabled| {
+        if enabled {
+            client.request(method, json!({})).await
+        } else {
+            Ok(Value::Null)
         }
     };
-    let prompts = match client.request("prompts/list", json!({})).await {
-        Ok(value) => parse_prompts(name, value),
-        Err(error) => {
-            tracing::debug!(mcp = name, error = %error, "MCP prompts/list failed during remote connect");
-            Vec::new()
-        }
-    };
-    Ok((tools, resources, prompts))
+    let (tools, resources, prompts) = tokio::join!(
+        list("tools/list", capabilities.tools),
+        list("resources/list", capabilities.resources),
+        list("prompts/list", capabilities.prompts),
+    );
+    let resources = resources.unwrap_or_else(|error| {
+        tracing::debug!(mcp = name, error = %error, "MCP resources/list failed");
+        Value::Null
+    });
+    let prompts = prompts.unwrap_or_else(|error| {
+        tracing::debug!(mcp = name, error = %error, "MCP prompts/list failed");
+        Value::Null
+    });
+    Ok((
+        parse_tools(name, tools?),
+        parse_resources(name, resources),
+        parse_prompts(name, prompts),
+    ))
 }
 
 trait JsonRpcClient {
@@ -593,11 +578,15 @@ impl JsonRpcClient for Arc<HttpJsonRpcClient> {
     }
 }
 
-async fn initialize_client<C>(name: &str, client: &C, remote: bool) -> anyhow::Result<()>
+async fn initialize_client<C>(
+    name: &str,
+    client: &C,
+    remote: bool,
+) -> anyhow::Result<McpCapabilities>
 where
     C: JsonRpcClient + Sync,
 {
-    client
+    let initialized = client
         .request(
             "initialize",
             json!({
@@ -627,7 +616,12 @@ where
                 format!("failed to complete MCP initialization for {name}")
             }
         })?;
-    Ok(())
+    let capabilities = &initialized["capabilities"];
+    Ok(McpCapabilities {
+        tools: capabilities.get("tools").is_some_and(Value::is_object),
+        resources: capabilities.get("resources").is_some_and(Value::is_object),
+        prompts: capabilities.get("prompts").is_some_and(Value::is_object),
+    })
 }
 
 fn notification_handler(

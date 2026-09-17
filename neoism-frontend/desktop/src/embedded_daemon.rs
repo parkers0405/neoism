@@ -32,7 +32,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -351,8 +351,11 @@ impl EmbeddedDaemonHandle {
                     // router. axum::Router implements
                     // tower::Service<Request<Incoming>>; hyper-util's
                     // auto-builder wants a hyper Service, hence the shim.
-                    fn spawn_connection<S>(app: neoism_workspace_daemon::server::AppRouter, stream: S)
-                    where
+                    fn spawn_connection<S>(
+                        app: neoism_workspace_daemon::server::AppRouter,
+                        stream: S,
+                        peer: Option<SocketAddr>,
+                    ) where
                         S: tokio::io::AsyncRead
                             + tokio::io::AsyncWrite
                             + Unpin
@@ -362,9 +365,16 @@ impl EmbeddedDaemonHandle {
                         tokio::spawn(async move {
                             let io = TokioIo::new(stream);
                             let hyper_service = hyper::service::service_fn(
-                                move |req: hyper::Request<Incoming>| {
+                                move |mut req: hyper::Request<Incoming>| {
                                     let mut svc = app.clone();
-                                    async move { svc.call(req).await }
+                                    async move {
+                                        if let Some(peer) = peer {
+                                            neoism_workspace_daemon::server::attach_tcp_peer(
+                                                &mut req, peer,
+                                            );
+                                        }
+                                        svc.call(req).await
+                                    }
                                 },
                             );
                             if let Err(error) = HyperServerBuilder::new(TokioExecutor::new())
@@ -416,10 +426,11 @@ impl EmbeddedDaemonHandle {
                                         tokio::spawn(async move {
                                             loop {
                                                 match listener.accept().await {
-                                                    Ok((stream, _addr)) => {
+                                                    Ok((stream, addr)) => {
                                                         spawn_connection(
                                                             app.clone(),
                                                             stream,
+                                                            Some(addr),
                                                         );
                                                     }
                                                     Err(error) => {
@@ -455,7 +466,7 @@ impl EmbeddedDaemonHandle {
                             loop {
                                 match listener.accept().await {
                                     Ok((stream, _addr)) => {
-                                        spawn_connection(app.clone(), stream)
+                                        spawn_connection(app.clone(), stream, None)
                                     }
                                     Err(error) => {
                                         tracing::warn!(%error, "embedded daemon accept failed");
@@ -469,8 +480,8 @@ impl EmbeddedDaemonHandle {
                         tokio::spawn(async move {
                             loop {
                                 match tcp_listener.accept().await {
-                                    Ok((stream, _addr)) => {
-                                        spawn_connection(app.clone(), stream)
+                                    Ok((stream, addr)) => {
+                                        spawn_connection(app.clone(), stream, Some(addr))
                                     }
                                     Err(error) => {
                                         tracing::warn!(%error, "embedded daemon tcp accept failed");

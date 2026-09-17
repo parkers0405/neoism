@@ -113,7 +113,7 @@ fn string_at(value: &Value, path: &[&str]) -> Option<String> {
     current.as_str().map(ToString::to_string)
 }
 
-fn is_context_overflow(message: &str) -> bool {
+pub fn is_context_overflow(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     (lower.contains("context") && lower.contains("window"))
         || lower.contains("maximum context")

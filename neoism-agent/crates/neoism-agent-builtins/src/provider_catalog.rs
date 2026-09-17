@@ -976,6 +976,8 @@ fn uses_codex_subscription_limits(model_id: &str, limit: &ModelLimit) -> bool {
     model_id.starts_with("gpt-5.4")
         || model_id.starts_with("gpt-5.5")
         || model_id.starts_with("gpt-5.6")
+        || model_id == "gpt-6"
+        || model_id.starts_with("gpt-6-")
         || (model_id.contains("codex") && limit.context > CODEX_OPENAI_CONTEXT_LIMIT)
 }
 
@@ -1296,6 +1298,49 @@ mod tests {
             assert_eq!(model.limit.output, 128_000, "{model_id}");
             assert_eq!(model.cost.input, 0.0, "{model_id}");
             assert_eq!(model.cost.output, 0.0, "{model_id}");
+        }
+    }
+
+    #[test]
+    fn sol_and_astra_limits_and_compaction_follow_subscription_auth() {
+        let mut providers = parse_codex_limit_fixture();
+        let openai = providers
+            .iter_mut()
+            .find(|provider| provider.id == "openai")
+            .unwrap();
+        for id in ["gpt-6", "gpt-6-astra"] {
+            let mut model = openai.models["gpt-5.6-sol"].clone();
+            model.id = id.into();
+            model.name = id.into();
+            openai.models.insert(id.into(), model);
+        }
+        for id in ["gpt-5.6-sol", "gpt-6", "gpt-6-astra"] {
+            for oauth in [true, false] {
+                let model = UserModel {
+                    provider_id: "openai".into(),
+                    model_id: id.into(),
+                    connection_id: None,
+                    variant: None,
+                };
+                let metadata = generation_metadata(&providers, &model, oauth);
+                let limit = metadata.limit.unwrap();
+                let visible = effective_provider_catalog(&providers, oauth);
+                let visible = &visible
+                    .iter()
+                    .find(|provider| provider.id == "openai")
+                    .unwrap()
+                    .models[id];
+                assert_eq!(visible.limit.context, limit.context, "{id}, oauth={oauth}");
+                assert_eq!(limit.context, if oauth { 400_000 } else { 1_050_000 });
+                assert_eq!(limit.input, Some(if oauth { 272_000 } else { 922_000 }));
+                assert_eq!(metadata.cost.unwrap().input == 0.0, oauth);
+                let trigger = neoism_agent_core::CompactionConfig::default().threshold(
+                    limit.context,
+                    limit.input.unwrap().saturating_sub(20_000),
+                );
+                // The subscription input safety ceiling wins over 65% of 400k.
+                assert_eq!(trigger, if oauth { 252_000 } else { 682_500 });
+            }
         }
     }
 

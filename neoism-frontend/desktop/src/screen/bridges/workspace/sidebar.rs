@@ -175,6 +175,7 @@ impl Screen<'_> {
                 // The drag stores the source path, so toggling a folder and
                 // rebuilding rows does not lose a later threshold-crossing drag.
                 self.renderer.notes_sidebar.set_selected(index);
+                if self.open_selected_notes_notebook() { return true; }
                 let (mx, my) = self.mouse_logical_for_hit_test();
                 self.notes_sidebar_opened_on_press = false;
                 if self.renderer.notes_sidebar.begin_notes_drag(index, mx, my) {
@@ -367,37 +368,22 @@ impl Screen<'_> {
 
     pub(crate) fn handle_notes_sidebar_context_click(&mut self) -> bool {
         use neoism_ui::panels::notes_sidebar::NotesSidebarHit;
-
-        if !self.renderer.notes_sidebar.is_visible() {
-            return false;
-        }
-        let scale = self.sugarloaf.scale_factor();
-        let x = self.mouse.x as f32 / scale;
-        let y = self.mouse.y as f32 / scale;
-        let Some(hit) = self.renderer.notes_sidebar.hit_test(x, y) else {
-            return false;
-        };
+        let (x, y) = self.mouse_logical_for_hit_test();
+        if !self.renderer.notes_sidebar.contains_point(x, y) { return false; }
         self.renderer.notes_sidebar.set_focused(true);
         self.renderer.file_tree.set_focused(false);
-
-        let target = match hit {
-            NotesSidebarHit::Note(index) | NotesSidebarHit::NoteIcon(index) => {
+        let target = match self.renderer.notes_sidebar.hit_test(x, y) {
+            Some(NotesSidebarHit::Note(index) | NotesSidebarHit::NoteIcon(index)) => {
                 self.renderer.notes_sidebar.set_selected(index);
                 self.renderer.notes_sidebar.note_path(index)
             }
-            NotesSidebarHit::WorkspacePicker
-            | NotesSidebarHit::NewNote
-            | NotesSidebarHit::NewFolder
-            | NotesSidebarHit::CreateFirstNote
-            | NotesSidebarHit::CreateWorkspaceVault
-            | NotesSidebarHit::SelectVault => {
-                self.renderer.notes_sidebar.workspace_path()
-            }
+            _ => self.renderer.notes_sidebar.workspace_path(),
         };
-        let Some(target) = target else {
-            return true;
-        };
-        self.open_notes_sidebar_context_menu_for_path(target, x, y);
+        if let Some(target) = target {
+            self.open_notes_sidebar_context_menu_for_path(target, x, y);
+        } else {
+            self.open_notes_vault_menu(x, y);
+        }
         true
     }
 
@@ -549,6 +535,7 @@ impl Screen<'_> {
                     self.open_notes_vault_menu_for_selector();
                     return true;
                 }
+                if self.open_selected_notes_notebook() { return true; }
                 if self
                     .renderer
                     .notes_sidebar
@@ -707,6 +694,16 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    fn open_selected_notes_notebook(&mut self) -> bool {
+        if self.context_manager.current_workspace_is_remote_joined() { return false; }
+        let Some(path) = self.renderer.notes_sidebar.selected_note_path().filter(|path| {
+            path.is_dir() && path.join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME).is_file()
+        }) else { return false; };
+        self.renderer.notes_sidebar.set_focused(false);
+        self.open_documentation_notebook(path);
+        true
+    }
+
     pub(crate) fn open_path_from_notes_sidebar(&mut self, path: PathBuf) {
         let source = neoism_ui::services::FileOpenSource::notes(
             self.context_manager.current_workspace_is_remote_joined(),
@@ -829,12 +826,13 @@ impl Screen<'_> {
         match result {
             Ok(()) => {
                 self.renderer.modal.close();
+                self.renderer.notes_sidebar.reveal_dir(&dir);
                 self.renderer.notes_sidebar.refresh_notes();
-                self.renderer.notes_sidebar.set_focused(true);
-                self.renderer.notifications.push(
-                    format!("Created note {}", path.display()),
-                    NotificationLevel::Info,
-                );
+                self.renderer.notes_sidebar.select_path(&path);
+                self.renderer.notes_sidebar.set_focused(false);
+                self.renderer.file_tree.set_focused(false);
+                self.refresh_file_tree_entries();
+                self.open_path_from_notes_sidebar(path);
             }
             Err(err) => self.renderer.notifications.push(
                 format!("Create note failed: {err}"),

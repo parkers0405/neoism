@@ -109,7 +109,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "write",
-            "Create or overwrite files",
+            "Create or overwrite files. Markdown prose: keep each paragraph on one source line; do not hard-wrap to column widths. Preserve intentional hard breaks, lists, tables, and code; follow explicit user/project formatting requirements.",
             object_required(
                 &[("filePath", "string"), ("content", "string")],
                 &["filePath", "content"],
@@ -119,7 +119,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "edit",
-            "Replaces text in a file. Requires filePath, oldString, and newString. For V4A envelope patches, use apply_patch.",
+            "Replaces text in a file. Requires filePath, oldString, and newString. For V4A envelope patches, use apply_patch. Markdown prose: keep each paragraph on one source line; do not hard-wrap to column widths. Preserve intentional breaks, lists, tables, and code; do not reflow unrelated text or override explicit formatting requirements.",
             object_required(
                 &[
                     ("filePath", "string"),
@@ -183,7 +183,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "apply_patch",
-            "Use the apply_patch tool to edit one or many files atomically. patchText must be a V4A envelope patch with *** Begin Patch, one or more *** Add File / *** Delete File / *** Update File headers, and *** End Patch. Put related multi-file changes in one patch; independent tool calls may run in parallel.",
+            "Use the apply_patch tool to edit one or many files atomically. patchText must be a V4A envelope patch with *** Begin Patch, one or more *** Add File / *** Delete File / *** Update File headers, and *** End Patch. Put related multi-file changes in one patch; independent tool calls may run in parallel. Markdown prose: keep each paragraph on one source line; do not hard-wrap to column widths. Preserve intentional breaks, lists, tables, and code; do not reflow unrelated text or override explicit formatting requirements.",
             object_required(&[("patchText", "string")], &["patchText"]),
             apply_patch_handler,
         ),

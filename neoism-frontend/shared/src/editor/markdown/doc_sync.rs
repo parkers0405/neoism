@@ -262,6 +262,14 @@ impl MarkdownDocBinding {
         self.replica.state_vector_v1()
     }
 
+    pub fn encode_full_update_v1(&self) -> CrdtTextUpdate {
+        CrdtTextUpdate {
+            origin_client_id: self.client_id(),
+            update_v1: self.replica.encode_full_update_v1(),
+            state_vector_v1: self.replica.state_vector_v1(),
+        }
+    }
+
     /// The replica's current document text (test/diagnostic aid).
     pub fn doc_text(&self) -> String {
         self.replica.text()

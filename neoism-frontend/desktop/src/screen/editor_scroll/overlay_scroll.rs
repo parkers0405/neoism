@@ -237,6 +237,9 @@ impl Screen<'_> {
                 self.renderer.context_menu.scroll_pixels(pixels);
                 self.mark_dirty();
                 return true;
+            } else if self.renderer.context_menu.is_markdown_block_completion() {
+                self.renderer.context_menu.close();
+                self.mark_dirty();
             }
         }
 

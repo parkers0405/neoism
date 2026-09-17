@@ -7,6 +7,7 @@ mod lines;
 mod mermaid;
 mod scrollbar;
 mod table;
+mod table_layout;
 mod types;
 mod virtualized;
 
@@ -80,6 +81,7 @@ pub fn render(
     if w <= 0.0 || h <= 0.0 {
         return;
     }
+    pane.viewport_bounds = [y, y + h];
     let font_scale = font_scale.clamp(0.5, 3.0);
 
     if virtualized::render_virtual(

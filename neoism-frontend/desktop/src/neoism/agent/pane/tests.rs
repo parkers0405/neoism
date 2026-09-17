@@ -1,4 +1,50 @@
 use super::*;
+
+#[test]
+fn live_baseline_family_hydration_survives_unrelated_text_tokens() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.runtime_status_requests.insert("root".into(), 1);
+    pane.note_session_runtime_event("root");
+    pane.background_sender()
+        .send(NeoismAgentBackgroundUpdate::SessionRuntimeStatusRefreshed {
+            session_id: "root".into(),
+            request_generation: 1,
+            runtime_revision: 0,
+            result: Ok(HashMap::new()),
+            runtime: Ok(super::super::api::FamilyRuntimeSnapshot {
+                root_session_id: "root".into(),
+                family_revision: 2,
+                branches: vec![("child".into(), "outstanding".into(), Some(1))],
+                ..Default::default()
+            }),
+            permissions: Ok(Vec::new()),
+            questions: Ok(Vec::new()),
+        })
+        .unwrap();
+    pane.drain_background_updates();
+    assert!(pane.active_subagent_ids.contains("child"));
+}
+
+#[test]
+fn live_baseline_replaces_cached_text_before_following_deltas() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages
+        .push(NeoismAgentMessage::assistant("prefix old attempt").with_id("p"));
+    pane.upsert_part_message(NeoismAgentMessage::assistant("prefix ").with_id("p"));
+    pane.apply_part_delta(None, Some("p".into()), Some("text".into()), "new");
+    assert_eq!(pane.messages[0].text, "prefix new");
+    pane.upsert_part_message(NeoismAgentMessage::assistant("").with_id("p"));
+    pane.apply_part_delta(None, Some("p".into()), Some("text".into()), "retry");
+    assert_eq!(pane.messages[0].text, "retry");
+    let mut cached = vec![NeoismAgentMessage::assistant("old").with_id("p")];
+    upsert_cached_part_message(
+        &mut cached,
+        NeoismAgentMessage::assistant("").with_id("p"),
+    );
+    apply_cached_part_delta(&mut cached, Some("p"), Some("text"), "fresh");
+    assert_eq!(cached[0].text, "fresh");
+}
 use neoism_ui::panels::agent_pane::state::side_panel::STATUS_LABEL_GRACE;
 use std::fs;
 

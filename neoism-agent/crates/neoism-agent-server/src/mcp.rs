@@ -675,9 +675,12 @@ pub(crate) async fn call_tool_in_session(
     if let Some(service) = builtin_service(Some(&state), client)
         .filter(|_| config.mcp.get(client).is_some_and(is_enabled))
     {
-        let result = service
-            .call_tool_authorized_async(std::path::Path::new(directory), tool, arguments, session_authorized, cancel, revocation_generation)
-            .await?;
+        let result = if client == "computer" && tool == "browser_step" {
+            crate::computer_use::typesafe::call(&state, directory, snapshot, &config,
+                arguments, session_authorized, cancel, revocation_generation).await?
+        } else {
+            service.call_tool_authorized_async(std::path::Path::new(directory), tool, arguments, session_authorized, cancel, revocation_generation).await?
+        };
         return Ok(McpToolCallResult {
             content: result
                 .content

@@ -294,6 +294,7 @@ pub fn default_config_file_content() -> String {
     //     "smallModel": "anthropic/claude-haiku-4-5",
     //     "variant": "high",       // low | medium | high | xhigh | max
     //     "textVerbosity": "low",  // low | medium | high
+    //     "compaction": { "auto": true, "threshold-percent": 65 }, // auto: false bypasses automatic compaction
     //     "permission": { "edit": "ask", "bash": "ask" },
     //     "mcp": { "my-server": { "type": "local", "command": ["my-mcp"] } },
     // },

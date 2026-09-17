@@ -3,6 +3,11 @@ use std::path::Path;
 
 impl Screen<'_> {
     pub fn open_path_in_markdown(&mut self, path: std::path::PathBuf) {
+        if neoism_ui::editor::documentation_notebook::is_manifest(&path) {
+            self.open_documentation_notebook(path);
+            return;
+        }
+        if self.follow_documentation_notebook_link(&path, None) { return; }
         let source = neoism_ui::services::FileOpenSource::workspace(self.context_manager.current_workspace_is_remote_joined());
         self.open_path_in_markdown_with_source(path, source);
     }
@@ -122,6 +127,7 @@ impl Screen<'_> {
             // Local rename failed — rename_file_tree_path already toasted.
             return;
         }
+        self.rebind_documentation_notebook_paths(&old_path, &new_path);
         if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(&old_path) {
             pane.path = new_path.clone();
             pane.title = sanitized;
@@ -245,6 +251,9 @@ impl Screen<'_> {
     }
 
     pub(crate) fn sync_markdown_tab_modified(&mut self, path: &Path, modified: bool) {
+        let notebook = self.context_manager.markdown_pane_mut_by_path(path)
+            .and_then(|pane| pane.documentation_notebook.as_ref().map(|book| book.path.clone()));
+        if let Some(notebook) = notebook { self.sync_documentation_notebook_modified(&notebook); }
         self.renderer.buffer_tabs.set_modified(path, modified);
         for tabs in self.renderer.pane_tabs.values_mut() {
             tabs.set_modified(path, modified);

@@ -9,6 +9,7 @@ use serde::Deserialize;
 const COOKIE: &str = "neoism_local_gui";
 const TTL: Duration = Duration::from_secs(12 * 60 * 60);
 pub(crate) const REGISTRY_PATH: &str = "/__neoism/gui/servers";
+pub(crate) const SHARE_TARGET_PATH: &str = "/__neoism/gui/share-target";
 #[derive(Clone)]
 pub(crate) struct LocalGui {
     port: u16,
@@ -68,6 +69,21 @@ impl LocalGui {
         // Restrict the cookie to this private GUI endpoint namespace; it must
         // not accompany unrelated localhost application/API requests.
         format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/__neoism/gui; Max-Age={}", TTL.as_secs())
+    }
+
+    /// Loopback operator GUI only: the sibling workspace-daemon HTTP origin.
+    pub(crate) fn share_target(&self, request: &Request<Body>) -> Response {
+        if !self.local_request(request) || request.method() != Method::GET {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        let Some(port) = std::env::var("NEOISM_DAEMON_TCP_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+        else {
+            return Json(serde_json::json!({ "daemon": "http://127.0.0.1:7878" })).into_response();
+        };
+        Json(serde_json::json!({ "daemon": format!("http://127.0.0.1:{port}") })).into_response()
     }
 
     /// OS CLI handoff: existing local API auth is verified server-side. Only a

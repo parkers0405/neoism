@@ -524,6 +524,17 @@ async fn read_tool_returns_media_attachment_metadata() {
 }
 
 #[tokio::test]
+async fn markdown_write_preserves_prose_and_explicit_breaks_verbatim() {
+    let root = std::env::temp_dir().join(format!("neoism-markdown-verbatim-{}", neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)));
+    std::fs::create_dir_all(&root).unwrap();
+    let paragraph = "A prose paragraph should wrap only in the view. ".repeat(20);
+    let source = format!("# Notes\n\n{paragraph}\n\nIntentional break  \nNext line\n\n- List item\n\n```rust\nlet x = 1;\n```\n");
+    execute("write", allow_context(&root).await, json!({"filePath":"note.md","content":source})).await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("note.md")).unwrap(), source);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn write_tool_creates_nested_missing_directories() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-write-nested-{}",

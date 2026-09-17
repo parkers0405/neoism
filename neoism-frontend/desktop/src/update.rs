@@ -353,8 +353,29 @@ pub(crate) fn latest_release(repo: &str) -> Result<String, String> {
     let effective_url = String::from_utf8(output.stdout)
         .map_err(|_| "GitHub returned an invalid release URL".to_string())?;
     release_tag_from_url(&effective_url)
-        .filter(|tag| valid_release_tag(tag))
-        .ok_or_else(|| "No valid published Neoism release found".to_string())
+        .filter(|tag| valid_release_tag(tag) && parse_version(tag).is_some_and(|version| version.prerelease.is_none()))
+        .ok_or_else(|| "No valid published stable Neoism release found".to_string())
+}
+
+pub(crate) fn latest_nightly_release(repo: &str) -> Result<String, String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
+    let output = crate::background_process::command("curl")
+        .args(["-fsSL", "--connect-timeout", "3", "--max-time", "15", "-A", "neoism-update-check", "-H", "Accept: application/vnd.github+json", &url])
+        .output().map_err(|error| format!("Cannot check nightly releases: {error}"))?;
+    if !output.status.success() { return Err("Nightly release lookup failed; GitHub may be unavailable or rate-limiting this connection".into()); }
+    let releases: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Invalid nightly release response: {error}"))?;
+    nightly_from_releases(&releases).ok_or_else(|| "No published Neoism nightly is available yet".into())
+}
+
+fn nightly_from_releases(releases: &serde_json::Value) -> Option<String> {
+    releases.as_array()?.iter().filter(|release| {
+        release["draft"].as_bool() == Some(false) && release["prerelease"].as_bool() == Some(true)
+    }).filter_map(|release| release["tag_name"].as_str()).filter(|tag| {
+        valid_release_tag(tag) && parse_version(tag).is_some_and(|version| {
+            matches!(version.prerelease.as_deref().and_then(|parts| parts.first()), Some(PrereleaseId::Text(name)) if name == "nightly")
+        })
+    }).max_by(|left, right| parse_version(left).cmp(&parse_version(right))).map(str::to_string)
 }
 
 fn available_version() -> Option<String> {
@@ -484,6 +505,22 @@ fn parse_version(value: &str) -> Option<Version> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nightly_lookup_excludes_drafts_stable_and_other_prereleases() {
+        let releases = serde_json::json!([
+            {"tag_name":"v99.0.0-nightly.1", "draft":true, "prerelease":true},
+            {"tag_name":"v99.0.0", "draft":false, "prerelease":false},
+            {"tag_name":"v99.0.0-beta.1", "draft":false, "prerelease":true},
+            {"tag_name":"v0.7.106-nightly.20260917.2", "draft":false, "prerelease":true},
+            {"tag_name":"v0.7.106-nightly.20260917.10", "draft":false, "prerelease":true},
+            {"tag_name":"v0.7.106-nightly.20260917.1", "draft":false, "prerelease":true}
+        ]);
+        assert_eq!(super::nightly_from_releases(&releases).as_deref(), Some("v0.7.106-nightly.20260917.10"));
+        assert!(super::nightly_from_releases(&serde_json::json!([])).is_none());
+        assert!(super::is_newer("v0.7.106-nightly.20260917.1", "0.7.105"));
+        assert!(super::is_newer("v0.7.106", "0.7.106-nightly.20260917.1"));
+    }
+
     use super::*;
 
     #[test]

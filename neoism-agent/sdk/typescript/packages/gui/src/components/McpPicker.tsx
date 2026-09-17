@@ -1,3 +1,4 @@
+import { TypeSafeComputerSettings } from "./TypeSafeComputerSettings";
 import { useEffect, useRef, useState } from "react";
 import type { NeoismClient } from "@neoism/sdk";
 import { getMcp, runMcpAction, type McpCatalog, type McpAction } from "../mcpActions";
@@ -66,6 +67,7 @@ export function McpPicker({ client, directory }: { client: NeoismClient; directo
                 {entry.oauthCapable && <button disabled={busy} onClick={() => void act(name, "auth")}>Authenticate</button>}
                 {entry.hasCredentials && <button disabled={busy} onClick={() => void act(name, "logout")}>Log out</button>}
             </div>
+            {name === "computer" && <TypeSafeComputerSettings key={directory} client={client} directory={directory} />}
         </article>)}
         {auth && <div className="mcp-auth"><h3>Authenticate {auth.name}</h3>
             <a href={/^https?:\/\//i.test(auth.url) ? auth.url : undefined} target="_blank" rel="noreferrer">Open authorization page</a>

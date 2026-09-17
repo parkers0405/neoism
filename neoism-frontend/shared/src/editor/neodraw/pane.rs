@@ -93,6 +93,7 @@ pub struct DrawPane {
     /// filled by the renderer. Used for accurate selection frames /
     /// hit-testing in place of the rough estimate in `geometry.rs`.
     pub text_dims: HashMap<ShapeId, Vec2>,
+    pub(super) text_layouts: HashMap<ShapeId, super::text_layout::TextLayout>,
     /// Shapes the eraser drag has swept over (drawn translucent, deleted
     /// on release).
     pub erasing: std::collections::HashSet<ShapeId>,
@@ -139,6 +140,7 @@ impl DrawPane {
             history: super::history::History::default(),
             clipboard: Vec::new(),
             text_dims: HashMap::new(),
+            text_layouts: HashMap::new(),
             erasing: std::collections::HashSet::new(),
             space_armed: false,
             graph: None,
@@ -165,6 +167,8 @@ impl DrawPane {
         match Scene::from_json(json) {
             Ok(scene) => {
                 self.scene = scene;
+                self.text_dims.clear();
+                self.text_layouts.clear();
                 self.error = None;
                 self.selection
                     .retain(|id| self.scene.shapes.iter().any(|s| s.id == *id));
@@ -256,11 +260,14 @@ impl DrawPane {
     /// Zoom about a window-logical point, keeping the world point under
     /// the cursor fixed. Clamped to a sane range.
     pub fn zoom_at(&mut self, x: f32, y: f32, factor: f32) {
+        if !factor.is_finite() || factor <= 0.0 || !x.is_finite() || !y.is_finite() {
+            return;
+        }
         let Some(rect) = self.last_rect else {
             return;
         };
         let world = self.placed_camera(rect).screen_to_world(Vec2::new(x, y));
-        let new_zoom = (self.camera.zoom * factor).clamp(0.1, 8.0);
+        let new_zoom = (self.camera.zoom * factor).clamp(0.05, 8.0);
         self.camera.zoom = new_zoom;
         // Re-solve pan so `world` still maps under (x, y).
         self.camera.pan.x = x - rect[0] - world.x * new_zoom;
@@ -269,7 +276,13 @@ impl DrawPane {
 
     /// Center and scale the scene to fit within `rect` (window-logical).
     pub fn fit_to_view(&mut self, rect: [f32; 4]) {
-        let Some(b) = self.scene.bounds() else {
+        let Some(b) = self
+            .scene
+            .shapes
+            .iter()
+            .map(|shape| self.shape_bounds(shape))
+            .reduce(Bounds::union)
+        else {
             self.camera = Camera::default();
             return;
         };
@@ -314,6 +327,22 @@ fn title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zoom_keeps_the_pointer_anchor_and_supports_the_fit_minimum() {
+        let mut pane = super::DrawPane::new(std::path::PathBuf::from("zoom.neodraw"));
+        pane.last_rect = Some([80.0, 50.0, 800.0, 600.0]);
+        pane.camera.zoom = 0.05;
+        let before = pane.window_to_world(320.0, 240.0).unwrap();
+        pane.zoom_at(320.0, 240.0, 1.2);
+        assert!((pane.camera.zoom - 0.06).abs() < 0.0001);
+        let after = pane.window_to_world(320.0, 240.0).unwrap();
+        assert!((before.x - after.x).abs() < 0.001);
+        assert!((before.y - after.y).abs() < 0.001);
+        let camera = pane.camera;
+        pane.zoom_at(320.0, 240.0, f32::NAN);
+        assert_eq!(pane.camera, camera);
+    }
+
     use super::*;
 
     #[test]

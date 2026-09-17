@@ -71,8 +71,16 @@ pub(super) fn render_virtual(
     } else {
         22.0 + cover_h
     };
-    let content_w = (w - pad_x * 2.0).clamp(220.0, 920.0);
-    let content_x = x + ((w - content_w) * 0.5).max(pad_x.min(w * 0.08));
+    let content_w = if pane.documentation_notebook.is_some() && w >= 800.0 {
+        (w - 280.0).clamp(220.0, 920.0)
+    } else {
+        (w - pad_x * 2.0).clamp(220.0, 920.0)
+    };
+    let content_x = if pane.documentation_notebook.is_some() && w >= 800.0 {
+        x + 40.0
+    } else {
+        x + ((w - content_w) * 0.5).max(pad_x.min(w * 0.08))
+    };
     // Notebook cells reserve a real left gutter for the same grip used by
     // Markdown blocks. Normal Markdown keeps its established page width.
     let notebook_gutter = if pane.is_notebook_document() {
@@ -203,7 +211,6 @@ pub(super) fn render_virtual(
     // lines, re-measure the node(s) it left and entered so the revealed line
     // never paints over the block below it (or leaves a stale gap).
     if pane.virtual_render.measured_cursor_line != Some(pane.cursor_line) {
-        let previous = pane.virtual_render.measured_cursor_line;
         pane.virtual_render.measured_cursor_line = Some(pane.cursor_line);
         // Held arrow keys fire faster than the reveal can re-measure each line
         // it sweeps; flag the stream so measurement keeps the cursor line at
@@ -217,24 +224,8 @@ pub(super) fn render_virtual(
                 now.saturating_duration_since(prev) < CURSOR_REVEAL_FAST_REPEAT
             });
         pane.virtual_render.last_cursor_change_at = Some(now);
-        let mut dirty_nodes: Vec<usize> = previous
-            .into_iter()
-            .chain(std::iter::once(pane.cursor_line))
-            .filter_map(|line| node_for_line(&pane.virtual_render, line))
-            .map(|(node_ix, ..)| node_ix)
-            .collect();
-        dirty_nodes.sort_unstable();
-        dirty_nodes.dedup();
-        for node_ix in dirty_nodes {
-            let _ = pane.virtual_render.surface.apply(
-                VirtualSurfaceCommand::MarkRangeDirty {
-                    start: node_ix,
-                    end: node_ix + 1,
-                    kind: DirtyKind::Layout,
-                },
-            );
-        }
     }
+    invalidate_reveal_layout(pane);
     if !prepare_surface(pane, body_content_w, y + pad_top, viewport_h) {
         return false;
     }
@@ -566,18 +557,20 @@ fn draw_value_picker(
         .map(|picker| picker.selected.min(candidates.len() - 1))
         .unwrap_or(0);
 
-    let row_font = markdown_font(15.0, font_scale);
+    let row_font = markdown_font(13.0, font_scale);
     let row_h = row_font * 1.7;
     let pad = 6.0;
-    let visible_rows = candidates.len().min(8);
-    let menu_w = (w * 0.5).clamp(220.0, 360.0);
-    let menu_h = visible_rows as f32 * row_h + pad * 2.0;
     let below_y = cursor[1] + cursor[3] + 6.0;
-    let menu_y = if below_y + menu_h > y + h {
-        (cursor[1] - menu_h - 6.0).max(y + 4.0)
-    } else {
-        below_y
-    };
+    let below = (y + h - 4.0 - below_y).max(0.0);
+    let above = (cursor[1] - 6.0 - y - 4.0).max(0.0);
+    let desired = candidates.len().min(6) as f32 * row_h + pad * 2.0;
+    let use_above = below < desired && above > below;
+    let available = if use_above { above } else { below };
+    let visible_rows = candidates.len().min(6).min(((available - pad * 2.0).max(0.0) / row_h).floor() as usize);
+    if visible_rows == 0 || w < 80.0 { return; }
+    let menu_w = (w * 0.5).clamp(200.0, 300.0).min(w - 16.0);
+    let menu_h = visible_rows as f32 * row_h + pad * 2.0;
+    let menu_y = if use_above { cursor[1] - menu_h - 6.0 } else { below_y };
     let menu_x = cursor[0].min(x + w - menu_w - 8.0).max(x + 8.0);
     let menu_clip = [menu_x, menu_y, menu_w, menu_h];
 
@@ -589,11 +582,13 @@ fn draw_value_picker(
         menu_y,
         menu_w,
         menu_h,
-        theme.f32(theme.surface),
+        theme.f32(theme.border),
         DEPTH,
         6.0,
         ORDER_BG + 4,
     );
+    sugarloaf.overlay_rounded_rect(menu_x + 1.0, menu_y + 1.0, menu_w - 2.0, menu_h - 2.0,
+        theme.f32(theme.surface), DEPTH, 5.0, ORDER_BG + 5);
 
     // Keep the selection inside the visible window.
     let first = selected.saturating_sub(visible_rows.saturating_sub(1));
@@ -610,7 +605,7 @@ fn draw_value_picker(
                 theme.f32_alpha(theme.accent, 0.28),
                 DEPTH,
                 4.0,
-                ORDER_BG + 5,
+                ORDER_BG + 6,
             );
         }
         let opts = DrawOpts {
@@ -1070,6 +1065,71 @@ fn cursor_reveal_glide_target(current: f32, previous_target: f32, revealed: f32)
 
 fn should_reveal_virtual_cursor(follow_cursor: bool, has_current_geometry: bool) -> bool {
     follow_cursor && !has_current_geometry
+}
+
+#[cfg(test)]
+mod reveal_layout_tests {
+    use super::*;
+
+    fn mark_measured(pane: &mut MarkdownPane) {
+        let layouts = collect_visible_items(pane).iter().map(|item| {
+            VirtualMeasuredLayout::new(item.node, item.revision, 40.0, 0.0, 1)
+        }).collect();
+        pane.virtual_render.surface.apply(VirtualSurfaceCommand::CommitMeasuredLayouts(layouts)).unwrap();
+        assert!(collect_visible_items(pane).iter().all(|item| item.measured_layout));
+    }
+
+    #[test]
+    fn mode_changes_invalidate_layout_without_moving_the_cursor() {
+        let mut pane = MarkdownPane::from_source("reveal.md".into(), "[Neoism](https://github.com/parkers0405/neoism)\n\nFollowing paragraph");
+        pane.vim_enabled = true;
+        pane.mode = crate::editor::markdown::MarkdownMode::Normal;
+        pane.cursor_line = 0;
+        assert!(prepare_surface(&mut pane, 300.0, 0.0, 600.0));
+        invalidate_reveal_layout(&mut pane);
+        mark_measured(&mut pane);
+        pane.mode = crate::editor::markdown::MarkdownMode::Insert;
+        invalidate_reveal_layout(&mut pane);
+        assert_eq!(pane.virtual_render.measured_reveal_line, Some(0));
+        assert!(collect_visible_items(&mut pane).iter().any(|item| !item.measured_layout));
+        mark_measured(&mut pane);
+        pane.mode = crate::editor::markdown::MarkdownMode::Normal;
+        invalidate_reveal_layout(&mut pane);
+        assert_eq!(pane.virtual_render.measured_reveal_line, None);
+        assert!(collect_visible_items(&mut pane).iter().any(|item| !item.measured_layout));
+    }
+
+    #[test]
+    fn moving_between_cells_invalidates_the_active_cell_layout() {
+        let mut pane = MarkdownPane::from_source("table.md".into(), "| A | B |\n| --- | --- |\n| [short](https://example.com/long-url) | **bold** |");
+        pane.mode = crate::editor::markdown::MarkdownMode::Insert;
+        pane.cursor_line = 2;
+        let cells = crate::editor::markdown::parse_table_cell_bounds(&pane.lines[2]).unwrap();
+        pane.cursor_col = cells[0].content_start;
+        assert!(prepare_surface(&mut pane, 400.0, 0.0, 600.0));
+        invalidate_reveal_layout(&mut pane);
+        assert_eq!(pane.virtual_render.measured_table_cell, Some((2, 0)));
+        mark_measured(&mut pane);
+        pane.cursor_col = cells[1].content_start;
+        invalidate_reveal_layout(&mut pane);
+        assert_eq!(pane.virtual_render.measured_table_cell, Some((2, 1)));
+        assert!(collect_visible_items(&mut pane).iter().any(|item| !item.measured_layout));
+    }
+
+    #[test]
+    fn fast_repeat_suppresses_both_raw_drawing_and_measurement() {
+        let mut pane = MarkdownPane::from_source("reveal.md".into(), "[Neoism](https://github.com/parkers0405/neoism)");
+        pane.mode = crate::editor::markdown::MarkdownMode::Insert;
+        pane.cursor_line = 0;
+        assert!(prepare_surface(&mut pane, 300.0, 0.0, 600.0));
+        invalidate_reveal_layout(&mut pane);
+        mark_measured(&mut pane);
+        pane.virtual_render.cursor_reveal_suppressed = true;
+        assert!(!pane.reveals_source_line(0));
+        invalidate_reveal_layout(&mut pane);
+        assert_eq!(pane.virtual_render.measured_reveal_line, None);
+        assert!(collect_visible_items(&mut pane).iter().any(|item| !item.measured_layout));
+    }
 }
 
 #[cfg(test)]
@@ -1770,6 +1830,27 @@ fn prepare_large_line_surface(
     true
 }
 
+fn invalidate_reveal_layout(pane: &mut MarkdownPane) {
+    let revealed = pane.reveals_source_line(pane.cursor_line).then_some(pane.cursor_line);
+    let cell = if pane.mode == crate::editor::markdown::MarkdownMode::Insert && !pane.read_only {
+        pane.table_cursor().map(|cursor| (pane.cursor_line, cursor.cell_ix))
+    } else { None };
+    if pane.virtual_render.measured_reveal_line == revealed && pane.virtual_render.measured_table_cell == cell { return; }
+    let previous_cell = std::mem::replace(&mut pane.virtual_render.measured_table_cell, cell);
+    let previous = std::mem::replace(&mut pane.virtual_render.measured_reveal_line, revealed);
+    let mut nodes: Vec<_> = previous.into_iter().chain(revealed)
+        .chain(previous_cell.map(|(line, _)| line)).chain(cell.map(|(line, _)| line))
+        .filter_map(|line| node_for_line(&pane.virtual_render, line))
+        .map(|(index, ..)| index).collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    for index in nodes {
+        let _ = pane.virtual_render.surface.apply(VirtualSurfaceCommand::MarkRangeDirty {
+            start: index, end: index + 1, kind: DirtyKind::Layout,
+        });
+    }
+}
+
 fn commit_visible_measurements(
     sugarloaf: &mut Sugarloaf,
     pane: &mut MarkdownPane,
@@ -1784,11 +1865,8 @@ fn commit_visible_measurements(
     }
     let mut measurements = Vec::with_capacity(items.len());
     let mut layout_changed = false;
-    // While a held-arrow stream is in flight, measure the cursor line as
-    // rendered (don't reveal raw): its height then stays put as the caret
-    // sweeps, so the blocks below it don't bounce a row per keystroke. The draw
-    // still reveals the markup (only the layout height is frozen), and it
-    // re-measures with the reveal the instant the caret settles.
+    // Measurement and drawing use the same effective reveal state, including
+    // held-arrow suppression. Never draw raw rows into a rendered-height block.
     let reveal_active = pane.cursor_reveal_active();
     for item in items {
         if item.measured_layout {
@@ -1803,6 +1881,9 @@ fn commit_visible_measurements(
             kind_tag: virtual_markdown_kind_tag(&item.kind),
             width_bucket: virtual_measure_bucket(width),
             font_scale_bucket: font_scale_fine_bucket(font_scale),
+            table_cell: pane.virtual_render.measured_table_cell
+                .filter(|(line, _)| *line >= item.first_line && *line < item.first_line + item.line_count)
+                .map(|(line, column)| ((line - item.first_line) as u32, column as u32)),
             cursor_token: if cursor_inside {
                 (pane.cursor_line - item.first_line) as u32 + 1
             } else {

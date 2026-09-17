@@ -14,9 +14,10 @@ export function messageAuthor(info: { author?: unknown }, localName: string): st
     // or malformed attribution is not evidence of local ownership.
     return clean(info.author) || (info.author === undefined ? localName : "Anonymous user");
 }
-export function useIdentity(client: NeoismClient, configured: string): string {
+export function useIdentity(client: NeoismClient, configured: string, local = true): string {
     const [result, setResult] = useState<{ client: NeoismClient; value: ServerIdentity }>();
     useEffect(() => {
+        if (!local) return;
         const abort = new AbortController();
         // Older deployments have no identity endpoint. Never infer an OS user
         // from location.hostname, directory paths, or browser environment.
@@ -24,6 +25,6 @@ export function useIdentity(client: NeoismClient, configured: string): string {
             .then(value => { if (!abort.signal.aborted) setResult({ client, value }); })
             .catch(() => { /* Explicit browser name or honest unknown fallback. */ });
         return () => abort.abort();
-    }, [client]);
-    return resolveIdentity(configured, result?.client === client ? result.value : undefined);
+    }, [client, local]);
+    return resolveIdentity(configured, local && result?.client === client ? result.value : undefined);
 }

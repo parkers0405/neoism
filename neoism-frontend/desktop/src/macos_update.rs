@@ -66,6 +66,16 @@ fn check_version(actual: &str, expected: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn release_version_from_plist(
+    mut read: impl FnMut(&str) -> Result<Option<String>, Error>,
+) -> Result<String, Error> {
+    if let Some(version) = read("NeoismReleaseVersion")? {
+        return Ok(version);
+    }
+    read("CFBundleShortVersionString")?
+        .ok_or_else(|| "bundle has no release version".into())
+}
+
 type Manifest = BTreeMap<PathBuf, String>;
 
 fn check_compiled_version(
@@ -630,18 +640,28 @@ mod native {
         Ok(String::from_utf8(output.stdout)?)
     }
 
+    fn plist_optional(app: &Path, key: &str) -> Result<Option<String>, Error> {
+        let mut command = Command::new("/usr/libexec/PlistBuddy");
+        command
+            .args(["-c", &format!("Print :{key}")])
+            .arg(app.join("Contents/Info.plist"));
+        let output = bounded_output(&mut command, Duration::from_secs(30))?;
+        if output.status.success() {
+            return Ok(Some(String::from_utf8(output.stdout)?.trim().to_owned()));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Does Not Exist") {
+            return Ok(None);
+        }
+        Err(format!("{command:?} exited {}: {stderr}", output.status).into())
+    }
+
     fn plist(app: &Path, key: &str) -> Result<String, Error> {
-        Ok(checked(
-            Command::new("/usr/libexec/PlistBuddy")
-                .args(["-c", &format!("Print :{key}")])
-                .arg(app.join("Contents/Info.plist")),
-        )?
-        .trim()
-        .to_owned())
+        plist_optional(app, key)?.ok_or_else(|| format!("bundle plist has no {key}").into())
     }
 
     pub fn bundle_version(app: &Path) -> Result<String, Error> {
-        plist(app, "CFBundleShortVersionString")
+        release_version_from_plist(|key| plist_optional(app, key))
     }
 
     pub fn installation(exe: &Path) -> Result<Installation, Error> {
@@ -1358,6 +1378,40 @@ mod tests {
         ] {
             assert!(check_compiled_version(bad, "neoism", "v0.7.8").is_err());
         }
+    }
+
+    #[test]
+    fn bundle_release_version_prefers_full_version_and_falls_back_for_stable_bundles() {
+        let full = release_version_from_plist(|key| match key {
+            "NeoismReleaseVersion" => Ok(Some("0.7.8-nightly.20260801".into())),
+            _ => panic!("the stable version must not be read when the release version exists"),
+        })
+        .unwrap();
+        assert_eq!(full, "0.7.8-nightly.20260801");
+
+        let stable = release_version_from_plist(|key| match key {
+            "NeoismReleaseVersion" => Ok(None),
+            "CFBundleShortVersionString" => Ok(Some("0.7.8".into())),
+            _ => unreachable!(),
+        })
+        .unwrap();
+        assert_eq!(stable, "0.7.8");
+    }
+
+    #[test]
+    fn nightly_bundle_and_binary_versions_remain_exact() {
+        let expected = "v0.7.8-nightly.20260801";
+        assert!(check_version("0.7.8-nightly.20260801", expected).is_ok());
+        assert!(check_version("0.7.8", expected).is_err());
+        assert!(check_version("0.7.8-nightly.20260802", expected).is_err());
+
+        assert!(check_compiled_version(
+            "neoism 0.7.8-nightly.20260801\n",
+            "neoism",
+            expected,
+        )
+        .is_ok());
+        assert!(check_compiled_version("neoism 0.7.8\n", "neoism", expected).is_err());
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

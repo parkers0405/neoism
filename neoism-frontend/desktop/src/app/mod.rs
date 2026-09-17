@@ -3,7 +3,7 @@ use crate::app::daemon_pump::DesktopDaemonConnection;
 use crate::app::scheduler::{Scheduler, TimerId, Topic};
 use crate::app::window_event::touch::on_touch;
 use crate::bridges::utils::apply_theme_to_config;
-use crate::daemon_client::DaemonServerMessage;
+use crate::daemon_client::{DaemonServerMessage, PtyFailureClass};
 use crate::router::{routes::RoutePath, Router};
 use crate::terminal::watcher::configuration_file_updates;
 use neoism_backend::clipboard::Clipboard;
@@ -350,6 +350,33 @@ impl Application<'_> {
             if let Some(session) = self.window_sessions.get_mut(&window_id) {
                 session.refresh_status();
             }
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                if let Some((handle, _runtime)) = route
+                    .window
+                    .screen
+                    .context_manager
+                    .daemon_link_handle_and_runtime()
+                {
+                    let mut handle = handle;
+                    if let Some(open) = handle.take_editor_connection_change() {
+                        let generation = handle.generation();
+                        if open {
+                            route
+                                .window
+                                .screen
+                                .context_manager
+                                .begin_daemon_generation_gate(generation);
+                        } else {
+                            route
+                                .window
+                                .screen
+                                .context_manager
+                                .begin_daemon_generation_gate(generation.max(1));
+                        }
+                    }
+                }
+            }
+            self.queue_dead_ssh_reconnect(window_id);
             if let (Some(session), Some(route)) = (
                 self.window_sessions.get(&window_id),
                 self.router.routes.get_mut(&window_id),
@@ -413,9 +440,21 @@ impl Application<'_> {
                         request_id,
                         session_id,
                         message,
+                        class,
                     } => {
                         if let Some(route) = self.router.routes.get_mut(&window_id) {
-                            if route
+                            if class == PtyFailureClass::Transport {
+                                route
+                                    .window
+                                    .screen
+                                    .context_manager
+                                    .apply_remote_pty_failure(
+                                        request_id,
+                                        session_id.as_deref(),
+                                        &message,
+                                        class,
+                                    );
+                            } else if route
                                 .window
                                 .screen
                                 .context_manager
@@ -423,6 +462,7 @@ impl Application<'_> {
                                     request_id,
                                     session_id.as_deref(),
                                     &message,
+                                    class,
                                 )
                             {
                                 route.window.screen.renderer.notifications.push(
@@ -1091,6 +1131,37 @@ impl Application<'_> {
         }
     }
 
+    fn resync_window_after_reconnect(&mut self, window_id: WindowId) {
+        let Some(session) = self.window_sessions.get(&window_id) else {
+            return;
+        };
+        if session.status != ServerConnectionStatus::Online
+            && session.connection.status() != crate::daemon_client::DaemonClientStatus::Open
+        {
+            return;
+        }
+        let generation = session.connection.handle().generation();
+        let Some(route) = self.router.routes.get_mut(&window_id) else {
+            return;
+        };
+        if !route
+            .window
+            .screen
+            .context_manager
+            .resync_after_daemon_reconnect(generation)
+        {
+            return;
+        }
+        route.window.screen.request_markdown_crdt_resync();
+        route.window.screen.request_code_crdt_resync();
+        route.window.screen.sync_host_git();
+        route
+            .window
+            .screen
+            .sync_file_tree_root_for_current_workspace();
+        route.request_redraw();
+    }
+
     /// Apply an inbound CRDT message only to the owning window.
     /// windows whose visible state changed.
     fn apply_daemon_crdt_message(
@@ -1128,6 +1199,37 @@ impl Application<'_> {
             _ => &[],
         };
         let workspaces = Self::workspace_summaries_from_message(&message);
+        if matches!(
+            &message,
+            WorkspaceServerMessage::HelloAck {
+                accepted: false,
+                ..
+            }
+        ) {
+            if let Some(session) = self.window_sessions.get_mut(&source_window_id) {
+                session.mark_host_ended();
+            }
+            if let Some(route) = self.router.routes.get_mut(&source_window_id) {
+                let reason = match &message {
+                    WorkspaceServerMessage::HelloAck { reason, .. } => reason
+                        .clone()
+                        .unwrap_or_else(|| "authentication rejected".into()),
+                    _ => "authentication rejected".into(),
+                };
+                route.window.screen.renderer.notifications.push(
+                    reason,
+                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                );
+                route.request_redraw();
+            }
+            return;
+        }
+        if matches!(
+            &message,
+            WorkspaceServerMessage::HelloAck { accepted: true, .. }
+        ) {
+            self.resync_window_after_reconnect(source_window_id);
+        }
         let rehome_target = self
             .window_sessions
             .get_mut(&source_window_id)

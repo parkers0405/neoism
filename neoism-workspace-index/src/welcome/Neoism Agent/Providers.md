@@ -41,6 +41,12 @@ Neoism includes explicit handling for several provider families:
 
 The exact methods returned in the picker are authoritative because provider support can change independently of a Neoism release.
 
+## OpenAI API and Codex subscription limits
+
+An OpenAI API-key connection and an OpenAI OAuth/Codex subscription connection can expose different context limits for the same model. Neoism applies subscription-specific limits to GPT-5.4/5.5/5.6 and GPT-6 models, including Sol (`gpt-5.6-sol`) and Astra (`gpt-6-astra`), without shrinking regular API-key model limits. Request metadata follows the selected connection, not simply the presence of `OPENAI_API_KEY`.
+
+Automatic compaction defaults to 65% of the effective context window, capped by input/output headroom. Subscription tokens still consume context; zero displayed API-style token cost does not mean unlimited context or unlimited subscription usage. See [[Compaction]] for the limits, calculation examples, percentage overrides, and bypass controls.
+
 ## Catalog and cache
 
 Neoism fetches `https://models.dev/api.json` and keeps a local cache. The in-process catalog is refreshed on a five-minute window. If refresh fails and a cache exists, Neoism uses that cache.

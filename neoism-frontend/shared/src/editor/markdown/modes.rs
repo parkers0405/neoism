@@ -11,7 +11,7 @@ impl MarkdownPane {
         self.mode = MarkdownMode::Insert;
         self.vim.clear_pending();
         self.visual_anchor = None;
-        self.follow_cursor = false;
+        self.follow_cursor = self.table_cursor().is_some();
     }
 
     pub fn enter_append(&mut self) {
@@ -33,6 +33,15 @@ impl MarkdownPane {
             return 0;
         };
         let cursor = floor_char_boundary(line, self.cursor_col.min(line.len()));
+        if let Some(table) = self.table_cursor() {
+            if let Some(cell) = parse_table_cell_bounds(line).and_then(|cells| cells.get(table.cell_ix).copied()) {
+                let source = &line[cell.content_start..cell.content_end];
+                let map = InlineSourceMap::for_table(source);
+                let visible = map.visible_for_source(cursor.clamp(cell.content_start, cell.content_end) - cell.content_start);
+                let target = (visible + usize::from(append)).min(map.visible_len());
+                return cell.content_start + map.source_for_visible(target).min(source.len());
+            }
+        }
         if self.mode == MarkdownMode::Insert
             || self.is_inside_code_block(self.cursor_line)
             || is_code_fence_line(line)

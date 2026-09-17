@@ -18,6 +18,52 @@ impl InlineSourceMap {
         builder.finish(text.len())
     }
 
+    pub(crate) fn table_edit(text: &str) -> Self {
+        let mut builder = InlineSourceMapBuilder::new(text.len());
+        let mut offset = 0;
+        let mut code_ticks = 0;
+        while offset < text.len() {
+            let rest = &text[offset..];
+            if rest.starts_with('`') {
+                let count = rest.bytes().take_while(|byte| *byte == b'`').count();
+                if code_ticks == 0 {
+                    code_ticks = count;
+                } else if code_ticks == count {
+                    code_ticks = 0;
+                }
+                for _ in 0..count {
+                    builder.push_visible_char(offset, offset + 1, '`');
+                    offset += 1;
+                }
+                continue;
+            }
+            if let Some(tag) = ["<br>", "<br/>", "<br />"].into_iter().find(|tag| {
+                code_ticks == 0
+                    && rest
+                        .get(..tag.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(tag))
+            }) {
+                builder.push_visible_char(offset, offset + tag.len(), '\n');
+                offset += tag.len();
+            } else if rest.starts_with("\\|") {
+                builder.push_visible_char(offset, offset + 2, '|');
+                offset += 2;
+            } else {
+                let ch = rest.chars().next().unwrap();
+                builder.push_visible_char(offset, offset + ch.len_utf8(), ch);
+                offset += ch.len_utf8();
+            }
+        }
+        builder.finish(text.len())
+    }
+
+    pub(crate) fn for_table(text: &str) -> Self {
+        let mut builder = InlineSourceMapBuilder::new(text.len());
+        builder.table_breaks = true;
+        build_inline_map(text, 0, &mut builder);
+        builder.finish(text.len())
+    }
+
     /// A map where every source character is visible (no markup stripping):
     /// `visible == source`. Used for the cursor's own line under Obsidian-style
     /// Live Preview, where the raw markup (`**`, `` ` ``, `[`, `]`, `#tag`, …) is
@@ -79,6 +125,7 @@ struct InlineSourceMapBuilder {
     visible_to_source: Vec<usize>,
     visible_chars: Vec<char>,
     visible: usize,
+    table_breaks: bool,
 }
 
 impl InlineSourceMapBuilder {
@@ -88,6 +135,7 @@ impl InlineSourceMapBuilder {
             visible_to_source: vec![0],
             visible_chars: Vec::new(),
             visible: 0,
+            table_breaks: false,
         }
     }
 
@@ -145,6 +193,16 @@ fn build_inline_map(text: &str, base: usize, builder: &mut InlineSourceMapBuilde
     let mut ix = 0usize;
     while ix < text.len() {
         let rest = &text[ix..];
+        if builder.table_breaks {
+            if let Some(tag) = ["<br>", "<br/>", "<br />"].into_iter().find(|tag| {
+                rest.get(..tag.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(tag))
+            }) {
+                builder.push_visible_char(base + ix, base + ix + tag.len(), '\n');
+                ix += tag.len();
+                continue;
+            }
+        }
         if let Some((escaped, consumed)) = backslash_escape_at_start(rest) {
             builder.hide_range(base + ix, base + ix + 1);
             builder.push_visible_char(base + ix + 1, base + ix + consumed, escaped);
@@ -170,13 +228,22 @@ fn build_inline_map(text: &str, base: usize, builder: &mut InlineSourceMapBuilde
             ix += source_len;
             continue;
         }
+        if let Some(image) = rest.strip_prefix('!').and_then(parse_markdown_link) {
+            let label_start = ix + 2;
+            let raw_end = ix + image.consumed + 1;
+            builder.hide_range(base + ix, base + label_start);
+            build_inline_map(image.label, base + label_start, builder);
+            builder.hide_range(base + label_start + image.label.len(), base + raw_end);
+            ix = raw_end;
+            continue;
+        }
         if let Some(link) = parse_markdown_link(rest) {
             if rendered_link_target(link.target).is_some() {
                 let label_start = ix + 1;
                 let label_end = label_start + link.label.len();
                 let raw_end = ix + link.consumed;
                 builder.hide_range(base + ix, base + label_start);
-                emit_source_chars(text, label_start, label_end, base, builder);
+                build_inline_map(link.label, base + label_start, builder);
                 builder.hide_range(base + label_end, base + raw_end);
                 ix = raw_end;
                 continue;
@@ -273,7 +340,14 @@ fn emit_source_chars(
         return;
     };
     let mut ix = source_start;
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if builder.table_breaks && ch == '\\' && chars.peek() == Some(&'|') {
+            chars.next();
+            builder.push_visible_char(base + ix, base + ix + 2, '|');
+            ix += 2;
+            continue;
+        }
         let next = ix + ch.len_utf8();
         builder.push_visible_char(base + ix, base + next, ch);
         ix = next;
@@ -368,6 +442,19 @@ mod tests {
         assert_eq!(map.visible_range(6, 11), "md:12");
         assert_eq!(map.visible_char(0), Some('G'));
         assert_eq!(map.visible_char(9), Some('1'));
+    }
+
+    #[test]
+    fn linked_images_project_only_the_alt_text_with_correct_caret_mapping() {
+        for text in ["![Neoism](https://example.com/image.png)", "[![Neoism](https://example.com/image.png)](https://github.com/parkers0405/neoism)"] {
+            let map = InlineSourceMap::new(text);
+            assert_eq!(map.visible_text(), "Neoism");
+            let start = text.find("Neoism").unwrap();
+            for offset in 0.."Neoism".len() {
+                assert_eq!(map.visible_for_source(start + offset), offset);
+                assert_eq!(map.source_for_visible(offset), start + offset);
+            }
+        }
     }
 
     #[test]

@@ -629,6 +629,42 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
+            "agent.experimental.options.computer-typesafe.enabled",
+            "Experimental TypeSafe browser mode",
+            "Opt into Jev browser decisions. Sends visible page text, labels, field values and goals to TypeSafe. Requires computer MCP permission and attachment. Enter credentials in the agent GUI's MCP computer settings or set TYPESAFE_API_KEY on the server; never put a key in workspace config.",
+            Kind::Boolean, json!(false), &[], false, C::Agent, Control::Toggle,
+        ),
+        d(
+            "agent.compaction.auto",
+            "Automatic compaction",
+            "Summarize long sessions automatically. Disable to bypass automatic compaction, including overflow recovery; /compact remains available.",
+            Kind::Boolean, json!(true), &[], false, C::Agent, Control::Toggle,
+        ),
+        d(
+            "agent.compaction.prune",
+            "Prune old tool output",
+            "Remove older tool output from model context independently of automatic summarization.",
+            Kind::Boolean, json!(true), &[], false, C::Agent, Control::Toggle,
+        ),
+        d(
+            "agent.compaction.threshold-percent",
+            "Auto-compaction threshold (%)",
+            "Compact when the upcoming request reaches this percentage of the model context window (1-100), bounded by safe input/output limits.",
+            Kind::Number, json!(65), &[], false, C::Agent, Control::Number,
+        ),
+        d(
+            "agent.compaction.buffer",
+            "Compaction headroom (tokens)",
+            "Minimum context headroom reserved before automatic compaction.",
+            Kind::Integer, json!(20_000), &[], false, C::Agent, Control::Number,
+        ),
+        d(
+            "agent.compaction.keep.tokens",
+            "Recent context to retain (tokens)",
+            "Recent conversation retained alongside the summary, bounded by the context budget.",
+            Kind::Integer, json!(8_000), &[], false, C::Agent, Control::Number,
+        ),
+        d(
             "agent.dangerously-skip-permissions",
             "Skip permission prompts",
             "Allow actions that would otherwise ask.",
@@ -846,6 +882,21 @@ fn apply_schema_metadata(rows: &mut Vec<D>) {
     }
 
     for (path, min, max, step, unit) in [
+        ("agent.compaction.threshold-percent", 1.0, 100.0, 1.0, "%"),
+        (
+            "agent.compaction.buffer",
+            0.0,
+            10_000_000.0,
+            1000.0,
+            "tokens",
+        ),
+        (
+            "agent.compaction.keep.tokens",
+            0.0,
+            10_000_000.0,
+            1000.0,
+            "tokens",
+        ),
         ("appearance.fonts.size", 6.0, 96.0, 0.5, "pt"),
         ("appearance.fonts.weight", 100.0, 900.0, 100.0, "weight"),
         ("appearance.line-height", 0.5, 3.0, 0.05, "x"),

@@ -440,6 +440,11 @@ impl ChromeBridge {
             );
             return true;
         }
+        if let Some((start, column, count)) = self.chrome.markdown_pane_mut().and_then(|pane| pane.table_column_menu_at(x, y)) {
+            let (w, h) = self.markdown_window_dims();
+            self.chrome.context_menu.open_table_column(start, column, count, x, y, w, h);
+            return true;
+        }
         if self
             .chrome
             .markdown_pane_mut()
@@ -1015,7 +1020,8 @@ impl ChromeBridge {
     fn markdown_menu_open(&self) -> bool {
         let menu = &self.chrome.context_menu;
         menu.is_visible()
-            && (menu.is_markdown_block_completion()
+            && (menu.is_table_column_menu()
+                || menu.is_markdown_block_completion()
                 || menu.is_markdown_link_completion()
                 || menu.is_markdown_spelling())
     }
@@ -1024,7 +1030,14 @@ impl ChromeBridge {
     /// consumed; `None` = not a menu key (dispatch to the pane, then
     /// refresh the menus).
     fn markdown_menu_key(&mut self, key: &str) -> Option<bool> {
+        if self.chrome.context_menu.is_markdown_block_completion()
+            && matches!(key, "ArrowLeft" | "ArrowRight" | "Home" | "End") {
+            self.chrome.context_menu.close();
+            return None;
+        }
         match key {
+            "PageDown" => { self.chrome.context_menu.move_selection(5); Some(true) }
+            "PageUp" => { self.chrome.context_menu.move_selection(-5); Some(true) }
             "ArrowDown" => {
                 self.chrome.context_menu.move_selection(1);
                 Some(true)
@@ -1055,6 +1068,9 @@ impl ChromeBridge {
     ) {
         use neoism_ui::panels::context_menu::ContextMenuAction as Action;
         match action {
+            Action::MarkdownTable(action) => {
+                if let Some(pane) = self.chrome.markdown_pane_mut() { pane.apply_table_action(action); }
+            }
             Action::MarkdownBlock(template) => {
                 let applied = self
                     .chrome

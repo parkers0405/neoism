@@ -37,7 +37,7 @@ impl Handle {
         Handle::Left,
     ];
 
-    /// The four corner handles (the only ones drawn for a clean look).
+    /// Default shape handles. Auto-height text uses Left/Right width handles.
     pub const CORNERS: [Handle; 4] = [
         Handle::TopLeft,
         Handle::TopRight,
@@ -90,7 +90,13 @@ impl DrawPane {
             .shapes
             .iter()
             .rev()
-            .find(|s| s.hit_select(world, tol))
+            .find(|s| {
+                if matches!(s.kind, super::scene::ShapeKind::Text { .. }) {
+                    self.shape_bounds(s).contains(world, tol)
+                } else {
+                    s.hit_select(world, tol)
+                }
+            })
             .map(|s| s.id)
     }
 
@@ -225,8 +231,16 @@ impl DrawPane {
 
     /// Scale every selected shape about `anchor`.
     pub fn scale_selection(&mut self, anchor: Vec2, sx: f32, sy: f32) {
+        if !sx.is_finite() || !sy.is_finite() {
+            return;
+        }
         for s in &mut self.scene.shapes {
             if self.selection.contains(&s.id) {
+                if let super::scene::ShapeKind::Text { width, .. } = &mut s.kind {
+                    if width.is_none() {
+                        *width = self.text_dims.get(&s.id).map(|size| size.x);
+                    }
+                }
                 s.kind.scale(anchor, sx, sy);
             }
         }
@@ -244,6 +258,36 @@ impl DrawPane {
         pointer: Vec2,
     ) {
         let (anchor, active_x, active_y) = handle.anchor(start_bounds);
+        if self.selection.len() == 1 {
+            let id = self.selection[0];
+            if let Some(shape) = self.scene.shapes.iter_mut().find(|shape| shape.id == id)
+            {
+                if let super::scene::ShapeKind::Text { x, y, width, .. } = &mut shape.kind
+                {
+                    if active_x {
+                        let left_handle = matches!(
+                            handle,
+                            Handle::Left | Handle::TopLeft | Handle::BottomLeft
+                        );
+                        let new_width = if left_handle {
+                            start_bounds.max.x - pointer.x
+                        } else {
+                            pointer.x - start_bounds.min.x
+                        }
+                        .max(16.0);
+                        *width = Some(new_width);
+                        *x = if left_handle {
+                            start_bounds.max.x - new_width
+                        } else {
+                            start_bounds.min.x
+                        };
+                    }
+                    *y = start_bounds.min.y;
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
         let start = handle.world_pos(start_bounds);
         let factor = |on: bool, p: f32, h: f32, a: f32| -> f32 {
             if !on {
@@ -261,6 +305,48 @@ impl DrawPane {
         self.scale_selection(anchor, sx, sy);
     }
 
+    pub(super) fn selection_handle_positions(
+        &self,
+        camera: &Camera,
+    ) -> Vec<(Handle, Vec2)> {
+        let Some(bounds) = self.selection_bounds() else {
+            return Vec::new();
+        };
+        let text_only = self.selection.len() == 1
+            && self.scene.shapes.iter().any(|shape| {
+                self.selection.contains(&shape.id)
+                    && matches!(shape.kind, super::scene::ShapeKind::Text { .. })
+            });
+        let handles: &[Handle] = if text_only {
+            &[Handle::Left, Handle::Right]
+        } else {
+            &Handle::CORNERS
+        };
+        handles
+            .iter()
+            .copied()
+            .map(|handle| {
+                let world = handle.world_pos(bounds);
+                let mut point = camera.world_to_screen(world);
+                point.x += if world.x == bounds.min.x {
+                    -2.0
+                } else if world.x == bounds.max.x {
+                    2.0
+                } else {
+                    0.0
+                };
+                point.y += if world.y == bounds.min.y {
+                    -2.0
+                } else if world.y == bounds.max.y {
+                    2.0
+                } else {
+                    0.0
+                };
+                (handle, point)
+            })
+            .collect()
+    }
+
     /// Hit-test the selection handles in *screen* space. `half_px` is
     /// half the handle's clickable square size in screen pixels.
     pub fn hit_handle(
@@ -269,31 +355,62 @@ impl DrawPane {
         camera: &Camera,
         half_px: f32,
     ) -> Option<Handle> {
-        let b = self.selection_bounds()?;
-        // Only the visible corner handles are interactive (the border is
-        // padded out by 2px, so match that here).
-        let pad = Vec2::new(2.0, 2.0);
-        Handle::CORNERS.into_iter().find(|h| {
-            let world = h.world_pos(b);
-            let mut hp = camera.world_to_screen(world);
-            // Nudge toward the padded-out corner the border draws at.
-            hp.x += if world.x <= b.center().x {
-                -pad.x
-            } else {
-                pad.x
-            };
-            hp.y += if world.y <= b.center().y {
-                -pad.y
-            } else {
-                pad.y
-            };
-            (screen.x - hp.x).abs() <= half_px && (screen.y - hp.y).abs() <= half_px
-        })
+        self.selection_handle_positions(camera)
+            .into_iter()
+            .find_map(|(handle, point)| {
+                ((screen.x - point.x).abs() <= half_px
+                    && (screen.y - point.y).abs() <= half_px)
+                    .then_some(handle)
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_resize_changes_wrap_width_not_font_size_and_uses_matching_handles() {
+        let mut p = super::DrawPane::new(std::path::PathBuf::from("resize.neodraw"));
+        p.last_rect = Some([0.0, 0.0, 1000.0, 1000.0]);
+        p.begin_text_at(super::Vec2::new(10.0, 20.0), 0.0);
+        p.insert_text("A text box whose width can be changed");
+        let id = p.editing_text.unwrap();
+        p.commit_text();
+        p.text_dims.insert(id, super::Vec2::new(240.0, 35.0));
+        p.set_tool(crate::editor::neodraw::Tool::Text);
+        let handles = p.selection_handle_positions(&p.camera);
+        assert_eq!(handles.len(), 2);
+        let right = handles
+            .iter()
+            .find(|(h, _)| *h == super::Handle::Right)
+            .unwrap()
+            .1;
+        assert_eq!(
+            p.hit_handle(right, &p.camera, 4.5),
+            Some(super::Handle::Right)
+        );
+        assert!(p.begin_pointer(right.x, right.y, false));
+        assert!(matches!(
+            p.gesture,
+            crate::editor::neodraw::DrawGesture::Resize { .. }
+        ));
+        p.drag_pointer(182.0, right.y);
+        p.drag_pointer(132.0, right.y);
+        p.end_pointer();
+        match p.scene.shapes[0].kind {
+            crate::editor::neodraw::ShapeKind::Text {
+                x, y, size, width, ..
+            } => {
+                assert_eq!((x, y, size, width), (10.0, 20.0, 28.0, Some(120.0)));
+            }
+            _ => panic!(),
+        }
+        assert!(p.undo());
+        assert!(matches!(
+            p.scene.shapes[0].kind,
+            crate::editor::neodraw::ShapeKind::Text { width: None, .. }
+        ));
+    }
+
     use super::*;
     use crate::editor::neodraw::scene::{Color, Scene, Shape, ShapeId, ShapeKind, Style};
     use std::path::PathBuf;

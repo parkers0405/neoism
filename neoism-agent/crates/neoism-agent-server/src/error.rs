@@ -66,6 +66,10 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn is_context_overflow(&self) -> bool {
+        neoism_agent_builtins::provider_error::is_context_overflow(&self.message)
+    }
+
     pub(crate) fn is_conflict(&self) -> bool {
         self.status == StatusCode::CONFLICT
     }

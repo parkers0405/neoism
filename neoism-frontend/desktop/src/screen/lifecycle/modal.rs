@@ -184,6 +184,14 @@ impl Screen<'_> {
                 // nvim removed; native editor equivalent TBD.
                 self.renderer.modal.close();
             }
+            ModalAction::MarkdownFileLink { document, value } => {
+                self.renderer.modal.close();
+                self.insert_markdown_file_link(document, &value);
+            }
+            ModalAction::DocumentationNotebook { kind, notebook, value } => {
+                self.renderer.modal.close();
+                self.submit_documentation_notebook_input(kind, notebook, value);
+            }
             ModalAction::EpubAddNote { value } => {
                 self.renderer.modal.close();
                 let result = self
@@ -506,6 +514,9 @@ impl Screen<'_> {
             }
             ModalAction::FileTreePromptNewFile { dir } => {
                 self.open_file_tree_new_file_prompt(PathBuf::from(dir));
+            }
+            ModalAction::NotesNewNotebook { dir } => {
+                self.create_documentation_notebook_in(PathBuf::from(dir));
             }
             ModalAction::NotesPromptNewFile { dir } => {
                 self.open_notes_new_file_prompt(PathBuf::from(dir));

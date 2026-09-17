@@ -599,6 +599,26 @@ mod tests {
     }
 
     #[test]
+    fn full_replica_update_recovers_lost_in_flight_apply() {
+        let local = CrdtTextBuffer::with_text(1, "hello");
+        let remote = CrdtTextBuffer::new(9_000_000_000);
+        remote
+            .apply_update_v1(&local.encode_full_update_v1())
+            .unwrap();
+        local.insert(5, "!").unwrap();
+        // Simulate a dropped ApplySync: remote never saw the insert.
+        assert_eq!(remote.text(), "hello");
+        remote
+            .apply_update_v1(&local.encode_full_update_v1())
+            .unwrap();
+        assert_eq!(remote.text(), "hello!");
+        remote
+            .apply_update_v1(&local.encode_full_update_v1())
+            .unwrap();
+        assert_eq!(remote.text(), "hello!");
+    }
+
+    #[test]
     fn crdt_bounds_checks_prevent_yrs_panics() {
         let buffer = CrdtTextBuffer::with_text(1, "abc");
 

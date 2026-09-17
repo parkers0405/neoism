@@ -62,6 +62,10 @@ async fn desktop_notes_are_discovered_and_called_through_agent_mcp() {
         [
             "mcp__notes__create",
             "mcp__notes__list",
+            "mcp__notes__notebookAddPage",
+            "mcp__notes__notebookList",
+            "mcp__notes__notebookMovePage",
+            "mcp__notes__notebookRead",
             "mcp__notes__read",
             "mcp__notes__search",
             "mcp__notes__taskToggle",
@@ -124,6 +128,51 @@ async fn desktop_notes_are_discovered_and_called_through_agent_mcp() {
     )
     .await;
     assert_eq!(missing["isError"], true);
+
+    neoism_ui::editor::documentation_notebook::NotebookBinding::create(
+        &neoism_workspace_index::default_notes_workspace().notes_workspace_dir().join("Agent Book"), Some("Agent Architecture"),
+    ).unwrap();
+    let notebook: Value = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &endpoint("notebookRead"),
+                Some(json!({"path":"Agent Book"})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(notebook["isError"], false);
+    let manifest: Value =
+        serde_json::from_str(notebook["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(manifest["path"], "Agent Book/notebook.json");
+    let page: Value = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &endpoint("notebookAddPage"),
+                Some(json!({"notebook":"Agent Book","title":"API","content":"# API\n"})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(page["isError"], false);
+    let notebook: Value = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &endpoint("notebookRead"),
+                Some(json!({"path":"Agent Book"})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let manifest: Value =
+        serde_json::from_str(notebook["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(manifest["pages"].as_array().unwrap().len(), 2);
 
     state.shutdown().await.unwrap();
 }

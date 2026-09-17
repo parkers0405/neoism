@@ -14,6 +14,19 @@ const LARGE_MARKDOWN_FAST_PARSE_LINES: usize = 20_000;
 const LARGE_MARKDOWN_FAST_PARSE_BYTES: usize = 2 * 1024 * 1024;
 
 impl MarkdownPane {
+    pub fn is_active_tab_path(&self, path: &std::path::Path) -> bool {
+        if self.path == path { return true; }
+        self.documentation_notebook.as_ref().is_some_and(|binding| {
+            binding.path == path && binding.session.lock().ok().is_some_and(|book| {
+                book.page_path(book.current).as_ref() == Some(&self.path)
+            })
+        })
+    }
+
+    pub fn tab_path(&self) -> &std::path::Path {
+        self.documentation_notebook.as_ref().map_or(self.path.as_path(), |book| book.path.as_path())
+    }
+
     /// Construct a pane from in-memory source text (no filesystem read).
     /// Used by the web/wasm chrome where the daemon ships the file body
     /// over the wire — there is no on-disk path to `MarkdownPane::load`.
@@ -58,7 +71,11 @@ impl MarkdownPane {
             cursor_line: 0,
             cursor_col: 0,
             visual_anchor: None,
+            documentation_notebook: None,
             mouse_select_anchor: None,
+            selection_pointer: None,
+            selection_scroll_at: None,
+            viewport_bounds: [0.0; 2],
             touch_word_edges: None,
             cursor_rect: None,
             follow_cursor: false,
@@ -242,7 +259,11 @@ impl MarkdownPane {
             cursor_line: 0,
             cursor_col: 0,
             visual_anchor: None,
+            documentation_notebook: None,
             mouse_select_anchor: None,
+            selection_pointer: None,
+            selection_scroll_at: None,
+            viewport_bounds: [0.0; 2],
             touch_word_edges: None,
             cursor_rect: None,
             follow_cursor: false,
@@ -413,7 +434,11 @@ impl MarkdownPane {
         if !fm.contains(&self.cursor_line) {
             return None;
         }
-        let (key, _) = self.lines.get(self.cursor_line)?.split_once(':')?;
+        let line = self.lines.get(self.cursor_line)?;
+        if !line.contains(':') && line.trim().chars().all(|ch| ch.is_ascii_alphabetic() || ch == '-') {
+            return Some(MarkdownDecorationKey::Property);
+        }
+        let (key, _) = line.split_once(':')?;
         match key.trim().to_ascii_lowercase().as_str() {
             "icon" => Some(MarkdownDecorationKey::Icon),
             "cover" => Some(MarkdownDecorationKey::Cover),
@@ -425,7 +450,7 @@ impl MarkdownPane {
     /// cursor edits an `icon:`/`cover:` frontmatter line in Insert mode,
     /// closed otherwise. Called once per render frame.
     pub fn refresh_value_picker(&mut self) {
-        let open = (self.mode == MarkdownMode::Insert)
+        let open = (!self.read_only && self.mode == MarkdownMode::Insert)
             .then(|| self.decoration_key_at_cursor())
             .flatten();
         match open {
@@ -480,6 +505,15 @@ impl MarkdownPane {
                 || value.to_ascii_lowercase().contains(&filter)
         };
         match picker.key {
+            MarkdownDecorationKey::Property => {
+                let query = self.lines.get(picker.line).map(|line| line.trim().to_ascii_lowercase()).unwrap_or_default();
+                ["title", "icon", "cover", "tags"].into_iter()
+                    .filter(|key| key.starts_with(&query) && !self.lines.iter().enumerate().any(|(index, line)| {
+                        index != picker.line && self.frontmatter_range().is_some_and(|range| range.contains(&index))
+                            && line.split_once(':').is_some_and(|(existing, _)| existing.trim().eq_ignore_ascii_case(key))
+                    }))
+                    .map(|key| (format!("{key}: "), key.to_string())).collect()
+            }
             MarkdownDecorationKey::Icon => EMOJI_CHOICES
                 .iter()
                 .filter(|(name, emoji)| matches(name, emoji))
@@ -519,11 +553,13 @@ impl MarkdownPane {
             return false;
         };
         let key = match picker.key {
+            MarkdownDecorationKey::Property => "",
             MarkdownDecorationKey::Icon => "icon",
             MarkdownDecorationKey::Cover => "cover",
         };
+        self.save_undo();
         if let Some(line) = self.lines.get_mut(picker.line) {
-            *line = format!("{key}: {value}");
+            *line = if picker.key == MarkdownDecorationKey::Property { value.clone() } else { format!("{key}: {value}") };
             self.cursor_line = picker.line;
             self.cursor_col = line.len();
         }

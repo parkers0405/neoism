@@ -2,6 +2,20 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.106-nightly.20260917.1] - 2026-09-17
+
+### Nightly preview
+
+This is an opt-in prerelease, not the latest stable release. `neoism update --nightly` installs the latest published nightly; plain `neoism update` stays on stable. Older Linux/Windows builds can bootstrap with `neoism update --target-version v0.7.106-nightly.20260917.1`. For an older macOS app bundle, install this release's DMG once, then use `--nightly` for subsequent updates.
+
+- Markdown tables, source/caret layout, links, code-fence pairing, spelling, Notes navigation, and context-menu fixes.
+- Drawing creation, world-space text scaling and wrapping, resize behavior, and drag selection.
+- Agent GUI/mobile improvements, browser computer-use work, MCP handling, and provider/compaction updates.
+- Workspace reconnect and live-message synchronization fixes.
+- Notebook creation remains disabled; existing notebook documents remain supported.
+
+Nightlies may contain regressions. Platform assets are published together only after the full Linux, macOS, and Windows matrix succeeds.
+
 ## [0.7.62] - 2026-08-27
 
 ### Fixed

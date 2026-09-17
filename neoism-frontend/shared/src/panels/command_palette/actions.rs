@@ -45,6 +45,9 @@ pub enum PaletteAction {
     Copy,
     Paste,
     SaveDocument,
+    CreateDocumentationNotebook,
+    OpenDocumentationNotebook,
+    LinkMarkdownFile,
     RunNotebookCell,
     RunNotebookCellAndBelow,
     RunAllNotebookCells,
@@ -700,6 +703,9 @@ pub(crate) fn command_visible_for_surface(
                 PaletteSurface::Editor | PaletteSurface::Markdown | PaletteSurface::Notebook
             )
         }
+        PaletteAction::LinkMarkdownFile => surface == PaletteSurface::Markdown && !cfg!(target_arch = "wasm32"),
+        PaletteAction::CreateDocumentationNotebook => false,
+        PaletteAction::OpenDocumentationNotebook => !cfg!(target_arch = "wasm32"),
         PaletteAction::OpenEpubTableOfContents => surface == PaletteSurface::Epub,
         PaletteAction::RunNotebookCell
         | PaletteAction::RunNotebookCellAndBelow

@@ -270,6 +270,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object { $_.name -eq "neoism" }).version
+          $installerVersion = ($version -split '[-+]', 2)[0]
           $bin = (Resolve-Path "target/${{ matrix.target }}/release").Path
           Remove-Item (Join-Path $bin "web") -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item neoism-frontend/web/dist (Join-Path $bin "web") -Recurse
@@ -289,7 +290,7 @@ jobs:
           wix build misc/windows/neoism.wxs `
             -arch x64 `
             -ext WixToolset.UI.wixext `
-            -d "Version=$version" `
+            -d "Version=$installerVersion" `
             -d "BinaryDir=$bin" `
             -o Neoism-x86_64.msi
 
@@ -380,7 +381,8 @@ jobs:
               [0-9]*.[0-9]*) ;; # tag push: vX.Y.Z
               *) VERSION="$(cargo pkgid -p neoism | sed 's/.*[@#]//')" ;; # dispatch/dry run
             esac
-            sed "s/{{VERSION}}/$VERSION/g" misc/macos/Info.plist > "$APP/Contents/Info.plist"
+            BUNDLE_VERSION="${VERSION%%[-+]*}"
+            sed -e "s/{{VERSION}}/$BUNDLE_VERSION/g" -e "s/{{RELEASE_VERSION}}/$VERSION/g" misc/macos/Info.plist > "$APP/Contents/Info.plist"
             codesign --force --deep -s - "$APP" # ad-hoc; real signing needs an Apple Dev account
           fi
           tar -C stage -czf "$OUT.tar.gz" "$OUT"
@@ -541,6 +543,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: false
           files: |
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
@@ -555,6 +559,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: false
           files: |
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.dmg
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.dmg.sha256
@@ -569,6 +575,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: false
           files: |
             Neoism-x86_64.msi
             Neoism-x86_64.msi.sha256
@@ -623,8 +631,9 @@ jobs:
         run: |
           set -euo pipefail
           gh run download "${{ needs.precheck.outputs.reuse_run }}" -R "${{ github.repository }}" -D artifacts -n neoism-linux-x86_64 -n neoism-darwin-aarch64 -n neoism-windows-x86_64
-          gh release create "${{ github.ref_name }}" -R parkers0405/neoism \
-            --draft --title "${{ github.ref_name }}" || true
+          release_args=(--draft --latest=false --title "${GITHUB_REF_NAME}")
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then release_args+=(--prerelease); fi
+          gh release create "${GITHUB_REF_NAME}" -R parkers0405/neoism "${release_args[@]}" || true
           gh release upload "${{ github.ref_name }}" -R parkers0405/neoism --clobber artifacts/*/*
       # The release body is the tag's section of CHANGELOG.md, so the notes
       # are written once in the repo and reviewed like any other change.
@@ -647,4 +656,10 @@ jobs:
       - name: Undraft the dist release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "${{ github.ref_name }}" -R parkers0405/neoism --draft=false --latest
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            gh release edit "${GITHUB_REF_NAME}" -R parkers0405/neoism --draft=false --prerelease --latest=false
+          else
+            gh release edit "${GITHUB_REF_NAME}" -R parkers0405/neoism --draft=false --prerelease=false --latest
+          fi

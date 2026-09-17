@@ -102,6 +102,10 @@ pub(super) fn markdown_scrollbar_hit(x: f32, y: f32, track_rect: [f32; 4]) -> bo
 
 pub fn parse_markdown_link_parts(inner: &str) -> Option<MarkdownParsedLink> {
     let rest = inner.trim();
+    let rest = rest
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or(rest);
     let (target_part, alias) = rest
         .split_once('|')
         .map(|(target, alias)| (target.trim(), Some(alias.trim().to_string())))
@@ -114,7 +118,8 @@ pub fn parse_markdown_link_parts(inner: &str) -> Option<MarkdownParsedLink> {
     if target_part.is_empty() {
         return None;
     }
-    let host_owned_scheme = target_part.contains("://");
+    let host_owned_scheme =
+        target_part.contains("://") && !target_part.starts_with("file://");
     let (target_part, heading) = if host_owned_scheme {
         (target_part, None)
     } else {
@@ -198,16 +203,58 @@ pub fn parse_table_cell_bounds(line: &str) -> Option<Vec<MarkdownTableCellBounds
     if !line.contains('|') {
         return None;
     }
-    let pipe_indices = line
-        .char_indices()
-        .filter_map(|(ix, ch)| (ch == '|').then_some(ix))
-        .collect::<Vec<_>>();
+    let bytes = line.as_bytes();
+    let mut pipe_indices = Vec::new();
+    let mut code_ticks = 0usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index = (index + 2).min(bytes.len()),
+            b'`' => {
+                let start = index;
+                while index < bytes.len() && bytes[index] == b'`' {
+                    index += 1;
+                }
+                let run = index - start;
+                if code_ticks == run {
+                    code_ticks = 0;
+                } else if code_ticks == 0 {
+                    let mut after = index;
+                    while after < bytes.len() {
+                        if bytes[after] == b'\\' {
+                            after = (after + 2).min(bytes.len());
+                            continue;
+                        }
+                        if bytes[after] != b'`' {
+                            after += 1;
+                            continue;
+                        }
+                        let start = after;
+                        while after < bytes.len() && bytes[after] == b'`' {
+                            after += 1;
+                        }
+                        if after - start == run {
+                            code_ticks = run;
+                            break;
+                        }
+                    }
+                }
+            }
+            b'|' if code_ticks == 0 => {
+                pipe_indices.push(index);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
     if pipe_indices.is_empty() {
         return None;
     }
 
-    let leading_pipe = line.trim_start().starts_with('|');
-    let trailing_pipe = line.trim_end().ends_with('|');
+    let leading_pipe =
+        pipe_indices.first().copied() == Some(line.len() - line.trim_start().len());
+    let trailing_pipe =
+        pipe_indices.last().copied() == line.trim_end().len().checked_sub(1);
     let mut raw_start = if leading_pipe { pipe_indices[0] + 1 } else { 0 };
     let mut bounds = Vec::new();
     let skip = usize::from(leading_pipe);
@@ -220,7 +267,7 @@ pub fn parse_table_cell_bounds(line: &str) -> Option<Vec<MarkdownTableCellBounds
     if !trailing_pipe && raw_start <= line.len() {
         bounds.push(table_cell_bounds_from_raw(line, raw_start, line.len()));
     }
-    (bounds.len() >= 2).then_some(bounds)
+    (!bounds.is_empty()).then_some(bounds)
 }
 
 pub(super) fn table_cell_bounds_from_raw(
@@ -230,7 +277,7 @@ pub(super) fn table_cell_bounds_from_raw(
 ) -> MarkdownTableCellBounds {
     let raw = &line[raw_start..raw_end];
     if raw.trim().is_empty() {
-        let entry = (raw_start + raw.len().min(1)).min(raw_end);
+        let entry = raw_start + raw.chars().next().map(char::len_utf8).unwrap_or(0);
         return MarkdownTableCellBounds {
             raw_start,
             raw_end,
@@ -239,28 +286,15 @@ pub(super) fn table_cell_bounds_from_raw(
         };
     }
     let content_start = raw_start + raw.len().saturating_sub(raw.trim_start().len());
-    let content_end = if raw_end > raw_start + raw.trim_end().len() {
-        prev_char_boundary(line, raw_end)
-    } else {
-        raw_end
-    }
-    .max(content_start)
-    .min(raw_end);
+    let content_end = (raw_start + raw.trim_end().len())
+        .max(content_start)
+        .min(raw_end);
     MarkdownTableCellBounds {
         raw_start,
         raw_end,
         content_start,
         content_end,
     }
-}
-
-pub(super) fn table_cell_visible_len(
-    line: &str,
-    bounds: MarkdownTableCellBounds,
-) -> usize {
-    line[bounds.content_start..bounds.content_end]
-        .chars()
-        .count()
 }
 
 pub(super) fn table_cell_entry_col(bounds: MarkdownTableCellBounds) -> usize {
@@ -298,6 +332,8 @@ pub(super) fn table_line_with_inserted_cell(
     line: &str,
     col_ix: usize,
     value: &str,
+    min_columns: usize,
+    padding: &str,
 ) -> Option<String> {
     let bounds = parse_table_cell_bounds(line)?;
     let mut cells = bounds
@@ -311,6 +347,7 @@ pub(super) fn table_line_with_inserted_cell(
             }
         })
         .collect::<Vec<_>>();
+    cells.resize(min_columns.max(cells.len()), padding.to_string());
     cells.insert(col_ix.min(cells.len()), value.to_string());
     Some(format_table_row(&cells))
 }
@@ -333,14 +370,12 @@ pub(super) fn table_row_cells_empty(line: &str) -> bool {
 }
 
 pub(super) fn parse_table_cells(line: &str) -> Option<Vec<&str>> {
-    if !line.contains('|') {
-        return None;
-    }
-    let trimmed = line.trim();
-    let trimmed = trimmed.strip_prefix('|').unwrap_or(trimmed);
-    let trimmed = trimmed.strip_suffix('|').unwrap_or(trimmed);
-    let cells = trimmed.split('|').map(str::trim).collect::<Vec<_>>();
-    (cells.len() >= 2).then_some(cells)
+    Some(
+        parse_table_cell_bounds(line)?
+            .into_iter()
+            .map(|cell| &line[cell.content_start..cell.content_end])
+            .collect(),
+    )
 }
 
 pub(super) fn is_table_separator_line(line: &str) -> bool {
@@ -348,9 +383,13 @@ pub(super) fn is_table_separator_line(line: &str) -> bool {
 }
 
 pub(super) fn is_table_separator_cells(cells: &[&str]) -> bool {
-    cells.iter().all(|cell| {
-        cell.contains('-') && cell.chars().all(|ch| matches!(ch, '-' | ':' | ' ' | '\t'))
-    })
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            let cell = cell.trim();
+            let core = cell.strip_prefix(':').unwrap_or(cell);
+            let core = core.strip_suffix(':').unwrap_or(core);
+            !core.is_empty() && core.chars().all(|ch| ch == '-')
+        })
 }
 
 pub(super) fn parse_markdown_list_marker(line: &str) -> Option<MarkdownListMarker> {

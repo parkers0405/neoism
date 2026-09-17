@@ -420,7 +420,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 item.context()
                     .markdown
                     .as_ref()
-                    .filter(|pane| pane.path.as_os_str() == path.as_os_str())
+                    .filter(|pane| pane.is_active_tab_path(path))
                     .map(|_| (item.context().route_id, *node))
             })
         })
@@ -502,6 +502,20 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         path: &std::path::Path,
         sugarloaf: &mut Sugarloaf,
     ) -> bool {
+        let notebook_routes: Vec<_> = self.contexts[self.current_index].contexts().values()
+            .filter_map(|item| item.context().markdown.as_ref()
+                .filter(|pane| pane.documentation_notebook.as_ref().is_some_and(|book| book.path == path))
+                .map(|_| item.context().route_id)).collect();
+        if !notebook_routes.is_empty() {
+            // Removing a leaf rebuilds Taffy IDs. Resolve each stable route anew.
+            for route in notebook_routes {
+                if let Some(node) = self.contexts[self.current_index].node_by_route_id(route) {
+                    self.contexts[self.current_index].remove_node(node, sugarloaf);
+                }
+            }
+            self.current_route = self.contexts[self.current_index].current().route_id;
+            return true;
+        }
         let Some(node) = self.contexts[self.current_index]
             .contexts()
             .iter()

@@ -473,6 +473,34 @@ fn cd_tab_completion_matches_path_segments_like_zsh() {
 }
 
 #[test]
+fn cd_tab_completion_selects_first_child_without_an_extra_press() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-completion-first-child-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("projects/neoism")).unwrap();
+    std::fs::create_dir_all(root.join("projects/next")).unwrap();
+
+    for suffix in ["", "n"] {
+        let mut input = TerminalInputBuffer::default();
+        input.insert_str("cd projec");
+        assert!(input.complete_or_accept(Some(&root)));
+        assert_eq!(input.text(), "cd projects/");
+
+        input.insert_str(suffix);
+        assert!(input.complete_or_accept(Some(&root)));
+        assert_eq!(input.text(), "cd projects/neoism/");
+        assert!(input.completion_items()[0].starts_with('>'));
+
+        assert!(input.complete_or_accept(Some(&root)));
+        assert_eq!(input.text(), "cd projects/next/");
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn completion_arrows_cycle_visible_menu() {
     let root = std::env::temp_dir().join(format!(
         "neoism-completion-arrow-test-{}",
@@ -535,7 +563,8 @@ fn completion_selection_stays_visible_past_old_display_limit() {
     input.insert_str("cd ");
 
     assert!(input.complete_or_accept(Some(&root)));
-    for _ in 0..12 {
+    assert_eq!(input.text(), "cd item00/");
+    for _ in 0..11 {
         assert!(input.completion_next());
     }
 

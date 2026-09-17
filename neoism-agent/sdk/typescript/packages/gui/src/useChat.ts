@@ -1,4 +1,3 @@
-import { subscribeGuiEvents } from "./sharedEvents";
 import { useSessionActivity } from "./useSessionActivity";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { liveOriginRegistry, markLiveEvent, markPromptSnapshot } from "./livePartOrigins";
@@ -94,7 +93,9 @@ export function useChat(
         };
         void (async () => {
             try {
-                for await (const event of subscribeGuiEvents(client, {
+                // A transcript needs the server's atomic live baseline on every
+                // attachment. The shared metadata stream is future-events-only.
+                for await (const event of client.events.subscribe({
                     sessionId: id,
                     tail: true,
                     signal: controller.signal,
@@ -119,18 +120,25 @@ export function useChat(
                 if (!controller.signal.aborted) notify(errorMessage(e));
             }
         })();
-        if (snapshot.fetchedAt === undefined || Date.now() - snapshot.fetchedAt >= CHAT_FRESH_MS || snapshot.state.busy || runtimeWorking(snapshot.state.runtime)) void refresh();
+        // An unfinished cached response may have completed while detached;
+        // the live baseline intentionally contains no completed history.
+        const unfinished = snapshot.state.messages.some(message =>
+            message.info.role === "assistant" && typeof message.info.time?.completed !== "number");
+        if (snapshot.fetchedAt === undefined || Date.now() - snapshot.fetchedAt >= CHAT_FRESH_MS || snapshot.state.busy || runtimeWorking(snapshot.state.runtime) || unfinished) void refresh();
         // Reconcile after reconnects (SDK reconnects internally), plus missed idle/status events.
         // A fixed, single-flight interval never cascades into pagination requests.
         const timer = setInterval(() => {
             if (!document.hidden) void refresh();
         }, 15000);
         const focus = () => void refresh();
+        const visible = () => { if (!document.hidden) void refresh(); };
         window.addEventListener("focus", focus);
+        document.addEventListener("visibilitychange", visible);
         return () => {
             controller.abort();
             clearInterval(timer);
             window.removeEventListener("focus", focus);
+            document.removeEventListener("visibilitychange", visible);
             if (epoch.current === generation) epoch.current++;
         };
     }, [client, id, notify]);

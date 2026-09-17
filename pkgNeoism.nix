@@ -91,7 +91,8 @@ in
       + lib.optionalString stdenv.hostPlatform.isDarwin ''
         mkdir -p $out/Applications/Neoism.app/Contents/MacOS \
                  $out/Applications/Neoism.app/Contents/Resources
-        sed 's/{{VERSION}}/${cargoToml.workspace.package.version}/g' \
+        sed -e 's/{{VERSION}}/${lib.head (lib.splitString "-" (lib.head (lib.splitString "+" cargoToml.workspace.package.version)))}/g' \
+          -e 's/{{RELEASE_VERSION}}/${cargoToml.workspace.package.version}/g' \
           misc/macos/Info.plist > $out/Applications/Neoism.app/Contents/Info.plist
         cp misc/macos/neoism.icns $out/Applications/Neoism.app/Contents/Resources/
         ln -s $out/bin/neoism $out/Applications/Neoism.app/Contents/MacOS/

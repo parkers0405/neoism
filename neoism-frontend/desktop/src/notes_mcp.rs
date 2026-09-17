@@ -8,6 +8,8 @@ use neoism_agent_service_api::{
 };
 use serde_json::{json, Value};
 
+mod notebooks;
+
 const INTERNAL_ARG: &str = "--neoism-notes-mcp";
 const CONFIG_SOURCE: &str = "neoism:desktop-notes-mcp";
 
@@ -68,7 +70,12 @@ impl DesktopNotesConfig {
                                 "mcp__notes__tasks": "allow",
                                 "mcp__notes__create": "deny",
                                 "mcp__notes__write": "deny",
-                                "mcp__notes__taskToggle": "deny"
+                                 "mcp__notes__taskToggle": "deny",
+                                 "mcp__notes__notebookList": "allow",
+                                 "mcp__notes__notebookRead": "allow",
+                                 "mcp__notes__notebookCreate": "deny",
+                                 "mcp__notes__notebookAddPage": "deny",
+                                 "mcp__notes__notebookMovePage": "deny"
                             }
                         }
                     }
@@ -180,7 +187,7 @@ fn invalid_params(message: String) -> RpcError {
 }
 
 fn tool_definitions() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         tool(
             "list",
             "List Markdown files in the workspace's linked Neoism Notes vault",
@@ -198,12 +205,12 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "create",
-            "Create a Markdown note in the linked vault",
+            "Create a Markdown note in the linked vault. Content is stored verbatim. Keep each prose paragraph on one source line; do not hard-wrap to a column width. Preserve intentional breaks, lists, tables, and code.",
             json!({"type":"object","properties":{"title":{"type":"string"},"content":{"type":"string"}},"required":["title"]}),
         ),
         tool(
             "write",
-            "Write or replace a note by vault-relative path",
+            "Write or replace a note by vault-relative path. Content is stored verbatim. Keep each prose paragraph on one source line; do not hard-wrap to a column width. Preserve intentional breaks, lists, tables, and code; do not reflow unrelated text.",
             json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}),
         ),
         tool(
@@ -216,7 +223,9 @@ fn tool_definitions() -> Vec<Value> {
             "Set or toggle a Markdown task by path and one-based line",
             json!({"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer","minimum":1},"checked":{"type":"boolean"}},"required":["path","line"]}),
         ),
-    ]
+    ];
+    tools.extend(notebooks::tools());
+    tools
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -240,6 +249,8 @@ fn call_notes_tool(
         .unwrap_or(100)
         .max(1) as usize;
     match name {
+        "notebookList" | "notebookRead" | "notebookAddPage"
+        | "notebookMovePage" => notebooks::call(notes, name, arguments),
         "list" => Ok(notes.files(limit)?.join("\n")),
         "search" => {
             let query = required_string(&arguments, "query")?.to_lowercase();
@@ -469,6 +480,17 @@ fn safe_note_file_name(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn note_writers_request_logical_paragraphs_without_source_reflow() {
+        let tools = super::tool_definitions();
+        for name in ["create", "write"] {
+            let description = tools.iter().find(|tool| tool["name"] == name).unwrap()["description"].as_str().unwrap();
+            assert!(description.contains("one source line"));
+            assert!(description.contains("stored verbatim"));
+            assert!(description.contains("intentional breaks"));
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -485,7 +507,11 @@ mod tests {
                 "create",
                 "write",
                 "tasks",
-                "taskToggle"
+                "taskToggle",
+                "notebookList",
+                "notebookRead",
+                "notebookAddPage",
+                "notebookMovePage"
             ]
         );
     }
@@ -596,19 +622,32 @@ mod tests {
         let root = std::env::temp_dir()
             .join(format!("neoism-notes-config-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let services = install(neoism_agent_neoism_adapter::neoism_services().with_config(
-            Arc::new(neoism_agent_service_api::StandardConfigSourceService::new(root.join("user"))),
-        ));
+        let services =
+            install(neoism_agent_neoism_adapter::neoism_services().with_config(
+                Arc::new(neoism_agent_service_api::StandardConfigSourceService::new(
+                    root.join("user"),
+                )),
+            ));
         let snapshot = services
             .config
             .snapshot(&ConfigSnapshotRequest::new(&root))
             .unwrap();
         let layer = snapshot.layers.last().unwrap();
         assert_eq!(layer.source_id, CONFIG_SOURCE);
-        assert_eq!(layer.scope, neoism_agent_service_api::ConfigDiscoveryScope::Installation);
+        assert_eq!(
+            layer.scope,
+            neoism_agent_service_api::ConfigDiscoveryScope::Installation
+        );
         assert!(!layer.writable);
         assert_eq!(layer.document["mcp"]["notes"]["type"], "local");
         assert_eq!(layer.document["mcp"]["notes"]["command"][1], INTERNAL_ARG);
+        let permissions = &layer.document["agent"]["plan"]["permission"]["mcp"];
+        for tool in ["notebookList", "notebookRead"] {
+            assert_eq!(permissions[format!("mcp__notes__{tool}")], "allow");
+        }
+        for tool in ["notebookCreate", "notebookAddPage", "notebookMovePage"] {
+            assert_eq!(permissions[format!("mcp__notes__{tool}")], "deny");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

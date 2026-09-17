@@ -1,3 +1,4 @@
+import { runtimeIsOlder } from "../state";
 import { subscribeGuiEvents } from "../sharedEvents";
 import type { NeoismClient, Session, SessionRuntimeSnapshot, SubagentTask } from "@neoism/sdk";
 import { errorMessage } from "../types";
@@ -5,12 +6,16 @@ import { eventForSession, refreshQueue, taskRows, type TaskRow } from "./chatSup
 
 export type SubagentSnapshot = { rows: TaskRow[]; loading: boolean; canStop: boolean; stopping?: string; errors: string[]; notice: string };
 export const emptySubagents = (): SubagentSnapshot => ({ rows: [], loading: true, canStop: false, errors: [], notice: "" });
-export async function fetchSubagents(client: NeoismClient, id: string, signal: AbortSignal) {
+export async function fetchSubagents(client: NeoismClient, id: string, signal: AbortSignal,
+    onRuntime?: (runtime: SessionRuntimeSnapshot) => void) {
     const path = { session_id: id };
     const results = await Promise.allSettled([
         client.operations.request("v2.subagents.tasks.list", { path, signal }),
         client.operations.request("v2.sessions.children", { path, signal }),
-        client.operations.request("v2.sessions.runtime", { path, signal }),
+        client.operations.request("v2.sessions.runtime", { path, signal }).then(runtime => {
+            if (!signal.aborted && Array.isArray(runtime?.branches)) onRuntime?.(runtime);
+            return runtime;
+        }),
     ]);
     const errors: string[] = [];
     const labels = ["Task controls", "Child sessions", "Runtime status"];
@@ -28,8 +33,27 @@ export function createSubagentController(client: NeoismClient, id: string, isCur
     let state = emptySubagents();
     const current = () => !signal.aborted && isCurrent();
     const emit = () => { if (current()) publish({ ...state }); };
-    const refresh = refreshQueue(() => fetchSubagents(client, id, signal), snapshot => {
-        state = { ...state, ...snapshot, loading: false }; emit();
+    let latestRuntime: SessionRuntimeSnapshot | undefined;
+    const applyRuntime = (runtime: SessionRuntimeSnapshot) => {
+        if (!current() || runtimeIsOlder(latestRuntime, runtime)) return;
+        latestRuntime = runtime;
+        const rows = new Map(state.rows.map(row => [row.sessionId, row]));
+        for (const branch of taskRows(id, [], [], runtime)) {
+            const prior = rows.get(branch.sessionId);
+            rows.set(branch.sessionId, { ...branch, ...prior,
+                id: prior?.id || branch.id, title: prior?.title || branch.title,
+                agent: prior?.agent || branch.agent,
+                status: branch.status === "completed" && prior && ["error", "failed", "cancelled", "stopped"].includes(prior.status) ? prior.status : branch.status,
+                stoppable: branch.status === "outstanding" && !!prior?.stoppable,
+            });
+        }
+        state = { ...state, rows: [...rows.values()] }; emit();
+    };
+    // Runtime can reveal active children before slower task-control/history
+    // requests finish. Live runtime events use the same revision-ordered path.
+    const refresh = refreshQueue(() => fetchSubagents(client, id, signal, applyRuntime), snapshot => {
+        state = { ...state, ...snapshot, loading: false };
+        if (latestRuntime) applyRuntime(latestRuntime); else emit();
     }, current, e => { state = { ...state, loading: false, errors: [errorMessage(e)] }; emit(); });
     async function stop(taskId?: string) {
         if (!current() || state.stopping || !state.canStop || !state.rows.some(r => r.stoppable && (!taskId || r.id === taskId))) return false;
@@ -51,6 +75,7 @@ export function createSubagentController(client: NeoismClient, id: string, isCur
                 if (!current()) break;
                 const known = state.rows.map(row => row.sessionId);
                 if (!eventForSession(event, id) && !known.some(child => eventForSession(event, child))) continue;
+                if (event.type === "session.execution.updated" && Array.isArray(event.data.runtime?.branches)) applyRuntime(event.data.runtime);
                 if (["session.status", "session.created", "session.updated", "session.deleted", "session.execution.updated", "session.subtask.completed"].includes(event.type)) void refresh();
             }
         } catch (e) {

@@ -130,14 +130,27 @@ fn agent_session_titles_update_by_route_and_reset_hover() {
 }
 
 #[test]
-fn agent_titles_are_compact_without_restricting_file_titles() {
-    assert_eq!(BufferTabs::<()>::agent_title_width(400.0, true, 1.0), 140.0);
-    assert_eq!(BufferTabs::<()>::agent_title_width(400.0, true, 2.0), 280.0);
+fn agent_and_markdown_titles_share_compact_hover_geometry() {
+    let mut tabs = BufferTabs::<()>::new();
+    let title = "A very long architecture document title that should not widen the entire tab strip.md";
+    let md = tabs.open_markdown(PathBuf::from(title));
+    let agent = tabs.open_neoism_agent(41);
+    tabs.set_neoism_agent_title(41, title);
+    let widths = tabs.geometry_widths();
+    assert_eq!(widths[md], widths[agent]);
+    tabs.set_visible(true);
+    tabs.set_hover(Some(TabHit::Activate(md)));
+    tabs.title_hover_overflow = true;
+    assert!(tabs.is_animating());
+    tabs.clear_hover_immediate();
+    assert!(!tabs.is_animating());
+    assert_eq!(BufferTabs::<()>::compact_title_width(400.0, true, 1.0), 140.0);
+    assert_eq!(BufferTabs::<()>::compact_title_width(400.0, true, 2.0), 280.0);
     assert_eq!(
-        BufferTabs::<()>::agent_title_width(400.0, false, 1.0),
+        BufferTabs::<()>::compact_title_width(400.0, false, 1.0),
         400.0
     );
-    assert_eq!(BufferTabs::<()>::agent_title_width(30.0, true, 1.0), 30.0);
+    assert_eq!(BufferTabs::<()>::compact_title_width(30.0, true, 1.0), 30.0);
 }
 
 #[test]

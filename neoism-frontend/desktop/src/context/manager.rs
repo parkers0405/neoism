@@ -151,6 +151,10 @@ impl ContextManagerDaemonLink {
         Some((self.handle.clone(), runtime))
     }
 
+    fn generation(&self) -> Option<u64> {
+        Some(self.handle.generation())
+    }
+
     /// 5D-wire: fire a `MoveWorkspaceToHost` palette intent at the daemon's
     /// real move-plane HTTP routes (`/workspace/promote` for a remote target,
     /// `/workspace/demote` for the local one). Resolves the route from the
@@ -472,6 +476,12 @@ pub struct ContextManagerDaemonCache {
     /// [`ContextManager::take_host_ended_reason`] to re-dial home and
     /// surface the reason as a notice. `None` in the steady state.
     pub host_ended_reason: Option<String>,
+    /// Last socket generation that completed same-runner PTY reattach /
+    /// consumer resync. Stale Open edges must not re-issue AttachPty.
+    pub last_resync_generation: u64,
+    /// True after the first accepted HelloAck on this link. Distinguishes
+    /// initial attach from later same-runner reconnects.
+    pub handshake_complete: bool,
 }
 
 mod builders;

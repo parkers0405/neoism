@@ -93,6 +93,7 @@ pub struct NotesSidebar {
     /// chrome uses on first open. Without this the panel only refreshed on
     /// a manual close/open.
     pending_refresh: bool,
+    panel_rect: Option<[f32; 4]>,
     note_rects: Vec<([f32; 4], usize)>,
     icon_rects: Vec<([f32; 4], usize)>,
     selected_cursor_rect: Option<[f32; 4]>,
@@ -237,6 +238,7 @@ impl Default for NotesSidebar {
             last_cursor_frame: Instant::now(),
             last_panel_height_rows: 1,
             pending_refresh: false,
+            panel_rect: None,
             note_rects: Vec::new(),
             icon_rects: Vec::new(),
             selected_cursor_rect: None,
@@ -628,6 +630,12 @@ impl NotesSidebar {
                     "resolved note row icon"
                 );
             }
+        }
+    }
+
+    pub fn select_path(&mut self, path: &Path) {
+        if let Some(index) = (0..self.rows.len()).find(|&index| self.row_entry(index).is_some_and(|entry| entry.path == path)) {
+            self.set_selected(index);
         }
     }
 
@@ -1045,6 +1053,10 @@ impl NotesSidebar {
         self.visible
     }
 
+    pub fn contains_point(&self, x: f32, y: f32) -> bool {
+        self.visible && self.panel_rect.is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NotesSidebarHit> {
         for (rect, index) in &self.icon_rects {
             if rect_contains(*rect, x, y) {
@@ -1099,6 +1111,7 @@ impl NotesSidebar {
         mouse: Option<(f32, f32)>,
         _now_seconds: f32,
     ) {
+        self.panel_rect = Some([x_left, y_top, panel_width, panel_height]);
         if !self.visible || panel_width <= 0.0 || panel_height <= 0.0 {
             return;
         }
@@ -1275,7 +1288,10 @@ impl NotesSidebar {
         self.workspace_rect = Some(workspace_rect);
         let header_bottom = (header_y + wordmark_h).max(create_y + create_size);
         let list_y = header_bottom + 8.0 * self.scale;
-        let list_h = (footer_y - list_y - 8.0 * self.scale).max(row_h);
+        let list_h = (footer_y - list_y - 8.0 * self.scale).max(0.0);
+        // GPU glyph clipping preserves partial rows while the scroll spring
+        // crosses the edges, without letting text paint over fixed chrome.
+        let list_clip = [content_x, list_y, content_w, list_h];
         let rows_visible = (list_h / row_h).floor().max(1.0) as usize;
         // Re-clamp before painting — a terminal resize can shrink the
         // panel between input and frame. Use the bounds-only clamp (not
@@ -1322,10 +1338,12 @@ impl NotesSidebar {
                         .max(font_size)
                         .min(row_h)
                         .min(content_h.max(2.0));
-                    let cursor_y = (row_y + (row_h - cursor_h) / 2.0)
-                        .clamp(content_y, (panel_bottom - cursor_h).max(content_y));
-                    self.selected_cursor_rect =
-                        Some([cursor_x, cursor_y, cursor_w, cursor_h]);
+                    let cursor_y = row_y + (row_h - cursor_h) / 2.0;
+                    let top = cursor_y.max(list_y);
+                    let bottom = (cursor_y + cursor_h).min(list_y + list_h);
+                    if bottom > top {
+                        self.selected_cursor_rect = Some([cursor_x, top, cursor_w, bottom - top]);
+                    }
                 }
             }
         }
@@ -1576,7 +1594,7 @@ impl NotesSidebar {
                     continue;
                 }
                 self.note_rects
-                    .push(([content_x, row_y, content_w, row_h], absolute_ix));
+                    .push(([content_x, visible_row_y, content_w, visible_row_h], absolute_ix));
 
                 let is_selected = absolute_ix == self.selected_index;
                 // Spring-loaded drop target: accent-tinted band so it
@@ -1658,21 +1676,21 @@ impl NotesSidebar {
                     theme.u8(theme.dim)
                 };
                 let chevron_opts = DrawOpts {
-                    font_size,
+                    font_size: (indent_px - 6.0 * self.scale).max(6.0 * self.scale),
                     color: fade_u8(theme.u8(theme.muted), row_dim),
-                    clip_rect: Some(panel_clip),
+                    clip_rect: Some(list_clip),
                     ..DrawOpts::default()
                 };
                 let icon_opts = DrawOpts {
                     font_size: icon_size,
                     color: fade_u8(icon_color, row_dim),
-                    clip_rect: Some(panel_clip),
+                    clip_rect: Some(list_clip),
                     ..DrawOpts::default()
                 };
                 let label_opts = DrawOpts {
                     font_size,
                     color: fade_u8(label_color, row_dim),
-                    clip_rect: Some(panel_clip),
+                    clip_rect: Some(list_clip),
                     ..DrawOpts::default()
                 };
                 // The drop-target folder wiggles under the drag.
@@ -1686,7 +1704,7 @@ impl NotesSidebar {
                     draw_icon_centered_with_occlusion(
                         sugarloaf,
                         cursor_x,
-                        [cursor_x, row_y, indent_px, row_h],
+                        [cursor_x, row_y, (indent_px - 4.0 * self.scale).max(1.0), row_h],
                         chevron,
                         &chevron_opts,
                         occlusion,
@@ -1697,7 +1715,7 @@ impl NotesSidebar {
                 // The icon is a click target: a tap on it opens the
                 // Notion-style icon/emoji picker for this entry.
                 self.icon_rects
-                    .push(([cursor_x - 2.0, row_y, icon_size + 4.0, row_h], absolute_ix));
+                    .push(([cursor_x - 2.0, visible_row_y, icon_size + 4.0, visible_row_h], absolute_ix));
                 // A blank/whitespace-only custom icon is treated as "no
                 // custom icon" so it falls back to the default glyph instead
                 // of rendering an empty box (belt-and-suspenders: the icon
@@ -1710,7 +1728,7 @@ impl NotesSidebar {
                     let custom_opts = DrawOpts {
                         font_size: icon_size,
                         color: fade_u8(theme.u8(theme.fg), row_dim),
-                        clip_rect: Some(panel_clip),
+                        clip_rect: Some(list_clip),
                         ..DrawOpts::default()
                     };
                     draw_icon_centered_with_occlusion(
@@ -1970,10 +1988,13 @@ impl NotesSidebar {
             return;
         }
         let rows_visible = rows_visible.max(1);
-        if self.selected_index < self.scroll_top {
-            self.set_scroll_top(self.selected_index);
-        } else if self.selected_index >= self.scroll_top + rows_visible {
-            self.set_scroll_top(self.selected_index.saturating_sub(rows_visible - 1));
+        let margin = if rows_visible <= 2 { 0 } else {
+            crate::panels::file_tree::SCROLL_OFF_ROWS.min((rows_visible - 1) / 2)
+        };
+        if self.selected_index < self.scroll_top.saturating_add(margin) {
+            self.set_scroll_top(self.selected_index.saturating_sub(margin));
+        } else if self.selected_index.saturating_add(margin) >= self.scroll_top.saturating_add(rows_visible) {
+            self.set_scroll_top(self.selected_index + margin + 1 - rows_visible);
         }
         let max_top = self.max_scroll_top_for(rows_visible);
         if self.scroll_top > max_top {
@@ -2448,6 +2469,40 @@ fn fade_u8(mut color: [u8; 4], alpha: f32) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keyboard_navigation_keeps_the_file_tree_scrolloff_band() {
+        let mut sidebar = super::NotesSidebar::default();
+        sidebar.rows = (0..100).map(|entry_index| super::NoteSidebarRow { entry_index }).collect();
+        sidebar.last_panel_height_rows = 12;
+        let margin = crate::panels::file_tree::SCROLL_OFF_ROWS.min(5);
+        for selected in 15..80 {
+            sidebar.set_selected(selected);
+            assert!(selected >= sidebar.scroll_top + margin);
+            assert!(selected + margin < sidebar.scroll_top + 12);
+        }
+        for selected in (15..80).rev() {
+            sidebar.set_selected(selected);
+            assert!(selected >= sidebar.scroll_top + margin);
+            assert!(selected + margin < sidebar.scroll_top + 12);
+        }
+        sidebar.set_selected(0);
+        assert_eq!(sidebar.scroll_top, 0);
+        sidebar.set_selected(99);
+        assert_eq!(sidebar.scroll_top, 88);
+    }
+
+    #[test]
+    fn empty_panel_background_is_a_context_menu_target() {
+        let mut sidebar = super::NotesSidebar::default();
+        sidebar.visible = true;
+        sidebar.panel_rect = Some([10.0, 80.0, 240.0, 600.0]);
+        assert!(sidebar.contains_point(100.0, 300.0));
+        assert!(sidebar.hit_test(100.0, 300.0).is_none());
+        assert!(!sidebar.contains_point(100.0, 40.0));
+        sidebar.visible = false;
+        assert!(!sidebar.contains_point(100.0, 300.0));
+    }
+
     use super::*;
 
     const VAULT: &str = "/tmp/neoism-notes-test-vault";

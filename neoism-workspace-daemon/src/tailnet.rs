@@ -58,7 +58,7 @@ pub struct TailnetPeer {
 /// macs running the GUI Tailscale.app (network-extension variant),
 /// which ships no PATH-visible `tailscale` and whose daemon the
 /// open-source CLI cannot reach.
-fn cli_candidates() -> &'static [&'static str] {
+pub(crate) fn cli_candidates() -> &'static [&'static str] {
     #[cfg(target_os = "macos")]
     {
         &[

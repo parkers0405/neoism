@@ -309,6 +309,39 @@ impl MarkdownPane {
             false
         };
 
+        // Pointer selection owns scrolling, never the keyboard's caret centering.
+        // Use the fixed pane edges, not glyph bounds which move with the page.
+        let mut selection_scrolled = false;
+        if let Some([x, y]) = self
+            .selection_pointer
+            .filter(|_| self.mouse_select_anchor.is_some())
+        {
+            let [top, bottom] = self.viewport_bounds;
+            let outside = if bottom <= top {
+                0.0
+            } else if y < top {
+                y - top
+            } else if y > bottom {
+                y - bottom
+            } else {
+                0.0
+            };
+            if outside != 0.0 {
+                let dt = self
+                    .selection_scroll_at
+                    .replace(now)
+                    .map(|at| now.saturating_duration_since(at).as_secs_f32().min(0.05))
+                    .unwrap_or(1.0 / 60.0);
+                let speed = outside.signum() * (60.0 + outside.abs() * 12.0).min(1200.0);
+                selection_scrolled = self.scroll_touch_pixels(speed * dt, bottom - top);
+                self.update_drag(x, y);
+            } else {
+                self.selection_scroll_at = None;
+            }
+        } else {
+            self.selection_scroll_at = None;
+        }
+
         let inertial_scroll = self.tick_inertial_scroll();
         let delta = self.target_scroll_y - self.scroll_y;
         let animating = delta.abs() > SCROLL_EPSILON
@@ -319,7 +352,8 @@ impl MarkdownPane {
             }
             self.scroll_animation_velocity_px_s = 0.0;
             self.scroll_animation_last_tick_at = None;
-            return inertial_scroll
+            return selection_scrolled
+                || inertial_scroll
                 || animating_tasks
                 || animating_yanks
                 || animating_change_flash
@@ -370,12 +404,9 @@ impl MarkdownPane {
     /// line keeps its rendered height and the blocks below it stop bouncing a
     /// row per keystroke; it re-reveals once the caret settles for a beat.
     pub(crate) fn cursor_reveal_active(&self) -> bool {
-        if !self.virtual_render.cursor_reveal_suppressed {
-            return true;
-        }
-        self.virtual_render
-            .last_cursor_change_at
-            .is_none_or(|since| since.elapsed() >= CURSOR_REVEAL_SETTLE)
+        // tick_scroll clears suppression and invalidates layout at a frame
+        // boundary. Reading elapsed time here could flip midway through drawing.
+        !self.virtual_render.cursor_reveal_suppressed
     }
 
     pub fn scroll_cursor_into_view(
@@ -500,12 +531,7 @@ impl MarkdownPane {
             .unwrap_or(0.0);
         let after = (before + delta_pixels).clamp(0.0, max_scroll);
         self.table_scroll_x.insert(table.start_line, after);
-        self.move_cursor_with_table_scroll(
-            table.start_line,
-            after,
-            table.viewport_width,
-            table.content_width,
-        );
+        self.follow_cursor = false;
         (after - before).abs() > 0.01
     }
 
@@ -532,33 +558,6 @@ impl MarkdownPane {
         self.scroll_animation_last_tick_at = None;
         self.follow_cursor = false;
         (next - before).abs() > 0.01
-    }
-
-    pub(crate) fn move_cursor_with_table_scroll(
-        &mut self,
-        start_line: usize,
-        scroll_x: f32,
-        viewport_width: f32,
-        content_width: f32,
-    ) {
-        let Some(range) = self.table_range_from_start(start_line) else {
-            return;
-        };
-        if !range.contains(&self.cursor_line) || self.cursor_line == start_line + 1 {
-            return;
-        }
-        let max_scroll = (content_width - viewport_width).max(0.0);
-        if max_scroll <= 0.0 {
-            return;
-        }
-        let line_len = self.lines[self.cursor_line].len();
-        let marker_len = self.visible_start_col(self.cursor_line).min(line_len);
-        let editable_len = line_len.saturating_sub(marker_len);
-        let target =
-            marker_len + ((scroll_x / max_scroll) * editable_len as f32).round() as usize;
-        self.cursor_col =
-            floor_char_boundary(&self.lines[self.cursor_line], target.min(line_len));
-        self.follow_cursor = false;
     }
 
     pub(crate) fn move_cursor_with_scroll(&mut self, delta_pixels: f32) {

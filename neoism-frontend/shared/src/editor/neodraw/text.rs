@@ -7,6 +7,7 @@
 
 use super::pane::{DrawPane, Tool};
 use super::scene::{Shape, ShapeId, ShapeKind, Vec2};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Default font size (world units) for a newly placed text shape.
 const DEFAULT_TEXT_SIZE: f32 = 28.0;
@@ -19,6 +20,9 @@ impl DrawPane {
     /// Scale the font size of the text being edited (or all selected text
     /// shapes) by `factor` — Ctrl +/-. Returns whether anything changed.
     pub fn change_text_size(&mut self, factor: f32) -> bool {
+        if !factor.is_finite() || factor <= 0.0 {
+            return false;
+        }
         let targets: Vec<ShapeId> = if let Some(id) = self.editing_text {
             vec![id]
         } else {
@@ -67,6 +71,9 @@ impl DrawPane {
     /// or create a new empty one. Records an undo checkpoint.
     pub fn begin_text_at(&mut self, world: Vec2, hit_tol: f32) {
         if let Some(id) = self.text_shape_at(world, hit_tol) {
+            if self.editing_text != Some(id) {
+                self.checkpoint();
+            }
             self.editing_text = Some(id);
             self.selection = vec![id];
             return;
@@ -82,6 +89,7 @@ impl DrawPane {
                 y: world.y,
                 content: String::new(),
                 size: DEFAULT_TEXT_SIZE,
+                width: None,
             },
             style,
         });
@@ -110,7 +118,8 @@ impl DrawPane {
             return false;
         };
         if let Some(content) = self.text_content_mut(id) {
-            if content.pop().is_some() {
+            if let Some((start, _)) = content.grapheme_indices(true).next_back() {
+                content.truncate(start);
                 self.dirty = true;
                 return true;
             }
@@ -151,7 +160,10 @@ impl DrawPane {
             .shapes
             .iter()
             .rev()
-            .find(|s| matches!(s.kind, ShapeKind::Text { .. }) && s.hit(world, tol))
+            .find(|s| {
+                matches!(s.kind, ShapeKind::Text { .. })
+                    && self.shape_bounds(s).contains(world, tol)
+            })
             .map(|s| s.id)
     }
 
@@ -226,6 +238,35 @@ mod tests {
         assert_eq!(p.scene.shapes.len(), 1);
         p.commit_text();
         assert!(p.scene.shapes.is_empty(), "empty text removed");
+    }
+
+    #[test]
+    fn reediting_existing_text_has_its_own_undo_checkpoint() {
+        let mut p = pane();
+        p.begin_text_at(Vec2::new(10.0, 10.0), 4.0);
+        p.insert_text("before");
+        p.commit_text();
+        p.begin_text_at(Vec2::new(12.0, 14.0), 6.0);
+        p.insert_text(" after");
+        assert!(p.undo());
+        match &p.scene.shapes[0].kind {
+            ShapeKind::Text { content, .. } => assert_eq!(content, "before"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn backspace_removes_a_complete_visible_character() {
+        let mut p = pane();
+        p.begin_text_at(Vec2::new(10.0, 10.0), 4.0);
+        p.insert_text("a\u{301}\u{1f469}\u{200d}\u{1f4bb}");
+        assert!(p.text_backspace());
+        match &p.scene.shapes[0].kind {
+            ShapeKind::Text { content, .. } => assert_eq!(content, "a\u{301}"),
+            _ => panic!(),
+        }
+        assert!(p.text_backspace());
+        assert!(!p.text_backspace());
     }
 
     #[test]

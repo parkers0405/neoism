@@ -8,6 +8,7 @@
 
 pub mod code;
 pub mod crdt;
+pub mod documentation_notebook;
 pub mod markdown;
 pub mod neodraw;
 pub mod notebook;

@@ -16,6 +16,8 @@
   <string>APPL</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
+  <key>NeoismReleaseVersion</key>
+  <string>{{RELEASE_VERSION}}</string>
   <key>CFBundleShortVersionString</key>
   <string>{{VERSION}}</string>
   <key>CFBundleVersion</key>

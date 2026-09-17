@@ -906,7 +906,7 @@ while IFS= read -r line; do
     *'"method":"notifications/initialized"'*)
       ;;
     *'"id":1'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{},"prompts":{}},"serverInfo":{"name":"mock","version":"1"}}}'
       ;;
     *'"id":2'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo text","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}]}}'
@@ -950,7 +950,7 @@ while IFS= read -r line; do
     *'"method":"notifications/initialized"'*) ;;
     *'"method":"initialize"'*)
       id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{},"prompts":{}},"serverInfo":{"name":"mock","version":"1"}}}\n' "$id"
       ;;
     *'"method":"tools/list"'*)
       id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
@@ -1044,7 +1044,7 @@ async fn remote_mcp_handler(
     let result = match method.as_str() {
         "initialize" => json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": {},
+            "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
             "serverInfo": { "name": "remote-mock", "version": "1" }
         }),
         "tools/list" => json!({

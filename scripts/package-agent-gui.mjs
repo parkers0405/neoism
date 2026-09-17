@@ -19,18 +19,28 @@ export function validateGui(root) {
   walk(root);
   const html = readFileSync(join(root, 'index.html'), 'utf8');
   const refs = [...html.matchAll(/(?:src|href)="([^"]+)"/g)].map(m => m[1]);
-  if (!refs.some(ref => ref.startsWith('/assets/') && ref.endsWith('.js'))) {
+  if (!refs.some(ref => /(^|\/)assets\/[^/]+\.js$/.test(ref.split(/[?#]/)[0]) && !ref.startsWith('http'))) {
     throw new Error('GUI index is not a production Vite build');
   }
   for (const ref of refs) {
     if (/^(?:https?:|data:|#)/.test(ref)) continue;
-    const path = resolve(root, ref.replace(/^\//, '').split(/[?#]/)[0]);
+    if (ref.startsWith('/')) throw new Error(`Root-absolute GUI asset: ${ref}`);
+    const path = resolve(root, ref.replace(/^\.\//, '').split(/[?#]/)[0]);
     const rel = relative(root, path);
     if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Unsafe asset: ${ref}`);
     if (!lstatSync(path).isFile()) throw new Error(`Missing GUI asset: ${ref}`);
   }
   for (const dir of ['assets', 'fonts', 'syntax']) {
     if (!readdirSync(join(root, dir)).length) throw new Error(`Empty GUI ${dir}`);
+  }
+  for (const name of ['index.html', ...readdirSync(join(root, 'assets')).map(n => join('assets', n))]) {
+    const path = join(root, name);
+    if (!existsSync(path) || !lstatSync(path).isFile()) continue;
+    if (!/\.(html|js|css|mjs)$/.test(path)) continue;
+    const text = readFileSync(path, 'utf8');
+    if (/(?:src|href|url\()["']?\/(?:assets|fonts|syntax)\//.test(text)) {
+      throw new Error(`Root-absolute public URL in ${name}`);
+    }
   }
 }
 

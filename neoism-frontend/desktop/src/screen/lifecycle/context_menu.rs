@@ -79,10 +79,12 @@ impl Screen<'_> {
                 self.mark_dirty();
                 true
             }
-            Ok(None) | Err(()) => {
+            Ok(None) => true,
+            Err(()) => {
+                let completion = self.renderer.context_menu.is_markdown_block_completion();
                 self.renderer.context_menu.close();
                 self.mark_dirty();
-                true
+                !completion
             }
         }
     }
@@ -99,6 +101,12 @@ impl Screen<'_> {
             return true;
         }
         if self.renderer.context_menu.is_markdown_block_completion() {
+            let mods = self.modifiers.state();
+            if mods.control_key() || mods.alt_key() || mods.super_key()
+                || matches!(key.logical_key, Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Home | NamedKey::End)) {
+                self.close_context_menu();
+                return false;
+            }
             match &key.logical_key {
                 Key::Named(NamedKey::Escape)
                 | Key::Named(NamedKey::ArrowDown)
@@ -221,6 +229,13 @@ impl Screen<'_> {
             }
             neoism_ui::panels::context_menu::ContextMenuAction::Epub(action) => {
                 self.execute_epub_context_action(action, clipboard);
+            }
+            neoism_ui::panels::context_menu::ContextMenuAction::MarkdownTable(action) => {
+                if self.context_manager.current_mut().active_markdown_mut().is_some_and(|pane| pane.apply_table_action(action)) {
+                    self.sync_active_markdown_modified();
+                    self.renderer.trail_cursor.reset();
+                    self.mark_dirty();
+                }
             }
             neoism_ui::panels::context_menu::ContextMenuAction::MarkdownBlock(template) => {
                 self.apply_markdown_block_template(template);

@@ -124,7 +124,7 @@ fn measure_item(
             let lines = virtual_item_lines(&item.text);
             if let Some(table) = parse_table(&lines, 0) {
                 let measurement =
-                    measure_table(sugarloaf, &table, width, theme, font_scale);
+                    measure_table(sugarloaf, pane, item.first_line, &table, width, theme, font_scale);
                 (measurement.height, measurement.visual_line_count)
             } else {
                 let rows = lines.len().max(1);
@@ -214,7 +214,7 @@ fn measure_item(
                 }
                 let line_ix = item.first_line + local_ix;
                 if frontmatter.as_ref().is_some_and(|fm| fm.contains(&line_ix))
-                    && cursor_line != Some(line_ix)
+                    && !pane.reveals_source_line(line_ix)
                 {
                     let (row_h, rows) = measure_frontmatter_row(
                         sugarloaf,
@@ -248,7 +248,7 @@ fn measure_item(
                 }
                 if let Some(table) = parse_table(&local_lines, local_ix) {
                     let table_measure =
-                        measure_table(sugarloaf, &table, width, theme, font_scale);
+                        measure_table(sugarloaf, pane, item.first_line + local_ix, &table, width, theme, font_scale);
                     height += table_measure.height;
                     visual_lines += table_measure.visual_line_count as usize;
                     local_ix = table.end_line;
@@ -580,7 +580,9 @@ fn draw_item(
     };
     let line_h_hint = line_height(&metric_opts);
     let cell_width = cursor_cell_width(&metric_opts).max(1.0);
-    let active = pane.register_block_rect(
+    let active = if matches!(item.kind, VirtualNodeKind::Table) {
+        false // The table renderer owns its one block handle and hit region.
+    } else { pane.register_block_rect(
         item.first_line,
         node_rect,
         handle_rect,
@@ -591,7 +593,7 @@ fn draw_item(
         line_h_hint,
         content_w,
         mouse,
-    );
+    ) };
 
     if active && !notebook_child {
         draw_block_actions(
@@ -1136,8 +1138,9 @@ fn draw_markdown_line(
         // normal raw reveal so every property stays editable in place.
         if let Some(fm) = frontmatter
             .as_ref()
-            .filter(|fm| fm.contains(&line_ix) && pane.cursor_line != line_ix)
+            .filter(|fm| fm.contains(&line_ix) && !pane.reveals_source_line(line_ix))
         {
+            let property_y = text_y;
             text_y += draw_frontmatter_row(
                 sugarloaf,
                 pane,
@@ -1156,6 +1159,25 @@ fn draw_markdown_line(
                 text_occlusions,
                 font_scale,
             );
+            if pane.cursor_line == line_ix {
+                // Rendered properties stay rendered in Normal mode. Keep the
+                // block caret visible without switching the row to raw YAML.
+                let source = pane.lines.get(line_ix).map(String::as_str).unwrap_or("");
+                let col = floor_char_boundary(source, pane.cursor_col.min(source.len()));
+                let mut cursor_opts = opts.clone();
+                cursor_opts.font_size = markdown_font(14.0, font_scale);
+                let (base_x, prefix) = if let Some((key, value)) = source.split_once(':') {
+                    let value_start = key.len() + 1 + value.len() - value.trim_start().len();
+                    if col >= value_start {
+                        let key_w = sugarloaf.text_mut().measure(key.trim(), &cursor_opts);
+                        cursor_opts.font_size = markdown_font(15.0, font_scale);
+                        (x + (key_w + 18.0).max(96.0), &source[value_start..col])
+                    } else { (x, source[..col.min(key.len())].trim_start()) }
+                } else { (x, &source[..col]) };
+                let cell_w = cursor_cell_width(&cursor_opts).max(1.0);
+                let cursor_x = (base_x + sugarloaf.text_mut().measure(prefix, &cursor_opts)).min(x + width - cell_w);
+                pane.set_cursor_rect(Some([cursor_x, property_y, cell_w, line_h]));
+            }
             if text_y > clip_bottom + line_h * 2.0 {
                 break;
             }

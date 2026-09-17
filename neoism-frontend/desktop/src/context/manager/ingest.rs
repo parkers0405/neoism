@@ -243,12 +243,19 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// A remote delivery failure invalidates this client view, not the remote
     /// process. Child-exit drives the existing pane teardown path, while the
     /// app displays the reason (never a fabricated command exit status).
+    /// A remote delivery failure. Transport loss gates input without
+    /// invalidating session identity; unknown-session / spawn errors still
+    /// retire the client view.
     pub fn apply_remote_pty_failure(
         &mut self,
         request_id: u64,
         session_id: Option<&str>,
         message: &str,
+        class: crate::daemon_client::PtyFailureClass,
     ) -> bool {
+        if class == crate::daemon_client::PtyFailureClass::Transport {
+            return self.gate_remote_pty_transport_loss(request_id, session_id, message);
+        }
         let attached = self.daemon.cache.pending_pty_attaches.remove(&request_id);
         let route_id = self
             .daemon
@@ -298,6 +305,72 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         );
         binding.feed.child_exited(1);
         true
+    }
+
+    fn gate_remote_pty_transport_loss(
+        &mut self,
+        request_id: u64,
+        session_id: Option<&str>,
+        message: &str,
+    ) -> bool {
+        self.daemon.cache.pending_pty_attaches.remove(&request_id);
+        self.daemon.cache.pending_pty_routes.remove(&request_id);
+        let Some((handle, runtime)) = self
+            .daemon
+            .link
+            .as_ref()
+            .and_then(|link| link.handle_and_runtime())
+        else {
+            return false;
+        };
+        let mut gated = false;
+        let routes = self
+            .daemon
+            .cache
+            .remote_routes
+            .iter()
+            .filter_map(|(route_id, binding)| {
+                let session = self
+                    .daemon
+                    .cache
+                    .route_sessions
+                    .get(route_id)
+                    .cloned()
+                    .or_else(|| {
+                        binding.shared.lock().ok().and_then(|shared| {
+                            shared
+                                .session_id
+                                .clone()
+                                .or_else(|| shared.awaiting_attach.clone())
+                        })
+                    })?;
+                if session_id.is_some_and(|wanted| wanted != session) {
+                    return None;
+                }
+                Some((*route_id, session, binding.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (_route_id, session, binding) in routes {
+            let generation = self.daemon.link.as_ref().and_then(|link| link.generation());
+            crate::context::remote_pty::await_attach_for_generation(
+                &binding,
+                &session,
+                handle.clone(),
+                runtime.clone(),
+                generation,
+            );
+            gated = true;
+        }
+        if gated {
+            tracing::warn!(
+                target: "neoism::remote_pty",
+                request_id,
+                ?session_id,
+                %message,
+                "gating remote PTY input after transport loss; session identity preserved"
+            );
+        }
+        false
     }
 
     pub fn apply_pty_server_message(
@@ -356,11 +429,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                             .as_ref()
                             .and_then(|link| link.handle_and_runtime())
                         {
-                            crate::context::remote_pty::bind_session(
+                            let generation = self
+                                .daemon
+                                .link
+                                .as_ref()
+                                .and_then(|link| link.generation());
+                            crate::context::remote_pty::bind_session_for_generation(
                                 binding,
                                 &session_id,
                                 handle,
                                 runtime,
+                                generation,
                             );
                         }
                     }
@@ -430,7 +509,12 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 }
             }
             PtyServerMessage::Error { message } => {
-                self.apply_remote_pty_failure(request_id, None, &message)
+                self.apply_remote_pty_failure(
+                    request_id,
+                    None,
+                    &message,
+                    crate::daemon_client::PtyFailureClass::Terminal,
+                )
             }
         }
     }

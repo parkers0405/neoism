@@ -83,7 +83,14 @@ impl MarkdownPane {
             return false;
         };
 
+        self.apply_table_action(action)
+    }
+
+    pub fn apply_table_action(&mut self, action: MarkdownTableAction) -> bool {
+        if self.read_only { return false; }
         match action {
+            MarkdownTableAction::DeleteColumn { start_line, col_ix } => self.delete_table_column(start_line, col_ix),
+            MarkdownTableAction::ColumnMenu { .. } => false,
             MarkdownTableAction::AddRowBelow { after_line } => {
                 self.insert_table_row_after(after_line)
             }
@@ -91,6 +98,13 @@ impl MarkdownPane {
                 self.insert_table_column(start_line, col_ix)
             }
         }
+    }
+
+    pub fn table_column_menu_at(&self, x: f32, y: f32) -> Option<(usize, usize, usize)> {
+        let action = self.table_action_rects.iter().rev().find(|action| point_in_rect(x, y, action.rect))?.action;
+        let MarkdownTableAction::ColumnMenu { start_line, col_ix } = action else { return None; };
+        let range = self.table_range_from_start(start_line)?;
+        Some((start_line, col_ix, self.table_col_count_for_range(&range)))
     }
 
     pub fn copy_at(&self, x: f32, y: f32) -> Option<String> {
@@ -301,18 +315,23 @@ impl MarkdownPane {
             .find(|cell| point_in_rect(x, y, cell.rect))
             .cloned()
         {
-            self.cursor_line = cell.line.min(self.lines.len().saturating_sub(1));
-            self.cursor_col = if self.read_only {
+            let line = cell.line.min(self.lines.len().saturating_sub(1));
+            let col = if self.read_only {
                 self.glyph_col_from_table_cell_point(cell.clone(), x, y)
             } else {
                 self.cursor_col_from_table_cell_point(cell, x, y)
             };
+            self.cursor_line = line;
+            self.cursor_col = col;
             if !self.vim_enabled {
                 self.mode = MarkdownMode::Insert;
             }
             self.clamp_cursor();
             self.visual_anchor = None;
             self.mouse_select_anchor = Some(self.cursor_position());
+            self.selection_pointer = Some([x, y]);
+            self.selection_scroll_at = None;
+            self.restore_scroll_position(self.scroll_y);
             self.follow_cursor = false;
             return true;
         }
@@ -350,6 +369,9 @@ impl MarkdownPane {
         self.clamp_cursor();
         self.visual_anchor = None;
         self.mouse_select_anchor = Some(self.cursor_position());
+        self.selection_pointer = Some([x, y]);
+        self.selection_scroll_at = None;
+        self.restore_scroll_position(self.scroll_y);
         self.follow_cursor = false;
         true
     }
@@ -505,23 +527,17 @@ impl MarkdownPane {
         self.cursor_col = focus.col;
         self.mode = MarkdownMode::Visual;
         self.vim.visual_linewise = false;
-        if let Some(top) = self
-            .block_rects
-            .iter()
-            .map(|block| block.rect[1])
-            .min_by(f32::total_cmp)
-        {
-            let edge = 28.0;
-            let bottom = top + self.scroll_viewport_height.max(edge * 2.0);
-            let delta = if y < top + edge {
-                -(top + edge - y).min(18.0)
-            } else if y > bottom - edge {
-                (y - (bottom - edge)).min(18.0)
+        let [top, bottom] = self.viewport_bounds;
+        if bottom > top {
+            let delta = if y < top {
+                -(top - y).min(18.0)
+            } else if y > bottom {
+                (y - bottom).min(18.0)
             } else {
                 0.0
             };
             if delta != 0.0 {
-                self.scroll_touch_pixels(delta, self.scroll_viewport_height);
+                self.scroll_touch_pixels(delta, bottom - top);
             }
         }
         self.follow_cursor = false;
@@ -551,16 +567,16 @@ impl MarkdownPane {
                 .copied()
                 .unwrap_or(0.0);
             self.table_scroll_x.insert(drag.start_line, next);
-            self.move_cursor_with_table_scroll(
-                drag.start_line,
-                next,
-                drag.viewport_width,
-                drag.content_width,
-            );
+            self.follow_cursor = false;
             return (next - before).abs() > 0.01;
         }
 
         if let Some(anchor) = self.mouse_select_anchor {
+            self.selection_pointer = Some([x, y]);
+            self.follow_cursor = false;
+            if y >= self.viewport_bounds[0] && y <= self.viewport_bounds[1] {
+                self.selection_scroll_at = None;
+            }
             if let Some(cell) = self
                 .table_cell_rects
                 .iter()
@@ -580,7 +596,6 @@ impl MarkdownPane {
                     self.vim.visual_linewise = false;
                     self.visual_anchor = Some(anchor);
                 }
-                self.follow_cursor = true;
                 return true;
             }
             // A text drag commonly crosses paragraph spacing or leaves the
@@ -625,7 +640,6 @@ impl MarkdownPane {
                 self.vim.visual_linewise = false;
                 self.visual_anchor = Some(anchor);
             }
-            self.follow_cursor = true;
             return true;
         }
 
@@ -659,6 +673,8 @@ impl MarkdownPane {
         self.dragging_table_scroll = None;
         self.dragging_scrollbar = None;
         self.mouse_select_anchor = None;
+        self.selection_pointer = None;
+        self.selection_scroll_at = None;
         self.drag_start_y = 0.0;
         self.drag_moved = false;
         self.pending_block_menu_rect = if reordered { None } else { clicked_handle };
@@ -837,50 +853,12 @@ impl MarkdownPane {
         line: usize,
     ) -> Option<std::ops::Range<usize>> {
         let line = line.min(self.lines.len().saturating_sub(1));
-        let cells = self
-            .lines
-            .get(line)
-            .and_then(|text| parse_table_cells(text))?;
-        if cells.len() < 2 {
-            return None;
+        self.lines.get(line).and_then(|text| parse_table_cells(text))?;
+        let mut first = line;
+        while first > 0 && self.lines.get(first - 1).and_then(|text| parse_table_cells(text)).is_some() {
+            first -= 1;
         }
-
-        if is_table_separator_cells(&cells) {
-            let start = line.checked_sub(1)?;
-            return self
-                .table_range_from_start(start)
-                .filter(|range| range.contains(&line));
-        }
-
-        if self
-            .lines
-            .get(line + 1)
-            .and_then(|text| parse_table_cells(text))
-            .is_some_and(|cells| is_table_separator_cells(&cells))
-        {
-            return self
-                .table_range_from_start(line)
-                .filter(|range| range.contains(&line));
-        }
-
-        let mut probe = line;
-        while probe > 0 {
-            probe -= 1;
-            let Some(cells) = self
-                .lines
-                .get(probe)
-                .and_then(|text| parse_table_cells(text))
-            else {
-                break;
-            };
-            if is_table_separator_cells(&cells) {
-                let start = probe.checked_sub(1)?;
-                return self
-                    .table_range_from_start(start)
-                    .filter(|range| range.contains(&line));
-            }
-        }
-        None
+        (first..=line).find_map(|start| self.table_range_from_start(start).filter(|range| range.contains(&line)))
     }
 
     pub(super) fn code_block_range_containing(
@@ -1112,7 +1090,7 @@ impl MarkdownPane {
             .floor()
             .max(0.0) as usize;
         let cell_source = &line[bounds.content_start..bounds.content_end];
-        let map = InlineSourceMap::new(cell_source);
+        let map = if cell.source_revealed { InlineSourceMap::table_edit(cell_source) } else { InlineSourceMap::for_table(cell_source) };
         let visible_len = map.visible_len();
         let visible_col = if let Some(row) = cell.hit_rows.get(visual_line) {
             let hit_x = (x - cell.text_x).max(0.0);

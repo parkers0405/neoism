@@ -3,11 +3,30 @@ import { DaemonConnection, daemonUrl, joinedDaemon, workspaceAgentUrl, scopedAge
 import { createHttpTransport } from '@neoism/sdk';
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 describe('daemon shared chat connection', () => {
+    it('uses the daemon workspace default for empty directories without rewriting explicit paths', async () => {
+        const fetcher = vi.fn().mockResolvedValue(response({}));
+        const base = 'https://host/agent/workspaces/ws-1';
+        const scoped = scopedAgentFetch(base, fetcher);
+        await scoped(base + '/v2/agents?directory=&scope=workspace');
+        expect(String(fetcher.mock.calls[0][0])).toBe(base + '/v2/agents?scope=workspace');
+        await scoped(base + '/v2/agents?directory=%2Fother');
+        expect(String(fetcher.mock.calls[1][0])).toBe(base + '/v2/agents?directory=%2Fother');
+    });
+    it('calls fetch without binding the daemon client as its receiver', async () => {
+        const fetcher = vi.fn(function (this: unknown) {
+            if (this !== undefined) throw new TypeError('Illegal invocation');
+            return Promise.resolve(response({ status: 'no_workspace', hint: 'Open a workspace.', shared: false }));
+        });
+        const result = await new DaemonConnection('http://127.0.0.1:7878', fetcher).sharePhone({});
+        expect(result.status).toBe('no_workspace');
+        expect(fetcher).toHaveBeenCalledOnce();
+    });
     it('rejects insecure remote, mixed content, credential-bearing and non-HTTP URLs', () => {
         for (const url of ['http://peer:7878', 'https://user:secret@host', 'https://host?token=secret', 'https://host/#secret', 'file:///tmp'])
             expect(() => daemonUrl(url)).toThrow();
         expect(() => daemonUrl('http://localhost:7878', 'https://gui.example')).toThrow('HTTPS');
         expect(daemonUrl('http://127.0.0.1:7878/', 'http://localhost')).toBe('http://127.0.0.1:7878');
+        expect(daemonUrl('http://100.64.0.7:7878', 'http://100.64.0.7:7878/agent-gui/')).toBe('http://100.64.0.7:7878');
     });
     it('pairs without requesting terminal or device administration permissions and verifies scoped access', async () => {
         const fetcher = vi.fn().mockResolvedValueOnce(response({ status: 'granted', device_token: 'device-secret' }))

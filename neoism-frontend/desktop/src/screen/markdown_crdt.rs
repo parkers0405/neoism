@@ -214,6 +214,64 @@ impl Screen<'_> {
         (std::mem::take(&mut state.outbound), pane_changed)
     }
 
+    /// After a same-runner reconnect, request snapshots for live markdown
+    /// CRDT docs. Local unacked edits are never replayed.
+    pub fn request_markdown_crdt_resync(&mut self) {
+        if !self.context_manager.daemon_client_attached() {
+            return;
+        }
+        let owned_grids = (0..self.context_manager.len())
+            .filter(|index| self.context_manager.grid_uses_attached_daemon(*index))
+            .collect::<Vec<_>>();
+        let mut buffer_ids = Vec::new();
+        for index in owned_grids {
+            let grid = &mut self.context_manager.contexts_mut()[index];
+            for item in grid.contexts_mut().values_mut() {
+                let context = item.context_mut();
+                if let Some(pane) = context.markdown.as_mut() {
+                    if pane.workspace_sync_ready() {
+                        buffer_ids.push(buffer_id_for_markdown_path(&pane.path));
+                    }
+                }
+                if let Some(notebook) = context.notebook.as_mut() {
+                    if notebook.markdown.workspace_sync_ready() {
+                        buffer_ids
+                            .push(buffer_id_for_notebook_render_path(&notebook.path));
+                    }
+                }
+            }
+        }
+        for buffer_id in buffer_ids {
+            let Some(mut target) =
+                find_crdt_pane_mut(&mut self.context_manager, &buffer_id)
+            else {
+                continue;
+            };
+            let Some(binding) = self.markdown_crdt.bindings.get_mut(&buffer_id) else {
+                continue;
+            };
+            if !binding.is_seeded() {
+                continue;
+            }
+            if let Some(update) = binding.flush_local(target.pane_mut()) {
+                self.markdown_crdt
+                    .outbound
+                    .push(make_apply_sync(&buffer_id, update));
+            }
+            let full = binding.encode_full_update_v1();
+            let sv = binding.state_vector_v1();
+            self.markdown_crdt
+                .outbound
+                .push(make_apply_sync(&buffer_id, full));
+            self.markdown_crdt
+                .outbound
+                .push(CrdtClientMessage::RequestSnapshot {
+                    buffer_id,
+                    state_vector_v1: sv,
+                });
+        }
+    }
+
     /// Daemon-owned save for the CURRENT markdown pane: flush any
     /// pending local edits through the binding (so the doc includes
     /// them), then queue `SaveBuffer` — the daemon writes the converged
@@ -314,6 +372,12 @@ impl Screen<'_> {
                 );
                 true
             }
+            CrdtServerMessage::Error {
+                buffer_id: Some(buffer_id),
+                message,
+            } if message.contains("unknown CRDT buffer") => {
+                self.reopen_markdown_crdt_without_clobber(buffer_id)
+            }
             // `Update` is the legacy duplicate of `Sync` (the hub
             // broadcasts both); applying both would be redundant.
             CrdtServerMessage::Update { .. }
@@ -340,6 +404,23 @@ impl Screen<'_> {
             format!("Wrote {}", path.display()),
             neoism_ui::panels::notifications::NotificationLevel::Info,
         );
+        true
+    }
+
+    fn reopen_markdown_crdt_without_clobber(&mut self, buffer_id: &str) -> bool {
+        let Some(binding) = self.markdown_crdt.bindings.get(buffer_id) else {
+            return false;
+        };
+        if !binding.is_seeded() {
+            return false;
+        }
+        let initial_text = binding.doc_text();
+        self.markdown_crdt
+            .outbound
+            .push(CrdtClientMessage::OpenBuffer {
+                buffer_id: buffer_id.to_string(),
+                initial_text,
+            });
         true
     }
 

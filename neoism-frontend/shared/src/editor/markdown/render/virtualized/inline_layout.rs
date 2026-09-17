@@ -1122,9 +1122,24 @@ fn inline_runs_for_text(raw: &str) -> Vec<InlineRun> {
             ix += source_len;
             continue;
         }
+        if let Some(image) = rest.strip_prefix('!').and_then(crate::widgets::markdown::parse_markdown_link) {
+            let label = clean_inline_with_active_link(image.label, None);
+            push_inline_run(&mut runs, InlineRunStyle::Link(image.target.to_string()), &label);
+            ix += image.consumed + 1;
+            continue;
+        }
+        if let Some(link) = crate::widgets::markdown::parse_markdown_link(rest) {
+            if let Some(target) = crate::widgets::markdown::rendered_link_target(link.target) {
+                let label = clean_inline_with_active_link(link.label, None);
+                push_inline_run(&mut runs, InlineRunStyle::Link(target.to_string()), &label);
+                ix += link.consumed;
+                continue;
+            }
+        }
         if let Some(link) = web_link_at_start(rest) {
             if let Some(label) = rest.get(link.label_start..link.label_end) {
-                push_inline_run(&mut runs, InlineRunStyle::Link(link.target), label);
+                let label = clean_inline_with_active_link(label, None);
+                push_inline_run(&mut runs, InlineRunStyle::Link(link.target), &label);
                 ix += link.raw_end;
                 continue;
             }

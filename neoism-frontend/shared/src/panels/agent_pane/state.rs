@@ -2088,6 +2088,21 @@ impl NeoismAgentMessage {
     }
 }
 
+fn merge_stream_part_message(
+    mut existing: NeoismAgentMessage,
+    incoming: NeoismAgentMessage,
+) -> NeoismAgentMessage {
+    // Ordered SSE part snapshots replace text, including retry resets. Only
+    // unordered REST reconciliation may preserve a longer local prefix.
+    if matches!(
+        incoming.kind,
+        NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+    ) {
+        existing.text.clear();
+    }
+    merge_part_message(existing, incoming)
+}
+
 fn merge_part_message(
     existing: NeoismAgentMessage,
     mut incoming: NeoismAgentMessage,

@@ -1750,18 +1750,13 @@ impl NeoismAgentPane {
                                 .apply_running_background_tasks(epoch, revision, tasks);
                         }
                     }
-                    if self.session_runtime_revision(&session_id) != runtime_revision {
-                        continue;
-                    }
-                    if let Ok(statuses) = result {
-                        self.apply_runtime_status_for_session(&session_id, &statuses);
-                        changed = true;
-                    }
                     let runtime_family = runtime.as_ref().ok().map(|runtime| {
                         std::iter::once(runtime.root_session_id.clone())
                             .chain(runtime.branches.iter().map(|branch| branch.0.clone()))
                             .collect::<HashSet<_>>()
                     });
+                    // Family lifecycle carries its own authoritative revision.
+                    // Unrelated text tokens must not discard child discovery.
                     if let Ok(runtime) = runtime {
                         changed |= self.apply_runtime_lifecycle_snapshot(
                             runtime.execution,
@@ -1769,6 +1764,13 @@ impl NeoismAgentPane {
                             runtime.family_revision,
                             runtime.branches,
                         );
+                    }
+                    if self.session_runtime_revision(&session_id) != runtime_revision {
+                        continue;
+                    }
+                    if let Ok(statuses) = result {
+                        self.apply_runtime_status_for_session(&session_id, &statuses);
+                        changed = true;
                     }
                     if let Ok(permissions) = permissions {
                         self.pending_permission = None;
@@ -2751,16 +2753,9 @@ impl NeoismAgentPane {
                 .iter()
                 .position(|existing| existing.id == message.id)
             {
-                // A retry re-seeds this same part with empty text to wipe
-                // the partial reply before re-streaming; honor the wipe so
-                // the retried tokens don't append onto the partial. Outside
-                // a retry, a late empty snapshot must never regress text
-                // that already streamed.
-                if self.retry_reset_pending {
-                    self.retry_reset_pending = false;
-                    self.messages[index].text.clear();
-                    self.mark_timeline_message_dirty_at(index);
-                }
+                self.retry_reset_pending = false;
+                self.messages[index].text.clear();
+                self.mark_timeline_message_dirty_at(index);
                 return;
             }
         }
@@ -2770,7 +2765,8 @@ impl NeoismAgentPane {
                 .iter()
                 .position(|existing| existing.id == message.id)
             {
-                let merged = merge_part_message(self.messages[index].clone(), message);
+                let merged =
+                    merge_stream_part_message(self.messages[index].clone(), message);
                 self.messages[index] = merged;
                 if self.messages[index].kind == NeoismAgentMessageKind::Reasoning {
                     self.move_previous_assistant_after_reasoning(index);

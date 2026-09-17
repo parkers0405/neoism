@@ -642,7 +642,7 @@ impl FileTree {
                 ..DrawOpts::default()
             };
             let chevron_opts = DrawOpts {
-                font_size,
+                font_size: (indent_px - 6.0 * self.scale).max(6.0 * self.scale),
                 color: fade_u8(theme.u8(theme.muted), row_reveal),
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
@@ -670,7 +670,7 @@ impl FileTree {
                 draw_icon_centered_with_occlusion(
                     sugarloaf,
                     cursor_x,
-                    [cursor_x, row_y, indent_px, row_h],
+                    [cursor_x, row_y, (indent_px - 4.0 * self.scale).max(1.0), row_h],
                     chev,
                     &chevron_opts,
                     text_occlusion_rects,

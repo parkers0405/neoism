@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use turso::Value as SqlValue;
 
+mod live_messages;
+
 pub(crate) const EVENT_BROADCAST_CAPACITY: usize = 16_384;
 
 #[derive(Clone)]
@@ -66,7 +68,7 @@ pub(crate) struct InnerState {
     event_sequence: std::sync::atomic::AtomicU64,
     /// Serializes stamp+broadcast so subscribers observe sequences in
     /// broadcast order.
-    event_order: std::sync::Mutex<()>,
+    event_order: std::sync::Mutex<live_messages::LiveMessages>,
 }
 
 struct ExecutionLeaseControl {
@@ -621,7 +623,8 @@ impl AppState {
         defer_subtask_recovery: bool,
     ) -> anyhow::Result<Self> {
         let started = crate::perf::now();
-        let services = services.with_builtin_mcp(Arc::new(crate::computer_use::ComputerUse));
+        let services =
+            services.with_builtin_mcp(Arc::new(crate::computer_use::ComputerUse));
         tokio::fs::create_dir_all(&artifact_root).await?;
         // Single ordered bus for every event (live deltas + committed edges).
         // Capacity must absorb a full streaming burst per subscriber. A
@@ -735,7 +738,7 @@ impl AppState {
                 events,
                 event_writer,
                 event_sequence: std::sync::atomic::AtomicU64::new(event_sequence_seed),
-                event_order: std::sync::Mutex::new(()),
+                event_order: std::sync::Mutex::new(live_messages::LiveMessages::default()),
             }),
         };
         let weak_state = Arc::downgrade(&state.inner);
@@ -1065,12 +1068,25 @@ impl AppState {
         self.inner.events.subscribe()
     }
 
+    /// Capture the live baseline and its subscription in one broadcast-order
+    /// critical section. No IO or provider work occurs under this lock.
+    pub(crate) fn subscribe_with_messages(
+        &self,
+    ) -> (broadcast::Receiver<EventPayload>, Vec<EventPayload>) {
+        let messages = self
+            .inner
+            .event_order
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (self.inner.events.subscribe(), messages.snapshot())
+    }
+
     /// Stamp the wire sequence and broadcast, atomically with respect to
     /// other broadcasts so subscribers see sequences in send order. Events
     /// that were already stamped (transactional commits allocate before the
     /// write) keep their sequence.
     fn stamp_and_broadcast(&self, event: &mut EventPayload) {
-        let _order = self
+        let mut messages = self
             .inner
             .event_order
             .lock()
@@ -1083,6 +1099,7 @@ impl AppState {
                     + 1,
             );
         }
+        messages.observe(event);
         let _ = self.inner.events.send(event.clone());
     }
 

@@ -45,7 +45,7 @@ jobs:
           $evidence = (New-Item -ItemType Directory -Force 'windows-validation').FullName
           Start-Transcript -Path "$evidence/transcript.log"
           try {
-            if ($env:SOURCE_RUN_ID -notmatch '^\d+$' -or $env:EXPECTED_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid source run ID or version' }
+            if ($env:SOURCE_RUN_ID -notmatch '^\d+$' -or $env:EXPECTED_VERSION -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw 'Invalid source run ID or version' }
             [pscustomobject]@{ sourceRun = $env:SOURCE_RUN_ID; version = $env:EXPECTED_VERSION; validationCommit = $env:GITHUB_SHA } | ConvertTo-Json | Set-Content "$evidence/provenance.json"
             Get-FileHash ./scripts/windows-installed-gui-smoke.ps1, ./scripts/windows-validation-process.ps1 | Format-List | Out-File "$evidence/script-hashes.log"
             $installer = (Resolve-Path 'candidate/Neoism-x86_64.msi').Path

@@ -48,7 +48,11 @@ if ($appPath -ne (Join-Path $installDir "neoism.exe")) { throw "App Paths regist
 $registeredVersion = (Get-ItemProperty "HKCU:\Software\Neoism").InstalledVersion
 $expectedVersion = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
   Where-Object { $_.name -eq "neoism" }).version
-if ($registeredVersion -ne $expectedVersion) { throw "MSI major upgrade did not replace the fixture" }
+$expectedInstallerVersion = ($expectedVersion -split '[-+]', 2)[0]
+if ($registeredVersion -ne $expectedInstallerVersion) {
+    throw "MSI major upgrade version mismatch: expected $expectedInstallerVersion, got $registeredVersion"
+}
+if ($version -cne "neoism $expectedVersion") { throw "Installed executable version mismatch: expected $expectedVersion, got $version" }
 $installedHash = (Get-FileHash (Join-Path $installDir "neoism.exe") -Algorithm SHA256).Hash
 if ($installedHash -eq $fixtureHash) { throw "MSI major upgrade did not replace neoism.exe" }
 $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Neoism\Neoism.lnk"

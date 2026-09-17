@@ -2,6 +2,15 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.106-nightly.20260917.2] - 2026-09-17
+
+### Nightly validation fix
+
+- Includes the same feature preview as nightly `.1`, with the Windows MSI validation corrected to compare its numeric installer version separately from the full nightly executable version. Exact binary-version and payload-hash checks remain enforced.
+- Nightly `.1` stays an unpublished draft; its tag is not moved.
+
+This is an opt-in prerelease. Use `neoism update --nightly`; older Linux/Windows builds can bootstrap with `neoism update --target-version v0.7.106-nightly.20260917.2`. Older macOS bundles should use the DMG once. Plain `neoism update` stays on stable.
+
 ## [0.7.106-nightly.20260917.1] - 2026-09-17
 
 ### Nightly preview

@@ -1,0 +1,11 @@
+---
+name: "Configurable v2 compaction at 65%"
+description: "OpenCode-v2-style proactive full-request compaction, configurable65% default, auto/prune bypass, model+agent overrides; bounded overflow recovery preserves run lease."
+type: "feature"
+scope: "project"
+origin: "neoism-agent"
+created: "2026-09-16"
+updated: "2026-09-16"
+---
+
+Implemented configurable proactive compaction in native Rust agent. Global grouped config: agent.compaction.{auto,threshold-percent,prune,buffer,keep.tokens}; defaults auto true, threshold65%, prune true, buffer20k, keep8k. Same compaction block supported under provider.<provider>.models.<model> and agent.<profile>; field-wise overlay global->model->mode->agent, resolving profile display names too. Percent validated1..100 incl fractions. auto false disables proactive summary and overflow retry but manual /compact still works; prune false independently prevents old tool-output pruning. Config core types api.rs; shared Settings descriptors backend config/intelligence.rs; seeded Compaction.md documents all. Local OpenCode550d1ffd24 REAL v2 lives packages/core/src/{config/compaction.ts,session/compaction.ts}, buffer/keep vs legacy packages/opencode reserved/provider usage. Neoism session_prompt run_assistant_step now shared first/followup: estimates serialized messages (includes system) + tools before provider request; percent effective context capped safe input/output/buffer, fallback120k context=>78k default. Durable history rebuilt after summary; replay bounded8k and deduplicated against retained tail; keep capped trigger/4. Bounded recovery only if no proactive summary already performed this step. provider_stream_message error finalizer recover_context_overflow flag preserves run ownership for recoverable overflow; final errors still release. External ACP finalizer uses false. Prior provider-reported after-step trigger removed. Legacy env auto/tokens/reserved controls retained. Tests cover scopes/settings validation, estimates, stub e2e fresh400k-char prompt trigger and bypass, fake provider bounded overflow retry+run ownership, pruning toggle. No release build. Note subagent tools repeatedly returned empty final and did no research/implementation this session; parent implemented directly.

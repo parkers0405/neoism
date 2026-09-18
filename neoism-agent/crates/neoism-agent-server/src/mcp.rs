@@ -678,6 +678,9 @@ pub(crate) async fn call_tool_in_session(
         let result = if client == "computer" && tool == "browser_step" {
             crate::computer_use::typesafe::call(&state, directory, snapshot, &config,
                 arguments, session_authorized, cancel, revocation_generation).await?
+        } else if client == "computer" && tool == "browser_goal" {
+            crate::computer_use::typesafe::call_goal(&state, directory, snapshot, &config,
+                arguments, session_authorized, cancel, revocation_generation).await?
         } else {
             service.call_tool_authorized_async(std::path::Path::new(directory), tool, arguments, session_authorized, cancel, revocation_generation).await?
         };

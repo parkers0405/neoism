@@ -4,7 +4,7 @@ Neoism's built-in `computer` MCP provides native desktop screenshots, input and 
 
 ## Optional TypeSafe mode
 
-For Jev-powered element selection inside this same computer MCP, see [[TypeSafe Browser Mode]]. It is experimental and off by default. Enable it and enter a server-stored key in the agent GUI's MCP computer settings, or use the documented server environment variable. `computer.browser_step` makes one bounded browser decision/action; regular desktop tools stay unchanged. Using this mode sends visible page content to TypeSafe, so enable it only when that disclosure is authorized.
+For bounded Jev-powered DOM goals inside this same computer MCP, see [[TypeSafe Browser Mode]]. It is experimental and off by default. Enable it and enter a server-stored key in the agent GUI's MCP computer settings, or use the documented server environment variable. Prefer `computer.browser_goal`; the shipped `computer.browser_step` remains available for compatibility and deliberate single actions. Regular desktop tools stay unchanged. Using this mode sends visible page content and a compact action trace to TypeSafe, so enable it only when that disclosure is authorized.
 
 ## Use the browser that is already open
 

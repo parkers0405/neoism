@@ -1,0 +1,15 @@
+---
+name: "Browser-aware computer use: Chromium and Firefox"
+description: "Chromium CDP + Firefox BiDi browser tools; bounded act/wait/observe/deltas, native crops, explicit session ownership; tested real Firefox Rust adapter and both browser fixtures"
+type: "feature"
+scope: "project"
+origin: "Firefox support follow-up"
+created: "2026-09-16"
+updated: "2026-09-16"
+---
+
+Built-in computer MCP browser tools now support BOTH Chromium CDP and Firefox WebDriver BiDi in neoism-agent/crates/neoism-agent-server/src/computer_use/browser.rs. Tools: browser_tabs/browser_observe/browser_act/browser_disconnect. Configure exactly ONE env var in agent-server: NEOISM_BROWSER_CDP_URL=ws://literal-loopback:port/devtools/browser/id OR NEOISM_BROWSER_BIDI_URL=ws://literal-loopback:port/session. Both set is rejected; no automatic launch/debugging enablement/profile migration. Firefox does not need geckodriver. Shared fixed browser_observe.js/browser_action.js run in isolated CDP world / named BiDi sandbox. Existing computer_use consent, native foreground target and focused visible HTTP(S) tab required.
+Bounded DOM elements/text and stable refs scoped by observation; deltas (16 cached snapshots/60s); action freshness30s with URL/node/label/occlusion/disabled checks. fill/select/DOM click + optional bounded text/url/element expectation and final observation in one call. No arbitrary model JS or action auto-replay, clipboard untouched. Read-only navigation-context retries bounded. DOM events untrusted, main frame only; shadow roots/iframes/password/upload/browser chrome use desktop fallback.
+Firefox Connection persists in BIDI_CONNECTION between calls to retain realms/refs; storage lock is NOT held during network/native operations, parent's SERIAL owns execution. session.new requests acceptInsecureCerts:false and unhandledPromptBehavior:ignore; refuses foreign session, never takes over. browser_disconnect ends only owned session without closing browser, invalidates observations, discards local connection even if remote cleanup unconfirmed. stop revokes active work/refs but DOES NOT end session. Agent crash/failed cleanup can require dedicated Firefox restart (documented), no automatic reconnect/replay.
+Native screenshot and batch accept crop in original captured-image pixels; Frame stores region/native size for crop-local coordinates on Linux/macOS/Windows code paths. Full capture limit retained. Clearer schemas and serverMs MCP executionTiming (NOT human approval/model/client latency).
+Docs: neoism-agent/browser-computer-use.md. Verification: cargo check passed; computer_use tests 141 passed,5 opt-in ignored. Live Chromium fixture passed. Firefox155.0.1 throwaway headless fixture passed shared scripts including no replay/hidden/occluded/disabled checks. NEOISM_TEST_BROWSER_RUST=1 on browser.firefox.live.test.mjs also ran ignored production Rust BiDi transport/session/action roundtrip successfully. This is real adapter-to-Firefox verification but not full native GUI/gateway integration. Firefox fetched via temporary nix shell, no user's normal browser profiles modified. No release build, commit, or normal-browser activation.

@@ -49,12 +49,12 @@ export function TypeSafeComputerSettings({ client, directory }: { client: Neoism
     }
 
     return <section aria-label="Experimental TypeSafe computer mode">
-        <h4>Experimental: TypeSafe browser steps</h4>
-        <p>Optional Jev decisions inside the computer MCP. Off by default; normal desktop tools are unchanged.</p>
-        <p>When used, visible page text, URLs, labels, field values and your supplied goal/value are sent to TypeSafe. Do not use on pages containing secrets or sensitive data you have not authorized for sharing.</p>
+        <h4>Experimental: TypeSafe/Jev browser goals</h4>
+        <p>Optional bounded Jev goal execution inside the computer MCP. When enabled, agents should prefer one browser goal over repeated single browser steps. Normal desktop tools are unchanged.</p>
+        <p>When used, visible page text, URLs, labels, ordinary field values, your goal and exact supplied values, plus a compact executed-action trace are sent to TypeSafe. Do not use on pages containing secrets or sensitive data you have not authorized for sharing.</p>
         <label><input type="checkbox" checked={enabled} disabled={!ready || busy} onChange={event => void toggle(event.target.checked)} /> Enable TypeSafe browser mode</label>
         {enabled && <div>
-            <p>Computer MCP enablement, browser attachment and normal session permissions are still required. One bounded action per step; no screenshot vision or background automation.</p>
+            <p>Computer MCP enablement, browser attachment and normal session permissions are still required. Goals have explicit step/time budgets and stop on uncertainty or consequential-action risk. DOM pages only: no screenshot vision, native desktop control, background automation, passwords or file uploads.</p>
             <label>TypeSafe API key<input type="password" autoComplete="off" spellCheck={false} value={key} disabled={busy} onChange={event => setKey(event.target.value)} /></label>
             <button disabled={busy || !key.trim()} onClick={() => void saveKey()}>Save TypeSafe key</button>
             <button disabled={busy} onClick={() => void removeKey()}>Remove saved TypeSafe key</button>

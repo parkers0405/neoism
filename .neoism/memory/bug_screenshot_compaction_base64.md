@@ -1,0 +1,11 @@
+---
+name: "Screenshot-triggered auto-compaction loop fixed"
+description: "Screenshot base64 counted as text falsely triggered compaction around16k actual tokens; shared modality-aware estimator fixes trigger/tail mismatch; TypeSafe never called."
+type: "bug"
+scope: "project"
+origin: "neoism-agent"
+created: "2026-09-17"
+updated: "2026-09-17"
+---
+
+Debug report after TypeSafe enable: user thought Explore Project Structure was passing whole context to Jev. Live debug API showed actual computer run titled Find Synapse Communications (ses_f5262df92ffe6NzuIp45R56hQy), mainmodel gpt-6-astra. It called only computer.capabilities/windows/focus/batch/input/screenshot via execute, NEVER browser_step, so no TypeSafe request occurred. Screenshot data URLs had427278 and994558chars (base64 payload427256+994536). Mainmodel reported15729 total immediately before firstauto summary; estimated_request_tokens serialized entire ProviderGenerationRequest messages+tools and counted base64/4 =>~355k false tokens, above OAuth252k safetythreshold. Tail selection used different modality estimator256/image, retained screenshots; nextrequest crossedfalse threshold again. Secondsummary cancelled. FIX session_prompt.rs estimated_request_tokens now estimated_provider_prompt_tokens(messages)+serialized tool schema tokens. Shared estimator uses conservative4096/image independent of encodedbytecount,256other attachment, counts realcontent/system/tools. Thus trigger and protectedtail sameunits. Regression with exact observedpayloadsizes proves oldestimate>252k, new<63k, encodinglength invariant, largeplaintext stillcompacts. Added TypeSafe payloadisolation test stateonly goal/action/value/page and input rejects messages field. Compaction.md documents modalityaccounting.55 tests passed(30 session_prompt20 session_context5typesafe), cargo check server passed; noreleasebuild, no sessiondata modified. Debuginstance sharedconfig ~/.config/neoism/config.json, debugstate ~/.local/state/neoism-dev/default/agent/agent.turso.db. Live Turso DB SQLite locked: preferlive API; immutable SQLite onlycheckpointdata ignoresWAL. APIportephemeral discover via ss debugdaemonPID. Debugserver wentoffline duringinspection (userdevrestart). Successfulsummarymetadata remains beforecancelledsummary so no DBhistoryreset needed.

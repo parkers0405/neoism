@@ -29,6 +29,8 @@ describe("TypeSafe computer settings", () => {
         expect(config.update).toHaveBeenCalledWith({ model: "openai/existing-model", experimental: { options: { "unrelated-feature": true, "computer-typesafe": { enabled: true } } } }, "/workspace");
         expect(host.querySelector('input[type="password"]')).not.toBeNull();
         expect(host.textContent).toContain("sent to TypeSafe");
+        expect(host.textContent).toContain("step/time budgets");
+        expect(host.textContent).toContain("DOM pages only");
     });
     it("saves keys through the credential API, clears the field, and never patches secrets into config", async () => {
         const { host, config, providers } = await setup(true);

@@ -15,7 +15,7 @@ test('isolated-world browser refs, action effects, deltas and stale protections'
   const profile = await mkdtemp(join(tmpdir(), 'neoism-browser-test-'));
   const server = createServer((_req, res) => {
     res.writeHead(200, {'content-type':'text/html'});
-    res.end(`<html><body><label for="q">Search</label><input id="q"><button id="go">Search now</button><select aria-label="Sort"><option value="a">Alpha</option><option value="b">Beta</option></select><input type="password" aria-label="Secret"><p id="result">Ready</p><script>document.querySelector('#go').onclick=()=>{document.querySelector('#result').textContent='Results '+document.querySelector('#q').value};</script></body></html>`);
+    res.end(`<html><body style="min-height:3000px"><label for="q">Search</label><input id="q"><button id="go">Search now</button><select aria-label="Sort"><option value="a">Alpha</option><option value="b">Beta</option></select><input type="password" aria-label="Secret"><input type="file" aria-label="Upload"><p id="result">Ready</p><script>document.querySelector('#go').onclick=()=>{document.querySelector('#result').textContent='Results '+document.querySelector('#q').value};</script></body></html>`);
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -72,6 +72,7 @@ test('isolated-world browser refs, action effects, deltas and stale protections'
     assert.equal(page.visible,true);
     assert.ok(page.elements.some(e => e.name==='Search'));
     assert.ok(!page.elements.some(e => e.name==='Secret'));
+    assert.ok(!page.elements.some(e => e.name==='Upload'));
     const search = page.elements.find(e => e.name==='Search');
     const payload = {token:'one',ref:search.ref,action:'fill',value:'literal "quotes" and \\slashes',url};
     assert.equal((await evaluate(`(${act})(${JSON.stringify(payload)})`)).ok,true);
@@ -87,6 +88,10 @@ test('isolated-world browser refs, action effects, deltas and stale protections'
     assert.equal((await evaluate(`(${act})(${JSON.stringify(select)})`)).ok,true);
     assert.equal(await evaluate('document.querySelector("select").value'),'b');
     assert.equal(page.elements.find(e=>e.name==='Search').value,payload.value,'filled value is observable');
+    page = await evaluate(`(${observe})("scroll")`);
+    assert.equal(page.canScrollDown,true);
+    assert.equal((await evaluate(`(${act})(${JSON.stringify({token:'scroll',action:'scroll',value:'down',url})})`)).ok,true);
+    assert.ok(await evaluate('scrollY > 0'));
     page = await evaluate(`(${observe})("occluded")`);
     await evaluate('document.body.insertAdjacentHTML("beforeend",\'<div id="overlay" style="position:fixed;inset:0;z-index:999;background:white"></div>\')');
     assert.equal((await evaluate(`(${act})(${JSON.stringify({...payload,token:'occluded'})})`)).ok,false,'covered control rejected');

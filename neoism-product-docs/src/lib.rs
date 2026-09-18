@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn typesafe_mode_setup_and_privacy_are_bundled() {
         let page = bundled_doc("Neoism Agent/TypeSafe Browser Mode.md").unwrap();
-        for required in ["off-by-default", "TYPESAFE_API_KEY", "computer.browser_step", "server credential store", "external provider", "preview", "false"] {
+        for required in ["off-by-default", "TYPESAFE_API_KEY", "computer.browser_goal", "computer.browser_step", "step/time budget", "partial_unknown", "DOM", "server credential store", "external provider", "preview", "false"] {
             assert!(page.body.contains(required), "missing TypeSafe guidance: {required}");
         }
         assert!(bundled_doc("Neoism Agent/Computer Use.md").unwrap().body.contains("[[TypeSafe Browser Mode]]"));

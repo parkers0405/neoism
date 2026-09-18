@@ -36,7 +36,7 @@
   let el;
   while ((el = walker.nextNode()) && scanned++ < 3000 && elements.length < 120) {
     if (!el.matches('a[href],button,input,textarea,select,[role],[contenteditable="true"],[tabindex]') || !visible(el)) continue;
-    if (el.matches('input[type="hidden"],input[type="password"]')) continue;
+    if (el.matches('input[type="hidden"],input[type="password"],input[type="file"]')) continue;
     let ref = state.ids.get(el);
     if (!ref) { ref = `e${++state.next}`; state.ids.set(el, ref); }
     const label = name(el);
@@ -47,7 +47,7 @@
       item.readOnly = el.readOnly;
     }
     if (el instanceof HTMLInputElement && ['checkbox','radio'].includes(el.type)) item.checked = el.checked;
-    if (el instanceof HTMLSelectElement) item.options = Array.from(el.options).slice(0, 50).map(o => ({value: o.value.slice(0,240),name: trim(o.label),selected:o.selected}));
+    if (el instanceof HTMLSelectElement) item.options = Array.from(el.options).slice(0, 50).map(o => ({value: o.value.slice(0,240),name: trim(o.label),selected:o.selected,disabled:o.disabled || !!o.parentElement?.disabled}));
     elements.push(item);
     state.refs.set(ref, {el, name:label, role, signature:state.signature(el)});
   }
@@ -60,8 +60,10 @@
     const value = trim(node.textContent, 1000);
     if (value) text += value + '\n';
   }
+  const root = document.scrollingElement || document.documentElement;
   return {url:location.href, title:document.title.slice(0,300), visible:document.visibilityState === 'visible', focused:document.hasFocus(),
     readyState:document.readyState, text:text.slice(0,12000), elements,
+    canScrollUp:root.scrollTop > 1, canScrollDown:root.scrollTop + innerHeight < root.scrollHeight - 1, historyLength:Math.min(history.length,1000),
     truncated:scanned >= 3000 || elements.length >= 120 || count >= 3000 || text.length >= 12000,
     iframeCount:document.querySelectorAll('iframe,frame').length};
 }

@@ -204,7 +204,7 @@ impl BuiltinMcpService for ComputerUse {
             if matches!(tool.name.as_str(),"screenshot"|"batch") {tool.input_schema["properties"]["crop"]=crop_schema.clone();}
         }
         tools.extend(browser::tools());
-        tools.push(typesafe::tool());
+        tools.extend(typesafe::tools());
         tools
     }
     fn call_tool(&self, _: &Path, tool: &str, _: Value) -> Result<BuiltinMcpCallResult, ServiceError> {

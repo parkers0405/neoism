@@ -630,8 +630,8 @@ pub fn config_descriptors() -> Vec<D> {
         ),
         d(
             "agent.experimental.options.computer-typesafe.enabled",
-            "Experimental TypeSafe browser mode",
-            "Opt into Jev browser decisions. Sends visible page text, labels, field values and goals to TypeSafe. Requires computer MCP permission and attachment. Enter credentials in the agent GUI's MCP computer settings or set TYPESAFE_API_KEY on the server; never put a key in workspace config.",
+            "Experimental TypeSafe/Jev browser goals",
+            "Opt into bounded Jev goals for attached-page DOM actions. Sends visible page text, labels, ordinary field values, goals, exact supplied values and a compact action trace to TypeSafe. This does not provide native desktop semantics. Requires computer MCP permission and attachment. Enter credentials in the agent GUI's MCP computer settings or set TYPESAFE_API_KEY on the server; never put a key in workspace config.",
             Kind::Boolean, json!(false), &[], false, C::Agent, Control::Toggle,
         ),
         d(

@@ -576,6 +576,9 @@ pub enum NeoismAgentUiEvent {
         title: String,
         body: String,
     },
+    SwitchWorkspace {
+        directory: String,
+    },
     CloseTab,
 }
 

@@ -152,6 +152,95 @@ fn adopted_workspace_identity_survives_active_server_cache_reset() {
 }
 
 #[test]
+fn home_daemon_does_not_own_joined_workspace_routes() {
+    let window_id: WindowId = WindowId::from(0);
+    let mut manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+    let runtime = attach_unconnected_daemon(&mut manager);
+    let stable = manager
+        .current_grid()
+        .workspace_route_id()
+        .expect("test grid has a stable root");
+    let route_id = manager.current().route_id;
+    manager.adopted_workspaces.insert(
+        stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: "joined".to_string(),
+            endpoint: "ws://peer.example:9877/session".to_string(),
+            credential: None,
+            is_peer: true,
+        },
+    );
+
+    assert!(!manager.grid_uses_attached_daemon(0));
+    assert!(!manager.route_uses_attached_daemon(route_id));
+    drop(runtime);
+}
+
+#[test]
+fn wrong_endpoint_unknown_session_cannot_close_joined_terminal() {
+    use crate::context::remote_pty;
+    use crate::daemon_client::PtyFailureClass;
+
+    let mut manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0)).unwrap();
+    let runtime = attach_unconnected_daemon(&mut manager);
+    let (handle, _) = manager
+        .daemon
+        .link
+        .as_ref()
+        .unwrap()
+        .handle_and_runtime()
+        .unwrap();
+    let prepared = remote_pty::prepare(handle, runtime.handle().clone());
+    let (pty, feed) = neoism_terminal_pty::PtySession::remote(prepared.sink);
+    let binding = remote_pty::RemotePtyBinding {
+        feed,
+        shared: prepared.shared,
+    };
+    let stable = manager.current_grid().workspace_route_id().unwrap();
+    let route_id = manager.current().route_id;
+    manager.current_mut().remote_pty = Some(binding.clone());
+    manager.adopted_workspaces.insert(
+        stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: "joined".into(),
+            endpoint: "ws://peer.example:9877/session".into(),
+            credential: None,
+            is_peer: true,
+        },
+    );
+    manager
+        .daemon
+        .cache
+        .remote_routes
+        .insert(route_id, binding.clone());
+    manager
+        .daemon
+        .cache
+        .route_sessions
+        .insert(route_id, "peer-session".into());
+    manager
+        .daemon
+        .cache
+        .session_routes
+        .insert("peer-session".into(), route_id);
+
+    assert!(!manager.apply_remote_pty_failure(
+        77,
+        Some("peer-session"),
+        "unknown session peer-session",
+        PtyFailureClass::Terminal,
+    ));
+    assert!(manager.daemon.cache.remote_routes.contains_key(&route_id));
+    assert_eq!(
+        manager.daemon.cache.route_sessions.get(&route_id).map(String::as_str),
+        Some("peer-session")
+    );
+    assert!(pty.exit_code().is_none());
+}
+
+#[test]
 fn peer_workspace_is_not_local_when_hostnames_collide() {
     use neoism_protocol::workspace::{
         WorkspaceHostKind, WorkspaceSummary, WorkspaceVisibility,

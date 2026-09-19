@@ -572,10 +572,24 @@ pub(crate) async fn v2_message_list(
     Path(session_id): Path<String>,
     Query(query): Query<MessageListQuery>,
 ) -> Result<Json<Page<MessageWithParts>>, ApiError> {
+    let requested_limit = query.limit.filter(|limit| *limit > 0);
     let Json(items) = message_list(State(state), Path(session_id), Query(query)).await?;
+    // Message history is a real cursor-paginated collection. Returning an
+    // empty PageCursor made clients which honor the canonical V2 envelope
+    // stop after the first bounded page. The desktop happened to reconstruct
+    // a cursor from the payload, which hid this locally but not through every
+    // joined-workspace client. Only advertise another page after a full page;
+    // an exact final page may yield one harmless empty follow-up.
+    let next = requested_limit
+        .filter(|limit| items.len() >= *limit)
+        .and_then(|_| items.last())
+        .map(crate::message_id_of);
     Ok(Json(Page {
         items,
-        cursor: PageCursor::default(),
+        cursor: PageCursor {
+            previous: None,
+            next,
+        },
     }))
 }
 

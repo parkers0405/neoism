@@ -793,6 +793,14 @@ impl Screen<'_> {
                     self.renderer.modal.open_message(title, body);
                     self.mark_dirty();
                 }
+                crate::neoism::agent::NeoismAgentUiEvent::SwitchWorkspace {
+                    directory,
+                } => {
+                    if route_id == active_route {
+                        self.set_active_workspace_root(PathBuf::from(directory), true);
+                        self.mark_dirty();
+                    }
+                }
                 crate::neoism::agent::NeoismAgentUiEvent::CloseTab => {
                     self.close_neoism_agent_route(route_id);
                     self.mark_dirty();

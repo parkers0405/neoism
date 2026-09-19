@@ -1064,6 +1064,8 @@ async fn session_directory_patch_moves_and_persists_the_session() {
     let session_id = neoism_agent_core::new_session_id();
     let mut session = store_test_session(&session_id, now_millis());
     session.directory = current.to_string_lossy().to_string();
+    let original_created = session.time.created;
+    let original_updated = session.time.updated;
     state.inner.store.insert_session(&session).await.unwrap();
 
     let response: SessionInfo = response_json(
@@ -1080,6 +1082,8 @@ async fn session_directory_patch_moves_and_persists_the_session() {
 
     let expected = target.canonicalize().unwrap().to_string_lossy().to_string();
     assert_eq!(response.directory, expected);
+    assert_eq!(response.time.created, original_created);
+    assert_eq!(response.time.updated, original_updated);
     let stored = state
         .inner
         .store
@@ -1089,6 +1093,59 @@ async fn session_directory_patch_moves_and_persists_the_session() {
         .expect("moved session remains stored");
     assert_eq!(stored.directory, expected);
     assert!(stored.extra.contains_key("contextEpoch"));
+
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn deferred_session_move_creates_target_and_preserves_chronology() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-deferred-session-move-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let current = root.join("current");
+    let target = root.join("projects").join("widget");
+    std::fs::create_dir_all(&current).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let mut session = store_test_session(&session_id, now_millis());
+    session.directory = current.to_string_lossy().to_string();
+    let original_time = session.time.clone();
+    state.inner.store.insert_session(&session).await.unwrap();
+
+    let destination = crate::session_routes::resolve_session_directory(
+        state.services(),
+        &session.directory,
+        target.to_str().unwrap(),
+        true,
+    )
+    .unwrap()
+    .directory;
+    state.inner.pending_session_moves.lock().await.insert(
+        session_id.to_string(),
+        crate::session_move::PendingSessionMove {
+            directory: destination.clone(),
+            switch_workspace: true,
+        },
+    );
+    crate::session_move::apply_pending_session_move(&state, session_id.as_str()).await;
+
+    let stored = state
+        .inner
+        .store
+        .get_session(session_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.directory, destination);
+    assert_eq!(stored.time.created, original_time.created);
+    assert_eq!(stored.time.updated, original_time.updated);
+    assert!(target.is_dir());
+    assert!(state.inner.pending_session_moves.lock().await.is_empty());
 
     state.inner.store.close().await;
     cleanup_sqlite_files(&db_path);

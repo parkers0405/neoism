@@ -292,12 +292,18 @@ pub(crate) async fn session_update(
     claims: Option<Extension<crate::caller::CallerClaims>>,
     Json(update): Json<SessionUpdateRequest>,
 ) -> Result<Json<SessionInfo>, ApiError> {
+    let updates_metadata = update.title.is_some()
+        || update.agent.is_some()
+        || update.permission.is_some()
+        || update.model.is_some()
+        || update.time.is_some();
     let mut info = state
         .inner
         .store
         .get_session(&session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
+    let previous_directory = info.directory.clone();
     if let Some(title) = update.title {
         info.title = title;
     }
@@ -322,8 +328,12 @@ pub(crate) async fn session_update(
                 "cannot change directory while the session is running",
             ));
         }
-        let project_context =
-            resolve_session_directory(state.services(), &info.directory, &directory)?;
+        let project_context = resolve_session_directory(
+            state.services(),
+            &info.directory,
+            &directory,
+            false,
+        )?;
         if claims.as_ref().is_some_and(|Extension(claims)| {
             !crate::caller::allows_directory(claims, &project_context.directory)
         }) {
@@ -341,12 +351,26 @@ pub(crate) async fn session_update(
             info.time.archived = Some(archived);
         }
     }
-    info.time.updated = now_millis();
+    if updates_metadata {
+        info.time.updated = now_millis();
+    }
     state.inner.store.update_session(&info).await?;
     state.publish(EventPayload::new(
         event_type::SESSION_UPDATED,
         json!({ "sessionID": session_id, "info": info }),
     ));
+    if info.directory != previous_directory {
+        state.publish(EventPayload::new(
+            event_type::SESSION_MOVED,
+            json!({
+                "sessionID": session_id,
+                "info": info,
+                "previousDirectory": previous_directory,
+                "directory": info.directory,
+                "switchWorkspace": false,
+            }),
+        ));
+    }
     Ok(Json(info))
 }
 
@@ -389,10 +413,11 @@ pub(crate) async fn session_directory_options(
     Ok(Json(options))
 }
 
-fn resolve_session_directory(
+pub(crate) fn resolve_session_directory(
     services: &neoism_agent_service_api::AgentServices,
     current: &str,
     requested: &str,
+    create: bool,
 ) -> Result<project::ProjectContext, ApiError> {
     let requested = requested.trim();
     let requested = requested
@@ -414,6 +439,14 @@ fn resolve_session_directory(
     } else {
         PathBuf::from(current).join(expanded)
     };
+    if create {
+        std::fs::create_dir_all(&candidate).map_err(|error| {
+            ApiError::bad_request(format!(
+                "could not create directory {}: {error}",
+                candidate.display()
+            ))
+        })?;
+    }
     let canonical =
         crate::windows_process::canonicalize_path(&candidate).map_err(|error| {
             ApiError::bad_request(format!(
@@ -741,6 +774,7 @@ mod directory_tests {
             &crate::standard_services(),
             current.to_string_lossy().as_ref(),
             "'../to with spaces'",
+            false,
         )
         .unwrap();
 

@@ -310,6 +310,38 @@ fn route_caller_claims(
     })
 }
 
+fn mcp_route_caller_claims(
+    request: &neoism_agent_plugin_api::RouteRequest,
+    action: neoism_agent_builtins::plugin::mcp::McpAction,
+) -> Option<axum::extract::Extension<crate::caller::CallerClaims>> {
+    let mut claims = route_caller_claims(request)?;
+    let peer_workspace = claims.workspace_id.as_deref().is_some_and(|workspace_id| {
+        claims.tenant_id == format!("workspace:{workspace_id}")
+    });
+    let host_gui_operation = matches!(
+        action,
+        neoism_agent_builtins::plugin::mcp::McpAction::Status
+            | neoism_agent_builtins::plugin::mcp::McpAction::Add
+            | neoism_agent_builtins::plugin::mcp::McpAction::Catalog
+            | neoism_agent_builtins::plugin::mcp::McpAction::Connect
+            | neoism_agent_builtins::plugin::mcp::McpAction::Disconnect
+            | neoism_agent_builtins::plugin::mcp::McpAction::Config
+    );
+    if peer_workspace && host_gui_operation {
+        // A short-lived workspace credential minted by the desktop host is a
+        // peer delegation into that self-hosted process, not a tenant in a
+        // multi-tenant Agent service. GUI status/connect operations therefore
+        // use the host's local MCP store, just as execution on that host does.
+        // The store remains inside the host process and no credential value is
+        // serialized back to the peer. Credential mutations and arbitrary MCP
+        // data/tool routes deliberately retain the hosted scope and fail closed.
+        claims.tenant_id = "local".into();
+        claims.workspace_id = None;
+        claims.hosted = false;
+    }
+    Some(claims)
+}
+
 impl neoism_agent_builtins::plugin::mcp::McpHost for Mcp {
     fn register_tools(&self, registrar: &mut PluginContributions) {
         registrar.tool("execute", None);
@@ -327,7 +359,7 @@ impl neoism_agent_builtins::plugin::mcp::McpHost for Mcp {
             let query = route_query(&request);
             let state = State(self.0.clone());
             let headers = axum::http::HeaderMap::new();
-            let claims = route_caller_claims(&request);
+            let claims = mcp_route_caller_claims(&request, action);
             let name = request.path.get("name").cloned().unwrap_or_default();
             if matches!(action, McpAction::AuthCallbackGet) {
                 let response = crate::mcp_routes::mcp_auth_callback_get(
@@ -532,6 +564,71 @@ impl neoism_agent_builtins::plugin::mcp::McpHost for Mcp {
             .map_err(runtime_error)?;
             Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
         })
+    }
+}
+
+#[cfg(test)]
+mod mcp_peer_scope_tests {
+    use super::*;
+    use neoism_agent_builtins::plugin::mcp::McpAction;
+
+    fn request(
+        tenant: &str,
+        workspace: Option<&str>,
+        hosted: bool,
+    ) -> neoism_agent_plugin_api::RouteRequest {
+        neoism_agent_plugin_api::RouteRequest {
+            tenant_id: Some(tenant.into()),
+            hosted,
+            workspace_id: workspace.map(str::to_string),
+            workspace: Some(std::path::PathBuf::from("/host/workspace")),
+            session_id: None,
+            actor: Some("device:peer".into()),
+            generation: None,
+            path: Default::default(),
+            query: Default::default(),
+            headers: Default::default(),
+            body: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn peer_workspace_mcp_gui_reads_the_hosts_local_store() {
+        let request = request("workspace:workspace-a", Some("workspace-a"), true);
+        let claims = mcp_route_caller_claims(&request, McpAction::Catalog)
+            .unwrap()
+            .0;
+        assert_eq!(claims.tenant_id, "local");
+        assert_eq!(claims.workspace_id, None);
+        assert!(!claims.hosted);
+        assert_eq!(claims.directory_prefixes, vec!["/host/workspace"]);
+    }
+
+    #[test]
+    fn peer_workspace_cannot_mutate_host_mcp_credentials() {
+        let request = request("workspace:workspace-a", Some("workspace-a"), true);
+        for action in [
+            McpAction::AuthStart,
+            McpAction::AuthRemove,
+            McpAction::Authenticate,
+            McpAction::ToolCall,
+        ] {
+            let claims = mcp_route_caller_claims(&request, action).unwrap().0;
+            assert_eq!(claims.tenant_id, "workspace:workspace-a");
+            assert_eq!(claims.workspace_id.as_deref(), Some("workspace-a"));
+            assert!(claims.hosted);
+        }
+    }
+
+    #[test]
+    fn direct_hosted_tenant_never_falls_back_to_local_mcp_credentials() {
+        let request = request("tenant-a", None, true);
+        let claims = mcp_route_caller_claims(&request, McpAction::Catalog)
+            .unwrap()
+            .0;
+        assert_eq!(claims.tenant_id, "tenant-a");
+        assert_eq!(claims.workspace_id, None);
+        assert!(claims.hosted);
     }
 }
 

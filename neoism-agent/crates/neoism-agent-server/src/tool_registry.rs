@@ -323,6 +323,30 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         ),
         tool(
             ToolOwner::Workspace, owner,
+            "move_chat",
+            "Move this existing chat to another project directory after the current response. The session ID, transcript, and conversation timestamps are preserved. Use create_directory to create a missing destination and switch_workspace to re-root the active Explorer, editors, and new terminals. This is a trusted operation and has no separate confirmation prompt; ask conversationally first only when the user's intent is unclear. After calling this tool, do not run more workspace tools in the current response because they still use the old directory.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "directory": {
+                        "type": "string",
+                        "description": "Destination project directory inside the chat's current workspace. Relative paths resolve from the current directory."
+                    },
+                    "create_directory": {
+                        "type": "boolean",
+                        "description": "Create the destination directory if it does not exist. Defaults to true."
+                    },
+                    "switch_workspace": {
+                        "type": "boolean",
+                        "description": "Also switch the active application workspace to the destination. Defaults to true."
+                    }
+                },
+                "required": ["directory"]
+            }),
+            stateful_handler,
+        ),
+        tool(
+            ToolOwner::Workspace, owner,
             "session_search",
             "Search recent session transcripts. Use for episodic recall like \"didn't we fix this before?\". Returns matching excerpts with role and date.",
             json!({
@@ -510,6 +534,29 @@ fn tool(
         handler,
         state: None,
     })
+}
+
+#[cfg(test)]
+mod move_chat_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_tools_advertise_deferred_chat_move() {
+        let tools = definitions(ToolOwner::Workspace);
+        let move_chat = tools
+            .iter()
+            .find(|tool| tool.id == "move_chat")
+            .expect("move_chat workspace tool");
+        assert!(move_chat.description.contains("after the current response"));
+        assert_eq!(
+            move_chat.parameters["required"],
+            serde_json::json!(["directory"])
+        );
+        assert_eq!(
+            move_chat.parameters["properties"]["switch_workspace"]["type"],
+            "boolean"
+        );
+    }
 }
 
 fn object_required(properties: &[(&str, &str)], required: &[&str]) -> Value {

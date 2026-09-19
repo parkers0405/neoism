@@ -88,6 +88,18 @@ async fn hosting_http_requires_operator_and_guests_read_same_history() {
     )
     .await;
     assert_eq!(adopted["workspaceId"], "http-host");
+    let mcp_catalog = app
+        .clone()
+        .oneshot(signed(
+            "device:guest",
+            Method::GET,
+            "/v2/plugins/dev.neoism.mcp/catalog",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(mcp_catalog.status(), StatusCode::OK);
+    let mcp_catalog: Value = response_json(mcp_catalog).await;
+    assert!(mcp_catalog.is_object());
     let mut child_request = signed("device:guest", Method::POST, "/v2/sessions");
     child_request
         .headers_mut()
@@ -146,6 +158,56 @@ async fn hosting_http_requires_operator_and_guests_read_same_history() {
     assert_eq!(
         serde_json::to_value(history.items).unwrap(),
         json!([message])
+    );
+
+    // Joined peers must receive the same canonical history cursor as local
+    // clients. Authorization remains session/workspace based on every page;
+    // the cursor itself grants no access.
+    let second = store_test_message(&old.id, now_millis() + 1, "after hosting");
+    state
+        .inner
+        .store
+        .append_message(old.id.as_str(), &second)
+        .await
+        .unwrap();
+    let first_page: neoism_agent_core::Page<MessageWithParts> = response_json(
+        app.clone()
+            .oneshot(signed(
+                "device:guest",
+                Method::GET,
+                &format!("/v2/sessions/{}/messages?order=desc&limit=1", old.id),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(first_page.items.len(), 1);
+    assert_eq!(
+        crate::message_id_of(&first_page.items[0]),
+        crate::message_id_of(&second)
+    );
+    let cursor = first_page
+        .cursor
+        .next
+        .expect("full page exposes an older cursor");
+    let older_page: neoism_agent_core::Page<MessageWithParts> = response_json(
+        app.clone()
+            .oneshot(signed(
+                "device:guest",
+                Method::GET,
+                &format!(
+                    "/v2/sessions/{}/messages?order=desc&limit=1&cursor={cursor}",
+                    old.id
+                ),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(older_page.items.len(), 1);
+    assert_eq!(
+        crate::message_id_of(&older_page.items[0]),
+        crate::message_id_of(&message)
     );
     let list: neoism_agent_core::Page<SessionInfo> = response_json(
         app.clone()

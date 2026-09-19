@@ -256,12 +256,18 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         if class == crate::daemon_client::PtyFailureClass::Transport {
             return self.gate_remote_pty_transport_loss(request_id, session_id, message);
         }
-        let attached = self.daemon.cache.pending_pty_attaches.remove(&request_id);
+        let attached = self
+            .daemon
+            .cache
+            .pending_pty_attaches
+            .get(&request_id)
+            .cloned();
         let route_id = self
             .daemon
             .cache
             .pending_pty_routes
-            .remove(&request_id)
+            .get(&request_id)
+            .copied()
             .or_else(|| {
                 attached.and_then(|(route, expected)| {
                     (self.daemon.cache.route_sessions.get(&route) == Some(&expected))
@@ -276,6 +282,15 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             tracing::warn!(target: "neoism::remote_pty", request_id, ?session_id, %message, "unmatched remote PTY error");
             return false;
         };
+        // Session ids and request ids are scoped to one daemon endpoint. A
+        // stale batch from the endpoint we just parked, or a polluted cache,
+        // must never invalidate a pane durably owned by another endpoint.
+        if !self.route_uses_attached_daemon(route_id) {
+            tracing::warn!(target: "neoism::remote_pty", request_id, route_id, ?session_id, %message, "ignoring remote PTY error from non-owning endpoint");
+            return false;
+        }
+        self.daemon.cache.pending_pty_attaches.remove(&request_id);
+        self.daemon.cache.pending_pty_routes.remove(&request_id);
         let Some(binding) = self.daemon.cache.remote_routes.remove(&route_id) else {
             tracing::warn!(target: "neoism::remote_pty", request_id, route_id, %message, "PTY error has no remote binding (local/mirror or already detached)");
             return false;
@@ -330,6 +345,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .remote_routes
             .iter()
             .filter_map(|(route_id, binding)| {
+                if !self.route_uses_attached_daemon(*route_id) {
+                    return None;
+                }
                 let session = self
                     .daemon
                     .cache
@@ -401,6 +419,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                     .remove(&request_id)
                     .or(attached_route)
                 {
+                    if !self.route_uses_attached_daemon(route_id) {
+                        tracing::warn!(target: "neoism::remote_pty", request_id, route_id, %session_id, "ignoring PTY creation from non-owning endpoint");
+                        return false;
+                    }
                     if let Some(shell) = shell.as_deref() {
                         if let Some(item) = self.get_by_route_id(route_id) {
                             let context = item.context_mut();
@@ -453,8 +475,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 exit_code,
             } => {
                 if let Some(route_id) =
-                    self.daemon.cache.session_routes.remove(&session_id)
+                    self.daemon.cache.session_routes.get(&session_id).copied()
                 {
+                    if !self.route_uses_attached_daemon(route_id) {
+                        tracing::warn!(target: "neoism::remote_pty", route_id, %session_id, "ignoring PTY close from non-owning endpoint");
+                        return false;
+                    }
+                    self.daemon.cache.session_routes.remove(&session_id);
                     self.daemon.cache.route_sessions.remove(&route_id);
                     // 8A: surface the daemon shell's exit through the
                     // pane's child-event channel — the Machine then
@@ -479,6 +506,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 else {
                     return false;
                 };
+                if !self.route_uses_attached_daemon(route_id) {
+                    return false;
+                }
                 let Some(binding) = self.daemon.cache.remote_routes.get(&route_id) else {
                     return false;
                 };

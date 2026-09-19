@@ -200,6 +200,83 @@ async fn execute_stateful_tool_call(
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> Result<Option<tool::ToolExecutionResult>, String> {
     match tool_name {
+        "move_chat" => {
+            let directory = string_arg(&input, "directory")
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "tool argument directory is required".to_string())?;
+            let create = input
+                .get("create_directory")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let switch_workspace = input
+                .get("switch_workspace")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let info = state
+                .inner
+                .store
+                .get_session(session_id.as_str())
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("session {session_id} not found"))?;
+            let existing = crate::session_routes::resolve_session_directory(
+                state.services(),
+                &info.directory,
+                &directory,
+                false,
+            );
+            let project_context = match existing {
+                Ok(project_context) => project_context,
+                Err(_) if create => {
+                    let requested = std::path::Path::new(directory.trim());
+                    if requested.is_absolute()
+                        || directory.trim().starts_with('~')
+                        || requested.components().any(|component| {
+                            matches!(
+                                component,
+                                std::path::Component::ParentDir
+                                    | std::path::Component::RootDir
+                                    | std::path::Component::Prefix(_)
+                            )
+                        })
+                    {
+                        return Err("A new project must use a child path inside the current workspace"
+                            .to_string());
+                    }
+                    crate::session_routes::resolve_session_directory(
+                        state.services(),
+                        &info.directory,
+                        &directory,
+                        true,
+                    )
+                    .map_err(|error| error.to_string())?
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+            let destination = project_context.directory;
+            if !std::path::Path::new(&destination).starts_with(std::path::Path::new(&info.directory))
+            {
+                return Err("move_chat cannot leave the current workspace scope".to_string());
+            }
+            state.inner.pending_session_moves.lock().await.insert(
+                session_id.to_string(),
+                crate::session_move::PendingSessionMove {
+                    directory: destination.clone(),
+                    switch_workspace,
+                },
+            );
+            Ok(Some(tool::ToolExecutionResult {
+                title: "Chat move scheduled".to_string(),
+                output: format!(
+                    "This chat will move to {destination} after the current response. Do not run more workspace tools in this response."
+                ),
+                metadata: Some(json!({
+                    "directory": destination,
+                    "switchWorkspace": switch_workspace,
+                    "deferred": true,
+                })),
+            }))
+        }
         "todowrite" => {
             ensure_tool_permission(permissions, "todowrite", "*")?;
             let todos = input

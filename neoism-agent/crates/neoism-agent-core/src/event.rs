@@ -72,6 +72,7 @@ pub mod event_type {
         "session.background_task.completed";
     pub const SESSION_QUEUE_UPDATED: &str = "session.queue.updated";
     pub const SESSION_PROMPT_ADMITTED: &str = "session.prompt.admitted";
+    pub const SESSION_MOVED: &str = "session.moved";
     pub const SESSION_STATUS: &str = "session.status";
     pub const SESSION_SUBTASK_COMPLETED: &str = "session.subtask.completed";
     pub const SESSION_UPDATED: &str = "session.updated";
@@ -112,6 +113,7 @@ pub mod event_type {
         SESSION_BACKGROUND_TASK_COMPLETED,
         SESSION_QUEUE_UPDATED,
         SESSION_PROMPT_ADMITTED,
+        SESSION_MOVED,
         SESSION_STATUS,
         SESSION_SUBTASK_COMPLETED,
         SESSION_UPDATED,

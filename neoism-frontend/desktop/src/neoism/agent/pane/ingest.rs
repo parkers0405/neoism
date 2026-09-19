@@ -193,6 +193,21 @@ impl NeoismAgentPane {
                             .note_streaming(NeoismAgentStreamingState::Idle, None);
                     }
                 }
+                AgentSessionUpdate::SessionMoved {
+                    directory,
+                    switch_workspace,
+                } => {
+                    if stream_is_active {
+                        self.directory = Some(directory.clone());
+                        self.invalidate_skill_options();
+                        self.side_panel.invalidate_goal_refresh();
+                        if switch_workspace {
+                            self.ui_events
+                                .push(NeoismAgentUiEvent::SwitchWorkspace { directory });
+                        }
+                        changed = true;
+                    }
+                }
                 AgentSessionUpdate::System { title, body } => {
                     self.system_message(title, body);
                     changed = true;

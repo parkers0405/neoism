@@ -1740,6 +1740,33 @@ export class TerminalPanel {
           payload.ThreadSwitched.session_id,
         );
       }
+      if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "SessionEvent" in payload &&
+        payload.SessionEvent.kind === "session.moved"
+      ) {
+        const tab = this.bufferTabs[this.activeTabIndex];
+        const properties = payload.SessionEvent.properties;
+        const activeSessionId =
+          tab?.agentSessionId ?? this.wasmAdapter?.agentSessionId?.() ?? null;
+        if (
+          tab?.kind === "neoism-agent" &&
+          activeSessionId === payload.SessionEvent.session_id &&
+          typeof properties === "object" &&
+          properties !== null &&
+          "switchWorkspace" in properties &&
+          properties.switchWorkspace === true &&
+          "directory" in properties &&
+          typeof properties.directory === "string" &&
+          properties.directory.trim().length > 0
+        ) {
+          this.options.onWorkspaceRootRequested?.(
+            properties.directory,
+            this.options.activeWorkspaceId ?? null,
+          );
+        }
+      }
       // The wasm bridge's `agent_event` handler mirrors `Notice`
       // events into the chrome's global toast stack
       // (`mirror_agent_event_to_bridge` -> `chrome.notifications`),

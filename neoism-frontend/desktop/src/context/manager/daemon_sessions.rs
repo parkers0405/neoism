@@ -32,19 +32,20 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     fn attach_existing_remote_routes(&mut self, generation: Option<u64>) {
-        let Some(endpoint) = self.daemon_endpoint().map(str::to_string) else {
+        if self.daemon_endpoint().is_none() {
             return;
-        };
+        }
         let mut routes = self
             .contexts
             .iter()
-            .filter(|grid| {
-                grid.workspace_route_id().is_some_and(|stable| {
-                    self.adopted_workspaces
-                        .get(&stable)
-                        .is_some_and(|binding| binding.endpoint == endpoint)
-                }) || !self.daemon.link_is_peer
-            })
+            .enumerate()
+            // HOME owns non-adopted grids, but it does not own every grid in
+            // the window. In particular, a joined grid keeps its peer
+            // endpoint while HOME is active. Treating `!link_is_peer` as a
+            // blanket match reattached peer session ids to HOME and the
+            // resulting `unknown session` error closed the joined tab.
+            .filter(|(index, _)| self.grid_uses_attached_daemon(*index))
+            .map(|(_, grid)| grid)
             .flat_map(|grid| grid.contexts().values())
             .filter_map(|item| {
                 let context = item.context();
@@ -66,6 +67,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 .remote_routes
                 .iter()
                 .filter_map(|(route_id, binding)| {
+                    if !self.route_uses_attached_daemon(*route_id) {
+                        return None;
+                    }
                     let session_id = self
                         .daemon
                         .cache
@@ -234,6 +238,22 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             Some(workspace) => self.daemon_endpoint() == Some(workspace),
             None => workspace_uses_attached_daemon(self.daemon.link_is_peer, false),
         }
+    }
+
+    /// Whether a pane route belongs to the currently attached endpoint.
+    /// Unknown routes are retained for compatibility with in-flight cache
+    /// entries, but every live pane route is checked against its grid's
+    /// durable adopted-workspace endpoint.
+    pub(super) fn route_uses_attached_daemon(&self, route_id: usize) -> bool {
+        self.contexts
+            .iter()
+            .enumerate()
+            .find(|(_, grid)| {
+                grid.contexts()
+                    .values()
+                    .any(|item| item.context().route_id == route_id)
+            })
+            .is_none_or(|(index, _)| self.grid_uses_attached_daemon(index))
     }
 
     fn daemon_request(&mut self, message: WorkspaceClientMessage) -> bool {

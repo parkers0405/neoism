@@ -314,10 +314,23 @@ pub(crate) fn apply_agent_event_to_pane(
                 pane.note_subagent_event(task_id, status, title, None, None, None);
             }
         }
-        AgentServerMessage::SessionEvent { .. } => {
-            // Typed variants below cover the chrome's needs; the
-            // raw envelope is reserved for forward-compatible events
-            // the daemon proxies through without a typed match.
+        AgentServerMessage::SessionEvent {
+            session_id,
+            kind,
+            properties,
+        } => {
+            if kind == "session.moved"
+                && pane.session_id_str() == Some(session_id.as_str())
+            {
+                if let Some(directory) = properties
+                    .get("directory")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|directory| !directory.is_empty())
+                {
+                    pane.set_directory(Some(directory.to_string()));
+                }
+            }
         }
         AgentServerMessage::MessageUpdated { message, .. } => {
             pane.ingest_live_part_message(map_history(message));

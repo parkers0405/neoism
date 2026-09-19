@@ -79,6 +79,7 @@ mod session_helpers;
 mod session_import_route;
 mod session_loop;
 mod session_message_routes;
+mod session_move;
 mod session_prompt;
 mod session_prompt_routes;
 mod session_queue;

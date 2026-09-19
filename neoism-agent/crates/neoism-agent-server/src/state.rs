@@ -38,6 +38,8 @@ pub(crate) struct InnerState {
         Mutex<HashMap<PathBuf, (u64, BTreeSet<String>)>>,
     pub(crate) statuses: RwLock<HashMap<String, SessionStatus>>,
     pub(crate) session_coordinator: crate::session_coordinator::SessionCoordinator,
+    pub(crate) pending_session_moves:
+        Mutex<HashMap<String, crate::session_move::PendingSessionMove>>,
     /// Keyed completion-state mutation locks. The map lock is held only long
     /// enough to clone a child's lock; callers never await storage while
     /// holding it and never acquire the same child lock recursively.
@@ -708,6 +710,7 @@ impl AppState {
                 workspace_plugin_generations: Mutex::new(HashMap::new()),
                 statuses: RwLock::new(HashMap::new()),
                 session_coordinator: Default::default(),
+                pending_session_moves: Mutex::new(HashMap::new()),
                 subtask_completion_locks: Mutex::new(HashMap::new()),
                 subtask_parent_locks: Mutex::new(HashMap::new()),
                 execution_activity_locks: Mutex::new(HashMap::new()),

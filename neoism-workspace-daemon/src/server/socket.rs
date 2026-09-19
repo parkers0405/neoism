@@ -241,6 +241,14 @@ pub(crate) async fn handle_socket(
     lsp_runtime: neoism_agent_server::language_server::LspRuntime,
 ) {
     let (mut sink, mut stream) = socket.split();
+    // The registry's PTY bus is process-wide, but a websocket only renders
+    // sessions it explicitly creates/attaches (or otherwise addresses). Do
+    // not serialize every other terminal's output into this socket: a noisy
+    // orphan/background PTY can otherwise fill the bounded broadcast receiver
+    // and make this client lose its own small `ls` output plus OSC 133;D. The
+    // shell has returned, but the client never sees either output or command
+    // completion, leaving a permanently spinning block timer.
+    let mut pty_subscriptions = std::collections::HashSet::<String>::new();
     tracing::debug!("websocket connection established");
 
     // Unsolicited status snapshot: the chrome status line wants a real
@@ -382,6 +390,11 @@ pub(crate) async fn handle_socket(
                         // workspace tree/root change for an ordinary shell cd.
                         if let ServerMessage::SessionCwd { session_id, cwd } = &out {
                             workspace_manager.track_pty_cwd(session_id, cwd.clone());
+                        }
+                        if pty_message_session_id(&out)
+                            .is_some_and(|session_id| !pty_subscriptions.contains(session_id))
+                        {
+                            continue;
                         }
                         if let Err(err) = send_json(&mut sink, &out).await {
                             tracing::warn!(error = %err, "websocket send error draining output");
@@ -709,8 +722,20 @@ pub(crate) async fn handle_socket(
                     continue;
                 }
             }
+            let addressed_session = pty_client_session_id(&msg).map(str::to_owned);
+            // Subscribe before writing input: a fast shell can emit its echo,
+            // output and prompt marks from `registry.handle` before we send
+            // the Ack. Installing interest afterward loses that first burst.
+            if let Some(session_id) = addressed_session.as_ref() {
+                pty_subscriptions.insert(session_id.clone());
+            }
             let responses = registry.handle(msg);
             for resp in responses {
+                remember_pty_subscription(
+                    &mut pty_subscriptions,
+                    addressed_session.as_deref(),
+                    &resp,
+                );
                 if let Err(err) = send_json(&mut sink, &resp).await {
                     tracing::warn!(error = %err, "websocket send error");
                     return;
@@ -743,11 +768,21 @@ pub(crate) async fn handle_socket(
                             continue;
                         }
                     }
+                    let addressed_session =
+                        pty_client_session_id(&message).map(str::to_owned);
+                    if let Some(session_id) = addressed_session.as_ref() {
+                        pty_subscriptions.insert(session_id.clone());
+                    }
                     let mut replies = registry.handle(message);
                     if replies.is_empty() {
                         replies.push(ServerMessage::Ack);
                     }
                     for message in replies {
+                        remember_pty_subscription(
+                            &mut pty_subscriptions,
+                            addressed_session.as_deref(),
+                            &message,
+                        );
                         let resp = ServiceServerMessage::PtyReply {
                             request_id,
                             message,
@@ -1685,6 +1720,72 @@ pub(crate) async fn handle_socket(
 
     poll_task.abort();
     tracing::debug!("websocket connection closed");
+}
+
+fn pty_client_session_id(message: &ClientMessage) -> Option<&str> {
+    match message {
+        ClientMessage::PtyInput { session_id, .. }
+        | ClientMessage::Resize { session_id, .. }
+        | ClientMessage::ClosePty { session_id }
+        | ClientMessage::AttachPty { session_id } => Some(session_id),
+        ClientMessage::CreatePty { .. } => None,
+    }
+}
+
+fn pty_message_session_id(message: &ServerMessage) -> Option<&str> {
+    match message {
+        ServerMessage::PtyCreated { session_id, .. }
+        | ServerMessage::PtyOutput { session_id, .. }
+        | ServerMessage::PtyClosed { session_id, .. }
+        | ServerMessage::SessionCwd { session_id, .. } => Some(session_id),
+        ServerMessage::Ack | ServerMessage::Error { .. } => None,
+    }
+}
+
+fn remember_pty_subscription(
+    subscriptions: &mut std::collections::HashSet<String>,
+    addressed_session: Option<&str>,
+    response: &ServerMessage,
+) {
+    // A successful create/attach returns PtyCreated. Other operations return
+    // Ack, so addressing an already-known session also establishes interest
+    // for legacy clients that learned its id from the initial backlog.
+    if let Some(session_id) = pty_message_session_id(response)
+        .filter(|_| matches!(response, ServerMessage::PtyCreated { .. }))
+        .or(addressed_session.filter(|_| matches!(response, ServerMessage::Ack)))
+    {
+        subscriptions.insert(session_id.to_owned());
+    }
+}
+
+#[cfg(test)]
+mod pty_subscription_tests {
+    use super::*;
+
+    #[test]
+    fn socket_forwards_only_explicitly_addressed_pty_sessions() {
+        let mut subscriptions = std::collections::HashSet::new();
+        let created = ServerMessage::PtyCreated {
+            session_id: "owned".into(),
+            workspace_root: None,
+            shell: None,
+        };
+        remember_pty_subscription(&mut subscriptions, None, &created);
+
+        let owned = ServerMessage::PtyOutput {
+            session_id: "owned".into(),
+            bytes: b"ok".to_vec(),
+        };
+        let noisy_other = ServerMessage::PtyOutput {
+            session_id: "other".into(),
+            bytes: vec![b'x'; 4096],
+        };
+        assert!(subscriptions.contains(pty_message_session_id(&owned).unwrap()));
+        assert!(!subscriptions.contains(pty_message_session_id(&noisy_other).unwrap()));
+
+        remember_pty_subscription(&mut subscriptions, Some("other"), &ServerMessage::Ack);
+        assert!(subscriptions.contains("other"));
+    }
 }
 
 /// Pull the branch string out of an initial `Branch` snapshot. Used to

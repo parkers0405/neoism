@@ -203,6 +203,10 @@ pub(super) enum AgentSessionUpdate {
         connection_id: Option<Option<String>>,
         thinking: Option<Option<String>>,
     },
+    SessionMoved {
+        directory: String,
+        switch_workspace: bool,
+    },
     ExecutionUpdated(Value),
     RuntimeUpdated(Value),
     McpChanged,
@@ -1100,6 +1104,15 @@ fn send_event_updates(
                 connection_id,
                 thinking,
             })?,
+            SessionEventUpdate::SessionMoved {
+                directory,
+                switch_workspace,
+            } => {
+                tx.send(AgentSessionUpdate::SessionMoved {
+                    directory,
+                    switch_workspace,
+                })?;
+            }
             SessionEventUpdate::ExecutionUpdated(snapshot) => {
                 tx.send(AgentSessionUpdate::ExecutionUpdated(snapshot))?;
             }

@@ -216,7 +216,10 @@ impl Renderer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| (d.as_secs() % 10_000) as f32 + d.subsec_nanos() as f32 / 1e9)
             .unwrap_or(0.0);
-        let show_ssh_label = context_manager.current_workspace_is_remote_joined();
+        // A daemon-hosted/server workspace is not necessarily SSH (the common
+        // host-owned case is a loopback websocket). Reserve this badge for the
+        // actual Quick-SSH transport instead of branding every remote PTY SSH.
+        let show_ssh_label = context_manager.current_workspace_is_quick_ssh();
 
         let grid = context_manager.current_grid();
         let active_key = grid.current;
@@ -331,7 +334,7 @@ impl Renderer {
         scale_factor: f32,
         logical_height: f32,
     ) {
-        let show_ssh_label = context_manager.current_workspace_is_remote_joined();
+        let show_ssh_label = context_manager.current_workspace_is_quick_ssh();
         // Gate: active context must be a terminal (no editor/markdown
         // surface) and not running an alt-screen TUI.
         let (

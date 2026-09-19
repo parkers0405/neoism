@@ -69,6 +69,7 @@ pub(crate) async fn try_finish_session_run(
         .store
         .finish_run(run_id, "completed", None)
         .await?;
+    crate::session_move::apply_pending_session_move(state, session_id).await;
     if !state
         .inner
         .session_coordinator

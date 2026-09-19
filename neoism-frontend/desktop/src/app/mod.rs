@@ -443,6 +443,19 @@ impl Application<'_> {
                         class,
                     } => {
                         if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            if route.window.screen.context_manager.daemon_endpoint()
+                                != Some(endpoint.as_str())
+                            {
+                                tracing::warn!(
+                                    target: "neoism::remote_pty",
+                                    source_endpoint = %endpoint,
+                                    active_endpoint = ?route.window.screen.context_manager.daemon_endpoint(),
+                                    request_id,
+                                    ?session_id,
+                                    "ignoring PTY failure from a daemon that was parked during this batch"
+                                );
+                                continue;
+                            }
                             if class == PtyFailureClass::Transport {
                                 route
                                     .window
@@ -477,7 +490,12 @@ impl Application<'_> {
                         request_id,
                         message,
                     } => {
-                        self.apply_daemon_pty_message(window_id, request_id, message);
+                        self.apply_daemon_pty_message(
+                            window_id,
+                            &endpoint,
+                            request_id,
+                            message,
+                        );
                     }
                     DaemonServerMessage::Crdt { message, .. } => {
                         self.apply_daemon_crdt_message(window_id, message);
@@ -1828,10 +1846,9 @@ impl Application<'_> {
     }
 
     /// Final phase of a server switch, shared by the async-dial path and
-    /// the parked-home fast path: swap the window's session (parking the
-    /// outgoing HOME connection so its daemon-side nvim namespace stays
-    /// alive), reset server-owned chrome, attach, and request the new
-    /// server's inventory.
+    /// the parked-connection fast path: swap the window's session (parking the
+    /// outgoing connection so its daemon-side panes and namespace stay alive),
+    /// reset server-owned chrome, attach, and request the new server's inventory.
     fn complete_server_switch(
         &mut self,
         window_id: WindowId,
@@ -1940,10 +1957,26 @@ impl Application<'_> {
     fn apply_daemon_pty_message(
         &mut self,
         window_id: WindowId,
+        source_endpoint: &str,
         request_id: u64,
         message: neoism_protocol::pty::ServerMessage,
     ) {
         if let Some(route) = self.router.routes.get_mut(&window_id) {
+            // A workspace message earlier in the drained batch may have
+            // switched and parked this connection. Never feed its remaining
+            // PTY frames into the newly active endpoint's route/session cache.
+            if route.window.screen.context_manager.daemon_endpoint()
+                != Some(source_endpoint)
+            {
+                tracing::warn!(
+                    target: "neoism::remote_pty",
+                    %source_endpoint,
+                    active_endpoint = ?route.window.screen.context_manager.daemon_endpoint(),
+                    request_id,
+                    "ignoring PTY frame from a daemon that was parked during this batch"
+                );
+                return;
+            }
             if let neoism_protocol::pty::ServerMessage::Error { message } = &message {
                 route.window.screen.renderer.notifications.push(
                     format!("Remote PTY error: {message}. Command execution is not confirmed; nothing was replayed."),

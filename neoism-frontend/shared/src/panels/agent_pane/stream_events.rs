@@ -332,6 +332,10 @@ pub enum SessionEventUpdate {
         connection_id: Option<Option<String>>,
         thinking: Option<Option<String>>,
     },
+    SessionMoved {
+        directory: String,
+        switch_workspace: bool,
+    },
     ExecutionUpdated(Value),
     RuntimeUpdated(Value),
     McpChanged,
@@ -371,6 +375,23 @@ pub fn classify_session_event(
     }
 
     match event_type {
+        event_type::SESSION_MOVED if !is_child_event => {
+            properties
+                .get("directory")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|directory| !directory.is_empty())
+                .map(|directory| {
+                    vec![SessionEventUpdate::SessionMoved {
+                        directory: directory.to_string(),
+                        switch_workspace: properties
+                            .get("switchWorkspace")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    }]
+                })
+                .unwrap_or_default()
+        }
         event_type::SESSION_CREATED | event_type::SESSION_UPDATED => {
             let mut out = Vec::new();
             if is_child_event {
@@ -2189,5 +2210,62 @@ mod tests {
             ),
             vec![SessionEventUpdate::McpChanged]
         );
+    }
+
+    #[test]
+    fn session_move_switches_only_the_matching_active_workspace() {
+        let event = json!({
+            "type": "session.moved",
+            "properties": {
+                "sessionID": "ses_root",
+                "directory": "/projects/widget",
+                "switchWorkspace": true
+            }
+        });
+        assert_eq!(
+            classify_session_event(
+                event.clone(),
+                "ses_root",
+                &mut SessionEventUpdateState::default()
+            ),
+            vec![SessionEventUpdate::SessionMoved {
+                directory: "/projects/widget".to_string(),
+                switch_workspace: true
+            }]
+        );
+        assert!(classify_session_event(
+            event,
+            "ses_other",
+            &mut SessionEventUpdateState::default()
+        )
+        .is_empty());
+
+        let chat_only = classify_session_event(
+            json!({
+                "type": "session.moved",
+                "properties": { "sessionID": "ses_root", "directory": "/projects/other", "switchWorkspace": false }
+            }),
+            "ses_root",
+            &mut SessionEventUpdateState::default(),
+        );
+        assert_eq!(
+            chat_only,
+            vec![SessionEventUpdate::SessionMoved {
+                directory: "/projects/other".to_string(),
+                switch_workspace: false,
+            }]
+        );
+
+        for properties in [
+            json!({ "sessionID": "ses_root", "directory": " ", "switchWorkspace": true }),
+            json!({ "sessionID": "ses_root", "switchWorkspace": true }),
+        ] {
+            assert!(classify_session_event(
+                json!({ "type": "session.moved", "properties": properties }),
+                "ses_root",
+                &mut SessionEventUpdateState::default()
+            )
+            .is_empty());
+        }
     }
 }

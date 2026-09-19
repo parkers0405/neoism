@@ -3246,6 +3246,13 @@ fn event_data_schema(event_type: &str) -> Value {
                 "sessionID": { "type": "string" }, "info": r("Session")
             }})
         }
+        _ if event_type == et::SESSION_MOVED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info", "previousDirectory", "directory", "switchWorkspace"], "properties": {
+                "sessionID": { "type": "string" }, "info": r("Session"),
+                "previousDirectory": { "type": "string" }, "directory": { "type": "string" },
+                "switchWorkspace": { "type": "boolean" }
+            }})
+        }
         _ if event_type == et::SESSION_DELETED => {
             json!({ "type": "object", "additionalProperties": false, "required": ["sessionID"], "properties": {
                 "sessionID": { "type": "string" }

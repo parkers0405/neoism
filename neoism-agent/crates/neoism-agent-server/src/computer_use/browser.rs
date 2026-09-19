@@ -432,8 +432,14 @@ fn with_connection<T>(
 struct ProcessInfo { pid:u32, ppid:u32, birth:String, exe:String, args:Vec<String>, sockets:HashSet<u64> }
 
 fn debugging_port(args:&[String])->Option<u16> {
+    // Chromium derivatives can rewrite argv as a single space-delimited process title.
+    let args: Vec<&str> = if args.len() == 1 {
+        args[0].split_ascii_whitespace().collect()
+    } else {
+        args.iter().map(String::as_str).collect()
+    };
     args.iter().enumerate().find_map(|(i,arg)| {
-        arg.strip_prefix("--remote-debugging-port=").or_else(||(arg=="--remote-debugging-port").then(||args.get(i+1).map(String::as_str)).flatten())?.parse::<u16>().ok().filter(|p|*p!=0)
+        arg.strip_prefix("--remote-debugging-port=").or_else(||(*arg=="--remote-debugging-port").then(||args.get(i+1).copied()).flatten())?.parse::<u16>().ok().filter(|p|*p!=0)
     })
 }
 fn process_family(selected:u32, processes:&[ProcessInfo])->HashSet<u32> {
@@ -523,10 +529,34 @@ fn http_version(port:u16,check:&Check)->anyhow::Result<String> {
     let mut stream=TcpStream::connect_timeout(&address,Duration::from_millis(500))?;
     stream.set_read_timeout(Some(Duration::from_millis(750)))?; stream.set_write_timeout(Some(Duration::from_millis(500)))?;
     stream.write_all(format!("GET /json/version HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nAccept: application/json\r\n\r\n").as_bytes())?;
-    let mut raw=Vec::new(); stream.take(64*1024+1).read_to_end(&mut raw)?; ensure!(raw.len()<=64*1024,"Browser version response too large");
-    let split=raw.windows(4).position(|w|w==b"\r\n\r\n").context("Malformed browser version response")?;
-    let head=std::str::from_utf8(&raw[..split])?; ensure!(head.lines().next().is_some_and(|s|s.starts_with("HTTP/1.1 200 ")||s.starts_with("HTTP/1.0 200 ")),"Browser version endpoint did not return 200 (redirects are refused)");
-    let value:Value=serde_json::from_slice(&raw[split+4..])?; let ws=value["webSocketDebuggerUrl"].as_str().context("No Chromium browser WebSocket in /json/version")?;
+    const MAX_RESPONSE:usize=64*1024;
+    let mut raw=Vec::with_capacity(4096); let split=loop {
+        if let Some(split)=raw.windows(4).position(|w|w==b"\r\n\r\n") {break split}
+        ensure!(raw.len()<MAX_RESPONSE,"Browser version response headers too large"); check.fast()?;
+        let mut chunk=[0;4096]; let limit=chunk.len().min(MAX_RESPONSE-raw.len());
+        let read=stream.read(&mut chunk[..limit]).context("Could not read browser version response headers")?;
+        ensure!(read>0,"Malformed browser version response: truncated headers"); raw.extend_from_slice(&chunk[..read]);
+    };
+    let head=std::str::from_utf8(&raw[..split])?; let mut lines=head.split("\r\n");
+    ensure!(lines.next().is_some_and(|s|s.starts_with("HTTP/1.1 200 ")||s.starts_with("HTTP/1.0 200 ")),"Browser version endpoint did not return 200 (redirects are refused)");
+    let mut content_length=None;
+    for line in lines {
+        let (name,value)=line.split_once(':').context("Malformed browser version response header")?;
+        if name.eq_ignore_ascii_case("transfer-encoding") && !value.trim().is_empty() {bail!("Unsupported browser version response framing: Transfer-Encoding is not supported")}
+        if name.eq_ignore_ascii_case("content-length") {
+            ensure!(content_length.is_none(),"Malformed browser version response: duplicate Content-Length");
+            content_length=Some(value.trim().parse::<usize>().context("Malformed browser version response Content-Length")?);
+        }
+    }
+    let content_length=content_length.context("Unsupported browser version response framing: Content-Length is required")?;
+    let body_start=split+4; let expected=body_start.checked_add(content_length).context("Browser version response too large")?;
+    ensure!(expected<=MAX_RESPONSE,"Browser version response too large");
+    while raw.len()<expected {
+        check.fast()?; let mut chunk=[0;4096]; let limit=chunk.len().min(expected-raw.len());
+        let read=stream.read(&mut chunk[..limit]).context("Could not read browser version response body")?;
+        ensure!(read>0,"Malformed browser version response: truncated body"); raw.extend_from_slice(&chunk[..read]);
+    }
+    let value:Value=serde_json::from_slice(&raw[body_start..expected])?; let ws=value["webSocketDebuggerUrl"].as_str().context("No Chromium browser WebSocket in /json/version")?;
     let (_,address)=endpoint(ws)?; ensure!(address.port()==port,"Discovered browser endpoint changed ports"); check.check()?; Ok(ws.to_owned())
 }
 fn native_fallback(reason:impl std::fmt::Display)->BuiltinMcpCallResult { text(json!({"attached":false,"domAvailable":false,"reason":reason.to_string(),"nativeFallback":"Use computer.screenshot and computer.input with this same active-window target immediately. Do not perform DOM action fallback automatically after an uncertain failed DOM action, and do not ask for browser/profile/restart setup unless the user explicitly requests DOM access."})) }
@@ -871,6 +901,50 @@ pub(super) fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn http_fixture(response:Vec<u8>,hold_open:Duration)->(u16,std::thread::JoinHandle<()>) {
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap(); let port=listener.local_addr().unwrap().port();
+        let worker=std::thread::spawn(move || {
+            let (mut stream,_)=listener.accept().unwrap(); stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut request=Vec::new(); let mut chunk=[0;1024];
+            while !request.windows(4).any(|w|w==b"\r\n\r\n") {let read=stream.read(&mut chunk).unwrap(); if read==0 {break} request.extend_from_slice(&chunk[..read]);}
+            stream.write_all(&response).unwrap(); std::thread::sleep(hold_open);
+        });
+        (port,worker)
+    }
+    #[test]
+    fn http_version_returns_after_content_length_without_waiting_for_eof() {
+        let _revocation=TEST_REVOCATION_LOCK.blocking_lock();
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap(); let port=listener.local_addr().unwrap().port();
+        let body=json!({"webSocketDebuggerUrl":format!("ws://127.0.0.1:{port}/devtools/browser/test")}).to_string();
+        let response=format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",body.len()).into_bytes();
+        let worker=std::thread::spawn(move || {
+            let (mut stream,_)=listener.accept().unwrap(); let mut request=Vec::new(); let mut chunk=[0;1024];
+            while !request.windows(4).any(|w|w==b"\r\n\r\n") {let read=stream.read(&mut chunk).unwrap(); if read==0 {break} request.extend_from_slice(&chunk[..read]);}
+            stream.write_all(&response).unwrap(); std::thread::sleep(Duration::from_millis(1000));
+        });
+        let result=run_worker(STOP.load(Ordering::SeqCst),Arc::new(AtomicBool::new(false)),Arc::new(AtomicBool::new(false)),|check|http_version(port,check)).unwrap();
+        assert_eq!(result,format!("ws://127.0.0.1:{port}/devtools/browser/test")); worker.join().unwrap();
+    }
+    #[test]
+    fn http_version_rejects_invalid_or_unsupported_framing() {
+        let _revocation=TEST_REVOCATION_LOCK.blocking_lock();
+        run_worker(STOP.load(Ordering::SeqCst),Arc::new(AtomicBool::new(false)),Arc::new(AtomicBool::new(false)),|check| {
+            let mut cases=vec![
+                (b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{}".to_vec(),"truncated body"),
+                (b"HTTP/1.1 200 OK\r\nContent-Length: 65536\r\n\r\n".to_vec(),"too large"),
+                (b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\nLocation: /elsewhere\r\n\r\n".to_vec(),"did not return 200"),
+                (b"HTTP/1.1 200 OK\r\n\r\n{}".to_vec(),"Content-Length is required"),
+                (b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}".to_vec(),"duplicate Content-Length"),
+                (b"HTTP/1.1 200 OK\r\nContent-Length: nope\r\n\r\n{}".to_vec(),"Content-Length"),
+                (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n".to_vec(),"Transfer-Encoding is not supported"),
+            ];
+            cases.push((vec![b'a';64*1024],"headers too large"));
+            for (response,expected) in cases {
+                let (port,worker)=http_fixture(response,Duration::ZERO); let error=http_version(port,check).unwrap_err().to_string(); worker.join().unwrap(); assert!(error.contains(expected),"{error}");
+            }
+            Ok(())
+        }).unwrap();
+    }
     #[test]
     fn endpoint_is_explicit_local_browser_only() {
         assert!(endpoint("ws://127.0.0.1:9222/devtools/browser/abc").is_ok());
@@ -967,6 +1041,15 @@ mod tests {
         assert_eq!(debugging_port(&["zen".into(),"--remote-debugging-port".into(),"9224".into()]),Some(9224));
         assert_eq!(debugging_port(&["zen".into()]),None);
         assert_eq!(debugging_port(&["zen".into(),"--remote-debugging-port=0".into()]),None);
+        assert_eq!(debugging_port(&["/opt/helium --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --restore-last-session https://x.com".into()]),Some(9222));
+        assert_eq!(debugging_port(&["helium --remote-debugging-port 9222".into()]),Some(9222));
+        for title in ["helium prefix--remote-debugging-port=9222", "helium --remote-debugging-port=9222suffix", "helium --remote-debugging-port=0", "helium --remote-debugging-port=65536", "helium --remote-debugging-port"] {
+            assert_eq!(debugging_port(&[title.into()]),None);
+        }
+        assert_eq!(debugging_port(&["helium".into(),"--title=example --remote-debugging-port=9222".into()]),None);
+        let processes=vec![process(10,1,&["helium --remote-debugging-port=9222"],&[77])];
+        assert_eq!(select_debug_process(10,&processes,&HashMap::from([(9222,HashSet::from([77]))])).unwrap(),(9222,10));
+        assert!(select_debug_process(10,&processes,&HashMap::from([(9222,HashSet::from([88]))])).is_err());
     }
     #[cfg(target_os="linux")]
     #[test]

@@ -1,27 +1,17 @@
 ---
 name: "Optional TypeSafe computer MCP mode"
-description: "Off-by-default browser_goal runs bounded Jev-selected typed DOM operations; browser_step retained; strict probability/risk/revocation gates and exact caller values."
+description: "Dependent exact-action risk request fixed Jev Choice independence bug; actionable DOM candidates hardened."
 type: "feature"
 scope: "project"
 origin: "neoism-agent"
-created: "2026-09-17"
+created: "2026-09-18"
 updated: "2026-09-18"
 ---
 
----
-name: "Optional TypeSafe computer MCP mode"
-description: "Off-by-default browser_goal runs bounded Jev-selected typed DOM operations; browser_step retained; strict probability/risk/revocation gates and exact caller values."
-type: "feature"
-scope: "project"
-origin: "neoism-agent"
-created: "2026-09-17"
-updated: "2026-09-18"
----
+Implemented dependent Jev decision pipeline in `computer_use/typesafe.rs`: selection request now batches only Choice + done, validates unchanged confidence >=.85 and selected probability >=.75 gates, resolves the exact candidate, then issues a separate structured-Noul risk request scoped to exact action/ref/value or URL plus current URL and selected target context. Risk >=.1 remains `needs_confirmation`; malformed/missing risk fails closed. Ambiguous/no-match/possibly-done selection skips risk. browser_step uses a 16s aggregate decision budget; browser_goal's existing total deadline covers selection+risk. Both recheck cancellation/revocation/enablement around risk and before dispatch; preview never dispatches. Results expose `selectionMs`, `riskMs`, `decisionMs`, and stage.
 
-TypeSafe/Jev integration lives inside built-in computer MCP and remains off by default (`agent.experimental.options.computer-typesafe.enabled`). Preferred tool is now `computer.browser_goal`; shipped `browser_step` remains compatibility single-step. Goal API accepts target/tab/goal, exact caller `text_values`, `select_values`, `navigate_urls`, click/scroll/back toggles, `max_steps` 1..8 and `timeout_ms` 1000..30000. Jev `jev-latest` chooses only server-generated typed candidates. Every action gets a fresh DOM observation; only compact executed trace is carried. Request/response 128 KiB; candidate cap 180 + none; no conversation history.
+`browser_observe.js` now emits `actions`, `actionable`, link `href`, and bounded nearby context; it filters headings/presentation/containers and other non-actionable role/tabindex nodes. TypeSafe candidate generation requires the explicit compatible action list, preventing click candidates for headings while leaving manual browser_act mechanics unchanged.
 
-Goal loop rechecks cancellation, STOP generation, computer MCP and TypeSafe enablement before model/action boundaries. Existing choice confidence >=.85, selected probability >=.75, distribution validation and risk >=.1 `needs_confirmation` remain fail-closed. `possibly_done` is explicitly not application verification. `partial_unknown` immediately stops and never replays. In-flight timeout returns partial_unknown; action budget returns step_budget_exhausted. Normal permissions, focus, attachment, ref freshness and TypeSafe credentials remain required.
+Bundled TypeSafe docs now explain the dependent second risk request, compact candidate semantics, stage timings, and that needs_confirmation remains a hard stop without broad confirmation UI.
 
-DOM adapter now supports guarded `scroll` up/down, `back`, and exact normalized caller HTTP(S) `navigate`, as well as click/fill/select. browser_act ref is required only for element actions. Observation exposes scroll/history capability, filters file and password inputs, and marks disabled select options. No arbitrary/generated JS or text, uploads, screenshots, background automation, or native desktop semantics.
-
-GUI and native settings wording, bundled TypeSafe Browser Mode and Computer Use docs updated to favor browser_goal and disclose page data + compact trace. Tests cover typed candidates, exact inputs, invalid bounds/schemes, risk/done gates, a two-decision goal loop, adapter schema, GUI wording, and bundled docs. Verified cargo check neoism-agent-server and neoism-backend; 8 TypeSafe Rust tests, browser schema test, 3 GUI tests, GUI tsc, product docs test, and git diff --check. Live Chromium adapter test expanded for file exclusion and scroll but not run because NEOISM_TEST_CHROMIUM was not supplied; no live TypeSafe request/key test.
+Verification: 12 TypeSafe tests pass; 12 browser unit tests pass (1 live Firefox ignored by fixture design); `cargo check -p neoism-agent-server` passes with pre-existing unrelated warnings; 2 neoism-product-docs tests pass; browser_observe.js passes `node --check`; edited diff passes `git diff --check`. Added regressions for exact selected action context/no hypothetical candidate, risk-call elision on ambiguity/done, high-risk dispatch stop, malformed distributions/risk, all mutation-capable operation risk requests including navigate, and no heading click candidates.

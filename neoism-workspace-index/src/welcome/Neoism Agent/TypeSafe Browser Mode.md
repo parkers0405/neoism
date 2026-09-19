@@ -55,8 +55,8 @@ The preferred tool is `computer.browser_goal`. Jev may choose compatible `click`
 Each call:
 
 1. Obtains a fresh, focused-page observation using `browser_observe`.
-2. Generates only operations compatible with observed elements and caller-supplied values, then sends one bounded `jev-latest` request that jointly asks for the operation, completion evidence, and consequential-effect risk.
-3. Validates the answer against the exact candidate distribution and existing confidence/probability thresholds. A no-match option is always available.
+2. Generates only operations compatible with observed actionable elements and caller-supplied values, then sends one bounded `jev-latest` request for the operation and completion evidence. A candidate contains the compact action, exact target identity, exact caller value or URL when applicable, and relevant href/nearby context from the observation; it is not a whole duplicated DOM node.
+3. Validates the answer against the exact candidate distribution and existing confidence/probability thresholds. A no-match option is always available. Only after one candidate passes those gates does a dependent request assess consequential-effect risk for that exact action, target, value, and page URL. Independent questions in one TypeSafe request cannot depend on the Choice answer, so risk is intentionally not asked alongside selection.
 4. Rechecks cancellation, revocation, current computer/TypeSafe enablement, window focus, and observation freshness before every dispatch through `browser_act`.
 5. Uses the post-action observation as the next fresh state and sends only a compact executed trace, never conversation history. It stops at the step/time budget or any safety/uncertainty terminal state.
 
@@ -65,7 +65,7 @@ Each call:
 - `preview`: no action performed. Inspect the nested decision status.
 - `no_match`: no suitable offered element; observe or use normal tools.
 - `ambiguous`: insufficient model certainty; inspect the page rather than retrying blindly.
-- `needs_confirmation`: the model flagged potentially consequential effects. Confirm the actual action with the user before any manual action; do not use another tool to evade a refusal.
+- `needs_confirmation`: the model flagged the exact selected action as potentially consequential. It is an explicit hard stop because broad confirmation UI is not implemented; confirm the actual action with the user before any separate manual action, and do not use another tool to evade a refusal.
 - `possibly_done`: model judgment only, not proof of task completion. Verify independently.
 - `step_budget_exhausted` or a time-budget error: bounded execution stopped; completion is not implied.
 - `partial_unknown`: an action may have executed, so the loop stops immediately and never replays it. Observe before any deliberate retry.
@@ -81,7 +81,7 @@ No screenshots are sent to Jev. This is not a vision model and does not promise 
 
 Requests and responses are bounded to 128 KiB, use a fixed HTTPS endpoint with redirects disabled, and have an eight-second HTTP timeout. The client reuses connections. Authentication failures, rate limits, malformed responses, timeouts and cancellations do not trigger action retries. Another observation or user change can invalidate a decision before it is used.
 
-No live latency or accuracy guarantee is claimed. `decisionMs` measures the external decision request, not total task duration or permission wait. Test representative tasks with your account before depending on the mode.
+No live latency or accuracy guarantee is claimed. `selectionMs` and `riskMs` expose the dependent external stages when reached; `decisionMs` is their accumulated decision time, not total task duration or permission wait. Test representative tasks with your account before depending on the mode.
 
 ## Skill and references
 

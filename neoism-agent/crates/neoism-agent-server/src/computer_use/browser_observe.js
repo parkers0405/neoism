@@ -22,6 +22,23 @@
       (el instanceof HTMLInputElement && ['button','submit','reset'].includes(el.type) ? el.value : '') ||
       el.innerText || el.getAttribute('title'));
   };
+  const interactiveRoles = new Set(['button','link','checkbox','radio','switch','tab','menuitem','menuitemcheckbox','menuitemradio','option','combobox','textbox','searchbox','spinbutton','slider']);
+  const excludedRoles = new Set(['heading','presentation','none','group','region','main','article','document','list','listitem','table','row','cell']);
+  const actions = el => {
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (excludedRoles.has(role)) return [];
+    if (el instanceof HTMLSelectElement) return ['click','select'];
+    if (el instanceof HTMLTextAreaElement || el.isContentEditable ||
+        (el instanceof HTMLInputElement && ['text','search','email','url','tel','number'].includes(el.type))) return ['click','fill'];
+    if (el.matches('a[href],button,summary,input[type="button"],input[type="submit"],input[type="reset"],input[type="image"],input[type="checkbox"],input[type="radio"]') || interactiveRoles.has(role)) return ['click'];
+    return [];
+  };
+  const nearby = el => {
+    const container = el.closest('label,li,form,nav,section,article,dialog,[role="dialog"],[role="menu"]');
+    const context = trim(container?.innerText, 360);
+    const own = name(el);
+    return context && context !== own ? context : '';
+  };
   state.signature = el => JSON.stringify([
     el.tagName, el.getAttribute('type'), el.getAttribute('href'), el.getAttribute('aria-label'),
     el.innerText?.slice(0,240), el.getAttribute('role'), el.getAttribute('placeholder'),
@@ -35,13 +52,18 @@
   let scanned = 0;
   let el;
   while ((el = walker.nextNode()) && scanned++ < 3000 && elements.length < 120) {
-    if (!el.matches('a[href],button,input,textarea,select,[role],[contenteditable="true"],[tabindex]') || !visible(el)) continue;
+    if (!el.matches('a[href],button,input,textarea,select,summary,[role],[contenteditable="true"],[tabindex]') || !visible(el)) continue;
     if (el.matches('input[type="hidden"],input[type="password"],input[type="file"]')) continue;
+    const availableActions = actions(el);
+    if (!availableActions.length) continue;
     let ref = state.ids.get(el);
     if (!ref) { ref = `e${++state.next}`; state.ids.set(el, ref); }
     const label = name(el);
     const role = el.getAttribute('role') || ({A:'link',BUTTON:'button',TEXTAREA:'textbox',SELECT:'combobox',INPUT:['button','submit','reset','image'].includes(el.type) ? 'button' : el.type === 'checkbox' ? 'checkbox' : el.type === 'radio' ? 'radio' : 'textbox'}[el.tagName]) || el.tagName.toLowerCase();
-    const item = {ref, role, name: label, disabled: el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true'};
+    const item = {ref, role, name: label, actions:availableActions, actionable:true, disabled: el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true'};
+    if (el instanceof HTMLAnchorElement && el.href) item.href = el.href.slice(0,2048);
+    const context = nearby(el);
+    if (context) item.nearby = context;
     if (el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && ['text','search','email','url','tel','number'].includes(el.type))) {
       item.value = el.value.slice(0,512);
       item.readOnly = el.readOnly;

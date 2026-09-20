@@ -68,6 +68,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         self.daemon.link.is_some()
     }
 
+    pub fn daemon_connection_key(&self) -> Option<usize> {
+        self.daemon
+            .link
+            .as_ref()
+            .map(|link| link.handle.connection_key())
+    }
+
     pub fn request_daemon_host_workspace_tree(&self) {
         if let Some(link) = self.daemon.link.as_ref() {
             link.send(WorkspaceClientMessage::RequestHostWorkspaceTree);

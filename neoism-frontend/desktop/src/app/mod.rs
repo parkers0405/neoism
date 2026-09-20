@@ -350,6 +350,26 @@ impl Application<'_> {
             if let Some(session) = self.window_sessions.get_mut(&window_id) {
                 session.refresh_status();
             }
+            // PTY subscriptions are websocket-local. A server switch can
+            // leave the window session and ContextManager pointing at two
+            // different connections whose normalized endpoint strings are
+            // identical. Commands then run through one socket while output is
+            // drained from the other until a workspace round-trip reattaches
+            // every route. Restore the connection-object invariant before
+            // accepting messages or allowing more terminal input.
+            let active_connection_key = self
+                .window_sessions
+                .get(&window_id)
+                .map(|session| session.connection.connection_key());
+            let linked_connection_key =
+                self.router.routes.get(&window_id).and_then(|route| {
+                    route.window.screen.context_manager.daemon_connection_key()
+                });
+            if active_connection_key.is_some()
+                && active_connection_key != linked_connection_key
+            {
+                self.attach_session_to_window(window_id);
+            }
             if let Some(route) = self.router.routes.get_mut(&window_id) {
                 if let Some((handle, _runtime)) = route
                     .window
@@ -402,15 +422,28 @@ impl Application<'_> {
             }
             // Capture the source endpoint BEFORE processing workspace events:
             // an earlier event in this batch can switch the active connection.
-            let (endpoint, messages, parked_editors) = self.window_sessions.get(&window_id)
-                .map(|session| (
-                    session.connection.endpoint().to_string(),
-                    session.connection.drain_messages(),
-                    session.parked_connections.values().flat_map(|connection| {
-                        let endpoint = connection.endpoint().to_string();
-                        connection.drain_editor_messages().into_iter().map(move |message| (endpoint.clone(), message))
-                    }).collect::<Vec<_>>(),
-                )).unwrap_or_default();
+            let (endpoint, connection_key, messages, parked_editors) = self
+                .window_sessions
+                .get(&window_id)
+                .map(|session| {
+                    (
+                        session.connection.endpoint().to_string(),
+                        session.connection.connection_key(),
+                        session.connection.drain_messages(),
+                        session
+                            .parked_connections
+                            .values()
+                            .flat_map(|connection| {
+                                let endpoint = connection.endpoint().to_string();
+                                connection
+                                    .drain_editor_messages()
+                                    .into_iter()
+                                    .map(move |message| (endpoint.clone(), message))
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap_or_default();
             for (endpoint, message) in parked_editors {
                 if let DaemonServerMessage::Editor { request_id, message } = message {
                     if let Some(route) = self.router.routes.get_mut(&window_id) {
@@ -493,6 +526,7 @@ impl Application<'_> {
                         self.apply_daemon_pty_message(
                             window_id,
                             &endpoint,
+                            connection_key,
                             request_id,
                             message,
                         );
@@ -1958,6 +1992,7 @@ impl Application<'_> {
         &mut self,
         window_id: WindowId,
         source_endpoint: &str,
+        source_connection_key: usize,
         request_id: u64,
         message: neoism_protocol::pty::ServerMessage,
     ) {
@@ -1967,13 +2002,17 @@ impl Application<'_> {
             // PTY frames into the newly active endpoint's route/session cache.
             if route.window.screen.context_manager.daemon_endpoint()
                 != Some(source_endpoint)
+                || route.window.screen.context_manager.daemon_connection_key()
+                    != Some(source_connection_key)
             {
                 tracing::warn!(
                     target: "neoism::remote_pty",
                     %source_endpoint,
+                    source_connection_key,
                     active_endpoint = ?route.window.screen.context_manager.daemon_endpoint(),
+                    active_connection_key = ?route.window.screen.context_manager.daemon_connection_key(),
                     request_id,
-                    "ignoring PTY frame from a daemon that was parked during this batch"
+                    "ignoring PTY frame from a non-owning daemon connection"
                 );
                 return;
             }

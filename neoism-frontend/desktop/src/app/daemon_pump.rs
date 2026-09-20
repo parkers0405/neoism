@@ -116,6 +116,10 @@ impl DesktopDaemonConnection {
         self.handle.clone()
     }
 
+    pub fn connection_key(&self) -> usize {
+        self.handle.connection_key()
+    }
+
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime_handle.clone()
     }

@@ -22,7 +22,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::{SinkExt, StreamExt};
 use neoism_protocol::crdt::{CrdtClientMessage, CrdtServerMessage};
@@ -245,6 +245,8 @@ pub struct DaemonClientHandle {
     pub(crate) status: watch::Receiver<DaemonClientStatus>,
     failures: mpsc::Sender<DaemonServerMessage>,
     generation: Arc<AtomicU64>,
+    last_server_activity_ms: Arc<AtomicU64>,
+    recycle_tx: watch::Sender<u64>,
 }
 
 impl DaemonClientHandle {
@@ -427,6 +429,23 @@ impl DaemonClientHandle {
         self.generation.load(Ordering::Acquire)
     }
 
+    /// Recycle an apparently-open socket that stopped receiving server
+    /// traffic while the machine was asleep. PTY input is never replayed
+    /// across this boundary; the next generation must attach first.
+    pub fn recycle_if_stale(&self, max_idle: Duration) -> bool {
+        if *self.status.borrow() != DaemonClientStatus::Open {
+            return false;
+        }
+        let last = self.last_server_activity_ms.load(Ordering::Acquire);
+        if wall_clock_millis().saturating_sub(last) <= max_idle.as_millis() as u64 {
+            return false;
+        }
+        self.recycle_tx.send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
+        true
+    }
+
     /// Register correlation before a fast localhost daemon can reply.
     pub async fn send_editor_with_request_id(
         &self,
@@ -574,6 +593,8 @@ impl DaemonClient {
         let (status_tx, status_rx) = watch::channel(DaemonClientStatus::Connecting);
         let next_request_id = Arc::new(AtomicU64::new(1));
         let generation = Arc::new(AtomicU64::new(0));
+        let last_server_activity_ms = Arc::new(AtomicU64::new(wall_clock_millis()));
+        let (recycle_tx, recycle_rx) = watch::channel(0u64);
 
         let runner = ClientRunner {
             options,
@@ -581,6 +602,8 @@ impl DaemonClient {
             in_tx: in_tx.clone(),
             status_tx,
             generation: Arc::clone(&generation),
+            last_server_activity_ms: Arc::clone(&last_server_activity_ms),
+            recycle_rx,
         };
         tokio::spawn(runner.run());
 
@@ -591,6 +614,8 @@ impl DaemonClient {
                 status: status_rx.clone(),
                 failures: in_tx,
                 generation,
+                last_server_activity_ms,
+                recycle_tx,
             },
             rx: in_rx,
             status_rx,
@@ -707,6 +732,8 @@ struct ClientRunner {
     in_tx: mpsc::Sender<DaemonServerMessage>,
     status_tx: watch::Sender<DaemonClientStatus>,
     generation: Arc<AtomicU64>,
+    last_server_activity_ms: Arc<AtomicU64>,
+    recycle_rx: watch::Receiver<u64>,
 }
 
 impl ClientRunner {
@@ -840,6 +867,17 @@ impl ClientRunner {
                         message: WorkspaceClientMessage::Ping { nonce },
                     }).await?;
                 }
+                changed = self.recycle_rx.changed() => {
+                    if changed.is_err() {
+                        return Err(DaemonClientError::ChannelClosed);
+                    }
+                    tracing::info!(
+                        target: "neoism::desktop_daemon",
+                        generation,
+                        "recycling stale workspace socket after foreground resume"
+                    );
+                    return Ok(());
+                }
                 _ = async {
                     if let Some(deadline) = liveness_deadline {
                         tokio::time::sleep_until(deadline).await;
@@ -967,6 +1005,8 @@ impl ClientRunner {
                 return Err(err);
             }
         };
+        self.last_server_activity_ms
+            .store(wall_clock_millis(), Ordering::Release);
         let target = pty_inflight.remove(&reply.request_id());
         let reply = match reply {
             DaemonServerMessage::Pty {
@@ -1082,6 +1122,12 @@ impl ClientRunner {
         loop {
             tokio::select! {
                 _ = &mut sleep => return false,
+                changed = self.recycle_rx.changed() => {
+                    if changed.is_err() {
+                        return true;
+                    }
+                    return false;
+                }
                 outbound = self.out_rx.recv() => {
                     let Some(outbound) = outbound else {
                         return true;
@@ -1095,6 +1141,14 @@ impl ClientRunner {
             }
         }
     }
+}
+
+fn wall_clock_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 
 enum FrameOutcome {
@@ -1784,12 +1838,16 @@ mod tests {
         let options =
             DaemonClientOptions::new(DaemonEndpoint::parse("ws://127.0.0.1:1").unwrap());
         let generation = Arc::new(AtomicU64::new(0));
+        let last_server_activity_ms = Arc::new(AtomicU64::new(wall_clock_millis()));
+        let (recycle_tx, recycle_rx) = watch::channel(0u64);
         let handle = DaemonClientHandle {
             tx,
             next_request_id: Arc::new(AtomicU64::new(1)),
             status: status_rx,
             failures: in_tx.clone(),
             generation: Arc::clone(&generation),
+            last_server_activity_ms: Arc::clone(&last_server_activity_ms),
+            recycle_tx,
         };
         (
             ClientRunner {
@@ -1798,10 +1856,25 @@ mod tests {
                 in_tx,
                 status_tx,
                 generation,
+                last_server_activity_ms,
+                recycle_rx,
             },
             handle,
             in_rx,
         )
+    }
+
+    #[test]
+    fn stale_open_connection_requests_socket_recycle() {
+        let (mut runner, handle, _) = delivery_test_client(DaemonClientStatus::Open);
+        assert!(!handle.recycle_if_stale(Duration::from_secs(25)));
+        handle.last_server_activity_ms.store(
+            wall_clock_millis().saturating_sub(26_000),
+            Ordering::Release,
+        );
+        assert!(handle.recycle_if_stale(Duration::from_secs(25)));
+        assert!(runner.recycle_rx.has_changed().unwrap());
+        assert_eq!(*runner.recycle_rx.borrow_and_update(), 1);
     }
 
     fn test_input() -> PtyClientMessage {

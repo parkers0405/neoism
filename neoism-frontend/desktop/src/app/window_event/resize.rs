@@ -65,6 +65,7 @@ impl Application<'_> {
             OccludedEventAction::UpdateOnly => {}
             OccludedEventAction::UpdateAndArmPostOcclusionRedraw => {
                 route.window.needs_render_after_occlusion = true;
+                self.recycle_stale_window_connection(window_id);
             }
         }
     }

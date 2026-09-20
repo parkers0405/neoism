@@ -51,5 +51,12 @@ impl Application<'_> {
         }
 
         route.window.screen.on_focus_change(focused);
+
+        // Laptop sleep can leave TCP looking Open until its first post-wake
+        // write. Recycle before the user can submit terminal input; the fresh
+        // generation gates and reattaches every remote PTY.
+        if focus_regained(was_focused, focused) {
+            self.recycle_stale_window_connection(window_id);
+        }
     }
 }

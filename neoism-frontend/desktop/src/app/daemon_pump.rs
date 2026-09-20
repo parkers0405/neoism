@@ -120,6 +120,10 @@ impl DesktopDaemonConnection {
         self.handle.connection_key()
     }
 
+    pub fn recycle_if_stale(&self, max_idle: std::time::Duration) -> bool {
+        self.handle.recycle_if_stale(max_idle)
+    }
+
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime_handle.clone()
     }

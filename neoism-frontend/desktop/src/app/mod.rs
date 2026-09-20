@@ -293,6 +293,14 @@ impl Application<'_> {
         }
     }
 
+    pub(in crate::app) fn recycle_stale_window_connection(&self, window_id: WindowId) {
+        if let Some(session) = self.window_sessions.get(&window_id) {
+            session
+                .connection
+                .recycle_if_stale(std::time::Duration::from_secs(25));
+        }
+    }
+
     fn attach_bootstrap_session(&mut self, window_id: WindowId) {
         if self.window_sessions.contains_key(&window_id) {
             self.attach_session_to_window(window_id);
@@ -2377,7 +2385,11 @@ impl Application<'_> {
 }
 
 impl ApplicationHandler<EventPayload> for Application<'_> {
-    fn resumed(&mut self, _active_event_loop: &ActiveEventLoop) {}
+    fn resumed(&mut self, _active_event_loop: &ActiveEventLoop) {
+        for window_id in self.window_sessions.keys().copied().collect::<Vec<_>>() {
+            self.recycle_stale_window_connection(window_id);
+        }
+    }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         self.pump_daemon(event_loop);

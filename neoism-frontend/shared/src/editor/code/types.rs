@@ -784,7 +784,10 @@ impl CodePane {
         !self.local_only && !self.remote_content_pending && self.error.is_none()
     }
 
-    pub fn load_with_source(path: PathBuf, source: crate::services::FileOpenSource) -> Self {
+    pub fn load_with_source(
+        path: PathBuf,
+        source: crate::services::FileOpenSource,
+    ) -> Self {
         use crate::services::FileOpenSource;
         if source == FileOpenSource::Host {
             let mut pane = Self::new(path, "");
@@ -812,7 +815,9 @@ impl CodePane {
     /// Mark a host read in flight without touching the guest filesystem or
     /// discarding any existing edits (mirrors the markdown pane).
     pub fn mark_remote_loading(&mut self) {
-        if self.local_only { return; }
+        if self.local_only {
+            return;
+        }
         self.remote_source = true;
         self.error = None;
         self.remote_content_pending = true;
@@ -823,10 +828,14 @@ impl CodePane {
     /// like a successful local load would. Language/highlighting were
     /// already resolved from the path at construction.
     pub fn apply_remote_source(&mut self, text: &str) {
-        if self.local_only { return; }
+        if self.local_only {
+            return;
+        }
         self.remote_source = true;
         if self.is_dirty() {
-            self.fail_remote_loading("Local edits were preserved; resolve them before reloading");
+            self.fail_remote_loading(
+                "Local edits were preserved; resolve them before reloading",
+            );
             return;
         }
         self.buffer.reset_from_text(text);
@@ -836,7 +845,9 @@ impl CodePane {
 
     /// Finish only the loading state. Preserve any user edits for recovery.
     pub fn fail_remote_loading(&mut self, message: &str) {
-        if self.local_only { return; }
+        if self.local_only {
+            return;
+        }
         self.remote_content_pending = false;
         self.error = Some(format!("Could not read host file: {message}"));
     }
@@ -846,7 +857,9 @@ impl CodePane {
     /// baseline. (Daemon/CRDT-owned saves come with the LSP wiring.)
     pub fn save(&mut self) -> std::io::Result<()> {
         if self.remote_source || self.remote_content_pending {
-            return Err(std::io::Error::other("Host-owned buffers must be saved through the daemon"));
+            return Err(std::io::Error::other(
+                "Host-owned buffers must be saved through the daemon",
+            ));
         }
         match std::fs::write(&self.path, self.buffer.text_for_disk()) {
             Ok(()) => {
@@ -863,7 +876,8 @@ impl CodePane {
 
     /// Host request pumps observe scrolling before deciding whether to fetch.
     pub fn observe_blame_viewport(&mut self) {
-        self.blame.observe_viewport([self.scroll_y, self.scroll_x, self.target_scroll_y]);
+        self.blame
+            .observe_viewport([self.scroll_y, self.scroll_x, self.target_scroll_y]);
     }
 
     /// Wheel/trackpad scroll: viewport only, cursor stays put (matching
@@ -871,7 +885,9 @@ impl CodePane {
     /// raw accumulator keeps sub-row deltas; the exposed target snaps
     /// to whole rows (Neovide-style line steps, glided by the painter).
     pub fn scroll_pixels(&mut self, delta_pixels: f32, viewport_height: f32) {
-        if delta_pixels != 0.0 { self.blame.note_scroll(); }
+        if delta_pixels != 0.0 {
+            self.blame.note_scroll();
+        }
         self.touch_viewport_detached = false;
         let content_delta = -delta_pixels;
         // Inertia guard: sub-row wheel deltas within a beat of a
@@ -939,7 +955,9 @@ impl CodePane {
         delta_pixels: f32,
         viewport_height: f32,
     ) -> bool {
-        if delta_pixels != 0.0 { self.blame.note_scroll(); }
+        if delta_pixels != 0.0 {
+            self.blame.note_scroll();
+        }
         self.scroll_viewport_height = viewport_height;
         let before = self.scroll_y;
         let max_scroll = (self.content_height - viewport_height).max(0.0);

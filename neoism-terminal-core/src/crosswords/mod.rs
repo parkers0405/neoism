@@ -2257,7 +2257,9 @@ impl Crosswords {
 }
 
 impl Handler for Crosswords {
-    fn synthetic_echo_filter(&mut self) -> Option<&mut crate::handler::SyntheticEchoFilter> {
+    fn synthetic_echo_filter(
+        &mut self,
+    ) -> Option<&mut crate::handler::SyntheticEchoFilter> {
         Some(&mut self.synthetic_echo_filter)
     }
     #[inline]
@@ -6076,7 +6078,8 @@ mod tests {
             "\x1b]133;A\x1b\\\r\n",
             "C:\\work>",
             "\x1b]133;B\x1b\\",
-        ).as_bytes();
+        )
+        .as_bytes();
         for byte in prompt {
             processor.advance(&mut cw, &[*byte]);
         }

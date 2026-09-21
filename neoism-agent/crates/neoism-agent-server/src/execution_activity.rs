@@ -31,10 +31,14 @@ pub(crate) struct ExecutionSummary {
 /// disappeared; reading those rows alone would keep an observer busy forever.
 /// No session/transcript enumeration: only current unfinished execution roots.
 async fn reconciled_summaries(state: &AppState) -> anyhow::Result<Vec<ExecutionSummary>> {
-    state.inner.store.reconcile_stale_execution_segments(
-        crate::now_millis().saturating_sub(15_000),
-        &state.inner.execution_owner_id,
-    ).await?;
+    state
+        .inner
+        .store
+        .reconcile_stale_execution_segments(
+            crate::now_millis().saturating_sub(15_000),
+            &state.inner.execution_owner_id,
+        )
+        .await?;
     let rows = state.inner.store.execution_activity_summaries().await?;
     let mut reconciled = false;
     for row in rows.iter().filter(|row| !row.finished) {
@@ -51,7 +55,8 @@ async fn reconciled_summaries(state: &AppState) -> anyhow::Result<Vec<ExecutionS
 pub(crate) async fn aggregate_snapshot(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Result<axum::Json<Vec<ExecutionSummary>>, crate::error::ApiError> {
-    reconciled_summaries(&state).await
+    reconciled_summaries(&state)
+        .await
         .map(axum::Json)
         .map_err(|error| crate::error::ApiError::internal(error.to_string()))
 }
@@ -62,7 +67,9 @@ pub(crate) async fn aggregate_snapshot(
 /// a failed read closes the stream, so clients reconnect as Unknown, never Done.
 pub(crate) async fn aggregate_events(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+) -> axum::response::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     let mut receiver = state.subscribe();
     let stream = async_stream::stream! {
         let period = std::time::Duration::from_secs(15);
@@ -736,34 +743,83 @@ mod tests {
     async fn aggregate_snapshot_stream_covers_all_roots_and_replays_during_handshake() {
         use axum::response::IntoResponse;
         use futures::StreamExt;
-        let path = std::env::temp_dir().join(format!("neoism-aggregate-{}.sqlite3", Id::ascending(IdKind::Event)));
+        let path = std::env::temp_dir().join(format!(
+            "neoism-aggregate-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
         let state = AppState::open_database(path.clone()).await.unwrap();
-        for (root, finished) in [("parent-with-background", false), ("other-root", false), ("old-root", true)] {
-            state.inner.store.replace_execution_activity(&ExecutionActivitySnapshot {
-                root_session_id: root.into(), execution_id: format!("execution-{root}"),
-                revision: 1, finished, ..Default::default()
-            }).await.unwrap();
+        for (root, finished) in [
+            ("parent-with-background", false),
+            ("other-root", false),
+            ("old-root", true),
+        ] {
+            state
+                .inner
+                .store
+                .replace_execution_activity(&ExecutionActivitySnapshot {
+                    root_session_id: root.into(),
+                    execution_id: format!("execution-{root}"),
+                    revision: 1,
+                    finished,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
         }
-        let initial = aggregate_snapshot(axum::extract::State(state.clone())).await.unwrap().0;
+        let initial = aggregate_snapshot(axum::extract::State(state.clone()))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(initial.len(), 3);
         assert_eq!(initial.iter().filter(|r| !r.finished).count(), 2);
         // The response installs the receiver before anyone polls the body.
-        let response = aggregate_events(axum::extract::State(state.clone())).await.into_response();
+        let response = aggregate_events(axum::extract::State(state.clone()))
+            .await
+            .into_response();
         let mut body = response.into_body().into_data_stream();
         let first = body.next().await.unwrap().unwrap();
         assert!(String::from_utf8_lossy(&first).contains("parent-with-background"));
-        state.inner.store.replace_execution_activity(&ExecutionActivitySnapshot {
-            root_session_id: "other-root".into(), execution_id: "execution-other-root".into(),
-            revision: 2, finished: true, ..Default::default()
-        }).await.unwrap();
+        state
+            .inner
+            .store
+            .replace_execution_activity(&ExecutionActivitySnapshot {
+                root_session_id: "other-root".into(),
+                execution_id: "execution-other-root".into(),
+                revision: 2,
+                finished: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         // Publish while the generator is suspended at the initial yield.
-        state.publish_live(EventPayload::new(event_type::SESSION_EXECUTION_UPDATED, json!({})));
-        let next = tokio::time::timeout(std::time::Duration::from_secs(2), body.next()).await.unwrap().unwrap().unwrap();
+        state.publish_live(EventPayload::new(
+            event_type::SESSION_EXECUTION_UPDATED,
+            json!({}),
+        ));
+        let next = tokio::time::timeout(std::time::Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let text = String::from_utf8_lossy(&next);
-        let data = text.lines().find_map(|line| line.strip_prefix("data: ")).unwrap();
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
         let rows: Vec<ExecutionSummary> = serde_json::from_str(data).unwrap();
-        assert!(rows.iter().find(|r| r.root_session_id == "other-root").unwrap().finished);
-        assert!(!rows.iter().find(|r| r.root_session_id == "parent-with-background").unwrap().finished);
+        assert!(
+            rows.iter()
+                .find(|r| r.root_session_id == "other-root")
+                .unwrap()
+                .finished
+        );
+        assert!(
+            !rows
+                .iter()
+                .find(|r| r.root_session_id == "parent-with-background")
+                .unwrap()
+                .finished
+        );
         drop(body);
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_file(path);
@@ -771,29 +827,90 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_read_reconciles_reopened_quiescent_execution() {
-        let path = std::env::temp_dir().join(format!("neoism-aggregate-reopen-{}.sqlite3", Id::ascending(IdKind::Event)));
+        let path = std::env::temp_dir().join(format!(
+            "neoism-aggregate-reopen-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
         let state = AppState::open_database(path.clone()).await.unwrap();
         let now = crate::now_millis();
         let root = SessionInfo {
-            id: neoism_agent_core::new_session_id(), slug: "reopened".into(),
-            project_id: "global".into(), workspace_id: None, directory: "/tmp".into(),
-            path: None, parent_id: None, title: "Reopened".into(), agent: None,
-            model: None, version: env!("CARGO_PKG_VERSION").into(),
-            time: TimeInfo { created: now, updated: now, compacting: None, archived: None },
-            permission: None, extra: BTreeMap::new(),
+            id: neoism_agent_core::new_session_id(),
+            slug: "reopened".into(),
+            project_id: "global".into(),
+            workspace_id: None,
+            directory: "/tmp".into(),
+            path: None,
+            parent_id: None,
+            title: "Reopened".into(),
+            agent: None,
+            model: None,
+            version: env!("CARGO_PKG_VERSION").into(),
+            time: TimeInfo {
+                created: now,
+                updated: now,
+                compacting: None,
+                archived: None,
+            },
+            permission: None,
+            extra: BTreeMap::new(),
         };
         state.inner.store.insert_session(&root).await.unwrap();
-        state.inner.store.admit_execution_activity(root.id.as_str(), "orphaned", "message", "").await.unwrap();
-        state.inner.store.heartbeat_execution_owner("dead-process", now.saturating_sub(60_000)).await.unwrap();
-        state.inner.store.insert_execution_segment(root.id.as_str(), "orphaned", "dead-segment", "dead-process", root.id.as_str(), now.saturating_sub(65_000)).await.unwrap();
+        state
+            .inner
+            .store
+            .admit_execution_activity(root.id.as_str(), "orphaned", "message", "")
+            .await
+            .unwrap();
+        state
+            .inner
+            .store
+            .heartbeat_execution_owner("dead-process", now.saturating_sub(60_000))
+            .await
+            .unwrap();
+        state
+            .inner
+            .store
+            .insert_execution_segment(
+                root.id.as_str(),
+                "orphaned",
+                "dead-segment",
+                "dead-process",
+                root.id.as_str(),
+                now.saturating_sub(65_000),
+            )
+            .await
+            .unwrap();
         state.shutdown().await.unwrap();
         drop(state);
         let reopened = AppState::open_database(path.clone()).await.unwrap();
-        assert!(!reopened.inner.store.get_execution_activity(root.id.as_str()).await.unwrap().unwrap().finished);
-        let rows = aggregate_snapshot(axum::extract::State(reopened.clone())).await.unwrap().0;
+        assert!(
+            !reopened
+                .inner
+                .store
+                .get_execution_activity(root.id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .finished
+        );
+        let rows = aggregate_snapshot(axum::extract::State(reopened.clone()))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].finished, "authoritative lease/quiescence repair must settle the reopened root");
-        assert!(reopened.inner.store.get_execution_activity(root.id.as_str()).await.unwrap().unwrap().active_segments.is_empty());
+        assert!(
+            rows[0].finished,
+            "authoritative lease/quiescence repair must settle the reopened root"
+        );
+        assert!(reopened
+            .inner
+            .store
+            .get_execution_activity(root.id.as_str())
+            .await
+            .unwrap()
+            .unwrap()
+            .active_segments
+            .is_empty());
         reopened.shutdown().await.unwrap();
         drop(reopened);
         let _ = std::fs::remove_file(path);
@@ -1066,7 +1183,10 @@ mod tests {
             .unwrap()
             .is_some_and(|execution| execution.finished));
 
-        let rows = aggregate_snapshot(axum::extract::State(state.clone())).await.unwrap().0;
+        let rows = aggregate_snapshot(axum::extract::State(state.clone()))
+            .await
+            .unwrap()
+            .0;
         assert!(!rows.iter().find(|row| row.root_session_id == root_id.as_str()).unwrap().finished,
             "aggregate reads must preserve outstanding children even between provider segments");
 

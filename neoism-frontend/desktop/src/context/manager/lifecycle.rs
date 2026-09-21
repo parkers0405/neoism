@@ -104,6 +104,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             daemon: ContextManagerDaemonState::default(),
             adopted_workspaces: HashMap::new(),
             workspace_icon_kinds: HashMap::new(),
+            pending_joined_terminal_routes: Vec::new(),
         })
     }
 
@@ -158,6 +159,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             daemon: ContextManagerDaemonState::default(),
             adopted_workspaces: HashMap::new(),
             workspace_icon_kinds: HashMap::new(),
+            pending_joined_terminal_routes: Vec::new(),
         })
     }
 

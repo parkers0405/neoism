@@ -366,6 +366,25 @@ pub(crate) struct SemanticSearchResponse {
 pub(crate) async fn semantic_search_route(
     State(state): State<AppState>,
     Query(query): Query<SemanticSearchQuery>,
+    claims: Option<axum::Extension<crate::caller::CallerClaims>>,
+) -> Result<Json<SemanticSearchResponse>, ApiError> {
+    let scope = claims
+        .as_ref()
+        .map(|axum::Extension(claims)| {
+            if !claims.hosted && claims.workspace_id.is_none() && claims.tenant_id == "local" {
+                crate::state::TenantQueryScope::LocalAll
+            } else {
+                crate::state::TenantQueryScope::Tenant(claims.tenant_id.as_str())
+            }
+        })
+        .unwrap_or(crate::state::TenantQueryScope::LocalAll);
+    semantic_search_with_scope(&state, query, scope).await
+}
+
+pub(crate) async fn semantic_search_with_scope(
+    state: &AppState,
+    query: SemanticSearchQuery,
+    scope: crate::state::TenantQueryScope<'_>,
 ) -> Result<Json<SemanticSearchResponse>, ApiError> {
     let store = &state.inner.store;
     let needle = query.q.trim();
@@ -376,10 +395,9 @@ pub(crate) async fn semantic_search_route(
         }));
     }
     let limit = query.limit.unwrap_or(20);
-
     // Exact matches first: they carry distance 0.0 so a literal hit always
     // outranks a fuzzy-semantic one, and they work with zero configuration.
-    let mut hits = keyword_hits(store, needle, query.session_id.as_deref(), limit).await;
+    let mut hits = keyword_hits(store, scope, needle, query.session_id.as_deref(), limit).await;
 
     let auth = if let Some(provider_id) = EmbeddingsClient::configured_provider_id() {
         state
@@ -401,6 +419,7 @@ pub(crate) async fn semantic_search_route(
                 .context("embeddings response was empty")?;
             let semantic = store
                 .semantic_search(
+                    scope,
                     &vector_json(&vector),
                     &client.model_spec,
                     query.session_id.as_deref(),
@@ -431,11 +450,12 @@ pub(crate) async fn semantic_search_route(
 /// that only mention one of the words.
 async fn keyword_hits(
     store: &crate::state::SessionStore,
+    scope: crate::state::TenantQueryScope<'_>,
     query: &str,
     session_id: Option<&str>,
     limit: usize,
 ) -> Vec<crate::state::SemanticSearchHit> {
-    let hits = search_hits(store, query, session_id, limit).await;
+    let hits = search_hits(store, scope, query, session_id, limit).await;
     if !hits.is_empty() {
         return hits;
     }
@@ -449,7 +469,7 @@ async fn keyword_hits(
     let mut merged: Vec<crate::state::SemanticSearchHit> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for term in terms {
-        for hit in search_hits(store, term, session_id, limit).await {
+        for hit in search_hits(store, scope, term, session_id, limit).await {
             if seen.insert(hit.message_id.clone()) {
                 merged.push(hit);
             }
@@ -462,12 +482,13 @@ async fn keyword_hits(
 
 async fn search_hits(
     store: &crate::state::SessionStore,
+    scope: crate::state::TenantQueryScope<'_>,
     query: &str,
     session_id: Option<&str>,
     limit: usize,
 ) -> Vec<crate::state::SemanticSearchHit> {
     store
-        .search_messages(query, session_id, limit)
+        .search_messages(scope, query, session_id, limit)
         .await
         .unwrap_or_default()
         .into_iter()

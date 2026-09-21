@@ -70,17 +70,28 @@ impl MarkdownPane {
     }
 
     pub fn delete_selection(&mut self) -> Option<String> {
-        if self.read_only { return None; }
+        if self.read_only {
+            return None;
+        }
         let (start, end) = self.normalized_visual_range()?;
         if !self.vim.visual_linewise {
-            if let Some(table) = self.table_range_containing(start.line).filter(|range| range.contains(&end.line)) {
+            if let Some(table) = self
+                .table_range_containing(start.line)
+                .filter(|range| range.contains(&end.line))
+            {
                 let removed = self.text_for_range(start, end);
                 let undo_end = end.line + 1;
                 let undo = self.save_local_undo(start.line, undo_end);
                 for line in start.line..=end.line {
-                    if line == table.start + 1 { continue; }
+                    if line == table.start + 1 {
+                        continue;
+                    }
                     let low = if line == start.line { start.col } else { 0 };
-                    let high = if line == end.line { end.col } else { self.lines[line].len() };
+                    let high = if line == end.line {
+                        end.col
+                    } else {
+                        self.lines[line].len()
+                    };
                     if let Some(cells) = parse_table_cell_bounds(&self.lines[line]) {
                         for cell in cells.into_iter().rev() {
                             let a = low.max(cell.content_start).min(cell.content_end);

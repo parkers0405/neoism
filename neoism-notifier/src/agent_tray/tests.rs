@@ -288,7 +288,10 @@ fn live_smoke() {
     assert_eq!(std::env::var("NEOISM_TRAY_LIVE").as_deref(), Ok("1"));
     let tray = AgentTray::start().unwrap();
     let hold = std::env::var("NEOISM_TRAY_LIVE_HOLD_SECS")
-        .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(5).clamp(3, 30);
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(5)
+        .clamp(3, 30);
     tray.set_state(TrayState::Working { count: 3 });
     println!("LIVE WORKING pid={}", std::process::id());
     std::thread::sleep(Duration::from_secs(hold));
@@ -306,9 +309,19 @@ fn live_smoke() {
             continue;
         };
         let path = format!("/{path}");
-        let dbus = zbus::blocking::Proxy::new(&bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus").unwrap();
-        let owner: u32 = dbus.call("GetConnectionUnixProcessID", &(name,)).unwrap_or(0);
-        if owner != std::process::id() { continue; }
+        let dbus = zbus::blocking::Proxy::new(
+            &bus,
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+        )
+        .unwrap();
+        let owner: u32 = dbus
+            .call("GetConnectionUnixProcessID", &(name,))
+            .unwrap_or(0);
+        if owner != std::process::id() {
+            continue;
+        }
         let Ok(item) = zbus::blocking::Proxy::new(&bus, name, path.as_str(), IFACE)
         else {
             continue;

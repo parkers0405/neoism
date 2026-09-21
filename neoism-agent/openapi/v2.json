@@ -519,6 +519,22 @@
         ],
         "type": "object"
       },
+      "ClaimSessionControlRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expectedRevision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "leaseSeconds": {
+            "default": 60,
+            "maximum": 300,
+            "minimum": 15,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "CodeRequest": {
         "additionalProperties": false,
         "properties": {
@@ -563,6 +579,43 @@
           "$ref": "#/components/schemas/Command"
         },
         "type": "array"
+      },
+      "CompactionConfig": {
+        "description": "Automatic compaction policy. Also accepted on provider models and agent profiles; agent fields override model fields, then global fields.",
+        "properties": {
+          "auto": {
+            "default": true,
+            "description": "Enable proactive compaction and bounded context-overflow recovery. Manual compaction remains available when false.",
+            "type": "boolean"
+          },
+          "buffer": {
+            "default": 20000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "keep": {
+            "properties": {
+              "tokens": {
+                "default": 8000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "prune": {
+            "default": true,
+            "description": "Prune older tool output independently of automatic summarization.",
+            "type": "boolean"
+          },
+          "threshold-percent": {
+            "default": 65,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "type": "object"
       },
       "CompactionPart": {
         "additionalProperties": true,
@@ -656,6 +709,11 @@
       "ConfigDocument": {
         "additionalProperties": true,
         "description": "Canonical agent configuration; extension/plugin keys are preserved.",
+        "properties": {
+          "compaction": {
+            "$ref": "#/components/schemas/CompactionConfig"
+          }
+        },
         "type": "object"
       },
       "ConfigProvidersResult": {
@@ -837,6 +895,9 @@
           },
           {
             "$ref": "#/components/schemas/EventSessionPromptAdmitted"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionMoved"
           },
           {
             "$ref": "#/components/schemas/EventSessionStatus"
@@ -2250,12 +2311,20 @@
           "data": {
             "additionalProperties": false,
             "properties": {
+              "info": {
+                "$ref": "#/components/schemas/Session"
+              },
               "sessionID": {
+                "type": "string"
+              },
+              "tenantID": {
                 "type": "string"
               }
             },
             "required": [
-              "sessionID"
+              "sessionID",
+              "info",
+              "tenantID"
             ],
             "type": "object"
           },
@@ -2390,6 +2459,71 @@
           },
           "type": {
             "const": "session.execution.updated"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "type",
+          "source",
+          "schemaVersion",
+          "timestamp",
+          "data"
+        ],
+        "type": "object"
+      },
+      "EventSessionMoved": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "additionalProperties": false,
+            "properties": {
+              "directory": {
+                "type": "string"
+              },
+              "info": {
+                "$ref": "#/components/schemas/Session"
+              },
+              "previousDirectory": {
+                "type": "string"
+              },
+              "sessionID": {
+                "type": "string"
+              },
+              "switchWorkspace": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "sessionID",
+              "info",
+              "previousDirectory",
+              "directory",
+              "switchWorkspace"
+            ],
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/EventSubject"
+          },
+          "timestamp": {
+            "type": "integer"
+          },
+          "type": {
+            "const": "session.moved"
           }
         },
         "required": [
@@ -5578,6 +5712,45 @@
         ],
         "type": "object"
       },
+      "SessionControl": {
+        "additionalProperties": false,
+        "properties": {
+          "actorType": {
+            "enum": [
+              "human",
+              "service-account"
+            ],
+            "type": "string"
+          },
+          "controllerSubject": {
+            "type": "string"
+          },
+          "leaseExpiresAt": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "updated": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sessionId",
+          "controllerSubject",
+          "actorType",
+          "leaseExpiresAt",
+          "revision",
+          "updated"
+        ],
+        "type": "object"
+      },
       "SessionGoal": {
         "additionalProperties": false,
         "properties": {
@@ -5640,6 +5813,36 @@
         "required": [
           "items",
           "cursor"
+        ],
+        "type": "object"
+      },
+      "SessionParticipant": {
+        "additionalProperties": false,
+        "properties": {
+          "actorType": {
+            "enum": [
+              "human",
+              "service-account"
+            ],
+            "type": "string"
+          },
+          "firstSeenAt": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lastSeenAt": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "actorType",
+          "firstSeenAt",
+          "lastSeenAt"
         ],
         "type": "object"
       },
@@ -17772,6 +17975,52 @@
         ]
       }
     },
+    "/v2/session-catalog/events": {
+      "get": {
+        "operationId": "v2.sessionCatalog.subscribe",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "directory",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Neoism-Directory",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Root-session catalogue event stream"
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "501": { "$ref": "#/components/responses/NotImplemented" }
+        },
+        "tags": ["events"]
+      }
+    },
     "/v2/sessions": {
       "get": {
         "operationId": "v2.sessions.list",
@@ -18629,6 +18878,119 @@
         ]
       }
     },
+    "/v2/sessions/{session_id}/control": {
+      "delete": {
+        "operationId": "v2.sessions.control.release",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "in": "query",
+            "name": "expectedRevision",
+            "required": false,
+            "schema": { "minimum": 0, "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": { "application/json": { "schema": { "type": "boolean" } } },
+            "description": "Session control released"
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "501": { "$ref": "#/components/responses/NotImplemented" }
+        },
+        "tags": ["sessions"]
+      },
+      "get": {
+        "operationId": "v2.sessions.control.get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    { "$ref": "#/components/schemas/SessionControl" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            },
+            "description": "Current session control lease"
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "501": { "$ref": "#/components/responses/NotImplemented" }
+        },
+        "tags": ["sessions"]
+      },
+      "post": {
+        "operationId": "v2.sessions.control.claim",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ClaimSessionControlRequest" }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionControl" }
+              }
+            },
+            "description": "Claimed session control lease"
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "501": { "$ref": "#/components/responses/NotImplemented" }
+        },
+        "tags": ["sessions"]
+      }
+    },
     "/v2/sessions/{session_id}/diff": {
       "get": {
         "operationId": "v2.sessions.diff",
@@ -19300,6 +19662,43 @@
         "tags": [
           "sessions"
         ]
+      }
+    },
+    "/v2/sessions/{session_id}/participants": {
+      "get": {
+        "operationId": "v2.sessions.participants.list",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": { "$ref": "#/components/schemas/SessionParticipant" },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Session participants"
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "501": { "$ref": "#/components/responses/NotImplemented" }
+        },
+        "tags": ["sessions"]
       }
     },
     "/v2/sessions/{session_id}/pin": {

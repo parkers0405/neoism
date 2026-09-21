@@ -1683,7 +1683,9 @@ mod tests {
     fn triple_backticks_pair_the_fence_and_keep_the_language_cursor() {
         let mut pane = MarkdownPane::from_source("fence.md".into(), "");
         pane.mode = MarkdownMode::Insert;
-        for _ in 0..3 { pane.insert_text("`"); }
+        for _ in 0..3 {
+            pane.insert_text("`");
+        }
         assert_eq!(pane.lines, vec!["```", "```"]);
         assert_eq!((pane.cursor_line, pane.cursor_col), (0, 3));
         pane.insert_text("rust");

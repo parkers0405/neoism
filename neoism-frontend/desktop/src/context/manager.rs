@@ -77,6 +77,10 @@ pub struct ContextManager<T: EventListener> {
     /// different server; badges belong to workspace tabs and must survive
     /// that server switch just like adopted-workspace identity does.
     workspace_icon_kinds: HashMap<String, String>,
+    /// Joined-workspace terminals created while their owning peer connection
+    /// is being restored. This is workspace state, not active-daemon cache:
+    /// server switches replace `daemon` before the peer is attached.
+    pending_joined_terminal_routes: Vec<(usize, Option<String>, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

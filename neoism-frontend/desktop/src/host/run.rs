@@ -1435,8 +1435,12 @@ impl Renderer {
             sugarloaf.set_late_overlay_mode(true);
             self.file_browser.render(
                 sugarloaf,
-                [0.0, 0.0, window_size.width as f32 / scale_factor,
-                 window_size.height as f32 / scale_factor],
+                [
+                    0.0,
+                    0.0,
+                    window_size.width as f32 / scale_factor,
+                    window_size.height as f32 / scale_factor,
+                ],
                 &active_theme,
             );
             sugarloaf.set_late_overlay_mode(false);

@@ -238,6 +238,7 @@ fn claims(
         artifact_retention_days: None,
         requests_per_minute: None,
         max_in_flight: None,
+        resolved: None,
     }
 }
 
@@ -290,7 +291,15 @@ async fn hosting_preserves_local_family_and_reuses_namespace_without_stealing() 
     local.tenant_id = "local".into();
     let loaded = store.list_sessions().await.unwrap();
     let page = store
-        .list_root_sessions_page(root.to_str(), None, None, None, None, Some(50))
+        .list_root_sessions_page(
+            crate::state::TenantQueryScope::LocalAll,
+            root.to_str(),
+            None,
+            None,
+            None,
+            None,
+            Some(50),
+        )
         .await
         .unwrap();
     assert!(page

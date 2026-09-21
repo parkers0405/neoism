@@ -51,8 +51,12 @@ fn prompt(
         }
         // cmd's line editor can redraw the old prompt tail (B) while echoing
         // a wrapped command. Only a new D can complete this submission.
-        let complete_prompt = output.windows(D.len()).rposition(|bytes| bytes == D)
-            .is_some_and(|start| contains(&output[start..], A) && contains(&output[start..], B));
+        let complete_prompt = output
+            .windows(D.len())
+            .rposition(|bytes| bytes == D)
+            .is_some_and(|start| {
+                contains(&output[start..], A) && contains(&output[start..], B)
+            });
         if complete_prompt {
             assert!(
                 contains(&output, D),

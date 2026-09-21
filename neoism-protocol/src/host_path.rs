@@ -126,8 +126,17 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_host_wire_segments_match_recursive_native_tree_joins() {
-        for root in [r"C:\Work", "C:/Work", "C:/", r"\\Server\Share\Work", r"\\?\C:\Work"] {
-            let native = std::path::PathBuf::from(root).join("src").join("子 dir").join("main.rs");
+        for root in [
+            r"C:\Work",
+            "C:/Work",
+            "C:/",
+            r"\\Server\Share\Work",
+            r"\\?\C:\Work",
+        ] {
+            let native = std::path::PathBuf::from(root)
+                .join("src")
+                .join("子 dir")
+                .join("main.rs");
             let wire = HostPath::new(root).join("src/子 dir/main.rs");
             assert_eq!(native.to_str().unwrap(), wire.as_str());
         }

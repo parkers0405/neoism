@@ -122,23 +122,29 @@ pub(crate) async fn permission_reply(
             }
             "always" => {
                 let grants = permission_grants(&pending.request, true);
-                let project_id = state
+                let (tenant_id, project_id) = state
                     .inner
                     .store
                     .get_session(&pending.request.session_id)
                     .await?
-                    .map(|session| session.project_id)
-                    .unwrap_or_else(|| "global".to_string());
+                    .map(|session| {
+                        (
+                            crate::caller::session_tenant(&session).to_string(),
+                            session.project_id,
+                        )
+                    })
+                    .unwrap_or_else(|| ("local".to_string(), "global".to_string()));
+                let approval_scope = (tenant_id.clone(), project_id.clone());
                 let approvals = {
                     let mut approval_map = state.inner.permission_approvals.write().await;
-                    let approvals = approval_map.entry(project_id.clone()).or_default();
+                    let approvals = approval_map.entry(approval_scope).or_default();
                     approvals.extend(grants.clone());
                     approvals.clone()
                 };
                 state
                     .inner
                     .store
-                    .save_permission_approvals(&project_id, &approvals)
+                    .save_permission_approvals(&tenant_id, &project_id, &approvals)
                     .await?;
                 sends.push((pending.sender, Ok(grants)));
                 let same_session = {

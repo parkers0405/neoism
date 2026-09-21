@@ -162,7 +162,8 @@ pub async fn handle(
         }
         ConfigClientMessage::ApplyMashupPack { id } => {
             let requested = id.clone();
-            let result = tokio::task::spawn_blocking(move || apply_mashup_pack(requested)).await;
+            let result =
+                tokio::task::spawn_blocking(move || apply_mashup_pack(requested)).await;
             match result {
                 Ok(Ok(())) => vec![ConfigServerMessage::MashupPackApplied {
                     id,
@@ -183,14 +184,25 @@ fn collect_mashup_entries() -> Vec<MashupPackSummary> {
         .into_iter()
         .map(|pack| {
             let mut slots = Vec::new();
-            if pack.theme.is_some() { slots.push("theme".to_string()); }
-            if pack.shader_overlay.is_some() { slots.push("shader".to_string()); }
-            if pack.wallpaper.is_some() { slots.push("wallpaper".to_string()); }
-            if !pack.filters.is_empty() { slots.push("filters".to_string()); }
-            if pack.font_family.is_some() { slots.push("font".to_string()); }
-            let theme_spec = pack.theme.as_deref().and_then(|name| {
-                theme_specs.iter().find(|spec| spec.name == name)
-            });
+            if pack.theme.is_some() {
+                slots.push("theme".to_string());
+            }
+            if pack.shader_overlay.is_some() {
+                slots.push("shader".to_string());
+            }
+            if pack.wallpaper.is_some() {
+                slots.push("wallpaper".to_string());
+            }
+            if !pack.filters.is_empty() {
+                slots.push("filters".to_string());
+            }
+            if pack.font_family.is_some() {
+                slots.push("font".to_string());
+            }
+            let theme_spec = pack
+                .theme
+                .as_deref()
+                .and_then(|name| theme_specs.iter().find(|spec| spec.name == name));
             MashupPackSummary {
                 id: pack.id,
                 name: pack.name,
@@ -594,8 +606,14 @@ mod tests {
             required_permission(&ConfigClientMessage::GetConfigDocument),
             Permission::ReadFiles
         );
-        assert_eq!(required_permission(&ConfigClientMessage::ListMashupPacks), Permission::ReadFiles);
-        assert_eq!(required_permission(&ConfigClientMessage::ApplyMashupPack { id: None }), Permission::WriteFiles);
+        assert_eq!(
+            required_permission(&ConfigClientMessage::ListMashupPacks),
+            Permission::ReadFiles
+        );
+        assert_eq!(
+            required_permission(&ConfigClientMessage::ApplyMashupPack { id: None }),
+            Permission::WriteFiles
+        );
         assert_eq!(
             required_permission(&ConfigClientMessage::GetConfigSchema),
             Permission::ReadFiles

@@ -1326,23 +1326,24 @@ fn looks_like_inline_table_line(raw: &str) -> bool {
 /// list guides) and the marker slot (checkbox/bullet/number gutter) the body
 /// text sits after. Shared by layout, measurement, and drawing so the guides,
 /// markers, and wrapped text all line up.
-fn list_marker_metrics(marker: &MarkdownListMarker, cell_w: f32) -> (usize, f32, f32) {
+fn list_marker_metrics(marker: &MarkdownListMarker, space_w: f32) -> (usize, f32, f32) {
     let depth = list_depth_from_indent(marker.indent);
     let indent_px = list_indent_px(depth);
     let marker_slot = match &marker.kind {
         MarkdownListMarkerKind::Task { .. } => 28.0,
         MarkdownListMarkerKind::Bullet(_) => 22.0,
         MarkdownListMarkerKind::Number { width, .. } => {
-            cell_w * (*width as f32 + 1.0) + 12.0
+            space_w * (*width as f32 + 1.0) + 12.0
         }
         MarkdownListMarkerKind::Letter { label, .. } => {
-            cell_w * (label.chars().count() as f32 + 1.0) + 12.0
+            space_w * (label.chars().count() as f32 + 1.0) + 12.0
         }
     };
     (depth, indent_px, marker_slot)
 }
 
 fn line_marker_layout<'a>(
+    sugarloaf: &mut Sugarloaf,
     raw: &'a str,
     width: f32,
     opts: &DrawOpts,
@@ -1351,8 +1352,8 @@ fn line_marker_layout<'a>(
         return (0.0, raw, 0);
     };
     let marker_len = marker.marker_len.min(raw.len());
-    let cell_w = cursor_cell_width(opts).max(1.0);
-    let (_, indent_px, marker_slot) = list_marker_metrics(&marker, cell_w);
+    let space_w = sugarloaf.text_mut().measure(" ", opts).max(1.0);
+    let (_, indent_px, marker_slot) = list_marker_metrics(&marker, space_w);
     let offset = (indent_px + marker_slot).min((width - 24.0).max(0.0));
     let body = raw.get(marker_len..).unwrap_or_default();
     (offset, body, marker_len)

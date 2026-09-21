@@ -87,6 +87,7 @@ async fn global_skills_are_root_bound_not_project_bound() {
         artifact_retention_days: None,
         requests_per_minute: None,
         max_in_flight: None,
+        resolved: None,
     };
     let body = json!({"scope":"installation", "name":"Global tool", "description":"Global instructions", "content":"Instructions", "compatibility":false, "metadata":{"zero":0}, "files":{"references/help.md":"Complete support file"}});
     let uri = "/skills/tool?scope=installation";

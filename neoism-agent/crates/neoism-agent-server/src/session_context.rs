@@ -463,6 +463,7 @@ async fn generate_model_compaction_summary(
     // request fits under the budget; the anchor summary preserves continuity.
     let budget = crate::session_prompt::compaction_request_token_budget(
         state,
+        crate::caller::session_tenant(info),
         &info.directory,
         &model,
     )
@@ -488,7 +489,10 @@ async fn generate_model_compaction_summary(
     }
     let mut provider_messages = message_model::compaction_provider_messages(&head);
     provider_messages.push(ProviderMessage::text(ProviderRole::User, prompt));
-    let Ok(runtime) = state.workspace_runtime(&info.directory).await else {
+    let Ok(runtime) = state
+        .workspace_runtime_for_tenant(crate::caller::session_tenant(info), &info.directory)
+        .await
+    else {
         return None;
     };
     let snapshot = runtime.snapshot();

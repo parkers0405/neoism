@@ -97,7 +97,9 @@ pub fn create_code_context<T: neoism_backend::event::EventListener>(
     let route_id = ROUTE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
     let mut context =
         create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
-    context.code = Some(neoism_ui::editor::code::CodePane::load_with_source(path, source));
+    context.code = Some(neoism_ui::editor::code::CodePane::load_with_source(
+        path, source,
+    ));
     context
 }
 
@@ -487,20 +489,28 @@ mod shell_integration_tests {
     #[test]
     fn generated_bash_zsh_and_fish_wrap_neoism_cd() {
         for (route, program) in ["bash", "zsh", "fish"].into_iter().enumerate() {
-            let shell = Shell { program: program.into(), args: Vec::new() };
+            let shell = Shell {
+                program: program.into(),
+                args: Vec::new(),
+            };
             let wrapped = neoism_block_shell_for_spawn(&shell, 99 + route).unwrap();
             let rc_path = match program {
                 "bash" => std::path::PathBuf::from(&wrapped.args[1]),
                 "zsh" => std::path::PathBuf::from(
                     wrapped.args[0].strip_prefix("ZDOTDIR=").unwrap(),
-                ).join(".zshrc"),
+                )
+                .join(".zshrc"),
                 "fish" => std::path::PathBuf::from(
                     wrapped.args[1].strip_prefix("source ").unwrap(),
                 ),
                 _ => unreachable!(),
             };
             let rc = std::fs::read_to_string(rc_path).unwrap();
-            assert!(rc.contains(if program == "fish" { "function neoism" } else { "neoism()" }));
+            assert!(rc.contains(if program == "fish" {
+                "function neoism"
+            } else {
+                "neoism()"
+            }));
             assert!(rc.contains("builtin cd"));
             assert!(rc.contains("command neoism"));
             assert!(rc.contains("033]7;file://") || rc.contains("\\e]7;file://"));

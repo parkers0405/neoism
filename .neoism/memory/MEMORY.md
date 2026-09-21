@@ -284,3 +284,10 @@
 - [Joined workspace Alt-switch closes PTY — FIXED](bug_joined_workspace_alt_switch_closes.md) - Fixed peer PTY session IDs being reattached/routed to HOME on Alt+number workspace switches; endpoint ownership defenses and regression tests.
 - [Host terminal no-output spinning timer — fixed](bug_host_terminal_global_pty_fanout.md) - Host daemon global PTY fan-out could drop a command's output and OSC D under unrelated noisy sessions; fixed with per-socket PTY subscriptions and corrected false SSH badge.
 - [Optional TypeSafe computer MCP mode](feature_typesafe_computer_mode.md) - Dependent exact-action risk request fixed Jev Choice independence bug; actionable DOM candidates hardened.
+- [Parked daemon queue starves PTY/LSP — FIXED](bug_parked_daemon_queue_starvation.md) - Root cause and fix for host/guest terminal+LSP starvation: parked daemon queues retained PTY output forever; filter parked inbound and remove global pre-auth backlog.
+- [bug_notes_sidebar_agent_md_refresh](bug_notes_sidebar_agent_md_refresh.md) - Alt+N missed agent-created .md notes until refresh; folders showed. FileTree debounce coalesced later creates inside the 200ms window.
+- [feature_notes_vault_link_event_mcp](feature_notes_vault_link_event_mcp.md) - Host vault-link broadcast + Notes MCP vaults/link
+- [Agent cloud control plane](project_agent_cloud_control_plane.md) - Cloud multi-tenant Agent control plane implementation status, security decisions, and remaining work
+- [feature_notes_gitbook_sidebar](feature_notes_gitbook_sidebar.md) - Implemented GitBook Alt+N takeover, notebook page breadcrumbs, search, and heading outline.
+- [Compaction estimator vs provider usage](bug_compaction_estimator_vs_provider_usage.md) - Premature auto-compaction at UI 53% caused by whole-request estimate overriding authoritative provider usage; fixed with OpenCode v2 usage-first trigger.
+- [Rust agent sidebar missing new chats — FIXED](bug_rust_agent_sidebar_missing_new_chats.md) - Rust GUI sidebar catalogue stayed Ready and active-family SSE excluded new root chats; fixed with authorized directory-scoped catalogue SSE and in-place deltas

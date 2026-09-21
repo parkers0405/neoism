@@ -5,6 +5,7 @@ pub(super) fn tools() -> Vec<Value> {
     vec![
         tool("notebookList", "List documentation notebooks in the linked Notes vault (folder-backed Markdown collections, not Jupyter notebooks)", json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false})),
         tool("notebookRead", "Read a documentation notebook manifest and its ordered page references. Does not read page contents; use notes.read for vault-relative Markdown files.", json!({"type":"object","properties":{"path":{"type":"string","description":"Notebook folder or notebook.json, relative to the linked vault"}},"required":["path"],"additionalProperties":false})),
+        tool("notebookCreate", "Create a GitBook-style documentation notebook folder in the linked Notes vault. Creates notebook.json and an ordinary overview.md page; path is relative to the vault.", json!({"type":"object","properties":{"path":{"type":"string","description":"New notebook folder relative to the linked vault"},"title":{"type":"string","description":"Optional display title; defaults to the folder name"}},"required":["path"],"additionalProperties":false})),
         tool("notebookAddPage", "Add a page to a documentation notebook. Supply title (and optional content) to create a new Markdown file, OR existing_path to reference an existing file anywhere within the linked vault without copying it.", json!({"type":"object","properties":{"notebook":{"type":"string","description":"Notebook folder or notebook.json, relative to the linked vault"},"title":{"type":"string"},"content":{"type":"string"},"existing_path":{"type":"string","description":"Existing Markdown file relative to the vault, not the notebook"}},"required":["notebook"],"oneOf":[{"required":["title"],"not":{"required":["existing_path"]}},{"required":["existing_path"],"not":{"anyOf":[{"required":["title"]},{"required":["content"]}]}}],"additionalProperties":false})),
         tool("notebookMovePage", "Move a notebook page up or down in reading order without moving or modifying its Markdown file", json!({"type":"object","properties":{"notebook":{"type":"string"},"page":{"type":"integer","minimum":1,"description":"One-based page position from notebookRead"},"direction":{"type":"string","enum":["up","down"]}},"required":["notebook","page","direction"],"additionalProperties":false})),
     ]
@@ -26,6 +27,25 @@ pub(super) fn call(notes: &Notes, name: &str, args: Value) -> Result<String, Str
         }
         "notebookRead" => {
             describe(notes, &load(notes, &required_string(&args, "path")?)?)
+        }
+        "notebookCreate" => {
+            let path = checked_path(notes, &required_string(&args, "path")?)?;
+            if path.exists() {
+                return Err("notebook path already exists".into());
+            }
+            let title = args
+                .get("title")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .map(str::to_string)
+                        .ok_or("title must be a non-empty string")
+                })
+                .transpose()?;
+            let binding = NotebookBinding::create(&path, title.as_deref())?;
+            describe(notes, &binding)
         }
         "notebookAddPage" => {
             let existing = args
@@ -128,10 +148,14 @@ fn checked_path(notes: &Notes, raw: &str) -> Result<PathBuf, String> {
                 .into(),
         );
     }
-    Ok(real.join(
-        path.strip_prefix(ancestor)
-            .map_err(|error| error.to_string())?,
-    ))
+    let suffix = path
+        .strip_prefix(ancestor)
+        .map_err(|error| error.to_string())?;
+    if suffix.as_os_str().is_empty() {
+        Ok(real)
+    } else {
+        Ok(real.join(suffix))
+    }
 }
 
 fn relative_path(notes: &Notes, path: &Path) -> Result<String, String> {
@@ -212,9 +236,13 @@ mod tests {
         let notes = Notes {
             root: root.path().to_path_buf(),
         };
-        let binding = NotebookBinding::create(&root.path().join("Code"), Some("Code Notes")).unwrap();
-        let created = describe(&notes, &binding).unwrap();
-        assert!(!tools().iter().any(|tool| tool["name"] == "notebookCreate"));
+        assert!(tools().iter().any(|tool| tool["name"] == "notebookCreate"));
+        let created = call(
+            &notes,
+            "notebookCreate",
+            json!({"path":"Code","title":"Code Notes"}),
+        )
+        .unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&created).unwrap()["path"],
             "Code/notebook.json"

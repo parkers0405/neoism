@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 
 pub(crate) const HOST_LOCAL_ACCESS_KEY: &str = "neoismHostLocalAccess";
 pub(crate) const TENANT_EXTRA_KEY: &str = "neoismTenantId";
+pub(crate) const EXECUTION_POLICY_EXTRA_KEY: &str = "neoismExecutionPolicy";
+pub(crate) const CREATED_BY_EXTRA_KEY: &str = "neoismCreatedBy";
+pub(crate) const QUOTAS_EXTRA_KEY: &str = "neoismTenantQuotas";
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallerClaims {
@@ -21,6 +24,7 @@ pub(crate) struct CallerClaims {
     pub(crate) artifact_retention_days: Option<u64>,
     pub(crate) requests_per_minute: Option<u32>,
     pub(crate) max_in_flight: Option<u32>,
+    pub(crate) resolved: Option<neoism_agent_service_api::ResolvedTenant>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -56,6 +60,7 @@ pub(crate) struct CallerPolicy {
     hosted_config: Result<Option<Arc<HostedAuthConfig>>, String>,
     local_token: Option<String>,
     usage: Arc<UsageTracker>,
+    tenant_resolver: Option<Arc<dyn neoism_agent_service_api::TenantResolver>>,
 }
 
 /// The canonical daemon-token file shared by every Neoism process on this
@@ -102,6 +107,12 @@ fn canonical_daemon_token_from_disk() -> Option<String> {
 
 impl CallerPolicy {
     pub(crate) fn from_env() -> Self {
+        Self::from_env_with_resolver(None)
+    }
+
+    pub(crate) fn from_env_with_resolver(
+        tenant_resolver: Option<Arc<dyn neoism_agent_service_api::TenantResolver>>,
+    ) -> Self {
         let hosted_config = std::env::var("NEOISM_AGENT_AUTH_CONFIG")
             .ok()
             .map(|raw| {
@@ -117,7 +128,46 @@ impl CallerPolicy {
             hosted_config,
             local_token: std::env::var("NEOISM_AGENT_TOKEN").ok(),
             usage: Arc::new(UsageTracker::default()),
+            tenant_resolver,
         }
+    }
+
+    pub(crate) async fn authenticate_request(
+        &self,
+        supplied: Option<&str>,
+    ) -> Result<Option<CallerClaims>, String> {
+        if supplied.is_some_and(|token| {
+            token.starts_with(neoism_agent_service_api::daemon_credential::PREFIX)
+        }) {
+            return self.authenticate(supplied);
+        }
+        if let (Some(resolver), Some(token)) = (&self.tenant_resolver, supplied) {
+            if let Some(resolved) = resolver
+                .resolve(token)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                if resolved.tenant_id.trim().is_empty() || resolved.subject.trim().is_empty() {
+                    return Err("tenant resolver returned an empty tenant or subject".into());
+                }
+                let quotas = resolved.quotas.clone();
+                return Ok(Some(CallerClaims {
+                    subject: resolved.subject.clone(),
+                    workspace_id: resolved.workspace_id.clone(),
+                    tenant_id: resolved.tenant_id.clone(),
+                    directory_prefixes: resolved.directory_prefixes.clone(),
+                    hosted: true,
+                    max_sessions: quotas.max_sessions,
+                    max_artifacts: quotas.max_artifacts,
+                    max_artifact_bytes: quotas.max_artifact_bytes,
+                    artifact_retention_days: quotas.artifact_retention_days,
+                    requests_per_minute: quotas.requests_per_minute,
+                    max_in_flight: quotas.max_in_flight,
+                    resolved: Some(resolved),
+                }));
+            }
+        }
+        self.authenticate(supplied)
     }
 
     pub(crate) fn authenticate(
@@ -176,6 +226,7 @@ impl CallerPolicy {
                 artifact_retention_days: None,
                 requests_per_minute: None,
                 max_in_flight: None,
+                resolved: None,
             }));
         }
         if let Some(config) = self.hosted_config.as_ref().map_err(Clone::clone)?.as_ref()
@@ -203,6 +254,7 @@ impl CallerPolicy {
                 artifact_retention_days: token.artifact_retention_days,
                 requests_per_minute: token.requests_per_minute,
                 max_in_flight: token.max_in_flight,
+                resolved: None,
             }));
         }
         let Some(expected) = self.local_token.as_deref() else {
@@ -222,6 +274,7 @@ impl CallerPolicy {
                 artifact_retention_days: None,
                 requests_per_minute: None,
                 max_in_flight: None,
+                resolved: None,
             }))
             .ok_or_else(|| "invalid bearer token".to_string())
     }
@@ -232,6 +285,67 @@ impl CallerPolicy {
     ) -> Result<RequestGuard, &'static str> {
         self.usage.begin_request(claims)
     }
+}
+
+impl CallerClaims {
+    pub(crate) fn execution_policy(&self) -> neoism_agent_service_api::ExecutionPolicy {
+        self.resolved
+            .as_ref()
+            .map(|resolved| resolved.execution.clone())
+            .unwrap_or_else(|| {
+                if self.hosted && self.workspace_id.is_none() {
+                    neoism_agent_service_api::ExecutionPolicy::Disabled
+                } else {
+                    neoism_agent_service_api::ExecutionPolicy::NativeLocal
+                }
+            })
+    }
+
+    pub(crate) fn actor_type_label(&self) -> &'static str {
+        match self.resolved.as_ref().map(|resolved| &resolved.actor_type) {
+            Some(neoism_agent_service_api::ActorType::ServiceAccount) => "service-account",
+            _ => "human",
+        }
+    }
+
+    pub(crate) fn quotas(&self) -> neoism_agent_service_api::TenantQuotas {
+        neoism_agent_service_api::TenantQuotas {
+            max_sessions: self.max_sessions,
+            max_artifacts: self.max_artifacts,
+            max_artifact_bytes: self.max_artifact_bytes,
+            artifact_retention_days: self.artifact_retention_days,
+            requests_per_minute: self.requests_per_minute,
+            max_in_flight: self.max_in_flight,
+        }
+    }
+}
+
+pub(crate) fn session_execution_policy(
+    session: &neoism_agent_core::SessionInfo,
+) -> neoism_agent_service_api::ExecutionPolicy {
+    session
+        .extra
+        .get(EXECUTION_POLICY_EXTRA_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_else(|| {
+            let tenant = session_tenant(session);
+            if tenant == "local"
+                || session.workspace_id.as_ref().is_some_and(|workspace_id| {
+                    tenant == format!("workspace:{workspace_id}")
+                })
+            {
+                neoism_agent_service_api::ExecutionPolicy::NativeLocal
+            } else {
+                neoism_agent_service_api::ExecutionPolicy::Disabled
+            }
+        })
+}
+
+pub(crate) fn native_execution_allowed(
+    policy: &neoism_agent_service_api::ExecutionPolicy,
+) -> bool {
+    matches!(policy, neoism_agent_service_api::ExecutionPolicy::NativeLocal)
 }
 
 struct Usage {
@@ -434,6 +548,7 @@ mod tests {
             hosted_config: Ok(None),
             local_token: None,
             usage: Arc::new(UsageTracker::default()),
+            tenant_resolver: None,
         };
         std::env::set_var("XDG_RUNTIME_DIR", &runtime);
         let verified = policy.authenticate(Some(&credential));
@@ -470,8 +585,6 @@ mod tests {
         .unwrap()
     }
 
-    use super::*;
-
     fn claims(tenant_id: String) -> CallerClaims {
         CallerClaims {
             subject: format!("subject:{tenant_id}"),
@@ -485,7 +598,64 @@ mod tests {
             artifact_retention_days: None,
             requests_per_minute: None,
             max_in_flight: None,
+            resolved: None,
         }
+    }
+
+    struct TestTenantResolver;
+
+    impl neoism_agent_service_api::TenantResolver for TestTenantResolver {
+        fn backend_name(&self) -> &'static str {
+            "test"
+        }
+
+        fn resolve<'a>(
+            &'a self,
+            bearer: &'a str,
+        ) -> neoism_agent_service_api::ServiceFuture<
+            'a,
+            Result<Option<neoism_agent_service_api::ResolvedTenant>, neoism_agent_service_api::ServiceError>,
+        > {
+            Box::pin(async move {
+                Ok((bearer == "synapse-token").then(|| {
+                    neoism_agent_service_api::ResolvedTenant {
+                        tenant_id: "company-a".into(),
+                        subject: "user-a".into(),
+                        actor_type: neoism_agent_service_api::ActorType::Human,
+                        scopes: vec!["sessions.prompt".into()],
+                        directory_prefixes: vec!["/workspace/company-a".into()],
+                        workspace_id: None,
+                        quotas: neoism_agent_service_api::TenantQuotas {
+                            max_sessions: Some(12),
+                            ..Default::default()
+                        },
+                        execution: neoism_agent_service_api::ExecutionPolicy::Sandboxed {
+                            provider: "vercel".into(),
+                            idle_ttl_seconds: 300,
+                            max_lifetime_seconds: 3600,
+                        },
+                    }
+                }))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_tenant_resolver_supplies_actor_quota_and_execution_policy() {
+        let policy = CallerPolicy::from_env_with_resolver(Some(Arc::new(TestTenantResolver)));
+        let claims = policy
+            .authenticate_request(Some("synapse-token"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claims.tenant_id, "company-a");
+        assert_eq!(claims.subject, "user-a");
+        assert_eq!(claims.max_sessions, Some(12));
+        assert!(matches!(
+            claims.execution_policy(),
+            neoism_agent_service_api::ExecutionPolicy::Sandboxed { ref provider, .. }
+                if provider == "vercel"
+        ));
     }
 
     #[test]

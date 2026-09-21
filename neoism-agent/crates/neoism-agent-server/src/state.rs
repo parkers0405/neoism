@@ -34,8 +34,9 @@ pub(crate) struct InnerState {
     pub(crate) management_lock: Mutex<()>,
     pub(crate) utilities: Arc<crate::utility_runtime::UtilityRuntime>,
     pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
-    pub(crate) workspace_plugin_generations:
-        Mutex<HashMap<PathBuf, (u64, BTreeSet<String>)>>,
+    pub(crate) workspace_plugin_generations: Mutex<
+        HashMap<crate::workspace_runtime::TenantRuntimeKey, (u64, BTreeSet<String>)>,
+    >,
     pub(crate) statuses: RwLock<HashMap<String, SessionStatus>>,
     pub(crate) session_coordinator: crate::session_coordinator::SessionCoordinator,
     pub(crate) pending_session_moves:
@@ -54,7 +55,8 @@ pub(crate) struct InnerState {
     execution_lease_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) permissions: RwLock<HashMap<String, PermissionRequestInfo>>,
     pub(crate) permission_waiters: RwLock<HashMap<String, PermissionPending>>,
-    pub(crate) permission_approvals: RwLock<HashMap<String, Vec<PermissionRule>>>,
+    pub(crate) permission_approvals:
+        RwLock<HashMap<(String, String), Vec<PermissionRule>>>,
     pub(crate) questions: RwLock<HashMap<String, QuestionRequestInfo>>,
     pub(crate) question_waiters: RwLock<HashMap<String, QuestionPending>>,
     pub(crate) todos: RwLock<HashMap<String, Vec<TodoInfo>>>,
@@ -148,6 +150,12 @@ mod hosting;
 #[derive(Clone)]
 pub(crate) struct SessionStore {
     db: Db,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TenantQueryScope<'a> {
+    Tenant(&'a str),
+    LocalAll,
 }
 
 /// Turso database access shared by the store. Reads may run concurrently,
@@ -345,6 +353,12 @@ fn event_statements(
     session_id: Option<String>,
     owner_id: Option<&str>,
 ) -> anyhow::Result<Vec<(String, Vec<SqlValue>)>> {
+    let tenant_session_id = session_id.clone();
+    let explicit_tenant_id = event
+        .properties
+        .get("tenantID")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     Ok(vec![
         (
             r#"
@@ -361,10 +375,12 @@ fn event_statements(
             ],
         ),
         (
-            "INSERT INTO events (seq, event_id, kind, aggregate_id, aggregate_seq, owner_id, session_id, event_json, created) VALUES (?, ?, ?, ?, (SELECT seq FROM event_sequences WHERE aggregate_id = ?), ?, ?, ?, ?)".to_string(),
+            "INSERT INTO events (seq, event_id, tenant_id, kind, aggregate_id, aggregate_seq, owner_id, session_id, event_json, created) VALUES (?, ?, COALESCE(?, (SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, (SELECT seq FROM event_sequences WHERE aggregate_id = ?), ?, ?, ?, ?)".to_string(),
             vec![
                 event.sequence.map(|seq| int(seq as i64)).unwrap_or(SqlValue::Null),
                 text(event.id.to_string()),
+                opt_text(explicit_tenant_id),
+                opt_text(tenant_session_id),
                 text(event.kind.clone()),
                 text(aggregate_id),
                 text(aggregate_id),
@@ -375,6 +391,15 @@ fn event_statements(
             ],
         ),
     ])
+}
+
+fn stored_event_session_id(event: &EventPayload) -> Option<&str> {
+    event
+        .properties
+        .get("sessionID")
+        .or_else(|| event.properties.get("sessionId"))
+        .or_else(|| event.properties.get("session_id"))
+        .and_then(Value::as_str)
 }
 
 /// Turso returns `Busy` immediately, so concurrent writers need a bounded retry.
@@ -512,6 +537,67 @@ pub(crate) struct PersistedEvent {
 }
 
 impl AppState {
+    pub(crate) async fn put_artifact_blob(
+        &self,
+        tenant_id: &str,
+        artifact_id: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        if let Some(store) = self.inner.services.artifacts.as_ref() {
+            anyhow::ensure!(
+                tenant_id == "local" || store.shared(),
+                "hosted artifacts require a shared artifact store"
+            );
+            store.put(tenant_id, artifact_id, bytes).await?;
+            return Ok(());
+        }
+        anyhow::ensure!(
+            tenant_id == "local" || self.inner.services.tenant_resolver.is_none(),
+            "hosted artifacts require an injected shared artifact store"
+        );
+        tokio::fs::write(self.inner.artifact_root.join(artifact_id), bytes).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn get_artifact_blob(
+        &self,
+        tenant_id: &str,
+        artifact_id: &str,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        if let Some(store) = self.inner.services.artifacts.as_ref() {
+            return Ok(store.get(tenant_id, artifact_id).await?);
+        }
+        anyhow::ensure!(
+            tenant_id == "local" || self.inner.services.tenant_resolver.is_none(),
+            "hosted artifacts require an injected shared artifact store"
+        );
+        match tokio::fs::read(self.inner.artifact_root.join(artifact_id)).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub(crate) async fn delete_artifact_blob(
+        &self,
+        tenant_id: &str,
+        artifact_id: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(store) = self.inner.services.artifacts.as_ref() {
+            store.delete(tenant_id, artifact_id).await?;
+            return Ok(());
+        }
+        anyhow::ensure!(
+            tenant_id == "local" || self.inner.services.tenant_resolver.is_none(),
+            "hosted artifacts require an injected shared artifact store"
+        );
+        match tokio::fs::remove_file(self.inner.artifact_root.join(artifact_id)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn execution_lease_running(&self) -> bool {
         self.inner
@@ -639,7 +725,9 @@ impl AppState {
             Arc::new(neoism_agent_builtins::ProviderPlatform::new(
                 services.provider_credentials.clone(),
             ));
-        let caller_policy = crate::caller::CallerPolicy::from_env();
+        let caller_policy = crate::caller::CallerPolicy::from_env_with_resolver(
+            services.tenant_resolver.clone(),
+        );
         let utilities = crate::utility_runtime::UtilityRuntime::new(&services);
         let recovery_started = crate::perf::now();
         let phase_started = crate::perf::now();
@@ -801,10 +889,16 @@ impl AppState {
             while let Some(event) = event_reader.recv().await {
                 match durable_store.append_event(&event).await {
                     Ok(()) => {
+                        let tenant_id = durable_store
+                            .tenant_for_event(&event)
+                            .await
+                            .unwrap_or_else(|_| "local".to_string());
                         for runtime in
                             durable_state.inner.workspace_runtimes.runtimes().await
                         {
-                            crate::plugin::publish_event(&runtime.snapshot(), &event);
+                            if runtime.tenant_id == tenant_id {
+                                crate::plugin::publish_event(&runtime.snapshot(), &event);
+                            }
                         }
                     }
                     Err(error) => {
@@ -935,21 +1029,40 @@ impl AppState {
         self.try_workspace_runtime(directory).await
     }
 
+    pub(crate) async fn workspace_runtime_for_tenant(
+        &self,
+        tenant_id: &str,
+        directory: &str,
+    ) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
+        self.try_workspace_runtime_for_tenant(tenant_id, directory).await
+    }
+
     pub(crate) async fn try_workspace_runtime(
         &self,
+        directory: &str,
+    ) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
+        self.try_workspace_runtime_for_tenant("local", directory).await
+    }
+
+    pub(crate) async fn try_workspace_runtime_for_tenant(
+        &self,
+        tenant_id: &str,
         directory: &str,
     ) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
         let (runtime, evicted) = self
             .inner
             .workspace_runtimes
-            .acquire(directory, self)
+            .acquire_for_tenant(tenant_id, directory, self)
             .await?;
         for stale in evicted {
             self.inner
                 .workspace_plugin_generations
                 .lock()
                 .await
-                .remove(&stale.root);
+                .remove(&crate::workspace_runtime::TenantRuntimeKey {
+                    tenant_id: stale.tenant_id.clone(),
+                    root: stale.root.clone(),
+                });
         }
         self.reconcile_semantic_service().await;
         let snapshot = runtime.published_snapshot();
@@ -971,13 +1084,17 @@ impl AppState {
         if runtime.published_snapshot().generation != snapshot.generation {
             return;
         }
+        let key = crate::workspace_runtime::TenantRuntimeKey {
+            tenant_id: runtime.tenant_id.clone(),
+            root: runtime.root.clone(),
+        };
         if generations
-            .get(&runtime.root)
+            .get(&key)
             .is_some_and(|(generation, _)| *generation == snapshot.generation)
         {
             return;
         }
-        generations.insert(runtime.root.clone(), (snapshot.generation, enabled.clone()));
+        generations.insert(key, (snapshot.generation, enabled.clone()));
         let workflow = enabled.contains(neoism_agent_builtins::plugin::workflows::ID);
         snapshot.set_workflow_enabled(workflow, self.clone());
         if workflow {
@@ -1148,8 +1265,11 @@ impl AppState {
         let mut event = event;
         self.allocate_event_sequence(&mut event);
         self.inner.store.append_event(&event).await?;
+        let tenant_id = self.inner.store.tenant_for_event(&event).await?;
         for runtime in self.inner.workspace_runtimes.runtimes().await {
-            crate::plugin::publish_event(&runtime.snapshot(), &event);
+            if runtime.tenant_id == tenant_id {
+                crate::plugin::publish_event(&runtime.snapshot(), &event);
+            }
         }
         let _ = self.inner.events.send(event);
         Ok(())
@@ -1159,8 +1279,16 @@ impl AppState {
         let state = self.clone();
         let hook_event = event.clone();
         tokio::spawn(async move {
+            let tenant_id = state
+                .inner
+                .store
+                .tenant_for_event(&hook_event)
+                .await
+                .unwrap_or_else(|_| "local".to_string());
             for runtime in state.inner.workspace_runtimes.runtimes().await {
-                crate::plugin::publish_event(&runtime.snapshot(), &hook_event);
+                if runtime.tenant_id == tenant_id {
+                    crate::plugin::publish_event(&runtime.snapshot(), &hook_event);
+                }
             }
         });
         let mut event = event;
@@ -1179,9 +1307,10 @@ impl AppState {
             .commit_projection_event(
                 vec![
                     (
-                        "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?"
+                        "UPDATE sessions SET tenant_id = ?, info_json = ?, updated = ? WHERE id = ?"
                             .to_string(),
                         vec![
+                            text(crate::caller::session_tenant(info)),
                             text(serde_json::to_string(info)?),
                             int(store_i64(info.time.updated)),
                             text(info.id.to_string()),
@@ -1209,9 +1338,10 @@ impl AppState {
             .store
             .commit_projection_event(
                 vec![(
-                    "INSERT INTO messages (id, session_id, message_json, created, position) VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE session_id = ?))".to_string(),
+                    "INSERT INTO messages (id, tenant_id, session_id, message_json, created, position) VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE session_id = ?))".to_string(),
                     vec![
                         text(message_id(message)),
+                        text(session_id),
                         text(session_id),
                         text(serde_json::to_string(message)?),
                         int(store_i64(message_created(message))),
@@ -1312,9 +1442,10 @@ impl AppState {
             .store
             .commit_projection_event(
                 vec![(
-                    "INSERT INTO prompt_queue (id, session_id, position, request_json, created, delivery) VALUES (?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM prompt_queue WHERE session_id = ?), ?, ?, ?)".to_string(),
+                    "INSERT INTO prompt_queue (id, tenant_id, session_id, position, request_json, created, delivery) VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM prompt_queue WHERE session_id = ?), ?, ?, ?)".to_string(),
                     vec![
                         text(Id::ascending(IdKind::Event).to_string()),
+                        text(session_id),
                         text(session_id),
                         text(session_id),
                         text(serde_json::to_string(request)?),
@@ -1412,6 +1543,7 @@ impl SessionStore {
                 r#"
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
                 info_json TEXT NOT NULL,
                 updated INTEGER NOT NULL
             )
@@ -1677,6 +1809,7 @@ impl SessionStore {
                 r#"
             CREATE TABLE IF NOT EXISTS interaction_requests (
                 id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
                 kind TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
@@ -1688,6 +1821,42 @@ impl SessionStore {
             "#,
                 Vec::new(),
             )
+            .await?;
+        self.db
+            .execute_transaction(vec![
+                (
+                    r#"CREATE TABLE IF NOT EXISTS session_control (
+                        session_id TEXT PRIMARY KEY,
+                        tenant_id TEXT NOT NULL,
+                        controller_subject TEXT NOT NULL,
+                        actor_type TEXT NOT NULL,
+                        lease_expires_at INTEGER NOT NULL,
+                        revision INTEGER NOT NULL,
+                        updated INTEGER NOT NULL,
+                        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    )"#
+                    .to_string(),
+                    Vec::new(),
+                ),
+                (
+                    r#"CREATE TABLE IF NOT EXISTS session_participants (
+                        session_id TEXT NOT NULL,
+                        tenant_id TEXT NOT NULL,
+                        subject TEXT NOT NULL,
+                        actor_type TEXT NOT NULL,
+                        first_seen_at INTEGER NOT NULL,
+                        last_seen_at INTEGER NOT NULL,
+                        PRIMARY KEY (session_id, subject),
+                        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    )"#
+                    .to_string(),
+                    Vec::new(),
+                ),
+                (
+                    "CREATE INDEX IF NOT EXISTS idx_session_participants_tenant_session ON session_participants(tenant_id, session_id)".to_string(),
+                    Vec::new(),
+                ),
+            ])
             .await?;
         self.db
             .execute(
@@ -1705,6 +1874,25 @@ impl SessionStore {
             "#,
                 Vec::new(),
             )
+            .await?;
+        self.db
+            .execute_transaction(vec![
+                (
+                    r#"CREATE TABLE IF NOT EXISTS workspace_revisions (
+                        tenant_id TEXT NOT NULL,
+                        root_id TEXT NOT NULL,
+                        revision TEXT NOT NULL,
+                        updated INTEGER NOT NULL,
+                        PRIMARY KEY (tenant_id, root_id)
+                    )"#
+                    .to_string(),
+                    Vec::new(),
+                ),
+                (
+                    "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (7, 'workspace-revisions', ?)".to_string(),
+                    vec![int(store_i64(crate::now_millis()))],
+                ),
+            ])
             .await?;
         self.db
             .execute(
@@ -1802,6 +1990,7 @@ impl SessionStore {
                 r#"
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
                 session_id TEXT NOT NULL,
                 message_json TEXT NOT NULL,
                 created INTEGER NOT NULL,
@@ -1816,19 +2005,44 @@ impl SessionStore {
             .execute(
                 r#"
             CREATE TABLE IF NOT EXISTS permission_approvals (
-                project_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
+                project_id TEXT NOT NULL,
                 rules_json TEXT NOT NULL,
-                updated INTEGER NOT NULL
+                updated INTEGER NOT NULL,
+                PRIMARY KEY (tenant_id, project_id)
             )
             "#,
                 Vec::new(),
             )
             .await?;
+        if !self.table_has_column("permission_approvals", "tenant_id").await? {
+            self.db
+                .execute_transaction(vec![
+                    (
+                        "ALTER TABLE permission_approvals RENAME TO permission_approvals_legacy"
+                            .to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "CREATE TABLE permission_approvals (tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, rules_json TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (tenant_id, project_id))"
+                            .to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "INSERT INTO permission_approvals (tenant_id, project_id, rules_json, updated) SELECT 'local', project_id, rules_json, updated FROM permission_approvals_legacy"
+                            .to_string(),
+                        Vec::new(),
+                    ),
+                    ("DROP TABLE permission_approvals_legacy".to_string(), Vec::new()),
+                ])
+                .await?;
+        }
         self.db
             .execute(
                 r#"
             CREATE TABLE IF NOT EXISTS prompt_queue (
                 id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
                 session_id TEXT NOT NULL,
                 position INTEGER NOT NULL,
                 request_json TEXT NOT NULL,
@@ -1845,6 +2059,7 @@ impl SessionStore {
             CREATE TABLE IF NOT EXISTS events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
                 kind TEXT NOT NULL,
                 aggregate_id TEXT,
                 aggregate_seq INTEGER,
@@ -1857,6 +2072,66 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        if !self.schema_migration_applied(6).await? {
+            for (table, column) in [
+                ("sessions", "tenant_id"),
+                ("messages", "tenant_id"),
+                ("prompt_queue", "tenant_id"),
+                ("interaction_requests", "tenant_id"),
+                ("events", "tenant_id"),
+            ] {
+                if !self.table_has_column(table, column).await? {
+                    self.db
+                        .execute(
+                            &format!(
+                                "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT 'local'"
+                            ),
+                            Vec::new(),
+                        )
+                        .await?;
+                }
+            }
+            self.db
+                .execute_transaction(vec![
+                    (
+                        "UPDATE sessions SET tenant_id = COALESCE((SELECT tenant_id FROM session_list_index WHERE session_id = sessions.id), 'local')".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "UPDATE messages SET tenant_id = COALESCE((SELECT tenant_id FROM sessions WHERE id = messages.session_id), 'local')".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "UPDATE prompt_queue SET tenant_id = COALESCE((SELECT tenant_id FROM sessions WHERE id = prompt_queue.session_id), 'local')".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "UPDATE interaction_requests SET tenant_id = COALESCE((SELECT tenant_id FROM sessions WHERE id = interaction_requests.session_id), 'local')".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "UPDATE events SET tenant_id = COALESCE((SELECT tenant_id FROM sessions WHERE id = events.session_id), 'local')".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "CREATE INDEX IF NOT EXISTS idx_sessions_tenant_updated ON sessions(tenant_id, updated DESC)".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "CREATE INDEX IF NOT EXISTS idx_messages_tenant_session_position ON messages(tenant_id, session_id, position)".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "CREATE INDEX IF NOT EXISTS idx_events_tenant_seq ON events(tenant_id, seq)".to_string(),
+                        Vec::new(),
+                    ),
+                    (
+                        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (6, 'core-tenant-ownership', ?)".to_string(),
+                        vec![int(store_i64(crate::now_millis()))],
+                    ),
+                ])
+                .await?;
+        }
         self.db
             .execute(
                 r#"
@@ -1990,6 +2265,7 @@ impl SessionStore {
                 r#"
             CREATE TABLE IF NOT EXISTS message_embeddings (
                 message_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
                 session_id TEXT NOT NULL,
                 created INTEGER NOT NULL,
                 model TEXT NOT NULL,
@@ -1999,9 +2275,26 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        if !self
+            .table_has_column("message_embeddings", "tenant_id")
+            .await?
+        {
+            self.db
+                .execute(
+                    "ALTER TABLE message_embeddings ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'local'",
+                    Vec::new(),
+                )
+                .await?;
+            self.db
+                .execute(
+                    "UPDATE message_embeddings SET tenant_id = COALESCE((SELECT tenant_id FROM sessions WHERE id = message_embeddings.session_id), 'local')",
+                    Vec::new(),
+                )
+                .await?;
+        }
         self.db
             .execute(
-                "CREATE INDEX IF NOT EXISTS idx_message_embeddings_session ON message_embeddings(session_id)",
+                "CREATE INDEX IF NOT EXISTS idx_message_embeddings_tenant_session ON message_embeddings(tenant_id, session_id)",
                 Vec::new(),
             )
             .await?;
@@ -2062,14 +2355,15 @@ impl SessionStore {
         self.db
             .execute(
                 r#"
-            INSERT INTO message_embeddings (message_id, session_id, created, model, embedding)
-            VALUES (?, ?, ?, ?, vector32(?))
+            INSERT INTO message_embeddings (message_id, tenant_id, session_id, created, model, embedding)
+            VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, ?, vector32(?))
             ON CONFLICT(message_id) DO UPDATE SET
                 model = excluded.model,
                 embedding = excluded.embedding
             "#,
                 vec![
                     text(message_id),
+                    text(session_id),
                     text(session_id),
                     int(created),
                     text(model),
@@ -2091,11 +2385,16 @@ impl SessionStore {
         self.db
             .execute(
                 r#"
-            INSERT INTO message_embeddings (message_id, session_id, created, model, embedding)
-            VALUES (?, ?, ?, 'none', NULL)
+            INSERT INTO message_embeddings (message_id, tenant_id, session_id, created, model, embedding)
+            VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, 'none', NULL)
             ON CONFLICT(message_id) DO UPDATE SET model = 'none', embedding = NULL
             "#,
-                vec![text(message_id), text(session_id), int(created)],
+                vec![
+                    text(message_id),
+                    text(session_id),
+                    text(session_id),
+                    int(created),
+                ],
             )
             .await?;
         Ok(())
@@ -2105,32 +2404,50 @@ impl SessionStore {
     /// Exact scan — fine at chat-history scale.
     pub(crate) async fn semantic_search(
         &self,
+        scope: TenantQueryScope<'_>,
         query_vector_json: &str,
         model: &str,
         session_id: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<SemanticSearchHit>> {
         let limit = limit.clamp(1, 50) as i64;
-        let (sql, params) = match session_id {
-            Some(session) => (
+        let (sql, params) = match (scope, session_id) {
+            (TenantQueryScope::Tenant(tenant), Some(session)) => (
                 "SELECT e.session_id, e.message_id, m.message_json, \
-                 vector_distance_cos(e.embedding, vector32(?)) AS distance \
-                 FROM message_embeddings e JOIN messages m ON m.id = e.message_id \
-                 WHERE e.model = ? AND e.embedding IS NOT NULL AND e.session_id = ? \
-                 ORDER BY distance ASC LIMIT ?",
+                  vector_distance_cos(e.embedding, vector32(?)) AS distance \
+                   FROM message_embeddings e JOIN messages m ON m.id = e.message_id \
+                   WHERE e.model = ? AND e.embedding IS NOT NULL AND e.session_id = ? AND e.tenant_id = ? \
+                  ORDER BY distance ASC LIMIT ?",
                 vec![
                     text(query_vector_json),
                     text(model),
                     text(session),
+                    text(tenant),
                     int(limit),
                 ],
             ),
-            None => (
+            (TenantQueryScope::Tenant(tenant), None) => (
                 "SELECT e.session_id, e.message_id, m.message_json, \
-                 vector_distance_cos(e.embedding, vector32(?)) AS distance \
-                 FROM message_embeddings e JOIN messages m ON m.id = e.message_id \
-                 WHERE e.model = ? AND e.embedding IS NOT NULL \
-                 ORDER BY distance ASC LIMIT ?",
+                  vector_distance_cos(e.embedding, vector32(?)) AS distance \
+                   FROM message_embeddings e JOIN messages m ON m.id = e.message_id \
+                   WHERE e.model = ? AND e.embedding IS NOT NULL AND e.tenant_id = ? \
+                  ORDER BY distance ASC LIMIT ?",
+                vec![text(query_vector_json), text(model), text(tenant), int(limit)],
+            ),
+            (TenantQueryScope::LocalAll, Some(session)) => (
+                "SELECT e.session_id, e.message_id, m.message_json, \
+                  vector_distance_cos(e.embedding, vector32(?)) AS distance \
+                  FROM message_embeddings e JOIN messages m ON m.id = e.message_id \
+                  WHERE e.model = ? AND e.embedding IS NOT NULL AND e.session_id = ? \
+                  ORDER BY distance ASC LIMIT ?",
+                vec![text(query_vector_json), text(model), text(session), int(limit)],
+            ),
+            (TenantQueryScope::LocalAll, None) => (
+                "SELECT e.session_id, e.message_id, m.message_json, \
+                  vector_distance_cos(e.embedding, vector32(?)) AS distance \
+                  FROM message_embeddings e JOIN messages m ON m.id = e.message_id \
+                  WHERE e.model = ? AND e.embedding IS NOT NULL \
+                  ORDER BY distance ASC LIMIT ?",
                 vec![text(query_vector_json), text(model), int(limit)],
             ),
         };
@@ -2282,11 +2599,12 @@ impl SessionStore {
     /// case-insensitively against each flattened message document.
     pub(crate) async fn search_messages(
         &self,
+        scope: TenantQueryScope<'_>,
         query: &str,
         session_id: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<MessageSearchHit>> {
-        self.search_messages_like(query, session_id, limit.clamp(1, 50))
+        self.search_messages_like(scope, query, session_id, limit.clamp(1, 50))
             .await
     }
 
@@ -2296,6 +2614,7 @@ impl SessionStore {
     /// recall on huge histories for predictable work.
     async fn search_messages_like(
         &self,
+        scope: TenantQueryScope<'_>,
         query: &str,
         session_id: Option<&str>,
         limit: usize,
@@ -2306,14 +2625,26 @@ impl SessionStore {
             return Ok(Vec::new());
         };
         let pattern = format!("%{}%", escape_like(seed));
-        let (sql, params) = match session_id {
-            Some(session) => (
+        let (sql, params) = match (scope, session_id) {
+            (TenantQueryScope::Tenant(tenant), Some(session)) => (
+                "SELECT m.session_id, m.id, m.message_json FROM messages m \
+                 WHERE m.message_json LIKE ? ESCAPE '\\' AND m.session_id = ? AND m.tenant_id = ? \
+                 ORDER BY created DESC LIMIT ?",
+                vec![text(pattern), text(session), text(tenant), int(SCAN_CAP)],
+            ),
+            (TenantQueryScope::Tenant(tenant), None) => (
+                "SELECT m.session_id, m.id, m.message_json FROM messages m \
+                 WHERE m.message_json LIKE ? ESCAPE '\\' AND m.tenant_id = ? \
+                 ORDER BY created DESC LIMIT ?",
+                vec![text(pattern), text(tenant), int(SCAN_CAP)],
+            ),
+            (TenantQueryScope::LocalAll, Some(session)) => (
                 "SELECT session_id, id, message_json FROM messages \
                  WHERE message_json LIKE ? ESCAPE '\\' AND session_id = ? \
                  ORDER BY created DESC LIMIT ?",
                 vec![text(pattern), text(session), int(SCAN_CAP)],
             ),
-            None => (
+            (TenantQueryScope::LocalAll, None) => (
                 "SELECT session_id, id, message_json FROM messages \
                  WHERE message_json LIKE ? ESCAPE '\\' \
                  ORDER BY created DESC LIMIT ?",
@@ -2408,6 +2739,7 @@ impl SessionStore {
 
     pub(crate) async fn list_root_sessions_page(
         &self,
+        scope: TenantQueryScope<'_>,
         directory: Option<&str>,
         path: Option<&str>,
         start: Option<u64>,
@@ -2418,6 +2750,10 @@ impl SessionStore {
         let limit = limit.unwrap_or(50).clamp(1, 200);
         let mut clauses = vec!["i.parent_id IS NULL".to_string()];
         let mut params = Vec::new();
+        if let TenantQueryScope::Tenant(tenant) = scope {
+            clauses.push("i.tenant_id = ?".to_string());
+            params.push(text(tenant));
+        }
         if let Some(directory) = directory {
             clauses.push("(i.directory = ? OR i.session_id IN (SELECT h.session_id FROM hosted_chat_sessions h JOIN hosted_chat_directories d ON d.workspace_id = h.workspace_id WHERE d.directory = ?))".to_string());
             params.push(text(directory));
@@ -2513,10 +2849,11 @@ impl SessionStore {
         self.db
             .execute_transaction(vec![
                 (
-                    "INSERT INTO sessions (id, info_json, updated) VALUES (?, ?, ?)"
+                    "INSERT INTO sessions (id, tenant_id, info_json, updated) VALUES (?, ?, ?, ?)"
                         .to_string(),
                     vec![
                         text(info.id.to_string()),
+                        text(crate::caller::session_tenant(info)),
                         text(serde_json::to_string(info)?),
                         int(store_i64(info.time.updated)),
                     ],
@@ -2838,9 +3175,10 @@ impl SessionStore {
         self.db
             .execute_transaction(vec![
                 (
-                    "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?"
+                    "UPDATE sessions SET tenant_id = ?, info_json = ?, updated = ? WHERE id = ?"
                         .to_string(),
                     vec![
+                        text(crate::caller::session_tenant(info)),
                         text(serde_json::to_string(info)?),
                         int(store_i64(info.time.updated)),
                         text(info.id.to_string()),
@@ -2895,6 +3233,28 @@ impl SessionStore {
             .fetch_optional(
                 "SELECT info_json FROM sessions WHERE id = ?",
                 vec![text(session_id)],
+            )
+            .await?;
+        let mut session: Option<SessionInfo> = row
+            .map(|row| decode_json(row.get_str("info_json")?))
+            .transpose()?;
+        if let Some(session) = session.as_mut() {
+            self.hydrate_host_associations(std::slice::from_mut(session))
+                .await?;
+        }
+        Ok(session)
+    }
+
+    pub(crate) async fn get_session_for_tenant(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Option<SessionInfo>> {
+        let row = self
+            .db
+            .fetch_optional(
+                "SELECT info_json FROM sessions WHERE tenant_id = ? AND id = ?",
+                vec![text(tenant_id), text(session_id)],
             )
             .await?;
         let mut session: Option<SessionInfo> = row
@@ -3763,9 +4123,10 @@ impl SessionStore {
             .await?;
         self.db
             .execute(
-                "INSERT INTO messages (id, session_id, message_json, created, position) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO messages (id, tenant_id, session_id, message_json, created, position) VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, ?, ?)",
                 vec![
                     text(message_id(message)),
+                    text(session_id),
                     text(session_id),
                     text(serde_json::to_string(message)?),
                     int(store_i64(message_created(message))),
@@ -3867,18 +4228,18 @@ impl SessionStore {
 
     pub(crate) async fn list_permission_approvals(
         &self,
-    ) -> anyhow::Result<HashMap<String, Vec<PermissionRule>>> {
+    ) -> anyhow::Result<HashMap<(String, String), Vec<PermissionRule>>> {
         let rows = self
             .db
             .fetch_all(
-                "SELECT project_id, rules_json FROM permission_approvals",
+                "SELECT tenant_id, project_id, rules_json FROM permission_approvals",
                 Vec::new(),
             )
             .await?;
         rows.into_iter()
             .map(|row| {
                 Ok((
-                    row.get_str("project_id")?,
+                    (row.get_str("tenant_id")?, row.get_str("project_id")?),
                     decode_json(row.get_str("rules_json")?)?,
                 ))
             })
@@ -3887,19 +4248,21 @@ impl SessionStore {
 
     pub(crate) async fn save_permission_approvals(
         &self,
+        tenant_id: &str,
         project_id: &str,
         rules: &[PermissionRule],
     ) -> anyhow::Result<()> {
         self.db
             .execute(
                 r#"
-            INSERT INTO permission_approvals (project_id, rules_json, updated)
-            VALUES (?, ?, ?)
-            ON CONFLICT(project_id) DO UPDATE SET
+            INSERT INTO permission_approvals (tenant_id, project_id, rules_json, updated)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(tenant_id, project_id) DO UPDATE SET
                 rules_json = excluded.rules_json,
                 updated = excluded.updated
             "#,
                 vec![
+                    text(tenant_id),
                     text(project_id),
                     text(serde_json::to_string(rules)?),
                     int(store_i64(crate::now_millis())),
@@ -3927,9 +4290,10 @@ impl SessionStore {
             .await?;
         self.db
             .execute(
-                "INSERT INTO prompt_queue (id, session_id, position, request_json, created, delivery) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO prompt_queue (id, tenant_id, session_id, position, request_json, created, delivery) VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, ?, ?, ?)",
                 vec![
                     text(Id::ascending(IdKind::Event).to_string()),
+                    text(session_id),
                     text(session_id),
                     int(position),
                     text(serde_json::to_string(request)?),
@@ -4084,9 +4448,10 @@ impl SessionStore {
             .await?;
         self.db
             .execute(
-                "INSERT INTO prompt_queue (id, session_id, position, request_json, created, delivery) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO prompt_queue (id, tenant_id, session_id, position, request_json, created, delivery) VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, ?, ?, ?)",
                 vec![
                     text(Id::ascending(IdKind::Event).to_string()),
+                    text(session_id),
                     text(session_id),
                     int(position),
                     text(serde_json::to_string(request)?),
@@ -4143,17 +4508,32 @@ impl SessionStore {
         self.append_event_with_owner(event, None).await
     }
 
+    pub(crate) async fn tenant_for_event(&self, event: &EventPayload) -> anyhow::Result<String> {
+        if let Some(tenant_id) = event.properties.get("tenantID").and_then(Value::as_str) {
+            return Ok(tenant_id.to_string());
+        }
+        let Some(session_id) = stored_event_session_id(event) else {
+            return Ok("local".to_string());
+        };
+        Ok(self
+            .db
+            .fetch_optional(
+                "SELECT tenant_id FROM sessions WHERE id = ?",
+                vec![text(session_id)],
+            )
+            .await?
+            .map(|row| row.get_str("tenant_id"))
+            .transpose()?
+            .unwrap_or_else(|| "local".to_string()))
+    }
+
     pub(crate) async fn append_event_with_owner(
         &self,
         event: &EventPayload,
         owner_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let aggregate_id = crate::sync::aggregate_id(event);
-        let session_id = event
-            .properties
-            .get("sessionID")
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
+        let session_id = stored_event_session_id(event).map(ToString::to_string);
         self.db
             .execute_transaction(event_statements(
                 event,
@@ -4167,26 +4547,31 @@ impl SessionStore {
 
     pub(crate) async fn list_events_after(
         &self,
+        scope: TenantQueryScope<'_>,
         since: i64,
         limit: usize,
         session_id: Option<&str>,
     ) -> anyhow::Result<Vec<PersistedEvent>> {
         let limit = limit.clamp(1, 5_000) as i64;
-        let rows = if let Some(session_id) = session_id {
-            self.db
-                .fetch_all(
+        let (sql, params) = match (scope, session_id) {
+            (TenantQueryScope::Tenant(tenant), Some(session)) => (
+                "SELECT seq, created, event_json FROM events WHERE tenant_id = ? AND seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
+                vec![text(tenant), int(since), text(session), int(limit)],
+            ),
+            (TenantQueryScope::Tenant(tenant), None) => (
+                "SELECT seq, created, event_json FROM events WHERE tenant_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
+                vec![text(tenant), int(since), int(limit)],
+            ),
+            (TenantQueryScope::LocalAll, Some(session)) => (
                     "SELECT seq, created, event_json FROM events WHERE seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
-                    vec![int(since), text(session_id), int(limit)],
-                )
-                .await?
-        } else {
-            self.db
-                .fetch_all(
+                vec![int(since), text(session), int(limit)],
+            ),
+            (TenantQueryScope::LocalAll, None) => (
                     "SELECT seq, created, event_json FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?",
                     vec![int(since), int(limit)],
-                )
-                .await?
+            ),
         };
+        let rows = self.db.fetch_all(sql, params).await?;
         rows.into_iter()
             .map(|row| {
                 Ok(PersistedEvent {
@@ -4291,15 +4676,63 @@ impl SessionStore {
         Ok(())
     }
 
-    pub(crate) async fn get_artifact(
+    pub(crate) async fn workspace_revision(
         &self,
-        id: &str,
-    ) -> anyhow::Result<Option<ArtifactInfo>> {
+        tenant_id: &str,
+        root_id: &str,
+    ) -> anyhow::Result<Option<String>> {
         self.db
             .fetch_optional(
+                "SELECT revision FROM workspace_revisions WHERE tenant_id = ? AND root_id = ?",
+                vec![text(tenant_id), text(root_id)],
+            )
+            .await?
+            .map(|row| row.get_str("revision"))
+            .transpose()
+    }
+
+    pub(crate) async fn commit_workspace_revision(
+        &self,
+        tenant_id: &str,
+        root_id: &str,
+        expected: Option<&str>,
+        revision: &str,
+    ) -> anyhow::Result<bool> {
+        let changed = if let Some(expected) = expected {
+            self.db
+                .execute(
+                    "UPDATE workspace_revisions SET revision = ?, updated = ? WHERE tenant_id = ? AND root_id = ? AND revision = ?",
+                    vec![text(revision), int(store_i64(crate::now_millis())), text(tenant_id), text(root_id), text(expected)],
+                )
+                .await?
+        } else {
+            self.db
+                .execute(
+                    "INSERT OR IGNORE INTO workspace_revisions (tenant_id, root_id, revision, updated) VALUES (?, ?, ?, ?)",
+                    vec![text(tenant_id), text(root_id), text(revision), int(store_i64(crate::now_millis()))],
+                )
+                .await?
+        };
+        Ok(changed > 0)
+    }
+
+    pub(crate) async fn get_artifact(
+        &self,
+        scope: TenantQueryScope<'_>,
+        id: &str,
+    ) -> anyhow::Result<Option<ArtifactInfo>> {
+        let (sql, params) = match scope {
+            TenantQueryScope::Tenant(tenant_id) => (
+                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE tenant_id = ? AND id = ?",
+                vec![text(tenant_id), text(id)],
+            ),
+            TenantQueryScope::LocalAll => (
                 "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE id = ?",
                 vec![text(id)],
-            )
+            ),
+        };
+        self.db
+            .fetch_optional(sql, params)
             .await?
             .map(artifact_from_row)
             .transpose()
@@ -4346,9 +4779,20 @@ impl SessionStore {
         row.map(|row| row.get_str("tenant_id")).transpose()
     }
 
-    pub(crate) async fn delete_artifact(&self, id: &str) -> anyhow::Result<()> {
+    pub(crate) async fn delete_artifact(
+        &self,
+        scope: TenantQueryScope<'_>,
+        id: &str,
+    ) -> anyhow::Result<()> {
+        let (sql, params) = match scope {
+            TenantQueryScope::Tenant(tenant_id) => (
+                "DELETE FROM artifacts WHERE tenant_id = ? AND id = ?",
+                vec![text(tenant_id), text(id)],
+            ),
+            TenantQueryScope::LocalAll => ("DELETE FROM artifacts WHERE id = ?", vec![text(id)]),
+        };
         self.db
-            .execute("DELETE FROM artifacts WHERE id = ?", vec![text(id)])
+            .execute(sql, params)
             .await?;
         Ok(())
     }
@@ -4435,12 +4879,13 @@ impl SessionStore {
         self.db
             .execute(
                 r#"
-                INSERT INTO interaction_requests (id, kind, session_id, payload_json, state, response_json, created, updated)
-                VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)
+                INSERT INTO interaction_requests (id, tenant_id, kind, session_id, payload_json, state, response_json, created, updated)
+                VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, ?, 'pending', NULL, ?, ?)
                 ON CONFLICT(id) DO NOTHING
                 "#,
                 vec![
                     text(id),
+                    text(session_id),
                     text(kind),
                     text(session_id),
                     text(payload_json),
@@ -4450,6 +4895,156 @@ impl SessionStore {
             )
             .await?;
         Ok(())
+    }
+
+    pub(crate) async fn session_control(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Option<crate::session_control::SessionControl>> {
+        self.db
+            .fetch_optional(
+                "SELECT controller_subject, actor_type, lease_expires_at, revision, updated FROM session_control WHERE tenant_id = ? AND session_id = ?",
+                vec![text(tenant_id), text(session_id)],
+            )
+            .await?
+            .map(|row| {
+                Ok(crate::session_control::SessionControl {
+                    session_id: session_id.to_string(),
+                    controller_subject: row.get_str("controller_subject")?,
+                    actor_type: row.get_str("actor_type")?,
+                    lease_expires_at: row.get_i64("lease_expires_at")?.max(0) as u64,
+                    revision: row.get_i64("revision")?.max(0) as u64,
+                    updated: row.get_i64("updated")?.max(0) as u64,
+                })
+            })
+            .transpose()
+    }
+
+    pub(crate) async fn claim_session_control(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        subject: &str,
+        actor_type: &str,
+        lease_expires_at: u64,
+        expected_revision: Option<u64>,
+    ) -> anyhow::Result<Option<crate::session_control::SessionControl>> {
+        let now = crate::now_millis();
+        let affected = match expected_revision {
+            Some(0) => self
+                .db
+                .execute(
+                    "INSERT OR IGNORE INTO session_control (session_id, tenant_id, controller_subject, actor_type, lease_expires_at, revision, updated) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                    vec![text(session_id), text(tenant_id), text(subject), text(actor_type), int(store_i64(lease_expires_at)), int(store_i64(now))],
+                )
+                .await?,
+            Some(revision) => self
+                .db
+                .execute(
+                    "UPDATE session_control SET controller_subject = ?, actor_type = ?, lease_expires_at = ?, revision = revision + 1, updated = ? WHERE tenant_id = ? AND session_id = ? AND revision = ?",
+                    vec![text(subject), text(actor_type), int(store_i64(lease_expires_at)), int(store_i64(now)), text(tenant_id), text(session_id), int(store_i64(revision))],
+                )
+                .await?,
+            None => self
+                .db
+                .execute(
+                    r#"INSERT INTO session_control
+                        (session_id, tenant_id, controller_subject, actor_type, lease_expires_at, revision, updated)
+                        VALUES (?, ?, ?, ?, ?, 1, ?)
+                        ON CONFLICT(session_id) DO UPDATE SET
+                            tenant_id = excluded.tenant_id,
+                            controller_subject = excluded.controller_subject,
+                            actor_type = excluded.actor_type,
+                            lease_expires_at = excluded.lease_expires_at,
+                            revision = session_control.revision + 1,
+                            updated = excluded.updated
+                        WHERE session_control.tenant_id = excluded.tenant_id"#,
+                    vec![text(session_id), text(tenant_id), text(subject), text(actor_type), int(store_i64(lease_expires_at)), int(store_i64(now))],
+                )
+                .await?,
+        };
+        if affected == 0 {
+            return Ok(None);
+        }
+        self.record_session_participant(tenant_id, session_id, subject, actor_type)
+            .await?;
+        self.session_control(tenant_id, session_id).await
+    }
+
+    pub(crate) async fn release_session_control(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        subject: &str,
+        expected_revision: Option<u64>,
+    ) -> anyhow::Result<bool> {
+        let (sql, params) = if let Some(revision) = expected_revision {
+            (
+                "DELETE FROM session_control WHERE tenant_id = ? AND session_id = ? AND controller_subject = ? AND revision = ?",
+                vec![text(tenant_id), text(session_id), text(subject), int(store_i64(revision))],
+            )
+        } else {
+            (
+                "DELETE FROM session_control WHERE tenant_id = ? AND session_id = ? AND controller_subject = ?",
+                vec![text(tenant_id), text(session_id), text(subject)],
+            )
+        };
+        Ok(self.db.execute(sql, params).await? > 0)
+    }
+
+    pub(crate) async fn record_session_participant(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        subject: &str,
+        actor_type: &str,
+    ) -> anyhow::Result<()> {
+        let now = store_i64(crate::now_millis());
+        self.db
+            .execute(
+                r#"INSERT INTO session_participants
+                    (session_id, tenant_id, subject, actor_type, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id, subject) DO UPDATE SET
+                        actor_type = excluded.actor_type,
+                        last_seen_at = excluded.last_seen_at
+                    WHERE session_participants.tenant_id = excluded.tenant_id"#,
+                vec![
+                    text(session_id),
+                    text(tenant_id),
+                    text(subject),
+                    text(actor_type),
+                    int(now),
+                    int(now),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn list_session_participants(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<crate::session_control::SessionParticipant>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT subject, actor_type, first_seen_at, last_seen_at FROM session_participants WHERE tenant_id = ? AND session_id = ? ORDER BY first_seen_at ASC, subject ASC",
+                vec![text(tenant_id), text(session_id)],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(crate::session_control::SessionParticipant {
+                    subject: row.get_str("subject")?,
+                    actor_type: row.get_str("actor_type")?,
+                    first_seen_at: row.get_i64("first_seen_at")?.max(0) as u64,
+                    last_seen_at: row.get_i64("last_seen_at")?.max(0) as u64,
+                })
+            })
+            .collect()
     }
 
     pub(crate) async fn resolve_interaction(

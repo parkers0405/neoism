@@ -440,9 +440,15 @@ impl ChromeBridge {
             );
             return true;
         }
-        if let Some((start, column, count)) = self.chrome.markdown_pane_mut().and_then(|pane| pane.table_column_menu_at(x, y)) {
+        if let Some((start, column, count)) = self
+            .chrome
+            .markdown_pane_mut()
+            .and_then(|pane| pane.table_column_menu_at(x, y))
+        {
             let (w, h) = self.markdown_window_dims();
-            self.chrome.context_menu.open_table_column(start, column, count, x, y, w, h);
+            self.chrome
+                .context_menu
+                .open_table_column(start, column, count, x, y, w, h);
             return true;
         }
         if self
@@ -1031,13 +1037,20 @@ impl ChromeBridge {
     /// refresh the menus).
     fn markdown_menu_key(&mut self, key: &str) -> Option<bool> {
         if self.chrome.context_menu.is_markdown_block_completion()
-            && matches!(key, "ArrowLeft" | "ArrowRight" | "Home" | "End") {
+            && matches!(key, "ArrowLeft" | "ArrowRight" | "Home" | "End")
+        {
             self.chrome.context_menu.close();
             return None;
         }
         match key {
-            "PageDown" => { self.chrome.context_menu.move_selection(5); Some(true) }
-            "PageUp" => { self.chrome.context_menu.move_selection(-5); Some(true) }
+            "PageDown" => {
+                self.chrome.context_menu.move_selection(5);
+                Some(true)
+            }
+            "PageUp" => {
+                self.chrome.context_menu.move_selection(-5);
+                Some(true)
+            }
             "ArrowDown" => {
                 self.chrome.context_menu.move_selection(1);
                 Some(true)
@@ -1069,7 +1082,9 @@ impl ChromeBridge {
         use neoism_ui::panels::context_menu::ContextMenuAction as Action;
         match action {
             Action::MarkdownTable(action) => {
-                if let Some(pane) = self.chrome.markdown_pane_mut() { pane.apply_table_action(action); }
+                if let Some(pane) = self.chrome.markdown_pane_mut() {
+                    pane.apply_table_action(action);
+                }
             }
             Action::MarkdownBlock(template) => {
                 let applied = self

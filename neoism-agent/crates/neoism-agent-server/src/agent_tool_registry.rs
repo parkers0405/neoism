@@ -30,10 +30,18 @@ pub(crate) async fn acquire_workspace_plugin_snapshot(
     state: &AppState,
     directory: &str,
 ) -> Result<WorkspacePluginSnapshot, ApiError> {
+    acquire_workspace_plugin_snapshot_for_tenant(state, "local", directory).await
+}
+
+pub(crate) async fn acquire_workspace_plugin_snapshot_for_tenant(
+    state: &AppState,
+    tenant_id: &str,
+    directory: &str,
+) -> Result<WorkspacePluginSnapshot, ApiError> {
     let (runtime, evicted) = state
         .inner
         .workspace_runtimes
-        .acquire(directory, state)
+        .acquire_for_tenant(tenant_id, directory, state)
         .await
         .map_err(ApiError::gone)?;
     for stale in evicted {
@@ -43,7 +51,10 @@ pub(crate) async fn acquire_workspace_plugin_snapshot(
             .workspace_plugin_generations
             .lock()
             .await
-            .remove(&stale.root);
+            .remove(&crate::workspace_runtime::TenantRuntimeKey {
+                tenant_id: stale.tenant_id.clone(),
+                root: stale.root.clone(),
+            });
     }
     let directory = runtime.root.to_string_lossy().into_owned();
     let snapshot = runtime.snapshot();
@@ -74,13 +85,18 @@ async fn configured_mcp_tools_with_snapshot(
     directory: &str,
     runtime_state: AppState,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    execution: &neoism_agent_service_api::ExecutionPolicy,
+    auth_store: &mcp_auth::McpAuthStore,
 ) -> Vec<McpToolInfo> {
     if tool_contribution(snapshot, MCP_GATEWAY_TOOL).is_none() {
         return Vec::new();
     }
     let mut config = snapshot.config().clone();
     crate::config::inject_builtin_mcp(&mut config, runtime_state.services());
-    let config = config.mcp;
+    let mut config = config.mcp;
+    if !crate::caller::native_execution_allowed(execution) {
+        config.retain(|_, server| matches!(server, neoism_agent_core::McpConfig::Remote { .. }));
+    }
     mcp::reconcile_configured_servers(directory, &config, snapshot).await;
     let names = config.keys().cloned().collect::<Vec<_>>();
     let mut tools = Vec::new();
@@ -88,7 +104,7 @@ async fn configured_mcp_tools_with_snapshot(
         let Ok(mut items) = mcp::tools_with_snapshot(
             directory,
             &name,
-            &mcp_auth::McpAuthStore::local(runtime_state.services()),
+            auth_store,
             runtime_state.clone(),
             snapshot,
         )
@@ -108,17 +124,33 @@ pub(crate) async fn available_tools_for_directory(
     let workspace = acquire_workspace_plugin_snapshot(state, directory).await?;
     let directory = workspace.directory;
     let snapshot = workspace.snapshot;
-    available_tools_for_snapshot(state, &directory, &snapshot).await
+    available_tools_for_snapshot(
+        state,
+        &directory,
+        &snapshot,
+        &neoism_agent_service_api::ExecutionPolicy::NativeLocal,
+        &mcp_auth::McpAuthStore::local(state.services()),
+    )
+    .await
 }
 
 async fn available_tools_for_snapshot(
     state: &AppState,
     directory: &str,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    execution: &neoism_agent_service_api::ExecutionPolicy,
+    auth_store: &mcp_auth::McpAuthStore,
 ) -> Result<Vec<ToolListItem>, ApiError> {
     let mut tools = Vec::new();
     for tool in snapshot.runtime_tools.values() {
         let definition = tool.definition();
+        match definition.id.as_str() {
+            "bash" | "background_task"
+                if !crate::caller::native_execution_allowed(execution) => continue,
+            "sandbox_exec"
+                if !matches!(execution, neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }) => continue,
+            _ => {}
+        }
         tools.push(ToolListItem {
             id: definition.id,
             description: definition.description,
@@ -126,13 +158,21 @@ async fn available_tools_for_snapshot(
             output_schema: Some(definition.output_schema),
         });
     }
+    if crate::caller::native_execution_allowed(execution) {
+        tools.extend(
+            crate::custom_tool::list(state.services(), directory)
+                .into_iter()
+                .filter(|tool| tool_contribution(&snapshot, &tool.id).is_some()),
+        );
+    }
     tools.extend(
-        crate::custom_tool::list(state.services(), directory)
-            .into_iter()
-            .filter(|tool| tool_contribution(&snapshot, &tool.id).is_some()),
-    );
-    tools.extend(
-        configured_mcp_tools_with_snapshot(directory, state.clone(), snapshot)
+        configured_mcp_tools_with_snapshot(
+            directory,
+            state.clone(),
+            snapshot,
+            execution,
+            auth_store,
+        )
             .await
             .into_iter()
             .map(mcp_tool_list_item),
@@ -152,8 +192,17 @@ pub(crate) async fn provider_tools_for_agent(
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
     permissions: &[PermissionRule],
     model_id: &str,
+    execution: &neoism_agent_service_api::ExecutionPolicy,
+    auth_store: &mcp_auth::McpAuthStore,
 ) -> Result<Vec<ToolListItem>, ApiError> {
-    let tools = available_tools_for_snapshot(state, directory, snapshot).await?;
+    let tools = available_tools_for_snapshot(
+        state,
+        directory,
+        snapshot,
+        execution,
+        auth_store,
+    )
+    .await?;
     if tools
         .iter()
         .any(|tool| matches!(tool.id.as_str(), "grep" | "glob"))
@@ -367,26 +416,41 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     cancel: Option<Arc<AtomicBool>>,
     state: Option<AppState>,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    execution: &neoism_agent_service_api::ExecutionPolicy,
+    auth_store: &mcp_auth::McpAuthStore,
 ) -> anyhow::Result<Option<tool::ToolExecutionResult>> {
     let execution_started = std::time::Instant::now();
     if !runtime_id.starts_with("mcp__") {
         return Ok(None);
     }
-    if runtime_id.starts_with("mcp__computer__") && !runtime_id.ends_with("__stop") && !runtime_id.ends_with("__capabilities") {
+    if runtime_id.starts_with("mcp__computer__")
+        && !runtime_id.ends_with("__stop")
+        && !runtime_id.ends_with("__capabilities")
+    {
         ensure_computer_permission(permissions, runtime_id)?;
     } else {
         ensure_tool_permission(permissions, "mcp", runtime_id)
             .map_err(|error| anyhow::anyhow!(error))?;
     }
-    let clipboard_authorized = if runtime_id.starts_with("mcp__computer__") && computer_clipboard_requested(&arguments) {
+    let clipboard_authorized = if runtime_id.starts_with("mcp__computer__")
+        && computer_clipboard_requested(&arguments)
+    {
         ensure_computer_clipboard_permission(permissions, runtime_id)?;
         true
-    } else { false };
+    } else {
+        false
+    };
     let runtime_state = state
         .clone()
         .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
     let Some(tool) =
-        configured_mcp_tools_with_snapshot(directory, runtime_state, snapshot)
+        configured_mcp_tools_with_snapshot(
+            directory,
+            runtime_state,
+            snapshot,
+            execution,
+            auth_store,
+        )
             .await
             .into_iter()
             .find(|tool| mcp::tool_runtime_id(&tool.client, &tool.name) == runtime_id)
@@ -395,18 +459,22 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     };
     let state =
         state.ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
-    let auth_store = mcp_auth::McpAuthStore::local(state.services());
-    let call = crate::computer_use::with_clipboard_authorization(clipboard_authorized, mcp::call_tool_in_session(
-        directory,
-        &tool.client,
-        &tool.name,
-        arguments,
-        &auth_store,
-        state,
-        snapshot,
-        true,
-        cancel.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
-    ));
+    let call = crate::computer_use::with_clipboard_authorization(
+        clipboard_authorized,
+        mcp::call_tool_in_session(
+            directory,
+            &tool.client,
+            &tool.name,
+            arguments,
+            auth_store,
+            state,
+            snapshot,
+            true,
+            cancel
+                .clone()
+                .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+        ),
+    );
     // The bounded computer worker owns cancellation and effect accounting. Dropping
     // it here would discard known dispatch/clipboard progress and recovery media.
     let result = if tool.client == "computer" {
@@ -427,7 +495,9 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     let is_error = result.is_error.unwrap_or(false);
     let output = if is_error {
         format!("MCP tool {} returned an error\n{}", tool.name, output)
-    } else { output };
+    } else {
+        output
+    };
     Ok(Some(tool::ToolExecutionResult {
         title: format!("MCP {}.{}", tool.client, tool.name),
         output,
@@ -448,23 +518,48 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     }))
 }
 
-fn computer_clipboard_requested(arguments:&Value)->bool {
-    arguments["action"]=="paste" || arguments["clipboard_policy"]=="replace" || arguments["method"]=="paste" ||
-        arguments["actions"].as_array().is_some_and(|actions|actions.iter().any(computer_clipboard_requested))
+fn computer_clipboard_requested(arguments: &Value) -> bool {
+    arguments["action"] == "paste"
+        || arguments["clipboard_policy"] == "replace"
+        || arguments["method"] == "paste"
+        || arguments["actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(computer_clipboard_requested))
 }
-fn ensure_computer_clipboard_permission(permissions:&[PermissionRule],runtime_id:&str)->anyhow::Result<()> {
-    let rules=permissions.iter().filter(|rule|rule.action != PermissionAction::Allow || rule.permission=="computer_clipboard").cloned().collect::<Vec<_>>();
-    ensure_tool_permission(&rules,"computer_clipboard",runtime_id).map_err(Into::into)
+fn ensure_computer_clipboard_permission(
+    permissions: &[PermissionRule],
+    runtime_id: &str,
+) -> anyhow::Result<()> {
+    let rules = permissions
+        .iter()
+        .filter(|rule| {
+            rule.action != PermissionAction::Allow
+                || rule.permission == "computer_clipboard"
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    ensure_tool_permission(&rules, "computer_clipboard", runtime_id).map_err(Into::into)
 }
 
-fn ensure_computer_permission(permissions: &[PermissionRule], runtime_id: &str) -> anyhow::Result<()> {
-    if permission::evaluate("mcp", runtime_id, permissions).action == PermissionAction::Deny {
+fn ensure_computer_permission(
+    permissions: &[PermissionRule],
+    runtime_id: &str,
+) -> anyhow::Result<()> {
+    if permission::evaluate("mcp", runtime_id, permissions).action
+        == PermissionAction::Deny
+    {
         ensure_tool_permission(permissions, "mcp", runtime_id)?;
     }
     // Generic MCP/agent wildcard allows are not desktop consent. Keep broad
     // denies, and require an explicit computer_use grant (or the existing
     // dangerouslySkipPermissions retry path's one-time grant).
-    let rules = permissions.iter().filter(|rule| rule.action != PermissionAction::Allow || rule.permission == "computer_use").cloned().collect::<Vec<_>>();
+    let rules = permissions
+        .iter()
+        .filter(|rule| {
+            rule.action != PermissionAction::Allow || rule.permission == "computer_use"
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     ensure_tool_permission(&rules, "computer_use", runtime_id).map_err(Into::into)
 }
 
@@ -488,6 +583,8 @@ pub(crate) async fn execute_mcp_gateway(
     cancel: Option<Arc<AtomicBool>>,
     state: Option<AppState>,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    execution: &neoism_agent_service_api::ExecutionPolicy,
+    auth_store: &mcp_auth::McpAuthStore,
 ) -> anyhow::Result<Option<tool::ToolExecutionResult>> {
     if tool_name != MCP_GATEWAY_TOOL {
         return Ok(None);
@@ -496,7 +593,14 @@ pub(crate) async fn execute_mcp_gateway(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
     let mut tools =
-        configured_mcp_tools_with_snapshot(directory, runtime_state, snapshot).await;
+        configured_mcp_tools_with_snapshot(
+            directory,
+            runtime_state,
+            snapshot,
+            execution,
+            auth_store,
+        )
+        .await;
     let runtime_ids = tools
         .iter()
         .map(|tool| mcp::tool_runtime_id(&tool.client, &tool.name))
@@ -530,9 +634,13 @@ pub(crate) async fn execute_mcp_gateway(
                     .mcp
                     .keys()
                     .find(|name| {
+                        let execution_allowed = crate::caller::native_execution_allowed(execution)
+                            || snapshot.config().mcp.get(*name).is_some_and(|server| {
+                                matches!(server, neoism_agent_core::McpConfig::Remote { .. })
+                            });
                         namespace.as_deref().is_some_and(|namespace| {
                             mcp_canonical_namespace(name).eq_ignore_ascii_case(namespace)
-                        })
+                        }) && execution_allowed
                     })
                     .cloned()
                 {
@@ -542,7 +650,7 @@ pub(crate) async fn execute_mcp_gateway(
                     let mut requested = mcp::tools_with_state(
                         directory,
                         &name,
-                        &mcp_auth::McpAuthStore::local(runtime_state.services()),
+                        auth_store,
                         runtime_state,
                     )
                     .await?;
@@ -567,6 +675,8 @@ pub(crate) async fn execute_mcp_gateway(
                 cancel,
                 state,
                 snapshot,
+                execution,
+                auth_store,
             )
             .await
         }
@@ -888,37 +998,77 @@ mod tests {
 
     #[test]
     fn clipboard_requires_separate_explicit_consent_and_preserves_denies() {
-        let target="mcp__computer__batch";
-        let mut rules=vec![PermissionRule {permission:"*".into(),pattern:"*".into(),action:PermissionAction::Allow},PermissionRule {permission:"computer_use".into(),pattern:"*".into(),action:PermissionAction::Allow}];
-        assert!(ensure_computer_clipboard_permission(&rules,target).is_err());
-        rules.push(PermissionRule{permission:"computer_clipboard".into(),pattern:target.into(),action:PermissionAction::Allow});
-        assert!(ensure_computer_clipboard_permission(&rules,target).is_ok());
-        rules.push(PermissionRule{permission:"computer_clipboard".into(),pattern:target.into(),action:PermissionAction::Deny});
-        assert!(ensure_computer_clipboard_permission(&rules,target).is_err());
-        assert!(computer_clipboard_requested(&json!({"actions":[{"action":"click"},{"action":"type","clipboard_policy":"replace"}]})));
+        let target = "mcp__computer__batch";
+        let mut rules = vec![
+            PermissionRule {
+                permission: "*".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "computer_use".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+        ];
+        assert!(ensure_computer_clipboard_permission(&rules, target).is_err());
+        rules.push(PermissionRule {
+            permission: "computer_clipboard".into(),
+            pattern: target.into(),
+            action: PermissionAction::Allow,
+        });
+        assert!(ensure_computer_clipboard_permission(&rules, target).is_ok());
+        rules.push(PermissionRule {
+            permission: "computer_clipboard".into(),
+            pattern: target.into(),
+            action: PermissionAction::Deny,
+        });
+        assert!(ensure_computer_clipboard_permission(&rules, target).is_err());
+        assert!(computer_clipboard_requested(
+            &json!({"actions":[{"action":"click"},{"action":"type","clipboard_policy":"replace"}]})
+        ));
         assert!(computer_clipboard_requested(&json!({"action":"paste"})));
-        assert!(!computer_clipboard_requested(&json!({"action":"type","text":"literal"})));
+        assert!(!computer_clipboard_requested(
+            &json!({"action":"type","text":"literal"})
+        ));
     }
 
     #[test]
     fn computer_use_requires_scoped_consent_and_preserves_denies() {
         let target = "mcp__computer__input";
-        let mut rules = vec![PermissionRule { permission:"*".into(),pattern:"*".into(),action:PermissionAction::Allow }];
-        assert!(ensure_computer_permission(&rules,target).is_err());
-        rules.push(PermissionRule { permission:"computer_use".into(),pattern:target.into(),action:PermissionAction::Allow });
-        assert!(ensure_computer_permission(&rules,target).is_ok());
-        rules.push(PermissionRule { permission:"mcp".into(),pattern:target.into(),action:PermissionAction::Deny });
-        assert!(ensure_computer_permission(&rules,target).is_err());
+        let mut rules = vec![PermissionRule {
+            permission: "*".into(),
+            pattern: "*".into(),
+            action: PermissionAction::Allow,
+        }];
+        assert!(ensure_computer_permission(&rules, target).is_err());
+        rules.push(PermissionRule {
+            permission: "computer_use".into(),
+            pattern: target.into(),
+            action: PermissionAction::Allow,
+        });
+        assert!(ensure_computer_permission(&rules, target).is_ok());
+        rules.push(PermissionRule {
+            permission: "mcp".into(),
+            pattern: target.into(),
+            action: PermissionAction::Deny,
+        });
+        assert!(ensure_computer_permission(&rules, target).is_err());
     }
 
     #[test]
     fn computer_use_images_enter_existing_attachment_path() {
         let result = neoism_agent_core::McpToolCallResult {
-            content:vec![neoism_agent_core::McpContent::Image { data:"YWJj".into(),mime_type:"image/png".into(),annotations:None }],is_error:None,
+            content: vec![neoism_agent_core::McpContent::Image {
+                data: "YWJj".into(),
+                mime_type: "image/png".into(),
+                annotations: None,
+            }],
+            is_error: None,
         };
         let attachments = mcp_image_attachments(&result);
-        assert_eq!(attachments[0]["mime"],"image/png");
-        assert_eq!(attachments[0]["url"],"data:image/png;base64,YWJj");
+        assert_eq!(attachments[0]["mime"], "image/png");
+        assert_eq!(attachments[0]["url"], "data:image/png;base64,YWJj");
     }
 
     #[test]

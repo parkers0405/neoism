@@ -74,12 +74,17 @@ pub fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
 /// component at a time yields the same separators as the host's tree joins.
 fn listing_identity_path(root: &Path, path: &str) -> Result<PathBuf, String> {
     let lexical = resolve_path(root, path)?;
-    Ok(lexical.strip_prefix(root).map(|relative| {
-        relative.components().fold(root.to_path_buf(), |mut path, part| {
-            path.push(part.as_os_str());
-            path
+    Ok(lexical
+        .strip_prefix(root)
+        .map(|relative| {
+            relative
+                .components()
+                .fold(root.to_path_buf(), |mut path, part| {
+                    path.push(part.as_os_str());
+                    path
+                })
         })
-    }).unwrap_or(lexical))
+        .unwrap_or(lexical))
 }
 
 /// Resolve an existing path and reject symlink escapes as well as lexical
@@ -124,7 +129,9 @@ pub async fn handle_with_root(
         }
         FilesClientMessage::BrowserListDir { path } => browser_list_dir(root, path).await,
         FilesClientMessage::BrowserStat { path } => browser_stat(root, path).await,
-        FilesClientMessage::BrowserReadFile { path } => browser_read_file(root, path).await,
+        FilesClientMessage::BrowserReadFile { path } => {
+            browser_read_file(root, path).await
+        }
         FilesClientMessage::ListDir { path } => list_dir(root, path).await,
         FilesClientMessage::Stat { path } => stat(root, path).await,
         FilesClientMessage::ReadFile { path } => read_file(root, path).await,
@@ -164,31 +171,56 @@ fn canonical_location(
 
 fn browser_locations(root: &Path) -> Vec<FileLocationDescriptor> {
     browser_locations_from([
-        (FileLocationKind::Workspace, "Workspace", Some(root.to_path_buf())),
+        (
+            FileLocationKind::Workspace,
+            "Workspace",
+            Some(root.to_path_buf()),
+        ),
         (FileLocationKind::Home, "Home", dirs::home_dir()),
-        (FileLocationKind::Documents, "Documents", dirs::document_dir()),
-        (FileLocationKind::Downloads, "Downloads", dirs::download_dir()),
+        (
+            FileLocationKind::Documents,
+            "Documents",
+            dirs::document_dir(),
+        ),
+        (
+            FileLocationKind::Downloads,
+            "Downloads",
+            dirs::download_dir(),
+        ),
         (FileLocationKind::Pictures, "Pictures", dirs::picture_dir()),
     ])
 }
 
-fn browser_locations_from<const N: usize>(candidates: [(FileLocationKind, &str, Option<PathBuf>); N]) -> Vec<FileLocationDescriptor> {
+fn browser_locations_from<const N: usize>(
+    candidates: [(FileLocationKind, &str, Option<PathBuf>); N],
+) -> Vec<FileLocationDescriptor> {
     let mut locations = Vec::new();
-    for location in candidates.into_iter().filter_map(|(kind, label, path)| canonical_location(kind, label, path)) {
+    for location in candidates
+        .into_iter()
+        .filter_map(|(kind, label, path)| canonical_location(kind, label, path))
+    {
         locations.push(location);
     }
     locations
 }
 
 fn resolve_browser_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
-    let roots = browser_locations(root).into_iter().map(|location| PathBuf::from(location.path)).collect::<Vec<_>>();
+    let roots = browser_locations(root)
+        .into_iter()
+        .map(|location| PathBuf::from(location.path))
+        .collect::<Vec<_>>();
     resolve_browser_path_against(requested, &roots)
 }
 
-fn resolve_browser_path_against(requested: &str, allowed_roots: &[PathBuf]) -> Result<PathBuf, String> {
+fn resolve_browser_path_against(
+    requested: &str,
+    allowed_roots: &[PathBuf],
+) -> Result<PathBuf, String> {
     let requested_path = Path::new(requested);
     if !requested_path.is_absolute()
-        || requested_path.components().any(|component| matches!(component, Component::ParentDir))
+        || requested_path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
     {
         return Err("Invalid picker path".into());
     }
@@ -214,7 +246,9 @@ async fn browser_list_dir(root: &Path, path: String) -> Vec<FilesServerMessage> 
     };
     let mut entries = Vec::new();
     while let Ok(Some(entry)) = read.next_entry().await {
-        let Ok(metadata) = entry.metadata().await else { continue; };
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
         entries.push(DirEntry {
             host_path: Some(entry.path().to_string_lossy().into_owned()),
             name: entry.file_name().to_string_lossy().into_owned(),
@@ -224,10 +258,7 @@ async fn browser_list_dir(root: &Path, path: String) -> Vec<FilesServerMessage> 
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    vec![FilesServerMessage::DirListing {
-        path,
-        entries,
-    }]
+    vec![FilesServerMessage::DirListing { path, entries }]
 }
 
 async fn browser_stat(root: &Path, path: String) -> Vec<FilesServerMessage> {
@@ -240,7 +271,11 @@ async fn browser_stat(root: &Path, path: String) -> Vec<FilesServerMessage> {
             path,
             entry: DirEntry {
                 host_path: Some(resolved.to_string_lossy().into_owned()),
-                name: resolved.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                name: resolved
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
                 is_dir: metadata.is_dir(),
                 size: metadata.is_file().then(|| metadata.len()),
                 icon: None,
@@ -257,10 +292,7 @@ async fn browser_read_file(root: &Path, path: String) -> Vec<FilesServerMessage>
         Err(error) => return err(error),
     };
     match fs::read(&resolved).await {
-        Ok(bytes) => vec![FilesServerMessage::FileContent {
-            path,
-            bytes,
-        }],
+        Ok(bytes) => vec![FilesServerMessage::FileContent { path, bytes }],
         Err(_) => err("Could not read that file"),
     }
 }
@@ -473,7 +505,8 @@ async fn list_dir(root: &Path, rel: String) -> Vec<FilesServerMessage> {
     // Keep the advertised workspace root spelling, not canonicalize()'s
     // Windows verbatim prefix or a symlink target. This is the same path the
     // host tab uses for CRDT/presence; canonicalize above only authorizes I/O.
-    let lexical_dir = listing_identity_path(root, &rel).expect("validated directory path");
+    let lexical_dir =
+        listing_identity_path(root, &rel).expect("validated directory path");
     let lexical_dir = &lexical_dir;
     let mut entries = stream::iter(raw_entries)
         .map(|entry| async move {
@@ -527,7 +560,9 @@ async fn stat(root: &Path, rel: String) -> Vec<FilesServerMessage> {
             vec![FilesServerMessage::Stat {
                 path: rel.clone(),
                 entry: DirEntry {
-                    host_path: listing_identity_path(root, &rel).ok().map(|path| path.to_string_lossy().into_owned()),
+                    host_path: listing_identity_path(root, &rel)
+                        .ok()
+                        .map(|path| path.to_string_lossy().into_owned()),
                     name,
                     is_dir,
                     size,
@@ -672,13 +707,21 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let missing = home.path().join("Documents");
         let locations = browser_locations_from([
-            (FileLocationKind::Workspace, "Workspace", Some(root.path().into())),
+            (
+                FileLocationKind::Workspace,
+                "Workspace",
+                Some(root.path().into()),
+            ),
             (FileLocationKind::Home, "Home", Some(home.path().into())),
             (FileLocationKind::Documents, "Documents", Some(missing)),
         ]);
         assert_eq!(locations.len(), 2);
-        assert!(locations.iter().all(|location| Path::new(&location.path).is_absolute()));
-        assert!(!locations.iter().any(|location| location.label == "Documents"));
+        assert!(locations
+            .iter()
+            .all(|location| Path::new(&location.path).is_absolute()));
+        assert!(!locations
+            .iter()
+            .any(|location| location.label == "Documents"));
     }
 
     #[tokio::test]
@@ -687,8 +730,12 @@ mod tests {
         let documents = home.path().join("Documents");
         std::fs::create_dir(&documents).unwrap();
         std::fs::write(documents.join("photo.png"), b"png").unwrap();
-        let roots = vec![home.path().canonicalize().unwrap(), documents.canonicalize().unwrap()];
-        let resolved = resolve_browser_path_against(documents.to_str().unwrap(), &roots).unwrap();
+        let roots = vec![
+            home.path().canonicalize().unwrap(),
+            documents.canonicalize().unwrap(),
+        ];
+        let resolved =
+            resolve_browser_path_against(documents.to_str().unwrap(), &roots).unwrap();
         assert_eq!(resolved, documents.canonicalize().unwrap());
     }
 
@@ -701,8 +748,15 @@ mod tests {
         std::fs::write(outside.path().join("secret.png"), b"secret").unwrap();
         symlink(outside.path(), allowed.path().join("escape")).unwrap();
         let roots = vec![allowed.path().canonicalize().unwrap()];
-        assert!(resolve_browser_path_against(outside.path().to_str().unwrap(), &roots).is_err());
-        assert!(resolve_browser_path_against(allowed.path().join("escape/secret.png").to_str().unwrap(), &roots).is_err());
+        assert!(
+            resolve_browser_path_against(outside.path().to_str().unwrap(), &roots)
+                .is_err()
+        );
+        assert!(resolve_browser_path_against(
+            allowed.path().join("escape/secret.png").to_str().unwrap(),
+            &roots
+        )
+        .is_err());
         assert!(resolve_browser_path_against("Documents", &roots).is_err());
     }
 

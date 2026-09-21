@@ -45,6 +45,8 @@ pub(crate) mod process;
 mod registry;
 #[path = "tool_support/shell_scan.rs"]
 pub(crate) mod shell_scan;
+#[path = "tool_support/sandbox.rs"]
+mod sandbox;
 #[path = "tool_support/truncate.rs"]
 pub(crate) mod truncate;
 #[path = "tool_support/web.rs"]
@@ -143,10 +145,23 @@ impl ToolContext {
                 crate::workspace_runtime::active_generation(&self.cwd.to_string_lossy())
                     .filter(|active| active.generation == generation);
             if self.plugin_snapshot.is_none() {
+                let tenant_id = if let Some(session_id) = self.session_id.as_deref() {
+                    state
+                        .inner
+                        .store
+                        .get_session(session_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|session| crate::caller::session_tenant(&session).to_string())
+                        .unwrap_or_else(|| "local".to_string())
+                } else {
+                    "local".to_string()
+                };
                 self.plugin_snapshot = state
                     .inner
                     .workspace_runtimes
-                    .loaded(&self.cwd.to_string_lossy())
+                    .loaded_for_tenant(&tenant_id, &self.cwd.to_string_lossy())
                     .await
                     .and_then(|runtime| runtime.lease_generation(generation));
             }
@@ -188,6 +203,112 @@ impl ToolContext {
             .as_ref()
             .map(|state| state.services().clone())
             .unwrap_or_else(crate::standard_services)
+    }
+
+    pub(crate) async fn execution_request(
+        &self,
+        process_class: neoism_agent_service_api::ProcessClass,
+        timeout_ms: Option<u64>,
+    ) -> anyhow::Result<neoism_agent_service_api::ExecutionRequest> {
+        let (tenant_id, subject, root_id, session_id, policy) =
+            if let (Some(state), Some(session_id)) = (self.state.as_ref(), self.session_id.as_ref()) {
+                let session = state
+                    .inner
+                    .store
+                    .get_session(session_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+                let root_id = crate::execution_activity::root_session_id(state, &session).await;
+                (
+                    crate::caller::session_tenant(&session).to_string(),
+                    session
+                        .extra
+                        .get(crate::caller::CREATED_BY_EXTRA_KEY)
+                        .and_then(Value::as_str)
+                        .unwrap_or("local")
+                        .to_string(),
+                    root_id,
+                    session_id.clone(),
+                    crate::caller::session_execution_policy(&session),
+                )
+            } else {
+                (
+                    "local".to_string(),
+                    "local".to_string(),
+                    "local".to_string(),
+                    "local".to_string(),
+                    neoism_agent_service_api::ExecutionPolicy::NativeLocal,
+                )
+            };
+        let workspace_revision = if matches!(
+            policy,
+            neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }
+        ) {
+            if let Some(state) = self.state.as_ref() {
+                state
+                    .inner
+                    .store
+                    .workspace_revision(&tenant_id, &root_id)
+                    .await?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let (provider, workspace, idle_ttl_seconds, max_lifetime_seconds, network) = match policy {
+            neoism_agent_service_api::ExecutionPolicy::Disabled => {
+                anyhow::bail!("execution is disabled for this session")
+            }
+            neoism_agent_service_api::ExecutionPolicy::NativeLocal => (
+                None,
+                neoism_agent_service_api::WorkspaceMaterialization {
+                    revision: None,
+                    local_path: Some(self.cwd.clone()),
+                    remote_locator: None,
+                },
+                0,
+                0,
+                neoism_agent_service_api::NetworkPolicy::Allow,
+            ),
+            neoism_agent_service_api::ExecutionPolicy::Sandboxed {
+                provider,
+                idle_ttl_seconds,
+                max_lifetime_seconds,
+            } => (
+                Some(provider),
+                neoism_agent_service_api::WorkspaceMaterialization {
+                    revision: workspace_revision,
+                    local_path: None,
+                    remote_locator: Some(root_id.clone()),
+                },
+                idle_ttl_seconds,
+                max_lifetime_seconds,
+                neoism_agent_service_api::NetworkPolicy::Deny,
+            ),
+        };
+        Ok(neoism_agent_service_api::ExecutionRequest {
+            scope: neoism_agent_service_api::ExecutionScope {
+                tenant_id,
+                subject,
+                root_id,
+                session_id,
+                execution_id: neoism_agent_core::Id::ascending(
+                    neoism_agent_core::IdKind::Event,
+                )
+                .to_string(),
+            },
+            provider,
+            process_class,
+            workspace,
+            limits: neoism_agent_service_api::ResourceLimits {
+                timeout_ms,
+                ..Default::default()
+            },
+            network,
+            idle_ttl_seconds,
+            max_lifetime_seconds,
+        })
     }
 
     pub(crate) fn session_id(&self) -> Option<&str> {
@@ -360,7 +481,11 @@ impl ToolExecutionResult {
     /// Transport succeeded, but the tool itself can report a structured failure
     /// with recovery media. Session persistence must retain the error status.
     pub(crate) fn is_error(&self) -> bool {
-        self.metadata.as_ref().and_then(|m|m.get("isError")).and_then(Value::as_bool)==Some(true)
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("isError"))
+            .and_then(Value::as_bool)
+            == Some(true)
     }
     /// Machine-readable result kept separate from the text sent back to the model.
     pub(crate) fn structured_output(&self) -> Value {
@@ -390,6 +515,10 @@ pub(crate) fn standard_output_schema() -> Value {
 
 fn bash_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(bash::bash_tool(context, arguments))
+}
+
+fn sandbox_handler(context: ToolContext, arguments: Value) -> ToolFuture {
+    Box::pin(sandbox::sandbox_tool(context, arguments))
 }
 
 fn read_handler(context: ToolContext, arguments: Value) -> ToolFuture {
@@ -649,6 +778,10 @@ pub(crate) async fn execute(
     }
     let result = tool
         .execute(neoism_agent_plugin_api::PluginToolInvocation {
+            tenant_id: "local".to_string(),
+            subject: None,
+            workspace_id: None,
+            execution_mode: neoism_agent_plugin_api::PluginExecutionMode::NativeLocal,
             directory: context.cwd.to_string_lossy().into_owned(),
             session_id: context.session_id.clone(),
             arguments,

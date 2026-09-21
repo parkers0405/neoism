@@ -71,12 +71,18 @@ pub(super) fn render_virtual(
     } else {
         22.0 + cover_h
     };
-    let content_w = if pane.documentation_notebook.is_some() && w >= 800.0 {
+    let documentation_outline_open = pane
+        .documentation_notebook
+        .as_ref()
+        .and_then(|binding| binding.session.lock().ok().map(|book| book.contents_open))
+        .unwrap_or(false);
+    let outline_has_room = documentation_outline_open && w >= 600.0;
+    let content_w = if outline_has_room {
         (w - 280.0).clamp(220.0, 920.0)
     } else {
         (w - pad_x * 2.0).clamp(220.0, 920.0)
     };
-    let content_x = if pane.documentation_notebook.is_some() && w >= 800.0 {
+    let content_x = if outline_has_room {
         x + 40.0
     } else {
         x + ((w - content_w) * 0.5).max(pad_x.min(w * 0.08))
@@ -398,19 +404,23 @@ pub(super) fn render_virtual(
         );
     }
 
-    draw_markdown_outline(
-        sugarloaf,
-        pane,
-        rect,
-        content_x,
-        content_w,
-        pad_top,
-        &title_text,
-        theme,
-        font_scale,
-        mouse,
-        text_occlusions,
-    );
+    if outline_has_room {
+        draw_markdown_outline(
+            sugarloaf,
+            pane,
+            rect,
+            content_x,
+            content_w,
+            theme,
+            font_scale,
+            mouse,
+            text_occlusions,
+        );
+    } else {
+        pane.virtual_render.outline_panel_rect = None;
+        pane.virtual_render.outline_hover = None;
+        pane.outline_rects.clear();
+    }
     draw_drag_drop_preview(
         sugarloaf,
         pane,
@@ -653,12 +663,10 @@ fn ensure_markdown_outline(pane: &mut MarkdownPane) {
     pane.virtual_render.outline = outline;
 }
 
-/// Docs-site style page outline in the right gutter (the editor centers
-/// content at ≤920px, so wide windows have dead space there). Headed by the
-/// page title, headings indented by level, the section under the viewport
-/// top marked with an accent tick, hovered rows slide in with a soft pill,
-/// click reveals. Drawn only when the gutter is wide enough — narrow
-/// windows lose nothing.
+/// Docs-site style page outline in a notebook page's reserved right panel.
+/// Headings are indented by level, the section under the viewport top is
+/// marked with an accent tick, hovered rows slide in with a soft pill, and
+/// click reveals. The breadcrumb outline button owns visibility.
 #[allow(clippy::too_many_arguments)]
 fn draw_markdown_outline(
     sugarloaf: &mut Sugarloaf,
@@ -666,17 +674,12 @@ fn draw_markdown_outline(
     rect: [f32; 4],
     content_x: f32,
     content_w: f32,
-    pad_top: f32,
-    title: &str,
     theme: &IdeTheme,
     font_scale: f32,
     mouse: Option<[f32; 2]>,
     occlusions: &[[f32; 4]],
 ) {
     ensure_markdown_outline(pane);
-    if pane.virtual_render.outline.is_empty() {
-        return;
-    }
     let [x, y, w, h] = rect;
     let gutter_x = content_x + content_w + 30.0;
     let avail_w = (x + w) - gutter_x - 20.0;
@@ -685,13 +688,6 @@ fn draw_markdown_outline(
     }
     let panel_w = avail_w.min(232.0);
     let text_x = gutter_x + 10.0;
-    let title_opts = DrawOpts {
-        font_size: markdown_font(13.0, font_scale),
-        color: theme.u8(theme.fg),
-        bold: true,
-        clip_rect: Some(rect),
-        ..DrawOpts::default()
-    };
     let row_opts_base = DrawOpts {
         font_size: markdown_font(12.5, font_scale),
         color: theme.u8_alpha(theme.muted, 0.92),
@@ -699,20 +695,38 @@ fn draw_markdown_outline(
         ..DrawOpts::default()
     };
     let row_h = line_height(&row_opts_base) + 7.0;
-    let top = y + pad_top.min(64.0);
+    let top = y + 12.0;
     let clip_bottom = y + h;
-    let title_label =
-        truncate_to_fit(title, (panel_w - 10.0).max(24.0), sugarloaf, &title_opts);
-    draw_if_visible(
-        sugarloaf,
-        text_x,
-        top,
-        &title_label,
-        &title_opts,
+    let panel_rect = [
+        gutter_x - 8.0,
         y,
-        clip_bottom,
-        occlusions,
+        panel_w + 28.0,
+        h,
+    ];
+    sugarloaf.rect(
+        None,
+        panel_rect[0],
+        panel_rect[1],
+        panel_rect[2],
+        panel_rect[3],
+        theme.f32_alpha(theme.surface, 0.46),
+        DEPTH,
+        ORDER_BG,
     );
+    sugarloaf.rect(
+        None,
+        panel_rect[0],
+        panel_rect[1],
+        1.0,
+        panel_rect[3],
+        theme.f32(theme.border),
+        DEPTH,
+        ORDER_BG + 1,
+    );
+    pane.virtual_render.outline_panel_rect = Some(panel_rect);
+    if pane.virtual_render.outline.is_empty() {
+        return;
+    }
 
     // Active section: the last heading at or above the first visible line.
     let first_visible_line = pane
@@ -728,14 +742,8 @@ fn draw_markdown_outline(
         .rposition(|entry| entry.line <= first_visible_line)
         .unwrap_or(0);
 
-    let list_top = top + line_height(&title_opts) + 12.0;
+    let list_top = top;
     let max_rows = (((clip_bottom - 16.0 - list_top) / row_h).floor().max(1.0)) as usize;
-    pane.virtual_render.outline_panel_rect = Some([
-        gutter_x - 8.0,
-        top,
-        panel_w + 16.0,
-        (clip_bottom - 16.0 - top).max(0.0),
-    ]);
     // Window the list when it overflows: follow the active section, or the
     // user's own wheel position after a manual scroll (clicking resumes
     // the auto-follow).

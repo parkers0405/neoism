@@ -152,7 +152,9 @@ impl MarkdownPane {
     pub fn move_line_start(&mut self) {
         self.clear_vertical_goal();
         if let Some(cursor) = self.table_cursor() {
-            if let Some(cell) = parse_table_cell_bounds(&self.lines[self.cursor_line]).and_then(|cells| cells.get(cursor.cell_ix).copied()) {
+            if let Some(cell) = parse_table_cell_bounds(&self.lines[self.cursor_line])
+                .and_then(|cells| cells.get(cursor.cell_ix).copied())
+            {
                 self.cursor_col = cell.content_start;
                 self.follow_cursor = true;
                 return;
@@ -165,7 +167,9 @@ impl MarkdownPane {
     pub fn move_line_end(&mut self) {
         self.clear_vertical_goal();
         if let Some(cursor) = self.table_cursor() {
-            if let Some(cell) = parse_table_cell_bounds(&self.lines[self.cursor_line]).and_then(|cells| cells.get(cursor.cell_ix).copied()) {
+            if let Some(cell) = parse_table_cell_bounds(&self.lines[self.cursor_line])
+                .and_then(|cells| cells.get(cursor.cell_ix).copied())
+            {
                 self.cursor_col = cell.content_end;
                 self.follow_cursor = true;
                 return;
@@ -683,13 +687,18 @@ impl MarkdownPane {
 
     pub(crate) fn is_editable_line(&self, line: usize) -> bool {
         if self.vim_enabled && self.mode != MarkdownMode::Insert {
-            if self.frontmatter_range().is_some_and(|range| line == range.start || line + 1 == range.end) {
+            if self
+                .frontmatter_range()
+                .is_some_and(|range| line == range.start || line + 1 == range.end)
+            {
                 return false;
             }
         }
         self.lines.get(line).is_some_and(|text| {
             let separator = is_table_separator_line(text)
-                && self.table_range_containing(line).is_some_and(|range| line == range.start + 1);
+                && self
+                    .table_range_containing(line)
+                    .is_some_and(|range| line == range.start + 1);
             !separator && !is_notebook_cell_anchor_line(text)
         })
     }

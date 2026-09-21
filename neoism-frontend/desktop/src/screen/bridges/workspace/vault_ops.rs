@@ -384,6 +384,7 @@ impl Screen<'_> {
                     Some(project_dir.clone()),
                 );
                 self.renderer.notes_sidebar.refresh_notes();
+                self.broadcast_notes_link_to_guests(&root);
                 self.renderer.notifications.push(
                     format!("Linked current workspace to {}", project_dir.display()),
                     NotificationLevel::Info,
@@ -471,6 +472,7 @@ impl Screen<'_> {
                     Some(vault_dir.clone()),
                 );
                 self.renderer.notes_sidebar.refresh_notes();
+                self.broadcast_notes_link_to_guests(&project_root);
                 self.renderer.notifications.push(
                     format!(
                         "Linked {} to {}",
@@ -486,6 +488,24 @@ impl Screen<'_> {
             ),
         }
         self.mark_dirty();
+    }
+
+    fn broadcast_notes_link_to_guests(&mut self, code_root: &std::path::Path) {
+        let Some(workspace_id) = self.context_manager.current_adopted_workspace_id()
+        else {
+            return;
+        };
+        let current_root = self
+            .served_workspace_root()
+            .or_else(|| self.active_workspace_root.clone());
+        if current_root.as_deref() != Some(code_root) {
+            return;
+        }
+        let _ = self.context_manager.send_workspace_request(
+            neoism_protocol::workspace::WorkspaceClientMessage::RefreshHostWorkspaceNotes {
+                workspace_id,
+            },
+        );
     }
 
     pub(crate) fn open_convert_notes_vault_prompt(

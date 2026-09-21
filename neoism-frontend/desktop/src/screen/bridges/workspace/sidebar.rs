@@ -145,6 +145,9 @@ impl Screen<'_> {
         self.renderer.notes_sidebar.set_focused(true);
         self.renderer.file_tree.set_focused(false);
         match hit {
+            NotesSidebarHit::NotebookBack => {
+                self.renderer.notes_sidebar.leave_notebook();
+            }
             NotesSidebarHit::NewNote => self.create_untitled_note_in_open_vault(),
             NotesSidebarHit::NewFolder => self.create_untitled_folder_in_open_vault(),
             NotesSidebarHit::CreateFirstNote => {
@@ -175,7 +178,9 @@ impl Screen<'_> {
                 // The drag stores the source path, so toggling a folder and
                 // rebuilding rows does not lose a later threshold-crossing drag.
                 self.renderer.notes_sidebar.set_selected(index);
-                if self.open_selected_notes_notebook() { return true; }
+                if self.open_selected_notes_notebook() {
+                    return true;
+                }
                 let (mx, my) = self.mouse_logical_for_hit_test();
                 self.notes_sidebar_opened_on_press = false;
                 if self.renderer.notes_sidebar.begin_notes_drag(index, mx, my) {
@@ -306,12 +311,21 @@ impl Screen<'_> {
         // when its daemon link is temporarily unavailable.
         if self.notes_sidebar_shows_shared_vault() {
             if let Some(vault_root) = self.served_notes_vault_root() {
-                let root = neoism_protocol::host_path::HostPath::new(vault_root.to_string_lossy());
+                let root = neoism_protocol::host_path::HostPath::new(
+                    vault_root.to_string_lossy(),
+                );
                 if let Some(from) = root.relative(&source.to_string_lossy()) {
-                    if let Some(name) = from.rsplit('/').next().filter(|name| !name.is_empty()) {
-                        let target = neoism_protocol::host_path::HostPath::new(dest_dir.to_string_lossy()).join(name);
+                    if let Some(name) =
+                        from.rsplit('/').next().filter(|name| !name.is_empty())
+                    {
+                        let target = neoism_protocol::host_path::HostPath::new(
+                            dest_dir.to_string_lossy(),
+                        )
+                        .join(name);
                         if let Some(to) = root.relative(target.as_str()) {
-                            if from == to { return; }
+                            if from == to {
+                                return;
+                            }
                             if self.send_remote_notes_move(vault_root, from, to) {
                                 self.renderer.notes_sidebar.reveal_dir(&dest_dir);
                                 self.mark_dirty();
@@ -321,13 +335,20 @@ impl Screen<'_> {
                     }
                 }
             }
-            self.renderer.notifications.push("Host vault is unavailable; move was not performed", NotificationLevel::Error);
+            self.renderer.notifications.push(
+                "Host vault is unavailable; move was not performed",
+                NotificationLevel::Error,
+            );
             self.mark_dirty();
             return;
         }
-        let Some(file_name) = source.file_name() else { return; };
+        let Some(file_name) = source.file_name() else {
+            return;
+        };
         let target = dest_dir.join(file_name);
-        if target == source { return; }
+        if target == source {
+            return;
+        }
 
         if !source.exists() {
             self.renderer.notifications.push(
@@ -369,7 +390,9 @@ impl Screen<'_> {
     pub(crate) fn handle_notes_sidebar_context_click(&mut self) -> bool {
         use neoism_ui::panels::notes_sidebar::NotesSidebarHit;
         let (x, y) = self.mouse_logical_for_hit_test();
-        if !self.renderer.notes_sidebar.contains_point(x, y) { return false; }
+        if !self.renderer.notes_sidebar.contains_point(x, y) {
+            return false;
+        }
         self.renderer.notes_sidebar.set_focused(true);
         self.renderer.file_tree.set_focused(false);
         let target = match self.renderer.notes_sidebar.hit_test(x, y) {
@@ -377,7 +400,12 @@ impl Screen<'_> {
                 self.renderer.notes_sidebar.set_selected(index);
                 self.renderer.notes_sidebar.note_path(index)
             }
-            _ => self.renderer.notes_sidebar.workspace_path(),
+            _ => self
+                .renderer
+                .notes_sidebar
+                .notebook_root()
+                .map(Path::to_path_buf)
+                .or_else(|| self.renderer.notes_sidebar.workspace_path()),
         };
         if let Some(target) = target {
             self.open_notes_sidebar_context_menu_for_path(target, x, y);
@@ -478,6 +506,15 @@ impl Screen<'_> {
                 }
                 true
             }
+            Key::Character(s) if s == "b" => {
+                self.renderer.notes_sidebar.clear_pending();
+                if !self.context_manager.current_workspace_is_remote_joined() {
+                    if let Some(dir) = self.notes_sidebar_target_dir() {
+                        self.create_documentation_notebook_in(dir);
+                    }
+                }
+                true
+            }
             Key::Character(s) if s == "r" => {
                 self.renderer.notes_sidebar.clear_pending();
                 if let Some(path) = self.renderer.notes_sidebar.selected_note_path() {
@@ -535,7 +572,13 @@ impl Screen<'_> {
                     self.open_notes_vault_menu_for_selector();
                     return true;
                 }
-                if self.open_selected_notes_notebook() { return true; }
+                if self.renderer.notes_sidebar.is_notebook_back_selected() {
+                    self.renderer.notes_sidebar.leave_notebook();
+                    return true;
+                }
+                if self.open_selected_notes_notebook() {
+                    return true;
+                }
                 if self
                     .renderer
                     .notes_sidebar
@@ -551,6 +594,9 @@ impl Screen<'_> {
                 true
             }
             Key::Named(NamedKey::Escape) => {
+                if self.renderer.notes_sidebar.leave_notebook() {
+                    return true;
+                }
                 self.renderer.notes_sidebar.set_focused(false);
                 true
             }
@@ -588,8 +634,14 @@ impl Screen<'_> {
             .renderer
             .notes_sidebar
             .selected_note_path()
+            .or_else(|| {
+                self.renderer
+                    .notes_sidebar
+                    .notebook_root()
+                    .map(Path::to_path_buf)
+            })
             .or_else(|| self.renderer.notes_sidebar.workspace_path())?;
-        if path.is_dir() {
+        if self.renderer.notes_sidebar.path_is_dir(&path) || path.is_dir() {
             Some(path)
         } else {
             path.parent().map(Path::to_path_buf)
@@ -603,11 +655,7 @@ impl Screen<'_> {
     /// workspaces stay None — their notes live on the host.
     pub(crate) fn notes_sidebar_create_target(&mut self) -> Option<PathBuf> {
         if self.notes_sidebar_shows_shared_vault() {
-            // The shared vault lives on the host; `is_dir` can't vouch for
-            // a path that isn't on this disk, so hand back the panel's
-            // vault root as-is. (A local vault picked while joined falls
-            // through to the on-disk resolution below.)
-            return self.renderer.notes_sidebar.workspace_path();
+            return self.notes_sidebar_target_dir();
         }
         if let Some(dir) = self.notes_sidebar_target_dir().filter(|dir| dir.is_dir()) {
             return Some(dir);
@@ -616,10 +664,15 @@ impl Screen<'_> {
         self.notes_sidebar_target_dir()
     }
 
-    /// Root of the vault currently displayed by the Notes panel. Header
-    /// quick-create actions always use this root, never the selected row.
+    /// Root currently displayed by the Notes panel. Inside a notebook,
+    /// header quick-create actions belong to that notebook rather than the
+    /// containing vault.
     fn notes_sidebar_open_vault_root(&mut self) -> Option<PathBuf> {
-        self.renderer.notes_sidebar.workspace_path()
+        self.renderer
+            .notes_sidebar
+            .notebook_root()
+            .map(Path::to_path_buf)
+            .or_else(|| self.renderer.notes_sidebar.workspace_path())
     }
 
     fn next_untitled_notes_name(&self, vault: &Path, folder: bool) -> Option<String> {
@@ -695,13 +748,7 @@ impl Screen<'_> {
     }
 
     fn open_selected_notes_notebook(&mut self) -> bool {
-        if self.context_manager.current_workspace_is_remote_joined() { return false; }
-        let Some(path) = self.renderer.notes_sidebar.selected_note_path().filter(|path| {
-            path.is_dir() && path.join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME).is_file()
-        }) else { return false; };
-        self.renderer.notes_sidebar.set_focused(false);
-        self.open_documentation_notebook(path);
-        true
+        self.renderer.notes_sidebar.enter_selected_notebook()
     }
 
     pub(crate) fn open_path_from_notes_sidebar(&mut self, path: PathBuf) {
@@ -711,12 +758,21 @@ impl Screen<'_> {
         );
         let markdown = crate::editor::markdown::state::is_markdown_path(&path);
         let epub = crate::screen::bridges::epub::is_epub_path(&path);
+        let notebook_root = self.renderer.notes_sidebar.notebook_root().map(Path::to_path_buf);
+        if markdown
+            && notebook_root.as_deref().is_some_and(|root| {
+                self.open_documentation_notebook_page(root, &path)
+            })
+        {
+            return;
+        }
         if epub {
             self.open_path_in_epub(path.clone());
         } else if markdown {
             self.open_path_in_markdown_with_source(path.clone(), source);
         } else if crate::editor::neodraw::is_neodraw_path(&path)
-            || crate::editor::notebook::is_notebook_path(&path) {
+            || crate::editor::notebook::is_notebook_path(&path)
+        {
             self.open_path_in_editor(path.clone());
         } else {
             self.open_path_in_code_with_source(path.clone(), source);
@@ -785,9 +841,14 @@ impl Screen<'_> {
         // ordinary local create below — it lives on this machine's disk.
         if self.notes_sidebar_shows_shared_vault() {
             if let Some(vault_root) = self.served_notes_vault_root() {
-                let Some(rel_dir) = neoism_protocol::host_path::HostPath::new(vault_root.to_string_lossy())
-                    .relative(&dir.to_string_lossy()) else {
-                    self.renderer.notifications.push("Note directory is outside the host vault", NotificationLevel::Error);
+                let Some(rel_dir) = neoism_protocol::host_path::HostPath::new(
+                    vault_root.to_string_lossy(),
+                )
+                .relative(&dir.to_string_lossy()) else {
+                    self.renderer.notifications.push(
+                        "Note directory is outside the host vault",
+                        NotificationLevel::Error,
+                    );
                     self.mark_dirty();
                     return;
                 };
@@ -800,7 +861,10 @@ impl Screen<'_> {
                     return;
                 }
             }
-            self.renderer.notifications.push("Host vault is unavailable; note was not created", NotificationLevel::Error);
+            self.renderer.notifications.push(
+                "Host vault is unavailable; note was not created",
+                NotificationLevel::Error,
+            );
             self.mark_dirty();
             return;
         }

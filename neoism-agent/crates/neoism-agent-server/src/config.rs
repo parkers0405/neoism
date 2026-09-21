@@ -74,7 +74,11 @@ pub(crate) fn mcp_owner<'a>(
     name: &str,
 ) -> Option<&'a neoism_agent_service_api::ConfigLayer> {
     snapshot.layers.iter().rev().find(|layer| {
-        layer.document.get("mcp").and_then(|mcp| mcp.get(name)).is_some()
+        layer
+            .document
+            .get("mcp")
+            .and_then(|mcp| mcp.get(name))
+            .is_some()
     })
 }
 

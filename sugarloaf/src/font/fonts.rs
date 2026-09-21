@@ -144,6 +144,11 @@ pub struct SugarloafFonts {
     pub disable_warnings_not_found: bool,
     #[serde(default = "Option::default", rename = "additional-dirs")]
     pub additional_dirs: Option<Vec<String>>,
+    /// Extra system families to load without changing the primary
+    /// terminal/code cascade. Markdown look (`appearance.look.markdown.font-family`)
+    /// uses this so a proportional face can sit beside a mono primary font.
+    #[serde(default = "Option::default", rename = "extra-families")]
+    pub extra_families: Option<Vec<String>>,
 }
 
 pub fn parse_unicode(input: &str) -> Option<char> {
@@ -172,6 +177,7 @@ impl Default for SugarloafFonts {
             symbol_map: None,
             disable_warnings_not_found: false,
             additional_dirs: None,
+            extra_families: None,
         }
     }
 }

@@ -126,9 +126,7 @@ pub fn prepare(
                         if let Some(generation) = guard.attach_generation {
                             if transport.handle.generation() != generation {
                                 match &op {
-                                    RemotePtyOp::Input(_) => {
-                                        Some((id, transport, true))
-                                    }
+                                    RemotePtyOp::Input(_) => Some((id, transport, true)),
                                     RemotePtyOp::Resize { .. } => {
                                         guard.queued.push(op.clone());
                                         None
@@ -225,6 +223,21 @@ pub fn bind_session_for_generation(
     }
 }
 
+pub fn rebind_transport(
+    binding: &RemotePtyBinding,
+    handle: DaemonClientHandle,
+    runtime: tokio::runtime::Handle,
+) {
+    let mut guard = match binding.shared.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.failed {
+        return;
+    }
+    guard.transport = Some(RemotePtyTransport { handle, runtime });
+}
+
 fn send_op(
     handle: &DaemonClientHandle,
     runtime: &tokio::runtime::Handle,
@@ -308,10 +321,9 @@ pub fn await_attach_for_generation(
         handle: handle.clone(),
         runtime: runtime.clone(),
     });
-    let (kept, rejected_input): (Vec<_>, Vec<_>) =
-        std::mem::take(&mut guard.queued).into_iter().partition(|op| {
-            !matches!(op, RemotePtyOp::Input(_))
-        });
+    let (kept, rejected_input): (Vec<_>, Vec<_>) = std::mem::take(&mut guard.queued)
+        .into_iter()
+        .partition(|op| !matches!(op, RemotePtyOp::Input(_)));
     guard.queued = kept;
     drop(guard);
     for op in rejected_input {

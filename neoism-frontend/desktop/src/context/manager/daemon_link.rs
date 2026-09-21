@@ -42,6 +42,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // themselves before the parked connection's queued PTY output is
         // drained, otherwise that output has no route and disappears.
         self.rehydrate_remote_routes_for_attached_daemon();
+        self.spawn_pending_joined_terminals();
         // Mirroring is HOME-only. Pushing this desktop's workspace
         // inventory (and rebinding its panes) into a joined server copies
         // the guest's local workspaces into the foreign daemon's tree —

@@ -83,7 +83,10 @@ pub(crate) fn register_agent_server_credential(server: &str, credential: Option<
     #[cfg(target_os = "linux")]
     crate::app::agent_tray::register_local_endpoint(
         server,
-        credential.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned),
+        credential
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
     );
     let key = server.trim().trim_end_matches('/').to_string();
     let Ok(mut credentials) = agent_server_credentials().write() else {
@@ -1661,6 +1664,32 @@ pub(super) fn open_event_stream(
     server: &str,
     session_id: &str,
 ) -> Result<EventStreamConnection, String> {
+    open_sse_stream(
+        server,
+        &format!(
+            "/v2/events?sessionId={}&tail=true&limit=1",
+            percent_encode(session_id)
+        ),
+    )
+}
+
+pub(super) fn open_session_catalog_stream(
+    server: &str,
+    directory: &str,
+) -> Result<EventStreamConnection, String> {
+    open_sse_stream(
+        server,
+        &format!(
+            "/v2/session-catalog/events?directory={}",
+            percent_encode(directory)
+        ),
+    )
+}
+
+fn open_sse_stream(
+    server: &str,
+    endpoint: &str,
+) -> Result<EventStreamConnection, String> {
     ensure_request_server_ready(server)?;
     let server = server.trim().trim_end_matches('/');
     let (tls, host, port, base_path) = parse_http_server(server)?;
@@ -1681,13 +1710,7 @@ pub(super) fn open_event_stream(
     )
     .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
 
-    let path = request_path(
-        &base_path,
-        &format!(
-            "/v2/events?sessionId={}&tail=true&limit=1",
-            percent_encode(session_id)
-        ),
-    );
+    let path = request_path(&base_path, endpoint);
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: text/event-stream\r\n{}Connection: keep-alive\r\n\r\n",
         authorization_header(server)
@@ -1947,7 +1970,7 @@ fn session_option_input(
 }
 
 /// Flat side-panel entry for one session.
-fn session_entry(
+pub(super) fn session_entry(
     session: &Value,
     statuses: &HashMap<String, SessionStatusSnapshot>,
 ) -> Option<NeoismAgentSessionEntry> {

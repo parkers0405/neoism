@@ -1,6 +1,6 @@
 //! Literal Unicode dispatch only. No layout mapping, modifiers, clipboard, or
 //! implicit Return/Tab events. Progress counts dispatched units, not insertion.
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnitKind {

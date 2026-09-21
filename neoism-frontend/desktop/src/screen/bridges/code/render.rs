@@ -35,21 +35,23 @@ impl Screen<'_> {
         > = std::collections::HashMap::new();
         {
             let grid = self.context_manager.current_grid();
-            let pane_buffers: Vec<(std::path::PathBuf, String)> = grid
-                .contexts()
-                .iter()
-                .filter(|(key, _)| visible_nodes.contains(key))
-                .filter_map(|(_, item)| {
-                    item.val.code.as_ref().filter(|pane| !pane.local_only).map(|pane| {
-                        (
+            let pane_buffers: Vec<(std::path::PathBuf, String)> =
+                grid.contexts()
+                    .iter()
+                    .filter(|(key, _)| visible_nodes.contains(key))
+                    .filter_map(|(_, item)| {
+                        item.val.code.as_ref().filter(|pane| !pane.local_only).map(
+                            |pane| {
+                                (
                             pane.path.clone(),
                             crate::screen::markdown_crdt::buffer_id_for_markdown_path(
                                 &pane.path,
                             ),
                         )
+                            },
+                        )
                     })
-                })
-                .collect();
+                    .collect();
             for (path, buffer_id) in pane_buffers {
                 let cursors = self
                     .remote_presence
@@ -69,11 +71,24 @@ impl Screen<'_> {
             }
         }
         let focused_route = self.context_manager.current().route_id;
-        let editor_focused = !self.context_manager.current().neoism_agent.as_ref()
+        let editor_focused = !self
+            .context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
             .is_some_and(|agent| agent.side_panel().is_focused())
             && self.renderer.buffer_tabs.focused_cursor_rect().is_none()
-            && self.renderer.pane_tabs.values().all(|tabs| tabs.focused_cursor_rect().is_none())
-            && self.renderer.island.as_ref().and_then(|island| island.focused_cursor_rect()).is_none()
+            && self
+                .renderer
+                .pane_tabs
+                .values()
+                .all(|tabs| tabs.focused_cursor_rect().is_none())
+            && self
+                .renderer
+                .island
+                .as_ref()
+                .and_then(|island| island.focused_cursor_rect())
+                .is_none()
             && !self.renderer.file_tree.is_focused()
             && !self.renderer.notes_sidebar.is_focused()
             && !self.renderer.git_diff_panel.is_focused()
@@ -99,7 +114,9 @@ impl Screen<'_> {
             // publishes `cursor_rect`.
             code.blame.focused = editor_focused && item.val.route_id == focused_route;
             code.caret_drawn_by_host = true;
-            code.remote_cursors = remote_by_path.remove(code.path.as_os_str()).unwrap_or_default();
+            code.remote_cursors = remote_by_path
+                .remove(code.path.as_os_str())
+                .unwrap_or_default();
             let animating = neoism_ui::editor::code::render::render(
                 &mut self.sugarloaf,
                 code,

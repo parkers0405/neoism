@@ -1,7 +1,7 @@
 mod live_messages;
 
 use super::*;
-use crate::state::SessionStore;
+use crate::state::{SessionStore, TenantQueryScope};
 use crate::tool_selection::provider_tool_map;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -24,12 +24,12 @@ mod hosting_tests;
 #[path = "tests_interaction_tools.rs"]
 mod interaction_tool_tests;
 
+#[path = "tests_computer_pipeline.rs"]
+mod computer_pipeline_tests;
 #[path = "tests_session_queue.rs"]
 mod session_queue_tests;
 #[path = "tests_session_undo.rs"]
 mod session_undo_tests;
-#[path = "tests_computer_pipeline.rs"]
-mod computer_pipeline_tests;
 
 #[path = "tests_tool_parts.rs"]
 mod tool_part_tests;
@@ -749,7 +749,10 @@ async fn store_persists_sessions_and_searches_with_like() {
     );
 
     // Transcript search ANDs terms in the bounded LIKE scan.
-    let hits = store.search_messages("quick fox", None, 10).await.unwrap();
+    let hits = store
+        .search_messages(TenantQueryScope::LocalAll, "quick fox", None, 10)
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].session_id, session_id.to_string());
     assert!(
@@ -758,7 +761,7 @@ async fn store_persists_sessions_and_searches_with_like() {
         hits[0].excerpt
     );
     assert!(store
-        .search_messages("quick zebra", None, 10)
+        .search_messages(TenantQueryScope::LocalAll, "quick zebra", None, 10)
         .await
         .unwrap()
         .is_empty());
@@ -797,6 +800,255 @@ async fn store_persists_sessions_and_searches_with_like() {
         .unwrap()
         .execution
         .is_none());
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn tenant_scoped_search_and_root_pagination_never_cross_tenants() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-tenant-query-scope-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let store = SessionStore::open(path.clone()).await.unwrap();
+    let now = now_millis();
+    let mut alpha = store_test_session(&neoism_agent_core::new_session_id(), now + 1);
+    alpha
+        .extra
+        .insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("alpha"));
+    let mut beta = store_test_session(&neoism_agent_core::new_session_id(), now + 2);
+    beta.extra
+        .insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("beta"));
+    store.insert_session(&alpha).await.unwrap();
+    store.insert_session(&beta).await.unwrap();
+    store
+        .append_message(
+            alpha.id.as_str(),
+            &store_test_message(&alpha.id, now + 1, "shared needle alpha"),
+        )
+        .await
+        .unwrap();
+    store
+        .append_message(
+            beta.id.as_str(),
+            &store_test_message(&beta.id, now + 2, "shared needle beta"),
+        )
+        .await
+        .unwrap();
+    store
+        .append_event(&EventPayload::new(
+            event_type::SESSION_STATUS,
+            json!({ "sessionID": alpha.id }),
+        ))
+        .await
+        .unwrap();
+    store
+        .append_event(&EventPayload::new(
+            event_type::SESSION_STATUS,
+            json!({ "sessionID": beta.id }),
+        ))
+        .await
+        .unwrap();
+
+    let alpha_hits = store
+        .search_messages(TenantQueryScope::Tenant("alpha"), "shared needle", None, 10)
+        .await
+        .unwrap();
+    assert_eq!(alpha_hits.len(), 1);
+    assert_eq!(alpha_hits[0].session_id, alpha.id.to_string());
+
+    let alpha_page = store
+        .list_root_sessions_page(
+            TenantQueryScope::Tenant("alpha"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alpha_page.items.len(), 1);
+    assert_eq!(alpha_page.items[0].id, alpha.id);
+
+    let alpha_events = store
+        .list_events_after(TenantQueryScope::Tenant("alpha"), 0, 10, None)
+        .await
+        .unwrap();
+    assert_eq!(alpha_events.len(), 1);
+    assert_eq!(
+        alpha_events[0].payload.properties["sessionID"],
+        json!(alpha.id)
+    );
+
+    let local_page = store
+        .list_root_sessions_page(
+            TenantQueryScope::LocalAll,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(local_page.items.len(), 2);
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn workspace_revisions_are_tenant_scoped_and_compare_and_swap() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-workspace-revision-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let store = SessionStore::open(path.clone()).await.unwrap();
+
+    assert!(store
+        .commit_workspace_revision("alpha", "root", None, "a1")
+        .await
+        .unwrap());
+    assert!(store
+        .commit_workspace_revision("beta", "root", None, "b1")
+        .await
+        .unwrap());
+    assert!(!store
+        .commit_workspace_revision("alpha", "root", Some("stale"), "a2")
+        .await
+        .unwrap());
+    assert!(store
+        .commit_workspace_revision("alpha", "root", Some("a1"), "a2")
+        .await
+        .unwrap());
+    assert_eq!(
+        store.workspace_revision("alpha", "root").await.unwrap(),
+        Some("a2".into())
+    );
+    assert_eq!(
+        store.workspace_revision("beta", "root").await.unwrap(),
+        Some("b1".into())
+    );
+    cleanup_sqlite_files(&path);
+}
+
+#[test]
+fn hosted_control_plane_configuration_fails_closed() {
+    let error = crate::standard_services()
+        .for_hosted_control_plane()
+        .validate()
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("tenant resolver"));
+}
+
+#[tokio::test]
+async fn session_control_takeover_is_tenant_scoped_and_revision_guarded() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-session-control-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let store = SessionStore::open(path.clone()).await.unwrap();
+    let mut session = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    session
+        .extra
+        .insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("company-a"));
+    store.insert_session(&session).await.unwrap();
+
+    let service = store
+        .claim_session_control(
+            "company-a",
+            session.id.as_str(),
+            "service-a",
+            "service-account",
+            now_millis() + 60_000,
+            Some(0),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(service.revision, 1);
+    assert!(store
+        .claim_session_control(
+            "company-a",
+            session.id.as_str(),
+            "human-a",
+            "human",
+            now_millis() + 60_000,
+            Some(0),
+        )
+        .await
+        .unwrap()
+        .is_none());
+    let human = store
+        .claim_session_control(
+            "company-a",
+            session.id.as_str(),
+            "human-a",
+            "human",
+            now_millis() + 60_000,
+            Some(service.revision),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(human.controller_subject, "human-a");
+    assert_eq!(human.revision, 2);
+    assert!(store
+        .session_control("company-b", session.id.as_str())
+        .await
+        .unwrap()
+        .is_none());
+    let participants = store
+        .list_session_participants("company-a", session.id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(participants.len(), 2);
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn permission_approvals_allow_colliding_project_ids_across_tenants() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-tenant-approvals-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let store = SessionStore::open(path.clone()).await.unwrap();
+    let alpha = vec![neoism_agent_core::PermissionRule {
+        permission: "bash".into(),
+        pattern: "cargo *".into(),
+        action: neoism_agent_core::PermissionAction::Allow,
+    }];
+    let beta = vec![neoism_agent_core::PermissionRule {
+        permission: "bash".into(),
+        pattern: "cargo *".into(),
+        action: neoism_agent_core::PermissionAction::Deny,
+    }];
+    store
+        .save_permission_approvals("alpha", "project", &alpha)
+        .await
+        .unwrap();
+    store
+        .save_permission_approvals("beta", "project", &beta)
+        .await
+        .unwrap();
+    let approvals = store.list_permission_approvals().await.unwrap();
+    let alpha_saved = approvals.get(&("alpha".into(), "project".into())).unwrap();
+    let beta_saved = approvals.get(&("beta".into(), "project".into())).unwrap();
+    assert_eq!(alpha_saved.len(), 1);
+    assert_eq!(beta_saved.len(), 1);
+    assert!(matches!(
+        alpha_saved[0].action,
+        neoism_agent_core::PermissionAction::Allow
+    ));
+    assert!(matches!(
+        beta_saved[0].action,
+        neoism_agent_core::PermissionAction::Deny
+    ));
     cleanup_sqlite_files(&path);
 }
 
@@ -1172,7 +1424,7 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     }
 
     let first = store
-        .list_root_sessions_page(Some("/indexed"), None, None, None, None, Some(2))
+        .list_root_sessions_page(TenantQueryScope::LocalAll, Some("/indexed"), None, None, None, None, Some(2))
         .await
         .unwrap();
     assert_eq!(first.items.len(), 2);
@@ -1182,6 +1434,7 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     .unwrap();
     let second = store
         .list_root_sessions_page(
+            TenantQueryScope::LocalAll,
             Some("/indexed"),
             None,
             None,
@@ -1210,7 +1463,7 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     store.update_session(&moved).await.unwrap();
     assert_eq!(
         store
-            .list_root_sessions_page(Some("/moved"), None, None, None, None, Some(10))
+            .list_root_sessions_page(TenantQueryScope::LocalAll, Some("/moved"), None, None, None, None, Some(10))
             .await
             .unwrap()
             .items
@@ -1219,7 +1472,7 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     );
     assert!(store.delete_session(ids[0].as_str()).await.unwrap());
     assert!(store
-        .list_root_sessions_page(Some("/moved"), None, None, None, None, Some(10))
+            .list_root_sessions_page(TenantQueryScope::LocalAll, Some("/moved"), None, None, None, None, Some(10))
         .await
         .unwrap()
         .items
@@ -1291,7 +1544,7 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
 
     // Query vector close to the first embedding: it must rank first.
     let hits = store
-        .semantic_search("[0.9,0.1,0]", "test-model", None, 10)
+        .semantic_search(TenantQueryScope::LocalAll, "[0.9,0.1,0]", "test-model", None, 10)
         .await
         .unwrap();
     assert_eq!(hits.len(), 2);
@@ -1302,7 +1555,7 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
     // A different model's vectors are invisible, and tombstones drop rows
     // out of the missing set without becoming searchable.
     assert!(store
-        .semantic_search("[0.9,0.1,0]", "other-model", None, 10)
+        .semantic_search(TenantQueryScope::LocalAll, "[0.9,0.1,0]", "other-model", None, 10)
         .await
         .unwrap()
         .is_empty());
@@ -1311,7 +1564,7 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
         .await
         .unwrap();
     let hits = store
-        .semantic_search("[0.9,0.1,0]", "test-model", None, 10)
+        .semantic_search(TenantQueryScope::LocalAll, "[0.9,0.1,0]", "test-model", None, 10)
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
@@ -1597,7 +1850,7 @@ async fn live_stream_events_broadcast_without_persistence() {
     assert!(state
         .inner
         .store
-        .list_events_after(0, 10, Some(session_id.as_str()))
+        .list_events_after(TenantQueryScope::LocalAll, 0, 10, Some(session_id.as_str()))
         .await
         .unwrap()
         .is_empty());
@@ -1670,6 +1923,61 @@ async fn v2_root_event_stream_forwards_live_delta_from_child_created_after_conne
     assert!(text.contains("live-child-token"), "{text}");
     assert!(text.contains(child_id.as_str()), "{text}");
     assert!(!text.contains("must-not-leak"), "{text}");
+
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn v2_session_catalog_stream_only_forwards_roots_in_the_requested_directory() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-catalog-events-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/session-catalog/events?directory=%2Ftmp")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+
+    let mut child =
+        store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    child.parent_id = Some(neoism_agent_core::new_session_id());
+    state.publish(EventPayload::new(
+        event_type::SESSION_CREATED,
+        json!({ "sessionID": child.id, "info": child }),
+    ));
+    let mut other_directory =
+        store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    other_directory.directory = "/".to_string();
+    state.publish(EventPayload::new(
+        event_type::SESSION_CREATED,
+        json!({ "sessionID": other_directory.id, "info": other_directory }),
+    ));
+    let root = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    let root_id = root.id.to_string();
+    state.publish(EventPayload::new(
+        event_type::SESSION_CREATED,
+        json!({ "sessionID": root.id, "info": root }),
+    ));
+
+    let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("root catalogue event should arrive")
+        .expect("catalogue SSE should remain open")
+        .expect("catalogue SSE chunk should be readable");
+    let text = String::from_utf8_lossy(&chunk);
+    assert!(text.contains("session.created"), "{text}");
+    assert!(text.contains(&root_id), "{text}");
+    assert!(!text.contains("parentId"), "{text}");
 
     cleanup_sqlite_files(&path);
 }
@@ -2374,7 +2682,7 @@ async fn concurrent_event_commits_keep_one_gapless_aggregate_sequence() {
     let events = state
         .inner
         .store
-        .list_events_after(0, 100, Some(&session_id))
+        .list_events_after(TenantQueryScope::LocalAll, 0, 100, Some(&session_id))
         .await
         .unwrap();
     assert_eq!(events.len(), 24);
@@ -2425,7 +2733,7 @@ async fn turso_transactions_retry_while_another_store_is_writing() {
     }
 
     let events = event_store
-        .list_events_after(0, writes, Some(session_id.as_str()))
+        .list_events_after(TenantQueryScope::LocalAll, 0, writes, Some(session_id.as_str()))
         .await
         .unwrap();
     assert_eq!(events.len(), writes);
@@ -4396,6 +4704,17 @@ async fn v2_openapi_describes_the_sdk_discovery_surface() {
     .await;
     assert!(document["paths"]["/v2/events"].is_object());
     assert!(document["components"]["schemas"]["EventEnvelope"].is_object());
+    assert!(document["paths"]["/v2/sessions/{session_id}/control"].is_object());
+    assert!(document["paths"]["/v2/sessions/{session_id}/participants"].is_object());
+    assert!(document["components"]["schemas"]["SessionControl"].is_object());
+    assert!(document["components"]["schemas"]["SessionParticipant"].is_object());
+    let deleted = &document["components"]["schemas"]["EventSessionDeleted"]["properties"]
+        ["data"];
+    assert_eq!(deleted["properties"]["tenantID"]["type"], "string");
+    assert_eq!(
+        deleted["properties"]["info"]["$ref"],
+        "#/components/schemas/Session"
+    );
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
@@ -4483,6 +4802,65 @@ async fn v2_artifacts_round_trip_binary_content() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn v2_session_control_round_trip_is_revision_guarded() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-v2-control-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let session = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+    let router = app(state);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post(format!("/v2/sessions/{}/control", session.id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"expectedRevision":0,"leaseSeconds":60}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let control: serde_json::Value = response_json(response).await;
+    assert_eq!(control["revision"], 1);
+    assert_eq!(control["controllerSubject"], "local");
+
+    let stale = router
+        .clone()
+        .oneshot(
+            Request::delete(format!(
+                "/v2/sessions/{}/control?expectedRevision=0",
+                session.id
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let released = router
+        .oneshot(
+            Request::delete(format!(
+                "/v2/sessions/{}/control?expectedRevision=1",
+                session.id
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(released.status(), StatusCode::OK);
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
@@ -4639,9 +5017,18 @@ async fn directory_routes_obey_real_router_auth_policy() {
         }
     }
     let cleanup = Cleanup {
-        root: std::env::temp_dir().join(format!("neoism-directory-auth-{}", neoism_agent_core::new_session_id())),
-        env: ["NEOISM_AGENT_TOKEN", "NEOISM_AGENT_AUTH_CONFIG", "NEOISM_AGENT_DISABLE_MODELS_FETCH"]
-            .into_iter().map(|key| (key, std::env::var_os(key))).collect(),
+        root: std::env::temp_dir().join(format!(
+            "neoism-directory-auth-{}",
+            neoism_agent_core::new_session_id()
+        )),
+        env: [
+            "NEOISM_AGENT_TOKEN",
+            "NEOISM_AGENT_AUTH_CONFIG",
+            "NEOISM_AGENT_DISABLE_MODELS_FETCH",
+        ]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect(),
     };
     std::fs::create_dir_all(cleanup.root.join("allowed/child")).unwrap();
     std::env::remove_var("NEOISM_AGENT_TOKEN");
@@ -4654,29 +5041,55 @@ async fn directory_routes_obey_real_router_auth_policy() {
         if mode == "local-token" {
             std::env::set_var("NEOISM_AGENT_TOKEN", "directory-test-token");
         } else if mode.starts_with("hosted-") {
-            let prefixes = if mode == "hosted-scoped" { vec![allowed.to_string_lossy().into_owned()] } else { vec![] };
-            std::env::set_var("NEOISM_AGENT_AUTH_CONFIG", json!({"tokens": [{
-                "token": "directory-test-token", "tenantId": "directory-test",
-                "directoryPrefixes": prefixes
-            }]}).to_string());
+            let prefixes = if mode == "hosted-scoped" {
+                vec![allowed.to_string_lossy().into_owned()]
+            } else {
+                vec![]
+            };
+            std::env::set_var(
+                "NEOISM_AGENT_AUTH_CONFIG",
+                json!({"tokens": [{
+                    "token": "directory-test-token", "tenantId": "directory-test",
+                    "directoryPrefixes": prefixes
+                }]})
+                .to_string(),
+            );
         }
-        let state = AppState::open_database(cleanup.root.join(format!("{mode}.db"))).await.unwrap();
+        let state = AppState::open_database(cleanup.root.join(format!("{mode}.db")))
+            .await
+            .unwrap();
         let router = app(state);
         for token in [None, Some("invalid"), Some("directory-test-token")] {
             let mut req = request(Method::GET, "/v2/directories", None);
             if let Some(token) = token {
-                req.headers_mut().insert("authorization", format!("Bearer {token}").parse().unwrap());
+                req.headers_mut()
+                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
             }
             let response = router.clone().oneshot(req).await.unwrap();
-            let expected = if mode == "no-auth" { StatusCode::OK }
-                else if token != Some("directory-test-token") { StatusCode::UNAUTHORIZED }
-                else if mode == "hosted-unscoped" { StatusCode::FORBIDDEN }
-                else { StatusCode::OK };
+            let expected = if mode == "no-auth" {
+                StatusCode::OK
+            } else if token != Some("directory-test-token") {
+                StatusCode::UNAUTHORIZED
+            } else if mode == "hosted-unscoped" {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::OK
+            };
             assert_eq!(response.status(), expected, "mode={mode}, token={token:?}");
             if expected == StatusCode::OK {
                 let body: Value = response_json(response).await;
-                let expected_root = if mode == "hosted-scoped" { allowed.clone() } else { std::env::current_dir().unwrap() };
-                assert_eq!(body["path"], windows_process::canonicalize_path(&expected_root).unwrap().to_string_lossy().as_ref());
+                let expected_root = if mode == "hosted-scoped" {
+                    allowed.clone()
+                } else {
+                    std::env::current_dir().unwrap()
+                };
+                assert_eq!(
+                    body["path"],
+                    windows_process::canonicalize_path(&expected_root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .as_ref()
+                );
                 if mode == "hosted-scoped" {
                     assert!(body["parent"].is_null());
                     assert_eq!(body["entries"][0]["name"], "child");
@@ -4685,8 +5098,14 @@ async fn directory_routes_obey_real_router_auth_policy() {
         }
         if mode == "hosted-scoped" {
             let mut req = request(Method::GET, "/v2/directories?path=..", None);
-            req.headers_mut().insert("authorization", "Bearer directory-test-token".parse().unwrap());
-            assert_eq!(router.oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+            req.headers_mut().insert(
+                "authorization",
+                "Bearer directory-test-token".parse().unwrap(),
+            );
+            assert_eq!(
+                router.oneshot(req).await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
         }
     }
 }
@@ -4925,6 +5344,8 @@ async fn disabled_workspace_tools_do_not_warm_search() {
         &snapshot,
         &[],
         "gpt-5.5",
+        &neoism_agent_service_api::ExecutionPolicy::NativeLocal,
+        &crate::mcp_auth::McpAuthStore::local(state.services()),
     )
     .await
     .unwrap();

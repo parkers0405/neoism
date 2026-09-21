@@ -28,7 +28,8 @@ use neoism_terminal_pty::{PtySession, PtySessionConfig};
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
     pub(super) fn rehydrate_remote_routes_for_attached_daemon(&mut self) {
-        self.attach_existing_remote_routes(None);
+        let generation = self.daemon.link.as_ref().and_then(|link| link.generation());
+        self.attach_existing_remote_routes(generation);
     }
 
     fn attach_existing_remote_routes(&mut self, generation: Option<u64>) {
@@ -361,6 +362,20 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // workspace open made every new split/tab in an unrelated local
         // workspace run on the peer daemon.
         if !self.current_workspace_uses_attached_daemon() {
+            if self.current_workspace_is_remote_joined() {
+                tracing::warn!(
+                    target: "neoism::remote_pty",
+                    "joined terminal create deferred until the peer daemon is attached"
+                );
+                if let Some((handle, runtime)) = self
+                    .daemon
+                    .link
+                    .as_ref()
+                    .and_then(|link| link.handle_and_runtime())
+                {
+                    return Some(crate::context::remote_pty::prepare(handle, runtime));
+                }
+            }
             return None;
         }
         // On a JOINED (peer) workspace every new terminal must run on
@@ -406,13 +421,26 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let Some(binding) = context.remote_pty.as_ref() else {
             return;
         };
-        let Some(link) = self.daemon.link.as_ref() else {
-            return;
-        };
         self.daemon
             .cache
             .remote_routes
             .insert(context.route_id, binding.clone());
+        if !self.current_workspace_uses_attached_daemon() {
+            if let Some(endpoint) = self.current_adopted_workspace_endpoint() {
+                let endpoint = endpoint.to_string();
+                self.pending_joined_terminal_routes
+                    .retain(|(route_id, _, _)| *route_id != context.route_id);
+                self.pending_joined_terminal_routes.push((
+                    context.route_id,
+                    cwd,
+                    endpoint,
+                ));
+            }
+            return;
+        }
+        let Some(link) = self.daemon.link.as_ref() else {
+            return;
+        };
         let request_id = link.send_pty(PtyClientMessage::CreatePty {
             cwd,
             cols: context
@@ -431,6 +459,75 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .cache
             .pending_pty_routes
             .insert(request_id, context.route_id);
+    }
+
+    pub(super) fn spawn_pending_joined_terminals(&mut self) {
+        if !self.current_workspace_is_remote_joined()
+            || !self.current_workspace_uses_attached_daemon()
+        {
+            return;
+        }
+        let Some(endpoint) = self.daemon_endpoint().map(str::to_string) else {
+            return;
+        };
+        let mut pending_for_endpoint = Vec::new();
+        self.pending_joined_terminal_routes
+            .retain(|pending @ (_, _, owner)| {
+                if owner == &endpoint {
+                    pending_for_endpoint.push(pending.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        for (route_id, cwd, owner) in pending_for_endpoint {
+            if self.daemon.cache.route_sessions.contains_key(&route_id)
+                || self
+                    .daemon
+                    .cache
+                    .pending_pty_routes
+                    .values()
+                    .any(|pending| *pending == route_id)
+            {
+                continue;
+            }
+            let Some(item) = self.get_by_route_id(route_id) else {
+                continue;
+            };
+            let context = item.context();
+            let Some(binding) = context.remote_pty.clone() else {
+                continue;
+            };
+            let cols = context
+                .dimension
+                .columns
+                .try_into()
+                .unwrap_or(MIN_COLUMNS as u16);
+            let rows = context
+                .dimension
+                .lines
+                .try_into()
+                .unwrap_or(MIN_LINES as u16);
+            let Some(link) = self.daemon.link.as_ref() else {
+                self.pending_joined_terminal_routes
+                    .push((route_id, cwd, owner));
+                return;
+            };
+            if let Some((handle, runtime)) = link.handle_and_runtime() {
+                crate::context::remote_pty::rebind_transport(&binding, handle, runtime);
+            }
+            self.daemon.cache.remote_routes.insert(route_id, binding);
+            let request_id = link.send_pty(PtyClientMessage::CreatePty {
+                cwd,
+                cols,
+                rows,
+                shell: None,
+            });
+            self.daemon
+                .cache
+                .pending_pty_routes
+                .insert(request_id, route_id);
+        }
     }
 
     /// 8C: like [`Self::prepared_remote_pty`] but NOT gated on

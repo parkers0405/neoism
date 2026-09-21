@@ -140,6 +140,10 @@ pub struct PluginToolPermission {
 
 #[derive(Clone)]
 pub struct PluginToolInvocation {
+    pub tenant_id: String,
+    pub subject: Option<String>,
+    pub workspace_id: Option<String>,
+    pub execution_mode: PluginExecutionMode,
     pub directory: String,
     pub session_id: Option<String>,
     pub arguments: Value,
@@ -148,6 +152,13 @@ pub struct PluginToolInvocation {
     pub cancel: Option<Arc<AtomicBool>>,
     pub formatter: Option<Value>,
     pub generation: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PluginExecutionMode {
+    Disabled,
+    NativeLocal,
+    Sandboxed,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

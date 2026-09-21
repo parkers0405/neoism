@@ -1038,7 +1038,10 @@ mod tests {
         overlay.active = true;
         overlay.menu_rects = vec![(SplashMenuAction::Search, [10.0, 20.0, 80.0, 30.0])];
         assert!(overlay.is_active());
-        assert_eq!(overlay.menu_hit(20.0, 25.0).map(SplashMenuAction::as_str), Some("search"));
+        assert_eq!(
+            overlay.menu_hit(20.0, 25.0).map(SplashMenuAction::as_str),
+            Some("search")
+        );
         assert_eq!(overlay.menu_hit(20.0, 55.0), None);
         overlay.reset();
         assert!(!overlay.is_active());

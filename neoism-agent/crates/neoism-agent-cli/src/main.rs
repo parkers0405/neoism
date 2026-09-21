@@ -398,7 +398,12 @@ async fn main() -> anyhow::Result<()> {
                 neoism_agent_server::listen(options, standalone_services()).await?;
             }
         }
-        Command::Web { server, hostname, port, no_open } => {
+        Command::Web {
+            server,
+            hostname,
+            port,
+            no_open,
+        } => {
             web_launcher::run(server, hostname, port, no_open).await?;
         }
         Command::Acp {

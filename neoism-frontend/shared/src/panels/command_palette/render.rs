@@ -8,8 +8,8 @@
 
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
-use web_time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
+use web_time::Instant;
 
 use crate::panels::file_tree;
 use crate::primitives::{draw_overlay_icon_centered, IdeTheme};
@@ -40,7 +40,9 @@ pub(super) fn wrap_grapheme_ranges(
     max_width: f32,
     mut measure: impl FnMut(&str) -> f32,
 ) -> Vec<(usize, usize)> {
-    if text.is_empty() { return vec![(0, 0)]; }
+    if text.is_empty() {
+        return vec![(0, 0)];
+    }
     let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
     let mut rows = Vec::new();
     let mut start_g = 0;
@@ -57,13 +59,21 @@ pub(super) fn wrap_grapheme_ranges(
                 break;
             }
             fit_end = end_g;
-            if graphemes[end_g - 1].1.chars().all(char::is_whitespace) { last_space = Some(end_g); }
-            if end_g == graphemes.len() { break; }
+            if graphemes[end_g - 1].1.chars().all(char::is_whitespace) {
+                last_space = Some(end_g);
+            }
+            if end_g == graphemes.len() {
+                break;
+            }
             end_g += 1;
         }
         end_g = if overflowed {
-            last_space.filter(|space| *space > start_g && *space <= fit_end).unwrap_or(fit_end)
-        } else { fit_end };
+            last_space
+                .filter(|space| *space > start_g && *space <= fit_end)
+                .unwrap_or(fit_end)
+        } else {
+            fit_end
+        };
         let end = graphemes.get(end_g).map(|(i, _)| *i).unwrap_or(text.len());
         rows.push((start, end));
         start_g = end_g.max(start_g + 1);
@@ -478,8 +488,8 @@ impl CommandPalette {
             self.selected_cursor_rect = None;
             return;
         }
-        self.server_edit_hit = None;
-        self.server_remove_hit = None;
+        self.server_edit_hits.clear();
+        self.server_remove_hits.clear();
 
         let (window_width, window_height, scale_factor) = dimensions;
 
@@ -503,19 +513,29 @@ impl CommandPalette {
         let frame_stroke = (file_tree::FRAME_STROKE * s).max(2.0);
         // Measure and cache dynamic input geometry before asking for the modal
         // rect, because the results list and hit testing both depend on it.
-        let preferred_width = if matches!(self.mode, PaletteMode::Themes(_) | PaletteMode::Mashups(_)) {
-            super::THEME_PALETTE_WIDTH
-        } else { super::PALETTE_WIDTH };
+        let preferred_width =
+            if matches!(self.mode, PaletteMode::Themes(_) | PaletteMode::Mashups(_)) {
+                super::THEME_PALETTE_WIDTH
+            } else {
+                super::PALETTE_WIDTH
+            };
         let logical_w = window_width / scale_factor;
-        let measured_palette_w = (preferred_width * s).min((logical_w - 16.0 * s).max(160.0));
+        let measured_palette_w =
+            (preferred_width * s).min((logical_w - 16.0 * s).max(160.0));
         let measured_inner_w = (measured_palette_w
             - (file_tree::FRAME_STROKE * s).max(2.0) * 2.0
             - pad * 2.0
-            - input_pad_x * 2.0).max(24.0 * s);
-        let measure_opts = DrawOpts { font_size: input_font, ..DrawOpts::default() };
+            - input_pad_x * 2.0)
+            .max(24.0 * s);
+        let measure_opts = DrawOpts {
+            font_size: input_font,
+            ..DrawOpts::default()
+        };
         let measured_text = if self.query.is_empty() {
             match self.mode {
-                PaletteMode::Search if self.search_backward => "Search buffer backward...",
+                PaletteMode::Search if self.search_backward => {
+                    "Search buffer backward..."
+                }
                 PaletteMode::Search => "Search buffer...",
                 PaletteMode::Commands | PaletteMode::Ex => "Type a command...",
                 PaletteMode::Fonts(_) => "Type a font name...",
@@ -526,10 +546,13 @@ impl CommandPalette {
                 PaletteMode::Workspaces(_) => "Search workspaces...",
                 PaletteMode::Servers(_) => "Search servers...",
             }
-        } else { self.query.as_str() };
-        let measured_rows = wrap_grapheme_ranges(measured_text, measured_inner_w, |part| {
-            sugarloaf.overlay_text_mut().measure(part, &measure_opts)
-        });
+        } else {
+            self.query.as_str()
+        };
+        let measured_rows =
+            wrap_grapheme_ranges(measured_text, measured_inner_w, |part| {
+                sugarloaf.overlay_text_mut().measure(part, &measure_opts)
+            });
         let query_rows = measured_rows.len().clamp(1, MAX_INPUT_ROWS);
         let error_rows = usize::from(self.cd_error.is_some());
         let line_h = INPUT_HEIGHT * s;
@@ -632,17 +655,26 @@ impl CommandPalette {
         let display_rows = wrap_grapheme_ranges(display_text, measured_inner_w, |part| {
             sugarloaf.overlay_text_mut().measure(part, &input_opts)
         });
-        let caret_display_byte = if matches!(self.mode, PaletteMode::Ex) && !self.query.is_empty() {
-            self.query_cursor + 1
-        } else { self.query_cursor };
-        let caret_row = display_rows.iter().position(|(start, end)| caret_display_byte >= *start && caret_display_byte <= *end)
+        let caret_display_byte =
+            if matches!(self.mode, PaletteMode::Ex) && !self.query.is_empty() {
+                self.query_cursor + 1
+            } else {
+                self.query_cursor
+            };
+        let caret_row = display_rows
+            .iter()
+            .position(|(start, end)| {
+                caret_display_byte >= *start && caret_display_byte <= *end
+            })
             .unwrap_or(display_rows.len().saturating_sub(1));
-        let (first_visible, visible_count) = visible_wrap_window(
-            &display_rows,
-            caret_display_byte,
-            MAX_INPUT_ROWS,
-        );
-        let visible_display_rows = display_rows.iter().skip(first_visible).take(visible_count).copied().collect::<Vec<_>>();
+        let (first_visible, visible_count) =
+            visible_wrap_window(&display_rows, caret_display_byte, MAX_INPUT_ROWS);
+        let visible_display_rows = display_rows
+            .iter()
+            .skip(first_visible)
+            .take(visible_count)
+            .copied()
+            .collect::<Vec<_>>();
         let mut input_rendered_width = 0.0;
         for (row, (start, end)) in visible_display_rows.iter().enumerate() {
             input_rendered_width = sugarloaf.overlay_text_mut().draw(
@@ -667,7 +699,10 @@ impl CommandPalette {
             }
         }
         if let Some(error) = self.cd_error.as_deref() {
-            let error_opts = DrawOpts { color: theme.u8(theme.red), ..input_opts };
+            let error_opts = DrawOpts {
+                color: theme.u8(theme.red),
+                ..input_opts
+            };
             sugarloaf.overlay_text_mut().draw(
                 text_x,
                 input_y + query_rows as f32 * line_h + (line_h - input_font) / 2.0,
@@ -715,13 +750,17 @@ impl CommandPalette {
         if caret_visible {
             let (caret_start, _) = display_rows.get(caret_row).copied().unwrap_or((0, 0));
             let prefix_end = caret_display_byte.min(display_text.len()).max(caret_start);
-            let text_width = sugarloaf.overlay_text_mut().measure(&display_text[caret_start..prefix_end], &input_opts);
+            let text_width = sugarloaf
+                .overlay_text_mut()
+                .measure(&display_text[caret_start..prefix_end], &input_opts);
 
             let max_caret_x = input_x + input_width - input_pad_x - caret_w;
             let caret_x = (text_x + text_width).min(max_caret_x.max(text_x));
             let caret_height = input_font + 4.0 * s;
-            let caret_y = input_y + caret_row.saturating_sub(first_visible) as f32 * line_h
-                + (line_h - caret_height) / 2.0 + 2.0 * s;
+            let caret_y = input_y
+                + caret_row.saturating_sub(first_visible) as f32 * line_h
+                + (line_h - caret_height) / 2.0
+                + 2.0 * s;
 
             sugarloaf.overlay_rect(
                 caret_x,
@@ -809,8 +848,8 @@ impl CommandPalette {
         let input_width = list_width;
         let list_clip = [input_x, results_y, input_width, list_clip_h];
         let mut next_selected_cursor_rect = None;
-        let mut next_server_edit_hit = None;
-        let mut next_server_remove_hit = None;
+        let mut next_server_edit_hits = Vec::new();
+        let mut next_server_remove_hits = Vec::new();
 
         // 5D-drag: the host header currently under the cursor during an
         // active workspace drag is the drop target — highlight it so the
@@ -1325,10 +1364,10 @@ impl CommandPalette {
                         &opts,
                     );
                 }
-                next_server_edit_hit =
-                    Some(([edit_x, chip_y, edit_w, chip_h], server_id.clone()));
-                next_server_remove_hit =
-                    Some(([remove_x, chip_y, remove_w, chip_h], server_id));
+                next_server_edit_hits
+                    .push(([edit_x, chip_y, edit_w, chip_h], server_id.clone()));
+                next_server_remove_hits
+                    .push(([remove_x, chip_y, remove_w, chip_h], server_id));
             }
             if let Some(((text, _), opts)) =
                 move_hint.as_ref().zip(move_hint_opts.as_ref())
@@ -1386,8 +1425,8 @@ impl CommandPalette {
         // hidden on first open, faded out 2.3 s after the last scroll.
         let total = filtered.len();
         drop(filtered);
-        self.server_edit_hit = next_server_edit_hit;
-        self.server_remove_hit = next_server_remove_hit;
+        self.server_edit_hits = next_server_edit_hits;
+        self.server_remove_hits = next_server_remove_hits;
         let track_height = MAX_VISIBLE_RESULTS as f32 * row_h;
         let normalized = if total > MAX_VISIBLE_RESULTS {
             self.scroll_offset as f32 / (total - MAX_VISIBLE_RESULTS) as f32

@@ -15,16 +15,21 @@ const LARGE_MARKDOWN_FAST_PARSE_BYTES: usize = 2 * 1024 * 1024;
 
 impl MarkdownPane {
     pub fn is_active_tab_path(&self, path: &std::path::Path) -> bool {
-        if self.path == path { return true; }
+        if self.path == path {
+            return true;
+        }
         self.documentation_notebook.as_ref().is_some_and(|binding| {
-            binding.path == path && binding.session.lock().ok().is_some_and(|book| {
-                book.page_path(book.current).as_ref() == Some(&self.path)
-            })
+            binding.path == path
+                && binding.session.lock().ok().is_some_and(|book| {
+                    book.page_path(book.current).as_ref() == Some(&self.path)
+                })
         })
     }
 
     pub fn tab_path(&self) -> &std::path::Path {
-        self.documentation_notebook.as_ref().map_or(self.path.as_path(), |book| book.path.as_path())
+        self.documentation_notebook
+            .as_ref()
+            .map_or(self.path.as_path(), |book| book.path.as_path())
     }
 
     /// Construct a pane from in-memory source text (no filesystem read).
@@ -223,7 +228,10 @@ impl MarkdownPane {
         !self.local_only && !self.remote_content_pending && self.error.is_none()
     }
 
-    pub fn load_with_source(path: PathBuf, source: crate::services::FileOpenSource) -> Self {
+    pub fn load_with_source(
+        path: PathBuf,
+        source: crate::services::FileOpenSource,
+    ) -> Self {
         use crate::services::FileOpenSource;
         if source == FileOpenSource::Host {
             let mut pane = Self::from_source(path, "");
@@ -380,10 +388,14 @@ impl MarkdownPane {
     /// `error`). Replaces the pane content exactly like a successful
     /// local reload would.
     pub fn apply_remote_source(&mut self, source: &str) {
-        if self.local_only { return; }
+        if self.local_only {
+            return;
+        }
         self.remote_source = true;
         if self.is_dirty() {
-            self.fail_remote_loading("Local edits were preserved; resolve them before reloading");
+            self.fail_remote_loading(
+                "Local edits were preserved; resolve them before reloading",
+            );
             return;
         }
         self.apply_source(source);
@@ -396,7 +408,9 @@ impl MarkdownPane {
     /// the daemon read is in flight, and keep the CRDT drain from
     /// seeding the buffer with placeholder text.
     pub fn mark_remote_loading(&mut self) {
-        if self.local_only { return; }
+        if self.local_only {
+            return;
+        }
         self.remote_source = true;
         // The loading renderer hides blocks; retain them for failure recovery.
         self.error = None;
@@ -406,7 +420,9 @@ impl MarkdownPane {
 
     /// Finish only the loading state. Preserve any user edits for recovery.
     pub fn fail_remote_loading(&mut self, message: &str) {
-        if self.local_only { return; }
+        if self.local_only {
+            return;
+        }
         self.remote_content_pending = false;
         self.remote_loading_started = None;
         self.error = Some(format!("Could not read host file: {message}"));
@@ -435,7 +451,12 @@ impl MarkdownPane {
             return None;
         }
         let line = self.lines.get(self.cursor_line)?;
-        if !line.contains(':') && line.trim().chars().all(|ch| ch.is_ascii_alphabetic() || ch == '-') {
+        if !line.contains(':')
+            && line
+                .trim()
+                .chars()
+                .all(|ch| ch.is_ascii_alphabetic() || ch == '-')
+        {
             return Some(MarkdownDecorationKey::Property);
         }
         let (key, _) = line.split_once(':')?;
@@ -506,13 +527,29 @@ impl MarkdownPane {
         };
         match picker.key {
             MarkdownDecorationKey::Property => {
-                let query = self.lines.get(picker.line).map(|line| line.trim().to_ascii_lowercase()).unwrap_or_default();
-                ["title", "icon", "cover", "tags"].into_iter()
-                    .filter(|key| key.starts_with(&query) && !self.lines.iter().enumerate().any(|(index, line)| {
-                        index != picker.line && self.frontmatter_range().is_some_and(|range| range.contains(&index))
-                            && line.split_once(':').is_some_and(|(existing, _)| existing.trim().eq_ignore_ascii_case(key))
-                    }))
-                    .map(|key| (format!("{key}: "), key.to_string())).collect()
+                let query = self
+                    .lines
+                    .get(picker.line)
+                    .map(|line| line.trim().to_ascii_lowercase())
+                    .unwrap_or_default();
+                ["title", "icon", "cover", "tags"]
+                    .into_iter()
+                    .filter(|key| {
+                        key.starts_with(&query)
+                            && !self.lines.iter().enumerate().any(|(index, line)| {
+                                index != picker.line
+                                    && self
+                                        .frontmatter_range()
+                                        .is_some_and(|range| range.contains(&index))
+                                    && line.split_once(':').is_some_and(
+                                        |(existing, _)| {
+                                            existing.trim().eq_ignore_ascii_case(key)
+                                        },
+                                    )
+                            })
+                    })
+                    .map(|key| (format!("{key}: "), key.to_string()))
+                    .collect()
             }
             MarkdownDecorationKey::Icon => EMOJI_CHOICES
                 .iter()
@@ -559,7 +596,11 @@ impl MarkdownPane {
         };
         self.save_undo();
         if let Some(line) = self.lines.get_mut(picker.line) {
-            *line = if picker.key == MarkdownDecorationKey::Property { value.clone() } else { format!("{key}: {value}") };
+            *line = if picker.key == MarkdownDecorationKey::Property {
+                value.clone()
+            } else {
+                format!("{key}: {value}")
+            };
             self.cursor_line = picker.line;
             self.cursor_col = line.len();
         }
@@ -832,7 +873,9 @@ impl MarkdownPane {
 
     pub fn save(&mut self) -> std::io::Result<()> {
         if self.remote_source || self.remote_content_pending {
-            return Err(std::io::Error::other("Host-owned buffers must be saved through the daemon"));
+            return Err(std::io::Error::other(
+                "Host-owned buffers must be saved through the daemon",
+            ));
         }
         let source = source_from_lines(&self.lines);
         match std::fs::write(&self.path, source) {

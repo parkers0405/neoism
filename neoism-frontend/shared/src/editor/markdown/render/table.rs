@@ -1170,18 +1170,48 @@ pub(super) fn draw_table_action_button(
         let color = theme.f32(if hovered { theme.fg } else { theme.muted });
         let cx = rect[0] + rect[2] * 0.5;
         let cy = rect[1] + rect[3] * 0.5;
-        draw_rect_clipped(sugarloaf, clip, cx - 4.0, cy - 0.75, 8.0, 1.5, color, DEPTH, ORDER_BG + 6);
-        if icon == "+" { draw_rect_clipped(sugarloaf, clip, cx - 0.75, cy - 4.0, 1.5, 8.0, color, DEPTH, ORDER_BG + 6); }
+        draw_rect_clipped(
+            sugarloaf,
+            clip,
+            cx - 4.0,
+            cy - 0.75,
+            8.0,
+            1.5,
+            color,
+            DEPTH,
+            ORDER_BG + 6,
+        );
+        if icon == "+" {
+            draw_rect_clipped(
+                sugarloaf,
+                clip,
+                cx - 0.75,
+                cy - 4.0,
+                1.5,
+                8.0,
+                color,
+                DEPTH,
+                ORDER_BG + 6,
+            );
+        }
         return;
     }
     if icon == "..." {
         let diameter = 2.5_f32.min(rect[3] * 0.2);
         let color = theme.f32(if hovered { theme.fg } else { theme.muted });
         for offset in [-5.0, 0.0, 5.0] {
-            draw_rounded_rect_clipped(sugarloaf, clip,
+            draw_rounded_rect_clipped(
+                sugarloaf,
+                clip,
                 rect[0] + rect[2] * 0.5 + offset - diameter * 0.5,
                 rect[1] + (rect[3] - diameter) * 0.5,
-                diameter, diameter, diameter * 0.5, color, DEPTH, ORDER_BG + 6);
+                diameter,
+                diameter,
+                diameter * 0.5,
+                color,
+                DEPTH,
+                ORDER_BG + 6,
+            );
         }
         return;
     }

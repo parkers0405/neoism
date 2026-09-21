@@ -83,9 +83,15 @@ impl ChromeBridge {
                     // move selection before the common commit path reads it.
                     self.chrome.command_palette.select_clicked(index);
                     let persistent_cd = self.chrome.command_palette.is_cd_query()
-                        && self.chrome.command_palette.workspace_directory_target().is_some();
+                        && self
+                            .chrome
+                            .command_palette
+                            .workspace_directory_target()
+                            .is_some();
                     self.pick_palette_action();
-                    if !persistent_cd { self.chrome.command_palette.set_enabled(false); }
+                    if !persistent_cd {
+                        self.chrome.command_palette.set_enabled(false);
+                    }
                     self.relayout_chrome();
                     1
                 }
@@ -583,20 +589,24 @@ impl ChromeBridge {
                 .get_selected_cd_directory()
                 .map(|entry| entry.absolute_path);
             let intent = if let Some(path) = selected.clone() {
-                self.chrome.command_palette.change_workspace_directory_intent(path)
+                self.chrome
+                    .command_palette
+                    .change_workspace_directory_intent(path)
             } else {
-                self.chrome.command_palette.typed_change_workspace_directory_intent()
+                self.chrome
+                    .command_palette
+                    .typed_change_workspace_directory_intent()
             };
             if let Some(intent) = intent {
-                    self.pending_palette_intents.push(
-                        PaletteIntent::ChangeWorkspaceDirectory {
-                            workspace_id: intent.target.workspace_id,
-                            root: intent.target.root,
-                            path: intent.destination,
-                            selected: selected.is_some(),
-                        },
-                    );
-                    return true;
+                self.pending_palette_intents.push(
+                    PaletteIntent::ChangeWorkspaceDirectory {
+                        workspace_id: intent.target.workspace_id,
+                        root: intent.target.root,
+                        path: intent.destination,
+                        selected: selected.is_some(),
+                    },
+                );
+                return true;
             }
             return false;
         }
@@ -889,7 +899,9 @@ impl ChromeBridge {
     }
 
     pub fn continue_workspace_directory_palette(&mut self, root: String) {
-        self.chrome.command_palette.continue_workspace_directory(root);
+        self.chrome
+            .command_palette
+            .continue_workspace_directory(root);
         self.cd_search_key = None;
         self.relayout_chrome();
     }
@@ -1162,11 +1174,13 @@ impl ChromeBridge {
             Some(&base),
         )
         .into_iter()
-        .map(|candidate| neoism_ui::panels::command_palette::PaletteDirectoryEntry {
-            absolute_path: candidate.replacement,
-            display: Some(candidate.label),
-            detail: candidate.detail,
-        })
+        .map(
+            |candidate| neoism_ui::panels::command_palette::PaletteDirectoryEntry {
+                absolute_path: candidate.replacement,
+                display: Some(candidate.label),
+                detail: candidate.detail,
+            },
+        )
         .collect();
         self.chrome
             .command_palette
@@ -1327,7 +1341,9 @@ impl ChromeBridge {
             // Desktop `toggle_code_word_wrap` (bridges/code/input.rs).
             "ToggleGitBlame" => {
                 let enabled = self.chrome.code_git_blame;
-                let Some(pane) = self.chrome.code_pane_mut() else { return false; };
+                let Some(pane) = self.chrome.code_pane_mut() else {
+                    return false;
+                };
                 pane.blame.apply_default(enabled);
                 pane.blame.toggle();
                 true

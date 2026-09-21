@@ -167,7 +167,23 @@ impl Drop for ManagedShutdownAttempt<'_> {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct TenantRuntimeKey {
+    pub(crate) tenant_id: String,
+    pub(crate) root: PathBuf,
+}
+
+impl TenantRuntimeKey {
+    pub(crate) fn new(tenant_id: &str, directory: &str) -> Self {
+        Self {
+            tenant_id: tenant_id.to_string(),
+            root: canonical_location(directory),
+        }
+    }
+}
+
 pub(crate) struct WorkspaceRuntime {
+    pub(crate) tenant_id: String,
     pub(crate) root: PathBuf,
     services: neoism_agent_service_api::AgentServices,
     generation: PluginGenerationSlot,
@@ -175,6 +191,15 @@ pub(crate) struct WorkspaceRuntime {
     reload: Mutex<()>,
     next_generation: AtomicU64,
     closed: AtomicBool,
+}
+
+impl WorkspaceRuntime {
+    pub(crate) fn key(&self) -> TenantRuntimeKey {
+        TenantRuntimeKey {
+            tenant_id: self.tenant_id.clone(),
+            root: self.root.clone(),
+        }
+    }
 }
 
 pub(crate) struct PluginGeneration {
@@ -1235,7 +1260,7 @@ impl WorkspaceRuntime {
 }
 
 pub(crate) struct WorkspaceRuntimeRegistry {
-    entries: Mutex<HashMap<PathBuf, RuntimeEntry>>,
+    entries: Mutex<HashMap<TenantRuntimeKey, RuntimeEntry>>,
     failed_shutdowns: Mutex<Vec<Arc<WorkspaceRuntime>>>,
     generation_quarantine: Arc<StdMutex<Vec<GenerationQuarantine>>>,
     plugin_quarantine: Mutex<Vec<Arc<neoism_agent_plugin_api::InstalledPlugins>>>,
@@ -1266,11 +1291,21 @@ impl WorkspaceRuntimeRegistry {
         directory: &str,
         state: &crate::state::AppState,
     ) -> Result<(Arc<WorkspaceRuntime>, Vec<Arc<WorkspaceRuntime>>), String> {
+        self.acquire_for_tenant("local", directory, state).await
+    }
+
+    pub(crate) async fn acquire_for_tenant(
+        &self,
+        tenant_id: &str,
+        directory: &str,
+        state: &crate::state::AppState,
+    ) -> Result<(Arc<WorkspaceRuntime>, Vec<Arc<WorkspaceRuntime>>), String> {
         if self.closed.load(Ordering::Acquire) {
             return Err("workspace runtime registry is shut down".into());
         }
         let services = state.services();
-        let root = canonical_location(directory);
+        let key = TenantRuntimeKey::new(tenant_id, directory);
+        let root = key.root.clone();
         let now = Instant::now();
         let entries = self.entries.lock().await;
         if self.closed.load(Ordering::Acquire) {
@@ -1300,7 +1335,7 @@ impl WorkspaceRuntimeRegistry {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(%error, root = %stale_root.display(), "idle workspace cleanup failed; retaining runtime for retry");
+                    tracing::warn!(%error, tenant = %stale_root.tenant_id, root = %stale_root.root.display(), "idle workspace cleanup failed; retaining runtime for retry");
                 }
             }
         }
@@ -1308,7 +1343,7 @@ impl WorkspaceRuntimeRegistry {
         if self.closed.load(Ordering::Acquire) {
             return Err("workspace runtime registry is shut down".into());
         }
-        if let Some(entry) = entries.get_mut(&root) {
+        if let Some(entry) = entries.get_mut(&key) {
             entry.last_used = now;
             let refresh =
                 now.duration_since(entry.last_config_refresh) >= CONFIG_REFRESH_INTERVAL;
@@ -1361,6 +1396,7 @@ impl WorkspaceRuntimeRegistry {
         );
         let next_generation = generation.snapshot.generation.saturating_add(1);
         let runtime = Arc::new(WorkspaceRuntime {
+            tenant_id: tenant_id.to_string(),
             root: root.clone(),
             services: services.clone(),
             generation: PluginGenerationSlot::with_quarantine(
@@ -1381,7 +1417,7 @@ impl WorkspaceRuntimeRegistry {
             }
             return Err("workspace runtime registry is shut down".into());
         }
-        if let Some(existing) = entries.get_mut(&root) {
+        if let Some(existing) = entries.get_mut(&key) {
             existing.last_used = now;
             let existing = existing.runtime.clone();
             drop(entries);
@@ -1389,7 +1425,7 @@ impl WorkspaceRuntimeRegistry {
             return Ok((existing, evicted));
         }
         entries.insert(
-            root,
+            key,
             RuntimeEntry {
                 runtime: runtime.clone(),
                 last_used: now,
@@ -1409,10 +1445,18 @@ impl WorkspaceRuntimeRegistry {
     }
 
     pub(crate) async fn loaded(&self, directory: &str) -> Option<Arc<WorkspaceRuntime>> {
+        self.loaded_for_tenant("local", directory).await
+    }
+
+    pub(crate) async fn loaded_for_tenant(
+        &self,
+        tenant_id: &str,
+        directory: &str,
+    ) -> Option<Arc<WorkspaceRuntime>> {
         self.entries
             .lock()
             .await
-            .get(&canonical_location(directory))
+            .get(&TenantRuntimeKey::new(tenant_id, directory))
             .map(|entry| entry.runtime.clone())
     }
 
@@ -1421,7 +1465,7 @@ impl WorkspaceRuntimeRegistry {
         self.entries
             .lock()
             .await
-            .remove(&canonical_location(directory))
+            .remove(&TenantRuntimeKey::new("local", directory))
             .map(|entry| entry.runtime)
     }
 
@@ -2073,6 +2117,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identical_roots_are_isolated_between_tenants() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-tenant-workspace-runtime-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = crate::state::AppState::open_database(root.join("state.sqlite3"))
+            .await
+            .unwrap();
+        let registry = WorkspaceRuntimeRegistry::default();
+        let (alpha, _) = registry
+            .acquire_for_tenant("alpha", &root.to_string_lossy(), &state)
+            .await
+            .unwrap();
+        let (alpha_again, _) = registry
+            .acquire_for_tenant("alpha", &root.to_string_lossy(), &state)
+            .await
+            .unwrap();
+        let (beta, _) = registry
+            .acquire_for_tenant("beta", &root.to_string_lossy(), &state)
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&alpha, &alpha_again));
+        assert!(!Arc::ptr_eq(&alpha, &beta));
+        assert_eq!(alpha.tenant_id, "alpha");
+        assert_eq!(beta.tenant_id, "beta");
+        assert_eq!(registry.runtimes().await.len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn invalid_reload_retains_last_known_good_generation() {
         let root = std::env::temp_dir().join(format!(
             "neoism-workspace-invalid-reload-{}",
@@ -2217,7 +2293,7 @@ mod tests {
                 .workspace_plugin_generations
                 .lock()
                 .await
-                .get(&canonical_location(root.to_string_lossy().as_ref()))
+                .get(&TenantRuntimeKey::new("local", root.to_string_lossy().as_ref()))
                 .map(|(generation, _)| *generation),
             Some(published_generation),
         );
@@ -2226,7 +2302,7 @@ mod tests {
             .entries
             .lock()
             .await
-            .get_mut(&canonical_location(root.to_string_lossy().as_ref()))
+            .get_mut(&TenantRuntimeKey::new("local", root.to_string_lossy().as_ref()))
             .unwrap()
             .last_used = Instant::now() - IDLE_TTL - Duration::from_secs(1);
 
@@ -2318,7 +2394,7 @@ mod tests {
             .workspace_plugin_generations
             .lock()
             .await
-            .remove(&evicted.root);
+            .remove(&evicted.key());
 
         assert_eq!(second_pty.infos.read().await.len(), 1);
         assert!(!state
@@ -2326,13 +2402,13 @@ mod tests {
             .workspace_plugin_generations
             .lock()
             .await
-            .contains_key(&first.root));
+            .contains_key(&first.key()));
         assert!(state
             .inner
             .workspace_plugin_generations
             .lock()
             .await
-            .contains_key(&second.root));
+            .contains_key(&second.key()));
         drop(second_pty);
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(root);
@@ -2692,7 +2768,7 @@ mod tests {
             .entries
             .lock()
             .await
-            .get_mut(&runtime.root)
+            .get_mut(&runtime.key())
             .unwrap()
             .last_used = Instant::now() - IDLE_TTL - Duration::from_secs(1);
         drop(runtime);
@@ -2909,7 +2985,7 @@ mod tests {
             .entries
             .lock()
             .await
-            .get_mut(&runtime.root)
+            .get_mut(&runtime.key())
             .unwrap()
             .last_used = Instant::now() - IDLE_TTL - Duration::from_secs(1);
         drop(runtime);

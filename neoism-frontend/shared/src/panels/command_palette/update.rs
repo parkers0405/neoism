@@ -82,9 +82,13 @@ impl CommandPalette {
     }
 
     pub fn cycle_cd_selection(&mut self, reverse: bool) -> bool {
-        if !self.is_cd_query() { return false; }
+        if !self.is_cd_query() {
+            return false;
+        }
         let count = self.filtered_rows().len();
-        if count == 0 { return false; }
+        if count == 0 {
+            return false;
+        }
         self.cd_completion_selected = true;
         let next = if reverse {
             self.selected_index.checked_sub(1).unwrap_or(count - 1)
@@ -265,12 +269,14 @@ impl CommandPalette {
         let completion = if self.is_cd_query() {
             self.selected_cd_completion_query()
         } else {
-            self.filtered_rows().get(self.selected_index).map(
-            |(_, row)| match row {
-                PaletteRow::Directory { entry } => format!("cd {}", entry.absolute_path),
-                _ => row.title().to_owned(),
-            },
-        )
+            self.filtered_rows()
+                .get(self.selected_index)
+                .map(|(_, row)| match row {
+                    PaletteRow::Directory { entry } => {
+                        format!("cd {}", entry.absolute_path)
+                    }
+                    _ => row.title().to_owned(),
+                })
         };
         let completion = match completion {
             Some(t) => t,
@@ -300,17 +306,23 @@ impl CommandPalette {
         if self.query_cursor != self.query.len() {
             return None;
         }
-        let entry = self.filtered_rows().get(self.selected_index).and_then(|(_, row)| {
-            match row {
+        let entry = self.filtered_rows().get(self.selected_index).and_then(
+            |(_, row)| match row {
                 PaletteRow::Directory { entry } => Some(*entry),
                 _ => None,
-            }
-        })?;
-        let root = self.workspace_directory_target().map(|target| target.root.as_str());
+            },
+        )?;
+        let root = self
+            .workspace_directory_target()
+            .map(|target| target.root.as_str());
         let entry_is_absolute = std::path::Path::new(&entry.absolute_path).is_absolute()
             || entry.absolute_path.starts_with("\\\\")
             || (entry.absolute_path.as_bytes().get(1) == Some(&b':')
-                && entry.absolute_path.as_bytes().get(2).is_some_and(|byte| matches!(byte, b'/' | b'\\')));
+                && entry
+                    .absolute_path
+                    .as_bytes()
+                    .get(2)
+                    .is_some_and(|byte| matches!(byte, b'/' | b'\\')));
         let mut insertion = if !entry_is_absolute {
             entry.absolute_path.clone()
         } else if {
@@ -318,7 +330,10 @@ impl CommandPalette {
             std::path::Path::new(typed).is_absolute()
                 || typed.starts_with("\\\\")
                 || (typed.as_bytes().get(1) == Some(&b':')
-                    && typed.as_bytes().get(2).is_some_and(|byte| matches!(byte, b'/' | b'\\')))
+                    && typed
+                        .as_bytes()
+                        .get(2)
+                        .is_some_and(|byte| matches!(byte, b'/' | b'\\')))
         } {
             entry.absolute_path.clone()
         } else if let Some(relative) = root.and_then(|root| {
@@ -340,7 +355,11 @@ impl CommandPalette {
             entry.absolute_path.clone()
         };
         if !insertion.ends_with('/') && !insertion.ends_with('\\') {
-            insertion.push(if entry.absolute_path.contains('\\') { '\\' } else { '/' });
+            insertion.push(if entry.absolute_path.contains('\\') {
+                '\\'
+            } else {
+                '/'
+            });
         }
         if entry_is_absolute && insertion.contains(char::is_whitespace) {
             insertion = format!("\"{}\"", insertion.replace('"', "\\\""));
@@ -400,15 +419,19 @@ impl CommandPalette {
                 && y >= rect[1]
                 && y <= rect[1] + rect[3]
         };
-        if let Some((rect, id)) = self.server_edit_hit.as_ref() {
-            if contains(*rect) {
-                return Some(PaletteAction::EditServer { id: id.clone() });
-            }
+        if let Some((_, id)) = self
+            .server_edit_hits
+            .iter()
+            .find(|(rect, _)| contains(*rect))
+        {
+            return Some(PaletteAction::EditServer { id: id.clone() });
         }
-        if let Some((rect, id)) = self.server_remove_hit.as_ref() {
-            if contains(*rect) {
-                return Some(PaletteAction::RemoveServer { id: id.clone() });
-            }
+        if let Some((_, id)) = self
+            .server_remove_hits
+            .iter()
+            .find(|(rect, _)| contains(*rect))
+        {
+            return Some(PaletteAction::RemoveServer { id: id.clone() });
         }
         None
     }
@@ -966,9 +989,10 @@ impl CommandPalette {
             + SEPARATOR_HEIGHT
             + RESULTS_MARGIN_TOP * self.scale
             + RESULTS_PADDING_BOTTOM * self.scale;
-        let available = (self.viewport_height - self.top_anchor - 8.0 * self.scale - fixed)
-            .max(0.0);
-        let viewport_rows = (available / (RESULT_ITEM_HEIGHT * self.scale).max(1.0)) as usize;
+        let available =
+            (self.viewport_height - self.top_anchor - 8.0 * self.scale - fixed).max(0.0);
+        let viewport_rows =
+            (available / (RESULT_ITEM_HEIGHT * self.scale).max(1.0)) as usize;
         self.filtered_rows()
             .len()
             .saturating_sub(self.scroll_offset)

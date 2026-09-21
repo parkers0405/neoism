@@ -530,7 +530,9 @@ impl EmbeddedDaemonHandle {
     }
 
     pub(crate) fn is_finished(&self) -> bool {
-        self.runtime_thread.as_ref().is_none_or(|thread| thread.is_finished())
+        self.runtime_thread
+            .as_ref()
+            .is_none_or(|thread| thread.is_finished())
     }
 
     /// Path to the unix socket the embedded daemon is listening on.

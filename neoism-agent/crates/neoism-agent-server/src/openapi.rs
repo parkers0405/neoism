@@ -533,6 +533,14 @@ pub fn canonical_openapi() -> Value {
         ],
         "responses": { "200": { "description": "Durable ordered SSE stream; each data field is an EventEnvelope", "content": { "text/event-stream": { "schema": { "type": "string" } } } } }
     }}));
+    paths.insert("/v2/session-catalog/events".into(), json!({ "get": {
+        "tags": ["events"], "operationId": "v2.sessionCatalog.subscribe",
+        "description": "Live root-session create, update, and delete events scoped to one authorized workspace directory.",
+        "parameters": [
+            { "name": "directory", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Root-session catalogue event stream", "content": { "text/event-stream": { "schema": { "type": "string" } } } } }
+    }}));
     paths.insert("/v2/artifacts".into(), json!({
         "get": { "tags": ["artifacts"], "operationId": "v2.artifacts.list", "parameters": [
             { "name": "sessionId", "in": "query", "required": false, "schema": { "type": "string" } }
@@ -753,12 +761,22 @@ fn apply_authoritative_contract(document: &mut Value) {
         let mut parameters = parameters;
         if id.starts_with("v2.plugins.workflows.")
             || id.starts_with("v2.management.skills.versions.")
-            || matches!(id, "v2.capabilities.list" | "v2.agents.list" | "v2.skills.list" | "v2.providers.configured") {
+            || matches!(
+                id,
+                "v2.capabilities.list"
+                    | "v2.agents.list"
+                    | "v2.skills.list"
+                    | "v2.providers.configured"
+            )
+        {
             parameters.as_array_mut().expect("operation parameters").push(query("scope", false,
                 json!({ "type": "string", "enum": ["installation", "workspace"], "description": "Installation selects global definitions/configuration. Omission preserves workspace behavior; directory is not a storage-scope selector." })));
         }
         if id == "v2.management.skills.versions.get" {
-            parameters.as_array_mut().expect("operation parameters").push(directory());
+            parameters
+                .as_array_mut()
+                .expect("operation parameters")
+                .push(directory());
         }
         let mut value = json!({
             "tags": [tag], "operationId": id, "parameters": parameters,
@@ -770,18 +788,31 @@ fn apply_authoritative_contract(document: &mut Value) {
         value
     };
 
-    add("/v2/directories", "get", op(
-        "v2.directories.list", "system",
-        json!([query("path", false, json!({ "type": "string", "description": "Server path, supporting ~ expansion. Omit for caller root or server working directory." }))]),
-        None,
-        success("200", "Canonical folder and authorized child directories", json!({
-            "type": "object", "required": ["path", "parent", "entries"],
-            "properties": {
-                "path": { "type": "string" }, "parent": { "type": ["string", "null"] },
-                "entries": { "type": "array", "items": { "type": "object", "required": ["name", "path"], "properties": { "name": { "type": "string" }, "path": { "type": "string" } } } }
-            }
-        }))
-    ));
+    add(
+        "/v2/directories",
+        "get",
+        op(
+            "v2.directories.list",
+            "system",
+            json!([query(
+                "path",
+                false,
+                json!({ "type": "string", "description": "Server path, supporting ~ expansion. Omit for caller root or server working directory." })
+            )]),
+            None,
+            success(
+                "200",
+                "Canonical folder and authorized child directories",
+                json!({
+                    "type": "object", "required": ["path", "parent", "entries"],
+                    "properties": {
+                        "path": { "type": "string" }, "parent": { "type": ["string", "null"] },
+                        "entries": { "type": "array", "items": { "type": "object", "required": ["name", "path"], "properties": { "name": { "type": "string" }, "path": { "type": "string" } } } }
+                    }
+                }),
+            ),
+        ),
+    );
     let mut health = op(
         "v2.health",
         "system",
@@ -791,11 +822,20 @@ fn apply_authoritative_contract(document: &mut Value) {
     );
     health["security"] = json!([]);
     add("/v2/health", "get", health);
-    let mut identity = op("v2.identity.get", "system", json!([]), None,
-        success("200", "Process-owner identity", json!({
-            "type": "object", "required": ["configuredName", "systemName"],
-            "properties": { "configuredName": { "type": ["string", "null"] }, "systemName": { "type": ["string", "null"] } }
-        })));
+    let mut identity = op(
+        "v2.identity.get",
+        "system",
+        json!([]),
+        None,
+        success(
+            "200",
+            "Process-owner identity",
+            json!({
+                "type": "object", "required": ["configuredName", "systemName"],
+                "properties": { "configuredName": { "type": ["string", "null"] }, "systemName": { "type": ["string", "null"] } }
+            }),
+        ),
+    );
     identity["description"] = json!("Server process-owner identity, not the authenticated caller. Unavailable in hosted multi-tenant mode. Advertised by neoism.identity.");
     add("/v2/identity", "get", identity);
     add(
@@ -957,6 +997,19 @@ fn apply_authoritative_contract(document: &mut Value) {
             json!({ "200": { "description": "Resumable durable event stream", "content": {
         "text/event-stream": { "schema": { "type": "string", "description": "SSE records whose data field is an Event (the typed, type-discriminated union in components/schemas/Event)" } }
     } } }),
+        ),
+    );
+    add(
+        "/v2/session-catalog/events",
+        "get",
+        op(
+            "v2.sessionCatalog.subscribe",
+            "events",
+            json!([directory()]),
+            None,
+            json!({ "200": { "description": "Root-session catalogue event stream", "content": {
+                "text/event-stream": { "schema": { "type": "string" } }
+            } } }),
         ),
     );
 
@@ -1700,6 +1753,61 @@ fn apply_authoritative_contract(document: &mut Value) {
             json!([session_id()]),
             None,
             success("200", "Session deleted", json!({ "type": "boolean" })),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/control",
+        "get",
+        op(
+            "v2.sessions.control.get",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success(
+                "200",
+                "Current session control lease",
+                json!({ "anyOf": [r("SessionControl"), { "type": "null" }] }),
+            ),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/control",
+        "post",
+        op(
+            "v2.sessions.control.claim",
+            "sessions",
+            json!([session_id()]),
+            Some(json_request(true, r("ClaimSessionControlRequest"))),
+            success("200", "Claimed session control lease", r("SessionControl")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/control",
+        "delete",
+        op(
+            "v2.sessions.control.release",
+            "sessions",
+            json!([
+                session_id(),
+                query("expectedRevision", false, json!({ "type": "integer", "minimum": 0 }))
+            ]),
+            None,
+            success("200", "Session control released", json!({ "type": "boolean" })),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/participants",
+        "get",
+        op(
+            "v2.sessions.participants.list",
+            "sessions",
+            json!([session_id()]),
+            None,
+            success(
+                "200",
+                "Session participants",
+                json!({ "type": "array", "items": r("SessionParticipant") }),
+            ),
         ),
     );
     add(
@@ -2919,6 +3027,16 @@ fn canonical_schemas() -> Value {
             "path": { "type": "string" }, "parentId": { "type": "string" }, "title": { "type": "string" }, "agent": { "type": "string" }, "model": { "$ref": "#/components/schemas/ModelRef" },
             "version": { "type": "string" }, "time": { "$ref": "#/components/schemas/SessionTime" }, "permission": { "type": "array", "items": { "$ref": "#/components/schemas/PermissionRule" } }
         }},
+        "ClaimSessionControlRequest": { "type": "object", "additionalProperties": false, "properties": {
+            "expectedRevision": { "type": "integer", "minimum": 0 }, "leaseSeconds": { "type": "integer", "minimum": 15, "maximum": 300, "default": 60 }
+        }},
+        "SessionControl": { "type": "object", "additionalProperties": false, "required": ["sessionId", "controllerSubject", "actorType", "leaseExpiresAt", "revision", "updated"], "properties": {
+            "sessionId": { "type": "string" }, "controllerSubject": { "type": "string" }, "actorType": { "type": "string", "enum": ["human", "service-account"] },
+            "leaseExpiresAt": { "type": "integer", "minimum": 0 }, "revision": { "type": "integer", "minimum": 1 }, "updated": { "type": "integer", "minimum": 0 }
+        }},
+        "SessionParticipant": { "type": "object", "additionalProperties": false, "required": ["subject", "actorType", "firstSeenAt", "lastSeenAt"], "properties": {
+            "subject": { "type": "string" }, "actorType": { "type": "string", "enum": ["human", "service-account"] }, "firstSeenAt": { "type": "integer", "minimum": 0 }, "lastSeenAt": { "type": "integer", "minimum": 0 }
+        }},
         "CreateSessionRequest": { "type": "object", "additionalProperties": false, "properties": { "parentId": { "type": "string" }, "title": { "type": "string" }, "agent": { "type": "string" }, "model": { "$ref": "#/components/schemas/ModelRef" }, "permission": { "type": "array", "items": { "$ref": "#/components/schemas/PermissionRule" } }, "workspaceId": { "type": "string" } } },
         "UpdateSessionRequest": { "type": "object", "additionalProperties": false, "properties": { "title": { "type": "string" }, "agent": { "type": "string" }, "model": { "$ref": "#/components/schemas/ModelRef" }, "directory": { "type": "string" }, "permission": { "type": "array", "items": { "$ref": "#/components/schemas/PermissionRule" } }, "time": { "type": "object", "properties": { "archived": { "type": "integer" } } } } },
         "PageCursor": { "type": "object", "additionalProperties": false, "properties": { "previous": { "type": "string" }, "next": { "type": "string" } } },
@@ -3254,8 +3372,8 @@ fn event_data_schema(event_type: &str) -> Value {
             }})
         }
         _ if event_type == et::SESSION_DELETED => {
-            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID"], "properties": {
-                "sessionID": { "type": "string" }
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info", "tenantID"], "properties": {
+                "sessionID": { "type": "string" }, "info": r("Session"), "tenantID": { "type": "string" }
             }})
         }
         _ if event_type == et::SESSION_ERROR => {
@@ -4131,18 +4249,25 @@ mod tests {
 
     #[test]
     fn public_router_excludes_only_exact_internal_hosting_operation() {
-        let operations = router_operations(r#"
+        let operations = router_operations(
+            r#"
             Router::new()
                 .route("/v2/hosting/associate", post(associate).get(read))
                 .route("/v2/hosting/other", post(other))
                 .route("/v2/directories", get(list))
-        "#);
-        assert_eq!(operations, BTreeSet::from([
-            ("GET".into(), "/v2/hosting/associate".into()),
-            ("POST".into(), "/v2/hosting/other".into()),
-            ("GET".into(), "/v2/directories".into()),
-        ]));
-        assert!(canonical_openapi()["paths"].get("/v2/hosting/associate").is_none());
+        "#,
+        );
+        assert_eq!(
+            operations,
+            BTreeSet::from([
+                ("GET".into(), "/v2/hosting/associate".into()),
+                ("POST".into(), "/v2/hosting/other".into()),
+                ("GET".into(), "/v2/directories".into()),
+            ])
+        );
+        assert!(canonical_openapi()["paths"]
+            .get("/v2/hosting/associate")
+            .is_none());
     }
 
     fn matching_paren(source: &str, start: usize) -> Option<usize> {

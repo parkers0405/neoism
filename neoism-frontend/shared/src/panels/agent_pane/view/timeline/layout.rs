@@ -443,8 +443,7 @@ where
     let scroll_top = (max_scroll - offset).clamp(0.0, max_scroll);
     let window_top = (scroll_top - overscan).max(0.0);
     let window_bottom = scroll_top + viewport_h + overscan;
-    let exact_start_row =
-        rows.partition_point(|row| row.top + row.height < window_top);
+    let exact_start_row = rows.partition_point(|row| row.top + row.height < window_top);
     let exact_end_row = exact_start_row
         + rows[exact_start_row..].partition_point(|row| row.top <= window_bottom);
     if exact_start_row == 0 && exact_end_row >= rows.len() {

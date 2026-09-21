@@ -1382,11 +1382,11 @@ pub struct ScreenWindowProperties {
 // Each declares its own `impl Screen<'_>` block.
 pub mod bridges;
 pub mod chrome_geom;
+mod code_blame;
 pub mod code_crdt;
 pub mod daemon_layout;
-mod code_blame;
-mod git_state;
 pub mod editor_scroll;
+mod git_state;
 pub mod lifecycle;
 pub mod markdown_crdt;
 pub mod panes;

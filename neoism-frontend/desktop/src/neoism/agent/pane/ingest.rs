@@ -18,6 +18,26 @@ impl NeoismAgentPane {
         let mut delta_bytes = 0usize;
         let mut changed = include_outbound && self.drain_outbound_commands();
         changed |= self.drain_background_updates();
+        let catalog_updates = self
+            .session_catalog_stream
+            .as_mut()
+            .map(|stream| stream.drain(128))
+            .unwrap_or_default();
+        for update in catalog_updates {
+            match update {
+                AgentSessionCatalogUpdate::Reconnected => {
+                    self.request_side_panel_session_page(None);
+                }
+                AgentSessionCatalogUpdate::Upsert(session) => {
+                    self.side_panel.upsert_session(session);
+                    changed = true;
+                }
+                AgentSessionCatalogUpdate::Delete(session_id) => {
+                    self.side_panel.remove_session(&session_id);
+                    changed = true;
+                }
+            }
+        }
         self.tick_stream_liveness();
         let Some(event_stream) = self.event_stream.as_mut() else {
             return changed;
@@ -1548,11 +1568,23 @@ impl NeoismAgentPane {
                         continue;
                     }
                     match result {
-                        Ok((sessions, next_cursor)) => self.side_panel.set_session_page(
-                            sessions,
-                            requested_cursor.as_deref(),
-                            next_cursor,
-                        ),
+                        Ok((sessions, next_cursor))
+                            if requested_cursor.is_none()
+                                && matches!(
+                                    self.side_panel.session_catalog_state(),
+                                    neoism_ui::panels::agent_pane::state::side_panel::SessionCatalogState::Ready
+                                ) =>
+                        {
+                            self.side_panel
+                                .reconcile_session_head(sessions, next_cursor);
+                        }
+                        Ok((sessions, next_cursor)) => {
+                            self.side_panel.set_session_page(
+                                sessions,
+                                requested_cursor.as_deref(),
+                                next_cursor,
+                            );
+                        }
                         Err(error) => {
                             tracing::warn!(%error, "failed to refresh agent sessions");
                             self.side_panel.settle_session_page_error(
@@ -2204,6 +2236,9 @@ impl NeoismAgentPane {
         self.event_wake = Some(wake.clone());
         self.background_tx.set_wake(wake.clone());
         if let Some(stream) = self.event_stream.as_mut() {
+            stream.set_wake(wake.clone());
+        }
+        if let Some(stream) = self.session_catalog_stream.as_mut() {
             stream.set_wake(wake);
         }
     }

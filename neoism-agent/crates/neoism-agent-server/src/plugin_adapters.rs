@@ -306,6 +306,7 @@ fn route_caller_claims(
             artifact_retention_days: None,
             requests_per_minute: None,
             max_in_flight: None,
+            resolved: None,
         })
     })
 }
@@ -799,10 +800,15 @@ impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {
                 ConfigAdminAction::Update => {
                     let config: neoism_agent_core::AgentConfigDocument =
                         serde_json::from_value(request.body).map_err(runtime_error)?;
-                    let disabling_typesafe = crate::computer_use::typesafe::enabled(
-                        &crate::config::load(self.0.services(), &directory).map_err(runtime_error)?.info,
-                    ) && !crate::computer_use::typesafe::enabled(&config);
-                    if disabling_typesafe { crate::computer_use::stop(); }
+                    let disabling_typesafe =
+                        crate::computer_use::typesafe::enabled(
+                            &crate::config::load(self.0.services(), &directory)
+                                .map_err(runtime_error)?
+                                .info,
+                        ) && !crate::computer_use::typesafe::enabled(&config);
+                    if disabling_typesafe {
+                        crate::computer_use::stop();
+                    }
                     let snapshot = crate::config::snapshot(self.0.services(), &directory)
                         .map_err(runtime_error)?;
                     self.0
@@ -819,7 +825,9 @@ impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ConfigAdmin {
                         })
                         .await
                         .map_err(runtime_error)?;
-                    if disabling_typesafe { crate::computer_use::stop(); }
+                    if disabling_typesafe {
+                        crate::computer_use::stop();
+                    }
                     serde_json::to_value(config)
                 }
             }
@@ -837,7 +845,7 @@ impl neoism_agent_builtins::plugin::semantic::SemanticHost for Semantic {
         request: neoism_agent_plugin_api::RouteRequest,
     ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
         Box::pin(async move {
-            use axum::extract::{Query, State};
+            let tenant_id = request.tenant_id.clone();
             let query = request.query.into_iter().fold(
                 serde_json::Map::new(),
                 |mut output, (key, values)| {
@@ -850,12 +858,15 @@ impl neoism_agent_builtins::plugin::semantic::SemanticHost for Semantic {
             );
             let query = serde_json::from_value(serde_json::Value::Object(query))
                 .map_err(runtime_error)?;
-            let response = crate::semantic::semantic_search_route(
-                State(self.0.clone()),
-                Query(query),
-            )
-            .await
-            .map_err(api_error)?;
+            let scope = match (request.hosted, tenant_id.as_deref()) {
+                (true, Some(tenant)) | (false, Some(tenant)) if tenant != "local" => {
+                    crate::state::TenantQueryScope::Tenant(tenant)
+                }
+                _ => crate::state::TenantQueryScope::LocalAll,
+            };
+            let response = crate::semantic::semantic_search_with_scope(&self.0, query, scope)
+                .await
+                .map_err(api_error)?;
             let body = serde_json::to_value(response.0).map_err(runtime_error)?;
             Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
         })
@@ -877,10 +888,16 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
             // An omitted scope keeps the shipped workspace destination.
             let scope: crate::workflow::WorkflowQuery = query_value(query.clone())?;
             let global_context = match scope.scope {
-                crate::workflow::WorkflowScope::Installation => Some(crate::workflow::installation_context(self.0.services()).map_err(api_error)?),
+                crate::workflow::WorkflowScope::Installation => Some(
+                    crate::workflow::installation_context(self.0.services())
+                        .map_err(api_error)?,
+                ),
                 crate::workflow::WorkflowScope::Workspace => None,
             };
-            let definition_workspace = global_context.as_deref().map(std::path::Path::new).or(request.workspace.as_deref());
+            let definition_workspace = global_context
+                .as_deref()
+                .map(std::path::Path::new)
+                .or(request.workspace.as_deref());
             let state = State(self.0.clone());
             let headers = header_map(&request.headers);
             let workflow_id =

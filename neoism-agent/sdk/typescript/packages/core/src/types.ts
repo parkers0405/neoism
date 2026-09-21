@@ -17,6 +17,8 @@ import type {
   PromptRequest as ContractPromptRequest,
   QuestionRequest as ContractQuestionRequest,
   Session as ContractSession,
+  SessionControl as ContractSessionControl,
+  SessionParticipant as ContractSessionParticipant,
   Tool,
 } from "./generated/contract.js";
 
@@ -26,6 +28,8 @@ export type CapabilityInfo = Capability;
 export type PluginManifest = ContractPluginManifest;
 export type ApiErrorBody = ApiError;
 export type Session = ContractSession;
+export type SessionControl = ContractSessionControl;
+export type SessionParticipant = ContractSessionParticipant;
 export type MessageWithParts = Message;
 export type {
   Part,

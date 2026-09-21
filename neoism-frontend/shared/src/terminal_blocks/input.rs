@@ -6,10 +6,10 @@ use super::command::{
     TerminalCommandBlockStatus,
 };
 use super::completion::{
-    byte_at_char_column, completion_candidates,
-    completion_detail, completion_labels, history_fuzzy_match, history_prefix_match,
-    CompletionCandidate, CompletionCycle, CompletionFlash, CompletionKind,
-    NO_MATCH_FLASH_MS, NO_MATCH_SHAKE_AMP, SUCCESS_FLASH_MS,
+    byte_at_char_column, completion_candidates, completion_detail, completion_labels,
+    history_fuzzy_match, history_prefix_match, CompletionCandidate, CompletionCycle,
+    CompletionFlash, CompletionKind, NO_MATCH_FLASH_MS, NO_MATCH_SHAKE_AMP,
+    SUCCESS_FLASH_MS,
 };
 use super::history::PersistentHistory;
 use super::shell::{

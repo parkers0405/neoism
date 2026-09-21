@@ -54,6 +54,9 @@ fn client_session_lifecycle_roundtrips() {
         session_id: "s-1".into(),
         path: "src/foo".into(),
     });
+    roundtrip_client(&WorkspaceClientMessage::RefreshHostWorkspaceNotes {
+        workspace_id: "ws-1".into(),
+    });
     roundtrip_client(&WorkspaceClientMessage::CloseSession {
         session_id: "s-1".into(),
     });

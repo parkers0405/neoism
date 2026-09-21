@@ -61,8 +61,10 @@ async fn desktop_notes_are_discovered_and_called_through_agent_mcp() {
         runtime_ids,
         [
             "mcp__notes__create",
+            "mcp__notes__link",
             "mcp__notes__list",
             "mcp__notes__notebookAddPage",
+            "mcp__notes__notebookCreate",
             "mcp__notes__notebookList",
             "mcp__notes__notebookMovePage",
             "mcp__notes__notebookRead",
@@ -70,6 +72,7 @@ async fn desktop_notes_are_discovered_and_called_through_agent_mcp() {
             "mcp__notes__search",
             "mcp__notes__taskToggle",
             "mcp__notes__tasks",
+            "mcp__notes__vaults",
             "mcp__notes__write",
         ]
     );
@@ -130,8 +133,12 @@ async fn desktop_notes_are_discovered_and_called_through_agent_mcp() {
     assert_eq!(missing["isError"], true);
 
     neoism_ui::editor::documentation_notebook::NotebookBinding::create(
-        &neoism_workspace_index::default_notes_workspace().notes_workspace_dir().join("Agent Book"), Some("Agent Architecture"),
-    ).unwrap();
+        &neoism_workspace_index::default_notes_workspace()
+            .notes_workspace_dir()
+            .join("Agent Book"),
+        Some("Agent Architecture"),
+    )
+    .unwrap();
     let notebook: Value = response_json(
         app.clone()
             .oneshot(request(

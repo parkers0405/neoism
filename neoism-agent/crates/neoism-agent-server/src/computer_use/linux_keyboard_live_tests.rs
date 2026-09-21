@@ -305,8 +305,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Receiver {
                 s.entered |= s.focused;
                 s.enable_text_input(connection, q);
                 if s.focused && !keys.is_empty() {
-                    s.held.extend(keys.chunks_exact(4).map(|key|u32::from_ne_bytes(key.try_into().unwrap())));
-                    eprintln!("Waiting for initially held keys to release: {:?}",s.held);
+                    s.held.extend(
+                        keys.chunks_exact(4)
+                            .map(|key| u32::from_ne_bytes(key.try_into().unwrap())),
+                    );
+                    eprintln!("Waiting for initially held keys to release: {:?}", s.held);
                 }
             }
             wl_keyboard::Event::Leave { surface, .. }

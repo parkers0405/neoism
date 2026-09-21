@@ -16,24 +16,25 @@ pub mod auth_cli;
 mod background_job;
 mod caller;
 mod command_routes;
-mod config;
 mod computer_use;
+mod config;
 mod custom_tool;
 #[cfg(test)]
 mod edit_smoke_tests;
 mod error;
 mod executable;
 mod execution_activity;
+mod execution_provider;
 mod external_acp;
 mod external_agent;
 mod global_routes;
+pub mod gui;
 mod instruction;
 mod interaction;
 pub mod language_server;
+mod local_gui;
 mod lsp;
 mod lsp_routes;
-mod local_gui;
-pub mod gui;
 mod management;
 mod mcp;
 mod mcp_auth;
@@ -65,15 +66,18 @@ mod provider_error {
     pub(crate) use neoism_agent_builtins::provider_error::ProviderError;
 }
 mod context_epoch;
+mod directory_routes;
+mod hosting;
+mod identity;
 mod pty;
 mod pty_routes;
-mod directory_routes;
 mod route_query;
 mod semantic;
 mod server_util;
 mod session_actions;
 mod session_context;
 mod session_coordinator;
+mod session_control;
 mod session_export_route;
 mod session_helpers;
 mod session_import_route;
@@ -97,10 +101,8 @@ mod tool_routes;
 mod tool_runtime;
 mod tool_selection;
 mod utility_runtime;
-mod identity;
 mod v2_routes;
 pub(crate) mod windows_process;
-mod hosting;
 mod workflow;
 mod workspace_runtime;
 
@@ -191,6 +193,9 @@ pub fn services_with_workspace_search(
         std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
         workspace_search,
     )
+    .with_execution(std::sync::Arc::new(
+        execution_provider::LocalExecutionProvider,
+    ))
 }
 
 pub fn standard_workspace_search(
@@ -284,7 +289,9 @@ pub async fn listen(
     // second backend or any change to API credentials/management policy.
     let gui = match gui::GuiRoot::discover() {
         Ok(root) => Some(root),
-        Err(error) if std::env::var_os("NEOISM_AGENT_GUI_ROOT").is_some() => return Err(error),
+        Err(error) if std::env::var_os("NEOISM_AGENT_GUI_ROOT").is_some() => {
+            return Err(error)
+        }
         Err(_) => None,
     };
     listen_with_gui(options, services, gui).await
@@ -296,11 +303,16 @@ pub async fn listen_with_gui(
     services: neoism_agent_service_api::AgentServices,
     gui: Option<gui::GuiRoot>,
 ) -> anyhow::Result<SocketAddr> {
+    services
+        .validate()
+        .map_err(anyhow::Error::msg)
+        .context("invalid agent service configuration")?;
     let started = crate::perf::now();
     let address = SocketAddr::new(
-        options.hostname.parse().with_context(|| {
-            format!("invalid listen IP address {}", options.hostname)
-        })?,
+        options
+            .hostname
+            .parse()
+            .with_context(|| format!("invalid listen IP address {}", options.hostname))?,
         options.port,
     );
     if !address.ip().is_loopback()
@@ -348,7 +360,11 @@ pub async fn listen_with_gui(
         Some(root) => gui::with_gui(api, root.for_listener(actual)),
         None => api,
     };
-    let result = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
+    let result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await;
     state.shutdown().await?;
     tracing::warn!(
         target: "neoism_agent::perf",

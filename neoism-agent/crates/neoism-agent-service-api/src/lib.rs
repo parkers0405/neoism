@@ -15,9 +15,18 @@ use std::sync::Arc;
 use serde_json::Value;
 
 pub mod background_process;
+pub mod artifacts;
 pub mod daemon_credential;
+pub mod execution;
 pub mod mcp_credentials;
 pub mod provider_credentials;
+pub mod tenant;
+pub use execution::{
+    DisabledExecutionProvider, ExecResult, ExecutionLease, ExecutionProcess, ExecutionProvider,
+    ExecutionRequest, ExecutionScope, NetworkPolicy, ProcessChunk, ProcessClass, ProcessSpec,
+    ResourceLimits, WorkspaceCommit, WorkspaceMaterialization,
+};
+pub use artifacts::ArtifactBlobStore;
 pub use mcp_credentials::{
     LocalMcpCredentialStore, McpConnectionRef, McpCredential, McpCredentialStore,
     McpOAuthAttempt, McpOAuthClientRegistration, McpOAuthTokens,
@@ -29,6 +38,9 @@ pub use provider_credentials::{
     CreateProviderConnection, CredentialScope, LocalProviderCredentialStore,
     ProviderConnectionRef, ProviderConnectionSummary, ProviderCredential,
     ProviderCredentialStore,
+};
+pub use tenant::{
+    ActorType, ExecutionPolicy, ResolvedTenant, TenantQuotas, TenantResolver,
 };
 
 pub use workspace_management::{
@@ -205,13 +217,21 @@ pub struct ConfigSnapshotRequest {
 
 impl ConfigSnapshotRequest {
     pub fn installation() -> Self {
-        Self { workspace: PathBuf::new(), installation: true }
+        Self {
+            workspace: PathBuf::new(),
+            installation: true,
+        }
     }
 
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
-        let installation = workspace.to_string_lossy().starts_with(INSTALLATION_CONTEXT_PREFIX);
-        Self { workspace, installation }
+        let installation = workspace
+            .to_string_lossy()
+            .starts_with(INSTALLATION_CONTEXT_PREFIX);
+        Self {
+            workspace,
+            installation,
+        }
     }
 }
 
@@ -283,7 +303,9 @@ pub struct ConfigUpdateRequest {
 pub trait ConfigSourceService: Send + Sync {
     /// Product-owned display name only; never expose the raw product config.
     /// Generic Agent hosts need not implement a product profile.
-    fn display_name(&self) -> Result<Option<String>, ServiceError> { Ok(None) }
+    fn display_name(&self) -> Result<Option<String>, ServiceError> {
+        Ok(None)
+    }
 
     fn snapshot(
         &self,
@@ -625,7 +647,9 @@ pub struct BuiltinMcpCallResult {
 pub trait BuiltinMcpService: Send + Sync {
     fn id(&self) -> &str;
     /// Sensitive host services can require explicit configuration opt-in.
-    fn enabled_by_default(&self) -> bool { true }
+    fn enabled_by_default(&self) -> bool {
+        true
+    }
     fn tools(&self) -> Vec<BuiltinMcpTool>;
     fn resources(&self) -> Vec<BuiltinMcpResource> {
         Vec::new()
@@ -808,8 +832,12 @@ pub struct AgentServices {
     pub workspace_management: Arc<dyn WorkspaceManagementService>,
     pub provider_credentials: Arc<dyn ProviderCredentialStore>,
     pub mcp_credentials: Arc<dyn McpCredentialStore>,
+    pub tenant_resolver: Option<Arc<dyn TenantResolver>>,
+    pub execution: Arc<dyn ExecutionProvider>,
+    pub artifacts: Option<Arc<dyn ArtifactBlobStore>>,
     pub documentation: Option<Arc<dyn DocumentationService>>,
     pub memory: Option<Arc<dyn MemoryService>>,
+    pub hosted: bool,
     builtin_mcp: BTreeMap<String, Arc<dyn BuiltinMcpService>>,
 }
 
@@ -832,8 +860,12 @@ impl AgentServices {
             workspace_management,
             provider_credentials,
             mcp_credentials,
+            tenant_resolver: None,
+            execution: Arc::new(DisabledExecutionProvider),
+            artifacts: None,
             documentation: None,
             memory: None,
+            hosted: false,
             builtin_mcp: BTreeMap::new(),
         }
     }
@@ -871,6 +903,60 @@ impl AgentServices {
     ) -> Self {
         self.mcp_credentials = mcp_credentials;
         self
+    }
+
+    pub fn with_tenant_resolver(mut self, tenant_resolver: Arc<dyn TenantResolver>) -> Self {
+        self.tenant_resolver = Some(tenant_resolver);
+        self
+    }
+
+    pub fn with_execution(mut self, execution: Arc<dyn ExecutionProvider>) -> Self {
+        self.execution = execution;
+        self
+    }
+
+    pub fn with_artifacts(mut self, artifacts: Arc<dyn ArtifactBlobStore>) -> Self {
+        self.artifacts = Some(artifacts);
+        self
+    }
+
+    /// Enables strict startup validation for a shared hosted control plane.
+    /// Standalone/local Neoism deliberately leaves this disabled.
+    pub fn for_hosted_control_plane(mut self) -> Self {
+        self.hosted = true;
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), ServiceError> {
+        if !self.hosted {
+            return Ok(());
+        }
+        if self.tenant_resolver.is_none() {
+            return Err(ServiceError::new(
+                "hosted control planes require an injected tenant resolver",
+            ));
+        }
+        if !self.provider_credentials.supports_hosted_scopes() {
+            return Err(ServiceError::new(
+                "hosted control planes require tenant-scoped provider credentials",
+            ));
+        }
+        if !self.mcp_credentials.supports_hosted_scopes() {
+            return Err(ServiceError::new(
+                "hosted control planes require tenant-scoped MCP credentials",
+            ));
+        }
+        if !self.execution.available() || self.execution.backend_name() == "local-native" {
+            return Err(ServiceError::new(
+                "hosted control planes require a non-native execution provider",
+            ));
+        }
+        if !self.artifacts.as_ref().is_some_and(|store| store.shared()) {
+            return Err(ServiceError::new(
+                "hosted control planes require a shared artifact store",
+            ));
+        }
+        Ok(())
     }
 
     pub fn with_language_capabilities(
@@ -1001,16 +1087,30 @@ impl ConfigSourceService for StandardConfigSourceService {
             let mut layers = vec![ConfigLayer {
                 source_id: "standard:user".into(),
                 scope: ConfigDiscoveryScope::Installation,
-                document: Self::read_layer(&self.user_root.join(STANDARD_AGENT_CONFIG_FILENAME))?,
+                document: Self::read_layer(
+                    &self.user_root.join(STANDARD_AGENT_CONFIG_FILENAME),
+                )?,
                 writable: true,
             }];
             layers.extend(self.memory_layers.iter().map(|(id, document)| ConfigLayer {
-                source_id: id.clone(), scope: ConfigDiscoveryScope::Installation, document: document.clone(), writable: false,
+                source_id: id.clone(),
+                scope: ConfigDiscoveryScope::Installation,
+                document: document.clone(),
+                writable: false,
             }));
             return Ok(ConfigSnapshot {
-                identity: snapshot_identity(&layers), workspace: self.user_root.clone(), layers,
-                discovery_roots: vec![ConfigDiscoveryRoot { scope: ConfigDiscoveryScope::Installation, source_id: "standard:user-root".into(), path: self.user_root.clone() }],
-                writable_target: ConfigWritableTarget { source_id: "standard:user".into(), label: "global Agent config".into() },
+                identity: snapshot_identity(&layers),
+                workspace: self.user_root.clone(),
+                layers,
+                discovery_roots: vec![ConfigDiscoveryRoot {
+                    scope: ConfigDiscoveryScope::Installation,
+                    source_id: "standard:user-root".into(),
+                    path: self.user_root.clone(),
+                }],
+                writable_target: ConfigWritableTarget {
+                    source_id: "standard:user".into(),
+                    label: "global Agent config".into(),
+                },
             });
         }
         let workspace = absolute_workspace(&request.workspace);

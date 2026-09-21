@@ -842,17 +842,22 @@ impl Application<'_> {
             let scale = route.window.screen.sugarloaf.scale_factor();
             let win_w = route.window.screen.sugarloaf.window_size().width;
             let (mx, my) = route.window.screen.mouse_logical_for_hit_test();
-            if let Ok(Some(index)) = route
+            if route
                 .window
                 .screen
                 .renderer
                 .modal
-                .hit_test(mx, my, win_w, scale)
+                .pointer_move(mx, my, win_w, scale)
             {
-                route.window.screen.renderer.modal.set_selected_index(index);
                 route.request_redraw();
             }
-            route.window.set_cursor(CursorIcon::Default);
+            route.window.set_cursor(
+                match route.window.screen.renderer.modal.pointer_kind() {
+                    neoism_ui::widgets::modal::ModalPointerKind::Default => CursorIcon::Default,
+                    neoism_ui::widgets::modal::ModalPointerKind::Pointer => CursorIcon::Pointer,
+                    neoism_ui::widgets::modal::ModalPointerKind::Text => CursorIcon::Text,
+                },
+            );
             return;
         }
 
@@ -1462,6 +1467,9 @@ impl Application<'_> {
             route.request_redraw();
         }
         if route.window.screen.clear_inline_diagnostic_hover() {
+            route.request_redraw();
+        }
+        if route.window.screen.renderer.modal.pointer_leave() {
             route.request_redraw();
         }
     }

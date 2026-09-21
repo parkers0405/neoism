@@ -11,7 +11,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 cd "$root"
 cargo run --quiet -p neoism-agent -- openapi > "$tmp/v2.json"
-node -e 'let b=[]; process.stdin.on("data", c => b.push(c)).on("end", () => process.stdout.write(require("crypto").createHash("sha256").update(Buffer.concat(b)).digest("hex")))' < "$tmp/v2.json" > "$tmp/v2.sha256"
+node -e 'let b=[]; process.stdin.on("data", c => b.push(c)).on("end", () => { const canonical = JSON.stringify(JSON.parse(Buffer.concat(b))); process.stdout.write(require("crypto").createHash("sha256").update(canonical).digest("hex")); })' < "$tmp/v2.json" > "$tmp/v2.sha256"
 node neoism-agent/scripts/generate-contract.mjs < "$tmp/v2.json" > "$tmp/contract.ts"
 
 case "$mode" in
@@ -26,7 +26,7 @@ case "$mode" in
       echo "canonical OpenAPI fingerprint drifted; run neoism-agent/scripts/openapi.sh update" >&2
       exit 1
     }
-    cmp "$tmp/v2.json" "$spec" || {
+    node -e 'const fs=require("fs"), assert=require("assert"); const [generated,snapshot]=process.argv.slice(1).map(path => JSON.parse(fs.readFileSync(path,"utf8"))); assert.deepStrictEqual(generated,snapshot)' "$tmp/v2.json" "$spec" || {
       echo "committed OpenAPI document drifted; run neoism-agent/scripts/openapi.sh update" >&2
       exit 1
     }

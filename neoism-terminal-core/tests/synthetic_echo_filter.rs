@@ -6,7 +6,10 @@ fn exact_synthetic_echo_is_removed_across_fragments_but_prompt_survives() {
     filter.expect_command(b"cd -- '/tmp/a b'\n");
     assert!(filter.filter(b"cd -- '").is_empty());
     assert!(filter.filter(b"/tmp/a b'\r").is_empty());
-    assert_eq!(filter.filter(b"\n\x1b]7;file:///tmp/a%20b\x07prompt"), b"\x1b]7;file:///tmp/a%20b\x07prompt");
+    assert_eq!(
+        filter.filter(b"\n\x1b]7;file:///tmp/a%20b\x07prompt"),
+        b"\x1b]7;file:///tmp/a%20b\x07prompt"
+    );
 }
 
 #[test]

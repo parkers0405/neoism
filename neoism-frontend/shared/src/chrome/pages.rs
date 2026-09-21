@@ -143,13 +143,26 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// config snapshot — used when the daemon fetch resolves after the
     /// overlay already opened.
     pub fn set_settings_values(&mut self, values: serde_json::Value) {
-        let enabled = values.pointer("/editor/git-blame").and_then(|v| v.as_bool()).unwrap_or(false);
+        let enabled = values
+            .pointer("/editor/git-blame")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         self.code_git_blame = enabled;
-        let delay_ms = values.pointer("/editor/git-blame-delay-ms").and_then(|v| v.as_u64()).unwrap_or(0);
-        let hide_on_scroll = values.pointer("/editor/git-blame-hide-on-scroll").and_then(|v| v.as_bool()).unwrap_or(false);
+        let delay_ms = values
+            .pointer("/editor/git-blame-delay-ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let hide_on_scroll = values
+            .pointer("/editor/git-blame-hide-on-scroll")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         self.code_git_blame_delay_ms = delay_ms;
         self.code_git_blame_hide_on_scroll = hide_on_scroll;
-        for pane in self.code_pane.iter_mut().chain(self.parked_code_panes.values_mut()) {
+        for pane in self
+            .code_pane
+            .iter_mut()
+            .chain(self.parked_code_panes.values_mut())
+        {
             pane.blame.configure(enabled);
             pane.blame.set_options(delay_ms, hide_on_scroll);
         }
@@ -214,12 +227,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 ModalButton::new(
                     "Retry now",
                     "Enter",
-                    ModalAction::RunEditorCommand { command: "connection.retry".into() },
+                    ModalAction::RunEditorCommand {
+                        command: "connection.retry".into(),
+                    },
                 ),
                 ModalButton::new(
                     "Switch workplace",
                     "↓",
-                    ModalAction::RunEditorCommand { command: "connection.switch".into() },
+                    ModalAction::RunEditorCommand {
+                        command: "connection.switch".into(),
+                    },
                 ),
             ],
             busy: false,
@@ -231,7 +248,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     }
 
     pub fn hide_connection_gate(&mut self) {
-        if !self.connection_gate_active { return; }
+        if !self.connection_gate_active {
+            return;
+        }
         self.connection_gate_active = false;
         self.modal.close();
         self.relayout();
@@ -396,7 +415,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     pub(crate) fn execute_chrome_modal_action(&mut self, action: ModalAction) {
         match action {
             ModalAction::Close => {
-                if self.connection_gate_active { return; }
+                if self.connection_gate_active {
+                    return;
+                }
                 self.modal.close();
                 self.relayout();
             }
@@ -799,7 +820,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 true
             }
             UiEvent::PointerDown { x, y, .. } => {
+                self.last_pointer_pos = (*x, *y);
                 self.handle_chrome_modal_click(*x, *y);
+                true
+            }
+            UiEvent::PointerMove { x, y, .. } => {
+                self.last_pointer_pos = (*x, *y);
+                let width = self.last_viewport.map(|v| v.w).unwrap_or(0.0);
+                self.modal.pointer_move(*x, *y, width, 1.0);
+                true
+            }
+            UiEvent::PointerLeave => {
+                self.modal.pointer_leave();
                 true
             }
             UiEvent::Wheel { dy, mode, .. } => {
@@ -816,9 +848,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 let _ = self.modal.scroll_at(px, py, width, 1.0, -pixels);
                 true
             }
-            // Pointer move/up/leave are swallowed while the modal owns
-            // input — nothing below may see them (desktop parity: the
-            // blocking modal arm returns true for everything).
+            // Pointer-up is swallowed while the modal owns input — nothing
+            // below may see it.
             _ => true,
         }
     }

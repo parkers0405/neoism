@@ -55,11 +55,24 @@ await sessionClient.sessions.command("session-1", "review", {
   arguments: "src/main.rs", agent: "build", model: "provider/model",
 });
 await sessionClient.sessions.command("session-1", "init");
+await sessionClient.sessions.control("session-1");
+await sessionClient.sessions.claimControl("session-1", { expectedRevision: 4, leaseSeconds: 120 });
+await sessionClient.sessions.releaseControl("session-1", 5);
+await sessionClient.sessions.participants("session-1");
 assert.deepEqual(sessionRequests[0].query, { order: "desc", limit: 40, cursor: "msg_oldest", slim: true });
 assert.deepEqual(sessionRequests[1].body, {
   arguments: "src/main.rs", agent: "build", model: "provider/model", command: "review",
 });
 assert.deepEqual(sessionRequests[2].body, { command: "init" });
+assert.deepEqual(
+  sessionRequests.slice(3).map((request) => [request.method, request.path, request.query, request.body]),
+  [
+    ["GET", "/v2/sessions/session-1/control", undefined, undefined],
+    ["POST", "/v2/sessions/session-1/control", undefined, { expectedRevision: 4, leaseSeconds: 120 }],
+    ["DELETE", "/v2/sessions/session-1/control", { expectedRevision: 5 }, undefined],
+    ["GET", "/v2/sessions/session-1/participants", undefined, undefined],
+  ],
+);
 
 const managementRequests = [];
 const managementClient = createNeoismClient({

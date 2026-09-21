@@ -312,7 +312,11 @@ fn operator_origin_allowed(origin: &str) -> bool {
     let Ok(url) = url::Url::parse(origin) else {
         return false;
     };
-    if url.username() != "" || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+    if url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
         return false;
     }
     if !matches!(url.scheme(), "http" | "https") {
@@ -415,11 +419,18 @@ pub(crate) async fn agent_local_workspaces(
 ) -> Response {
     if !operator_local(peer, &headers) {
         return with_loopback_cors(
-            (StatusCode::FORBIDDEN, "operator-local workspace discovery only").into_response(),
+            (
+                StatusCode::FORBIDDEN,
+                "operator-local workspace discovery only",
+            )
+                .into_response(),
             &headers,
         );
     }
-    let workspaces: Vec<_> = state.workspaces.list_host_workspaces(None).into_iter()
+    let workspaces: Vec<_> = state
+        .workspaces
+        .list_host_workspaces(None)
+        .into_iter()
         .filter_map(|workspace| {
             let root = agent_workspace_root(&state.workspaces, &workspace.id)?;
             Some(serde_json::json!({
@@ -430,8 +441,11 @@ pub(crate) async fn agent_local_workspaces(
             }))
         })
         .collect();
-    let mut response = Json(serde_json::json!({ "workspaces": workspaces })).into_response();
-    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    let mut response =
+        Json(serde_json::json!({ "workspaces": workspaces })).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     with_loopback_cors(response, &headers)
 }
 
@@ -482,10 +496,14 @@ pub(crate) async fn agent_share(
 ) -> Response {
     let reply = |response: Response| with_loopback_cors(response, &headers);
     if !operator_local(peer, &headers) {
-        return reply((StatusCode::FORBIDDEN, "operator-local share only").into_response());
+        return reply(
+            (StatusCode::FORBIDDEN, "operator-local share only").into_response(),
+        );
     }
     if !allow_share_mint() {
-        return reply((StatusCode::TOO_MANY_REQUESTS, "try again shortly").into_response());
+        return reply(
+            (StatusCode::TOO_MANY_REQUESTS, "try again shortly").into_response(),
+        );
     }
     let workspace_id = match resolve_share_workspace(
         &state.workspaces,
@@ -602,10 +620,17 @@ pub(crate) async fn agent_share(
         crate::agent::ensure_agent_server_started(state.workspaces.clone());
         if let Err(error) = crate::agent_hosting::associate(&workspace_id, &root).await {
             tracing::warn!(%error, %workspace_id, "phone chat hosting association failed");
-            return reply(Json(share_reply(
-                "hosting_unavailable", None, "Could not prepare this workspace's chats. Try again.",
-                None, Some(workspace_id), true,
-            )).into_response());
+            return reply(
+                Json(share_reply(
+                    "hosting_unavailable",
+                    None,
+                    "Could not prepare this workspace's chats. Try again.",
+                    None,
+                    Some(workspace_id),
+                    true,
+                ))
+                .into_response(),
+            );
         }
     }
     let minted = state.auth.mint_preapproved_pairing_code(
@@ -613,7 +638,9 @@ pub(crate) async fn agent_share(
         workspace.id.clone(),
     );
     if minted.code.is_empty() {
-        return reply((StatusCode::TOO_MANY_REQUESTS, "try again shortly").into_response());
+        return reply(
+            (StatusCode::TOO_MANY_REQUESTS, "try again shortly").into_response(),
+        );
     }
     let Some(url) = share_page_url(
         &origin,
@@ -662,7 +689,11 @@ pub(crate) async fn agent_gui_asset(
     serve_agent_gui_file(&path, method, None).await
 }
 
-async fn serve_agent_gui_file(relative: &str, method: Method, pair: Option<String>) -> Response {
+async fn serve_agent_gui_file(
+    relative: &str,
+    method: Method,
+    pair: Option<String>,
+) -> Response {
     if method != Method::GET && method != Method::HEAD {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
@@ -733,10 +764,9 @@ async fn serve_agent_gui_file(relative: &str, method: Method, pair: Option<Strin
         axum::body::Body::from(body)
     }
     .into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(mime),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
     response
         .headers_mut()
         .insert(header::CONTENT_LENGTH, len.into());
@@ -817,13 +847,9 @@ mod tests {
 
     #[test]
     fn share_url_has_pair_workspace_session_not_tokens() {
-        let url = share_page_url(
-            "http://100.64.0.7:7878",
-            "ws-1",
-            Some("chat-9"),
-            "ABCD2345",
-        )
-        .unwrap();
+        let url =
+            share_page_url("http://100.64.0.7:7878", "ws-1", Some("chat-9"), "ABCD2345")
+                .unwrap();
         assert!(url.starts_with("http://100.64.0.7:7878/agent-gui/?"));
         assert!(url.contains("pair=ABCD2345"));
         assert!(url.contains("workspace=ws-1"));

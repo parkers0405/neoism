@@ -232,18 +232,32 @@ pub fn parse_cd_operand(input: &str) -> Result<String, String> {
             Some(q) if ch == q => quote = None,
             Some('"') if ch == '\\' => escaped = true,
             Some(_) => word.push(ch),
-            None if ch == '\\' => { escaped = true; started = true; }
-            None if ch == '\'' || ch == '"' => { quote = Some(ch); started = true; }
-            None if ch.is_whitespace() => {
-                if started { words.push(std::mem::take(&mut word)); started = false; }
+            None if ch == '\\' => {
+                escaped = true;
+                started = true;
             }
-            None => { word.push(ch); started = true; }
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                started = true;
+            }
+            None if ch.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            None => {
+                word.push(ch);
+                started = true;
+            }
         }
     }
     if escaped || quote.is_some() {
         return Err("Unterminated quote or escape in directory".into());
     }
-    if started { words.push(word); }
+    if started {
+        words.push(word);
+    }
     match words.len() {
         0 => Ok(String::new()),
         1 => Ok(words.remove(0)),

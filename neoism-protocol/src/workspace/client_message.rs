@@ -232,7 +232,9 @@ pub enum WorkspaceClientMessage {
     /// Application-level liveness probe. Browsers cannot originate WebSocket
     /// control Ping frames, and Safari may retain an OPEN-looking socket after
     /// page suspension even though the transport is dead.
-    Ping { nonce: String },
+    Ping {
+        nonce: String,
+    },
     /// Ask the daemon to send a [`WorkspaceServerMessage::FullSnapshot`]
     /// describing the connection's current authoritative view (sessions,
     /// pane layout, persisted preferences, per-route PTY offsets). The
@@ -378,6 +380,13 @@ pub enum WorkspaceClientMessage {
     /// guest's no-vault empty state; the mutation must happen on the daemon
     /// machine, never against the guest's local Default vault.
     CreateWorkspaceVault {
+        workspace_id: String,
+    },
+    /// Re-read the host's on-disk notes link for this workspace and
+    /// broadcast the updated `linked_vault_dir` / `notes_vault_dir`. Used
+    /// after a local vault link (UI or Notes MCP) so joined guests re-point
+    /// Alt+N without waiting for a daemon restart.
+    RefreshHostWorkspaceNotes {
         workspace_id: String,
     },
     /// Ask the daemon for a URL a PHONE (or any other device on the

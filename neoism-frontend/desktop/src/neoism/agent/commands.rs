@@ -1873,7 +1873,11 @@ impl NeoismAgentPane {
             .ok_or_else(|| "server did not return session id".to_string())?
             .to_string();
         self.session_id = Some(id.clone());
-        self.session_title = neoism_ui::panels::agent_pane::api_mapping::session_state_from_json(&response).title;
+        self.session_title =
+            neoism_ui::panels::agent_pane::api_mapping::session_state_from_json(
+                &response,
+            )
+            .title;
         self.parent_session_id = None;
         self.session_tree_root_id = Some(id.clone());
         self.side_panel.set_viewed_session_id(Some(id.clone()));
@@ -1975,7 +1979,8 @@ fn create_prompt_session(
         .ok_or_else(|| "server did not return session id".to_string())?;
     Ok((
         session_id,
-        neoism_ui::panels::agent_pane::api_mapping::session_state_from_json(&response).title,
+        neoism_ui::panels::agent_pane::api_mapping::session_state_from_json(&response)
+            .title,
     ))
 }
 

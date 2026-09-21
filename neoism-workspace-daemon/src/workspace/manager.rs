@@ -28,7 +28,7 @@ impl WorkspaceManager {
         let (pane_layout_tx, _) =
             tokio::sync::broadcast::channel(PANE_LAYOUT_BROADCAST_CAPACITY);
         let (tree_tx, _) = tokio::sync::broadcast::channel(TREE_BROADCAST_CAPACITY);
-        Self {
+        let manager = Self {
             inner: Arc::new(Mutex::new(ManagerInner {
                 hosts: bootstrap_hosts(),
                 host_workspaces: HashMap::new(),
@@ -50,7 +50,9 @@ impl WorkspaceManager {
             pane_layout_tx: Arc::new(pane_layout_tx),
             tree_tx: Arc::new(tree_tx),
             snapshot_writer: SnapshotWriter::ephemeral(),
-        }
+        };
+        install_notes_link_watch(manager.clone());
+        manager
     }
 
     /// G1: rehydrate a manager from a previously-written
@@ -96,6 +98,7 @@ impl WorkspaceManager {
             }
         }
         manager.install_snapshot_writer(state_dir);
+        install_notes_link_watch(manager.clone());
         manager
     }
 
@@ -584,6 +587,9 @@ impl WorkspaceManager {
             .insert(workspace.id.clone(), workspace.clone());
         drop(inner);
         self.mark_dirty();
+        if let Some(root) = workspace.root_dir.as_ref() {
+            watch_notes_link_dir(root);
+        }
         workspace
     }
 
@@ -700,7 +706,7 @@ impl WorkspaceManager {
                 .previous_workspace_roots
                 .insert(workspace_id.to_string(), current_root);
         }
-        workspace.root_dir = Some(dir);
+        workspace.root_dir = Some(dir.clone());
         workspace.linked_vault_dir = linked_vault_dir;
         workspace.notes_vault_dir = notes_vault_dir;
         workspace.last_active = now_secs();
@@ -709,7 +715,54 @@ impl WorkspaceManager {
             .insert(workspace.id.clone(), workspace.clone());
         drop(inner);
         self.mark_dirty();
+        watch_notes_link_dir(&dir);
         Some(workspace)
+    }
+
+    /// Re-read the on-disk notes link for a hosted workspace and persist
+    /// the advertised vault dirs. Returns `None` when the workspace is
+    /// unknown or has no directory.
+    pub(crate) fn refresh_host_workspace_notes(
+        &self,
+        workspace_id: &str,
+    ) -> Option<WorkspaceSummary> {
+        let root = {
+            let inner = self.inner.lock();
+            inner.host_workspaces.get(workspace_id)?.root_dir.clone()?
+        };
+        watch_notes_link_dir(&root);
+        self.set_host_workspace_root(workspace_id, root)
+    }
+
+    /// Re-resolve notes links for every hosted workspace rooted at `root`.
+    /// Called when `.neoism/workspace.json` changes on disk.
+    pub(crate) fn refresh_notes_link_for_root(
+        &self,
+        root: &Path,
+    ) -> Vec<WorkspaceSummary> {
+        let event_root = crate::path::canonicalize_lossy(root);
+        let ids: Vec<(String, PathBuf)> = {
+            let inner = self.inner.lock();
+            inner
+                .host_workspaces
+                .values()
+                .filter_map(|workspace| {
+                    let workspace_root = workspace.root_dir.as_ref()?;
+                    (crate::path::canonicalize_lossy(workspace_root) == event_root)
+                        .then(|| (workspace.id.clone(), workspace_root.clone()))
+                })
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (id, dir) in ids {
+            if let Some(workspace) = self.set_host_workspace_root(&id, dir) {
+                out.push(workspace);
+            }
+        }
+        if !out.is_empty() {
+            self.broadcast_tree_changed(None);
+        }
+        out
     }
 
     pub(crate) fn set_host_workspace_visibility(
@@ -1197,7 +1250,9 @@ impl WorkspaceManager {
             .filter(|tab| tab.session_id.as_deref() == Some(id))
             .map(|tab| tab.id.clone())
             .collect();
-        inner.workspace_tabs.retain(|_, tab| tab.session_id.as_deref() != Some(id));
+        inner
+            .workspace_tabs
+            .retain(|_, tab| tab.session_id.as_deref() != Some(id));
         for workspace in inner.host_workspaces.values_mut() {
             if workspace.main_session_id.as_deref() == Some(id) {
                 workspace.main_session_id = None;
@@ -1216,7 +1271,9 @@ impl WorkspaceManager {
             .filter(|surface| surface.session_id == id)
             .map(|surface| surface.workspace_id.clone())
             .collect();
-        inner.editor_surfaces.retain(|_, surface| surface.session_id != id);
+        inner
+            .editor_surfaces
+            .retain(|_, surface| surface.session_id != id);
         for workspace_id in affected_workspaces {
             rebuild_layout_after_surface_remove(&mut inner, &workspace_id);
         }

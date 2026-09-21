@@ -335,15 +335,26 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         crate::chrome::EditorPaneKind::Code => {
                             let mouse =
                                 Some([self.last_pointer_pos.0, self.last_pointer_pos.1]);
-                            let blame_focused = self.buffer_tabs.focused_cursor_rect().is_none()
-                                && !self.agent_pane.as_ref().is_some_and(|pane| pane.side_panel().is_focused())
-                                && !self.file_tree.as_ref().is_some_and(|tree| tree.is_focused())
-                                && !self.notes_sidebar.is_focused() && !self.git_diff_panel.is_focused()
-                                && !self.command_palette.is_enabled() && !self.finder.is_enabled()
-                                && !self.generic_keyboard_overlay_active();
+                            let blame_focused =
+                                self.buffer_tabs.focused_cursor_rect().is_none()
+                                    && !self.agent_pane.as_ref().is_some_and(|pane| {
+                                        pane.side_panel().is_focused()
+                                    })
+                                    && !self
+                                        .file_tree
+                                        .as_ref()
+                                        .is_some_and(|tree| tree.is_focused())
+                                    && !self.notes_sidebar.is_focused()
+                                    && !self.git_diff_panel.is_focused()
+                                    && !self.command_palette.is_enabled()
+                                    && !self.finder.is_enabled()
+                                    && !self.generic_keyboard_overlay_active();
                             if let Some(pane) = self.code_pane.as_mut() {
                                 pane.blame.apply_default(self.code_git_blame);
-                                pane.blame.set_options(self.code_git_blame_delay_ms, self.code_git_blame_hide_on_scroll);
+                                pane.blame.set_options(
+                                    self.code_git_blame_delay_ms,
+                                    self.code_git_blame_hide_on_scroll,
+                                );
                                 pane.blame.focused = blame_focused;
                                 // The chrome trail cursor draws the
                                 // caret (desktop parity) — the pane
@@ -541,17 +552,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             self.notifications.draw(
                 sugarloaf,
                 &PanelLayout {
-                // Full-width band: buffer_tabs spans the whole viewport,
-                // so toasts anchor at the real WINDOW right edge instead
-                // of the terminal pane's (which reserves right-side
-                // space and starts after the file tree).
-                bounds: crate::layout::Rect {
-                    x: layout.buffer_tabs.x,
-                    y: layout.terminal.y,
-                    w: layout.buffer_tabs.w,
-                    h: layout.terminal.h,
-                },
-                scale: 1.0,
+                    // Full-width band: buffer_tabs spans the whole viewport,
+                    // so toasts anchor at the real WINDOW right edge instead
+                    // of the terminal pane's (which reserves right-side
+                    // space and starts after the file tree).
+                    bounds: crate::layout::Rect {
+                        x: layout.buffer_tabs.x,
+                        y: layout.terminal.y,
+                        w: layout.buffer_tabs.w,
+                        h: layout.terminal.h,
+                    },
+                    scale: 1.0,
                 },
                 &ctx,
             );
@@ -646,7 +657,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         if content_available && self.context_menu.is_visible() {
             if self.context_menu.is_markdown_block_completion() {
                 let rect = layout.terminal;
-                self.context_menu.set_viewport([rect.x, rect.y, rect.w, rect.h]);
+                self.context_menu
+                    .set_viewport([rect.x, rect.y, rect.w, rect.h]);
             }
             let window_w = [
                 layout.buffer_tabs.x + layout.buffer_tabs.w,

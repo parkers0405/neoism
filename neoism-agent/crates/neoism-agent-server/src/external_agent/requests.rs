@@ -247,6 +247,10 @@ async fn external_effective_permissions(
     else {
         return Ok(Vec::new());
     };
+    let approval_scope = (
+        crate::caller::session_tenant(&session).to_string(),
+        session.project_id.clone(),
+    );
     let mut rules = session.permission.unwrap_or_default();
     if let Some(extra) = ctx
         .state
@@ -254,7 +258,7 @@ async fn external_effective_permissions(
         .permission_approvals
         .read()
         .await
-        .get(&session.project_id)
+        .get(&approval_scope)
         .cloned()
     {
         rules.extend(extra);

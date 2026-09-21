@@ -896,6 +896,10 @@ rl.on("line", (line) => {
             .expect("fixture tool registered");
         let result = tool
             .execute(PluginToolInvocation {
+                tenant_id: "local".to_string(),
+                subject: None,
+                workspace_id: None,
+                execution_mode: neoism_agent_plugin_api::PluginExecutionMode::NativeLocal,
                 directory: "/tmp".to_string(),
                 session_id: Some("ses_test".to_string()),
                 arguments: json!({ "text": "hi" }),

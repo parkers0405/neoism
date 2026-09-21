@@ -123,9 +123,14 @@ pub(crate) async fn mcp_config_patch(
     if !request.enabled {
         let _ = mcp::disconnect(&state, &directory, &name).await;
     }
-    let plugins = state.publish_config_mutation(&directory).await.map_err(|error| {
-        ApiError::internal(format!("MCP configuration was saved but publication failed: {error}"))
-    })?;
+    let plugins = state
+        .publish_config_mutation(&directory)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "MCP configuration was saved but publication failed: {error}"
+            ))
+        })?;
     let store = auth_store(&state, claims.as_deref())?;
     mcp::catalog_with_snapshot(&directory, &store, &state, &plugins)
         .await

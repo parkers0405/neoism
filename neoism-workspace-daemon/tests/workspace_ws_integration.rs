@@ -503,11 +503,7 @@ async fn fresh_socket_never_receives_unattached_pty_backlog() {
         );
     }
 
-    send_pty(
-        &mut owner,
-        &PtyClientMessage::ClosePty { session_id },
-    )
-    .await;
+    send_pty(&mut owner, &PtyClientMessage::ClosePty { session_id }).await;
     close(fresh).await;
     close(owner).await;
 }

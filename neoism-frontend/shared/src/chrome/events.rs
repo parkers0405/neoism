@@ -1531,17 +1531,25 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         tree.set_focused(false);
                     }
                     self.blur(PanelKey::FileTree);
-                    if let NotesSidebarHit::Note(index)
-                    | NotesSidebarHit::NoteIcon(index) = hit
-                    {
-                        self.notes_sidebar.set_selected(index);
-                        if self.notes_sidebar.note_is_dir(index) {
-                            self.notes_sidebar.toggle_selected_dir();
-                        } else if let Some(path) = self.notes_sidebar.note_path(index) {
-                            self.notes_sidebar.set_focused(false);
-                            self.pending_panel_open_paths
-                                .push(path.to_string_lossy().into_owned());
+                    match hit {
+                        NotesSidebarHit::NotebookBack => {
+                            self.notes_sidebar.leave_notebook();
                         }
+                        NotesSidebarHit::Note(index)
+                        | NotesSidebarHit::NoteIcon(index) => {
+                            self.notes_sidebar.set_selected(index);
+                            if self.notes_sidebar.selected_is_notebook() {
+                                self.notes_sidebar.enter_selected_notebook();
+                            } else if self.notes_sidebar.note_is_dir(index) {
+                                self.notes_sidebar.toggle_selected_dir();
+                            } else if let Some(path) = self.notes_sidebar.note_path(index)
+                            {
+                                self.notes_sidebar.set_focused(false);
+                                self.pending_panel_open_paths
+                                    .push(path.to_string_lossy().into_owned());
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 // Clicks anywhere on the sidebar belong to it.
@@ -1629,8 +1637,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     return true;
                 }
                 LogicalKey::Named(NamedKey::Enter) => {
+                    if self.notes_sidebar.is_notebook_back_selected() {
+                        self.notes_sidebar.leave_notebook();
+                        return true;
+                    }
                     let index = self.notes_sidebar.selected_index();
-                    if self.notes_sidebar.note_is_dir(index) {
+                    if self.notes_sidebar.selected_is_notebook() {
+                        self.notes_sidebar.enter_selected_notebook();
+                    } else if self.notes_sidebar.note_is_dir(index) {
                         self.notes_sidebar.toggle_selected_dir();
                     } else if let Some(path) = self.notes_sidebar.note_path(index) {
                         self.notes_sidebar.set_focused(false);
@@ -1640,6 +1654,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     return true;
                 }
                 LogicalKey::Named(NamedKey::Escape) => {
+                    if self.notes_sidebar.leave_notebook() {
+                        return true;
+                    }
                     self.notes_sidebar.set_visible(false);
                     self.notes_sidebar.set_focused(false);
                     self.relayout();

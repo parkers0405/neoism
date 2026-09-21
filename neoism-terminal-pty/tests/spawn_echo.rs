@@ -78,8 +78,14 @@ fn spawn_applies_scoped_child_environment() {
         cols: 80,
         rows: 24,
     };
-    let got = read_until_hello(PtySession::spawn(config).expect("spawn PTY"), Duration::from_secs(1));
-    assert!(got.contains(&b'1'), "child did not receive scoped env: {got:?}");
+    let got = read_until_hello(
+        PtySession::spawn(config).expect("spawn PTY"),
+        Duration::from_secs(1),
+    );
+    assert!(
+        got.contains(&b'1'),
+        "child did not receive scoped env: {got:?}"
+    );
 }
 
 /// Windows leg: same smoke through ConPTY. `cmd.exe` cold-starts much

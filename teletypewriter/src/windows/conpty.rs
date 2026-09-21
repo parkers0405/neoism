@@ -17,9 +17,8 @@ use windows_sys::{s, w};
 
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-    TerminateProcess, UpdateProcThreadAttribute,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    TerminateProcess, UpdateProcThreadAttribute, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     STARTUPINFOW,
 };

@@ -187,7 +187,7 @@ impl Screen<'_> {
         use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
         use neoism_ui::widgets::modal::ModalAction;
 
-        let target_dir = if target.is_dir() {
+        let target_dir = if self.renderer.notes_sidebar.path_is_dir(&target) || target.is_dir() {
             target.clone()
         } else {
             target
@@ -233,25 +233,35 @@ impl Screen<'_> {
                 ),
             ),
         ];
-        let notebooks_available = !self.context_manager.current_workspace_is_remote_joined();
+        let notebooks_available =
+            !self.context_manager.current_workspace_is_remote_joined();
         if notebooks_available {
-            items.insert(1, ContextMenuItem::new(
-                "New Drawing", "",
-                ContextMenuAction::Modal(ModalAction::NotesNewDrawing {
-                    dir: target_dir_string.clone(),
-                }.into()),
-            ));
-        }
-        if notebooks_available && target.join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME).is_file() {
-            use neoism_ui::editor::documentation_notebook::NotebookInput;
-            items.push(ContextMenuItem::new(
-                "Open Notebook", "",
-                ContextMenuAction::Modal(ModalAction::DocumentationNotebook {
-                    kind: NotebookInput::Open,
-                    notebook: None,
-                    value: target.to_string_lossy().into_owned(),
-                }.into()),
-            ));
+            items.insert(
+                1,
+                ContextMenuItem::new(
+                    "New Notebook",
+                    "b",
+                    ContextMenuAction::Modal(
+                        ModalAction::NotesNewNotebook {
+                            dir: target_dir_string.clone(),
+                        }
+                        .into(),
+                    ),
+                ),
+            );
+            items.insert(
+                2,
+                ContextMenuItem::new(
+                    "New Drawing",
+                    "",
+                    ContextMenuAction::Modal(
+                        ModalAction::NotesNewDrawing {
+                            dir: target_dir_string.clone(),
+                        }
+                        .into(),
+                    ),
+                ),
+            );
         }
         if self
             .renderer

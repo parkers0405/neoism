@@ -527,7 +527,10 @@ pub fn create_pty_with_spawn_env(
                 "--env=COLORTERM=truecolor".to_string(),
                 "--env=TERM=rio".to_string(),
             ];
-            with_args.extend(env.iter().map(|(key, value)| format!("--env={key}={value}")));
+            with_args.extend(
+                env.iter()
+                    .map(|(key, value)| format!("--env={key}={value}")),
+            );
 
             if let Some(directory) = working_directory {
                 with_args.push(format!(

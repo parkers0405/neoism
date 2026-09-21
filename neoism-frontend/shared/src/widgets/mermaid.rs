@@ -157,7 +157,7 @@ pub fn mermaid_scene(diagram: &MermaidDiagram, theme: &IdeTheme, scale: f32) -> 
             scene.shapes.push(shape(
                 &mut next_id,
                 ShapeKind::Text {
-                width: None,
+                    width: None,
                     x: midpoint.x
                         - estimated_text_width(label, EDGE_LABEL_SIZE * scale) * 0.5,
                     y: midpoint.y - EDGE_LABEL_SIZE * scale * 0.75,

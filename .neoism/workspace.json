@@ -1,10 +1,12 @@
 {
-  "version": 5,
+  "version": 6,
   "id": "2ed75df2-733d-4dd8-94ef-5bfd4770c17e",
   "name": "neoism",
   "notes": {
     "enabled": true,
-    "workspace": "Default",
+    "workspace": "neoism",
+    "vault_id": "36963087-d864-4d08-a7d5-488760bf06be",
+    "scope": ".",
     "ignore": [
       ".git",
       ".hg",

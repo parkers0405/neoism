@@ -88,7 +88,8 @@ impl RemoteFiles {
             self.runtime.spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 event_proxy.send_event(
-                    neoism_backend::event::RioEvent::RemoteEditorReadTimeout(request_id).into(),
+                    neoism_backend::event::RioEvent::RemoteEditorReadTimeout(request_id)
+                        .into(),
                     window_id,
                 );
             });

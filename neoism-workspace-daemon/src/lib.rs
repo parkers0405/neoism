@@ -3,8 +3,8 @@
 //! The binary in `main.rs` is a thin wrapper around this crate; the
 //! integration tests live alongside it and depend on these modules.
 
-pub mod agent_hosting;
 pub mod agent;
+pub mod agent_hosting;
 pub mod audit;
 pub mod auth;
 pub mod cloud_auth;
@@ -16,8 +16,8 @@ pub mod crdt;
 pub mod daemon_token;
 pub mod files;
 pub mod fs_watch;
-mod git_blame;
 pub mod git;
+mod git_blame;
 mod git_snapshot;
 pub mod handshake;
 pub mod hosts;

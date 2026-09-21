@@ -185,6 +185,16 @@ fn handle_inner(
         },
         WorkspaceClientMessage::CreateWorkspaceVault { workspace_id } => {
             DispatchOutcome::just(create_workspace_vault(manager, conn, &workspace_id))
+        }
+        WorkspaceClientMessage::RefreshHostWorkspaceNotes { workspace_id } => {
+            DispatchOutcome::just(match manager.refresh_host_workspace_notes(&workspace_id)
+            {
+                Some(workspace) => {
+                    manager.broadcast_tree_changed(Some(conn.client_id));
+                    vec![WorkspaceServerMessage::HostWorkspaceUpserted { workspace }]
+                }
+                None => vec![err(format!("no such host workspace: {workspace_id}"))],
+            })
         },
         WorkspaceClientMessage::RequestShareTarget { workspace_id } => {
             DispatchOutcome::just(vec![share_target(manager, workspace_id.as_deref())])

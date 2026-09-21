@@ -81,7 +81,8 @@ impl Screen<'_> {
             }
             Ok(None) => true,
             Err(()) => {
-                let completion = self.renderer.context_menu.is_markdown_block_completion();
+                let completion =
+                    self.renderer.context_menu.is_markdown_block_completion();
                 self.renderer.context_menu.close();
                 self.mark_dirty();
                 !completion
@@ -102,8 +103,19 @@ impl Screen<'_> {
         }
         if self.renderer.context_menu.is_markdown_block_completion() {
             let mods = self.modifiers.state();
-            if mods.control_key() || mods.alt_key() || mods.super_key()
-                || matches!(key.logical_key, Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Home | NamedKey::End)) {
+            if mods.control_key()
+                || mods.alt_key()
+                || mods.super_key()
+                || matches!(
+                    key.logical_key,
+                    Key::Named(
+                        NamedKey::ArrowLeft
+                            | NamedKey::ArrowRight
+                            | NamedKey::Home
+                            | NamedKey::End
+                    )
+                )
+            {
                 self.close_context_menu();
                 return false;
             }

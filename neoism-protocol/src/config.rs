@@ -322,7 +322,9 @@ mod tests {
             },
             ConfigClientMessage::ListExtensions,
             ConfigClientMessage::ListMashupPacks,
-            ConfigClientMessage::ApplyMashupPack { id: Some("phosphor".into()) },
+            ConfigClientMessage::ApplyMashupPack {
+                id: Some("phosphor".into()),
+            },
         ];
         for msg in msgs {
             let json = serde_json::to_string(&msg).unwrap();
@@ -415,6 +417,9 @@ mod tests {
             }],
         };
         let json = serde_json::to_string(&reply).unwrap();
-        assert_eq!(serde_json::from_str::<ConfigServerMessage>(&json).unwrap(), reply);
+        assert_eq!(
+            serde_json::from_str::<ConfigServerMessage>(&json).unwrap(),
+            reply
+        );
     }
 }

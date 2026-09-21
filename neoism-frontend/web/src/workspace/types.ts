@@ -1714,6 +1714,8 @@ export type WorkspaceClientMessage =
   | { CloseHostWorkspace: { workspace_id: string } }
   | { SwitchHostWorkspace: { workspace_id: string } }
   | { SetWorkspaceRoot: { workspace_id: string; root_dir: string } }
+  | { CreateWorkspaceVault: { workspace_id: string } }
+  | { RefreshHostWorkspaceNotes: { workspace_id: string } }
   | { RequestShareTarget: { workspace_id: string | null } }
   | { ShareWorkspace: { workspace_id: string } }
   | { StopSharingWorkspace: { workspace_id: string } }

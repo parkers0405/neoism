@@ -133,6 +133,44 @@ impl Screen<'_> {
         }
     }
 
+    pub(crate) fn open_documentation_notebook_page(
+        &mut self,
+        notebook_root: &Path,
+        page: &Path,
+    ) -> bool {
+        if self.context_manager.current_workspace_is_remote_joined() {
+            return false;
+        }
+        let manifest = notebook_root.join(MANIFEST_NAME);
+        let manifest = std::fs::canonicalize(&manifest).unwrap_or(manifest);
+        let binding = match self
+            .documentation_notebook_binding(&manifest)
+            .map(Ok)
+            .unwrap_or_else(|| NotebookBinding::load(&manifest))
+        {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.file_tree_notify(
+                    error,
+                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                );
+                return false;
+            }
+        };
+        let page = std::fs::canonicalize(page).unwrap_or_else(|_| page.to_path_buf());
+        let selected = binding
+            .session
+            .lock()
+            .ok()
+            .and_then(|mut book| {
+                let index = book.index_of(&page)?;
+                book.navigate(index);
+                Some(())
+            })
+            .is_some();
+        selected && self.activate_documentation_notebook_page(binding)
+    }
+
     fn activate_documentation_notebook_page(&mut self, binding: NotebookBinding) -> bool {
         let (path, title) = {
             let Ok(book) = binding.session.lock() else {
@@ -386,7 +424,10 @@ impl Screen<'_> {
 
     pub(crate) fn create_documentation_notebook_in(&mut self, dir: PathBuf) {
         if self.context_manager.current_workspace_is_remote_joined() {
-            self.file_tree_notify("Folder notebooks currently require a local workspace", neoism_ui::panels::notifications::NotificationLevel::Warn);
+            self.file_tree_notify(
+                "Folder notebooks currently require a local workspace",
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
             return;
         }
         let result = NotebookBinding::create_untitled_in(&dir);
@@ -394,11 +435,17 @@ impl Screen<'_> {
             Ok(binding) => {
                 self.renderer.notes_sidebar.reveal_dir(&dir);
                 self.renderer.notes_sidebar.refresh_notes();
-                if let Some(folder) = binding.path.parent() { self.renderer.notes_sidebar.select_path(folder); }
+                if let Some(folder) = binding.path.parent() {
+                    self.renderer.notes_sidebar.select_path(folder);
+                }
                 self.refresh_file_tree_entries();
-                self.open_documentation_notebook(binding.path);
+                self.renderer.notes_sidebar.enter_selected_notebook();
+                self.renderer.notes_sidebar.set_focused(true);
             }
-            Err(error) => self.file_tree_notify(error, neoism_ui::panels::notifications::NotificationLevel::Error),
+            Err(error) => self.file_tree_notify(
+                error,
+                neoism_ui::panels::notifications::NotificationLevel::Error,
+            ),
         }
         self.mark_dirty();
     }

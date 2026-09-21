@@ -73,8 +73,7 @@ pub(crate) async fn read_tool(
     let limit = usize_arg(&arguments, "limit")
         .unwrap_or(DEFAULT_ARTIFACT_READ_LIMIT)
         .max(1);
-    let content = fs::read_to_string(&artifact.path)
-        .with_context(|| format!("failed to read {}", artifact.path))?;
+    let content = read_artifact_content(&context, &artifact).await?;
     let lines = content.lines().collect::<Vec<_>>();
     if offset > lines.len().saturating_add(1) {
         anyhow::bail!(
@@ -118,8 +117,7 @@ pub(crate) async fn search_tool(
     let limit = usize_arg(&arguments, "limit")
         .unwrap_or(DEFAULT_ARTIFACT_SEARCH_LIMIT)
         .max(1);
-    let content = fs::read_to_string(&artifact.path)
-        .with_context(|| format!("failed to read {}", artifact.path))?;
+    let content = read_artifact_content(&context, &artifact).await?;
     let mut matches = String::new();
     let mut match_count = 0;
     for (index, line) in content.lines().enumerate() {
@@ -159,6 +157,7 @@ async fn resolve_artifact(
         crate::tool::args::required_string(arguments, "artifact")?.to_string();
     let id = id_or_uri
         .strip_prefix("artifact://tool-output/")
+        .or_else(|| id_or_uri.strip_prefix("artifact://"))
         .unwrap_or(&id_or_uri);
     let Some(state) = context.state() else {
         anyhow::bail!("artifact tools require session state");
@@ -199,6 +198,33 @@ async fn resolve_artifact(
             }
         }
     }
+    let session = state
+        .inner
+        .store
+        .get_session(session_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+    if let Some(artifact) = state
+        .inner
+        .store
+        .get_artifact(
+            crate::state::TenantQueryScope::Tenant(crate::caller::session_tenant(&session)),
+            id,
+        )
+        .await?
+    {
+        if artifact.session_id.as_deref() == Some(session_id) {
+            return Ok(ToolArtifact {
+                id: artifact.id.clone(),
+                uri: format!("artifact://{}", artifact.id),
+                title: artifact.filename,
+                tool: "sandbox_exec".into(),
+                path: format!("artifact://{}", artifact.id),
+                byte_count: artifact.size,
+                summary: format!("{} bytes of sandbox command output", artifact.size),
+            });
+        }
+    }
     // Failed legacy tool calls could only preserve the managed spill path in
     // their error text. Read those cache files directly, but never accept a
     // path outside Neoism's tool-output directories.
@@ -211,6 +237,34 @@ async fn resolve_artifact(
         );
     }
     anyhow::bail!("unknown artifact {id_or_uri}")
+}
+
+async fn read_artifact_content(
+    context: &ToolContext,
+    artifact: &ToolArtifact,
+) -> anyhow::Result<String> {
+    let Some(id) = artifact.path.strip_prefix("artifact://") else {
+        return fs::read_to_string(&artifact.path)
+            .with_context(|| format!("failed to read {}", artifact.path));
+    };
+    let state = context
+        .state()
+        .ok_or_else(|| anyhow::anyhow!("artifact tools require session state"))?;
+    let session_id = context
+        .session_id()
+        .ok_or_else(|| anyhow::anyhow!("artifact tools require a session id"))?;
+    let session = state
+        .inner
+        .store
+        .get_session(session_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+    let tenant_id = crate::caller::session_tenant(&session);
+    let bytes = state
+        .get_artifact_blob(tenant_id, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("artifact content not found"))?;
+    String::from_utf8(bytes).context("artifact is not UTF-8 text")
 }
 
 fn artifact_for_path(

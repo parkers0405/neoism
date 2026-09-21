@@ -3,14 +3,25 @@ use std::path::Path;
 
 impl Screen<'_> {
     pub fn open_path_in_code(&mut self, path: std::path::PathBuf) {
-        let source = neoism_ui::services::FileOpenSource::workspace(self.context_manager.current_workspace_is_remote_joined());
+        let source = neoism_ui::services::FileOpenSource::workspace(
+            self.context_manager.current_workspace_is_remote_joined(),
+        );
         self.open_path_in_code_with_source(path, source);
     }
 
-    pub(crate) fn open_path_in_code_with_source(&mut self, path: std::path::PathBuf, source: neoism_ui::services::FileOpenSource) {
+    pub(crate) fn open_path_in_code_with_source(
+        &mut self,
+        path: std::path::PathBuf,
+        source: neoism_ui::services::FileOpenSource,
+    ) {
         if self.context_manager.code_node_by_path(&path).is_some()
-            && self.context_manager.code_pane_mut_by_path(&path)
-                .is_some_and(|pane| source.conflicts_with(pane.remote_source, pane.local_only)) {
+            && self
+                .context_manager
+                .code_pane_mut_by_path(&path)
+                .is_some_and(|pane| {
+                    source.conflicts_with(pane.remote_source, pane.local_only)
+                })
+        {
             self.file_tree_notify("That path is already open from another source; preserve its edits and close it before opening the other source", neoism_ui::panels::notifications::NotificationLevel::Warn);
             return;
         }
@@ -54,7 +65,9 @@ impl Screen<'_> {
             return;
         };
         if neoism_protocol::host_path::HostPath::new(remote.root().to_string_lossy())
-            .relative(&path.to_string_lossy()).is_none() {
+            .relative(&path.to_string_lossy())
+            .is_none()
+        {
             return;
         }
         let needs_fetch = self
@@ -80,11 +93,17 @@ impl Screen<'_> {
     }
 
     pub(crate) fn activate_code_path(&mut self, path: std::path::PathBuf) {
-        let source = neoism_ui::services::FileOpenSource::workspace(self.context_manager.current_workspace_is_remote_joined());
+        let source = neoism_ui::services::FileOpenSource::workspace(
+            self.context_manager.current_workspace_is_remote_joined(),
+        );
         self.activate_code_path_with_source(path, source);
     }
 
-    fn activate_code_path_with_source(&mut self, path: std::path::PathBuf, source: neoism_ui::services::FileOpenSource) {
+    fn activate_code_path_with_source(
+        &mut self,
+        path: std::path::PathBuf,
+        source: neoism_ui::services::FileOpenSource,
+    ) {
         if let Some((_route_id, node)) = self.context_manager.code_node_by_path(&path) {
             let _ = self
                 .context_manager
@@ -95,10 +114,12 @@ impl Screen<'_> {
         }
         let rich_text_id = next_rich_text_id();
         let _ = self.sugarloaf.text(Some(rich_text_id));
-        if !self
-            .context_manager
-            .add_stacked_code_with_source(path, rich_text_id, &mut self.sugarloaf, source)
-        {
+        if !self.context_manager.add_stacked_code_with_source(
+            path,
+            rich_text_id,
+            &mut self.sugarloaf,
+            source,
+        ) {
             self.file_tree_notify(
                 "Could not open code pane",
                 neoism_ui::panels::notifications::NotificationLevel::Error,

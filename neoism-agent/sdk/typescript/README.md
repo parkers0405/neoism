@@ -62,6 +62,20 @@ matching Neoism GUI's one-stream session-family model. The main agent starts
 subagents; SDK clients observe their child-session events and may list or stop
 tasks through the optional subagents client.
 
+Hosted clients may omit `sessionId` to consume the authenticated tenant-wide stream. The server scopes replay and live delivery to the resolved tenant before emitting events. `limit` bounds replay without changing the reconnect cursor.
+
+Tenant-owned sessions support revision-guarded actor control. A service account can start work and a human can take control of the same session without cloning its transcript or artifacts:
+
+```ts
+const current = await client.sessions.control(sessionId);
+const lease = await client.sessions.claimControl(sessionId, {
+  expectedRevision: current?.revision ?? 0,
+  leaseSeconds: 60,
+});
+const participants = await client.sessions.participants(sessionId);
+await client.sessions.releaseControl(sessionId, lease.revision);
+```
+
 The package exports capability-gated clients for agents, commands, providers,
 skills, goals, LSP, MCP, PTY, semantic search, subagents, VCS, and workflows.
 `client.operations` remains the complete generated protocol escape hatch.
@@ -72,8 +86,7 @@ including `workspaces` and `repositories`. Repository creation accepts either
 Deleting either registration never removes files from its working tree.
 Management reads and writes require a local operator token; trusted loopback
 runtime access and workspace-scoped daemon credentials do not grant management
-authority. Shared provider/MCP credential tenancy is explicitly deferred, so
-the existing local provider/MCP runtime and OAuth APIs are unchanged.
+authority. Hosted provider and MCP credentials are supplied by tenant-scoped host stores and are never read from the local desktop credential files.
 
 Loopback servers may run in trusted mode without a token. Non-loopback
 `neoism-agent serve` requires `NEOISM_AGENT_TOKEN` or
@@ -82,28 +95,9 @@ Loopback servers may run in trusted mode without a token. Non-loopback
 escape hatch for deployments that provide authentication in an upstream
 gateway.
 
-Hosted deployments can replace the single token with `NEOISM_AGENT_AUTH_CONFIG`:
+Shared hosted deployments embed `neoism-agent-server` and inject a `TenantResolver`, non-native `ExecutionProvider`, shared `ArtifactBlobStore`, and tenant-scoped provider and MCP credential stores. Call `for_hosted_control_plane()` when constructing services so the server refuses startup if any required boundary is missing. The resolver turns each short-lived Bearer token into the authoritative tenant, actor, scope, quota, workspace, and execution policy. See [Hosted control plane embedding](../../docs/hosted-control-plane.md).
 
-```json
-{
-  "tokens": [{
-    "token": "secret",
-    "tenantId": "team-a",
-    "directoryPrefixes": ["/srv/workspaces/team-a"],
-    "requestsPerMinute": 600,
-    "maxInFlight": 20,
-    "maxSessions": 100,
-    "maxArtifacts": 1000,
-    "maxArtifactBytes": 26214400,
-    "artifactRetentionDays": 30
-  }]
-}
-```
-
-Hosted claims scope sessions, event streams, interactions, artifacts, audit
-entries, directories, and quotas. Global configuration and provider credential
-mutation routes are denied in hosted mode until they have tenant-owned secret
-storage.
+Hosted claims scope sessions, event streams, interactions, artifacts, audit entries, credentials, runtime generations, and quotas. Directory strings and model arguments never establish tenant identity. Global local configuration and native process routes remain unavailable to hosted actors.
 
 Set `NEOISM_AGENT_ARTIFACT_SCAN_COMMAND` to an executable that accepts the
 temporary upload path and exits successfully only for accepted content. Scanner
@@ -111,7 +105,7 @@ execution is limited to 60 seconds and rejected uploads are deleted.
 
 ## Contract generation
 
-`neoism-agent/openapi/v2.sha256` fingerprints the deterministic canonical document. A
+`neoism-agent/openapi/v2.sha256` fingerprints the canonical semantic document. A
 dependency-free generator produces
 `packages/core/src/generated/contract.ts` from its schemas and operations.
 
@@ -122,10 +116,7 @@ npm run contract:print
 npm run contract:check
 ```
 
-Use `npm run contract:update` after an intentional API change. The Rust parity
-test checks every router method and path in both directions; `contract:check`
-then performs byte-for-byte drift checks on the OpenAPI snapshot and generated
-TypeScript types.
+Use `npm run contract:update` after an intentional API change. The Rust parity test checks every router method and path in both directions; `contract:check` then compares the OpenAPI snapshot semantically, checks its canonical fingerprint, and byte-compares generated TypeScript types.
 
 ## Process plugins
 

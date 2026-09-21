@@ -1,4 +1,4 @@
-use web_time::Instant;
+use web_time::{Duration, Instant};
 
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
@@ -30,6 +30,7 @@ const BUSY_BAR_WIDTH: f32 = 120.0;
 const MAX_BODY_LINES: usize = 14;
 const MAX_VISIBLE_ACTIONS: usize = 8;
 const WRAP_COLUMNS: usize = 72;
+const HOVER_ANIMATION_DURATION: Duration = Duration::from_millis(150);
 
 #[allow(dead_code)]
 const DEPTH_BACKDROP: f32 = 0.0;
@@ -40,7 +41,9 @@ const ORDER: u8 = 24;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
     Close,
-    UpdateNeoism { version: String },
+    UpdateNeoism {
+        version: String,
+    },
     InstallLsp {
         server: String,
     },
@@ -63,7 +66,10 @@ pub enum ModalAction {
         command: String,
         value: String,
     },
-    MarkdownFileLink { document: std::path::PathBuf, value: String },
+    MarkdownFileLink {
+        document: std::path::PathBuf,
+        value: String,
+    },
     DocumentationNotebook {
         kind: crate::editor::documentation_notebook::NotebookInput,
         notebook: Option<std::path::PathBuf>,
@@ -158,7 +164,9 @@ pub enum ModalAction {
     FileTreePromptNewFile {
         dir: String,
     },
-    NotesNewNotebook { dir: String },
+    NotesNewNotebook {
+        dir: String,
+    },
     NotesPromptNewFile {
         dir: String,
     },
@@ -308,8 +316,16 @@ impl ModalAction {
             ModalAction::RunEditorCommandWithInput { command, .. } => {
                 ModalAction::RunEditorCommandWithInput { command, value }
             }
-            ModalAction::MarkdownFileLink { document, .. } => ModalAction::MarkdownFileLink { document, value },
-            ModalAction::DocumentationNotebook { kind, notebook, .. } => ModalAction::DocumentationNotebook { kind, notebook, value },
+            ModalAction::MarkdownFileLink { document, .. } => {
+                ModalAction::MarkdownFileLink { document, value }
+            }
+            ModalAction::DocumentationNotebook { kind, notebook, .. } => {
+                ModalAction::DocumentationNotebook {
+                    kind,
+                    notebook,
+                    value,
+                }
+            }
             ModalAction::EpubAddNote { .. } => ModalAction::EpubAddNote { value },
             ModalAction::EpubUpdateAnnotation { id, .. } => {
                 ModalAction::EpubUpdateAnnotation { id, value }
@@ -405,6 +421,22 @@ struct BodyLine {
     row_span: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModalHoverTarget {
+    Close,
+    Tab(usize),
+    Input,
+    Field(usize),
+    Action(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModalPointerKind {
+    Default,
+    Pointer,
+    Text,
+}
+
 impl BodyLine {
     fn new(text: String, kind: BodyLineKind) -> Self {
         Self {
@@ -461,7 +493,11 @@ pub struct UniversalModal {
     pending_host_actions: Vec<ModalHostAction>,
     viewport_height: f32,
     input_hit_rects: Vec<[f32; 4]>,
+    form_field_hit_rects: Vec<(usize, [f32; 4])>,
     close_rect: Option<[f32; 4]>,
+    hovered_target: Option<ModalHoverTarget>,
+    previous_hover_target: Option<ModalHoverTarget>,
+    hover_started: Option<Instant>,
 }
 
 /// A modal outcome the CHROME could validate but not execute — the
@@ -530,7 +566,11 @@ impl Default for UniversalModal {
             pending_host_actions: Vec::new(),
             viewport_height: 720.0,
             input_hit_rects: Vec::new(),
+            form_field_hit_rects: Vec::new(),
             close_rect: None,
+            hovered_target: None,
+            previous_hover_target: None,
+            hover_started: None,
         }
     }
 }
@@ -573,7 +613,11 @@ impl UniversalModal {
         self.blocking = true;
         self.dismissible = true;
         self.input_hit_rects.clear();
+        self.form_field_hit_rects.clear();
         self.close_rect = None;
+        self.hovered_target = None;
+        self.previous_hover_target = None;
+        self.hover_started = None;
     }
 
     pub fn open(&mut self, spec: ModalSpec) {
@@ -623,6 +667,12 @@ impl UniversalModal {
         self.body_scroll_offset = 0;
         self.body_wheel_accumulator = 0.0;
         self.input_caret = self.focused_input_chars();
+        self.input_hit_rects.clear();
+        self.form_field_hit_rects.clear();
+        self.close_rect = None;
+        self.hovered_target = None;
+        self.previous_hover_target = None;
+        self.hover_started = None;
     }
 
     pub fn open_form(&mut self, spec: ModalFormSpec) {
@@ -986,7 +1036,107 @@ impl UniversalModal {
     }
 
     pub fn needs_redraw(&self) -> bool {
-        self.active && self.busy && self.progress.is_none()
+        self.active
+            && ((self.busy && self.progress.is_none())
+                || self
+                    .hover_started
+                    .is_some_and(|started| started.elapsed() < HOVER_ANIMATION_DURATION))
+    }
+
+    pub fn pointer_move(
+        &mut self,
+        x: f32,
+        y: f32,
+        window_width: f32,
+        scale_factor: f32,
+    ) -> bool {
+        let target = self.hover_target_at(x, y, window_width, scale_factor);
+        if target == self.hovered_target {
+            return false;
+        }
+        self.previous_hover_target = self.hovered_target;
+        self.hovered_target = target;
+        self.hover_started = Some(Instant::now());
+        true
+    }
+
+    pub fn pointer_leave(&mut self) -> bool {
+        if self.hovered_target.is_none() {
+            return false;
+        }
+        self.previous_hover_target = self.hovered_target;
+        self.hovered_target = None;
+        self.hover_started = Some(Instant::now());
+        true
+    }
+
+    pub fn pointer_kind(&self) -> ModalPointerKind {
+        match self.hovered_target {
+            Some(ModalHoverTarget::Input | ModalHoverTarget::Field(_)) => ModalPointerKind::Text,
+            Some(
+                ModalHoverTarget::Close
+                | ModalHoverTarget::Tab(_)
+                | ModalHoverTarget::Action(_),
+            ) => ModalPointerKind::Pointer,
+            None => ModalPointerKind::Default,
+        }
+    }
+
+    fn hover_target_at(
+        &self,
+        x: f32,
+        y: f32,
+        window_width: f32,
+        scale_factor: f32,
+    ) -> Option<ModalHoverTarget> {
+        let contains = |rect: [f32; 4]| {
+            x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3]
+        };
+        if self.close_rect.is_some_and(contains) {
+            return Some(ModalHoverTarget::Close);
+        }
+        if let Some(index) = self.form_tab_rects.iter().position(|rect| contains(*rect)) {
+            return Some(ModalHoverTarget::Tab(index));
+        }
+        if let Some((index, _)) = self
+            .form_field_hit_rects
+            .iter()
+            .find(|(_, rect)| contains(*rect))
+        {
+            return Some(ModalHoverTarget::Field(*index));
+        }
+        if self.form.is_none() && self.input_hit_rects.iter().any(|rect| contains(*rect)) {
+            return Some(ModalHoverTarget::Input);
+        }
+        match self.hit_test(x, y, window_width, scale_factor) {
+            Ok(Some(index)) if index < self.buttons.len() => Some(ModalHoverTarget::Action(index)),
+            _ => None,
+        }
+    }
+
+    fn hover_intensity(&self, target: ModalHoverTarget) -> f32 {
+        let Some(started) = self.hover_started else {
+            return if self.hovered_target == Some(target) {
+                1.0
+            } else {
+                0.0
+            };
+        };
+        let progress = (started.elapsed().as_secs_f32()
+            / HOVER_ANIMATION_DURATION.as_secs_f32())
+        .clamp(0.0, 1.0);
+        let eased = crate::animation::ease_out_cubic(progress);
+        let from = if self.previous_hover_target == Some(target) {
+            1.0
+        } else {
+            0.0
+        };
+        let to = if self.hovered_target == Some(target) {
+            1.0
+        } else {
+            0.0
+        };
+        from + (to - from) * eased
     }
 
     pub fn update_progress(
@@ -1566,7 +1716,16 @@ impl UniversalModal {
         if mouse_x < x || mouse_x > x + w || mouse_y < y || mouse_y > y + h {
             return Err(());
         }
-        if let Some(form) = self.form.as_ref() {
+        if !self.form_field_hit_rects.is_empty() {
+            if let Some((index, _)) = self.form_field_hit_rects.iter().find(|(_, rect)| {
+                mouse_x >= rect[0]
+                    && mouse_x <= rect[0] + rect[2]
+                    && mouse_y >= rect[1]
+                    && mouse_y <= rect[1] + rect[3]
+            }) {
+                return Ok(Some(self.buttons.len() + index));
+            }
+        } else if let Some(form) = self.form.as_ref() {
             let mut field_y = y
                 + MODAL_PADDING * self.scale
                 + TITLE_HEIGHT * self.scale
@@ -1619,7 +1778,9 @@ impl UniversalModal {
         let Some(form) = self.form.as_ref() else {
             return false;
         };
-        let index = hit.saturating_sub(self.buttons.len());
+        let Some(index) = hit.checked_sub(self.buttons.len()) else {
+            return false;
+        };
         if form
             .fields
             .get(index)
@@ -1646,6 +1807,7 @@ impl UniversalModal {
         self.viewport_height = (window_height / scale_factor).max(1.0);
         self.clamp_body_scroll();
         self.input_hit_rects.clear();
+        self.form_field_hit_rects.clear();
         let s = self.scale;
         let pad = MODAL_PADDING * s;
         let radius = MODAL_CORNER_RADIUS * s;
@@ -1713,10 +1875,28 @@ impl UniversalModal {
         self.close_rect = self.dismissible.then_some(close);
         let close_opts = DrawOpts {
             font_size: 18.0 * s,
-            color: theme.u8(theme.dim),
+            color: if self.hovered_target == Some(ModalHoverTarget::Close) {
+                theme.u8(theme.fg)
+            } else {
+                theme.u8(theme.dim)
+            },
             ..DrawOpts::default()
         };
         if self.dismissible {
+            let hover = self.hover_intensity(ModalHoverTarget::Close);
+            if hover > 0.0 {
+                sugarloaf.rounded_rect(
+                    None,
+                    close[0],
+                    close[1],
+                    close[2],
+                    close[3],
+                    theme.f32_alpha(theme.hover, hover * 0.9),
+                    DEPTH_ELEMENT,
+                    6.0 * s,
+                    ORDER + 1,
+                );
+            }
             sugarloaf.text_mut().draw(
                 close[0] + 11.0 * s,
                 close[1] + 8.0 * s,
@@ -1750,6 +1930,7 @@ impl UniversalModal {
             for (index, label) in self.form_tabs.iter().enumerate() {
                 let tab_w = widths[index];
                 let active = index == self.form_active_tab;
+                let hover = self.hover_intensity(ModalHoverTarget::Tab(index));
                 sugarloaf.rounded_rect(
                     None,
                     tab_x,
@@ -1759,7 +1940,7 @@ impl UniversalModal {
                     if active {
                         theme.f32_alpha(theme.accent, 0.30)
                     } else {
-                        theme.f32_alpha(theme.hover, 0.35)
+                        theme.f32_alpha(theme.hover, 0.35 + hover * 0.55)
                     },
                     DEPTH_ELEMENT,
                     tab_h * 0.5,
@@ -1904,6 +2085,20 @@ impl UniversalModal {
                 5.0 * s,
                 ORDER,
             );
+            let hover = self.hover_intensity(ModalHoverTarget::Input);
+            if hover > 0.0 {
+                sugarloaf.rounded_rect(
+                    None,
+                    text_x,
+                    input_y,
+                    w - pad * 2.0,
+                    input_h,
+                    theme.f32_alpha(theme.accent, hover * 0.08),
+                    DEPTH_ELEMENT + 0.01,
+                    5.0 * s,
+                    ORDER + 1,
+                );
+            }
             self.input_hit_rects
                 .push([text_x, input_y, w - pad * 2.0, input_h]);
             sugarloaf.rounded_rect(
@@ -2057,8 +2252,24 @@ impl UniversalModal {
                     5.0 * s,
                     ORDER,
                 );
+                let hover = self.hover_intensity(ModalHoverTarget::Field(index));
+                if hover > 0.0 && index != self.form_focus {
+                    sugarloaf.rounded_rect(
+                        None,
+                        text_x,
+                        text_y,
+                        w - pad * 2.0,
+                        input_h,
+                        theme.f32_alpha(theme.accent, hover * 0.08),
+                        DEPTH_ELEMENT + 0.01,
+                        5.0 * s,
+                        ORDER + 1,
+                    );
+                }
                 self.input_hit_rects
                     .push([text_x, text_y, w - pad * 2.0, input_h]);
+                self.form_field_hit_rects
+                    .push((index, [text_x, text_y, w - pad * 2.0, input_h]));
                 let value = if field.value.is_empty() {
                     field.placeholder.clone()
                 } else if field.secret {
@@ -2185,6 +2396,24 @@ impl UniversalModal {
                     ORDER,
                 );
             }
+            let hover = self.hover_intensity(ModalHoverTarget::Action(actual_idx));
+            if hover > 0.0 {
+                sugarloaf.rounded_rect(
+                    None,
+                    row_x,
+                    row_y,
+                    row_w,
+                    row_h,
+                    if destructive {
+                        theme.f32_alpha(theme.red, 0.08 + hover * 0.12)
+                    } else {
+                        theme.f32_alpha(theme.accent, 0.04 + hover * 0.12)
+                    },
+                    DEPTH_ELEMENT + 0.01,
+                    4.0 * s,
+                    ORDER + 1,
+                );
+            }
 
             let label_x = row_x + 14.0 * s;
             let label_y = row_y + (row_h - ACTION_FONT_SIZE * s) / 2.0;
@@ -2195,7 +2424,7 @@ impl UniversalModal {
                 } else {
                     theme.u8(theme.fg)
                 },
-                bold: selected || destructive,
+                bold: selected || destructive || hover > 0.5,
                 clip_rect: Some(action_clip),
                 ..DrawOpts::default()
             };
@@ -2619,13 +2848,22 @@ mod tests {
         let mut modal = UniversalModal::new();
         modal.open_form(ModalFormSpec {
             title: "Add server".into(),
-            fields: vec![ModalFormField {
-                id: "address".into(),
-                label: "Server address".into(),
-                value: String::new(),
-                placeholder: "http://localhost:7878".into(),
-                secret: false,
-            }],
+            fields: vec![
+                ModalFormField {
+                    id: "address".into(),
+                    label: "Server address".into(),
+                    value: String::new(),
+                    placeholder: "http://localhost:7878".into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "name".into(),
+                    label: "Server name".into(),
+                    value: String::new(),
+                    placeholder: "Home".into(),
+                    secret: false,
+                },
+            ],
             submit_label: "Add server".into(),
         });
         let (x, y, _, _) = modal.modal_rect(1200.0, 1.0);
@@ -2648,6 +2886,40 @@ mod tests {
             ),
             Ok(Some(1))
         );
+
+        assert!(!modal.focus_form_hit(0));
+        modal.set_selected_index(0);
+        assert_eq!(modal.selected_action(), Some(ModalAction::ServerFormSubmit));
+        assert!(!modal.focus_form_hit(1));
+        modal.set_selected_index(1);
+        assert_eq!(modal.selected_action(), Some(ModalAction::Close));
+        assert!(modal.focus_form_hit(modal.buttons.len()));
+
+        modal.form_field_hit_rects = vec![
+            (0, [x + 20.0, 200.0, 300.0, 40.0]),
+            (1, [x + 20.0, 260.0, 300.0, 40.0]),
+        ];
+        assert_eq!(
+            modal.hit_test(x + 40.0, 280.0, 1200.0, 1.0),
+            Ok(Some(modal.buttons.len() + 1))
+        );
+        assert!(modal.focus_form_hit(modal.buttons.len() + 1));
+        assert_eq!(modal.form_focus, 1);
+        assert!(modal.pointer_move(x + 40.0, 280.0, 1200.0, 1.0));
+        assert_eq!(modal.pointer_kind(), ModalPointerKind::Text);
+        assert!(!modal.pointer_move(x + 40.0, 280.0, 1200.0, 1.0));
+        assert!(modal.pointer_leave());
+        assert_eq!(modal.pointer_kind(), ModalPointerKind::Default);
+
+        let selected = modal.selected_index;
+        assert!(modal.pointer_move(
+            x + MODAL_PADDING + 20.0,
+            actions_y + ACTION_ROW_HEIGHT + 10.0,
+            1200.0,
+            1.0,
+        ));
+        assert_eq!(modal.pointer_kind(), ModalPointerKind::Pointer);
+        assert_eq!(modal.selected_index, selected);
     }
 
     #[test]

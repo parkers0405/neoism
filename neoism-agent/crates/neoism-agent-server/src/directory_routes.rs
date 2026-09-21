@@ -143,6 +143,7 @@ mod tests {
             artifact_retention_days: None,
             requests_per_minute: None,
             max_in_flight: None,
+            resolved: None,
         }
     }
     #[test]

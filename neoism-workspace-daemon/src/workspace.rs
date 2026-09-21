@@ -410,6 +410,37 @@ pub(crate) fn resolve_notes_vault_dir(root: &Path) -> PathBuf {
         .notes_workspace_dir()
 }
 
+/// Watch `{root}/.neoism` so a vault link written by the UI or Notes MCP
+/// (workspace.json) re-resolves `linked_vault_dir` without a restart.
+pub(crate) fn watch_notes_link_dir(root: &Path) {
+    let neoism = root.join(neoism_workspace_index::config::NEOISM_DIR);
+    if neoism.is_dir() {
+        crate::fs_watch::hub().ensure_watched_dir(root, &neoism);
+    }
+    crate::fs_watch::hub().ensure_watched_dir(root, root);
+}
+
+fn install_notes_link_watch(manager: WorkspaceManager) {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    STARTED.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::fs_watch::hub().set_notes_link_listener(tx);
+        let manager = manager.clone();
+        let _ = std::thread::Builder::new()
+            .name("neoism-notes-link-watch".into())
+            .spawn(move || {
+                while let Ok(root) = rx.recv() {
+                    manager.refresh_notes_link_for_root(&root);
+                }
+            });
+    });
+    for workspace in manager.list_host_workspaces(None) {
+        if let Some(root) = workspace.root_dir.as_ref() {
+            watch_notes_link_dir(root);
+        }
+    }
+}
+
 /// Fill an empty/None `root_dir` with the daemon's default so a workspace
 /// summary never reaches a client without a directory to root at. Used on
 /// read paths to normalize legacy records.

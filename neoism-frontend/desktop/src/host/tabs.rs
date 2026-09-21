@@ -179,7 +179,10 @@ impl Renderer {
             rects.push(rect);
         }
         if let Some(rect) = self.file_browser.occlusion_rect_for([
-            0.0, 0.0, window_width / scale_factor, window_height / scale_factor,
+            0.0,
+            0.0,
+            window_width / scale_factor,
+            window_height / scale_factor,
         ]) {
             rects.push(rect);
         }

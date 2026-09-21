@@ -302,19 +302,42 @@ pub(crate) struct WorkflowQuery {
 
 // A persisted, scope-qualified identity, never an execution directory. This keeps
 // global activations/history distinct from all workspace activations of the same id.
-const INSTALLATION_CONTEXT_PREFIX: &str = neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX;
+const INSTALLATION_CONTEXT_PREFIX: &str =
+    neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX;
 
-pub(crate) fn installation_context(services: &neoism_agent_service_api::AgentServices) -> Result<String, ApiError> {
-    let snapshot = services.config.snapshot(&neoism_agent_service_api::ConfigSnapshotRequest::installation())
+pub(crate) fn installation_context(
+    services: &neoism_agent_service_api::AgentServices,
+) -> Result<String, ApiError> {
+    let snapshot = services
+        .config
+        .snapshot(&neoism_agent_service_api::ConfigSnapshotRequest::installation())
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let root = snapshot.discovery_roots.into_iter()
-        .find(|root| root.scope == neoism_agent_service_api::ConfigDiscoveryScope::Installation)
-        .ok_or_else(|| ApiError::bad_request("No installation discovery root is configured"))?;
-    if !root.path.is_absolute() { return Err(ApiError::bad_request("Installation discovery root must be absolute")); }
-    Ok(format!("{INSTALLATION_CONTEXT_PREFIX}{}", root.path.display()))
+    let root = snapshot
+        .discovery_roots
+        .into_iter()
+        .find(|root| {
+            root.scope == neoism_agent_service_api::ConfigDiscoveryScope::Installation
+        })
+        .ok_or_else(|| {
+            ApiError::bad_request("No installation discovery root is configured")
+        })?;
+    if !root.path.is_absolute() {
+        return Err(ApiError::bad_request(
+            "Installation discovery root must be absolute",
+        ));
+    }
+    Ok(format!(
+        "{INSTALLATION_CONTEXT_PREFIX}{}",
+        root.path.display()
+    ))
 }
 
-fn workflow_context(state: &AppState, directory: Option<String>, scope: WorkflowScope, headers: &HeaderMap) -> Result<String, ApiError> {
+fn workflow_context(
+    state: &AppState,
+    directory: Option<String>,
+    scope: WorkflowScope,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
     match scope {
         WorkflowScope::Installation => installation_context(state.services()),
         WorkflowScope::Workspace => workspace_root(resolve_directory(directory, headers)),
@@ -812,14 +835,20 @@ fn authorize_admin(
 }
 
 fn managed_workflow_root(workspace: &FsPath) -> PathBuf {
-    match workspace.to_string_lossy().strip_prefix(INSTALLATION_CONTEXT_PREFIX) {
+    match workspace
+        .to_string_lossy()
+        .strip_prefix(INSTALLATION_CONTEXT_PREFIX)
+    {
         Some(root) => PathBuf::from(root),
         None => workspace.join(".agent"),
     }
 }
 
 fn canonical_definition_context(workspace: &FsPath) -> std::io::Result<PathBuf> {
-    if workspace.to_string_lossy().starts_with(INSTALLATION_CONTEXT_PREFIX) {
+    if workspace
+        .to_string_lossy()
+        .starts_with(INSTALLATION_CONTEXT_PREFIX)
+    {
         Ok(workspace.to_path_buf())
     } else {
         workspace.canonicalize()
@@ -3068,7 +3097,10 @@ mod tests {
         use neoism_agent_service_api::*;
         struct NativeRoots;
         impl ConfigSourceService for NativeRoots {
-            fn snapshot(&self, request: &ConfigSnapshotRequest) -> Result<ConfigSnapshot, ServiceError> {
+            fn snapshot(
+                &self,
+                request: &ConfigSnapshotRequest,
+            ) -> Result<ConfigSnapshot, ServiceError> {
                 let mut snapshot = crate::standard_services().config.snapshot(request)?;
                 snapshot.discovery_roots = vec![ConfigDiscoveryRoot {
                     scope: ConfigDiscoveryScope::Workspace,
@@ -3077,26 +3109,46 @@ mod tests {
                 }];
                 Ok(snapshot)
             }
-            fn update<'a>(&'a self, _: &'a ConfigUpdateRequest) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+            fn update<'a>(
+                &'a self,
+                _: &'a ConfigUpdateRequest,
+            ) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
                 Box::pin(async { Err(ServiceError::new("read-only test adapter")) })
             }
         }
-        let root = std::env::temp_dir().join(format!("neoism-native-workflow-{}", Id::ascending(IdKind::Event)));
+        let root = std::env::temp_dir().join(format!(
+            "neoism-native-workflow-{}",
+            Id::ascending(IdKind::Event)
+        ));
         let selected = root.join("selected");
         let other = root.join("default");
         fs::create_dir_all(selected.join(".neoism")).unwrap();
         fs::create_dir_all(&other).unwrap();
-        let services = crate::standard_services().with_config(std::sync::Arc::new(NativeRoots));
-        let workspace = workspace_root(selected.join("..").join("selected").display().to_string()).unwrap();
-        let path = managed_workflow_path(FsPath::new(&workspace), "selected-flow").unwrap();
+        let services =
+            crate::standard_services().with_config(std::sync::Arc::new(NativeRoots));
+        let workspace =
+            workspace_root(selected.join("..").join("selected").display().to_string())
+                .unwrap();
+        let path =
+            managed_workflow_path(FsPath::new(&workspace), "selected-flow").unwrap();
         atomic_workflow_write(FsPath::new(&workspace), &path, b"---\nid: selected-flow\nname: Selected flow\nschedule:\n  date: 2099-09-15\n  time: '09:30'\n---\nRun once.\n").unwrap();
         assert!(selected.join(".agent/workflows/selected-flow.md").is_file());
         assert!(!other.join(".agent").exists());
         let catalog = discover(&services, &workspace).unwrap();
-        let source = catalog.workflows.get("selected-flow").expect("managed workflow must be discoverable under native roots");
+        let source = catalog
+            .workflows
+            .get("selected-flow")
+            .expect("managed workflow must be discoverable under native roots");
         assert!(workflow_source_is_managed(&workspace, source));
-        assert_eq!(workflow_watch_paths(&services, std::slice::from_ref(&workspace)).get(&path.parent().unwrap().canonicalize().unwrap()), Some(&RecursiveMode::Recursive));
-        assert!(discover(&services, other.to_str().unwrap()).unwrap().workflows.is_empty());
+        assert_eq!(
+            workflow_watch_paths(&services, std::slice::from_ref(&workspace))
+                .get(&path.parent().unwrap().canonicalize().unwrap()),
+            Some(&RecursiveMode::Recursive)
+        );
+        assert!(discover(&services, other.to_str().unwrap())
+            .unwrap()
+            .workflows
+            .is_empty());
         assert!(managed_workflow_path(&selected, "../escape").is_err());
         fs::remove_dir_all(root).unwrap();
     }

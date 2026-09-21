@@ -28,7 +28,11 @@ impl Screen<'_> {
 
     pub fn open_path_in_editor(&mut self, path: std::path::PathBuf) {
         if neoism_ui::editor::documentation_notebook::is_manifest(&path)
-            || (path.is_dir() && path.join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME).is_file()) {
+            || (path.is_dir()
+                && path
+                    .join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME)
+                    .is_file())
+        {
             self.open_documentation_notebook(path);
             return;
         }

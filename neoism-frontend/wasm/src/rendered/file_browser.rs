@@ -1,5 +1,7 @@
 use super::*;
-use neoism_ui::panels::file_browser::{FileBrowserEntry, FileBrowserLocation, FileBrowserMode};
+use neoism_ui::panels::file_browser::{
+    FileBrowserEntry, FileBrowserLocation, FileBrowserMode,
+};
 
 #[wasm_bindgen]
 impl ChromeBridge {
@@ -31,10 +33,11 @@ impl ChromeBridge {
     }
 
     pub fn set_file_browser_locations(&mut self, locations_json: &str) -> bool {
-        let locations: Vec<FileBrowserLocation> = match serde_json::from_str(locations_json) {
-            Ok(value) => value,
-            Err(_) => return false,
-        };
+        let locations: Vec<FileBrowserLocation> =
+            match serde_json::from_str(locations_json) {
+                Ok(value) => value,
+                Err(_) => return false,
+            };
         self.chrome.file_browser.set_locations(locations)
     }
 
@@ -53,13 +56,17 @@ impl ChromeBridge {
     }
 
     pub fn file_browser_pointer_down(&mut self, x: f32, y: f32, click_count: u8) -> bool {
-        if !self.chrome.file_browser.is_active() { return false; }
+        if !self.chrome.file_browser.is_active() {
+            return false;
+        }
         self.chrome.file_browser.pointer_down(x, y, click_count);
         true
     }
 
     pub fn file_browser_scroll(&mut self, delta_pixels: f32) -> bool {
-        if !self.chrome.file_browser.is_active() { return false; }
+        if !self.chrome.file_browser.is_active() {
+            return false;
+        }
         self.chrome.file_browser.scroll_pixels(delta_pixels);
         true
     }

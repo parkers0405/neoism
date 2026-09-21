@@ -695,6 +695,68 @@ fn workspace_action_create_note_falls_back_to_default_vault() {
 }
 
 #[test]
+fn refresh_host_workspace_notes_advertises_a_late_vault_link() {
+    let td = TempDir::new().unwrap();
+    std::env::set_var("NEOISM_NOTES_HOME", td.path().join("vaults"));
+    let vault_dir = td.path().join("vaults").join("neoism");
+    std::fs::create_dir_all(&vault_dir).unwrap();
+    neoism_workspace_index::register_notes_vault("neoism", &vault_dir).unwrap();
+    let code = td.path().join("code");
+    std::fs::create_dir_all(&code).unwrap();
+    let mgr = make_manager(&td);
+    let mut conn = ConnectionWorkspace::default();
+    let created = handle(
+        &mgr,
+        &mut conn,
+        WorkspaceClientMessage::CreateWorkspace {
+            workspace_id: Some("ws-link".into()),
+            title: Some("code".into()),
+            root_dir: Some(code.clone()),
+        },
+    );
+    let workspace = created
+        .iter()
+        .find_map(|message| match message {
+            WorkspaceServerMessage::HostWorkspaceUpserted { workspace } => {
+                Some(workspace.clone())
+            }
+            _ => None,
+        })
+        .expect("create upsert");
+    assert!(workspace.linked_vault_dir.is_none());
+
+    let mut notes = neoism_workspace_index::init_workspace(&code).unwrap();
+    notes.config.notes.workspace = "neoism".into();
+    notes.config.notes.vault_id = None;
+    neoism_workspace_index::link_code_dir_to_workspace_vault(&mut notes, &code).unwrap();
+
+    let out = handle(
+        &mgr,
+        &mut conn,
+        WorkspaceClientMessage::RefreshHostWorkspaceNotes {
+            workspace_id: "ws-link".into(),
+        },
+    );
+    let refreshed = out
+        .iter()
+        .find_map(|message| match message {
+            WorkspaceServerMessage::HostWorkspaceUpserted { workspace } => {
+                Some(workspace.clone())
+            }
+            _ => None,
+        })
+        .expect("refresh upsert");
+    let advertised = refreshed
+        .linked_vault_dir
+        .as_ref()
+        .map(|path| crate::path::canonicalize_lossy(path));
+    assert_eq!(
+        advertised,
+        Some(crate::path::canonicalize_lossy(&vault_dir))
+    );
+}
+
+#[test]
 fn clipboard_payload_is_connection_scoped() {
     let td = TempDir::new().unwrap();
     let mgr = make_manager(&td);

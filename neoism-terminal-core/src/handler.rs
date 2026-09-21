@@ -779,7 +779,9 @@ impl SyntheticEchoFilter {
     }
 
     pub fn filter(&mut self, bytes: &[u8]) -> Vec<u8> {
-        if self.expected.is_empty() { return bytes.to_vec(); }
+        if self.expected.is_empty() {
+            return bytes.to_vec();
+        }
         let mut out = Vec::new();
         for &byte in bytes {
             if self.expected.is_empty() {

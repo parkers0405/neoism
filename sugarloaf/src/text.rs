@@ -167,7 +167,11 @@ fn instances_ink_bounds_px(instances: &[TextInstance]) -> Option<[f32; 4]> {
         .iter()
         .filter(|instance| instance.glyph_size[0] > 0 && instance.glyph_size[1] > 0)
     {
-        let scale = if instance.raster_scale > 0.0 { instance.raster_scale } else { 1.0 };
+        let scale = if instance.raster_scale > 0.0 {
+            instance.raster_scale
+        } else {
+            1.0
+        };
         let left = instance.pos[0] + f32::from(instance.bearings[0]) * scale;
         let top = instance.pos[1] + f32::from(instance.bearings[1]) * scale;
         let right = left + instance.glyph_size[0] as f32 * scale;
@@ -520,14 +524,26 @@ impl Text {
     /// rendered width in **logical** pixels.
     /// Draw canvas text from a bounded raster size, scaling glyph geometry and
     /// advances together. Normal UI text remains on the unscaled draw path.
-    pub fn draw_scaled(&mut self, x: f32, y: f32, text: &str, opts: &DrawOpts, scale: f32) -> f32 {
-        if !scale.is_finite() || scale <= 0.0 { return 0.0; }
+    pub fn draw_scaled(
+        &mut self,
+        x: f32,
+        y: f32,
+        text: &str,
+        opts: &DrawOpts,
+        scale: f32,
+    ) -> f32 {
+        if !scale.is_finite() || scale <= 0.0 {
+            return 0.0;
+        }
         let first = self.instances.len();
         let mut raster_opts = *opts;
         raster_opts.clip_rect = None;
         let advance = self.draw(x, y, text, &raster_opts);
         let origin = [x * self.scale_factor, y * self.scale_factor];
-        let clip = opts.clip_rect.map(|rect| rect.map(|value| value * self.scale_factor)).unwrap_or([0.0; 4]);
+        let clip = opts
+            .clip_rect
+            .map(|rect| rect.map(|value| value * self.scale_factor))
+            .unwrap_or([0.0; 4]);
         for glyph in &mut self.instances[first..] {
             glyph.pos[0] = origin[0] + (glyph.pos[0] - origin[0]) * scale;
             glyph.pos[1] = origin[1] + (glyph.pos[1] - origin[1]) * scale;
@@ -605,12 +621,6 @@ impl Text {
         let style_flags =
             (if opts.bold { 1u8 } else { 0 }) | (if opts.italic { 2u8 } else { 0 });
 
-        if let Some(font_id) = opts.font_id.map(|id| id as u32) {
-            return self
-                .shape_run_for(text, font_id, size_bucket, size_u16, style_flags)
-                .map(|run| vec![run]);
-        }
-
         let mut ss = SpanStyle::default();
         let weight = if opts.bold {
             Weight::BOLD
@@ -623,6 +633,17 @@ impl Text {
             FontStyle::Normal
         };
         ss.font_attrs = Attributes::new(Stretch::NORMAL, weight, fstyle);
+
+        if let Some(preferred) = opts.font_id.map(|id| id as u32) {
+            return self.shape_with_preferred_font(
+                text,
+                preferred,
+                size_bucket,
+                size_u16,
+                style_flags,
+                &ss,
+            );
+        }
 
         let mut runs = Vec::new();
         let mut run_start = 0usize;
@@ -681,6 +702,81 @@ impl Text {
             }
         };
         font_id
+    }
+
+    fn font_covers_char(&self, font_id: u32, ch: char) -> bool {
+        self.font_library
+            .inner
+            .read()
+            .font_covers_char(font_id as usize, ch)
+    }
+
+    fn resolve_font_id_for_char_with_preferred(
+        &mut self,
+        ch: char,
+        style_flags: u8,
+        style: &crate::SpanStyle,
+        preferred: u32,
+    ) -> u32 {
+        if self.font_covers_char(preferred, ch) {
+            return preferred;
+        }
+        self.resolve_font_id_for_char(ch, style_flags, style)
+    }
+
+    fn shape_with_preferred_font(
+        &mut self,
+        text: &str,
+        preferred: u32,
+        size_bucket: u16,
+        size_u16: u16,
+        style_flags: u8,
+        style: &crate::SpanStyle,
+    ) -> Option<Vec<ShapedRun>> {
+        let mut runs = Vec::new();
+        let mut run_start = 0usize;
+        let mut current_font_id: Option<u32> = None;
+
+        for (byte_ix, ch) in text.char_indices() {
+            let font_id = self.resolve_font_id_for_char_with_preferred(
+                ch,
+                style_flags,
+                style,
+                preferred,
+            );
+            match current_font_id {
+                None => current_font_id = Some(font_id),
+                Some(current) if current != font_id => {
+                    if byte_ix > run_start {
+                        let run = self.shape_run_for(
+                            &text[run_start..byte_ix],
+                            current,
+                            size_bucket,
+                            size_u16,
+                            style_flags,
+                        )?;
+                        runs.push(run);
+                    }
+                    run_start = byte_ix;
+                    current_font_id = Some(font_id);
+                }
+                Some(_) => {}
+            }
+        }
+
+        let font_id = current_font_id?;
+        if run_start < text.len() {
+            let run = self.shape_run_for(
+                &text[run_start..],
+                font_id,
+                size_bucket,
+                size_u16,
+                style_flags,
+            )?;
+            runs.push(run);
+        }
+
+        Some(runs)
     }
 
     fn shape_run_for(
@@ -797,7 +893,7 @@ impl Text {
                     .font_library
                     .inner
                     .write()
-                    .get_font_metrics(&(font_id as usize), size_u16 as f32);
+                    .get_ui_font_metrics(&(font_id as usize), size_u16 as f32);
                 metrics.map_or_else(
                     || {
                         centered_line_box_baseline_px(
@@ -1234,7 +1330,11 @@ impl Text {
 
         for inst in &self.instances {
             if inst.raster_scale > 0.0 {
-                let (atlas, side) = if inst.atlas == 1 { (color_atlas, color_side) } else { (mask, mask_side) };
+                let (atlas, side) = if inst.atlas == 1 {
+                    (color_atlas, color_side)
+                } else {
+                    (mask, mask_side)
+                };
                 canvas::draw_scaled_cpu(inst, atlas, side, buf, buf_w_i, buf_h_i);
                 continue;
             }
@@ -2627,6 +2727,26 @@ mod tests {
         assert_ne!(
             runs[0].font_id, runs[1].font_id,
             "icon and ASCII label should resolve to different font runs"
+        );
+    }
+
+    #[test]
+    fn preferred_markdown_font_falls_back_for_icons() {
+        let (library, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&library);
+        let preferred = 0;
+        let mixed = text
+            .shape_for(
+                "\u{f07b} Neoism 🦀",
+                &DrawOpts {
+                    font_id: Some(preferred),
+                    ..DrawOpts::default()
+                },
+            )
+            .expect("shape mixed markdown with preferred font");
+        assert!(
+            mixed.len() >= 2,
+            "pinned markdown fonts must still split missing glyphs onto fallback faces"
         );
     }
 

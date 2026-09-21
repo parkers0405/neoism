@@ -13,8 +13,9 @@ impl Screen<'_> {
     pub(crate) fn render_markdown_panels(&mut self) -> bool {
         // Opt-in CPU timing; excludes GPU submit/present. Compare this with
         // full-frame timing before blaming the Windows presentation backend.
-        let perf_started = tracing::enabled!(target: "neoism::markdown_perf", tracing::Level::DEBUG)
-            .then(std::time::Instant::now);
+        let perf_started =
+            tracing::enabled!(target: "neoism::markdown_perf", tracing::Level::DEBUG)
+                .then(std::time::Instant::now);
         let scale = self.sugarloaf.scale_factor();
         let theme = self.renderer.theme;
         let markdown_font_scale = self.renderer.chrome_scale();
@@ -157,8 +158,9 @@ impl Screen<'_> {
                     {
                         let markdown = &mut notebook.markdown;
                         markdown.spellcheck_enabled = spellcheck_enabled;
-                        markdown.remote_cursors =
-                            remote_by_path.remove(markdown.path.as_os_str()).unwrap_or_default();
+                        markdown.remote_cursors = remote_by_path
+                            .remove(markdown.path.as_os_str())
+                            .unwrap_or_default();
                         crate::editor::markdown::render::render(
                             &mut self.sugarloaf,
                             markdown,
@@ -218,8 +220,9 @@ impl Screen<'_> {
             self.sugarloaf
                 .clear_image_overlays_for(item.val.rich_text_id);
             markdown.spellcheck_enabled = spellcheck_enabled;
-            markdown.remote_cursors =
-                remote_by_path.remove(markdown.path.as_os_str()).unwrap_or_default();
+            markdown.remote_cursors = remote_by_path
+                .remove(markdown.path.as_os_str())
+                .unwrap_or_default();
             let rect = [
                 (scaled_margin.left + item.layout_rect[0]) / scale,
                 (scaled_margin.top + item.layout_rect[1]) / scale,
@@ -229,11 +232,19 @@ impl Screen<'_> {
             let rect = if let Some(binding) = &markdown.documentation_notebook {
                 if let Ok(mut book) = binding.session.lock() {
                     neoism_ui::editor::documentation_notebook::render_navigation(
-                        &mut self.sugarloaf, &mut book, rect, &theme,
-                        markdown_mouse, &text_occlusions,
+                        &mut self.sugarloaf,
+                        &mut book,
+                        rect,
+                        &theme,
+                        markdown_mouse,
+                        &text_occlusions,
                     )
-                } else { rect }
-            } else { rect };
+                } else {
+                    rect
+                }
+            } else {
+                rect
+            };
             // Always render the rich markdown (checkboxes, headings, etc.) —
             // it scrolls as normal. The ink layer composites OVER it below.
             crate::editor::markdown::render::render(
@@ -812,9 +823,15 @@ impl Screen<'_> {
         target: crate::editor::markdown::state::MarkdownLinkTarget,
     ) {
         let path = target.path.clone();
-        if self.follow_documentation_notebook_link(&path, target.line) { return; }
+        if self.follow_documentation_notebook_link(&path, target.line) {
+            return;
+        }
         if neoism_ui::editor::documentation_notebook::is_manifest(&path)
-            || (path.is_dir() && path.join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME).is_file()) {
+            || (path.is_dir()
+                && path
+                    .join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME)
+                    .is_file())
+        {
             self.open_documentation_notebook(path);
             return;
         }

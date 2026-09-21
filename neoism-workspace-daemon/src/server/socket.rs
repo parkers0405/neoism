@@ -265,13 +265,6 @@ pub(crate) async fn handle_socket(
         return;
     }
 
-    for message in registry.backlog_messages() {
-        if let Err(err) = send_json(&mut sink, &message).await {
-            tracing::warn!(error = %err, "websocket send error on pty backlog");
-            return;
-        }
-    }
-
     // Poll the workspace every 2 seconds and re-push any field whose
     // value has changed since the last tick. We send through a local
     // mpsc so the polling task doesn't have to share the sink with the

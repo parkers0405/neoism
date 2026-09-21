@@ -19,6 +19,7 @@ pub struct DesktopDaemonConnection {
     handle: DaemonClientHandle,
     inbound: Arc<Mutex<VecDeque<DaemonServerMessage>>>,
     inbound_wake_pending: Arc<AtomicBool>,
+    editor_only: Arc<AtomicBool>,
     status_rx: tokio::sync::watch::Receiver<DaemonClientStatus>,
     endpoint: String,
     token: Option<String>,
@@ -66,10 +67,15 @@ impl DesktopDaemonConnection {
         let inbound_task = Arc::clone(&inbound);
         let inbound_wake_pending = Arc::new(AtomicBool::new(false));
         let inbound_wake_pending_task = Arc::clone(&inbound_wake_pending);
+        let editor_only = Arc::new(AtomicBool::new(false));
+        let editor_only_task = Arc::clone(&editor_only);
         let runtime_handle = runtime.handle().clone();
 
         runtime_handle.spawn(async move {
             while let Some(message) = rx.recv().await {
+                if !accepts_inbound(editor_only_task.load(Ordering::Acquire), &message) {
+                    continue;
+                }
                 let should_wake = match inbound_task.lock() {
                     Ok(mut queue) => {
                         queue.push_back(message);
@@ -98,6 +104,7 @@ impl DesktopDaemonConnection {
             handle,
             inbound,
             inbound_wake_pending,
+            editor_only,
             status_rx,
             endpoint: endpoint_string,
             token,
@@ -118,6 +125,10 @@ impl DesktopDaemonConnection {
 
     pub fn connection_key(&self) -> usize {
         self.handle.connection_key()
+    }
+
+    pub fn set_parked(&self, parked: bool) {
+        self.editor_only.store(parked, Ordering::Release);
     }
 
     pub fn recycle_if_stale(&self, max_idle: std::time::Duration) -> bool {
@@ -187,19 +198,12 @@ impl DesktopDaemonConnection {
     }
 
     /// Parked connections still own background editors. Drain only editor
-    /// replies; preserve other families until their normal workspace pump runs.
+    /// replies and discard every other family. PTY routes are explicitly
+    /// reattached with retained backlog when this connection becomes active;
+    /// retaining their live output here makes the parked queue grow forever.
     pub fn drain_editor_messages(&self) -> Vec<DaemonServerMessage> {
         let mut queue = self.inbound.lock().unwrap_or_else(|p| p.into_inner());
-        let mut editors = Vec::new();
-        let mut kept = std::collections::VecDeque::new();
-        for message in queue.drain(..) {
-            if matches!(message, DaemonServerMessage::Editor { .. }) {
-                editors.push(message);
-            } else {
-                kept.push_back(message);
-            }
-        }
-        queue.extend(kept);
+        let editors = take_editor_messages(&mut queue);
         self.inbound_wake_pending.store(false, Ordering::Release);
         editors
     }
@@ -220,5 +224,57 @@ impl DesktopDaemonConnection {
                 Vec::new()
             }
         }
+    }
+}
+
+fn take_editor_messages(
+    queue: &mut VecDeque<DaemonServerMessage>,
+) -> Vec<DaemonServerMessage> {
+    queue
+        .drain(..)
+        .filter(|message| matches!(message, DaemonServerMessage::Editor { .. }))
+        .collect()
+}
+
+fn accepts_inbound(editor_only: bool, message: &DaemonServerMessage) -> bool {
+    !editor_only || matches!(message, DaemonServerMessage::Editor { .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neoism_protocol::editor::EditorServerMessage;
+    use neoism_protocol::pty::ServerMessage as PtyServerMessage;
+
+    #[test]
+    fn parked_drain_drops_stale_pty_frames_instead_of_growing_forever() {
+        let pty = DaemonServerMessage::Pty {
+            request_id: 1,
+            message: PtyServerMessage::PtyOutput {
+                session_id: "parked-shell".into(),
+                bytes: vec![b'x'; 32 * 1024],
+            },
+        };
+        let editor = DaemonServerMessage::Editor {
+            request_id: 2,
+            message: EditorServerMessage::Batch {
+                surface_id: None,
+                messages: Vec::new(),
+            },
+        };
+        assert!(!accepts_inbound(true, &pty));
+        assert!(accepts_inbound(true, &editor));
+        assert!(accepts_inbound(false, &pty));
+
+        let mut queue = VecDeque::from([pty, editor]);
+
+        let editors = take_editor_messages(&mut queue);
+
+        assert!(queue.is_empty());
+        assert_eq!(editors.len(), 1);
+        assert!(matches!(
+            editors[0],
+            DaemonServerMessage::Editor { request_id: 2, .. }
+        ));
     }
 }

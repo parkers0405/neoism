@@ -1916,6 +1916,7 @@ impl Application<'_> {
         if let Some(route) = self.router.routes.get_mut(&window_id) {
             route.window.screen.reset_server_owned_state();
         }
+        connection.set_parked(false);
         let outgoing = self.window_sessions.remove(&window_id);
         let home_endpoint = self.home_daemon_endpoint.clone();
         let switching_home = home_endpoint.as_deref() == Some(connection.endpoint());
@@ -1925,6 +1926,7 @@ impl Application<'_> {
                 let pending_peer_adopt = old.pending_peer_adopt.take();
                 let mut parked = std::mem::take(&mut old.parked_connections);
                 if old.connection.endpoint() != connection.endpoint() {
+                    old.connection.set_parked(true);
                     parked.insert(old.connection.endpoint().to_string(), old.connection);
                 }
                 (profile_id, parked, pending_peer_adopt)

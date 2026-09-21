@@ -102,26 +102,6 @@ impl SessionRegistry {
         self.output_tx.subscribe()
     }
 
-    /// Synthetic attach stream for a new client. `PtyCreated` announces
-    /// every live daemon-owned PTY; `PtyOutput` replays the retained
-    /// in-memory backlog for that session.
-    pub fn backlog_messages(&self) -> Vec<ServerMessage> {
-        let mut messages = Vec::new();
-        for entry in self.inner.iter() {
-            let session_id = entry.key().clone();
-            messages.push(ServerMessage::PtyCreated {
-                session_id: session_id.clone(),
-                workspace_root: entry.value().workspace_root.clone(),
-                shell: entry.value().shell.clone(),
-            });
-            let bytes = entry.value().backlog.lock().clone();
-            if !bytes.is_empty() {
-                messages.push(ServerMessage::PtyOutput { session_id, bytes });
-            }
-        }
-        messages
-    }
-
     /// Bridge a live PTY to the workspace tab it backs. Returns `false`
     /// if `pty_session_id` is unknown (the shell already exited, or the
     /// id is wrong) — callers should treat that as "respawn needed".

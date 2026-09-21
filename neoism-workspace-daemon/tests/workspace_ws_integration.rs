@@ -450,6 +450,69 @@ impl Drop for Daemon {
 // ---------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_socket_never_receives_unattached_pty_backlog() {
+    let _g = EnvGuard::new(&[
+        ("NEOISM_REQUIRE_AUTH", Some("1")),
+        ("NEOISM_DAEMON_TOKEN", None),
+    ]);
+    let daemon = Daemon::spawn().await;
+    let token = daemon.pairing_tokens.mint();
+
+    let mut owner = connect_client(daemon.addr).await;
+    send_workspace(
+        &mut owner,
+        1,
+        &WorkspaceClientMessage::Hello {
+            token: Some(token),
+            client_name: Some("pty-owner".into()),
+            client_id: uuid::Uuid::nil(),
+        },
+    )
+    .await;
+    recv_workspace_timeout(&mut owner, Duration::from_secs(3))
+        .await
+        .expect("owner HelloAck");
+    send_pty(
+        &mut owner,
+        &PtyClientMessage::CreatePty {
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            shell: None,
+        },
+    )
+    .await;
+    let session_id = recv_pty_created(&mut owner, Duration::from_secs(3))
+        .await
+        .expect("owner PtyCreated");
+
+    let mut fresh = connect_client(daemon.addr).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    while let Some(remaining) =
+        deadline.checked_duration_since(tokio::time::Instant::now())
+    {
+        if remaining.is_zero() {
+            break;
+        }
+        let Some(message) = recv_timeout(&mut fresh, remaining).await else {
+            break;
+        };
+        assert!(
+            !matches!(message, ServerEnvelope::Pty(_)),
+            "fresh unauthenticated socket received another client's PTY backlog"
+        );
+    }
+
+    send_pty(
+        &mut owner,
+        &PtyClientMessage::ClosePty { session_id },
+    )
+    .await;
+    close(fresh).await;
+    close(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hello_with_valid_token_accepts_when_auth_required() {
     let _g = EnvGuard::new(&[
         ("NEOISM_REQUIRE_AUTH", Some("1")),

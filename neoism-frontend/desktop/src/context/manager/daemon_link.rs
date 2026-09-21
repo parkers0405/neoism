@@ -290,9 +290,8 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 .session_routes
                 .insert(session_id.clone(), route_id);
             self.daemon.cache.remote_routes.insert(route_id, binding);
-            // The fresh websocket's eager backlog arrived before this grid's
-            // route map was rebound and was intentionally ignored. Ask for a
-            // one-shot retained replay now that output has a destination.
+            // Subscribe this websocket and request a one-shot retained replay
+            // now that output has a route on the active grid.
             link.send_pty(neoism_protocol::pty::ClientMessage::AttachPty { session_id });
         }
     }

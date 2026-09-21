@@ -400,10 +400,9 @@ fn find_code_pane_mut<'a>(
     for grid in context_manager.contexts_mut() {
         for item in grid.contexts_mut().values_mut() {
             let context = item.context_mut();
-            let matches = context
-                .code
-                .as_ref()
-                .is_some_and(|code| !code.local_only && buffer_id_for_markdown_path(&code.path) == buffer_id);
+            let matches = context.code.as_ref().is_some_and(|code| {
+                !code.local_only && buffer_id_for_markdown_path(&code.path) == buffer_id
+            });
             if matches {
                 return context.code.as_mut();
             }

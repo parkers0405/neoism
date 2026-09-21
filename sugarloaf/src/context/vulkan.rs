@@ -1581,9 +1581,15 @@ mod tests {
     fn frame_wait_timeout_follows_high_refresh_without_exceeding_cap() {
         assert_eq!(frame_wait_timeout_ns(Some(6_944_444)), 6_944_444);
         assert_eq!(frame_wait_timeout_ns(Some(8_333_333)), 8_333_333);
-        assert_eq!(frame_wait_timeout_ns(Some(3_000_000)), MIN_FRAME_WAIT_TIMEOUT_NS);
+        assert_eq!(
+            frame_wait_timeout_ns(Some(3_000_000)),
+            MIN_FRAME_WAIT_TIMEOUT_NS
+        );
         assert_eq!(frame_wait_timeout_ns(Some(16_666_667)), 16_666_667);
-        assert_eq!(frame_wait_timeout_ns(Some(50_000_000)), MAX_FRAME_WAIT_TIMEOUT_NS);
+        assert_eq!(
+            frame_wait_timeout_ns(Some(50_000_000)),
+            MAX_FRAME_WAIT_TIMEOUT_NS
+        );
         assert_eq!(frame_wait_timeout_ns(None), 16_666_667);
     }
 

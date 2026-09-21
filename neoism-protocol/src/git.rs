@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitClientMessage {
     /// Read-only HEAD attribution. Path is workspace-relative or an absolute host path.
-    Blame { path: String },
+    Blame {
+        path: String,
+    },
     Status,
     /// Subscribe to one workspace on this socket; echo the opaque scope token.
     WatchStatus {
@@ -80,7 +82,9 @@ impl GitClientMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitServerMessage {
-    Blame { snapshot: GitBlameSnapshot },
+    Blame {
+        snapshot: GitBlameSnapshot,
+    },
     /// Authoritative, atomic branch/count/tree snapshot for a scoped subscription.
     RepoStatus {
         token: String,

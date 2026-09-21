@@ -65,11 +65,19 @@ impl FileOpenSource {
     }
 
     pub fn notes(joined: bool, shared_vault: bool) -> Self {
-        if joined && !shared_vault { Self::LocalOnly } else { Self::workspace(joined) }
+        if joined && !shared_vault {
+            Self::LocalOnly
+        } else {
+            Self::workspace(joined)
+        }
     }
 
     pub fn workspace(joined: bool) -> Self {
-        if joined { Self::Host } else { Self::Local }
+        if joined {
+            Self::Host
+        } else {
+            Self::Local
+        }
     }
 }
 

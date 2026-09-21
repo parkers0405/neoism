@@ -54,7 +54,10 @@ impl Screen<'_> {
                 matches!(key.physical_key, PhysicalKey::Code(KeyCode::KeyT));
             let change_directory =
                 matches!(key.physical_key, PhysicalKey::Code(KeyCode::KeyD));
-            if change_directory || (new_terminal && !self.context_manager.current().has_non_terminal_surface()) {
+            if change_directory
+                || (new_terminal
+                    && !self.context_manager.current().has_non_terminal_surface())
+            {
                 if key.state == ElementState::Pressed {
                     if new_terminal {
                         self.create_focused_terminal_tab();

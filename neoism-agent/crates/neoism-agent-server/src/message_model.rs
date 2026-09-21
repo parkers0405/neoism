@@ -416,7 +416,9 @@ fn tool_state_metadata(part: &ToolPart) -> Option<&Value> {
     match &part.state {
         ToolState::Completed { metadata, .. } => Some(metadata),
         ToolState::Pending { .. } | ToolState::Running { .. } => None,
-        ToolState::Error { .. } => part.metadata.as_ref().and_then(|m|m.get("toolResult")),
+        ToolState::Error { .. } => {
+            part.metadata.as_ref().and_then(|m| m.get("toolResult"))
+        }
     }
 }
 

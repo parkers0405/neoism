@@ -210,7 +210,7 @@ async fn live_baseline_precedes_new_tokens_on_scoped_sse_and_reconnect() {
             if state
                 .inner
                 .store
-                .list_events_after(0, 100, None)
+                .list_events_after(crate::state::TenantQueryScope::LocalAll, 0, 100, None)
                 .await
                 .unwrap()
                 .len()

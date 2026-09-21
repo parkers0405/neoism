@@ -17,6 +17,7 @@
 use crate::app::scheduler::{Scheduler, TimerId};
 use crate::app::Application;
 use crate::bridges::utils::apply_theme_to_config;
+use crate::mashup::fonts_with_markdown_family;
 use crate::router::Router;
 use neoism_backend::clipboard::ClipboardType;
 use neoism_backend::config::colors::ColorRgbExt;
@@ -56,6 +57,26 @@ impl Application<'_> {
         if scheduler.scheduled(timer_id) {
             return;
         }
+        let event = EventPayload::new(RioEventType::Rio(follow_up_event), window_id);
+        scheduler.schedule(event, delay, false, timer_id);
+    }
+
+    /// Like [`Self::debounce_follow_up`], but later events with the same
+    /// id postpone the already-scheduled follow-up.
+    ///
+    /// File-tree / notes-vault watches need this: `notes.create` does
+    /// `create_dir_all` then writes the `.md`. The mkdir starts the 200ms
+    /// timer; coalescing (not postponing) lets that walk run before the
+    /// file exists, so Alt+N shows the folder and not the note until a
+    /// later refresh.
+    pub(super) fn postpone_follow_up(
+        scheduler: &mut Scheduler,
+        timer_id: TimerId,
+        delay: Duration,
+        follow_up_event: RioEvent,
+        window_id: WindowId,
+    ) {
+        let _ = scheduler.unschedule(timer_id);
         let event = EventPayload::new(RioEventType::Rio(follow_up_event), window_id);
         scheduler.schedule(event, delay, false, timer_id);
     }
@@ -303,12 +324,17 @@ impl Application<'_> {
             Err(error) => (neoism_backend::config::Config::default(), Some(error)),
         };
 
-        let has_font_updates = self.config.appearance.fonts != config.appearance.fonts;
+        let has_font_updates = self.config.appearance.fonts != config.appearance.fonts
+            || self.config.appearance.look.markdown.font_family
+                != config.appearance.look.markdown.font_family;
         let has_config_error = config_error.is_some();
 
         let font_library_errors = if has_font_updates {
             let new_font_library = neoism_backend::sugarloaf::font::FontLibrary::new(
-                config.appearance.fonts.to_owned(),
+                fonts_with_markdown_family(
+                    config.appearance.fonts.to_owned(),
+                    config.appearance.look.markdown.font_family.as_deref(),
+                ),
             );
             *self.router.font_library = new_font_library.0;
             new_font_library.1

@@ -587,7 +587,11 @@ impl<A> BufferTabs<A> {
         }
     }
 
-    pub(super) fn compact_title_width(title_width: f32, compact: bool, scale: f32) -> f32 {
+    pub(super) fn compact_title_width(
+        title_width: f32,
+        compact: bool,
+        scale: f32,
+    ) -> f32 {
         if compact {
             title_width.min(140.0 * scale)
         } else {
@@ -1159,7 +1163,8 @@ impl<A> BufferTabs<A> {
         // A folder notebook owns several live contexts. Moving only its active
         // page would strand the others; group transfer needs a dedicated payload.
         if matches!(self.target_at(ix), Some(BufferTabTarget::Markdown(path))
-            if crate::editor::documentation_notebook::is_manifest(&path)) {
+            if crate::editor::documentation_notebook::is_manifest(&path))
+        {
             return;
         }
         let widths = self.geometry_widths();

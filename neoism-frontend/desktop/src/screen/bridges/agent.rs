@@ -1706,7 +1706,8 @@ impl Screen<'_> {
     }
 
     pub(crate) fn open_agent_image_browser(&mut self) {
-        let persisted = neoism_backend::config::config_dir_path().join("file-browser-recents.json");
+        let persisted =
+            neoism_backend::config::config_dir_path().join("file-browser-recents.json");
         let recents = std::fs::read(&persisted)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
@@ -1716,9 +1717,12 @@ impl Screen<'_> {
             "",
             recents,
         );
-        let root = self.active_pane_workspace_root()
+        let root = self
+            .active_pane_workspace_root()
             .or_else(|| self.active_workspace_root.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            });
         let candidates = [
             ("workspace", "Workspace", Some(root)),
             ("home", "Home", dirs::home_dir()),
@@ -1728,28 +1732,49 @@ impl Screen<'_> {
         ];
         let mut locations = Vec::new();
         for (kind, label, path) in candidates {
-            let Some(path) = path.and_then(|path| path.canonicalize().ok()).filter(|path| path.is_dir()) else { continue; };
+            let Some(path) = path
+                .and_then(|path| path.canonicalize().ok())
+                .filter(|path| path.is_dir())
+            else {
+                continue;
+            };
             let path = path.to_string_lossy().into_owned();
-            locations.push(neoism_ui::panels::file_browser::FileBrowserLocation { kind: kind.into(), label: label.into(), path });
+            locations.push(neoism_ui::panels::file_browser::FileBrowserLocation {
+                kind: kind.into(),
+                label: label.into(),
+                path,
+            });
         }
         self.renderer.file_browser.set_locations(locations);
         self.pump_agent_image_browser();
     }
 
     pub(crate) fn pump_agent_image_browser(&mut self) {
-        let root = self.active_pane_workspace_root()
+        let root = self
+            .active_pane_workspace_root()
             .or_else(|| self.active_workspace_root.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            });
         self.renderer.file_browser.fulfill_requests_native(&root);
         if let Some(selection) = self.renderer.file_browser.take_selection() {
-            let state_path = neoism_backend::config::config_dir_path().join("file-browser-recents.json");
+            let state_path = neoism_backend::config::config_dir_path()
+                .join("file-browser-recents.json");
             if let Ok(bytes) = serde_json::to_vec(self.renderer.file_browser.recents()) {
-                let _ = std::fs::create_dir_all(neoism_backend::config::config_dir_path());
+                let _ =
+                    std::fs::create_dir_all(neoism_backend::config::config_dir_path());
                 let _ = std::fs::write(state_path, bytes);
             }
-            if selection.mode == neoism_ui::panels::file_browser::FileBrowserMode::AttachImage {
-                let resolved = self.renderer.file_browser.resolve_native_selection(&selection.path);
-                if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            if selection.mode
+                == neoism_ui::panels::file_browser::FileBrowserMode::AttachImage
+            {
+                let resolved = self
+                    .renderer
+                    .file_browser
+                    .resolve_native_selection(&selection.path);
+                if let Some(agent) =
+                    self.context_manager.current_mut().neoism_agent.as_mut()
+                {
                     if let Ok(path) = resolved {
                         let _ = agent.attach_path(&path);
                     }

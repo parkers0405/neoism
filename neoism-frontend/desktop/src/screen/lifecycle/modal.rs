@@ -2,7 +2,9 @@ use super::*;
 
 impl Screen<'_> {
     pub fn handle_file_browser_click(&mut self) -> bool {
-        if !self.renderer.file_browser.is_active() { return false; }
+        if !self.renderer.file_browser.is_active() {
+            return false;
+        }
         let (x, y) = self.mouse_logical_for_hit_test();
         self.renderer.file_browser.pointer_down(x, y, 1);
         self.pump_agent_image_browser();
@@ -19,6 +21,15 @@ impl Screen<'_> {
         let window_width = self.sugarloaf.window_size().width;
         let scale_factor = self.sugarloaf.scale_factor();
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
+        if self.renderer.modal.close_button_hit(mouse_x, mouse_y) {
+            if let Some(action) = self.renderer.modal.escape_action() {
+                self.execute_modal_action(action);
+            } else {
+                self.renderer.modal.close();
+            }
+            self.mark_dirty();
+            return true;
+        }
         if self.renderer.modal.click_markdown_input(mouse_x, mouse_y) {
             self.mark_dirty();
             return true;
@@ -67,11 +78,12 @@ impl Screen<'_> {
                 if !blocking {
                     return false;
                 }
-                if self
-                    .renderer
-                    .modal
-                    .has_action(|action| matches!(action, neoism_ui::widgets::modal::ModalAction::UpdateNeoism { .. }))
-                {
+                if self.renderer.modal.has_action(|action| {
+                    matches!(
+                        action,
+                        neoism_ui::widgets::modal::ModalAction::UpdateNeoism { .. }
+                    )
+                }) {
                     return true;
                 }
                 if let Some(action) = self.renderer.modal.escape_action() {
@@ -188,7 +200,11 @@ impl Screen<'_> {
                 self.renderer.modal.close();
                 self.insert_markdown_file_link(document, &value);
             }
-            ModalAction::DocumentationNotebook { kind, notebook, value } => {
+            ModalAction::DocumentationNotebook {
+                kind,
+                notebook,
+                value,
+            } => {
                 self.renderer.modal.close();
                 self.submit_documentation_notebook_input(kind, notebook, value);
             }

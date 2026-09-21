@@ -20,6 +20,27 @@ pub(crate) struct McpAuthStore {
 }
 
 impl McpAuthStore {
+    pub(crate) fn for_session(
+        services: &neoism_agent_service_api::AgentServices,
+        session: &neoism_agent_core::SessionInfo,
+    ) -> anyhow::Result<Self> {
+        let tenant_id = crate::caller::session_tenant(session);
+        let host_workspace = session.workspace_id.as_ref().is_some_and(|workspace_id| {
+            tenant_id == format!("workspace:{workspace_id}")
+        });
+        if tenant_id == "local" || host_workspace {
+            return Ok(Self::local(services));
+        }
+        Self::from_services(
+            services,
+            CredentialScope {
+                tenant_id: tenant_id.to_string(),
+                workspace_id: session.workspace_id.as_ref().map(ToString::to_string),
+            },
+            true,
+        )
+    }
+
     pub(crate) fn from_services(
         services: &neoism_agent_service_api::AgentServices,
         scope: CredentialScope,

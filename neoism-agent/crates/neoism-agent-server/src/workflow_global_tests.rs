@@ -236,6 +236,7 @@ async fn installation_http_routes_enforce_real_root_and_operator_boundaries() {
         artifact_retention_days: None,
         requests_per_minute: None,
         max_in_flight: None,
+        resolved: None,
     };
     let definition = json!({"id":"http-global", "name":"HTTP global", "prompt":"Instructions", "active":false, "schedule":{"frequency":"daily"}});
     for (caller, expected) in [

@@ -553,7 +553,8 @@ pub struct MarkdownPane {
     pub cursor_line: usize,
     pub cursor_col: usize,
     pub(super) visual_anchor: Option<MarkdownPosition>,
-    pub documentation_notebook: Option<crate::editor::documentation_notebook::NotebookBinding>,
+    pub documentation_notebook:
+        Option<crate::editor::documentation_notebook::NotebookBinding>,
     pub(super) mouse_select_anchor: Option<MarkdownPosition>,
     pub(super) selection_pointer: Option<[f32; 2]>,
     pub(super) selection_scroll_at: Option<Instant>,

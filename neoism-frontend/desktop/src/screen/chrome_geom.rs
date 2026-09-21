@@ -53,12 +53,16 @@ impl Screen<'_> {
     ) {
         self.renderer.code_git_blame = config.editor.git_blame;
         self.renderer.code_git_blame_delay_ms = config.editor.git_blame_delay_ms;
-        self.renderer.code_git_blame_hide_on_scroll = config.editor.git_blame_hide_on_scroll;
+        self.renderer.code_git_blame_hide_on_scroll =
+            config.editor.git_blame_hide_on_scroll;
         for grid in self.context_manager.all_grids_mut().iter_mut() {
             for item in grid.contexts_mut().values_mut() {
                 if let Some(code) = item.context_mut().code.as_mut() {
                     code.blame.configure(config.editor.git_blame);
-                    code.blame.set_options(config.editor.git_blame_delay_ms, config.editor.git_blame_hide_on_scroll);
+                    code.blame.set_options(
+                        config.editor.git_blame_delay_ms,
+                        config.editor.git_blame_hide_on_scroll,
+                    );
                 }
             }
         }

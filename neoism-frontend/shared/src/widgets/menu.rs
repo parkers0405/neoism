@@ -94,7 +94,9 @@ impl<A> Menu<A> {
 
     pub fn set_max_visible(&mut self, max: usize) {
         let max = max.max(1);
-        if self.max_visible == max { return; }
+        if self.max_visible == max {
+            return;
+        }
         self.max_visible = max;
         self.ensure_selection_visible();
     }
@@ -172,7 +174,9 @@ impl<A> Menu<A> {
         if self.items.get(index).is_some_and(|item| item.enabled) {
             self.selected = index;
             true
-        } else { false }
+        } else {
+            false
+        }
     }
 
     pub fn set_selected_index(&mut self, idx: usize) -> bool {

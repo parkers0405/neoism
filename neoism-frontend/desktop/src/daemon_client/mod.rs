@@ -210,12 +210,13 @@ impl Default for ReconnectBackoff {
 
 /// Deterministic full-jitter in `[0, delay]`. Caps retry storms without
 /// synchronizing every client on the same reconnect tick.
-pub fn reconnect_backoff_delay(attempt: u32, policy: ReconnectBackoff, seed: u64) -> Duration {
+pub fn reconnect_backoff_delay(
+    attempt: u32,
+    policy: ReconnectBackoff,
+    seed: u64,
+) -> Duration {
     let exp = attempt.min(16).saturating_sub(1);
-    let cap = policy
-        .initial
-        .saturating_mul(1u32 << exp)
-        .min(policy.max);
+    let cap = policy.initial.saturating_mul(1u32 << exp).min(policy.max);
     full_jitter(cap, seed.wrapping_add(attempt as u64))
 }
 
@@ -472,7 +473,8 @@ impl DaemonClientHandle {
     /// per-connection workspace/files/editor request sequence.
     pub fn allocate_git_request_id(&self) -> u64 {
         static NEXT_GIT_REQUEST: AtomicU64 = AtomicU64::new(1 << 63);
-        NEXT_GIT_REQUEST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        NEXT_GIT_REQUEST
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .expect("Git request namespace exhausted")
     }
 
@@ -481,31 +483,51 @@ impl DaemonClientHandle {
     /// A pre-open failure/reconnect needs no frame or user input to retry.
     /// Dropping the screen's task owner aborts this loop on workspace switch.
     pub async fn maintain_git_status_watch(
-        self, request_id: u64, token: String, workspace_root: PathBuf,
+        self,
+        request_id: u64,
+        token: String,
+        workspace_root: PathBuf,
     ) {
         let mut status = self.status.clone();
         let result: Result<()> = async {
             loop {
                 let current = *status.borrow_and_update();
                 match current {
-                    DaemonClientStatus::Closed => return Err(DaemonClientError::ChannelClosed),
-                    DaemonClientStatus::Open => self.send_git_with_request_id(
-                        request_id, GitClientMessage::WatchStatus { token: token.clone() },
-                        Some(workspace_root.clone()),
-                    ).await?,
-                    _ => {},
+                    DaemonClientStatus::Closed => {
+                        return Err(DaemonClientError::ChannelClosed)
+                    }
+                    DaemonClientStatus::Open => {
+                        self.send_git_with_request_id(
+                            request_id,
+                            GitClientMessage::WatchStatus {
+                                token: token.clone(),
+                            },
+                            Some(workspace_root.clone()),
+                        )
+                        .await?
+                    }
+                    _ => {}
                 }
-                status.changed().await.map_err(|_| DaemonClientError::ChannelClosed)?;
+                status
+                    .changed()
+                    .await
+                    .map_err(|_| DaemonClientError::ChannelClosed)?;
             }
-        }.await;
+        }
+        .await;
         if let Err(error) = result {
             // Surface terminal delivery failures instead of silently leaving
             // the panel in its initial empty/loading state. A new handle/scope
             // starts a new task; never retry a closed channel in a tight loop.
-            let _ = self.failures.send(DaemonServerMessage::Git {
-                request_id,
-                message: GitServerMessage::Error { message: format!("Host Git subscription unavailable: {error}") },
-            }).await;
+            let _ = self
+                .failures
+                .send(DaemonServerMessage::Git {
+                    request_id,
+                    message: GitServerMessage::Error {
+                        message: format!("Host Git subscription unavailable: {error}"),
+                    },
+                })
+                .await;
         }
     }
 
@@ -978,7 +1000,9 @@ impl ClientRunner {
         _ws: &mut WebSocketStream<S>,
         pending: &mut VecDeque<OutboundServiceMessage>,
         pty_inflight: &mut HashMap<u64, Option<String>>,
-        frame: Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>,
+        frame: Option<
+            std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
+        >,
         pending_nonce: &mut Option<String>,
     ) -> Result<FrameOutcome>
     where
@@ -1050,7 +1074,10 @@ impl ClientRunner {
             }
         }
         if let DaemonServerMessage::Workspace {
-            message: WorkspaceServerMessage::HelloAck { accepted, reason, .. },
+            message:
+                WorkspaceServerMessage::HelloAck {
+                    accepted, reason, ..
+                },
             ..
         } = &reply
         {
@@ -1719,60 +1746,129 @@ mod tests {
         assert_ne!(old, new);
         assert!(new > old);
         let json = serialize_outbound_service_message(&OutboundServiceMessage::Git {
-            request_id: new, workspace_root: Some("/same/path".into()),
-            message: GitClientMessage::DiffFiles { paths: vec!["same.rs".into()] },
-        }).unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap()["Git"]["request_id"].as_u64(), Some(new));
-        for message in [GitServerMessage::FileDiffs { diffs: vec![] }, GitServerMessage::Error { message: "old host error".into() }] {
-            let value = serde_json::json!({"GitReply": {"request_id": old, "message": message}});
-            let parsed = parse_server_frame(Message::Text(value.to_string().into())).unwrap().unwrap();
+            request_id: new,
+            workspace_root: Some("/same/path".into()),
+            message: GitClientMessage::DiffFiles {
+                paths: vec!["same.rs".into()],
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["Git"]
+                ["request_id"]
+                .as_u64(),
+            Some(new)
+        );
+        for message in [
+            GitServerMessage::FileDiffs { diffs: vec![] },
+            GitServerMessage::Error {
+                message: "old host error".into(),
+            },
+        ] {
+            let value =
+                serde_json::json!({"GitReply": {"request_id": old, "message": message}});
+            let parsed = parse_server_frame(Message::Text(value.to_string().into()))
+                .unwrap()
+                .unwrap();
             assert_eq!(parsed.request_id(), old);
         }
     }
 
     #[tokio::test]
     async fn git_watch_recovers_before_open_and_after_dropped_send_without_a_frame() {
-        let (mut runner, handle, _) = delivery_test_client(DaemonClientStatus::Connecting);
+        let (mut runner, handle, _) =
+            delivery_test_client(DaemonClientStatus::Connecting);
         let request_id = handle.allocate_git_request_id();
         let root = PathBuf::from(r"C:\Host\same-path");
-        let task = tokio::spawn(handle.maintain_git_status_watch(request_id, "scope:1".into(), root.clone()));
+        let task = tokio::spawn(handle.maintain_git_status_watch(
+            request_id,
+            "scope:1".into(),
+            root.clone(),
+        ));
         // Initial connection attempt fails. No Git request is queued into the
         // backoff buffer; no render/Screen method is called anywhere in test.
-        runner.status_tx.send_replace(DaemonClientStatus::BackingOff);
-        assert!(tokio::time::timeout(Duration::from_millis(20), runner.out_rx.recv()).await.is_err());
+        runner
+            .status_tx
+            .send_replace(DaemonClientStatus::BackingOff);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), runner.out_rx.recv())
+                .await
+                .is_err()
+        );
         runner.status_tx.send_replace(DaemonClientStatus::Open);
-        let first = tokio::time::timeout(Duration::from_secs(1), runner.out_rx.recv()).await.unwrap().unwrap();
-        assert!(matches!(&first, OutboundServiceMessage::Git { request_id: id, workspace_root: Some(path), message: GitClientMessage::WatchStatus { token } }
-            if *id == request_id && path == &root && token == "scope:1"));
+        let first = tokio::time::timeout(Duration::from_secs(1), runner.out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&first, OutboundServiceMessage::Git { request_id: id, workspace_root: Some(path), message: GitClientMessage::WatchStatus { token } }
+            if *id == request_id && path == &root && token == "scope:1")
+        );
         assert!(!outbound_is_replayable(&first));
         // Simulate send success into queue followed by connection loss before
         // reaching the server: discard first request. Re-Open must send again,
         // even when BackingOff was too brief to observe as a separate revision.
         drop(first);
-        runner.status_tx.send_replace(DaemonClientStatus::BackingOff);
+        runner
+            .status_tx
+            .send_replace(DaemonClientStatus::BackingOff);
         runner.status_tx.send_replace(DaemonClientStatus::Open);
-        let retry = tokio::time::timeout(Duration::from_secs(1), runner.out_rx.recv()).await.unwrap().unwrap();
-        assert!(matches!(retry, OutboundServiceMessage::Git { request_id: id, message: GitClientMessage::WatchStatus { .. }, .. } if id == request_id));
-        assert!(tokio::time::timeout(Duration::from_millis(20), runner.out_rx.recv()).await.is_err(), "healthy idle connection retried without an Open revision");
+        let retry = tokio::time::timeout(Duration::from_secs(1), runner.out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(retry, OutboundServiceMessage::Git { request_id: id, message: GitClientMessage::WatchStatus { .. }, .. } if id == request_id)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), runner.out_rx.recv())
+                .await
+                .is_err(),
+            "healthy idle connection retried without an Open revision"
+        );
         task.abort();
     }
 
     #[tokio::test]
     async fn git_watch_closed_delivery_reports_correlated_error_instead_of_hanging() {
-        let (mut runner, handle, mut incoming) = delivery_test_client(DaemonClientStatus::Connecting);
+        let (mut runner, handle, mut incoming) =
+            delivery_test_client(DaemonClientStatus::Connecting);
         let id = handle.allocate_git_request_id();
-        let task = tokio::spawn(handle.maintain_git_status_watch(id, "scope:failed".into(), "/host/repo".into()));
+        let task = tokio::spawn(handle.maintain_git_status_watch(
+            id,
+            "scope:failed".into(),
+            "/host/repo".into(),
+        ));
         runner.out_rx.close();
         runner.status_tx.send_replace(DaemonClientStatus::Open);
-        let reply = tokio::time::timeout(Duration::from_secs(1), incoming.recv()).await.unwrap().unwrap();
-        assert!(matches!(reply, DaemonServerMessage::Git { request_id, message: GitServerMessage::Error { .. } } if request_id == id));
-        tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(1), incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(reply, DaemonServerMessage::Git { request_id, message: GitServerMessage::Error { .. } } if request_id == id)
+        );
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
     fn git_actions_and_obsolete_watches_are_not_replayed() {
-        for message in [GitClientMessage::Commit { message: "one action".into() }, GitClientMessage::WatchStatus { token: "obsolete".into() }] {
-            assert!(!outbound_is_replayable(&OutboundServiceMessage::Git { request_id: 7, workspace_root: None, message }));
+        for message in [
+            GitClientMessage::Commit {
+                message: "one action".into(),
+            },
+            GitClientMessage::WatchStatus {
+                token: "obsolete".into(),
+            },
+        ] {
+            assert!(!outbound_is_replayable(&OutboundServiceMessage::Git {
+                request_id: 7,
+                workspace_root: None,
+                message
+            }));
         }
     }
 
@@ -1996,7 +2092,10 @@ mod tests {
                 binding.shared.lock().unwrap().session_id.as_deref(),
                 Some("existing")
             );
-            assert!(runner.out_rx.try_recv().is_err() || matches!(runner.out_rx.try_recv(), Err(_)));
+            assert!(
+                runner.out_rx.try_recv().is_err()
+                    || matches!(runner.out_rx.try_recv(), Err(_))
+            );
             let failure = tokio::time::timeout(Duration::from_secs(1), replies.recv())
                 .await
                 .unwrap();
@@ -2025,7 +2124,13 @@ mod tests {
         pty.resize(100, 30).unwrap();
         let runtime = tokio::runtime::Handle::current();
         remote_pty::await_attach(&binding, "existing", handle.clone(), runtime.clone());
-        assert!(binding.shared.lock().unwrap().queued.iter().all(|op| !matches!(op, neoism_terminal_pty::RemotePtyOp::Input(_))));
+        assert!(binding
+            .shared
+            .lock()
+            .unwrap()
+            .queued
+            .iter()
+            .all(|op| !matches!(op, neoism_terminal_pty::RemotePtyOp::Input(_))));
         assert!(!binding.shared.lock().unwrap().failed);
         remote_pty::bind_session(&binding, "existing", handle, runtime);
         assert_eq!(
@@ -2057,7 +2162,13 @@ mod tests {
         let runtime = tokio::runtime::Handle::current();
         pty.resize(80, 24).unwrap();
         remote_pty::await_attach(&binding, "existing", handle.clone(), runtime.clone());
-        assert!(binding.shared.lock().unwrap().queued.iter().all(|op| matches!(op, neoism_terminal_pty::RemotePtyOp::Resize { .. })));
+        assert!(binding
+            .shared
+            .lock()
+            .unwrap()
+            .queued
+            .iter()
+            .all(|op| matches!(op, neoism_terminal_pty::RemotePtyOp::Resize { .. })));
         pty.resize(100, 30).unwrap();
         assert!(runner.out_rx.try_recv().is_err());
         remote_pty::bind_session(&binding, "existing", handle, runtime);
@@ -2066,14 +2177,22 @@ mod tests {
         assert!(matches!(
             first,
             OutboundServiceMessage::Pty {
-                message: PtyClientMessage::Resize { cols: 80, rows: 24, .. },
+                message: PtyClientMessage::Resize {
+                    cols: 80,
+                    rows: 24,
+                    ..
+                },
                 ..
             }
         ));
         assert!(matches!(
             second,
             OutboundServiceMessage::Pty {
-                message: PtyClientMessage::Resize { cols: 100, rows: 30, .. },
+                message: PtyClientMessage::Resize {
+                    cols: 100,
+                    rows: 30,
+                    ..
+                },
                 ..
             }
         ));
@@ -2189,11 +2308,8 @@ mod tests {
                 }
                 drop(server);
             };
-            let (run_result, request_id, _) = tokio::join!(
-                runner.run_socket(client, &mut pending),
-                send,
-                serve
-            );
+            let (run_result, request_id, _) =
+                tokio::join!(runner.run_socket(client, &mut pending), send, serve);
             let _ = run_result;
             assert!(pending.is_empty());
             let mut failure = None;
@@ -2508,7 +2624,10 @@ mod tests {
         assert!(matches!(
             replies.recv().await,
             Some(DaemonServerMessage::Workspace {
-                message: WorkspaceServerMessage::HelloAck { accepted: false, .. },
+                message: WorkspaceServerMessage::HelloAck {
+                    accepted: false,
+                    ..
+                },
                 ..
             })
         ));

@@ -528,12 +528,32 @@ fn render_selection(
     theme: &IdeTheme,
 ) {
     if matches!(pane.gesture, super::input::DrawGesture::Marquee { .. }) {
-        for shape in pane.scene.shapes.iter().filter(|shape| pane.selection.contains(&shape.id)) {
+        for shape in pane
+            .scene
+            .shapes
+            .iter()
+            .filter(|shape| pane.selection.contains(&shape.id))
+        {
             let bounds = pane.shape_bounds(shape);
             let a = cam.world_to_screen(bounds.min);
             let b = cam.world_to_screen(bounds.max);
-            for (x0, y0, x1, y1) in [(a.x, a.y, b.x, a.y), (b.x, a.y, b.x, b.y), (b.x, b.y, a.x, b.y), (a.x, b.y, a.x, a.y)] {
-                draw_line_clipped(sugarloaf, clip, x0, y0, x1, y1, 1.0, DEPTH, theme.f32(theme.accent));
+            for (x0, y0, x1, y1) in [
+                (a.x, a.y, b.x, a.y),
+                (b.x, a.y, b.x, b.y),
+                (b.x, b.y, a.x, b.y),
+                (a.x, b.y, a.x, a.y),
+            ] {
+                draw_line_clipped(
+                    sugarloaf,
+                    clip,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    1.0,
+                    DEPTH,
+                    theme.f32(theme.accent),
+                );
             }
         }
         return;

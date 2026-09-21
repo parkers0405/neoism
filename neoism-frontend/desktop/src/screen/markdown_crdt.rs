@@ -603,11 +603,9 @@ fn find_crdt_pane_mut<'a>(
     for grid in context_manager.contexts_mut() {
         for item in grid.contexts_mut().values_mut() {
             let context = item.context_mut();
-            if context
-                .markdown
-                .as_ref()
-                .is_some_and(|pane| !pane.local_only && buffer_id_for_markdown_path(&pane.path) == buffer_id)
-            {
+            if context.markdown.as_ref().is_some_and(|pane| {
+                !pane.local_only && buffer_id_for_markdown_path(&pane.path) == buffer_id
+            }) {
                 return context
                     .markdown
                     .as_mut()
@@ -633,10 +631,9 @@ fn find_markdown_pane_mut<'a>(
     for grid in context_manager.contexts_mut() {
         for item in grid.contexts_mut().values_mut() {
             let context = item.context_mut();
-            let matches = context
-                .markdown
-                .as_ref()
-                .is_some_and(|pane| !pane.local_only && buffer_id_for_markdown_path(&pane.path) == buffer_id);
+            let matches = context.markdown.as_ref().is_some_and(|pane| {
+                !pane.local_only && buffer_id_for_markdown_path(&pane.path) == buffer_id
+            });
             if matches {
                 return context.markdown.as_mut();
             }

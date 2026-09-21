@@ -87,9 +87,13 @@ impl MarkdownPane {
     }
 
     pub fn apply_table_action(&mut self, action: MarkdownTableAction) -> bool {
-        if self.read_only { return false; }
+        if self.read_only {
+            return false;
+        }
         match action {
-            MarkdownTableAction::DeleteColumn { start_line, col_ix } => self.delete_table_column(start_line, col_ix),
+            MarkdownTableAction::DeleteColumn { start_line, col_ix } => {
+                self.delete_table_column(start_line, col_ix)
+            }
             MarkdownTableAction::ColumnMenu { .. } => false,
             MarkdownTableAction::AddRowBelow { after_line } => {
                 self.insert_table_row_after(after_line)
@@ -101,8 +105,15 @@ impl MarkdownPane {
     }
 
     pub fn table_column_menu_at(&self, x: f32, y: f32) -> Option<(usize, usize, usize)> {
-        let action = self.table_action_rects.iter().rev().find(|action| point_in_rect(x, y, action.rect))?.action;
-        let MarkdownTableAction::ColumnMenu { start_line, col_ix } = action else { return None; };
+        let action = self
+            .table_action_rects
+            .iter()
+            .rev()
+            .find(|action| point_in_rect(x, y, action.rect))?
+            .action;
+        let MarkdownTableAction::ColumnMenu { start_line, col_ix } = action else {
+            return None;
+        };
         let range = self.table_range_from_start(start_line)?;
         Some((start_line, col_ix, self.table_col_count_for_range(&range)))
     }
@@ -853,12 +864,23 @@ impl MarkdownPane {
         line: usize,
     ) -> Option<std::ops::Range<usize>> {
         let line = line.min(self.lines.len().saturating_sub(1));
-        self.lines.get(line).and_then(|text| parse_table_cells(text))?;
+        self.lines
+            .get(line)
+            .and_then(|text| parse_table_cells(text))?;
         let mut first = line;
-        while first > 0 && self.lines.get(first - 1).and_then(|text| parse_table_cells(text)).is_some() {
+        while first > 0
+            && self
+                .lines
+                .get(first - 1)
+                .and_then(|text| parse_table_cells(text))
+                .is_some()
+        {
             first -= 1;
         }
-        (first..=line).find_map(|start| self.table_range_from_start(start).filter(|range| range.contains(&line)))
+        (first..=line).find_map(|start| {
+            self.table_range_from_start(start)
+                .filter(|range| range.contains(&line))
+        })
     }
 
     pub(super) fn code_block_range_containing(
@@ -1090,7 +1112,11 @@ impl MarkdownPane {
             .floor()
             .max(0.0) as usize;
         let cell_source = &line[bounds.content_start..bounds.content_end];
-        let map = if cell.source_revealed { InlineSourceMap::table_edit(cell_source) } else { InlineSourceMap::for_table(cell_source) };
+        let map = if cell.source_revealed {
+            InlineSourceMap::table_edit(cell_source)
+        } else {
+            InlineSourceMap::for_table(cell_source)
+        };
         let visible_len = map.visible_len();
         let visible_col = if let Some(row) = cell.hit_rows.get(visual_line) {
             let hit_x = (x - cell.text_x).max(0.0);

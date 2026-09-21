@@ -17,7 +17,9 @@ fn notebook_image_preview_display_size(
 }
 
 impl MarkdownPane {
-    pub fn viewport_vertical_bounds(&self) -> [f32; 2] { self.viewport_bounds }
+    pub fn viewport_vertical_bounds(&self) -> [f32; 2] {
+        self.viewport_bounds
+    }
 
     pub fn begin_block_layout(&mut self) {
         self.block_rects.clear();

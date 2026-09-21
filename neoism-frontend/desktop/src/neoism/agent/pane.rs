@@ -42,7 +42,8 @@ use super::side_panel::{
     SessionGoal,
 };
 use super::updates::{
-    start_session_event_stream, AgentEventWake, AgentSessionEventStream,
+    start_session_catalog_stream, start_session_event_stream, AgentEventWake,
+    AgentSessionCatalogStream, AgentSessionCatalogUpdate, AgentSessionEventStream,
     AgentSessionUpdate,
 };
 
@@ -843,6 +844,7 @@ pub struct NeoismAgentPane {
         Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>,
     >,
     event_stream: Option<AgentSessionEventStream>,
+    session_catalog_stream: Option<AgentSessionCatalogStream>,
     event_wake: Option<AgentEventWake>,
     /// When the most recent update was drained from the event stream.
     /// Feeds the liveness watchdog: a session that claims active work but
@@ -1148,6 +1150,7 @@ impl Default for NeoismAgentPane {
             ),
             file_mention_root_pin: Mutex::new(None),
             event_stream: None,
+            session_catalog_stream: None,
             event_wake: None,
             last_stream_update_at: None,
             last_stream_resubscribe_at: None,

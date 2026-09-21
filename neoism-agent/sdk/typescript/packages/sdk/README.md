@@ -40,5 +40,19 @@ family, including child sessions created by subagents. The main agent owns
 subagent execution; clients observe child messages, tools, status, permissions,
 questions, and completion through the same typed SSE stream.
 
+Shared hosted deployments use short-lived Bearer credentials resolved to a tenant and human or service-account actor. Tenant-wide subscriptions may omit `sessionId`; both replay and live events remain tenant-scoped. Sessions expose revision-guarded control and participant APIs:
+
+```ts
+const current = await client.sessions.control(sessionId);
+const lease = await client.sessions.claimControl(sessionId, {
+  expectedRevision: current?.revision ?? 0,
+  leaseSeconds: 60,
+});
+const participants = await client.sessions.participants(sessionId);
+await client.sessions.releaseControl(sessionId, lease.revision);
+```
+
+Hosted execution is lazy and provider-backed. Native execution is never used as a fallback, and shared artifact bytes remain behind the host's tenant-scoped store.
+
 See the [Neoism repository](https://github.com/parkers0405/neoism/tree/main/neoism-agent/sdk/typescript)
 for the complete headless example and API documentation.

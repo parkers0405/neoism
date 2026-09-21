@@ -153,7 +153,13 @@ impl Application<'_> {
         let clipboard =
             unsafe { Clipboard::new(event_loop.display_handle().unwrap().as_raw()) };
 
-        let mut router = Router::new(config.appearance.fonts.to_owned(), clipboard);
+        let mut router = Router::new(
+            crate::mashup::fonts_with_markdown_family(
+                config.appearance.fonts.to_owned(),
+                config.appearance.look.markdown.font_family.as_deref(),
+            ),
+            clipboard,
+        );
         if let Some(error) = config_error {
             router.propagate_error_to_next_route(error.into());
         }
@@ -453,9 +459,17 @@ impl Application<'_> {
                 })
                 .unwrap_or_default();
             for (endpoint, message) in parked_editors {
-                if let DaemonServerMessage::Editor { request_id, message } = message {
+                if let DaemonServerMessage::Editor {
+                    request_id,
+                    message,
+                } = message
+                {
                     if let Some(route) = self.router.routes.get_mut(&window_id) {
-                        if route.window.screen.apply_remote_code_lsp_message(&endpoint, request_id, &message) { route.request_redraw(); }
+                        if route.window.screen.apply_remote_code_lsp_message(
+                            &endpoint, request_id, &message,
+                        ) {
+                            route.request_redraw();
+                        }
                     }
                 }
             }
@@ -469,10 +483,14 @@ impl Application<'_> {
                     // Native guest code panes reuse the editor envelope for
                     // host-owned LSP snapshots/diagnostics. Grid/nvim
                     // messages remain harmless no-ops in the screen bridge.
-                    DaemonServerMessage::Editor { request_id, message } => {
+                    DaemonServerMessage::Editor {
+                        request_id,
+                        message,
+                    } => {
                         if let Some(route) = self.router.routes.get_mut(&window_id) {
-                            if route.window.screen.apply_remote_code_lsp_message(&endpoint, request_id, &message)
-                            {
+                            if route.window.screen.apply_remote_code_lsp_message(
+                                &endpoint, request_id, &message,
+                            ) {
                                 route.request_redraw();
                             }
                         }
@@ -1096,7 +1114,9 @@ impl Application<'_> {
 
     fn probe_saved_servers(&mut self, active_id: Option<&str>) {
         for server in self.server_registry.servers().to_vec() {
-            if server.agent_api { continue; }
+            if server.agent_api {
+                continue;
+            }
             if active_id == Some(server.id.as_str())
                 || !self.server_health_inflight.insert(server.id.clone())
             {
@@ -1196,7 +1216,8 @@ impl Application<'_> {
             return;
         };
         if session.status != ServerConnectionStatus::Online
-            && session.connection.status() != crate::daemon_client::DaemonClientStatus::Open
+            && session.connection.status()
+                != crate::daemon_client::DaemonClientStatus::Open
         {
             return;
         }
@@ -2523,7 +2544,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     match close_terminal_action(handled) {
                         CloseTerminalAction::RemoveRouteAndMaybeExit => {
                             self.router.unbind_native_window(window_id);
-                            if let Some(route) = self.router.routes.get(&window_id) { route.window.screen.clear_remote_code_lsp(); }
+                            if let Some(route) = self.router.routes.get(&window_id) {
+                                route.window.screen.clear_remote_code_lsp();
+                            }
                             self.router.routes.remove(&window_id);
                             crate::app::freeze_watchdog::unregister_window(window_id);
                             // Unschedule pending events.
@@ -2581,7 +2604,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 );
             }
             RioEventType::Rio(RioEvent::PrepareRefreshFileTree) => {
-                Self::debounce_follow_up(
+                Self::postpone_follow_up(
                     &mut self.scheduler,
                     TimerId::new(Topic::FileTree, 0),
                     Duration::from_millis(200),
@@ -2619,7 +2642,10 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             RioEventType::Rio(RioEvent::RemoteEditorReadTimeout(request_id)) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
-                    if route.window.screen.fail_remote_editor_read(request_id, "Host read timed out; reopen the file to retry") {
+                    if route.window.screen.fail_remote_editor_read(
+                        request_id,
+                        "Host read timed out; reopen the file to retry",
+                    ) {
                         route.request_redraw();
                     }
                 }
@@ -2769,13 +2795,19 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             neoism_ui::panels::notifications::NotificationLevel::Error,
                         );
                     } else if percent == Some(100) && !ready_to_restart {
-                        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+                        use neoism_ui::widgets::modal::{
+                            ModalAction, ModalButton, ModalSpec,
+                        };
                         route.window.screen.renderer.modal.open(ModalSpec {
                             title: "Neoism update".to_string(),
                             body: message,
                             meta: "No restart required.".to_string(),
                             input: None,
-                            buttons: vec![ModalButton::new("Close", "Enter", ModalAction::Close)],
+                            buttons: vec![ModalButton::new(
+                                "Close",
+                                "Enter",
+                                ModalAction::Close,
+                            )],
                             busy: false,
                             blocking: false,
                         });
@@ -2910,7 +2942,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     );
                 }
                 self.router.unbind_native_window(window_id);
-                if let Some(route) = self.router.routes.get(&window_id) { route.window.screen.clear_remote_code_lsp(); }
+                if let Some(route) = self.router.routes.get(&window_id) {
+                    route.window.screen.clear_remote_code_lsp();
+                }
                 self.router.routes.remove(&window_id);
                 self.window_sessions.remove(&window_id);
                 crate::app::freeze_watchdog::unregister_window(window_id);

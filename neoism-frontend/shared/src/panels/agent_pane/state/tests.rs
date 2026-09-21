@@ -1740,9 +1740,12 @@ fn mobile_side_panel_session_navigation_switches_and_dismisses_takeover() {
     let mut pane = NeoismAgentPane::default();
     pane.set_session_id(Some("current".to_string()));
     pane.side_panel_mut().set_user_hidden(false);
-    pane.side_panel_mut().set_sessions(vec![NeoismAgentSessionEntry::new(
-        "target", "Target chat", "now",
-    )]);
+    pane.side_panel_mut()
+        .set_sessions(vec![NeoismAgentSessionEntry::new(
+            "target",
+            "Target chat",
+            "now",
+        )]);
     pane.side_panel_mut().set_selected(0);
 
     assert!(pane.activate_side_panel_row(true, true));
@@ -1759,9 +1762,12 @@ fn wide_side_panel_session_navigation_keeps_panel_open() {
     let mut pane = NeoismAgentPane::default();
     pane.set_session_id(Some("current".to_string()));
     pane.side_panel_mut().set_user_hidden(false);
-    pane.side_panel_mut().set_sessions(vec![NeoismAgentSessionEntry::new(
-        "target", "Target chat", "now",
-    )]);
+    pane.side_panel_mut()
+        .set_sessions(vec![NeoismAgentSessionEntry::new(
+            "target",
+            "Target chat",
+            "now",
+        )]);
     pane.side_panel_mut().set_selected(0);
 
     assert!(pane.activate_side_panel_row(true, false));
@@ -1773,10 +1779,14 @@ fn wide_side_panel_session_navigation_keeps_panel_open() {
 fn mobile_semantic_search_result_navigation_dismisses_takeover() {
     let mut pane = NeoismAgentPane::default();
     pane.set_session_id(Some("current".to_string()));
-    pane.side_panel_mut().set_sessions(vec![NeoismAgentSessionEntry::new(
-        "result", "Unrelated title", "now",
-    )]);
-    pane.side_panel_mut().set_session_query("needle".to_string());
+    pane.side_panel_mut()
+        .set_sessions(vec![NeoismAgentSessionEntry::new(
+            "result",
+            "Unrelated title",
+            "now",
+        )]);
+    pane.side_panel_mut()
+        .set_session_query("needle".to_string());
     pane.side_panel_mut().set_semantic_results(
         "needle".to_string(),
         vec![NeoismAgentSemanticMatch {
@@ -1802,9 +1812,12 @@ fn mobile_semantic_search_result_navigation_dismisses_takeover() {
 fn mobile_non_navigation_side_panel_action_does_not_dismiss() {
     let mut pane = NeoismAgentPane::default();
     pane.side_panel_mut().set_user_hidden(false);
-    pane.side_panel_mut().set_sessions(vec![NeoismAgentSessionEntry::new(
-        "target", "Target chat", "now",
-    )]);
+    pane.side_panel_mut()
+        .set_sessions(vec![NeoismAgentSessionEntry::new(
+            "target",
+            "Target chat",
+            "now",
+        )]);
     pane.side_panel_mut().focus_search();
 
     assert!(!pane.activate_side_panel_row(true, true));
@@ -1832,7 +1845,8 @@ fn session_search_typing_route_owns_only_the_painted_field() {
 
 #[test]
 fn mobile_child_and_root_navigation_both_dismiss_takeover() {
-    for (current, selected_row, expected) in [("root", 1, "child"), ("child", 0, "root")] {
+    for (current, selected_row, expected) in [("root", 1, "child"), ("child", 0, "root")]
+    {
         let mut pane = NeoismAgentPane::default();
         pane.set_session_id(Some(current.to_string()));
         pane.side_panel_mut().set_mode(SidePanelMode::Subagents);
@@ -2407,6 +2421,84 @@ fn session_catalog_pages_append_once_without_resetting_loaded_rows() {
     assert_eq!(pane.side_panel.scroll_top(), scroll_top);
     assert_eq!(pane.side_panel.session_next_cursor(), None);
     assert_eq!(pane.side_panel.begin_session_page_near_end(), None);
+}
+
+#[test]
+fn live_session_catalog_mutations_preserve_pages_and_selected_session() {
+    let mut pane = NeoismAgentPane::default();
+    pane.side_panel.set_session_page(
+        vec![
+            NeoismAgentSessionEntry::new("session-a", "A", "now").with_updated_ms(30),
+            NeoismAgentSessionEntry::new("session-b", "B", "now").with_updated_ms(20),
+            NeoismAgentSessionEntry::new("session-c", "C", "now").with_updated_ms(10),
+        ],
+        None,
+        Some("next-page".to_string()),
+    );
+    pane.side_panel.select_next();
+    assert_eq!(
+        pane.side_panel
+            .selected_session()
+            .map(|entry| entry.id.as_str()),
+        Some("session-b")
+    );
+
+    pane.side_panel.upsert_session(
+        NeoismAgentSessionEntry::new("session-d", "D", "now").with_updated_ms(40),
+    );
+    pane.side_panel.upsert_session(
+        NeoismAgentSessionEntry::new("session-b", "Renamed", "now").with_updated_ms(50),
+    );
+    // A head snapshot taken just before session-d was created must not erase
+    // the live delta when its background response reaches the UI afterward.
+    pane.side_panel.reconcile_session_head(
+        vec![
+            NeoismAgentSessionEntry::new("session-a", "A", "now").with_updated_ms(30),
+            NeoismAgentSessionEntry::new("session-b", "Renamed", "now")
+                .with_updated_ms(50),
+        ],
+        Some("next-page".to_string()),
+    );
+
+    assert_eq!(pane.side_panel.session_next_cursor(), Some("next-page"));
+    assert_eq!(
+        pane.side_panel
+            .selected_session()
+            .map(|entry| entry.id.as_str()),
+        Some("session-b")
+    );
+    assert_eq!(
+        pane.side_panel
+            .sessions()
+            .iter()
+            .filter(|entry| entry.id == "session-b")
+            .count(),
+        1
+    );
+    assert!(pane
+        .side_panel
+        .sessions()
+        .iter()
+        .any(|entry| entry.id == "session-d"));
+    assert_eq!(
+        pane.side_panel
+            .selected_session()
+            .map(|entry| entry.title.as_str()),
+        Some("Renamed")
+    );
+
+    pane.side_panel.remove_session("session-d");
+    assert!(!pane
+        .side_panel
+        .sessions()
+        .iter()
+        .any(|entry| entry.id == "session-d"));
+    assert_eq!(
+        pane.side_panel
+            .selected_session()
+            .map(|entry| entry.id.as_str()),
+        Some("session-b")
+    );
 }
 
 #[test]

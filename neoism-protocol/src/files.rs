@@ -12,17 +12,32 @@ pub enum FilesClientMessage {
     ListBrowserLocations,
     /// Picker-only operations. Absolute paths must be contained by one of the
     /// roots returned by `BrowserLocations`.
-    BrowserListDir { path: String },
-    BrowserStat { path: String },
-    BrowserReadFile { path: String },
+    BrowserListDir {
+        path: String,
+    },
+    BrowserStat {
+        path: String,
+    },
+    BrowserReadFile {
+        path: String,
+    },
     /// List a directory. `path` is workspace-relative.
-    ListDir { path: String },
+    ListDir {
+        path: String,
+    },
     /// Stat a single path. `path` is workspace-relative.
-    Stat { path: String },
+    Stat {
+        path: String,
+    },
     /// Read a file's bytes. `path` is workspace-relative.
-    ReadFile { path: String },
+    ReadFile {
+        path: String,
+    },
     /// Write bytes to a file (creates if not exists, truncates).
-    WriteFile { path: String, bytes: Vec<u8> },
+    WriteFile {
+        path: String,
+        bytes: Vec<u8>,
+    },
     /// Recursively walk a directory and return all entries.
     WalkTree {
         path: String,
@@ -31,24 +46,37 @@ pub enum FilesClientMessage {
     /// Create a new empty file under `dir/name`. Mirrors desktop's
     /// `Screen::create_file_tree_file`. Fails if the file already
     /// exists; parent dirs are created.
-    CreateFile { dir: String, name: String },
+    CreateFile {
+        dir: String,
+        name: String,
+    },
     /// Create a new directory under `dir/name`. Mirrors desktop's
     /// `Screen::create_file_tree_folder`. Idempotent — `create_dir_all`
     /// under the hood, but `Error` if the target is a non-dir file.
-    CreateDir { dir: String, name: String },
+    CreateDir {
+        dir: String,
+        name: String,
+    },
     /// Rename or move a path. `from`/`to` are workspace-relative; the
     /// destination's parent dirs are created. Mirrors desktop's
     /// `Screen::rename_file_tree_path` (which also handles moves when
     /// the new name contains a `/`).
-    Rename { from: String, to: String },
+    Rename {
+        from: String,
+        to: String,
+    },
     /// Delete a file or directory. Directories are removed
     /// recursively. Mirrors desktop's `Screen::delete_file_tree_path`.
-    Delete { path: String },
+    Delete {
+        path: String,
+    },
     /// Read the daemon user's shell history (newest last, at most
     /// `max_entries`). Web composers can't touch `~/.zsh_history`
     /// through the workspace-scoped file surface, but the desktop
     /// composer seeds ArrowUp recall from it — this keeps parity.
-    ReadShellHistory { max_entries: Option<u32> },
+    ReadShellHistory {
+        max_entries: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +199,9 @@ mod tests {
         };
         let json = serde_json::to_string(&message).unwrap();
         assert!(json.contains("/home/test/Documents"));
-        assert!(matches!(serde_json::from_str::<FilesServerMessage>(&json).unwrap(), FilesServerMessage::BrowserLocations { .. }));
+        assert!(matches!(
+            serde_json::from_str::<FilesServerMessage>(&json).unwrap(),
+            FilesServerMessage::BrowserLocations { .. }
+        ));
     }
 }

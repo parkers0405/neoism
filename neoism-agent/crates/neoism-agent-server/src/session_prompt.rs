@@ -78,8 +78,9 @@ pub(crate) async fn append_prompt(
     let session_id = Id::parse(IdKind::Session, session_id.to_string())
         .map_err(|_| ApiError::not_found("Session not found"))?;
     let session_id_text = session_id.to_string();
-    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot(
+    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot_for_tenant(
         state,
+        crate::caller::session_tenant(&info),
         &info.directory,
     )
     .await?;
@@ -1287,10 +1288,14 @@ fn finish_requires_text_continuation(message: &MessageWithParts) -> bool {
 
 async fn auto_compaction_threshold_for_user_model(
     state: &AppState,
+    tenant_id: &str,
     directory: &str,
     model: &UserModel,
 ) -> Option<u64> {
-    let runtime = state.workspace_runtime(directory).await.ok()?;
+    let runtime = state
+        .workspace_runtime_for_tenant(tenant_id, directory)
+        .await
+        .ok()?;
     let snapshot = runtime.snapshot();
     let provider = snapshot
         .provider_services_by_priority()
@@ -1313,10 +1318,11 @@ fn estimated_prompt_compaction_threshold(usable_context: u64) -> u64 {
 /// estimation error. This safety estimate does not trigger compaction.
 pub(crate) async fn compaction_request_token_budget(
     state: &AppState,
+    tenant_id: &str,
     directory: &str,
     model: &UserModel,
 ) -> u64 {
-    let usable = auto_compaction_threshold_for_user_model(state, directory, model)
+    let usable = auto_compaction_threshold_for_user_model(state, tenant_id, directory, model)
         .await
         .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD);
     estimated_prompt_compaction_threshold(usable)
@@ -1413,7 +1419,6 @@ fn summary_covers_all_messages(
         == Some(through)
 }
 
-#[cfg(test)]
 fn token_usage_total(tokens: &TokenUsage) -> u64 {
     // Exact opencode v2 overflow formula. Provider total wins when non-zero;
     // otherwise its fallback uses normalized input/output/cache buckets and
@@ -1425,6 +1430,27 @@ fn token_usage_total(tokens: &TokenUsage) -> u64 {
             .saturating_add(tokens.cache.read)
             .saturating_add(tokens.cache.write)
     })
+}
+
+fn last_known_token_total(messages: &[MessageWithParts]) -> u64 {
+    for message in messages.iter().rev() {
+        // Usage before a compaction boundary describes context that the summary
+        // replaced, so it must not trigger another compaction immediately.
+        if message
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::Compaction(_)))
+        {
+            return 0;
+        }
+        if let MessageInfo::Assistant(assistant) = &message.info {
+            let total = token_usage_total(&assistant.tokens);
+            if total > 0 {
+                return total;
+            }
+        }
+    }
+    0
 }
 
 fn usable_context_tokens(limit: &ModelLimit) -> u64 {
@@ -1505,17 +1531,22 @@ async fn generate_model_title(
     fallback_title: String,
     activity_segment: Option<crate::execution_activity::ProviderSegmentGuard>,
 ) {
-    let directory =
+    let session =
         if let Ok(Some(info)) = state.inner.store.get_session(&session_id).await {
             if info.title != fallback_title && !is_default_session_title(&info.title) {
                 return;
             }
-            Some(info.directory)
+            Some(info)
         } else {
             None
         };
+    let directory = session.as_ref().map(|info| info.directory.as_str());
+    let tenant_id = session
+        .as_ref()
+        .map(crate::caller::session_tenant)
+        .unwrap_or("local");
     let Ok(provider_runtime) = state
-        .workspace_runtime(directory.as_deref().unwrap_or_default())
+        .workspace_runtime_for_tenant(tenant_id, directory.unwrap_or_default())
         .await
     else {
         return;
@@ -2352,12 +2383,26 @@ fn compaction_trigger_tokens(
 }
 
 fn estimated_request_tokens(request: &ProviderGenerationRequest) -> u64 {
-    // Use the same modality-aware estimate for triggering and tail retention.
+    // Use the same modality-aware estimate for first-request fallback and tail retention.
     // Serializing the entire request counted screenshot base64 as text, causing
     // spurious compactions while the provider reported only ~16k actual tokens.
     estimated_provider_prompt_tokens(&request.messages).saturating_add(estimate_tokens(
         &serde_json::to_string(&request.tools).unwrap_or_default(),
     ))
+}
+
+fn compaction_usage_tokens(
+    request: &ProviderGenerationRequest,
+    history: &[MessageWithParts],
+) -> u64 {
+    let reported = last_known_token_total(history);
+    if reported > 0 {
+        reported
+    } else {
+        // There is no provider accounting on a brand-new session. Preserve the
+        // proactive guard for a first request that is already too large.
+        estimated_request_tokens(request)
+    }
 }
 
 async fn rebuilt_compaction_messages(
@@ -2416,6 +2461,9 @@ async fn run_assistant_step(
         plugin_snapshot,
         &tool_permissions,
         &reply_model.model_id,
+        &crate::caller::session_execution_policy(info),
+        &crate::mcp_auth::McpAuthStore::for_session(state.services(), info)
+            .map_err(|error| ApiError::forbidden(error.to_string()))?,
     )
     .await?;
     let provider_tool_map = provider_tool_map(&provider_tools);
@@ -2455,7 +2503,7 @@ async fn run_assistant_step(
     let mut compacted = false;
     if enabled
         && !summary_covers_all_messages(info, &history)
-        && estimated_request_tokens(&request) >= threshold
+        && compaction_usage_tokens(&request, &history) >= threshold
         && !cancellation.load(Ordering::SeqCst)
     {
         match compact_session_context_for_run(state, session_id_text).await {

@@ -54,10 +54,13 @@ mod version_tests {
 
     #[test]
     fn version_is_reported_without_starting_services() {
-        let version = Cli::try_parse_from(["neoism-workspace-daemon", "--version"])
-            .unwrap_err();
+        let version =
+            Cli::try_parse_from(["neoism-workspace-daemon", "--version"]).unwrap_err();
         assert_eq!(version.kind(), clap::error::ErrorKind::DisplayVersion);
-        assert_eq!(version.to_string().trim(), concat!("neoism-workspace-daemon ", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            version.to_string().trim(),
+            concat!("neoism-workspace-daemon ", env!("CARGO_PKG_VERSION"))
+        );
     }
 }
 

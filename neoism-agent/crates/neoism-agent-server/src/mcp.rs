@@ -74,7 +74,9 @@ pub(crate) async fn catalog_with_state(
     state: Option<&AppState>,
 ) -> anyhow::Result<BTreeMap<String, McpCatalogEntry>> {
     let config = configured_servers(directory, state)?;
-    let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
+    let services = state
+        .map(|state| state.services().clone())
+        .unwrap_or_else(crate::standard_services);
     let sources = crate::config::snapshot(&services, directory).ok();
     let mut catalog = BTreeMap::new();
     for (name, entry) in &config {
@@ -99,7 +101,8 @@ pub(crate) async fn catalog_with_state(
         .is_some_and(|entry| {
             entry.tokens.is_some() || entry.client_registration.is_some()
         });
-        let (config_writable, config_scope) = config_source_metadata(sources.as_ref(), name);
+        let (config_writable, config_scope) =
+            config_source_metadata(sources.as_ref(), name);
         catalog.insert(
             name.clone(),
             McpCatalogEntry {
@@ -171,7 +174,8 @@ pub(crate) async fn catalog_with_snapshot(
         .is_some_and(|entry| {
             entry.tokens.is_some() || entry.client_registration.is_some()
         });
-        let (config_writable, config_scope) = config_source_metadata(sources.as_ref(), name);
+        let (config_writable, config_scope) =
+            config_source_metadata(sources.as_ref(), name);
         catalog.insert(
             name.clone(),
             McpCatalogEntry {
@@ -194,12 +198,17 @@ fn config_source_metadata(
 ) -> (bool, Option<neoism_agent_core::McpConfigScope>) {
     use neoism_agent_core::McpConfigScope;
     use neoism_agent_service_api::ConfigDiscoveryScope;
-    let Some(snapshot) = snapshot else { return (false, None); };
+    let Some(snapshot) = snapshot else {
+        return (false, None);
+    };
     match crate::config::mcp_owner(snapshot, name) {
-        Some(owner) => (owner.writable, Some(match owner.scope {
-            ConfigDiscoveryScope::Installation => McpConfigScope::Global,
-            ConfigDiscoveryScope::Workspace => McpConfigScope::Workspace,
-        })),
+        Some(owner) => (
+            owner.writable,
+            Some(match owner.scope {
+                ConfigDiscoveryScope::Installation => McpConfigScope::Global,
+                ConfigDiscoveryScope::Workspace => McpConfigScope::Workspace,
+            }),
+        ),
         // Unpersisted builtins use the existing workspace-default write policy.
         None => (true, Some(McpConfigScope::Workspace)),
     }
@@ -641,8 +650,18 @@ pub(crate) async fn call_tool_with_snapshot(
     state: AppState,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
 ) -> anyhow::Result<McpToolCallResult> {
-    call_tool_in_session(directory, client, tool, arguments, auth_store, state, snapshot, false,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await
+    call_tool_in_session(
+        directory,
+        client,
+        tool,
+        arguments,
+        auth_store,
+        state,
+        snapshot,
+        false,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .await
 }
 
 pub(crate) async fn call_tool_in_session(
@@ -676,20 +695,55 @@ pub(crate) async fn call_tool_in_session(
         .filter(|_| config.mcp.get(client).is_some_and(is_enabled))
     {
         let result = if client == "computer" && tool == "browser_step" {
-            crate::computer_use::typesafe::call(&state, directory, snapshot, &config,
-                arguments, session_authorized, cancel, revocation_generation).await?
+            crate::computer_use::typesafe::call(
+                &state,
+                directory,
+                snapshot,
+                &config,
+                arguments,
+                session_authorized,
+                cancel,
+                revocation_generation,
+            )
+            .await?
         } else if client == "computer" && tool == "browser_goal" {
-            crate::computer_use::typesafe::call_goal(&state, directory, snapshot, &config,
-                arguments, session_authorized, cancel, revocation_generation).await?
+            crate::computer_use::typesafe::call_goal(
+                &state,
+                directory,
+                snapshot,
+                &config,
+                arguments,
+                session_authorized,
+                cancel,
+                revocation_generation,
+            )
+            .await?
         } else {
-            service.call_tool_authorized_async(std::path::Path::new(directory), tool, arguments, session_authorized, cancel, revocation_generation).await?
+            service
+                .call_tool_authorized_async(
+                    std::path::Path::new(directory),
+                    tool,
+                    arguments,
+                    session_authorized,
+                    cancel,
+                    revocation_generation,
+                )
+                .await?
         };
         return Ok(McpToolCallResult {
             content: result
                 .content
                 .into_iter()
                 .map(|content| match content {
-                    neoism_agent_service_api::BuiltinMcpContent::Image { data, mime_type, annotations } => McpContent::Image { data, mime_type, annotations },
+                    neoism_agent_service_api::BuiltinMcpContent::Image {
+                        data,
+                        mime_type,
+                        annotations,
+                    } => McpContent::Image {
+                        data,
+                        mime_type,
+                        annotations,
+                    },
                     neoism_agent_service_api::BuiltinMcpContent::Text {
                         text,
                         annotations,

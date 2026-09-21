@@ -96,7 +96,10 @@ async fn injected_builtin_registry_is_discoverable_while_absent_services_are_unc
     let catalog = catalog_with_state(root.to_str().unwrap(), &store, Some(&state))
         .await
         .unwrap();
-    assert_eq!(catalog["fake-service"].config_scope, Some(neoism_agent_core::McpConfigScope::Workspace));
+    assert_eq!(
+        catalog["fake-service"].config_scope,
+        Some(neoism_agent_core::McpConfigScope::Workspace)
+    );
     assert!(catalog["fake-service"].config_writable);
     assert!(matches!(
         catalog["fake-service"].status,
@@ -150,7 +153,12 @@ async fn computer_use_picker_activation_needs_no_restart_and_preserves_boundarie
     use neoism_agent_service_api::{BuiltinMcpCallResult, BuiltinMcpContent};
     let _revocation = crate::computer_use::TEST_REVOCATION_LOCK.lock().await;
     let root = temp_dir("computer-use-boundary");
-    let state = crate::state::AppState::open_database_with_services(root.join("state.db"),crate::standard_services()).await.unwrap();
+    let state = crate::state::AppState::open_database_with_services(
+        root.join("state.db"),
+        crate::standard_services(),
+    )
+    .await
+    .unwrap();
     let directory = root.to_str().unwrap();
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
     let inputs = Arc::new(std::sync::atomic::AtomicUsize::new(0));

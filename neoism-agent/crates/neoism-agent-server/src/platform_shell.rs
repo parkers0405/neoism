@@ -206,10 +206,7 @@ mod tests {
         let script = decode_powershell_command(&args[6]);
         assert!(script.contains(command), "{script}");
         assert!(script.contains("$OutputEncoding"));
-        assert_eq!(
-            runtime.command_args(command, true)[5],
-            "-EncodedCommand"
-        );
+        assert_eq!(runtime.command_args(command, true)[5], "-EncodedCommand");
     }
 
     #[test]

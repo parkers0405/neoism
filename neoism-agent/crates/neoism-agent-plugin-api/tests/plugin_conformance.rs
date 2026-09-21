@@ -120,6 +120,10 @@ fn assert_plugin_conforms(plugin: Box<dyn PluginFactory>) {
 
     let tool = &snapshot.runtime_tools["fixture_echo"];
     let result = block_on(tool.execute(PluginToolInvocation {
+        tenant_id: "local".to_string(),
+        subject: None,
+        workspace_id: None,
+        execution_mode: neoism_agent_plugin_api::PluginExecutionMode::NativeLocal,
         directory: "/workspace".to_string(),
         session_id: Some("session-test".to_string()),
         arguments: json!({ "value": "hello" }),

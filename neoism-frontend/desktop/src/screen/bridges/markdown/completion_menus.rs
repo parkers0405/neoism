@@ -116,15 +116,28 @@ impl Screen<'_> {
     }
 
     pub(crate) fn constrain_markdown_completion_menu(&mut self) {
-        if !self.renderer.context_menu.is_markdown_block_completion() { return; }
+        if !self.renderer.context_menu.is_markdown_block_completion() {
+            return;
+        }
         let scale = self.sugarloaf.scale_factor();
-        let Some(item) = self.context_manager.current_grid().current_item() else { return; };
+        let Some(item) = self.context_manager.current_grid().current_item() else {
+            return;
+        };
         let [x, y, w, h] = item.layout_rect.map(|value| value / scale);
-        let Some(pane) = item.val.markdown.as_ref() else { self.renderer.context_menu.close(); return; };
+        let Some(pane) = item.val.markdown.as_ref() else {
+            self.renderer.context_menu.close();
+            return;
+        };
         let [top, bottom] = pane.viewport_vertical_bounds();
         let top = top.max(y);
-        let bottom = if bottom > top { bottom.min(y + h) } else { y + h };
-        self.renderer.context_menu.set_viewport([x, top, w, (bottom - top).max(0.0)]);
+        let bottom = if bottom > top {
+            bottom.min(y + h)
+        } else {
+            y + h
+        };
+        self.renderer
+            .context_menu
+            .set_viewport([x, top, w, (bottom - top).max(0.0)]);
     }
 
     pub(crate) fn refresh_markdown_block_menu(&mut self) -> bool {

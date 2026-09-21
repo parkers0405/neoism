@@ -347,7 +347,8 @@ fn measure_item(
                     .0;
                     inline_visual_row_count(&inline_lines)
                 } else {
-                    let (body_offset, body, _) = line_marker_layout(text, width, &opts);
+                    let (body_offset, body, _) =
+                        line_marker_layout(sugarloaf, text, width, &opts);
                     let body_width = (width - body_offset).max(24.0);
                     let inline_lines =
                         inline_wrapped_lines_dropcap(sugarloaf, body, body_width, &opts)
@@ -2103,9 +2104,10 @@ fn draw_line_marker<'a>(
     // vertically centered against the 17px BODY text they sit beside —
     // centering on the 16px marker size leaves them sitting a touch high.
     let body_font = markdown_font(17.0, font_scale);
-    let (body_offset, body, marker_len) = line_marker_layout(raw, width, &opts);
-    let cell_w = cursor_cell_width(&opts).max(1.0);
-    let (depth, indent_px, _) = list_marker_metrics(&marker, cell_w);
+    let (body_offset, body, marker_len) =
+        line_marker_layout(sugarloaf, raw, width, &opts);
+    let space_w = sugarloaf.text_mut().measure(" ", &opts).max(1.0);
+    let (depth, indent_px, _) = list_marker_metrics(&marker, space_w);
     // Marker sits at the nesting indent; the body (returned below) sits one
     // marker-slot further right. The guides share this indent so the bullets,
     // checkboxes, and the vertical tree lines all align.

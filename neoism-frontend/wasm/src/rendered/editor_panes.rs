@@ -552,14 +552,28 @@ impl ChromeBridge {
     /// deliberately independent of render DPR and visualViewport pinch scale.
     pub fn set_mobile_keyboard_inset(&mut self, bottom: f32) {
         self.chrome.set_bottom_content_inset(bottom);
-        self.chrome.settings_page.set_safe_area_insets(0.0, 0.0, bottom, 0.0);
-        self.chrome.file_browser.set_safe_area(0.0, 0.0, bottom, 0.0);
+        self.chrome
+            .settings_page
+            .set_safe_area_insets(0.0, 0.0, bottom, 0.0);
+        self.chrome
+            .file_browser
+            .set_safe_area(0.0, 0.0, bottom, 0.0);
         self.relayout_chrome();
     }
 
-    pub fn set_overlay_safe_area(&mut self, top: f32, right: f32, bottom: f32, left: f32) {
-        self.chrome.settings_page.set_safe_area_insets(top, right, bottom, left);
-        self.chrome.file_browser.set_safe_area(top, right, bottom, left);
+    pub fn set_overlay_safe_area(
+        &mut self,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        left: f32,
+    ) {
+        self.chrome
+            .settings_page
+            .set_safe_area_insets(top, right, bottom, left);
+        self.chrome
+            .file_browser
+            .set_safe_area(top, right, bottom, left);
         self.chrome.top_bar.set_left_safe_inset(left);
         self.chrome.top_bar.set_right_safe_inset(right);
         self.relayout_chrome();
@@ -1053,17 +1067,31 @@ impl ChromeBridge {
         pane.blame.set_options(delay_ms, hide_on_scroll);
         pane.observe_blame_viewport();
         pane.blame.update(&pane.buffer);
-        if !pane.blame.needs_request(format!("{scope}:{:?}", pane.path)) { return None; }
+        if !pane.blame.needs_request(format!("{scope}:{:?}", pane.path)) {
+            return None;
+        }
         thread_local! { static NEXT: std::cell::Cell<u32> = const { std::cell::Cell::new(1) }; }
-        let id = NEXT.with(|next| { let id = next.get(); next.set(id.checked_add(1).expect("blame request IDs exhausted")); id });
+        let id = NEXT.with(|next| {
+            let id = next.get();
+            next.set(id.checked_add(1).expect("blame request IDs exhausted"));
+            id
+        });
         pane.blame.requested(u64::from(id));
         Some(serde_json::json!({"id":id,"path":pane.path.to_string_lossy()}).to_string())
     }
 
     pub fn code_blame_reply(&mut self, id: u32, json: String) -> bool {
-        let Some(pane) = self.chrome.code_pane_mut() else { return false; };
-        let Ok(reply) = serde_json::from_str::<neoism_protocol::git::GitServerMessage>(&json) else { return false; };
-        if !pane.blame.accept(u64::from(id), &reply) { return false; }
+        let Some(pane) = self.chrome.code_pane_mut() else {
+            return false;
+        };
+        let Ok(reply) =
+            serde_json::from_str::<neoism_protocol::git::GitServerMessage>(&json)
+        else {
+            return false;
+        };
+        if !pane.blame.accept(u64::from(id), &reply) {
+            return false;
+        }
         pane.blame.update(&pane.buffer);
         true
     }

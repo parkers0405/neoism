@@ -643,12 +643,39 @@ impl Route<'_> {
         if self.window.screen.renderer.file_browser.is_active() {
             if key_event.state == ElementState::Pressed {
                 match &key_event.logical_key {
-                    Key::Named(NamedKey::Escape) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::Escape),
-                    Key::Named(NamedKey::Enter) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::Enter),
-                    Key::Named(NamedKey::ArrowUp) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::ArrowUp),
-                    Key::Named(NamedKey::ArrowDown) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::ArrowDown),
-                    Key::Named(NamedKey::Backspace) => self.window.screen.renderer.file_browser.press_named(neoism_ui::event::NamedKey::Backspace),
-                    Key::Character(text) => self.window.screen.renderer.file_browser.input_text(text),
+                    Key::Named(NamedKey::Escape) => self
+                        .window
+                        .screen
+                        .renderer
+                        .file_browser
+                        .press_named(neoism_ui::event::NamedKey::Escape),
+                    Key::Named(NamedKey::Enter) => self
+                        .window
+                        .screen
+                        .renderer
+                        .file_browser
+                        .press_named(neoism_ui::event::NamedKey::Enter),
+                    Key::Named(NamedKey::ArrowUp) => self
+                        .window
+                        .screen
+                        .renderer
+                        .file_browser
+                        .press_named(neoism_ui::event::NamedKey::ArrowUp),
+                    Key::Named(NamedKey::ArrowDown) => self
+                        .window
+                        .screen
+                        .renderer
+                        .file_browser
+                        .press_named(neoism_ui::event::NamedKey::ArrowDown),
+                    Key::Named(NamedKey::Backspace) => self
+                        .window
+                        .screen
+                        .renderer
+                        .file_browser
+                        .press_named(neoism_ui::event::NamedKey::Backspace),
+                    Key::Character(text) => {
+                        self.window.screen.renderer.file_browser.input_text(text)
+                    }
                     _ => {}
                 }
                 self.window.screen.pump_agent_image_browser();
@@ -1077,32 +1104,53 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::ArrowLeft) => {
-                        self.window.screen.renderer.command_palette.move_query_cursor_left();
+                        self.window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .move_query_cursor_left();
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::ArrowRight) => {
-                        self.window.screen.renderer.command_palette.move_query_cursor_right();
+                        self.window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .move_query_cursor_right();
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::Home) => {
-                        self.window.screen.renderer.command_palette.set_query_cursor(0);
+                        self.window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .set_query_cursor(0);
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::End) => {
                         let end = self.window.screen.renderer.command_palette.query.len();
-                        self.window.screen.renderer.command_palette.set_query_cursor(end);
+                        self.window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .set_query_cursor(end);
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::Tab) => {
                         if self.window.screen.renderer.command_palette.is_cd_query() {
-                            let reverse = self.window.screen.modifiers.state().shift_key();
+                            let reverse =
+                                self.window.screen.modifiers.state().shift_key();
                             let completed = if reverse {
                                 false
                             } else {
                                 self.window.screen.renderer.command_palette.tab_complete()
                             };
                             if reverse || !completed {
-                                self.window.screen.renderer.command_palette.cycle_cd_selection(reverse);
+                                self.window
+                                    .screen
+                                    .renderer
+                                    .command_palette
+                                    .cycle_cd_selection(reverse);
                             }
                             if completed {
                                 self.window.screen.refresh_cd_palette_results();
@@ -1607,8 +1655,15 @@ impl Route<'_> {
                     }
                     Key::Named(NamedKey::Backspace) => {
                         tracing::trace!(target: "neoism::input", "command palette handling Backspace");
-                        if self.window.screen.renderer.command_palette.backspace_query() {
-                            let new_query = self.window.screen.renderer.command_palette.query.clone();
+                        if self
+                            .window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .backspace_query()
+                        {
+                            let new_query =
+                                self.window.screen.renderer.command_palette.query.clone();
                             let was_search = self
                                 .window
                                 .screen
@@ -1643,8 +1698,18 @@ impl Route<'_> {
                                     .renderer
                                     .command_palette
                                     .is_search_mode();
-                                self.window.screen.renderer.command_palette.insert_query_text(text_str);
-                                let new_query = self.window.screen.renderer.command_palette.query.clone();
+                                self.window
+                                    .screen
+                                    .renderer
+                                    .command_palette
+                                    .insert_query_text(text_str);
+                                let new_query = self
+                                    .window
+                                    .screen
+                                    .renderer
+                                    .command_palette
+                                    .query
+                                    .clone();
                                 self.window.screen.refresh_cd_palette_results();
                                 if was_search {
                                     self.dispatch_palette_search_query(&new_query);

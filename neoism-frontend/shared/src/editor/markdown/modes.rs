@@ -34,12 +34,18 @@ impl MarkdownPane {
         };
         let cursor = floor_char_boundary(line, self.cursor_col.min(line.len()));
         if let Some(table) = self.table_cursor() {
-            if let Some(cell) = parse_table_cell_bounds(line).and_then(|cells| cells.get(table.cell_ix).copied()) {
+            if let Some(cell) = parse_table_cell_bounds(line)
+                .and_then(|cells| cells.get(table.cell_ix).copied())
+            {
                 let source = &line[cell.content_start..cell.content_end];
                 let map = InlineSourceMap::for_table(source);
-                let visible = map.visible_for_source(cursor.clamp(cell.content_start, cell.content_end) - cell.content_start);
+                let visible = map.visible_for_source(
+                    cursor.clamp(cell.content_start, cell.content_end)
+                        - cell.content_start,
+                );
                 let target = (visible + usize::from(append)).min(map.visible_len());
-                return cell.content_start + map.source_for_visible(target).min(source.len());
+                return cell.content_start
+                    + map.source_for_visible(target).min(source.len());
             }
         }
         if self.mode == MarkdownMode::Insert

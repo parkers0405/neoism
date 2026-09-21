@@ -71,18 +71,41 @@ fn local_origin(url: &reqwest::Url) -> bool {
     matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
 }
 
-async fn launch_url(client: &reqwest::Client, url: &reqwest::Url) -> anyhow::Result<reqwest::Url> {
-    if !local_origin(url) { return Ok(url.clone()); }
-    let response = client.post(url.join("__neoism/gui/launch")?).header("x-neoism-launcher", "1").send().await?;
-    if matches!(response.status(), reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED) {
+async fn launch_url(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+) -> anyhow::Result<reqwest::Url> {
+    if !local_origin(url) {
+        return Ok(url.clone());
+    }
+    let response = client
+        .post(url.join("__neoism/gui/launch")?)
+        .header("x-neoism-launcher", "1")
+        .send()
+        .await?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+    ) {
         // Old/agent-only deployments remain usable; do not invent registry sync.
         return Ok(url.clone());
     }
-    anyhow::ensure!(response.status().is_success(), "local GUI launch was not authorized ({})", response.status());
+    anyhow::ensure!(
+        response.status().is_success(),
+        "local GUI launch was not authorized ({})",
+        response.status()
+    );
     let value: serde_json::Value = response.json().await?;
-    let path = value["path"].as_str().context("invalid local GUI launch response")?;
-    let ticket = path.strip_prefix("/__neoism/gui/launch/").context("invalid local GUI launch path")?;
-    anyhow::ensure!(ticket.len() == 64 && ticket.bytes().all(|b| b.is_ascii_hexdigit()), "invalid local GUI launch ticket");
+    let path = value["path"]
+        .as_str()
+        .context("invalid local GUI launch response")?;
+    let ticket = path
+        .strip_prefix("/__neoism/gui/launch/")
+        .context("invalid local GUI launch path")?;
+    anyhow::ensure!(
+        ticket.len() == 64 && ticket.bytes().all(|b| b.is_ascii_hexdigit()),
+        "invalid local GUI launch ticket"
+    );
     Ok(url.join(path)?)
 }
 
@@ -137,7 +160,12 @@ pub(crate) async fn run(
     // Never send a local credential to an arbitrary --server target.
     if local_origin(&url) {
         if let Ok(token) = std::env::var("NEOISM_AGENT_TOKEN") {
-            headers.insert(reqwest::header::AUTHORIZATION, format!("Bearer {token}").parse().context("invalid local Agent credential")?);
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {token}")
+                    .parse()
+                    .context("invalid local Agent credential")?,
+            );
         }
     }
     let client = reqwest::Client::builder()

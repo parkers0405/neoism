@@ -103,21 +103,22 @@ impl ChromeBridge {
                             .as_ref()
                             .map(|(_, (_, root, _))| PathBuf::from(root))
                             .unwrap_or_else(|| self.workspace_root.clone());
-                        let absolute = super::palettes_finder::join_workspace_path(&base, &hit.path);
+                        let absolute =
+                            super::palettes_finder::join_workspace_path(&base, &hit.path);
                         neoism_ui::panels::command_palette::PaletteDirectoryEntry {
                             absolute_path: absolute.to_string_lossy().into_owned(),
                             display: Some(hit.path),
-                            detail: Some(
-                                base.to_string_lossy().into_owned(),
-                            ),
+                            detail: Some(base.to_string_lossy().into_owned()),
                         }
                     })
                     .collect();
-                self.chrome.command_palette.compose_workspace_directory_choices(
-                    None,
-                    Some(self.workspace_root.to_string_lossy().into_owned()),
-                    rows,
-                );
+                self.chrome
+                    .command_palette
+                    .compose_workspace_directory_choices(
+                        None,
+                        Some(self.workspace_root.to_string_lossy().into_owned()),
+                        rows,
+                    );
             }
             self.cd_search_pending = None;
         }

@@ -27,3 +27,5 @@ neoism mcp logout supabase
 The runtime remains embeddable through `neoism-agent-server`; provider and MCP
 setup stay on the small `neoism auth` command surface, while `neoism-agent` stays
 limited to hosting the server.
+
+For a shared multi-tenant deployment, use the strict host wiring and identity/execution mapping in [Hosted control plane embedding](docs/hosted-control-plane.md). The stock launcher remains local-native; hosted products embed the server with their own tenant resolver, sandbox provider, shared artifact store, and scoped credential stores.

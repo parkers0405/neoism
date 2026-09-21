@@ -57,7 +57,10 @@ fn explicitly_local_vault_while_joined_loads_and_saves_locally() {
     assert_eq!(FileOpenSource::notes(false, false), FileOpenSource::Local);
     sidebar.set_remote_workspace("host", Some(temp.path().into()));
     assert!(sidebar.is_remote_workspace());
-    assert!(!sidebar.contains_path(&note_path), "a source switch must not display guest entries as host entries");
+    assert!(
+        !sidebar.contains_path(&note_path),
+        "a source switch must not display guest entries as host entries"
+    );
 }
 
 #[test]

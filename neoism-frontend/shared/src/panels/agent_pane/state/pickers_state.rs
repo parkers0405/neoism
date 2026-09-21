@@ -831,15 +831,26 @@ mod mcp_tests {
                     "status":{"status":"disabled"}, "enabled":false,
                     "configScope":scope, "configWritable":writable
                 }}));
-                let label = if scope == "global" { "Global" } else { "Workspace" };
-                assert!(rows[0].description.contains(label), "{}", rows[0].description);
+                let label = if scope == "global" {
+                    "Global"
+                } else {
+                    "Workspace"
+                };
+                assert!(
+                    rows[0].description.contains(label),
+                    "{}",
+                    rows[0].description
+                );
                 assert_eq!(rows[0].description.contains("read-only"), !writable);
                 let mut entry: Value = serde_json::from_str(&rows[0].value).unwrap();
                 for (enabled, title) in [(false, "Enable"), (true, "Disable")] {
                     entry["enabled"] = json!(enabled);
                     let actions = mcp_action_options(&entry);
                     if writable {
-                        assert!(actions.iter().any(|row| row.title == title && row.description.contains(label)));
+                        assert!(actions
+                            .iter()
+                            .any(|row| row.title == title
+                                && row.description.contains(label)));
                     } else {
                         assert!(!actions.iter().any(|row| row.title == title));
                     }

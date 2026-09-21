@@ -68,8 +68,10 @@ impl DesktopNotesConfig {
                                 "mcp__notes__search": "allow",
                                 "mcp__notes__read": "allow",
                                 "mcp__notes__tasks": "allow",
+                                "mcp__notes__vaults": "allow",
                                 "mcp__notes__create": "deny",
                                 "mcp__notes__write": "deny",
+                                 "mcp__notes__link": "deny",
                                  "mcp__notes__taskToggle": "deny",
                                  "mcp__notes__notebookList": "allow",
                                  "mcp__notes__notebookRead": "allow",
@@ -223,6 +225,16 @@ fn tool_definitions() -> Vec<Value> {
             "Set or toggle a Markdown task by path and one-based line",
             json!({"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer","minimum":1},"checked":{"type":"boolean"}},"required":["path","line"]}),
         ),
+        tool(
+            "vaults",
+            "List registered Neoism Notes vaults (name, id, path). Use this before link instead of reading project.json or .neoism/workspace.json.",
+            json!({"type":"object","properties":{}}),
+        ),
+        tool(
+            "link",
+            "Link this code project to a registered Notes vault by name so Alt+N and notes tools use that vault. Optional notes_path is a folder inside the vault (default: vault root). Optional path is a code directory (default: current workspace). Do not edit project.json or workspace.json by hand.",
+            json!({"type":"object","properties":{"vault":{"type":"string","description":"Registered vault name"},"notes_path":{"type":"string","description":"Relative folder inside the vault"},"path":{"type":"string","description":"Code project directory to link; defaults to the current workspace"}},"required":["vault"]}),
+        ),
     ];
     tools.extend(notebooks::tools());
     tools
@@ -233,9 +245,15 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 }
 
 fn call_tool(name: &str, arguments: Value) -> Result<String, String> {
-    let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
-    let notes = Notes::for_workspace(&workspace)?;
-    call_notes_tool(&notes, name, arguments)
+    match name {
+        "vaults" => list_vaults(),
+        "link" => link_vault(arguments),
+        _ => {
+            let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+            let notes = Notes::for_workspace(&workspace)?;
+            call_notes_tool(&notes, name, arguments)
+        }
+    }
 }
 
 fn call_notes_tool(
@@ -249,8 +267,13 @@ fn call_notes_tool(
         .unwrap_or(100)
         .max(1) as usize;
     match name {
-        "notebookList" | "notebookRead" | "notebookAddPage"
-        | "notebookMovePage" => notebooks::call(notes, name, arguments),
+        "notebookList"
+        | "notebookRead"
+        | "notebookCreate"
+        | "notebookAddPage"
+        | "notebookMovePage" => {
+            notebooks::call(notes, name, arguments)
+        }
         "list" => Ok(notes.files(limit)?.join("\n")),
         "search" => {
             let query = required_string(&arguments, "query")?.to_lowercase();
@@ -403,6 +426,109 @@ impl Notes {
     }
 }
 
+fn list_vaults() -> Result<String, String> {
+    let default_id = neoism_workspace_index::default_notes_vault()
+        .ok()
+        .map(|vault| vault.id);
+    let vaults = neoism_workspace_index::existing_notes_vaults()
+        .map_err(|error| error.to_string())?;
+    let payload = vaults
+        .into_iter()
+        .map(|vault| {
+            json!({
+                "name": vault.name,
+                "id": vault.id,
+                "path": vault.path.to_string_lossy(),
+                "default": default_id.as_ref() == Some(&vault.id),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())
+}
+
+fn link_vault(arguments: Value) -> Result<String, String> {
+    let vault_name = required_string(&arguments, "vault")?;
+    let code_root = match arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .map_err(|error| error.to_string())?
+                    .join(path)
+            }
+        }
+        None => std::env::current_dir().map_err(|error| error.to_string())?,
+    };
+    if !code_root.is_dir() {
+        return Err(format!(
+            "code path is not a directory: {}",
+            code_root.display()
+        ));
+    }
+    let vault = neoism_workspace_index::notes_vault_by_name(&vault_name)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no registered vault named `{vault_name}`"))?;
+    let mut workspace = match neoism_workspace_index::load_workspace(&code_root)
+        .map_err(|error| error.to_string())?
+    {
+        Some(workspace) => workspace,
+        None => neoism_workspace_index::init_workspace(&code_root)
+            .map_err(|error| error.to_string())?,
+    };
+    workspace.config.notes.workspace = vault.name.clone();
+    workspace.config.notes.vault_id = Some(vault.id.clone());
+    let notes_path = arguments
+        .get("notes_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let notes_dir = match notes_path {
+        None | Some(".") => None,
+        Some(relative) => {
+            let relative_path = Path::new(relative);
+            if relative_path.is_absolute()
+                || relative_path.components().any(|component| {
+                    matches!(
+                        component,
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                    )
+                })
+            {
+                return Err(
+                    "notes_path must be a relative folder inside the vault".into()
+                );
+            }
+            Some(vault.path.join(relative_path))
+        }
+    };
+    let linked = match notes_dir {
+        Some(dir) => neoism_workspace_index::link_code_dir_to_notes_scope(
+            &mut workspace,
+            &code_root,
+            dir,
+        ),
+        None => neoism_workspace_index::link_code_dir_to_workspace_vault(
+            &mut workspace,
+            &code_root,
+        ),
+    }
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&json!({
+        "vault": vault.name,
+        "vault_id": vault.id,
+        "notes_dir": linked.to_string_lossy(),
+        "path": code_root.to_string_lossy(),
+    }))
+    .map_err(|error| error.to_string())
+}
+
 fn collect_markdown_files(
     root: &Path,
     directory: &Path,
@@ -484,7 +610,10 @@ mod tests {
     fn note_writers_request_logical_paragraphs_without_source_reflow() {
         let tools = super::tool_definitions();
         for name in ["create", "write"] {
-            let description = tools.iter().find(|tool| tool["name"] == name).unwrap()["description"].as_str().unwrap();
+            let description = tools.iter().find(|tool| tool["name"] == name).unwrap()
+                ["description"]
+                .as_str()
+                .unwrap();
             assert!(description.contains("one source line"));
             assert!(description.contains("stored verbatim"));
             assert!(description.contains("intentional breaks"));
@@ -508,8 +637,11 @@ mod tests {
                 "write",
                 "tasks",
                 "taskToggle",
+                "vaults",
+                "link",
                 "notebookList",
                 "notebookRead",
+                "notebookCreate",
                 "notebookAddPage",
                 "notebookMovePage"
             ]
@@ -642,11 +774,47 @@ mod tests {
         assert_eq!(layer.document["mcp"]["notes"]["type"], "local");
         assert_eq!(layer.document["mcp"]["notes"]["command"][1], INTERNAL_ARG);
         let permissions = &layer.document["agent"]["plan"]["permission"]["mcp"];
-        for tool in ["notebookList", "notebookRead"] {
+        for tool in ["notebookList", "notebookRead", "vaults"] {
             assert_eq!(permissions[format!("mcp__notes__{tool}")], "allow");
         }
-        for tool in ["notebookCreate", "notebookAddPage", "notebookMovePage"] {
+        for tool in [
+            "notebookCreate",
+            "notebookAddPage",
+            "notebookMovePage",
+            "link",
+        ] {
             assert_eq!(permissions[format!("mcp__notes__{tool}")], "deny");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn link_binds_a_code_dir_to_a_named_vault() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let root = std::env::temp_dir()
+            .join(format!("neoism-notes-mcp-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let notes_home = root.join("vaults");
+        let code = root.join("project");
+        let vault_dir = notes_home.join("Docs");
+        std::fs::create_dir_all(&code).unwrap();
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let previous = std::env::var_os("NEOISM_NOTES_HOME");
+        unsafe { std::env::set_var("NEOISM_NOTES_HOME", &notes_home) };
+        neoism_workspace_index::register_notes_vault("Docs", &vault_dir).unwrap();
+        let listed = list_vaults().unwrap();
+        assert!(listed.contains("Docs"));
+        let linked =
+            link_vault(json!({"vault":"Docs","path": code.to_string_lossy()})).unwrap();
+        assert!(linked.contains("Docs"));
+        let resolved = neoism_workspace_index::linked_project_for_code_dir(&code)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.notes_workspace_dir(), vault_dir);
+        match previous {
+            Some(value) => unsafe { std::env::set_var("NEOISM_NOTES_HOME", value) },
+            None => unsafe { std::env::remove_var("NEOISM_NOTES_HOME") },
         }
         let _ = std::fs::remove_dir_all(root);
     }

@@ -1,22 +1,21 @@
 //! Explicit, replace-only clipboard publication. Never reads the old selection,
 //! restores it, invokes an IME, or silently falls back from keyboard input.
 //! A successful ACK means publication was dispatched, not that an app pasted it.
-use anyhow::{Context, ensure};
+use anyhow::{ensure, Context};
 use std::{
     ffi::OsString,
     fs::File,
     io::{self, Write},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{
-        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU8, Ordering},
-        mpsc,
+        mpsc, Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
 use wayland_client::{
-    Connection, Dispatch, EventQueue, QueueHandle,
     protocol::{wl_callback, wl_registry, wl_seat},
+    Connection, Dispatch, EventQueue, QueueHandle,
 };
 use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_device_v1 as device, zwlr_data_control_manager_v1 as manager,

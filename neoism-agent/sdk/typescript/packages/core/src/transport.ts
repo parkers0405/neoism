@@ -13,6 +13,7 @@ export interface RequestDescriptor {
 export interface EventOptions {
   since?: number;
   tail?: boolean;
+  limit?: number;
   sessionId?: string;
   signal?: AbortSignal;
 }

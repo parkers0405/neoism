@@ -350,7 +350,9 @@ impl Screen<'_> {
         request_id: u64,
         message: &Reply,
     ) -> bool {
-        if self.apply_code_blame_reply(request_id, message) { return true; }
+        if self.apply_code_blame_reply(request_id, message) {
+            return true;
+        }
         self.sync_host_git();
         if self.host_git.scope.is_none() {
             return false;

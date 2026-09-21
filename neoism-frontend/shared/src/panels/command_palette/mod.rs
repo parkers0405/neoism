@@ -41,11 +41,11 @@ pub mod update;
 mod tests;
 
 pub use actions::{
-    mashup_packs_modal_spec, parse_cd_operand, shaders_modal_spec, theme_picker_modal_spec,
-    ChangeWorkspaceDirectoryIntent, HostKind, PaletteAction, PaletteBufferEntry,
-    PaletteBufferTarget, PaletteDirectoryEntry, PaletteHostCapabilities,
-    PaletteHostEntry, PaletteMashupEntry, PaletteServerEntry, PaletteShaderEntry,
-    PaletteSurface, PaletteWorkspaceEntry, PaletteWorkspaceTarget,
+    mashup_packs_modal_spec, parse_cd_operand, shaders_modal_spec,
+    theme_picker_modal_spec, ChangeWorkspaceDirectoryIntent, HostKind, PaletteAction,
+    PaletteBufferEntry, PaletteBufferTarget, PaletteDirectoryEntry,
+    PaletteHostCapabilities, PaletteHostEntry, PaletteMashupEntry, PaletteServerEntry,
+    PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry, PaletteWorkspaceTarget,
     WorkspaceDirectoryTarget, WorkspaceHostKind, WorkspaceVisibility,
     WORKSPACE_ROOT_DETAIL_PREFIX,
 };

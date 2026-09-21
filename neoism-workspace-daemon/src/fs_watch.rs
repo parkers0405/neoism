@@ -97,6 +97,34 @@ fn is_ignored_watch_path(root: &Path, path: &Path) -> bool {
     })
 }
 
+/// True when a watched path is the notes-link config (`.neoism/workspace.json`
+/// or the `.neoism` directory itself). A vault link written here must re-point
+/// joined guests; ordinary source edits under the same root must not.
+pub(crate) fn is_notes_link_config_path(root: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let mut components = rel.components();
+    let Some(std::path::Component::Normal(first)) = components.next() else {
+        return false;
+    };
+    if first != ".neoism" {
+        return false;
+    }
+    match components.next() {
+        None => true,
+        Some(std::path::Component::Normal(name)) => {
+            components.next().is_none()
+                && (name == "workspace.json" || name == "workspace.toml")
+        }
+        _ => false,
+    }
+}
+
+fn notes_link_tx() -> &'static Mutex<Option<std::sync::mpsc::Sender<PathBuf>>> {
+    static TX: OnceLock<Mutex<Option<std::sync::mpsc::Sender<PathBuf>>>> =
+        OnceLock::new();
+    TX.get_or_init(|| Mutex::new(None))
+}
+
 /// Only mutations can change a remote client's tree or visible file state.
 /// Directory listings themselves produce read/open/close events on Linux;
 /// forwarding those makes a guest re-list the directory, which produces the
@@ -163,6 +191,16 @@ pub fn hub() -> &'static FsWatchHub {
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                             for (root, paths) in pending.drain() {
+                                if paths
+                                    .iter()
+                                    .any(|path| is_notes_link_config_path(&root, path))
+                                {
+                                    if let Ok(slot) = notes_link_tx().lock() {
+                                        if let Some(tx) = slot.as_ref() {
+                                            let _ = tx.send(root.clone());
+                                        }
+                                    }
+                                }
                                 let _ = broadcast_tx.send(FsChanged {
                                     root: root.to_string_lossy().into_owned(),
                                     paths: paths
@@ -195,6 +233,12 @@ pub fn hub() -> &'static FsWatchHub {
 impl FsWatchHub {
     pub fn subscribe(&self) -> broadcast::Receiver<FsChanged> {
         self.tx.subscribe()
+    }
+
+    pub fn set_notes_link_listener(&self, tx: std::sync::mpsc::Sender<PathBuf>) {
+        if let Ok(mut slot) = notes_link_tx().lock() {
+            *slot = Some(tx);
+        }
     }
 
     /// Idempotently watch `root` itself. This compatibility entry point is
@@ -278,7 +322,10 @@ impl FsWatchHub {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ignored_watch_path, is_relevant_watch_event_kind, Path};
+    use super::{
+        is_ignored_watch_path, is_notes_link_config_path, is_relevant_watch_event_kind,
+        Path,
+    };
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind,
         RemoveKind, RenameMode,
@@ -363,5 +410,24 @@ mod tests {
         let root = Path::new("/srv/build/my-repo");
         let p = root.join("src/lib.rs");
         assert!(!is_ignored_watch_path(root, &p));
+    }
+
+    #[test]
+    fn notes_link_watch_matches_workspace_json_not_source_files() {
+        let root = Path::new("/projects/neoism");
+        assert!(is_notes_link_config_path(
+            root,
+            &root.join(".neoism/workspace.json")
+        ));
+        assert!(is_notes_link_config_path(
+            root,
+            &root.join(".neoism/workspace.toml")
+        ));
+        assert!(is_notes_link_config_path(root, &root.join(".neoism")));
+        assert!(!is_notes_link_config_path(root, &root.join("src/lib.rs")));
+        assert!(!is_notes_link_config_path(
+            root,
+            &root.join(".neoism/memory/note.md")
+        ));
     }
 }

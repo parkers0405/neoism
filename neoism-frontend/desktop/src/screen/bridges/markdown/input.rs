@@ -94,9 +94,18 @@ impl Screen<'_> {
             .current()
             .active_markdown()
             .is_some_and(|markdown| {
-                markdown.link_at(x, y).is_some() || markdown.table_column_menu_at(x, y).is_some() || markdown.documentation_notebook.as_ref().is_some_and(|binding| {
-                    binding.session.lock().ok().is_some_and(|book| book.action_at(x, y).is_some())
-                })
+                markdown.link_at(x, y).is_some()
+                    || markdown.table_column_menu_at(x, y).is_some()
+                    || markdown
+                        .documentation_notebook
+                        .as_ref()
+                        .is_some_and(|binding| {
+                            binding
+                                .session
+                                .lock()
+                                .ok()
+                                .is_some_and(|book| book.action_at(x, y).is_some())
+                        })
             })
     }
 
@@ -223,7 +232,9 @@ impl Screen<'_> {
             }
             return true;
         }
-        if self.handle_documentation_notebook_click(x, y) { return true; }
+        if self.handle_documentation_notebook_click(x, y) {
+            return true;
+        }
         // Wave 7G: roster dots draw above everything in the pane's
         // top-right corner, so they win the hit-test. A hit queues a
         // centered reveal of that collaborator's cursor line.
@@ -258,10 +269,23 @@ impl Screen<'_> {
             self.open_markdown_block_menu(Some(rect));
             return true;
         }
-        if let Some((start, column, count)) = self.context_manager.current().active_markdown().and_then(|pane| pane.table_column_menu_at(x, y)) {
+        if let Some((start, column, count)) = self
+            .context_manager
+            .current()
+            .active_markdown()
+            .and_then(|pane| pane.table_column_menu_at(x, y))
+        {
             let size = self.sugarloaf.window_size();
             let height = self.context_menu_logical_height();
-            self.renderer.context_menu.open_table_column(start, column, count, x, y, size.width as f32 / self.sugarloaf.scale_factor(), height);
+            self.renderer.context_menu.open_table_column(
+                start,
+                column,
+                count,
+                x,
+                y,
+                size.width as f32 / self.sugarloaf.scale_factor(),
+                height,
+            );
             self.mark_dirty();
             return true;
         }

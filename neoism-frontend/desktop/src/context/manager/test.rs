@@ -3,6 +3,7 @@ use crate::daemon_client::{
     DaemonClient, DaemonClientOptions, DaemonEndpoint, ReconnectBackoff,
 };
 use crate::event::VoidListener;
+use neoism_backend::config::layout::Margin;
 use neoism_protocol::workspace::{
     PaneFocusDir, PaneLayoutOp, PaneLayoutSnapshotNode, WorkspaceServerMessage,
 };
@@ -183,7 +184,8 @@ fn wrong_endpoint_unknown_session_cannot_close_joined_terminal() {
     use crate::daemon_client::PtyFailureClass;
 
     let mut manager =
-        ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0)).unwrap();
+        ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
+            .unwrap();
     let runtime = attach_unconnected_daemon(&mut manager);
     let (handle, _) = manager
         .daemon
@@ -234,7 +236,12 @@ fn wrong_endpoint_unknown_session_cannot_close_joined_terminal() {
     ));
     assert!(manager.daemon.cache.remote_routes.contains_key(&route_id));
     assert_eq!(
-        manager.daemon.cache.route_sessions.get(&route_id).map(String::as_str),
+        manager
+            .daemon
+            .cache
+            .route_sessions
+            .get(&route_id)
+            .map(String::as_str),
         Some("peer-session")
     );
     assert!(pty.exit_code().is_none());
@@ -860,12 +867,7 @@ fn transport_loss_gates_input_without_killing_session_identity() {
         shared: prepared.shared,
     };
     let route = 42;
-    remote_pty::bind_session(
-        &binding,
-        "live-shell",
-        handle,
-        runtime.handle().clone(),
-    );
+    remote_pty::bind_session(&binding, "live-shell", handle, runtime.handle().clone());
     manager
         .daemon
         .cache
@@ -902,22 +904,225 @@ fn transport_loss_gates_input_without_killing_session_identity() {
     assert!(!binding.shared.lock().unwrap().failed);
     assert!(manager.resync_after_daemon_reconnect(3));
     assert!(!manager.resync_after_daemon_reconnect(3));
+    assert!(
+        manager.apply_pty_server_message(
+            manager
+                .daemon
+                .cache
+                .pending_pty_attaches
+                .keys()
+                .copied()
+                .next()
+                .unwrap_or(0),
+            neoism_protocol::pty::ServerMessage::PtyCreated {
+                session_id: "live-shell".into(),
+                shell: None,
+                workspace_root: None
+            }
+        ) || manager.daemon.cache.pending_pty_attaches.is_empty()
+    );
+    pty.close();
+}
+
+#[test]
+fn parked_connection_reactivation_replaces_stale_pty_generation() {
+    use crate::context::remote_pty;
+    let mut manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
+            .unwrap();
+    let runtime = attach_unconnected_daemon(&mut manager);
+    let (handle, _) = manager
+        .daemon
+        .link
+        .as_ref()
+        .unwrap()
+        .handle_and_runtime()
+        .unwrap();
+    let prepared = remote_pty::prepare(handle.clone(), runtime.handle().clone());
+    let (_pty, feed) = neoism_terminal_pty::PtySession::remote(prepared.sink);
+    let binding = remote_pty::RemotePtyBinding {
+        feed,
+        shared: prepared.shared,
+    };
+    remote_pty::bind_session_for_generation(
+        &binding,
+        "joined-shell",
+        handle.clone(),
+        runtime.handle().clone(),
+        Some(99),
+    );
+    let route = 43;
+    manager
+        .daemon
+        .cache
+        .remote_routes
+        .insert(route, binding.clone());
+    manager
+        .daemon
+        .cache
+        .route_sessions
+        .insert(route, "joined-shell".into());
+    manager
+        .daemon
+        .cache
+        .session_routes
+        .insert("joined-shell".into(), route);
+
+    manager.rehydrate_remote_routes_for_attached_daemon();
+
+    let current_generation = handle.generation();
+    let shared = binding.shared.lock().unwrap();
+    assert_eq!(shared.awaiting_attach.as_deref(), Some("joined-shell"));
+    assert_eq!(shared.attach_generation, Some(current_generation));
+    drop(shared);
+    let request_id = manager
+        .daemon
+        .cache
+        .pending_pty_attaches
+        .iter()
+        .find_map(|(request_id, (pending_route, _))| {
+            (*pending_route == route).then_some(*request_id)
+        })
+        .expect("reactivation must request an explicit PTY attach");
     assert!(manager.apply_pty_server_message(
+        request_id,
+        neoism_protocol::pty::ServerMessage::PtyCreated {
+            session_id: "joined-shell".into(),
+            shell: None,
+            workspace_root: None,
+        }
+    ));
+    let shared = binding.shared.lock().unwrap();
+    assert_eq!(shared.session_id.as_deref(), Some("joined-shell"));
+    assert!(shared.awaiting_attach.is_none());
+}
+
+#[test]
+fn joined_terminal_created_during_home_attach_is_spawned_after_peer_reattach() {
+    let window_id: WindowId = WindowId::from(0);
+    let mut manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+    let runtime = attach_unconnected_daemon(&mut manager);
+    let stable = manager
+        .current_grid()
+        .workspace_route_id()
+        .expect("test grid has a stable root");
+    manager.adopted_workspaces.insert(
+        stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: "joined".into(),
+            endpoint: "ws://peer.example:9877/session".into(),
+            credential: None,
+            is_peer: true,
+        },
+    );
+
+    let prepared = manager
+        .prepared_remote_pty()
+        .expect("joined create must keep a remote placeholder while HOME is attached");
+    let cursor = manager.current().cursor_from_ref();
+    let config = manager.config.clone();
+    let context = ContextManager::create_context(
+        (&cursor, false),
+        VoidListener {},
+        window_id,
+        0,
+        manager.current().dimension,
+        &config,
+        Some(prepared),
+    )
+    .unwrap();
+    let route_id = context.route_id;
+    let binding = context
+        .remote_pty
+        .as_ref()
+        .expect("joined context keeps its remote PTY binding")
+        .clone();
+    manager.register_remote_context_with_cwd(&context, Some("/host".into()));
+    assert!(manager
+        .pending_joined_terminal_routes
+        .iter()
+        .any(|(route, _, endpoint)| *route == route_id
+            && endpoint == "ws://peer.example:9877/session"));
+    assert!(!manager
+        .daemon
+        .cache
+        .pending_pty_routes
+        .values()
+        .any(|pending| *pending == route_id));
+
+    let peer_endpoint = "ws://peer.example:9877/session".to_string();
+    let (handle, daemon_runtime) = manager
+        .daemon
+        .link
+        .as_ref()
+        .and_then(|link| link.handle_and_runtime())
+        .expect("HOME link has a transport");
+    manager.contexts[0] = ContextGrid::new(
+        context,
+        Margin::default(),
+        manager.config.split_color,
+        manager.config.split_active_color,
+        manager.config.panel,
+    );
+    manager.adopted_workspaces.remove(&stable);
+    manager.adopted_workspaces.insert(
+        route_id,
+        AdoptedWorkspaceBinding {
+            workspace_id: "joined".into(),
+            endpoint: peer_endpoint.clone(),
+            credential: None,
+            is_peer: true,
+        },
+    );
+
+    // The real server-switch path resets all connection-scoped daemon state
+    // before attaching the parked peer. The deferred create must survive it.
+    manager.detach_daemon_client();
+    assert!(manager
+        .pending_joined_terminal_routes
+        .iter()
+        .any(|(route, _, _)| *route == route_id));
+    manager.attach_daemon_client_with_runtime(
+        handle,
+        daemon_runtime,
+        peer_endpoint,
+        None,
+        false,
+    );
+
+    assert!(!manager
+        .pending_joined_terminal_routes
+        .iter()
+        .any(|(route, _, _)| *route == route_id));
+    let request_id = manager
+        .daemon
+        .cache
+        .pending_pty_routes
+        .iter()
+        .find_map(|(request_id, pending)| (*pending == route_id).then_some(*request_id))
+        .expect("peer attach must send a correlated CreatePty");
+    assert!(manager.apply_pty_server_message(
+        request_id,
+        neoism_protocol::pty::ServerMessage::PtyCreated {
+            session_id: "new-joined-shell".into(),
+            shell: None,
+            workspace_root: None,
+        }
+    ));
+    assert_eq!(
         manager
             .daemon
             .cache
-            .pending_pty_attaches
-            .keys()
-            .copied()
-            .next()
-            .unwrap_or(0),
-        neoism_protocol::pty::ServerMessage::PtyCreated {
-            session_id: "live-shell".into(),
-            shell: None,
-            workspace_root: None
-        }
-    ) || manager.daemon.cache.pending_pty_attaches.is_empty());
-    pty.close();
+            .route_sessions
+            .get(&route_id)
+            .map(String::as_str),
+        Some("new-joined-shell")
+    );
+    let shared = binding.shared.lock().unwrap();
+    assert_eq!(shared.session_id.as_deref(), Some("new-joined-shell"));
+    assert!(shared.awaiting_attach.is_none());
+    drop(runtime);
 }
 
 #[test]

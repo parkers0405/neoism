@@ -670,7 +670,12 @@ impl FileTree {
                 draw_icon_centered_with_occlusion(
                     sugarloaf,
                     cursor_x,
-                    [cursor_x, row_y, (indent_px - 4.0 * self.scale).max(1.0), row_h],
+                    [
+                        cursor_x,
+                        row_y,
+                        (indent_px - 4.0 * self.scale).max(1.0),
+                        row_h,
+                    ],
                     chev,
                     &chevron_opts,
                     text_occlusion_rects,

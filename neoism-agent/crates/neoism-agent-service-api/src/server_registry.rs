@@ -10,14 +10,25 @@ use uuid::Uuid;
 /// Same OS-user registry directory used by neoism_backend::config. Kept here
 /// so the local Agent GUI can use it without depending on the renderer/backend.
 pub fn registry_directory() -> PathBuf {
-    if let Some(path) = std::env::var_os("NEOISM_CONFIG_HOME") { return path.into(); }
+    if let Some(path) = std::env::var_os("NEOISM_CONFIG_HOME") {
+        return path.into();
+    }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     #[cfg(target_os = "windows")]
-    { home.join("AppData").join("Local").join("neoism") }
+    {
+        home.join("AppData").join("Local").join("neoism")
+    }
     #[cfg(target_os = "macos")]
-    { home.join(".config").join("neoism") }
+    {
+        home.join(".config").join("neoism")
+    }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config")).join("neoism") }
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+            .join("neoism")
+    }
 }
 
 const REGISTRY_FILE: &str = "servers.json";
@@ -95,12 +106,22 @@ pub struct ServerEntry {
 }
 impl From<&SavedServer> for ServerEntry {
     fn from(s: &SavedServer) -> Self {
-        Self { id: s.id.clone(), name: s.name.clone(), endpoint: s.endpoint.clone(), agent_api: s.agent_api, directory: s.directory.clone() }
+        Self {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            endpoint: s.endpoint.clone(),
+            agent_api: s.agent_api,
+            directory: s.directory.clone(),
+        }
     }
 }
 
 #[derive(Debug)]
-pub enum RegistryError { Conflict, Invalid(String), Io(io::Error) }
+pub enum RegistryError {
+    Conflict,
+    Invalid(String),
+    Io(io::Error),
+}
 
 #[derive(Debug)]
 pub struct ServerRegistry {
@@ -111,7 +132,11 @@ pub struct ServerRegistry {
 
 impl ServerRegistry {
     pub fn load(directory: PathBuf) -> io::Result<Self> {
-        let mut registry = Self { directory, data: RegistryFile::default(), credentials: CredentialsFile::default() };
+        let mut registry = Self {
+            directory,
+            data: RegistryFile::default(),
+            credentials: CredentialsFile::default(),
+        };
         registry.reload()?;
         Ok(registry)
     }
@@ -120,11 +145,18 @@ impl ServerRegistry {
     /// before mutation. Lock contention is explicit, never an unbounded UI wait.
     fn lock_and_reload(&mut self) -> io::Result<fs::File> {
         fs::create_dir_all(&self.directory)?;
-        let lock = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
             .open(self.directory.join("servers.lock"))?;
-        lock.try_lock().map_err(|error| io::Error::other(format!("server registry busy: {error}")))?;
+        lock.try_lock().map_err(|error| {
+            io::Error::other(format!("server registry busy: {error}"))
+        })?;
         let data = read_json(&self.directory.join(REGISTRY_FILE))?.unwrap_or_default();
-        let credentials = read_json(&self.directory.join(CREDENTIALS_FILE))?.unwrap_or_default();
+        let credentials =
+            read_json(&self.directory.join(CREDENTIALS_FILE))?.unwrap_or_default();
         self.data = data;
         self.credentials = credentials;
         Ok(lock)
@@ -202,7 +234,11 @@ impl ServerRegistry {
             subscription.last_active_workspace_id = None;
         }
         if subscription != before {
-            self.data.window_profiles.entry(profile_id.to_string()).or_default().servers
+            self.data
+                .window_profiles
+                .entry(profile_id.to_string())
+                .or_default()
+                .servers
                 .insert(server_id.to_string(), subscription.clone());
             self.persist().map_err(|e| e.to_string())?;
         }
@@ -332,7 +368,11 @@ impl ServerRegistry {
         token: Option<&str>,
     ) -> Result<SavedServer, String> {
         let _lock = self.lock_and_reload().map_err(|e| e.to_string())?;
-        let endpoint = if self.server(id).is_some_and(|s| s.agent_api) { normalize_agent_address(address)? } else { normalize_server_address(address)? };
+        let endpoint = if self.server(id).is_some_and(|s| s.agent_api) {
+            normalize_agent_address(address)?
+        } else {
+            normalize_server_address(address)?
+        };
         if self
             .data
             .servers
@@ -364,22 +404,63 @@ impl ServerRegistry {
         Ok(updated)
     }
 
-    pub fn entries(&self) -> Vec<ServerEntry> { self.data.servers.iter().map(ServerEntry::from).collect() }
+    pub fn entries(&self) -> Vec<ServerEntry> {
+        self.data.servers.iter().map(ServerEntry::from).collect()
+    }
 
     /// Row-level compare-and-swap after reload: a stale browser cannot overwrite
     /// a desktop edit. Name-only edits retain native credentials and relaunch data.
-    pub fn save_entry(&mut self, mut entry: ServerEntry, expected: Option<ServerEntry>) -> Result<ServerEntry, RegistryError> {
+    pub fn save_entry(
+        &mut self,
+        mut entry: ServerEntry,
+        expected: Option<ServerEntry>,
+    ) -> Result<ServerEntry, RegistryError> {
         let _lock = self.lock_and_reload().map_err(RegistryError::Io)?;
-        if entry.id == "local" || Uuid::parse_str(&entry.id).is_err() { return Err(RegistryError::Invalid("invalid server id".into())); }
+        if entry.id == "local" || Uuid::parse_str(&entry.id).is_err() {
+            return Err(RegistryError::Invalid("invalid server id".into()));
+        }
         let previous = self.server(&entry.id).cloned();
-        if previous.as_ref().map(ServerEntry::from) != expected { return Err(RegistryError::Conflict); }
-        entry.endpoint = if entry.agent_api { normalize_agent_address(&entry.endpoint) } else { normalize_server_address(&entry.endpoint) }.map_err(RegistryError::Invalid)?;
+        if previous.as_ref().map(ServerEntry::from) != expected {
+            return Err(RegistryError::Conflict);
+        }
+        entry.endpoint = if entry.agent_api {
+            normalize_agent_address(&entry.endpoint)
+        } else {
+            normalize_server_address(&entry.endpoint)
+        }
+        .map_err(RegistryError::Invalid)?;
         entry.name = normalized_name(Some(&entry.name), &entry.endpoint);
-        if !entry.agent_api { entry.directory.clear(); }
-        if self.data.servers.iter().any(|s| s.id != entry.id && s.endpoint == entry.endpoint) { return Err(RegistryError::Invalid("that server is already saved".into())); }
-        let changed = previous.as_ref().is_some_and(|p| p.endpoint != entry.endpoint || p.agent_api != entry.agent_api);
-        if changed { self.credentials.tokens.remove(&entry.id); }
-        let saved = SavedServer { id: entry.id.clone(), name: entry.name.clone(), endpoint: entry.endpoint.clone(), agent_api: entry.agent_api, directory: entry.directory.clone(), hosted: if changed { None } else { previous.and_then(|p| p.hosted) } };
+        if !entry.agent_api {
+            entry.directory.clear();
+        }
+        if self
+            .data
+            .servers
+            .iter()
+            .any(|s| s.id != entry.id && s.endpoint == entry.endpoint)
+        {
+            return Err(RegistryError::Invalid(
+                "that server is already saved".into(),
+            ));
+        }
+        let changed = previous.as_ref().is_some_and(|p| {
+            p.endpoint != entry.endpoint || p.agent_api != entry.agent_api
+        });
+        if changed {
+            self.credentials.tokens.remove(&entry.id);
+        }
+        let saved = SavedServer {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            endpoint: entry.endpoint.clone(),
+            agent_api: entry.agent_api,
+            directory: entry.directory.clone(),
+            hosted: if changed {
+                None
+            } else {
+                previous.and_then(|p| p.hosted)
+            },
+        };
         self.data.servers.retain(|s| s.id != entry.id);
         self.data.servers.push(saved);
         self.persist().map_err(RegistryError::Io)?;
@@ -388,10 +469,14 @@ impl ServerRegistry {
 
     pub fn remove_entry(&mut self, expected: ServerEntry) -> Result<(), RegistryError> {
         let _lock = self.lock_and_reload().map_err(RegistryError::Io)?;
-        if self.server(&expected.id).map(ServerEntry::from).as_ref() != Some(&expected) { return Err(RegistryError::Conflict); }
+        if self.server(&expected.id).map(ServerEntry::from).as_ref() != Some(&expected) {
+            return Err(RegistryError::Conflict);
+        }
         self.data.servers.retain(|s| s.id != expected.id);
         self.credentials.tokens.remove(&expected.id);
-        for profile in self.data.window_profiles.values_mut() { profile.servers.remove(&expected.id); }
+        for profile in self.data.window_profiles.values_mut() {
+            profile.servers.remove(&expected.id);
+        }
         self.persist().map_err(RegistryError::Io)
     }
 
@@ -415,9 +500,17 @@ impl ServerRegistry {
 
 pub fn normalize_agent_address(address: &str) -> Result<String, String> {
     let url = Url::parse(address.trim()).map_err(|e| e.to_string())?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
-        || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
-        return Err("use an HTTP(S) Agent address without URL credentials, query or fragment".into());
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "use an HTTP(S) Agent address without URL credentials, query or fragment"
+                .into(),
+        );
     }
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
@@ -444,8 +537,14 @@ pub fn normalize_server_address(address: &str) -> Result<String, String> {
             "put the access token in the token field, not in the server address".into(),
         );
     }
-    if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
-        return Err("put credentials in the credential field, not in the server address".into());
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "put credentials in the credential field, not in the server address".into(),
+        );
     }
     if url.host_str().is_none() {
         return Err("server address must include a host".into());
@@ -510,7 +609,9 @@ fn write_json_atomic<T: Serialize>(
         drop(file);
         fs::rename(&temporary, path)
     })();
-    if result.is_err() { let _ = fs::remove_file(&temporary); }
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
     result
 }
 
@@ -527,24 +628,60 @@ mod tests {
         let directory = test_dir();
         let mut desktop = ServerRegistry::load(directory.clone()).unwrap();
         let mut web = ServerRegistry::load(directory.clone()).unwrap();
-        let first = desktop.add("wss://first.example/session", Some("First"), Some("native-secret")).unwrap();
-        desktop.set_workspace_subscription("window", &first.id, ServerWorkspaceSubscription { subscribed_workspace_ids: vec!["work".into()], last_active_workspace_id: Some("work".into()) }).unwrap();
-        let second = web.add("wss://second.example/session", Some("Second"), None).unwrap();
-        desktop.update(&first.id, &first.endpoint, Some("Renamed"), Some("native-secret")).unwrap();
+        let first = desktop
+            .add(
+                "wss://first.example/session",
+                Some("First"),
+                Some("native-secret"),
+            )
+            .unwrap();
+        desktop
+            .set_workspace_subscription(
+                "window",
+                &first.id,
+                ServerWorkspaceSubscription {
+                    subscribed_workspace_ids: vec!["work".into()],
+                    last_active_workspace_id: Some("work".into()),
+                },
+            )
+            .unwrap();
+        let second = web
+            .add("wss://second.example/session", Some("Second"), None)
+            .unwrap();
+        desktop
+            .update(
+                &first.id,
+                &first.endpoint,
+                Some("Renamed"),
+                Some("native-secret"),
+            )
+            .unwrap();
         web.reload().unwrap();
         assert_eq!(web.servers().len(), 2);
         assert!(web.server(&second.id).is_some());
         assert_eq!(web.token(&first.id), Some("native-secret"));
-        assert_eq!(web.workspace_subscription("window", &first.id).last_active_workspace_id.as_deref(), Some("work"));
+        assert_eq!(
+            web.workspace_subscription("window", &first.id)
+                .last_active_workspace_id
+                .as_deref(),
+            Some("work")
+        );
         let before = ServerEntry::from(web.server(&first.id).unwrap());
-        let mut after = before.clone(); after.name = "Web name".into();
+        let mut after = before.clone();
+        after.name = "Web name".into();
         web.save_entry(after.clone(), Some(before.clone())).unwrap();
         assert_eq!(web.token(&first.id), Some("native-secret"));
-        assert!(matches!(desktop.save_entry(before.clone(), Some(before)), Err(RegistryError::Conflict)));
+        assert!(matches!(
+            desktop.save_entry(before.clone(), Some(before)),
+            Err(RegistryError::Conflict)
+        ));
         let json = serde_json::to_string(&web.entries()).unwrap();
-        assert!(!json.contains("native-secret")); assert!(!json.contains("window"));
+        assert!(!json.contains("native-secret"));
+        assert!(!json.contains("window"));
         web.remove_entry(after).unwrap();
-        desktop.reload().unwrap(); assert!(desktop.server(&first.id).is_none()); assert!(desktop.token(&first.id).is_none());
+        desktop.reload().unwrap();
+        assert!(desktop.server(&first.id).is_none());
+        assert!(desktop.token(&first.id).is_none());
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -552,13 +689,18 @@ mod tests {
     fn lock_contention_is_explicit_and_endpoint_change_drops_credentials() {
         let directory = test_dir();
         let mut desktop = ServerRegistry::load(directory.clone()).unwrap();
-        let saved = desktop.add("wss://first.example/session", None, Some("secret")).unwrap();
+        let saved = desktop
+            .add("wss://first.example/session", None, Some("secret"))
+            .unwrap();
         let mut web = ServerRegistry::load(directory.clone()).unwrap();
         let lock = desktop.lock_and_reload().unwrap();
         assert!(web.add("wss://second.example/session", None, None).is_err());
         drop(lock);
-        let before = ServerEntry::from(&saved); let mut after = before.clone(); after.endpoint = "wss://replacement.example/session".into();
-        web.save_entry(after, Some(before)).unwrap(); assert!(web.token(&saved.id).is_none());
+        let before = ServerEntry::from(&saved);
+        let mut after = before.clone();
+        after.endpoint = "wss://replacement.example/session".into();
+        web.save_entry(after, Some(before)).unwrap();
+        assert!(web.token(&saved.id).is_none());
         let _ = fs::remove_dir_all(directory);
     }
 

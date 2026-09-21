@@ -63,7 +63,10 @@ impl Screen<'_> {
             let remote_joined = self.uses_host_git();
             let branch_for = |path: Option<&Path>| {
                 if remote_joined {
-                    self.host_git.snapshot.as_ref().and_then(|snapshot| snapshot.branch.clone())
+                    self.host_git
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.branch.clone())
                 } else {
                     path.and_then(neoism_ui::panels::git_branch::branch_for)
                 }
@@ -445,6 +448,8 @@ impl Screen<'_> {
                 // the user works in a neighboring agent pane.
                 let mut epub_segments = None;
                 let mut notebook_kernel = None;
+                let mut documentation_outline = None;
+                let mut documentation_page_path = None;
                 let mut code_tail = None;
                 if let Some(path) = crumb_path.as_deref() {
                     for item in self.context_manager.current_grid().contexts().values() {
@@ -487,6 +492,20 @@ impl Screen<'_> {
                         {
                             notebook_kernel = Some(notebook.kernel_display_label());
                         }
+                        if let Some(markdown) = context
+                            .markdown
+                            .as_ref()
+                            .filter(|markdown| markdown.is_active_tab_path(path))
+                        {
+                            if let Some(binding) = markdown.documentation_notebook.as_ref() {
+                                documentation_outline = binding
+                                    .session
+                                    .lock()
+                                    .ok()
+                                    .map(|book| book.contents_open);
+                                documentation_page_path = Some(markdown.path.clone());
+                            }
+                        }
                         if let Some(code) = context
                             .code
                             .as_ref()
@@ -504,6 +523,9 @@ impl Screen<'_> {
                     }
                 }
 
+                self.renderer
+                    .breadcrumbs
+                    .set_documentation_controls(documentation_outline);
                 if let Some(segments) = epub_segments {
                     self.renderer.breadcrumbs.set_segments(segments);
                     self.renderer.breadcrumbs.clear_tail();
@@ -540,7 +562,7 @@ impl Screen<'_> {
                     self.renderer
                         .file_tree
                         .set_active_path(crumb_path.clone().or(active_path.clone()));
-                } else if let Some(p) = crumb_path.clone() {
+                } else if let Some(p) = documentation_page_path.or_else(|| crumb_path.clone()) {
                     self.renderer
                         .breadcrumbs
                         .set_from_path(&p, active_cwd.as_deref());
@@ -565,6 +587,7 @@ impl Screen<'_> {
                 }
             } else {
                 self.renderer.breadcrumbs.set_segments(Vec::new());
+                self.renderer.breadcrumbs.set_documentation_controls(None);
                 self.renderer.breadcrumbs.clear_tail();
                 // Terminal panes have no "active file" — clear the
                 // accent so the tree doesn't keep highlighting a row

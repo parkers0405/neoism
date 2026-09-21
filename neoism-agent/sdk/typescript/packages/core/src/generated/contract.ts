@@ -14,19 +14,21 @@ export type AuthInfo = ({ key: string; metadata?: unknown; type: "api"; }) | ({ 
 export type BackgroundJobStopResponse = { jobId: string; status: "stopping"; };
 export type CacheUsage = { read: number; write: number; };
 export type Capability = { apiPrefix?: string; disableable: boolean; enabled: boolean; id: string; pluginId?: string; reason?: string; source: string; version: string; };
+export type ClaimSessionControlRequest = { expectedRevision?: number; leaseSeconds?: number; };
 export type CodeRequest = { code: string; };
 export type Command = { agent?: string; description?: string; model?: string; name: string; subtask?: boolean; template?: string; };
 export type CommandList = Array<Command>;
+export type CompactionConfig = { auto?: boolean; buffer?: number; keep?: { tokens?: number; }; prune?: boolean; "threshold-percent"?: number; };
 export type CompactionPart = { id: string; messageId: string; reason: string; sessionId: string; summary: boolean; tailStartMessageId?: string; type: "compaction"; [key: string]: unknown; };
 export type ConfigDefaults = { defaultAgent: string | null; model: string | null; variant: string | null; };
 export type ConfigDiagnostic = { level: "error" | "warning"; message: string; path: string; };
-export type ConfigDocument = { [key: string]: unknown; };
+export type ConfigDocument = { compaction?: CompactionConfig; [key: string]: unknown; };
 export type ConfigProvidersResult = { default: { [key: string]: string; }; providers: Array<Provider>; };
 export type ConfigValidation = { diagnostics: Array<ConfigDiagnostic>; ok: boolean; };
 export type CreateSessionRequest = { agent?: string; model?: ModelRef; parentId?: string; permission?: Array<PermissionRule>; title?: string; workspaceId?: string; };
 export type CredentialScope = { tenantId: string; workspaceId?: string; };
 export type EmptyObject = Record<string, unknown>;
-export type Event = (EventMessagePartUpdated) | (EventMessagePartRemoved) | (EventMessagePartDelta) | (EventMessageUpdated) | (EventMessageRemoved) | (EventMcpToolsChanged) | (EventLspUpdated) | (EventPermissionAsked) | (EventPermissionReplied) | (EventQuestionAsked) | (EventQuestionRejected) | (EventQuestionReplied) | (EventPtyCreated) | (EventPtyUpdated) | (EventPtyDeleted) | (EventPtyExited) | (EventSessionNextCompactionStarted) | (EventSessionNextCompactionDelta) | (EventSessionNextCompactionEnded) | (EventSessionCompacted) | (EventSessionContextUpdated) | (EventSessionCreated) | (EventSessionDeleted) | (EventSessionError) | (EventSessionExecutionUpdated) | (EventSessionBackgroundTasksUpdated) | (EventSessionBackgroundTaskCompleted) | (EventSessionQueueUpdated) | (EventSessionPromptAdmitted) | (EventSessionStatus) | (EventSessionSubtaskCompleted) | (EventSessionUpdated) | (EventTodoUpdated) | (EventWorkflowUpdated) | (EventWorkflowRunUpdated);
+export type Event = (EventMessagePartUpdated) | (EventMessagePartRemoved) | (EventMessagePartDelta) | (EventMessageUpdated) | (EventMessageRemoved) | (EventMcpToolsChanged) | (EventLspUpdated) | (EventPermissionAsked) | (EventPermissionReplied) | (EventQuestionAsked) | (EventQuestionRejected) | (EventQuestionReplied) | (EventPtyCreated) | (EventPtyUpdated) | (EventPtyDeleted) | (EventPtyExited) | (EventSessionNextCompactionStarted) | (EventSessionNextCompactionDelta) | (EventSessionNextCompactionEnded) | (EventSessionCompacted) | (EventSessionContextUpdated) | (EventSessionCreated) | (EventSessionDeleted) | (EventSessionError) | (EventSessionExecutionUpdated) | (EventSessionBackgroundTasksUpdated) | (EventSessionBackgroundTaskCompleted) | (EventSessionQueueUpdated) | (EventSessionPromptAdmitted) | (EventSessionMoved) | (EventSessionStatus) | (EventSessionSubtaskCompleted) | (EventSessionUpdated) | (EventTodoUpdated) | (EventWorkflowUpdated) | (EventWorkflowRunUpdated);
 export type EventEnvelope = { data: unknown; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: string; };
 export type EventLspUpdated = { data: Record<string, unknown>; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "lsp.updated"; };
 export type EventMcpToolsChanged = { data: { directory: string; server: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "mcp.tools.changed"; };
@@ -49,9 +51,10 @@ export type EventSessionBackgroundTasksUpdated = { data: { backgroundJobsEpoch: 
 export type EventSessionCompacted = { data: { info: Session; sessionID: string; summary: { kind: string; messageID: string; text: string; throughMessageID: string; updated: number; }; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.compacted"; };
 export type EventSessionContextUpdated = { data: { epoch: { [key: string]: unknown; }; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.context.updated"; };
 export type EventSessionCreated = { data: { info: Session; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.created"; };
-export type EventSessionDeleted = { data: { sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.deleted"; };
+export type EventSessionDeleted = { data: { info: Session; sessionID: string; tenantID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.deleted"; };
 export type EventSessionError = { data: { error: ApiError; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.error"; };
 export type EventSessionExecutionUpdated = { data: { runtime: SessionRuntimeSnapshot; sessionID: string; snapshot: ExecutionActivitySnapshot; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.execution.updated"; };
+export type EventSessionMoved = { data: { directory: string; info: Session; previousDirectory: string; sessionID: string; switchWorkspace: boolean; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.moved"; };
 export type EventSessionNextCompactionDelta = { data: { sessionID: string; text: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.next.compaction.delta"; };
 export type EventSessionNextCompactionEnded = { data: { error?: { [key: string]: unknown; }; kind?: string; messageID?: string; sessionID: string; status?: string; summary?: { [key: string]: unknown; }; text?: string; timestamp?: number; [key: string]: unknown; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.next.compaction.ended"; };
 export type EventSessionNextCompactionStarted = { data: { messageID: string; reason: string; sessionID: string; timestamp: number; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.next.compaction.started"; };
@@ -157,8 +160,10 @@ export type SemanticSearchResponse = { available: boolean; hits: Array<SemanticS
 export type Session = { agent?: string; directory: string; id: string; model?: ModelRef; parentId?: string; path?: string; permission?: Array<PermissionRule>; projectId: string; slug: string; time: SessionTime; title: string; version: string; workspaceId?: string; [key: string]: unknown; };
 export type SessionBundle = { messages: Array<Message>; queuedPrompts: Array<QueuedPromptBundleItem>; session: Session; version: number; workspaceRoot?: string; };
 export type SessionCommandRequest = { agent?: string; arguments?: string; command: string; messageId?: string; model?: UserModel; };
+export type SessionControl = { actorType: "human" | "service-account"; controllerSubject: string; leaseExpiresAt: number; revision: number; sessionId: string; updated: number; };
 export type SessionGoal = { created: number; paused: boolean; research: Array<GoalResearchNote>; status: "active" | "complete" | "blocked"; summary: string; text: string; updated: number; };
 export type SessionPage = { cursor: PageCursor; items: Array<Session>; };
+export type SessionParticipant = { actorType: "human" | "service-account"; firstSeenAt: number; lastSeenAt: number; subject: string; };
 export type SessionQueueInfo = { count: number; items: Array<SessionQueueItem>; running: boolean; sessionId: string; worker: boolean; };
 export type SessionQueueItem = { agent?: string | null; index: number; model?: (UserModel) | (null); noReply: boolean; partCount: number; text?: string | null; };
 export type SessionQueueMutation = { queue: SessionQueueInfo; removed: number; sessionId: string; };
@@ -354,11 +359,15 @@ export interface ApiOperations {
   "v2.providers.list": { method: "GET"; path: "/v2/providers"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ProviderListResult; }; response: ProviderListResult; };
   "v2.providers.oauth.authorize": { method: "POST"; path: "/v2/providers/{provider_id}/oauth/authorize"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; body: ProviderAuthorizeRequest; signal?: AbortSignal; }; responses: { "200": (ProviderAuthAuthorization) | (null); }; response: (ProviderAuthAuthorization) | (null); };
   "v2.providers.oauth.callback": { method: "POST"; path: "/v2/providers/{provider_id}/oauth/callback"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; body: ProviderCallbackRequest; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
+  "v2.sessionCatalog.subscribe": { method: "GET"; path: "/v2/session-catalog/events"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": string; }; response: string; };
   "v2.sessions.abort": { method: "POST"; path: "/v2/sessions/{session_id}/abort"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.sessions.children": { method: "GET"; path: "/v2/sessions/{session_id}/children"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": SessionPage; }; response: SessionPage; };
   "v2.sessions.commands.execute": { method: "POST"; path: "/v2/sessions/{session_id}/commands"; input: { path: { session_id: string; }; body: SessionCommandRequest; signal?: AbortSignal; }; responses: { "200": Message; }; response: Message; };
   "v2.sessions.compact": { method: "POST"; path: "/v2/sessions/{session_id}/compact"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
   "v2.sessions.context": { method: "GET"; path: "/v2/sessions/{session_id}/context"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": MessageList; }; response: MessageList; };
+  "v2.sessions.control.claim": { method: "POST"; path: "/v2/sessions/{session_id}/control"; input: { path: { session_id: string; }; body: ClaimSessionControlRequest; signal?: AbortSignal; }; responses: { "200": SessionControl; }; response: SessionControl; };
+  "v2.sessions.control.get": { method: "GET"; path: "/v2/sessions/{session_id}/control"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": (SessionControl) | (null); }; response: (SessionControl) | (null); };
+  "v2.sessions.control.release": { method: "DELETE"; path: "/v2/sessions/{session_id}/control"; input: { path: { session_id: string; }; query?: { expectedRevision?: number; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.sessions.create": { method: "POST"; path: "/v2/sessions"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; body?: CreateSessionRequest; signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
   "v2.sessions.delete": { method: "DELETE"; path: "/v2/sessions/{session_id}"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.sessions.diff": { method: "GET"; path: "/v2/sessions/{session_id}/diff"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": Array<VcsFileDiff>; }; response: Array<VcsFileDiff>; };
@@ -372,6 +381,7 @@ export interface ApiOperations {
   "v2.sessions.messages": { method: "GET"; path: "/v2/sessions/{session_id}/messages"; input: { path: { session_id: string; }; query?: { limit?: number; order?: "asc" | "desc"; slim?: boolean; cursor?: string; }; signal?: AbortSignal; }; responses: { "200": MessagePage; }; response: MessagePage; };
   "v2.sessions.messages.delete": { method: "DELETE"; path: "/v2/sessions/{session_id}/messages/{message_id}"; input: { path: { session_id: string; message_id: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.sessions.messages.get": { method: "GET"; path: "/v2/sessions/{session_id}/messages/{message_id}"; input: { path: { session_id: string; message_id: string; }; signal?: AbortSignal; }; responses: { "200": Message; }; response: Message; };
+  "v2.sessions.participants.list": { method: "GET"; path: "/v2/sessions/{session_id}/participants"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": Array<SessionParticipant>; }; response: Array<SessionParticipant>; };
   "v2.sessions.parts.delete": { method: "DELETE"; path: "/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}"; input: { path: { session_id: string; message_id: string; part_id: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.sessions.parts.update": { method: "PATCH"; path: "/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}"; input: { path: { session_id: string; message_id: string; part_id: string; }; body: Part; signal?: AbortSignal; }; responses: { "200": Part; }; response: Part; };
   "v2.sessions.pin": { method: "POST"; path: "/v2/sessions/{session_id}/pin"; input: { path: { session_id: string; }; body?: SetPinRequest; signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
@@ -545,11 +555,15 @@ export const operationDescriptors = {
   "v2.providers.list": {"method":"GET","path":"/v2/providers","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.oauth.authorize": {"method":"POST","path":"/v2/providers/{provider_id}/oauth/authorize","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.oauth.callback": {"method":"POST","path":"/v2/providers/{provider_id}/oauth/callback","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessionCatalog.subscribe": {"method":"GET","path":"/v2/session-catalog/events","transport":"sse","responses":{"200":["text/event-stream"]}},
   "v2.sessions.abort": {"method":"POST","path":"/v2/sessions/{session_id}/abort","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.children": {"method":"GET","path":"/v2/sessions/{session_id}/children","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.commands.execute": {"method":"POST","path":"/v2/sessions/{session_id}/commands","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.compact": {"method":"POST","path":"/v2/sessions/{session_id}/compact","transport":"http","responses":{"204":[]}},
   "v2.sessions.context": {"method":"GET","path":"/v2/sessions/{session_id}/context","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessions.control.claim": {"method":"POST","path":"/v2/sessions/{session_id}/control","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessions.control.get": {"method":"GET","path":"/v2/sessions/{session_id}/control","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessions.control.release": {"method":"DELETE","path":"/v2/sessions/{session_id}/control","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.create": {"method":"POST","path":"/v2/sessions","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.delete": {"method":"DELETE","path":"/v2/sessions/{session_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.diff": {"method":"GET","path":"/v2/sessions/{session_id}/diff","transport":"http","response":"json","responses":{"200":["application/json"]}},
@@ -563,6 +577,7 @@ export const operationDescriptors = {
   "v2.sessions.messages": {"method":"GET","path":"/v2/sessions/{session_id}/messages","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.messages.delete": {"method":"DELETE","path":"/v2/sessions/{session_id}/messages/{message_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.messages.get": {"method":"GET","path":"/v2/sessions/{session_id}/messages/{message_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessions.participants.list": {"method":"GET","path":"/v2/sessions/{session_id}/participants","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.parts.delete": {"method":"DELETE","path":"/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.parts.update": {"method":"PATCH","path":"/v2/sessions/{session_id}/messages/{message_id}/parts/{part_id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.pin": {"method":"POST","path":"/v2/sessions/{session_id}/pin","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},

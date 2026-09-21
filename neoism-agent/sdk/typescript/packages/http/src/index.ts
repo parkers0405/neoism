@@ -166,6 +166,7 @@ async function* followEvents(
       const query = new URLSearchParams();
       if (options.sessionId) query.set("sessionId", options.sessionId);
       if (options.tail && cursor === undefined) query.set("tail", "true");
+      if (options.limit !== undefined) query.set("limit", String(options.limit));
       const response = await fetcher(`${baseUrl}/v2/events${query.size ? `?${query}` : ""}`, {
         headers: {
           accept: "text/event-stream",

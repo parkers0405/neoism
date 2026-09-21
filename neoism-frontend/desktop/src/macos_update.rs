@@ -316,7 +316,9 @@ pub fn install_unix_loose(target: &Path, source: &Path) -> Result<(), Error> {
         return Err("update payload is missing web/agent-gui/index.html".into());
     }
     let expected = loose_manifest(source, std::ffi::OsStr::new("neoism"))?;
-    let work = tempfile::Builder::new().prefix(".neoism-update-").tempdir_in(parent)?;
+    let work = tempfile::Builder::new()
+        .prefix(".neoism-update-")
+        .tempdir_in(parent)?;
     let staged = work.path().join("staged");
     fs::create_dir(&staged)?;
     for (relative, kind) in &expected {
@@ -324,7 +326,9 @@ pub fn install_unix_loose(target: &Path, source: &Path) -> Result<(), Error> {
         if kind == "directory" {
             fs::create_dir_all(destination)?;
         } else {
-            if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::copy(source.join(relative), destination)?;
         }
     }
@@ -332,15 +336,30 @@ pub fn install_unix_loose(target: &Path, source: &Path) -> Result<(), Error> {
         return Err("staged update hashes differ from release payload".into());
     }
     let recovery = work.keep();
-    let result = replace_loose_with(target, &staged, &recovery.join("backup"), |from, to| fs::rename(from, to), || {
-        if loose_manifest(parent, target.file_name().ok_or("executable has no name")?)? != expected {
-            return Err("installed update hashes differ from release payload".into());
-        }
-        Ok(())
-    });
+    let result = replace_loose_with(
+        target,
+        &staged,
+        &recovery.join("backup"),
+        |from, to| fs::rename(from, to),
+        || {
+            if loose_manifest(
+                parent,
+                target.file_name().ok_or("executable has no name")?,
+            )? != expected
+            {
+                return Err("installed update hashes differ from release payload".into());
+            }
+            Ok(())
+        },
+    );
     match result {
-        Ok(()) => { fs::remove_dir_all(recovery)?; Ok(()) }
-        Err(error) => Err(format!("{error}; recovery files: {}", recovery.display()).into()),
+        Ok(()) => {
+            fs::remove_dir_all(recovery)?;
+            Ok(())
+        }
+        Err(error) => {
+            Err(format!("{error}; recovery files: {}", recovery.display()).into())
+        }
     }
 }
 
@@ -657,7 +676,8 @@ mod native {
     }
 
     fn plist(app: &Path, key: &str) -> Result<String, Error> {
-        plist_optional(app, key)?.ok_or_else(|| format!("bundle plist has no {key}").into())
+        plist_optional(app, key)?
+            .ok_or_else(|| format!("bundle plist has no {key}").into())
     }
 
     pub fn bundle_version(app: &Path) -> Result<String, Error> {
@@ -1314,8 +1334,16 @@ mod tests {
         fs::write(app.join("Contents/Info.plist"), BUNDLE_ID).unwrap();
         fs::write(app.join("Contents/Resources/web/index.html"), "web").unwrap();
         fs::create_dir_all(app.join("Contents/Resources/web/agent-gui/assets")).unwrap();
-        fs::write(app.join("Contents/Resources/web/agent-gui/index.html"), "agent GUI").unwrap();
-        fs::write(app.join("Contents/Resources/web/agent-gui/assets/app.js"), "agent JS").unwrap();
+        fs::write(
+            app.join("Contents/Resources/web/agent-gui/index.html"),
+            "agent GUI",
+        )
+        .unwrap();
+        fs::write(
+            app.join("Contents/Resources/web/agent-gui/assets/app.js"),
+            "agent JS",
+        )
+        .unwrap();
         fs::write(app.join("Contents/Resources/neoism.icns"), "icon").unwrap();
         app
     }
@@ -1384,7 +1412,9 @@ mod tests {
     fn bundle_release_version_prefers_full_version_and_falls_back_for_stable_bundles() {
         let full = release_version_from_plist(|key| match key {
             "NeoismReleaseVersion" => Ok(Some("0.7.8-nightly.20260801".into())),
-            _ => panic!("the stable version must not be read when the release version exists"),
+            _ => panic!(
+                "the stable version must not be read when the release version exists"
+            ),
         })
         .unwrap();
         assert_eq!(full, "0.7.8-nightly.20260801");
@@ -1425,11 +1455,20 @@ mod tests {
         loose_fixture(&staged, "0.7.103");
         fs::remove_file(staged.join("web/agent-gui/index.html")).unwrap();
         assert!(install_unix_loose(&target, &staged).is_err());
-        assert_eq!(fs::read_to_string(installed.join("web/index.html")).unwrap(), "0.7.102");
+        assert_eq!(
+            fs::read_to_string(installed.join("web/index.html")).unwrap(),
+            "0.7.102"
+        );
         fs::write(staged.join("web/agent-gui/index.html"), "GUI").unwrap();
         install_unix_loose(&target, &staged).unwrap();
-        assert_eq!(fs::read_to_string(installed.join("web/agent-gui/assets/app.js")).unwrap(), "0.7.103");
-        assert_eq!(loose_manifest(&installed, std::ffi::OsStr::new("neoism")).unwrap(), loose_manifest(&staged, std::ffi::OsStr::new("neoism")).unwrap());
+        assert_eq!(
+            fs::read_to_string(installed.join("web/agent-gui/assets/app.js")).unwrap(),
+            "0.7.103"
+        );
+        assert_eq!(
+            loose_manifest(&installed, std::ffi::OsStr::new("neoism")).unwrap(),
+            loose_manifest(&staged, std::ffi::OsStr::new("neoism")).unwrap()
+        );
     }
 
     #[test]
@@ -1441,8 +1480,19 @@ mod tests {
         for version in ["0.7.103", "0.7.104"] {
             let staged = root.path().join(version);
             loose_fixture(&staged, version);
-            replace_loose_with(&target, &staged, &root.path().join(format!("backup-{version}")), |from, to| fs::rename(from, to), || Ok(())).unwrap();
-            assert_eq!(fs::read_to_string(installed.join("web/agent-gui/assets/app.js")).unwrap(), version);
+            replace_loose_with(
+                &target,
+                &staged,
+                &root.path().join(format!("backup-{version}")),
+                |from, to| fs::rename(from, to),
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(installed.join("web/agent-gui/assets/app.js"))
+                    .unwrap(),
+                version
+            );
             assert!(!installed.join("web/agent-gui/assets/old-hash.js").exists());
             fs::write(installed.join("web/agent-gui/assets/old-hash.js"), "old").unwrap();
         }

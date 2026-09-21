@@ -1065,7 +1065,13 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
         }
     };
     for child in deferred {
-        let Ok(runtime) = state.workspace_runtime(&child.directory).await else {
+        let Ok(runtime) = state
+            .workspace_runtime_for_tenant(
+                crate::caller::session_tenant(&child),
+                &child.directory,
+            )
+            .await
+        else {
             clear_subtask_completion_for_teardown(state, child.id.as_str()).await;
             continue;
         };

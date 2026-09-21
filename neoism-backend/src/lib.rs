@@ -5,8 +5,8 @@ pub mod effects_adapter;
 pub mod error;
 pub mod event;
 pub mod graphics_adapter;
-pub mod server_registry;
 pub mod performer;
+pub mod server_registry;
 
 #[cfg(test)]
 mod graphics;

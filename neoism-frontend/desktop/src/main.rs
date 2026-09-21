@@ -105,18 +105,20 @@ fn run_neoism_terminal_command() -> Result<bool, Box<dyn std::error::Error>> {
 
     if let Some(argv0) = std::env::args_os().next() {
         if !terminal_control_allowed(&argv0, is_cd_command) {
-        // Inside a Neoism pane, a bare `neoism` acts like a lightweight
-        // editor command. Explicit paths (`./target/debug/neoism`,
-        // `/usr/bin/neoism`) are treated as real app launches so testing
-        // the freshly-built binary from an embedded terminal works.
+            // Inside a Neoism pane, a bare `neoism` acts like a lightweight
+            // editor command. Explicit paths (`./target/debug/neoism`,
+            // `/usr/bin/neoism`) are treated as real app launches so testing
+            // the freshly-built binary from an embedded terminal works.
             return Ok(false);
         }
     }
 
-    if !is_cd_command && args.iter().any(|arg| {
-        matches!(arg.to_str(), Some("-h" | "--help" | "-V" | "--version"))
-            || arg == ipc::NEW_WINDOW_ARG
-    }) {
+    if !is_cd_command
+        && args.iter().any(|arg| {
+            matches!(arg.to_str(), Some("-h" | "--help" | "-V" | "--version"))
+                || arg == ipc::NEW_WINDOW_ARG
+        })
+    {
         return Ok(false);
     }
 
@@ -127,7 +129,8 @@ fn run_neoism_terminal_command() -> Result<bool, Box<dyn std::error::Error>> {
 
     let cwd = std::env::current_dir()?;
     if is_cd_command {
-        let path = resolve_terminal_cd_path(&args[1..], &cwd, |key| std::env::var_os(key))?;
+        let path =
+            resolve_terminal_cd_path(&args[1..], &cwd, |key| std::env::var_os(key))?;
         let path_text = path.to_string_lossy();
         if path_text.chars().any(|ch| ch == '\0' || ch.is_control()) {
             return Err("directory contains a control character".into());
@@ -171,7 +174,10 @@ mod terminal_cd_tests {
     use super::*;
     use std::ffi::{OsStr, OsString};
 
-    fn env(home: &std::path::Path, oldpwd: Option<&std::path::Path>) -> impl FnMut(&str) -> Option<OsString> {
+    fn env(
+        home: &std::path::Path,
+        oldpwd: Option<&std::path::Path>,
+    ) -> impl FnMut(&str) -> Option<OsString> {
         let home = home.to_path_buf();
         let oldpwd = oldpwd.map(std::path::Path::to_path_buf);
         move |key| match key {
@@ -188,18 +194,58 @@ mod terminal_cd_tests {
         let cwd = root.join("work/current");
         let child = cwd.join("child");
         let tilde = home.join("x/y");
-        for dir in [&home, &cwd, &child, &tilde] { std::fs::create_dir_all(dir).unwrap(); }
+        for dir in [&home, &cwd, &child, &tilde] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
         let none: Vec<OsString> = vec![];
-        assert_eq!(resolve_terminal_cd_path(&none, &cwd, env(&home, None)).unwrap(), std::fs::canonicalize(&home).unwrap());
-        assert_eq!(resolve_terminal_cd_path(&["child".into()], &cwd, env(&home, None)).unwrap(), std::fs::canonicalize(&child).unwrap());
-        assert_eq!(resolve_terminal_cd_path(&[child.clone().into_os_string()], &cwd, env(&home, None)).unwrap(), std::fs::canonicalize(&child).unwrap());
-        assert_eq!(resolve_terminal_cd_path(&["~/x/y".into()], &cwd, env(&home, None)).unwrap(), std::fs::canonicalize(&tilde).unwrap());
-        assert_eq!(resolve_terminal_cd_path(&["-".into()], &cwd, env(&home, Some(&home))).unwrap(), std::fs::canonicalize(&home).unwrap());
-        assert!(resolve_terminal_cd_path(&["missing".into()], &cwd, env(&home, None)).is_err());
-        assert!(resolve_terminal_cd_path(&["a".into(), "b".into()], &cwd, env(&home, None)).unwrap_err().to_string().contains("usage"));
+        assert_eq!(
+            resolve_terminal_cd_path(&none, &cwd, env(&home, None)).unwrap(),
+            std::fs::canonicalize(&home).unwrap()
+        );
+        assert_eq!(
+            resolve_terminal_cd_path(&["child".into()], &cwd, env(&home, None)).unwrap(),
+            std::fs::canonicalize(&child).unwrap()
+        );
+        assert_eq!(
+            resolve_terminal_cd_path(
+                &[child.clone().into_os_string()],
+                &cwd,
+                env(&home, None)
+            )
+            .unwrap(),
+            std::fs::canonicalize(&child).unwrap()
+        );
+        assert_eq!(
+            resolve_terminal_cd_path(&["~/x/y".into()], &cwd, env(&home, None)).unwrap(),
+            std::fs::canonicalize(&tilde).unwrap()
+        );
+        assert_eq!(
+            resolve_terminal_cd_path(&["-".into()], &cwd, env(&home, Some(&home)))
+                .unwrap(),
+            std::fs::canonicalize(&home).unwrap()
+        );
+        assert!(
+            resolve_terminal_cd_path(&["missing".into()], &cwd, env(&home, None))
+                .is_err()
+        );
+        assert!(resolve_terminal_cd_path(
+            &["a".into(), "b".into()],
+            &cwd,
+            env(&home, None)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("usage"));
         let file = root.join("file");
         std::fs::write(&file, "x").unwrap();
-        assert!(resolve_terminal_cd_path(&[file.into_os_string()], &cwd, env(&home, None)).unwrap_err().to_string().contains("not a directory"));
+        assert!(resolve_terminal_cd_path(
+            &[file.into_os_string()],
+            &cwd,
+            env(&home, None)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("not a directory"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -220,11 +266,14 @@ fn terminal_home(
 ) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        env("USERPROFILE").map(PathBuf::from).or_else(|| {
-            let mut drive = env("HOMEDRIVE")?;
-            drive.push(env("HOMEPATH")?);
-            Some(PathBuf::from(drive))
-        }).or_else(|| env("HOME").map(PathBuf::from))
+        env("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let mut drive = env("HOMEDRIVE")?;
+                drive.push(env("HOMEPATH")?);
+                Some(PathBuf::from(drive))
+            })
+            .or_else(|| env("HOME").map(PathBuf::from))
     }
     #[cfg(not(windows))]
     {
@@ -248,9 +297,14 @@ fn resolve_terminal_cd_path(
             env("OLDPWD").map(PathBuf::from).ok_or("OLDPWD not set")?
         }
         Some(value) if value == "~" => home.ok_or("cannot determine home directory")?,
-        Some(value) if value.to_str().is_some_and(|value| value.starts_with("~/") || value.starts_with("~\\")) => home
-            .ok_or("cannot determine home directory")?
-            .join(&value.to_string_lossy()[2..]),
+        Some(value)
+            if value.to_str().is_some_and(|value| {
+                value.starts_with("~/") || value.starts_with("~\\")
+            }) =>
+        {
+            home.ok_or("cannot determine home directory")?
+                .join(&value.to_string_lossy()[2..])
+        }
         Some(value) if value.to_str().is_some_and(|value| value.starts_with('~')) => {
             return Err("unsupported home expansion (use ~ or ~/path)".into())
         }
@@ -911,7 +965,10 @@ fn resolve_daemon(daemon_url: Option<&str>) -> Option<ResolvedDaemon> {
             #[cfg(unix)]
             let url = unix_socket_url(&embedded_daemon::default_socket_path());
             #[cfg(not(unix))]
-            let url = format!("ws://127.0.0.1:{}/session", embedded_daemon::default_tcp_port());
+            let url = format!(
+                "ws://127.0.0.1:{}/session",
+                embedded_daemon::default_tcp_port()
+            );
             let resolved = ResolvedDaemon::isolated(url, service);
             tracing::info!(
                 daemon = resolved.url,
@@ -1049,8 +1106,8 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
 
 fn download_progress(downloaded: u64, total: u64, range: (u8, u8)) -> u8 {
     let span = range.1.saturating_sub(range.0);
-    let offset = u128::from(downloaded.min(total)) * u128::from(span)
-        / u128::from(total.max(1));
+    let offset =
+        u128::from(downloaded.min(total)) * u128::from(span) / u128::from(total.max(1));
     range.0 + offset as u8
 }
 
@@ -1119,7 +1176,8 @@ fn download_update_file(
             let chunk = chunk?;
             file.write_all(&chunk).await?;
             downloaded = downloaded.saturating_add(chunk.len() as u64);
-            let percent = total.map(|total| download_progress(downloaded, total, progress_range));
+            let percent =
+                total.map(|total| download_progress(downloaded, total, progress_range));
             if percent != last_percent {
                 last_percent = percent;
                 reporter.progress(percent, "Downloading Neoism");
@@ -1317,7 +1375,14 @@ fn self_update(
     let current = concat!("v", env!("CARGO_PKG_VERSION"));
     println!("neoism {current} ({goos}/{goarch}) — checking for updates…");
     println!("Installation: {}", std::env::current_exe()?.display());
-    reporter.progress(Some(5), if options.nightly { "Checking the latest Neoism nightly" } else { "Checking the latest stable Neoism release" });
+    reporter.progress(
+        Some(5),
+        if options.nightly {
+            "Checking the latest Neoism nightly"
+        } else {
+            "Checking the latest stable Neoism release"
+        },
+    );
 
     // The modal pins its displayed release. CLI invocations resolve latest once.
     let latest = match &options.target_version {
@@ -1348,7 +1413,10 @@ fn self_update(
     let asset = format!("neoism-{goos}-{goarch}.tar.gz");
     let url = format!("https://github.com/{repo}/releases/download/{latest}/{asset}");
     // Private, unpredictable staging also isolates concurrent updater processes.
-    let tmp = tempfile::Builder::new().prefix("neoism-update-").tempdir()?.keep();
+    let tmp = tempfile::Builder::new()
+        .prefix("neoism-update-")
+        .tempdir()?
+        .keep();
     let archive = tmp.join(&asset);
     reporter.progress(Some(10), format!("Downloading Neoism {latest}"));
     if let Err(error) = download_update_file(&url, &archive, reporter, (10, 70)) {
@@ -1435,13 +1503,21 @@ fn self_update(
     {
         let handoff = match &macos_installation {
             macos_update::Installation::Bundle(app_dst) => macos_update::stage_update(
-                app_dst, &extracted.join("Neoism.app"), &latest,
-                options.parent_pid, options.relaunch,
+                app_dst,
+                &extracted.join("Neoism.app"),
+                &latest,
+                options.parent_pid,
+                options.relaunch,
             )?,
-            macos_update::Installation::Loose(executable) => macos_update::stage_loose_update(
-                executable, &extracted, &latest,
-                options.parent_pid, options.relaunch,
-            )?,
+            macos_update::Installation::Loose(executable) => {
+                macos_update::stage_loose_update(
+                    executable,
+                    &extracted,
+                    &latest,
+                    options.parent_pid,
+                    options.relaunch,
+                )?
+            }
         };
         println!("Neoism {latest} is staged; the detached helper will finish the macOS update.");
         println!("  • Executable: {}", handoff.target_executable.display());

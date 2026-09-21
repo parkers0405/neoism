@@ -282,6 +282,57 @@ fn compaction_request_estimate_counts_system_tools_and_fresh_results() {
     assert!(estimated_request_tokens(&request) >= tools + 1000);
 }
 
+#[test]
+fn provider_usage_wins_over_request_estimate_for_compaction() {
+    let session_id = Id::ascending(IdKind::Session);
+    let user_id = Id::ascending(IdKind::Message);
+    let request: ProviderGenerationRequest = serde_json::from_value(json!({
+        "providerId": "openai",
+        "modelId": "gpt-5.6-sol",
+        "messages": [{"role": "user", "content": "x".repeat(1_100_000)}]
+    }))
+    .unwrap();
+    assert!(estimated_request_tokens(&request) > 252_000);
+
+    let history = vec![MessageWithParts {
+        info: MessageInfo::Assistant(AssistantMessage {
+            id: Id::ascending(IdKind::Message),
+            session_id,
+            time: CompletedTime {
+                created: 1,
+                streamed: Some(2),
+                completed: Some(2),
+            },
+            parent_id: user_id,
+            mode: "build".into(),
+            agent: "build".into(),
+            path: AssistantPath {
+                cwd: "/tmp".into(),
+                root: "/tmp".into(),
+            },
+            cost: 0.0,
+            tokens: TokenUsage {
+                total: Some(211_038),
+                input: 210_018,
+                output: 54,
+                reasoning: 966,
+                cache: neoism_agent_core::CacheUsage { read: 0, write: 0 },
+            },
+            model_id: "gpt-5.6-sol".into(),
+            provider_id: "openai".into(),
+            finish: Some("stop".into()),
+            error: None,
+        }),
+        parts: vec![],
+    }];
+
+    assert_eq!(compaction_usage_tokens(&request, &history), 211_038);
+    assert_eq!(
+        compaction_usage_tokens(&request, &[]),
+        estimated_request_tokens(&request)
+    );
+}
+
 #[tokio::test]
 async fn compaction_policy_is_loaded_from_workspace_config() {
     let root = std::env::temp_dir().join(format!(

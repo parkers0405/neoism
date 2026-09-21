@@ -144,8 +144,14 @@ fn agent_and_markdown_titles_share_compact_hover_geometry() {
     assert!(tabs.is_animating());
     tabs.clear_hover_immediate();
     assert!(!tabs.is_animating());
-    assert_eq!(BufferTabs::<()>::compact_title_width(400.0, true, 1.0), 140.0);
-    assert_eq!(BufferTabs::<()>::compact_title_width(400.0, true, 2.0), 280.0);
+    assert_eq!(
+        BufferTabs::<()>::compact_title_width(400.0, true, 1.0),
+        140.0
+    );
+    assert_eq!(
+        BufferTabs::<()>::compact_title_width(400.0, true, 2.0),
+        280.0
+    );
     assert_eq!(
         BufferTabs::<()>::compact_title_width(400.0, false, 1.0),
         400.0

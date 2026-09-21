@@ -481,10 +481,17 @@ impl Screen<'_> {
                 }
                 // Wheel over the "On this page" outline scrolls the outline
                 // list, not the document.
-                let notebook_scroll = markdown.documentation_notebook.as_ref().is_some_and(|binding| {
-                    binding.session.lock().ok().is_some_and(|mut book| book.wheel_at(mouse_x, mouse_y, new_scroll_y_px as f32))
-                });
-                if notebook_scroll || markdown.outline_wheel_at(mouse_x, mouse_y, new_scroll_y_px as f32) {
+                let notebook_scroll = markdown
+                    .documentation_notebook
+                    .as_ref()
+                    .is_some_and(|binding| {
+                        binding.session.lock().ok().is_some_and(|mut book| {
+                            book.wheel_at(mouse_x, mouse_y, new_scroll_y_px as f32)
+                        })
+                    });
+                if notebook_scroll
+                    || markdown.outline_wheel_at(mouse_x, mouse_y, new_scroll_y_px as f32)
+                {
                     self.mark_dirty();
                     return;
                 }

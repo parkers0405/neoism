@@ -462,7 +462,13 @@ impl Screen<'_> {
     }
 
     pub(crate) fn handle_notebook_chrome_click(&mut self) -> bool {
-        if self.context_manager.current().notebook.is_none() {
+        let documentation = self
+            .context_manager
+            .current()
+            .markdown
+            .as_ref()
+            .and_then(|pane| pane.documentation_notebook.clone());
+        if self.context_manager.current().notebook.is_none() && documentation.is_none() {
             return false;
         }
 
@@ -487,6 +493,35 @@ impl Screen<'_> {
             && mouse_y < crumbs_y + row_h;
         if !in_row {
             return false;
+        }
+
+        if let Some(action) = self
+            .renderer
+            .breadcrumbs
+            .documentation_action_at(mouse_x, mouse_y)
+        {
+            match action {
+                neoism_ui::panels::breadcrumbs::DocumentationBreadcrumbAction::Search => {
+                    if let Some(markdown) = self.context_manager.current_mut().markdown.as_mut() {
+                        markdown.search_begin(false);
+                        self.renderer.command_palette.enter_search_mode();
+                    }
+                }
+                neoism_ui::panels::breadcrumbs::DocumentationBreadcrumbAction::ToggleOutline => {
+                    if let Some(binding) = documentation {
+                        if let Ok(mut book) = binding.session.lock() {
+                            book.contents_open = !book.contents_open;
+                        }
+                    }
+                    self.reapply_chrome_layout();
+                }
+            }
+            self.mark_dirty();
+            return true;
+        }
+
+        if self.context_manager.current().notebook.is_none() {
+            return true;
         }
 
         if self
@@ -635,8 +670,15 @@ impl Screen<'_> {
     }
 
     pub(crate) fn handle_notebook_chrome_hover(&mut self) -> bool {
-        if self.context_manager.current().notebook.is_none() {
-            return self.renderer.breadcrumbs.clear_notebook_hover();
+        let documentation = self
+            .context_manager
+            .current()
+            .markdown
+            .as_ref()
+            .is_some_and(|pane| pane.documentation_notebook.is_some());
+        if self.context_manager.current().notebook.is_none() && !documentation {
+            return self.renderer.breadcrumbs.clear_notebook_hover()
+                | self.renderer.breadcrumbs.clear_documentation_hover();
         }
 
         let scale_factor = self.sugarloaf.scale_factor();
@@ -659,8 +701,14 @@ impl Screen<'_> {
             && mouse_y >= crumbs_y
             && mouse_y < crumbs_y + row_h;
         if !in_row {
-            return self.renderer.breadcrumbs.clear_notebook_hover();
+            return self.renderer.breadcrumbs.clear_notebook_hover()
+                | self.renderer.breadcrumbs.clear_documentation_hover();
         }
+
+        let documentation_changed = self
+            .renderer
+            .breadcrumbs
+            .set_documentation_hover_at(mouse_x, mouse_y);
 
         let action_changed = self
             .renderer
@@ -670,12 +718,13 @@ impl Screen<'_> {
             .renderer
             .breadcrumbs
             .set_kernel_hover_at(mouse_x, mouse_y);
-        action_changed | kernel_changed
+        documentation_changed | action_changed | kernel_changed
     }
 
     pub(crate) fn notebook_chrome_action_hovered(&self) -> bool {
         self.renderer.breadcrumbs.action_hovered()
             || self.renderer.breadcrumbs.kernel_hovered()
+            || self.renderer.breadcrumbs.documentation_control_hovered()
     }
 
     pub(crate) fn poll_notebook_executions(&mut self) -> bool {

@@ -58,6 +58,24 @@ async fn execute_tool_call_with_env_and_cancel(
     let started = crate::perf::now();
     let input_bytes = input.to_string().len();
     let services = state.services().clone();
+    let session = match session_id {
+        Some(session_id) => state
+            .inner
+            .store
+            .get_session(session_id.as_str())
+            .await
+            .map_err(|error| error.to_string())?,
+        None => None,
+    };
+    let execution = session
+        .as_ref()
+        .map(crate::caller::session_execution_policy)
+        .unwrap_or(neoism_agent_service_api::ExecutionPolicy::NativeLocal);
+    let mcp_auth = match session.as_ref() {
+        Some(session) => crate::mcp_auth::McpAuthStore::for_session(&services, session)
+            .map_err(|error| error.to_string())?,
+        None => crate::mcp_auth::McpAuthStore::local(&services),
+    };
     let contribution = crate::agent_tool_registry::tool_contribution(snapshot, tool_name);
     if contribution
         .is_some_and(|item| item.plugin_id == neoism_agent_builtins::plugin::mcp::ID)
@@ -70,6 +88,8 @@ async fn execute_tool_call_with_env_and_cancel(
             cancel.clone(),
             Some(state.clone()),
             snapshot,
+            &execution,
+            &mcp_auth,
         )
         .await
         .map_err(|error| format!("{error:#}"))?
@@ -89,6 +109,7 @@ async fn execute_tool_call_with_env_and_cancel(
     if contribution.is_some_and(|item| {
         item.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID
     }) {
+        ensure_native_process_tool(state, session_id, tool_name).await?;
         let result = crate::custom_tool::execute(
             &services,
             directory,
@@ -117,6 +138,12 @@ async fn execute_tool_call_with_env_and_cancel(
     let formatter = crate::config::formatter_value(snapshot.config());
     let runtime = snapshot.runtime_tools.get(tool_name).cloned();
     let runtime = runtime.ok_or_else(|| format!("unknown tool {tool_name}"))?;
+    if matches!(tool_name, "bash" | "background_task") {
+        ensure_native_process_tool(state, session_id, tool_name).await?;
+    }
+    if tool_name == "sandbox_exec" {
+        ensure_sandbox_process_tool(state, session_id).await?;
+    }
     let definition = runtime.definition();
     if let Some(permission) = definition.permission {
         let target = input
@@ -127,6 +154,31 @@ async fn execute_tool_call_with_env_and_cancel(
     }
     let result = runtime
         .execute(neoism_agent_plugin_api::PluginToolInvocation {
+            tenant_id: session
+                .as_ref()
+                .map(|session| crate::caller::session_tenant(session).to_string())
+                .unwrap_or_else(|| "local".to_string()),
+            subject: session.as_ref().and_then(|session| {
+                session
+                    .extra
+                    .get(crate::caller::CREATED_BY_EXTRA_KEY)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+            workspace_id: session
+                .as_ref()
+                .and_then(|session| session.workspace_id.as_ref().map(ToString::to_string)),
+            execution_mode: match execution {
+                neoism_agent_service_api::ExecutionPolicy::Disabled => {
+                    neoism_agent_plugin_api::PluginExecutionMode::Disabled
+                }
+                neoism_agent_service_api::ExecutionPolicy::NativeLocal => {
+                    neoism_agent_plugin_api::PluginExecutionMode::NativeLocal
+                }
+                neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. } => {
+                    neoism_agent_plugin_api::PluginExecutionMode::Sandboxed
+                }
+            },
             directory: directory.to_string(),
             session_id: session_id.map(ToString::to_string),
             arguments: input,
@@ -153,6 +205,54 @@ async fn execute_tool_call_with_env_and_cancel(
         started,
     );
     Ok(result)
+}
+
+async fn ensure_native_process_tool(
+    state: &AppState,
+    session_id: Option<&Id>,
+    tool_name: &str,
+) -> Result<(), String> {
+    let Some(session_id) = session_id else {
+        return Ok(());
+    };
+    let session = state
+        .inner
+        .store
+        .get_session(session_id.as_str())
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+    let policy = crate::caller::session_execution_policy(&session);
+    if crate::caller::native_execution_allowed(&policy) {
+        return Ok(());
+    }
+    Err(format!(
+        "native process tool {tool_name} is unavailable for this session; use an approved remote sandbox MCP"
+    ))
+}
+
+async fn ensure_sandbox_process_tool(
+    state: &AppState,
+    session_id: Option<&Id>,
+) -> Result<(), String> {
+    let Some(session_id) = session_id else {
+        return Err("sandbox execution requires a tenant session".to_string());
+    };
+    let session = state
+        .inner
+        .store
+        .get_session(session_id.as_str())
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "session not found".to_string())?;
+    if matches!(
+        crate::caller::session_execution_policy(&session),
+        neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }
+    ) {
+        Ok(())
+    } else {
+        Err("sandbox_exec is unavailable for this session".to_string())
+    }
 }
 
 fn log_tool_perf(
@@ -254,9 +354,12 @@ async fn execute_stateful_tool_call(
                 Err(error) => return Err(error.to_string()),
             };
             let destination = project_context.directory;
-            if !std::path::Path::new(&destination).starts_with(std::path::Path::new(&info.directory))
+            if !std::path::Path::new(&destination)
+                .starts_with(std::path::Path::new(&info.directory))
             {
-                return Err("move_chat cannot leave the current workspace scope".to_string());
+                return Err(
+                    "move_chat cannot leave the current workspace scope".to_string()
+                );
             }
             state.inner.pending_session_moves.lock().await.insert(
                 session_id.to_string(),
@@ -327,10 +430,23 @@ async fn execute_stateful_tool_call(
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
+            let session = state
+                .inner
+                .store
+                .get_session(session_id.as_str())
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("session {session_id} not found"))?;
+            let tenant = crate::caller::session_tenant(&session);
+            let scope = if tenant == "local" {
+                crate::state::TenantQueryScope::LocalAll
+            } else {
+                crate::state::TenantQueryScope::Tenant(tenant)
+            };
             let hits = state
                 .inner
                 .store
-                .search_messages(query, scope_session, limit)
+                .search_messages(scope, query, scope_session, limit)
                 .await
                 .map_err(|error| error.to_string())?;
             let output =
@@ -1036,9 +1152,15 @@ pub(crate) async fn execute_tool_call_in_generation(
     let unattended = session
         .as_ref()
         .is_some_and(|session| session.extra.contains_key("workflowRunID"));
+    let tenant_id = session
+        .as_ref()
+        .map(|session| crate::caller::session_tenant(session).to_string())
+        .unwrap_or_else(|| "local".to_string());
     let project_id = session
-        .map(|session| session.project_id)
+        .as_ref()
+        .map(|session| session.project_id.clone())
         .unwrap_or_else(|| project_info(state, directory.to_string()).id);
+    let approval_scope = (tenant_id, project_id);
     // Invocation hooks are part of one logical tool call. Approval may resume
     // permission evaluation, but it must never rerun hooks or regenerate the
     // environment and thereby duplicate plugin side effects.
@@ -1085,7 +1207,7 @@ pub(crate) async fn execute_tool_call_in_generation(
                 .permission_approvals
                 .read()
                 .await
-                .get(&project_id)
+                .get(&approval_scope)
                 .cloned()
                 .unwrap_or_default(),
         );
@@ -1190,7 +1312,9 @@ pub(crate) async fn execute_tool_call_in_generation(
                 // in skip-permissions mode.
                 // Clipboard replacement requires its own human grant even when
                 // ordinary tool prompts are globally skipped.
-                if permission != "computer_clipboard" && dangerously_skip_permissions_enabled(snapshot.config()) {
+                if permission != "computer_clipboard"
+                    && dangerously_skip_permissions_enabled(snapshot.config())
+                {
                     one_time_rules.extend(patterns.into_iter().map(|pattern| {
                         PermissionRule {
                             permission: permission.clone(),

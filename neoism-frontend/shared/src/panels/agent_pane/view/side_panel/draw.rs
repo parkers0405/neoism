@@ -493,7 +493,6 @@ pub(crate) fn render_sessions_list(
         pane.side_panel().session_catalog_state(),
         crate::panels::agent_pane::state::side_panel::SessionCatalogState::Initial
             | crate::panels::agent_pane::state::side_panel::SessionCatalogState::Loading
-            | crate::panels::agent_pane::state::side_panel::SessionCatalogState::Error(_)
     ) {
         draw_session_loading_skeleton(
             sugarloaf,
@@ -503,6 +502,26 @@ pub(crate) fn render_sessions_list(
             pane.side_panel().sessions_loading_elapsed(),
             theme,
             s,
+        );
+        return;
+    }
+
+    if let crate::panels::agent_pane::state::side_panel::SessionCatalogState::Error(message) =
+        pane.side_panel().session_catalog_state()
+    {
+        let opts = DrawOpts {
+            font_size: FONT_SIZE * s,
+            color: theme.u8(theme.dim),
+            clip_rect: Some(clip),
+            ..DrawOpts::default()
+        };
+        draw_text_with_occlusion(
+            sugarloaf,
+            text_x,
+            list_top + 12.0 * s,
+            message,
+            &opts,
+            occlusion_rects,
         );
         return;
     }

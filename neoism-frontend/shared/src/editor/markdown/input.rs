@@ -6,41 +6,77 @@ impl MarkdownPane {
         if text.is_empty() || self.read_only {
             return;
         }
-        let fence_indent = if self.mode == MarkdownMode::Insert && !text.contains(['\n', '\r'])
-            && !self.is_inside_code_block(self.cursor_line) {
+        let fence_indent = if self.mode == MarkdownMode::Insert
+            && !text.contains(['\n', '\r'])
+            && !self.is_inside_code_block(self.cursor_line)
+        {
             self.lines.get(self.cursor_line).and_then(|line| {
-                if line.trim_start().starts_with("```") { return None; }
+                if line.trim_start().starts_with("```") {
+                    return None;
+                }
                 let col = floor_char_boundary(line, self.cursor_col.min(line.len()));
                 let candidate = format!("{}{}{}", &line[..col], text, &line[col..]);
                 let body = candidate.trim_start_matches(' ');
                 let indent = candidate.len() - body.len();
                 let suffix = body.strip_prefix("```")?;
-                if indent > 3 || suffix.contains('`') { return None; }
-                let closing_exists = self.lines.get(self.cursor_line + 1).is_some_and(|line| line.trim() == "```")
-                    || (self.lines.get(self.cursor_line + 1).is_some_and(|line| line.trim().is_empty())
-                        && self.lines.get(self.cursor_line + 2).is_some_and(|line| line.trim() == "```"));
+                if indent > 3 || suffix.contains('`') {
+                    return None;
+                }
+                let closing_exists = self
+                    .lines
+                    .get(self.cursor_line + 1)
+                    .is_some_and(|line| line.trim() == "```")
+                    || (self
+                        .lines
+                        .get(self.cursor_line + 1)
+                        .is_some_and(|line| line.trim().is_empty())
+                        && self
+                            .lines
+                            .get(self.cursor_line + 2)
+                            .is_some_and(|line| line.trim() == "```"));
                 (!closing_exists).then(|| " ".repeat(indent))
             })
-        } else { None };
+        } else {
+            None
+        };
         let fence_cursor = self.cursor_col + text.len();
         self.clear_vertical_goal();
         let undo_start = self.cursor_line;
         let local_undo = self.save_local_undo(undo_start, undo_start.saturating_add(1));
         let mut text = if self.table_cursor().is_some() {
             let mut out = String::with_capacity(text.len());
-            let prefix = self.lines.get(self.cursor_line).and_then(|line| line.get(..self.cursor_col)).unwrap_or("");
-            let mut escaped = prefix.bytes().rev().take_while(|ch| *ch == b'\\').count() % 2 == 1;
+            let prefix = self
+                .lines
+                .get(self.cursor_line)
+                .and_then(|line| line.get(..self.cursor_col))
+                .unwrap_or("");
+            let mut escaped =
+                prefix.bytes().rev().take_while(|ch| *ch == b'\\').count() % 2 == 1;
             for ch in text.chars() {
                 match ch {
                     '\r' => continue,
-                    '\n' => { out.push_str("<br>"); escaped = false; }
-                    '|' if !escaped => { out.push_str("\\|"); escaped = false; }
-                    '\\' => { out.push(ch); escaped = !escaped; }
-                    _ => { out.push(ch); escaped = false; }
+                    '\n' => {
+                        out.push_str("<br>");
+                        escaped = false;
+                    }
+                    '|' if !escaped => {
+                        out.push_str("\\|");
+                        escaped = false;
+                    }
+                    '\\' => {
+                        out.push(ch);
+                        escaped = !escaped;
+                    }
+                    _ => {
+                        out.push(ch);
+                        escaped = false;
+                    }
                 }
             }
             out
-        } else { text.replace('\r', "") };
+        } else {
+            text.replace('\r', "")
+        };
         if let Some(indent) = &fence_indent {
             text.push('\n');
             text.push_str(indent);
@@ -469,20 +505,33 @@ impl MarkdownPane {
     }
 
     pub fn slash_block_query_before_cursor(&self) -> Option<String> {
-        if self.read_only || self.is_inside_code_block(self.cursor_line) { return None; }
+        if self.read_only || self.is_inside_code_block(self.cursor_line) {
+            return None;
+        }
         let line = self.lines.get(self.cursor_line)?;
         let cursor = floor_char_boundary(line, self.cursor_col.min(line.len()));
-        if !line.get(cursor..)?.trim().is_empty() { return None; }
+        if !line.get(cursor..)?.trim().is_empty() {
+            return None;
+        }
         let before = line.get(..cursor)?;
         let slash = before.rfind('/')?;
-        if !before[..slash].trim().is_empty() { return None; }
+        if !before[..slash].trim().is_empty() {
+            return None;
+        }
         let query = before.get(slash + 1..)?;
-        if !query.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-') { return None; }
+        if !query
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            return None;
+        }
         Some(query.to_string())
     }
 
     pub(crate) fn remove_slash_trigger_before_cursor(&mut self) -> bool {
-        if self.slash_block_query_before_cursor().is_none() { return false; }
+        if self.slash_block_query_before_cursor().is_none() {
+            return false;
+        }
         let Some(line) = self.lines.get_mut(self.cursor_line) else {
             return false;
         };

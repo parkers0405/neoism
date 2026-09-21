@@ -20,6 +20,8 @@ import type {
   PermissionRequest,
   QuestionRequest,
   Session,
+  SessionControl,
+  SessionParticipant,
   ToolInfo,
 } from "./types.js";
 import {
@@ -129,6 +131,10 @@ export interface NeoismClient {
     summarize(id: string): Promise<OperationResponse<"v2.sessions.summarize">>;
     pin(id: string, pinned: boolean): Promise<OperationResponse<"v2.sessions.pin">>;
     cancelJob(id: string, jobId: string): Promise<OperationResponse<"v2.sessions.jobs.cancel">>;
+    control(id: string): Promise<SessionControl | null>;
+    claimControl(id: string, options?: { expectedRevision?: number; leaseSeconds?: number }): Promise<SessionControl>;
+    releaseControl(id: string, expectedRevision?: number): Promise<boolean>;
+    participants(id: string): Promise<SessionParticipant[]>;
   };
 }
 
@@ -358,6 +364,10 @@ export function createNeoismClient(transport: NeoismTransport): NeoismClient {
       summarize: (id) => operations.request("v2.sessions.summarize", { path: { session_id: id }, body: {} }),
       pin: (id, pinned) => operations.request("v2.sessions.pin", { path: { session_id: id }, body: { pinned } }),
       cancelJob: (id, jobId) => operations.request("v2.sessions.jobs.cancel", { path: { session_id: id, job_id: jobId } }),
+      control: (id) => operations.request("v2.sessions.control.get", { path: { session_id: id } }),
+      claimControl: (id, body = {}) => operations.request("v2.sessions.control.claim", { path: { session_id: id }, body: clean(body) }),
+      releaseControl: (id, expectedRevision) => operations.request("v2.sessions.control.release", { path: { session_id: id }, query: clean({ expectedRevision }) }),
+      participants: (id) => operations.request("v2.sessions.participants.list", { path: { session_id: id } }),
     },
   };
   return client;

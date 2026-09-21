@@ -1597,6 +1597,79 @@ impl NeoismAgentSidePanel {
         self.set_session_page(sessions, None, None);
     }
 
+    /// Apply one live catalogue mutation without discarding continuation pages
+    /// or moving the user's selection to a different session after re-sorting.
+    pub fn upsert_session(&mut self, session: NeoismAgentSessionEntry) {
+        let selected_id = self.selected_session().map(|entry| entry.id.clone());
+        if let Some(existing) = self
+            .all_sessions
+            .iter_mut()
+            .find(|existing| existing.id == session.id)
+        {
+            *existing = session;
+        } else {
+            self.all_sessions.push(session);
+        }
+        self.session_catalog_state = SessionCatalogState::Ready;
+        self.rebuild_session_display();
+        self.restore_selected_session(selected_id.as_deref());
+    }
+
+    /// Merge an authoritative newest page after the catalogue stream has
+    /// subscribed. A live create can race the HTTP response; merging prevents
+    /// that newer row from being erased by a snapshot taken just before it.
+    pub fn reconcile_session_head(
+        &mut self,
+        sessions: Vec<NeoismAgentSessionEntry>,
+        next_cursor: Option<String>,
+    ) {
+        let selected_id = self.selected_session().map(|entry| entry.id.clone());
+        for session in sessions {
+            if let Some(existing) = self
+                .all_sessions
+                .iter_mut()
+                .find(|existing| existing.id == session.id)
+            {
+                *existing = session;
+            } else {
+                self.all_sessions.push(session);
+            }
+        }
+        self.session_next_cursor =
+            next_cursor.or_else(|| self.session_next_cursor.take());
+        self.session_page_loading = false;
+        self.session_requested_cursor = None;
+        self.session_refresh_attempts = 0;
+        self.session_catalog_state = SessionCatalogState::Ready;
+        self.rebuild_session_display();
+        self.restore_selected_session(selected_id.as_deref());
+    }
+
+    pub fn remove_session(&mut self, session_id: &str) {
+        let selected_id = self
+            .selected_session()
+            .filter(|entry| entry.id != session_id)
+            .map(|entry| entry.id.clone());
+        self.all_sessions.retain(|entry| entry.id != session_id);
+        self.semantic_results
+            .retain(|entry| entry.session_id != session_id);
+        self.rebuild_session_display();
+        self.restore_selected_session(selected_id.as_deref());
+    }
+
+    fn restore_selected_session(&mut self, session_id: Option<&str>) {
+        let Some(session_id) = session_id else {
+            return;
+        };
+        if let Some(index) = self
+            .sessions
+            .iter()
+            .position(|entry| !entry.is_header && entry.id == session_id)
+        {
+            self.selected = index;
+        }
+    }
+
     /// Apply a catalogue page. First pages replace and reset the home list;
     /// continuation pages append by id while preserving the viewport.
     pub fn set_session_page(

@@ -75,6 +75,9 @@ pub(crate) async fn session_create(
     });
     let directory = resolve_directory(query.directory, &headers);
     let mut extra = BTreeMap::new();
+    let creating_actor = claims.as_ref().map(|Extension(claims)| {
+        (claims.subject.clone(), claims.actor_type_label())
+    });
     if let Some(Extension(claims)) = claims {
         if !crate::caller::allows_directory(&claims, &directory) {
             return Err(ApiError::forbidden(
@@ -100,6 +103,20 @@ pub(crate) async fn session_create(
             crate::caller::TENANT_EXTRA_KEY.to_string(),
             Value::String(claims.tenant_id.clone()),
         );
+        extra.insert(
+            crate::caller::EXECUTION_POLICY_EXTRA_KEY.to_string(),
+            serde_json::to_value(claims.execution_policy())
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        );
+        extra.insert(
+            crate::caller::CREATED_BY_EXTRA_KEY.to_string(),
+            Value::String(claims.subject.clone()),
+        );
+        extra.insert(
+            crate::caller::QUOTAS_EXTRA_KEY.to_string(),
+            serde_json::to_value(claims.quotas())
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        );
         if let Some(parent_id) = request.parent_id.as_ref() {
             let parent = state
                 .inner
@@ -115,9 +132,20 @@ pub(crate) async fn session_create(
         }
         bind_authenticated_workspace(&mut request, &claims)?;
     }
-    Ok(Json(
-        create_session_in_directory(&state, &directory, request, extra).await?,
-    ))
+    let info = create_session_in_directory(&state, &directory, request, extra).await?;
+    if let Some((subject, actor_type)) = creating_actor {
+        state
+            .inner
+            .store
+            .record_session_participant(
+                crate::caller::session_tenant(&info),
+                info.id.as_str(),
+                &subject,
+                actor_type,
+            )
+            .await?;
+    }
+    Ok(Json(info))
 }
 
 fn bind_authenticated_workspace(
@@ -206,6 +234,17 @@ pub(crate) async fn create_session_in_directory(
                 Value::String(parent_tenant.to_string()),
             );
         }
+        for key in [
+            crate::caller::EXECUTION_POLICY_EXTRA_KEY,
+            crate::caller::CREATED_BY_EXTRA_KEY,
+            crate::caller::QUOTAS_EXTRA_KEY,
+        ] {
+            if !extra.contains_key(key) {
+                if let Some(value) = parent.extra.get(key) {
+                    extra.insert(key.to_string(), value.clone());
+                }
+            }
+        }
     }
     let info = SessionInfo {
         id: id.clone(),
@@ -278,7 +317,14 @@ pub(crate) async fn session_delete(
     state.inner.statuses.write().await.remove(&session_id);
     state.publish(EventPayload::new(
         event_type::SESSION_DELETED,
-        json!({ "sessionID": session_id }),
+        json!({
+            "sessionID": session_id,
+            "info": deleted_session.as_ref(),
+            "tenantID": deleted_session
+                .as_ref()
+                .map(crate::caller::session_tenant)
+                .unwrap_or("local")
+        }),
     ));
     if let Some(root) = execution_root.filter(|root| root != &session_id) {
         crate::execution_activity::finish_if_quiescent(&state, &root).await;
@@ -811,6 +857,7 @@ mod directory_tests {
             artifact_retention_days: None,
             requests_per_minute: None,
             max_in_flight: None,
+            resolved: None,
         };
         let mut request = CreateSessionRequest {
             parent_id: None,

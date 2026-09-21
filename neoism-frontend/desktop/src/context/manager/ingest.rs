@@ -538,14 +538,12 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                     false
                 }
             }
-            PtyServerMessage::Error { message } => {
-                self.apply_remote_pty_failure(
-                    request_id,
-                    None,
-                    &message,
-                    crate::daemon_client::PtyFailureClass::Terminal,
-                )
-            }
+            PtyServerMessage::Error { message } => self.apply_remote_pty_failure(
+                request_id,
+                None,
+                &message,
+                crate::daemon_client::PtyFailureClass::Terminal,
+            ),
         }
     }
 

@@ -9,6 +9,7 @@
 use neoism_backend::config::mashup::{
     find_mashup_pack, load_ide_theme_specs, load_mashup_packs, LookConfig,
 };
+use neoism_backend::sugarloaf::font::SugarloafFonts;
 use neoism_ui::panels::command_palette::PaletteMashupEntry;
 use neoism_ui::primitives::ide_theme::{
     parse_theme_hex, replace_custom_ide_themes, IdeTheme,
@@ -83,6 +84,36 @@ pub fn mashup_palette_entries() -> Vec<PaletteMashupEntry> {
             }
         })
         .collect()
+}
+
+/// Fold a markdown look family into the font-library spec so
+/// `font_id_for_family` can resolve it without changing the primary
+/// terminal/code cascade.
+pub fn fonts_with_markdown_family(
+    mut fonts: SugarloafFonts,
+    markdown_family: Option<&str>,
+) -> SugarloafFonts {
+    let Some(family) = markdown_family
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return fonts;
+    };
+    if fonts
+        .family
+        .as_deref()
+        .is_some_and(|primary| primary.eq_ignore_ascii_case(family))
+    {
+        return fonts;
+    }
+    let extras = fonts.extra_families.get_or_insert_with(Vec::new);
+    if !extras
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(family))
+    {
+        extras.push(family.to_string());
+    }
+    fonts
 }
 
 /// Merge the active pack's look slots (scrollbar/markdown/icons)

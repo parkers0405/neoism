@@ -37,6 +37,14 @@ const ORDER_TEXT: u8 = 20;
 const KERNEL_GLYPH: &str = "\u{f085}";
 const CHEVRON_DOWN: &str = "\u{f078}";
 const CHEVRON_UP: &str = "\u{f077}";
+const SEARCH_GLYPH: &str = "\u{f002}";
+const OUTLINE_GLYPH: &str = "\u{f03a}";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentationBreadcrumbAction {
+    Search,
+    ToggleOutline,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BreadcrumbAction {
@@ -91,6 +99,9 @@ pub struct Breadcrumbs {
     kernel_selector: Option<BreadcrumbKernelSelector>,
     kernel_hit: RefCell<Option<[f32; 4]>>,
     kernel_hovered: RefCell<bool>,
+    documentation_outline_open: Option<bool>,
+    documentation_hits: RefCell<Vec<([f32; 4], DocumentationBreadcrumbAction)>>,
+    documentation_hovered: RefCell<Option<DocumentationBreadcrumbAction>>,
     scale: f32,
 }
 
@@ -106,6 +117,9 @@ impl Breadcrumbs {
             kernel_selector: None,
             kernel_hit: RefCell::new(None),
             kernel_hovered: RefCell::new(false),
+            documentation_outline_open: None,
+            documentation_hits: RefCell::new(Vec::new()),
+            documentation_hovered: RefCell::new(None),
             scale: 1.0,
         }
     }
@@ -188,6 +202,51 @@ impl Breadcrumbs {
             *self.kernel_hit.borrow_mut() = None;
             *self.kernel_hovered.borrow_mut() = false;
         }
+    }
+
+    pub fn set_documentation_controls(&mut self, outline_open: Option<bool>) {
+        self.documentation_outline_open = outline_open;
+        if outline_open.is_some() {
+            self.visible = true;
+        } else {
+            self.documentation_hits.borrow_mut().clear();
+            *self.documentation_hovered.borrow_mut() = None;
+        }
+    }
+
+    pub fn documentation_action_at(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> Option<DocumentationBreadcrumbAction> {
+        self.documentation_hits
+            .borrow()
+            .iter()
+            .find(|(rect, _)| point_in_rect(x, y, *rect))
+            .map(|(_, action)| *action)
+    }
+
+    pub fn set_documentation_hover_at(&self, x: f32, y: f32) -> bool {
+        let next = self.documentation_action_at(x, y);
+        let mut hovered = self.documentation_hovered.borrow_mut();
+        if *hovered == next {
+            return false;
+        }
+        *hovered = next;
+        true
+    }
+
+    pub fn clear_documentation_hover(&self) -> bool {
+        let mut hovered = self.documentation_hovered.borrow_mut();
+        if hovered.is_none() {
+            return false;
+        }
+        *hovered = None;
+        true
+    }
+
+    pub fn documentation_control_hovered(&self) -> bool {
+        self.documentation_hovered.borrow().is_some()
     }
 
     pub fn action_at(&self, x: f32, y: f32) -> Option<BreadcrumbAction> {
@@ -354,7 +413,13 @@ impl Breadcrumbs {
         let icon_y = y_top + (row_h - icon_size) / 2.0;
 
         let mut cursor_x = x_left + padding_x;
-        let max_x = x_left + width - padding_x;
+        let max_x = self.render_documentation_controls(
+            sugarloaf,
+            x_left,
+            y_top,
+            width,
+            theme,
+        );
         for (ix, seg) in self.segments.iter().enumerate() {
             let is_leaf = ix == last_ix;
 
@@ -444,6 +509,106 @@ impl Breadcrumbs {
         }
 
         let _ = ORDER_TEXT;
+    }
+
+    fn render_documentation_controls(
+        &self,
+        sugarloaf: &mut Sugarloaf,
+        x_left: f32,
+        y_top: f32,
+        width: f32,
+        theme: &IdeTheme,
+    ) -> f32 {
+        let padding_x = PADDING_X * self.scale;
+        let Some(outline_open) = self.documentation_outline_open else {
+            self.documentation_hits.borrow_mut().clear();
+            *self.documentation_hovered.borrow_mut() = None;
+            return x_left + width - padding_x;
+        };
+        let row_h = self.height();
+        let button_h = 20.0 * self.scale;
+        let button_y = y_top + (row_h - button_h) * 0.5;
+        let gap = 5.0 * self.scale;
+        let outline_w = 22.0 * self.scale;
+        let search_w = (width * 0.32)
+            .clamp(110.0 * self.scale, 220.0 * self.scale)
+            .min((width - padding_x * 2.0 - outline_w - gap).max(0.0));
+        let outline_rect = [
+            x_left + width - padding_x - outline_w,
+            button_y,
+            outline_w,
+            button_h,
+        ];
+        let search_rect = [
+            outline_rect[0] - gap - search_w,
+            button_y,
+            search_w,
+            button_h,
+        ];
+        let hovered = *self.documentation_hovered.borrow();
+        let radius = 6.0 * self.scale;
+        for (rect, active) in [
+            (search_rect, hovered == Some(DocumentationBreadcrumbAction::Search)),
+            (
+                outline_rect,
+                outline_open
+                    || hovered == Some(DocumentationBreadcrumbAction::ToggleOutline),
+            ),
+        ] {
+            sugarloaf.rounded_rect(
+                None,
+                rect[0],
+                rect[1],
+                rect[2],
+                rect[3],
+                if active {
+                    theme.f32_alpha(theme.hover, 0.88)
+                } else {
+                    theme.f32(theme.surface)
+                },
+                DEPTH,
+                radius,
+                ORDER_BUTTON,
+            );
+        }
+        let icon_opts = DrawOpts {
+            font_size: ICON_FONT_SIZE * self.scale,
+            color: theme.u8(theme.muted),
+            ..DrawOpts::default()
+        };
+        let text_opts = DrawOpts {
+            font_size: FONT_SIZE * self.scale,
+            color: theme.u8(theme.dim),
+            ..DrawOpts::default()
+        };
+        let icon_y = y_top + (row_h - ICON_FONT_SIZE * self.scale) * 0.5;
+        let text_y = y_top + (row_h - FONT_SIZE * self.scale) * 0.5;
+        sugarloaf.text_mut().draw(
+            search_rect[0] + 7.0 * self.scale,
+            icon_y,
+            SEARCH_GLYPH,
+            &icon_opts,
+        );
+        sugarloaf.text_mut().draw(
+            search_rect[0] + 25.0 * self.scale,
+            text_y,
+            "Search...",
+            &text_opts,
+        );
+        sugarloaf.text_mut().draw(
+            outline_rect[0] + 5.0 * self.scale,
+            icon_y,
+            OUTLINE_GLYPH,
+            &icon_opts,
+        );
+        *self.documentation_hits.borrow_mut() = vec![
+            (search_rect, DocumentationBreadcrumbAction::Search),
+            (
+                outline_rect,
+                DocumentationBreadcrumbAction::ToggleOutline,
+            ),
+        ];
+        search_rect[0] - gap
     }
 
     fn render_actions(
@@ -760,5 +925,21 @@ mod tests {
         )]);
         assert!(b.is_visible());
         assert!(b.segments().is_empty());
+    }
+
+    #[test]
+    fn documentation_controls_preserve_path_and_clear_stale_hits() {
+        let mut b = Breadcrumbs::new();
+        b.set_from_path(Path::new("/proj/guide.md"), Some(Path::new("/proj")));
+        b.set_documentation_controls(Some(false));
+        assert_eq!(b.segments(), &["guide.md".to_string()]);
+        assert!(b.is_visible());
+        b.documentation_hits.borrow_mut().push((
+            [0.0, 0.0, 10.0, 10.0],
+            DocumentationBreadcrumbAction::Search,
+        ));
+        b.set_documentation_controls(None);
+        assert!(b.documentation_hits.borrow().is_empty());
+        assert!(!b.documentation_control_hovered());
     }
 }

@@ -34,16 +34,27 @@ fn cd_operand_parser_handles_bare_quotes_and_rejects_multiple_words() {
 fn persistent_cd_resets_query_and_advances_captured_workspace() {
     use super::actions::WorkspaceDirectoryTarget;
     let mut palette = CommandPalette::new();
-    palette.open_commands_for_workspace("cd ..", WorkspaceDirectoryTarget {
-        workspace_id: Some("captured".into()), root: "/a/b".into(),
-    });
+    palette.open_commands_for_workspace(
+        "cd ..",
+        WorkspaceDirectoryTarget {
+            workspace_id: Some("captured".into()),
+            root: "/a/b".into(),
+        },
+    );
     palette.continue_workspace_directory("/a");
     assert!(palette.is_enabled());
     assert_eq!(palette.query, "cd ");
     assert_eq!(palette.workspace_directory_target().unwrap().root, "/a");
     palette.continue_workspace_directory_pending();
     assert_eq!(palette.query, "cd ");
-    assert_eq!(palette.workspace_directory_target().unwrap().workspace_id.as_deref(), Some("captured"));
+    assert_eq!(
+        palette
+            .workspace_directory_target()
+            .unwrap()
+            .workspace_id
+            .as_deref(),
+        Some("captured")
+    );
     assert_eq!(palette.workspace_directory_target().unwrap().root, "/a");
 }
 
@@ -51,9 +62,13 @@ fn persistent_cd_resets_query_and_advances_captured_workspace() {
 fn invalid_cd_stays_open_with_inline_error_and_escape_is_explicit_close() {
     use super::actions::WorkspaceDirectoryTarget;
     let mut palette = CommandPalette::new();
-    palette.open_commands_for_workspace("cd one two", WorkspaceDirectoryTarget {
-        workspace_id: Some("workspace".into()), root: "/tmp".into(),
-    });
+    palette.open_commands_for_workspace(
+        "cd one two",
+        WorkspaceDirectoryTarget {
+            workspace_id: Some("workspace".into()),
+            root: "/tmp".into(),
+        },
+    );
     assert!(palette.typed_change_workspace_directory_intent().is_none());
     assert!(palette.cd_error().unwrap().contains("quote"));
     assert!(palette.is_enabled());
@@ -79,11 +94,15 @@ fn measured_wrap_prefers_spaces_and_breaks_long_unicode_tokens() {
     let rows = wrap_grapheme_ranges("cd alpha beta", 8.0, |s| s.chars().count() as f32);
     let text = "cd alpha beta";
     assert!(rows.len() >= 2);
-    assert!(rows.iter().all(|(a, b)| text.is_char_boundary(*a) && text.is_char_boundary(*b)));
+    assert!(rows
+        .iter()
+        .all(|(a, b)| text.is_char_boundary(*a) && text.is_char_boundary(*b)));
     let token = "世界世界世界世界";
     let rows = wrap_grapheme_ranges(token, 3.0, |s| s.chars().count() as f32);
     assert!(rows.len() >= 3);
-    assert!(rows.iter().all(|(a, b)| token.is_char_boundary(*a) && token.is_char_boundary(*b)));
+    assert!(rows
+        .iter()
+        .all(|(a, b)| token.is_char_boundary(*a) && token.is_char_boundary(*b)));
 
     let long = "command-with-no-spaces-and-many-graphemes-世界世界世界";
     let narrow = wrap_grapheme_ranges(long, 6.0, |s| s.chars().count() as f32);
@@ -103,9 +122,13 @@ fn measured_wrap_prefers_spaces_and_breaks_long_unicode_tokens() {
 fn persistent_cd_dynamic_input_shifts_result_hits() {
     use super::actions::WorkspaceDirectoryTarget;
     let mut palette = CommandPalette::new();
-    palette.open_commands_for_workspace("cd /a/very/long/query", WorkspaceDirectoryTarget {
-        workspace_id: Some("workspace".into()), root: "/".into(),
-    });
+    palette.open_commands_for_workspace(
+        "cd /a/very/long/query",
+        WorkspaceDirectoryTarget {
+            workspace_id: Some("workspace".into()),
+            root: "/".into(),
+        },
+    );
     palette.set_cd_directory_results(vec![PaletteDirectoryEntry::new("/a/result")]);
     palette.input_band_height = super::INPUT_HEIGHT * 4.0;
     let (x, y) = palette.row_center_coords(0, 480.0, 1.0);
@@ -117,22 +140,42 @@ fn persistent_cd_dynamic_input_shifts_result_hits() {
 fn cd_choices_only_show_live_completions_and_dedupe_them() {
     use super::actions::WorkspaceDirectoryTarget;
     let mut palette = CommandPalette::new();
-    palette.open_commands_for_workspace("cd ", WorkspaceDirectoryTarget {
-        workspace_id: Some("workspace".into()), root: "/work/project/src".into(),
-    });
+    palette.open_commands_for_workspace(
+        "cd ",
+        WorkspaceDirectoryTarget {
+            workspace_id: Some("workspace".into()),
+            root: "/work/project/src".into(),
+        },
+    );
     palette.record_workspace_directory("/recent");
     palette.compose_workspace_directory_choices(
         Some("/home/me".into()),
         Some("/work".into()),
-        vec![PaletteDirectoryEntry::new("/recent"), PaletteDirectoryEntry::new("/completion")],
+        vec![
+            PaletteDirectoryEntry::new("/recent"),
+            PaletteDirectoryEntry::new("/completion"),
+        ],
     );
     let rows = &palette.cd_directory_results;
     assert!(!rows.iter().any(|row| matches!(
         row.display.as_deref(),
-        Some("Home" | "Workspace root" | "Current directory" | "Parent directory" | "Recent")
+        Some(
+            "Home"
+                | "Workspace root"
+                | "Current directory"
+                | "Parent directory"
+                | "Recent"
+        )
     )));
-    assert_eq!(rows.iter().filter(|row| row.absolute_path == "/recent").count(), 1);
-    assert!(!rows.iter().any(|row| row.display.as_deref() == Some("Recent")));
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.absolute_path == "/recent")
+            .count(),
+        1
+    );
+    assert!(!rows
+        .iter()
+        .any(|row| row.display.as_deref() == Some("Recent")));
 }
 
 #[test]
@@ -154,13 +197,18 @@ fn generic_command_palette_can_capture_workspace_after_typing_cd() {
 fn windows_workspace_paths_keep_completion_semantics_on_wasm() {
     use super::actions::WorkspaceDirectoryTarget;
     let mut palette = CommandPalette::new();
-    palette.open_commands_for_workspace("cd pro", WorkspaceDirectoryTarget {
-        workspace_id: Some("workspace".into()),
-        root: "C:\\Users\\me".into(),
-    });
-    palette.compose_workspace_directory_choices(None, None, vec![
-        PaletteDirectoryEntry::new("C:\\Users\\me\\projects"),
-    ]);
+    palette.open_commands_for_workspace(
+        "cd pro",
+        WorkspaceDirectoryTarget {
+            workspace_id: Some("workspace".into()),
+            root: "C:\\Users\\me".into(),
+        },
+    );
+    palette.compose_workspace_directory_choices(
+        None,
+        None,
+        vec![PaletteDirectoryEntry::new("C:\\Users\\me\\projects")],
+    );
     assert_eq!(palette.cd_ghost_suffix().as_deref(), Some("jects\\"));
 }
 
@@ -168,13 +216,23 @@ fn windows_workspace_paths_keep_completion_semantics_on_wasm() {
 fn tab_cycle_animates_cursor_wraps_and_scrolls_to_selection() {
     use super::actions::WorkspaceDirectoryTarget;
     let mut palette = CommandPalette::new();
-    palette.open_commands_for_workspace("cd ", WorkspaceDirectoryTarget {
-        workspace_id: Some("workspace".into()), root: "/".into(),
-    });
-    palette.set_cd_directory_results((0..20).map(|i| PaletteDirectoryEntry::new(format!("/d{i}"))).collect());
+    palette.open_commands_for_workspace(
+        "cd ",
+        WorkspaceDirectoryTarget {
+            workspace_id: Some("workspace".into()),
+            root: "/".into(),
+        },
+    );
+    palette.set_cd_directory_results(
+        (0..20)
+            .map(|i| PaletteDirectoryEntry::new(format!("/d{i}")))
+            .collect(),
+    );
     assert!(palette.cycle_cd_selection(false));
     assert_ne!(palette.cursor_spring.position, 0.0);
-    for _ in 0..12 { palette.cycle_cd_selection(false); }
+    for _ in 0..12 {
+        palette.cycle_cd_selection(false);
+    }
     assert!(palette.scroll_offset > 0);
     assert_ne!(palette.list_scroll_spring.position, 0.0);
     let selected = palette.selected_index;
@@ -228,7 +286,10 @@ fn workspace_directory_intent_keeps_captured_workspace_and_root() {
         },
     );
     let intent = palette.change_workspace_directory_intent("child").unwrap();
-    assert_eq!(intent.target.workspace_id.as_deref(), Some("workspace-source"));
+    assert_eq!(
+        intent.target.workspace_id.as_deref(),
+        Some("workspace-source")
+    );
     assert_eq!(intent.target.root, "/captured/root");
     assert_eq!(intent.destination, "child");
 }
@@ -443,10 +504,13 @@ fn exact_cd_is_a_cd_query_and_backspacing_restores_commands() {
 fn directory_tab_completion_keeps_relative_spelling_and_exposes_ghost() {
     use super::actions::WorkspaceDirectoryTarget;
     let mut palette = CommandPalette::new();
-    palette.open_commands_for_workspace("cd pro", WorkspaceDirectoryTarget {
-        workspace_id: Some("workspace".into()),
-        root: "/home/parkersettle".into(),
-    });
+    palette.open_commands_for_workspace(
+        "cd pro",
+        WorkspaceDirectoryTarget {
+            workspace_id: Some("workspace".into()),
+            root: "/home/parkersettle".into(),
+        },
+    );
     palette.set_cd_directory_results(vec![PaletteDirectoryEntry {
         absolute_path: "/home/parkersettle/projects".into(),
         display: Some("projects".into()),
@@ -456,20 +520,20 @@ fn directory_tab_completion_keeps_relative_spelling_and_exposes_ghost() {
     assert_eq!(palette.cd_ghost_suffix().as_deref(), Some("jects/"));
     assert!(palette.tab_complete());
     assert_eq!(palette.query, "cd projects/");
-    assert_eq!(
-        palette.get_typed_cd_target(),
-        Some("projects/".into())
-    );
+    assert_eq!(palette.get_typed_cd_target(), Some("projects/".into()));
 }
 
 #[test]
 fn directory_tab_fills_the_selected_fuzzy_terminal_completion() {
     use super::actions::WorkspaceDirectoryTarget;
     let mut palette = CommandPalette::new();
-    palette.open_commands_for_workspace("cd front", WorkspaceDirectoryTarget {
-        workspace_id: Some("workspace".into()),
-        root: "/work".into(),
-    });
+    palette.open_commands_for_workspace(
+        "cd front",
+        WorkspaceDirectoryTarget {
+            workspace_id: Some("workspace".into()),
+            root: "/work".into(),
+        },
+    );
     palette.set_cd_directory_results(vec![PaletteDirectoryEntry {
         absolute_path: "neoism-frontend/".into(),
         display: Some("neoism-frontend/".into()),
@@ -674,6 +738,37 @@ fn servers_mode_filters_and_emits_connection_actions() {
         palette.get_selected_action(),
         Some(PaletteAction::SelectServer { id: "home".into() })
     );
+}
+
+#[test]
+fn every_server_row_keeps_its_edit_and_remove_actions() {
+    let mut palette = CommandPalette::new();
+    palette.server_edit_hits = vec![
+        ([10.0, 20.0, 30.0, 10.0], "home".into()),
+        ([10.0, 40.0, 30.0, 10.0], "work".into()),
+    ];
+    palette.server_remove_hits = vec![
+        ([50.0, 20.0, 30.0, 10.0], "home".into()),
+        ([50.0, 40.0, 30.0, 10.0], "work".into()),
+    ];
+
+    assert_eq!(
+        palette.server_action_at(20.0, 25.0),
+        Some(PaletteAction::EditServer { id: "home".into() })
+    );
+    assert_eq!(
+        palette.server_action_at(20.0, 45.0),
+        Some(PaletteAction::EditServer { id: "work".into() })
+    );
+    assert_eq!(
+        palette.server_action_at(60.0, 25.0),
+        Some(PaletteAction::RemoveServer { id: "home".into() })
+    );
+    assert_eq!(
+        palette.server_action_at(60.0, 45.0),
+        Some(PaletteAction::RemoveServer { id: "work".into() })
+    );
+    assert_eq!(palette.server_action_at(100.0, 100.0), None);
 }
 
 #[test]

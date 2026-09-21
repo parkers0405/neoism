@@ -29,7 +29,10 @@ impl NeoismAgentPane {
                 .lock()
                 .unwrap()
                 .insert(
-                    (format!("http://127.0.0.1:{port}"), PathBuf::from(pane_directory)),
+                    (
+                        format!("http://127.0.0.1:{port}"),
+                        PathBuf::from(pane_directory),
+                    ),
                     session.clone(),
                 );
         }
@@ -223,6 +226,7 @@ impl NeoismAgentPane {
     /// pushes its result through `background_tx` and the next frame's
     /// `drain_background_updates` lifts it into `side_panel`.
     pub fn maybe_refresh_side_panel_sessions(&mut self) {
+        self.ensure_session_catalog_stream();
         if !self.side_panel.should_refresh_sessions() {
             return;
         }
@@ -230,7 +234,26 @@ impl NeoismAgentPane {
         self.request_side_panel_session_page(None);
     }
 
-    fn request_side_panel_session_page(&mut self, cursor: Option<String>) {
+    fn ensure_session_catalog_stream(&mut self) {
+        let Some(directory) = self.directory.clone() else {
+            self.session_catalog_stream = None;
+            return;
+        };
+        if self
+            .session_catalog_stream
+            .as_ref()
+            .is_some_and(|stream| stream.matches(&self.server, &directory))
+        {
+            return;
+        }
+        let mut stream = start_session_catalog_stream(self.server.clone(), directory);
+        if let Some(wake) = self.event_wake.clone() {
+            stream.set_wake(wake);
+        }
+        self.session_catalog_stream = Some(stream);
+    }
+
+    pub(crate) fn request_side_panel_session_page(&mut self, cursor: Option<String>) {
         let generation = self.side_panel.next_session_request_generation();
         let server = self.server.clone();
         let current = self.session_id.clone();

@@ -35,10 +35,19 @@ pub(super) fn draw_scaled_cpu(
         for x in x0..x1 {
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
-            if px < left || px >= right || py < top || py >= bottom { continue; }
+            if px < left || px >= right || py < top || py >= bottom {
+                continue;
+            }
             let clip = glyph.clip_rect;
-            if clip[2] > 0.0 && clip[3] > 0.0
-                && (px < clip[0] || px >= clip[0] + clip[2] || py < clip[1] || py >= clip[1] + clip[3]) { continue; }
+            if clip[2] > 0.0
+                && clip[3] > 0.0
+                && (px < clip[0]
+                    || px >= clip[0] + clip[2]
+                    || py < clip[1]
+                    || py >= clip[1] + clip[3])
+            {
+                continue;
+            }
             let sx = (x as f32 + 0.5 - left) / scale + glyph.glyph_pos[0] as f32 - 0.5;
             let sy = (y as f32 + 0.5 - top) / scale + glyph.glyph_pos[1] as f32 - 0.5;
             let bx = sx.floor() as i32;

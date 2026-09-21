@@ -5,11 +5,17 @@ impl NotebookBinding {
     pub fn create_untitled_in(dir: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
         for index in 1..10_000 {
-            let name = if index == 1 { "Untitled Notebook".to_string() } else { format!("Untitled Notebook {index}") };
+            let name = if index == 1 {
+                "Untitled Notebook".to_string()
+            } else {
+                format!("Untitled Notebook {index}")
+            };
             let path = dir.join(&name);
             match std::fs::create_dir(&path) {
                 Ok(()) => return Self::create(&path, Some(&name)),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    continue
+                }
                 Err(error) => return Err(error.to_string()),
             }
         }
@@ -160,8 +166,14 @@ mod tests {
         let second = NotebookBinding::create_untitled_in(&clicked).unwrap();
         let clicked = std::fs::canonicalize(clicked).unwrap();
         assert_eq!(first.path, clicked.join("Untitled Notebook/notebook.json"));
-        assert_eq!(second.path, clicked.join("Untitled Notebook 2/notebook.json"));
-        assert_eq!(first.session.lock().unwrap().manifest.title, "Untitled Notebook");
+        assert_eq!(
+            second.path,
+            clicked.join("Untitled Notebook 2/notebook.json")
+        );
+        assert_eq!(
+            first.session.lock().unwrap().manifest.title,
+            "Untitled Notebook"
+        );
         assert!(first.path.parent().unwrap().join("overview.md").is_file());
     }
 

@@ -319,12 +319,25 @@ impl Screen<'_> {
     }
 
     pub(crate) fn close_workspace_buffer_tab_at(&mut self, ix: usize) -> bool {
-        if let Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path)) = self.renderer.buffer_tabs.target_at(ix) {
+        if let Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path)) =
+            self.renderer.buffer_tabs.target_at(ix)
+        {
             if neoism_ui::editor::documentation_notebook::is_manifest(&path)
-                && self.context_manager.current_grid().contexts().values().any(|item| {
-                    item.context().markdown.as_ref().is_some_and(|pane| pane.tab_path() == path && pane.is_dirty())
-                }) {
-                self.file_tree_notify("Save the notebook's edited pages before closing it", neoism_ui::panels::notifications::NotificationLevel::Warn);
+                && self
+                    .context_manager
+                    .current_grid()
+                    .contexts()
+                    .values()
+                    .any(|item| {
+                        item.context().markdown.as_ref().is_some_and(|pane| {
+                            pane.tab_path() == path && pane.is_dirty()
+                        })
+                    })
+            {
+                self.file_tree_notify(
+                    "Save the notebook's edited pages before closing it",
+                    neoism_ui::panels::notifications::NotificationLevel::Warn,
+                );
                 return false;
             }
         }
@@ -577,12 +590,28 @@ impl Screen<'_> {
     }
 
     pub(crate) fn pane_tab_close(&mut self, route_id: usize, ix: usize) {
-        if let Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path)) = self.renderer.pane_tabs.get(&route_id).and_then(|tabs| tabs.target_at(ix)) {
+        if let Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path)) =
+            self.renderer
+                .pane_tabs
+                .get(&route_id)
+                .and_then(|tabs| tabs.target_at(ix))
+        {
             if neoism_ui::editor::documentation_notebook::is_manifest(&path)
-                && self.context_manager.current_grid().contexts().values().any(|item| {
-                    item.context().markdown.as_ref().is_some_and(|pane| pane.tab_path() == path && pane.is_dirty())
-                }) {
-                self.file_tree_notify("Save the notebook's edited pages before closing it", neoism_ui::panels::notifications::NotificationLevel::Warn);
+                && self
+                    .context_manager
+                    .current_grid()
+                    .contexts()
+                    .values()
+                    .any(|item| {
+                        item.context().markdown.as_ref().is_some_and(|pane| {
+                            pane.tab_path() == path && pane.is_dirty()
+                        })
+                    })
+            {
+                self.file_tree_notify(
+                    "Save the notebook's edited pages before closing it",
+                    neoism_ui::panels::notifications::NotificationLevel::Warn,
+                );
                 return;
             }
         }
@@ -670,7 +699,8 @@ impl Screen<'_> {
             match removed {
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path) => {
                     if neoism_ui::editor::documentation_notebook::is_manifest(&path) {
-                        self.context_manager.remove_markdown_by_path(&path, &mut self.sugarloaf);
+                        self.context_manager
+                            .remove_markdown_by_path(&path, &mut self.sugarloaf);
                     } else if let Some(markdown_route) =
                         self.pane_markdown_route_for_strip(route_id, &path)
                     {

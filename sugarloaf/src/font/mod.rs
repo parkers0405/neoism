@@ -486,7 +486,7 @@ impl FontLibrary {
     }
 }
 
-fn prefers_color_emoji(ch: char) -> bool {
+pub(crate) fn prefers_color_emoji(ch: char) -> bool {
     neoism_grapheme_width::emoji::Presentation::for_char(ch)
         == neoism_grapheme_width::emoji::Presentation::Emoji
 }
@@ -841,6 +841,68 @@ impl FontLibraryData {
         }
     }
 
+    /// Ascent/descent/leading for UI text, using this face's own line box.
+    /// Unlike [`Self::get_font_metrics`], secondary families are not forced
+    /// onto the primary mono cell — markdown's proportional override needs
+    /// SF Pro's metrics, not Geist Mono's.
+    pub fn get_ui_font_metrics(
+        &mut self,
+        font_id: &usize,
+        font_size: f32,
+    ) -> Option<(f32, f32, f32)> {
+        if *font_id == FONT_ID_REGULAR {
+            return self.get_font_metrics(font_id, font_size);
+        }
+        let font = self.inner.get_mut(font_id)?;
+        font.get_rich_text_metrics(font_size, None)
+    }
+
+    /// Whether `font_id` itself carries a real glyph for `ch`. Used by
+    /// UI text with a preferred family so missing emoji/PUA can fall
+    /// back instead of tofuing in that one face.
+    pub fn font_covers_char(&self, font_id: usize, ch: char) -> bool {
+        if prefers_color_emoji(ch) {
+            return self.inner.get(&font_id).is_some_and(|font| font.is_emoji);
+        }
+        if let Some(symbol_maps) = &self.symbol_maps {
+            for symbol_map in symbol_maps {
+                if symbol_map.range.contains(&ch) {
+                    return symbol_map.font_index == font_id;
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let handle_opt = self.inner.get(&font_id).and_then(|font| {
+                font.handle().cloned().or_else(|| {
+                    if let Some(path) = &font.path {
+                        crate::font::macos::FontHandle::from_path(path)
+                    } else if let Some(bytes) = &font.data {
+                        crate::font::macos::FontHandle::from_bytes(bytes.as_ref())
+                    } else {
+                        None
+                    }
+                })
+            });
+            return handle_opt
+                .is_some_and(|handle| crate::font::macos::font_has_char(&handle, ch));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let Some((shared_data, offset, key)) = self.get_data(&font_id) else {
+                return false;
+            };
+            let font_ref = FontRef {
+                data: shared_data.as_ref(),
+                offset,
+                key,
+            };
+            font_ref.charmap().map(ch) != 0
+        }
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
@@ -1048,6 +1110,32 @@ impl FontLibraryData {
 
         self.symbol_maps = Some(symbol_maps);
 
+        // Extra system families (e.g. a proportional Markdown face) are
+        // registered after the primary cascade so they resolve by name
+        // without becoming the terminal/code default. First-inserted
+        // regular of each extra family wins `font_id_for_family`.
+        for extra_family in spec.extra_families.unwrap_or_default() {
+            let extra_family = extra_family.trim();
+            if extra_family.is_empty() {
+                continue;
+            }
+            match try_find_font!(
+                &db,
+                SugarloafFont {
+                    family: extra_family.to_string(),
+                    ..SugarloafFont::default()
+                },
+                true
+            ) {
+                FindResult::Found(data) => {
+                    self.insert(data);
+                }
+                FindResult::NotFound(extra_spec) => {
+                    fonts_not_fount.push(extra_spec);
+                }
+            }
+        }
+
         // Bundled "Press Start 2P" (OFL) — the arcade pixel face feature UIs
         // (agent side-panel headings) resolve by family name through
         // `font_id_for_family("Press Start 2P")`. Registered last so it sits
@@ -1162,8 +1250,13 @@ pub struct FontData {
     pub should_embolden: bool,
     pub should_italicize: bool,
     pub is_emoji: bool,
-    // Cached metrics per font size (per-font caching)
+    // Cached metrics per font size (per-font caching).
+    // `metrics_cache` is the terminal-grid path: secondary faces inherit
+    // the primary mono cell. `natural_metrics_cache` is the UI/markdown
+    // path: each face keeps its own ascent/descent so a proportional
+    // markdown family is not forced onto Geist Mono's line box.
     metrics_cache: FxHashMap<u32, Metrics>,
+    natural_metrics_cache: FxHashMap<u32, Metrics>,
     /// Parsed CoreText handle, constructed once at `FontData` creation
     /// and cloned out via CF refcount on every access. Per-font pointer
     /// rather than a library-global cache. `Clone` of `FontHandle` is an
@@ -1246,8 +1339,12 @@ impl FontData {
         primary_metrics: Option<&Metrics>,
     ) -> Option<Metrics> {
         let size_key = (font_size * 100.0) as u32; // Use scaled int as key
-
-        if let Some(cached) = self.metrics_cache.get(&size_key) {
+        let cache = if primary_metrics.is_some() {
+            &self.metrics_cache
+        } else {
+            &self.natural_metrics_cache
+        };
+        if let Some(cached) = cache.get(&size_key) {
             return Some(*cached);
         }
 
@@ -1290,7 +1387,11 @@ impl FontData {
             } else {
                 Metrics::calc(face_metrics)
             };
-            self.metrics_cache.insert(size_key, metrics);
+            if primary_metrics.is_some() {
+                self.metrics_cache.insert(size_key, metrics);
+            } else {
+                self.natural_metrics_cache.insert(size_key, metrics);
+            }
             return Some(metrics);
         }
 
@@ -1316,8 +1417,11 @@ impl FontData {
                 Metrics::calc(face_metrics)
             };
 
-            // Cache the result
-            self.metrics_cache.insert(size_key, metrics);
+            if primary_metrics.is_some() {
+                self.metrics_cache.insert(size_key, metrics);
+            } else {
+                self.natural_metrics_cache.insert(size_key, metrics);
+            }
             Some(metrics)
         } else {
             None
@@ -1378,6 +1482,7 @@ impl FontData {
             path: Some(path),
             is_emoji,
             metrics_cache: FxHashMap::default(),
+            natural_metrics_cache: FxHashMap::default(),
             // `from_data` is the non-macOS code path — macOS goes through
             // `from_path_macos` or `from_static_slice`, both of which
             // populate `handle` themselves. Leave it unset here; if
@@ -1432,6 +1537,7 @@ impl FontData {
             should_italicize: false,
             is_emoji: attrs.is_color,
             metrics_cache: FxHashMap::default(),
+            natural_metrics_cache: FxHashMap::default(),
             handle: Some(handle),
             postscript_name,
             family_name,
@@ -1473,6 +1579,7 @@ impl FontData {
             should_italicize,
             is_emoji: attrs.is_color,
             metrics_cache: FxHashMap::default(),
+            natural_metrics_cache: FxHashMap::default(),
             handle: Some(handle),
             postscript_name,
             family_name,
@@ -1517,6 +1624,7 @@ impl FontData {
             path: None,
             is_emoji,
             metrics_cache: FxHashMap::default(),
+            natural_metrics_cache: FxHashMap::default(),
             #[cfg(target_os = "macos")]
             handle,
             postscript_name,
@@ -1554,6 +1662,7 @@ impl FontData {
             path: None,
             is_emoji,
             metrics_cache: FxHashMap::default(),
+            natural_metrics_cache: FxHashMap::default(),
             #[cfg(target_os = "macos")]
             handle: None,
             postscript_name,
@@ -1612,6 +1721,7 @@ impl FontData {
             path: Some(path),
             is_emoji,
             metrics_cache: FxHashMap::default(),
+            natural_metrics_cache: FxHashMap::default(),
             postscript_name,
             family_name,
         })

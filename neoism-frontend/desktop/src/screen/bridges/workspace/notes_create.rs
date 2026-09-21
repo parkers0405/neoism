@@ -7,6 +7,9 @@ impl Screen<'_> {
     /// sidebar has not been initialized yet, fall back to the vault linked
     /// to the active project (or Default for an unlinked project).
     pub(crate) fn notes_creation_dir(&mut self) -> PathBuf {
+        if let Some(path) = self.renderer.notes_sidebar.notebook_root() {
+            return path.to_path_buf();
+        }
         if let Some(path) = self.renderer.notes_sidebar.workspace_path() {
             return path;
         }
@@ -26,7 +29,8 @@ impl Screen<'_> {
 
         let note_dir = self.notes_creation_dir();
         if self.context_manager.current_workspace_is_remote_joined()
-            && self.notes_sidebar_shows_shared_vault() {
+            && self.notes_sidebar_shows_shared_vault()
+        {
             // Name allocation/existence belongs to the host. Do not probe or
             // create directories on the guest for a shared vault path.
             self.open_notes_new_file_prompt(note_dir);
@@ -76,7 +80,10 @@ impl Screen<'_> {
         use std::io::Write;
 
         if self.context_manager.current_workspace_is_remote_joined() {
-            self.renderer.notifications.push("Drawing creation currently requires a local folder", NotificationLevel::Warn);
+            self.renderer.notifications.push(
+                "Drawing creation currently requires a local folder",
+                NotificationLevel::Warn,
+            );
             self.mark_dirty();
             return;
         }
@@ -93,7 +100,10 @@ impl Screen<'_> {
             }
             // Seed with an empty, valid scene so it opens cleanly.
             let scene = neoism_ui::editor::neodraw::Scene::empty();
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
             file.write_all(scene.to_json().as_bytes())?;
             file.sync_all()?;
             Ok(())
@@ -133,7 +143,9 @@ impl Screen<'_> {
                     .unwrap_or_else(|| "Shared vault".to_string());
                 self.renderer.notes_sidebar.set_vault_actions(false);
                 if self.context_manager.current_workspace_is_remote_joined() {
-                    self.renderer.notes_sidebar.set_remote_workspace(name, Some(vault));
+                    self.renderer
+                        .notes_sidebar
+                        .set_remote_workspace(name, Some(vault));
                 } else {
                     self.renderer.notes_sidebar.set_workspace(name, Some(vault));
                 }
@@ -149,6 +161,24 @@ impl Screen<'_> {
             }
         }
         true
+    }
+
+    /// Re-point Alt+N when this window is viewing the served vault (or the
+    /// no-vault empty state). A personal-vault selection made while joined
+    /// is left alone.
+    pub(crate) fn maybe_refresh_served_notes_sidebar(&mut self) -> bool {
+        if !self.renderer.notes_sidebar.is_visible() {
+            return false;
+        }
+        if self.served_workspace_root().is_none() {
+            return false;
+        }
+        if self.renderer.notes_sidebar.shows_vault_actions()
+            || self.notes_sidebar_shows_shared_vault()
+        {
+            return self.point_notes_sidebar_at_served_vault();
+        }
+        false
     }
 
     pub(crate) fn open_neoism_notes_sidebar(&mut self) {

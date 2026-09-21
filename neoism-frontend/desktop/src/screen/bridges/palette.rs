@@ -48,7 +48,8 @@ fn expand_cd_target(base: &Path, target: &str) -> Option<PathBuf> {
 impl Screen<'_> {
     pub(crate) fn is_primary_terminal_route(&self, route_id: usize) -> bool {
         let grid = self.context_manager.current_grid();
-        grid.root == Some(grid.current) && self.context_manager.current_route() == route_id
+        grid.root == Some(grid.current)
+            && self.context_manager.current_route() == route_id
     }
 
     /// Refresh the directory rows for a normal command-palette query beginning
@@ -95,7 +96,9 @@ impl Screen<'_> {
                 .command_palette
                 .compose_workspace_directory_choices(
                     None,
-                    self.active_workspace_root.as_ref().map(|path| path.to_string_lossy().into_owned()),
+                    self.active_workspace_root
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
                     Vec::new(),
                 );
             return;
@@ -126,11 +129,15 @@ impl Screen<'_> {
             detail: candidate.detail,
         })
         .collect();
-        self.renderer.command_palette.compose_workspace_directory_choices(
-            dirs::home_dir().map(|path| path.to_string_lossy().into_owned()),
-            self.active_workspace_root.as_ref().map(|path| path.to_string_lossy().into_owned()),
-            rows,
-        );
+        self.renderer
+            .command_palette
+            .compose_workspace_directory_choices(
+                dirs::home_dir().map(|path| path.to_string_lossy().into_owned()),
+                self.active_workspace_root
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                rows,
+            );
     }
 
     /// Re-point the workspace captured by Alt+D. Shell cwd remains local to
@@ -159,14 +166,18 @@ impl Screen<'_> {
         }
         if self.context_manager.current_workspace_is_remote_joined() {
             let Some(workspace_id) = intent.target.workspace_id else {
-                self.renderer.command_palette.set_cd_error("No active workspace");
+                self.renderer
+                    .command_palette
+                    .set_cd_error("No active workspace");
                 return false;
             };
             self.context_manager.set_daemon_workspace_root(
                 workspace_id,
                 PathBuf::from(intent.destination),
             );
-            self.renderer.command_palette.continue_workspace_directory_pending();
+            self.renderer
+                .command_palette
+                .continue_workspace_directory_pending();
             return true;
         }
         let base = PathBuf::from(&intent.target.root);
@@ -185,15 +196,21 @@ impl Screen<'_> {
             return false;
         };
         let Ok(path) = std::fs::canonicalize(&path) else {
-            self.renderer.command_palette.set_cd_error(format!("Directory not found: {}", path.display()));
+            self.renderer
+                .command_palette
+                .set_cd_error(format!("Directory not found: {}", path.display()));
             return false;
         };
         if !path.is_dir() {
-            self.renderer.command_palette.set_cd_error(format!("Not a directory: {}", path.display()));
+            self.renderer
+                .command_palette
+                .set_cd_error(format!("Not a directory: {}", path.display()));
             return false;
         }
         self.set_active_workspace_root(path.clone(), true);
-        self.renderer.command_palette.continue_workspace_directory(path.to_string_lossy());
+        self.renderer
+            .command_palette
+            .continue_workspace_directory(path.to_string_lossy());
         self.refresh_cd_palette_results();
         true
     }
@@ -484,7 +501,9 @@ impl Screen<'_> {
     pub(crate) fn open_workspace_directory_palette(&mut self) {
         use neoism_ui::panels::command_palette::WorkspaceDirectoryTarget;
 
-        let root = self.active_workspace_root.clone()
+        let root = self
+            .active_workspace_root
+            .clone()
             .or_else(|| self.workspace_root_for_new_shell())
             .unwrap_or_else(|| PathBuf::from("."));
         self.renderer
@@ -1154,10 +1173,14 @@ impl Screen<'_> {
             }
             PaletteAction::LinkMarkdownFile => self.open_markdown_file_link_prompt(),
             PaletteAction::CreateDocumentationNotebook => {
-                self.open_documentation_notebook_prompt(neoism_ui::editor::documentation_notebook::NotebookInput::Create);
+                self.open_documentation_notebook_prompt(
+                    neoism_ui::editor::documentation_notebook::NotebookInput::Create,
+                );
             }
             PaletteAction::OpenDocumentationNotebook => {
-                self.open_documentation_notebook_prompt(neoism_ui::editor::documentation_notebook::NotebookInput::Open);
+                self.open_documentation_notebook_prompt(
+                    neoism_ui::editor::documentation_notebook::NotebookInput::Open,
+                );
             }
             PaletteAction::RunNotebookCell => {
                 self.run_current_notebook_cell();

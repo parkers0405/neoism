@@ -9,8 +9,8 @@
 //! lives in [`super::render`]. This file owns the fields and the
 //! "enter mode" / "set query" entry points.
 
-use web_time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
+use web_time::Instant;
 
 use crate::animation::CriticallyDampedSpring;
 
@@ -60,8 +60,8 @@ pub struct CommandPalette {
     pub query: String,
     pub selected_index: usize,
     pub(super) hovered_index: Option<usize>,
-    pub(super) server_edit_hit: Option<([f32; 4], String)>,
-    pub(super) server_remove_hit: Option<([f32; 4], String)>,
+    pub(super) server_edit_hits: Vec<([f32; 4], String)>,
+    pub(super) server_remove_hits: Vec<([f32; 4], String)>,
     pub(super) scroll_offset: usize,
     pub has_adaptive_theme: bool,
     /// Which list the palette is showing (commands or fonts).
@@ -169,8 +169,8 @@ impl Default for CommandPalette {
             query: String::new(),
             selected_index: 0,
             hovered_index: None,
-            server_edit_hit: None,
-            server_remove_hit: None,
+            server_edit_hits: Vec::new(),
+            server_remove_hits: Vec::new(),
             scroll_offset: 0,
             has_adaptive_theme: false,
             mode: PaletteMode::Commands,
@@ -292,7 +292,10 @@ impl CommandPalette {
         self.workspace_directory_target = Some(target);
     }
 
-    pub fn capture_workspace_directory_target(&mut self, target: WorkspaceDirectoryTarget) {
+    pub fn capture_workspace_directory_target(
+        &mut self,
+        target: WorkspaceDirectoryTarget,
+    ) {
         if self.workspace_directory_target.is_none() {
             self.workspace_directory_target = Some(target);
         }
@@ -317,11 +320,16 @@ impl CommandPalette {
                 self.cd_error = None;
                 self.change_workspace_directory_intent(destination)
             }
-            Err(error) => { self.cd_error = Some(error); None }
+            Err(error) => {
+                self.cd_error = Some(error);
+                None
+            }
         }
     }
 
-    pub fn cd_error(&self) -> Option<&str> { self.cd_error.as_deref() }
+    pub fn cd_error(&self) -> Option<&str> {
+        self.cd_error.as_deref()
+    }
     pub fn set_cd_error(&mut self, error: impl Into<String>) {
         self.cd_error = Some(error.into());
     }
@@ -349,8 +357,11 @@ impl CommandPalette {
 
     pub fn record_workspace_directory(&mut self, root: impl Into<String>) {
         let root = root.into();
-        if root.is_empty() { return; }
-        self.workspace_directory_recents.retain(|entry| entry != &root);
+        if root.is_empty() {
+            return;
+        }
+        self.workspace_directory_recents
+            .retain(|entry| entry != &root);
         self.workspace_directory_recents.insert(0, root);
         self.workspace_directory_recents.truncate(8);
     }
@@ -368,10 +379,17 @@ impl CommandPalette {
         _workspace_root: Option<String>,
         completions: Vec<PaletteDirectoryEntry>,
     ) {
-        if self.workspace_directory_target.is_none() { return; }
+        if self.workspace_directory_target.is_none() {
+            return;
+        }
         let mut rows: Vec<PaletteDirectoryEntry> = Vec::new();
         for completion in completions {
-            if rows.iter().any(|row| row.absolute_path == completion.absolute_path) { continue; }
+            if rows
+                .iter()
+                .any(|row| row.absolute_path == completion.absolute_path)
+            {
+                continue;
+            }
             rows.push(completion);
         }
         self.set_cd_directory_results(rows);
@@ -698,15 +716,17 @@ impl CommandPalette {
         self.reset_motion();
     }
 
-
-    pub fn query_cursor(&self) -> usize { self.query_cursor }
+    pub fn query_cursor(&self) -> usize {
+        self.query_cursor
+    }
 
     pub fn set_query_cursor(&mut self, byte: usize) {
         let requested = byte.min(self.query.len());
         let byte = if requested == self.query.len() {
             requested
         } else {
-            self.query.grapheme_indices(true)
+            self.query
+                .grapheme_indices(true)
                 .map(|(index, _)| index)
                 .take_while(|index| *index <= requested)
                 .last()
@@ -717,17 +737,27 @@ impl CommandPalette {
     }
 
     pub fn move_query_cursor_left(&mut self) {
-        let prev = self.query[..self.query_cursor].grapheme_indices(true).next_back().map(|(i, _)| i).unwrap_or(0);
+        let prev = self.query[..self.query_cursor]
+            .grapheme_indices(true)
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         self.set_query_cursor(prev);
     }
 
     pub fn move_query_cursor_right(&mut self) {
-        let next = self.query[self.query_cursor..].grapheme_indices(true).nth(1).map(|(i, _)| self.query_cursor + i).unwrap_or(self.query.len());
+        let next = self.query[self.query_cursor..]
+            .grapheme_indices(true)
+            .nth(1)
+            .map(|(i, _)| self.query_cursor + i)
+            .unwrap_or(self.query.len());
         self.set_query_cursor(next);
     }
 
     pub fn insert_query_text(&mut self, text: &str) {
-        if text.is_empty() || text.chars().any(char::is_control) { return; }
+        if text.is_empty() || text.chars().any(char::is_control) {
+            return;
+        }
         let at = self.query_cursor;
         let mut next = self.query.clone();
         next.insert_str(at, text);
@@ -736,9 +766,15 @@ impl CommandPalette {
     }
 
     pub fn backspace_query(&mut self) -> bool {
-        if self.query_cursor == 0 { return false; }
+        if self.query_cursor == 0 {
+            return false;
+        }
         let at = self.query_cursor;
-        let prev = self.query[..at].grapheme_indices(true).next_back().map(|(i, _)| i).unwrap_or(0);
+        let prev = self.query[..at]
+            .grapheme_indices(true)
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         let mut next = self.query.clone();
         next.replace_range(prev..at, "");
         self.set_query(next);

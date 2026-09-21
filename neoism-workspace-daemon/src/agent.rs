@@ -166,7 +166,8 @@ pub fn ensure_agent_server_started_with_services(
     });
 }
 
-type AgentServerExit = Result<anyhow::Result<std::net::SocketAddr>, tokio::task::JoinError>;
+type AgentServerExit =
+    Result<anyhow::Result<std::net::SocketAddr>, tokio::task::JoinError>;
 
 fn agent_server_exit_detail(result: AgentServerExit) -> String {
     match result {
@@ -209,7 +210,9 @@ async fn agent_health_ready(client: &reqwest::Client, url: &str) -> bool {
             return false;
         };
         value["healthy"] == true
-            && value["version"].as_str().is_some_and(|version| !version.is_empty())
+            && value["version"]
+                .as_str()
+                .is_some_and(|version| !version.is_empty())
             && (value["provider_credential_store"].is_string()
                 || value["providerCredentialStore"].is_string())
     })
@@ -460,7 +463,8 @@ mod readiness_tests {
                 "healthy": true,
                 "version": "0.7.104",
                 (credential_field): "test"
-            }).to_string();
+            })
+            .to_string();
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = [0; 1024];

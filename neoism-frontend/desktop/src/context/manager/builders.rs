@@ -502,14 +502,27 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         path: &std::path::Path,
         sugarloaf: &mut Sugarloaf,
     ) -> bool {
-        let notebook_routes: Vec<_> = self.contexts[self.current_index].contexts().values()
-            .filter_map(|item| item.context().markdown.as_ref()
-                .filter(|pane| pane.documentation_notebook.as_ref().is_some_and(|book| book.path == path))
-                .map(|_| item.context().route_id)).collect();
+        let notebook_routes: Vec<_> = self.contexts[self.current_index]
+            .contexts()
+            .values()
+            .filter_map(|item| {
+                item.context()
+                    .markdown
+                    .as_ref()
+                    .filter(|pane| {
+                        pane.documentation_notebook
+                            .as_ref()
+                            .is_some_and(|book| book.path == path)
+                    })
+                    .map(|_| item.context().route_id)
+            })
+            .collect();
         if !notebook_routes.is_empty() {
             // Removing a leaf rebuilds Taffy IDs. Resolve each stable route anew.
             for route in notebook_routes {
-                if let Some(node) = self.contexts[self.current_index].node_by_route_id(route) {
+                if let Some(node) =
+                    self.contexts[self.current_index].node_by_route_id(route)
+                {
                     self.contexts[self.current_index].remove_node(node, sugarloaf);
                 }
             }
@@ -690,7 +703,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         rich_text_id: usize,
         sugarloaf: &mut Sugarloaf,
     ) -> bool {
-        let source = neoism_ui::services::FileOpenSource::workspace(self.current_workspace_is_remote_joined());
+        let source = neoism_ui::services::FileOpenSource::workspace(
+            self.current_workspace_is_remote_joined(),
+        );
         self.add_stacked_code_with_source(file, rich_text_id, sugarloaf, source)
     }
 
@@ -728,7 +743,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         rich_text_id: usize,
         sugarloaf: &mut Sugarloaf,
     ) -> bool {
-        let source = neoism_ui::services::FileOpenSource::workspace(self.current_workspace_is_remote_joined());
+        let source = neoism_ui::services::FileOpenSource::workspace(
+            self.current_workspace_is_remote_joined(),
+        );
         self.add_stacked_markdown_with_source(file, rich_text_id, sugarloaf, source)
     }
 
@@ -980,7 +997,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             rich_text_id,
             dimension,
             file,
-            neoism_ui::services::FileOpenSource::workspace(self.current_workspace_is_remote_joined()),
+            neoism_ui::services::FileOpenSource::workspace(
+                self.current_workspace_is_remote_joined(),
+            ),
         );
         let new_route_id = new_context.route_id;
         self.contexts[self.current_index].add_stacked_context_on_parent(
@@ -1065,7 +1084,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             rich_text_id,
             dimension,
             file,
-            neoism_ui::services::FileOpenSource::workspace(self.current_workspace_is_remote_joined()),
+            neoism_ui::services::FileOpenSource::workspace(
+                self.current_workspace_is_remote_joined(),
+            ),
         );
         let new_route_id = new_context.route_id;
         self.contexts[self.current_index].add_stacked_context_on_parent(

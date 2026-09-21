@@ -63,26 +63,111 @@ pub(crate) async fn v2_capabilities(
     headers: HeaderMap,
 ) -> Result<Json<Vec<CapabilityInfo>>, ApiError> {
     let directory = match query.scope {
-        crate::workflow::WorkflowScope::Installation => crate::workflow::installation_context(state.services())?,
-        crate::workflow::WorkflowScope::Workspace => resolve_directory(query.directory, &headers),
+        crate::workflow::WorkflowScope::Installation => {
+            crate::workflow::installation_context(state.services())?
+        }
+        crate::workflow::WorkflowScope::Workspace => {
+            resolve_directory(query.directory, &headers)
+        }
     };
     let snapshot = state.plugin_snapshot(&directory).await;
     let mut capabilities = crate::plugins::capabilities(snapshot.as_ref());
     capabilities.push(CapabilityInfo {
-        id: "neoism.providers.manage".into(), version: "1.0.0".into(),
+        id: "neoism.providers.manage".into(),
+        version: "1.0.0".into(),
         enabled: !claims.as_ref().is_some_and(|Extension(c)| c.hosted),
-        disableable: false, source: "server".into(), plugin_id: None,
-        api_prefix: None, reason: None,
+        disableable: false,
+        source: "server".into(),
+        plugin_id: None,
+        api_prefix: None,
+        reason: None,
     });
     capabilities.push(CapabilityInfo {
-        id: "neoism.resources.installation".into(), version: "1.0.0".into(), enabled: true,
-        disableable: false, source: "server".into(), plugin_id: None, api_prefix: None, reason: None,
+        id: "neoism.resources.installation".into(),
+        version: "1.0.0".into(),
+        enabled: true,
+        disableable: false,
+        source: "server".into(),
+        plugin_id: None,
+        api_prefix: None,
+        reason: None,
     });
     capabilities.push(CapabilityInfo {
-        id: "neoism.identity".into(), version: "1.0.0".into(),
+        id: "neoism.identity".into(),
+        version: "1.0.0".into(),
         enabled: !claims.as_ref().is_some_and(|Extension(c)| c.hosted),
-        disableable: false, source: "server".into(), plugin_id: None,
-        api_prefix: Some("/v2/identity".into()), reason: None,
+        disableable: false,
+        source: "server".into(),
+        plugin_id: None,
+        api_prefix: Some("/v2/identity".into()),
+        reason: None,
+    });
+    let execution = claims
+        .as_ref()
+        .map(|Extension(claims)| claims.execution_policy())
+        .unwrap_or(neoism_agent_service_api::ExecutionPolicy::NativeLocal);
+    let execution_backend = state.services().execution.backend_name().to_string();
+    capabilities.push(CapabilityInfo {
+        id: "neoism.execution.native".into(),
+        version: "1.0.0".into(),
+        enabled: matches!(execution, neoism_agent_service_api::ExecutionPolicy::NativeLocal),
+        disableable: false,
+        source: execution_backend.clone(),
+        plugin_id: None,
+        api_prefix: None,
+        reason: Some("Native execution is never a fallback for hosted sessions".into()),
+    });
+    capabilities.push(CapabilityInfo {
+        id: "neoism.execution.sandbox".into(),
+        version: "1.0.0".into(),
+        enabled: matches!(execution, neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. })
+            && state.services().execution.available(),
+        disableable: false,
+        source: execution_backend,
+        plugin_id: None,
+        api_prefix: None,
+        reason: Some("Sandbox leases are acquired lazily on the first process operation".into()),
+    });
+    capabilities.push(CapabilityInfo {
+        id: "neoism.sessions.control".into(),
+        version: "1.0.0".into(),
+        enabled: true,
+        disableable: false,
+        source: "server".into(),
+        plugin_id: None,
+        api_prefix: Some("/v2/sessions/{session_id}/control".into()),
+        reason: Some("Tenant-owned sessions support revision-guarded actor control leases".into()),
+    });
+    let shared_artifacts = state
+        .services()
+        .artifacts
+        .as_ref()
+        .is_some_and(|store| store.shared());
+    capabilities.push(CapabilityInfo {
+        id: "neoism.artifacts.shared".into(),
+        version: "1.0.0".into(),
+        enabled: !state.services().hosted || shared_artifacts,
+        disableable: false,
+        source: state
+            .services()
+            .artifacts
+            .as_ref()
+            .map(|store| store.backend_name())
+            .unwrap_or("local-filesystem")
+            .into(),
+        plugin_id: None,
+        api_prefix: Some("/v2/artifacts".into()),
+        reason: Some("Hosted control planes require artifact bytes shared by every replica".into()),
+    });
+    capabilities.push(CapabilityInfo {
+        id: "neoism.workflows.hosted".into(),
+        version: "1.0.0".into(),
+        enabled: !claims.as_ref().is_some_and(|Extension(c)| c.hosted),
+        disableable: false,
+        source: "server".into(),
+        plugin_id: Some("dev.neoism.workflows".into()),
+        api_prefix: Some("/v2/plugins/dev.neoism.workflows".into()),
+        reason: Some("Hosted workflows remain unavailable until scheduling and recovery are tenant-owned".into()),
     });
     if state.management_enabled() {
         capabilities.push(CapabilityInfo {
@@ -128,6 +213,7 @@ pub(crate) async fn v2_plugin(
 
 pub(crate) async fn v2_events(
     State(state): State<AppState>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
     headers: HeaderMap,
     Query(query): Query<V2EventQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -138,6 +224,9 @@ pub(crate) async fn v2_events(
     let explicit_cursor = query.since.or(header_cursor);
     let page_size = query.limit.unwrap_or(1_000).clamp(1, 5_000);
     let session_id = query.session_id;
+    let tenant_id = claims.and_then(|Extension(claims)| {
+        (claims.hosted || claims.tenant_id != "local").then_some(claims.tenant_id)
+    });
     let family_root = match session_id.as_deref() {
         Some(requested) => match state.inner.store.get_session(requested).await {
             Ok(Some(session)) => {
@@ -155,11 +244,6 @@ pub(crate) async fn v2_events(
     // (out-of-order timeline rows) the deltas around it. Subscribe BEFORE the
     // catch-up replay so nothing slips between them.
     let (mut receiver, live_messages) = state.subscribe_with_messages();
-    let live_message_ids: HashSet<String> = live_messages
-        .iter()
-        .filter(|event| event.kind == neoism_agent_core::event_type::MESSAGE_UPDATED)
-        .filter_map(|event| event.properties["info"]["id"].as_str().map(str::to_owned))
-        .collect();
     let mut session_family = if let Some(root) = family_root.as_deref() {
         Some(session_family_ids(&state, root).await)
     } else {
@@ -174,6 +258,25 @@ pub(crate) async fn v2_events(
         Some(explicit_cursor.unwrap_or(0))
     };
     let stream = async_stream::stream! {
+        let mut tenant_sessions = std::collections::HashMap::<String, bool>::new();
+        let mut admitted_live_messages = Vec::new();
+        for event in live_messages {
+            if admit_tenant_event(
+                &state,
+                &event,
+                tenant_id.as_deref(),
+                &mut tenant_sessions,
+            )
+            .await
+            {
+                admitted_live_messages.push(event);
+            }
+        }
+        let live_message_ids: HashSet<String> = admitted_live_messages
+            .iter()
+            .filter(|event| event.kind == neoism_agent_core::event_type::MESSAGE_UPDATED)
+            .filter_map(|event| event.properties["info"]["id"].as_str().map(str::to_owned))
+            .collect();
         // Events committed while the catch-up replay ran are yielded by the
         // replay AND buffered in the live subscription; remember replayed ids
         // so the buffered copies are skipped instead of duplicated.
@@ -188,7 +291,15 @@ pub(crate) async fn v2_events(
                 let replay = state
                     .inner
                     .store
-                    .list_events_after(cursor as i64, page_size, None)
+                    .list_events_after(
+                        tenant_id
+                            .as_deref()
+                            .map(crate::state::TenantQueryScope::Tenant)
+                            .unwrap_or(crate::state::TenantQueryScope::LocalAll),
+                        cursor as i64,
+                        page_size,
+                        None,
+                    )
                     .await
                     .unwrap_or_default();
                 let replayed = replay.len();
@@ -246,7 +357,7 @@ pub(crate) async fn v2_events(
         }
         // These connection-local snapshots have fresh event IDs and no resume
         // cursor. They are replacements, followed only by post-snapshot deltas.
-        for event in live_messages {
+        for event in admitted_live_messages {
             if event_matches_family(&event, session_family.as_ref()) {
                 yield Ok(v2_live_sse_event(event));
             }
@@ -268,6 +379,16 @@ pub(crate) async fn v2_events(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
             if !replayed_ids.is_empty() && replayed_ids.remove(live.id.as_str()) {
+                continue;
+            }
+            if !admit_tenant_event(
+                &state,
+                &live,
+                tenant_id.as_deref(),
+                &mut tenant_sessions,
+            )
+            .await
+            {
                 continue;
             }
             if !admit_live_event(
@@ -293,6 +414,102 @@ pub(crate) async fn v2_events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+}
+
+/// Root-session lifecycle events for one authorized workspace directory.
+/// This is deliberately separate from `/v2/events`: transcript streams are
+/// scoped to one conversation family, while the GUI catalogue must also see
+/// independent roots created by another workspace participant.
+pub(crate) async fn v2_session_catalog_events(
+    State(state): State<AppState>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
+    headers: HeaderMap,
+    Query(query): Query<InstanceQuery>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let directory = resolve_directory(query.directory, &headers);
+    let claims = claims.map(|Extension(claims)| claims);
+    let mut receiver = state.subscribe();
+    let stream = async_stream::stream! {
+        loop {
+            let mut event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "session catalogue subscriber lagged; closing stream for recovery");
+                    break;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if !matches!(
+                event.kind.as_str(),
+                neoism_agent_core::event_type::SESSION_CREATED
+                    | neoism_agent_core::event_type::SESSION_UPDATED
+                    | neoism_agent_core::event_type::SESSION_DELETED
+            ) {
+                continue;
+            }
+            let Some(info) = event
+                .properties
+                .get("info")
+                .cloned()
+                .and_then(|info| serde_json::from_value::<SessionInfo>(info).ok())
+            else {
+                continue;
+            };
+            let mut hydrated = [info];
+            if state
+                .inner
+                .store
+                .hydrate_host_associations(&mut hydrated)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let [info] = hydrated;
+            if info.parent_id.is_some() || info.directory != directory {
+                continue;
+            }
+            if claims
+                .as_ref()
+                .is_some_and(|claims| !crate::caller::allows_session(claims, &info))
+            {
+                continue;
+            }
+            event.properties["info"] = serde_json::to_value(&info).unwrap_or(Value::Null);
+            yield Ok(v2_live_sse_event(event));
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+}
+
+async fn admit_tenant_event(
+    state: &AppState,
+    event: &neoism_agent_core::EventPayload,
+    tenant_id: Option<&str>,
+    sessions: &mut std::collections::HashMap<String, bool>,
+) -> bool {
+    let Some(tenant_id) = tenant_id else {
+        return true;
+    };
+    if let Some(event_tenant) = event.properties.get("tenantID").and_then(Value::as_str) {
+        return event_tenant == tenant_id;
+    }
+    let Some(session_id) = event_session_id(event) else {
+        return false;
+    };
+    if let Some(allowed) = sessions.get(session_id) {
+        return *allowed;
+    }
+    let allowed = state
+        .inner
+        .store
+        .get_session(session_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|session| crate::caller::session_tenant(&session) == tenant_id);
+    sessions.insert(session_id.to_string(), allowed);
+    allowed
 }
 
 pub(crate) async fn v2_session_runtime(
@@ -531,6 +748,19 @@ pub(crate) async fn v2_session_list(
             .inner
             .store
             .list_root_sessions_page(
+                claims
+                    .as_ref()
+                    .map(|Extension(claims)| {
+                        if !claims.hosted
+                            && claims.workspace_id.is_none()
+                            && claims.tenant_id == "local"
+                        {
+                            crate::state::TenantQueryScope::LocalAll
+                        } else {
+                            crate::state::TenantQueryScope::Tenant(&claims.tenant_id)
+                        }
+                    })
+                    .unwrap_or(crate::state::TenantQueryScope::LocalAll),
                 query.directory.as_deref(),
                 query.path.as_deref(),
                 query.start,
@@ -545,8 +775,9 @@ pub(crate) async fn v2_session_list(
             ));
         }
         if let Some(Extension(claims)) = claims {
-            page.items
-                .retain(|session| crate::caller::allows_session(&claims, session));
+            page.items.retain(|session| {
+                crate::caller::allows_session(&claims, session)
+            });
         }
         return Ok(Json(Page {
             items: page.items,
@@ -700,6 +931,7 @@ mod authenticated_author_tests {
             artifact_retention_days: None,
             requests_per_minute: None,
             max_in_flight: None,
+            resolved: None,
         };
         bind_authenticated_author(&mut request, &claims);
         assert_eq!(request.author.as_deref(), Some("piss-desktop"));
@@ -732,6 +964,7 @@ mod authenticated_author_tests {
             artifact_retention_days: None,
             requests_per_minute: None,
             max_in_flight: None,
+            resolved: None,
         };
         bind_authenticated_author(&mut request, &claims);
         assert_eq!(request.author.as_deref(), Some("hosted:authenticated"));
@@ -764,6 +997,7 @@ mod authenticated_author_tests {
             artifact_retention_days: None,
             requests_per_minute: None,
             max_in_flight: None,
+            resolved: None,
         };
         bind_authenticated_author(&mut request, &claims);
         assert_eq!(request.author.as_deref(), Some("device:authenticated"));

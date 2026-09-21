@@ -592,11 +592,19 @@ pub fn parse_markdown_link(value: &str) -> Option<MarkdownLink<'_>> {
     let mut depth = 1usize;
     let mut escaped = false;
     let label_end = rest.char_indices().find_map(|(index, ch)| {
-        if escaped { escaped = false; return None; }
+        if escaped {
+            escaped = false;
+            return None;
+        }
         match ch {
             '\\' => escaped = true,
             '[' => depth += 1,
-            ']' => { depth -= 1; if depth == 0 { return Some(index); } }
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
             _ => {}
         }
         None

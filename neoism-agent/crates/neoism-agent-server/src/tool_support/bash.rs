@@ -15,8 +15,6 @@ use super::args::{optional_string, required_string, usize_arg};
 use super::paths::{display_path, existing_project_path};
 use super::{process, shell_scan, truncate, ToolContext, ToolExecutionResult};
 
-const MAX_CAPTURE_BYTES_PER_STREAM: usize = 1024 * 1024;
-
 /// One runtime's cached login-shell environment. The single-entry cache is
 /// bounded and is invalidated when the resolved shell changes or its TTL
 /// expires. Running `$SHELL -lc <cmd>` for every tool call re-sources
@@ -175,49 +173,38 @@ pub(super) async fn bash_tool(
             anyhow::bail!("{} command aborted\n(no output)", runtime.display_name());
         }
     };
-    let mut process = Command::new(&shell);
-    runtime.apply_command(&mut process, &command, false);
-    process
-        .current_dir(&cwd)
-        .env("TERM", "xterm-256color")
-        .env("NEOISM_TERMINAL", "1")
-        .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut env = std::collections::BTreeMap::new();
     #[cfg(not(windows))]
-    process.envs(login_env.iter());
-    process.envs(context.env.clone());
-    process::set_new_process_group(&mut process);
-    let mut child = process
-        .spawn()
-        .with_context(|| format!("failed to spawn shell {shell}"))?;
-    let child_id = child.id();
-    let stdout_task =
-        process::read_child_output(child.stdout.take(), MAX_CAPTURE_BYTES_PER_STREAM);
-    let stderr_task =
-        process::read_child_output(child.stderr.take(), MAX_CAPTURE_BYTES_PER_STREAM);
-    let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
-    tokio::pin!(timeout);
-    let wait_result: anyhow::Result<std::process::ExitStatus> = tokio::select! {
-        status = child.wait() => {
-            status.with_context(|| format!("failed to wait for shell {shell}"))
-        }
-        _ = &mut timeout => {
-            process::terminate_child(&mut child, child_id).await;
-            Err(anyhow::anyhow!("{} command timed out after {timeout_ms}ms", runtime.display_name()))
-        }
+    env.extend(login_env.iter().map(|(key, value)| (key.clone(), value.clone())));
+    env.extend(context.env.clone());
+    env.insert("TERM".into(), "xterm-256color".into());
+    env.insert("NEOISM_TERMINAL".into(), "1".into());
+    let request = context
+        .execution_request(
+            neoism_agent_service_api::ProcessClass::Command,
+            Some(timeout_ms),
+        )
+        .await?;
+    let services = context.services();
+    let lease = services.execution.acquire(request).await?;
+    let spec = neoism_agent_service_api::ProcessSpec {
+        executable: shell.clone(),
+        args: runtime.command_args(&command, false),
+        cwd: Some(cwd.clone()),
+        env,
+        stdin: None,
+        timeout_ms: Some(timeout_ms),
+    };
+    let result = tokio::select! {
+        result = lease.exec(spec) => result.map_err(anyhow::Error::from)?,
         _ = process::wait_for_cancel(context.cancel.clone()) => {
-            process::terminate_child(&mut child, child_id).await;
-            Err(anyhow::anyhow!("{} command aborted", runtime.display_name()))
+            let _ = lease.terminate().await;
+            anyhow::bail!("{} command aborted", runtime.display_name());
         }
     };
-
-    let stdout = stdout_task.await??;
-    let stderr = stderr_task.await??;
-    let capture_truncated = stdout.truncated || stderr.truncated;
-    let stdout = String::from_utf8_lossy(&stdout.bytes);
-    let stderr = String::from_utf8_lossy(&stderr.bytes);
+    let capture_truncated = result.truncated;
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
     let mut rendered = String::new();
     if !stdout.is_empty() {
         rendered.push_str(&stdout);
@@ -237,15 +224,8 @@ pub(super) async fn bash_tool(
         );
     }
 
-    let status = match wait_result {
-        Ok(status) => status,
-        Err(error) => {
-            let rendered = truncate::truncate_output(&rendered)?.output;
-            anyhow::bail!("{error}\n{rendered}")
-        }
-    };
-    let exit = status.code();
-    if !status.success() {
+    let exit = Some(result.status);
+    if result.status != 0 {
         let rendered = truncate::truncate_output(&rendered)?.output;
         anyhow::bail!(
             "{} command failed with status {:?}\n{}",

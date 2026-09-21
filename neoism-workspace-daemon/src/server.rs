@@ -170,7 +170,8 @@ pub fn router(state: AppState) -> Router {
         // both ways so SSE flows live.
         .route(
             "/agent-gui/workspaces",
-            post(agent_gui::agent_local_workspaces).options(agent_gui::agent_share_preflight),
+            post(agent_gui::agent_local_workspaces)
+                .options(agent_gui::agent_share_preflight),
         )
         .route(
             "/agent-gui/share",
@@ -218,12 +219,19 @@ async fn agent_workspaces(State(state): State<AppState>, headers: HeaderMap) -> 
         return response;
     }
     let device = device_from_headers(&state.auth, &headers);
-    let workspaces: Vec<_> = state.workspaces.list_host_workspaces(None).into_iter()
-        .filter(|w| w.visibility == neoism_protocol::workspace::WorkspaceVisibility::Shared)
+    let workspaces: Vec<_> = state
+        .workspaces
+        .list_host_workspaces(None)
+        .into_iter()
+        .filter(|w| {
+            w.visibility == neoism_protocol::workspace::WorkspaceVisibility::Shared
+        })
         .filter(|w| agent_workspace_root(&state.workspaces, &w.id).is_some())
-        .filter(|w| device.as_ref().is_none_or(|d| {
-            d.workspace_id.as_deref().is_none_or(|bound| bound == w.id)
-        }))
+        .filter(|w| {
+            device.as_ref().is_none_or(|d| {
+                d.workspace_id.as_deref().is_none_or(|bound| bound == w.id)
+            })
+        })
         .map(|w| serde_json::json!({ "id": w.id, "title": w.title }))
         .collect();
     Json(serde_json::json!({ "workspaces": workspaces })).into_response()
@@ -326,10 +334,12 @@ async fn agent_proxy_inner(
         .workspaces
         .get_host_workspace(&workspace_id)
         .is_some_and(|workspace| {
-            workspace.visibility == neoism_protocol::workspace::WorkspaceVisibility::Shared
+            workspace.visibility
+                == neoism_protocol::workspace::WorkspaceVisibility::Shared
         });
     let credential =
-        match agent_proxy_credential(&state.auth, &headers, &workspace_id, &root, shared) {
+        match agent_proxy_credential(&state.auth, &headers, &workspace_id, &root, shared)
+        {
             Ok(identity) => identity,
             Err(_)
                 if headers.get(header::AUTHORIZATION).is_none()
@@ -431,8 +441,12 @@ fn agent_proxy_credential(
     mint_agent_credential(subject, namespace.as_deref().unwrap_or(workspace_id), root)
 }
 
-fn device_from_headers(auth: &AuthService, headers: &HeaderMap) -> Option<crate::auth::DeviceRecord> {
-    cloud_auth::extract_bearer(headers).and_then(|token| auth.authenticate_bearer(&token).ok())
+fn device_from_headers(
+    auth: &AuthService,
+    headers: &HeaderMap,
+) -> Option<crate::auth::DeviceRecord> {
+    cloud_auth::extract_bearer(headers)
+        .and_then(|token| auth.authenticate_bearer(&token).ok())
 }
 
 fn agent_proxy_principal(
@@ -465,16 +479,23 @@ fn agent_proxy_principal(
         if let Some((workspace_id, shared)) = scoped {
             if let Some(bound) = device.workspace_id.as_deref() {
                 if bound != workspace_id {
-                    return Err((StatusCode::FORBIDDEN, "workspace is not shared with this device")
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        "workspace is not shared with this device",
+                    )
                         .into_response());
                 }
                 if !shared {
-                    return Err((StatusCode::FORBIDDEN, "workspace is not shared").into_response());
+                    return Err((StatusCode::FORBIDDEN, "workspace is not shared")
+                        .into_response());
                 }
                 if !device.granted_permissions.contains(&Permission::AgentUse)
-                    && !device.granted_permissions.contains(&Permission::DeviceManage)
+                    && !device
+                        .granted_permissions
+                        .contains(&Permission::DeviceManage)
                 {
-                    return Err((StatusCode::FORBIDDEN, "device token lacks AgentUse").into_response());
+                    return Err((StatusCode::FORBIDDEN, "device token lacks AgentUse")
+                        .into_response());
                 }
             }
         }
@@ -674,23 +695,52 @@ mod agent_proxy_auth_tests {
         for id in ["shared-chat", "private-chat"] {
             let root = temp.path().join(id);
             std::fs::create_dir_all(&root).unwrap();
-            state.workspaces.create_host_workspace("test-host".into(), Some(id.into()), Some(id.into()), Some(root));
+            state.workspaces.create_host_workspace(
+                "test-host".into(),
+                Some(id.into()),
+                Some(id.into()),
+                Some(root),
+            );
         }
-        state.workspaces.set_host_workspace_visibility("shared-chat", neoism_protocol::workspace::WorkspaceVisibility::Shared);
+        state.workspaces.set_host_workspace_visibility(
+            "shared-chat",
+            neoism_protocol::workspace::WorkspaceVisibility::Shared,
+        );
         let app = router(state);
         for bearer in [None, Some("invalid")] {
             let mut request = axum::http::Request::get("/agent-workspaces");
-            if let Some(bearer) = bearer { request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}")); }
-            let response = app.clone().oneshot(request.body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            if let Some(bearer) = bearer {
+                request =
+                    request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
-        let response = app.oneshot(axum::http::Request::get("/agent-workspaces")
-            .header(header::AUTHORIZATION, format!("Bearer {}", issued.raw_token))
-            .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/agent-workspaces")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", issued.raw_token),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body, serde_json::json!({ "workspaces": [{ "id": "shared-chat", "title": "shared-chat" }] }));
+        assert_eq!(
+            body,
+            serde_json::json!({ "workspaces": [{ "id": "shared-chat", "title": "shared-chat" }] })
+        );
     }
 
     #[tokio::test]
@@ -698,27 +748,49 @@ mod agent_proxy_auth_tests {
         let temp = tempfile::tempdir().unwrap();
         let state = test_state(AuthService::bootstrap(temp.path()).unwrap());
         state.workspaces.create_host_workspace(
-            "test-host".into(), Some("home-workspace".into()), Some("Home project".into()),
+            "test-host".into(),
+            Some("home-workspace".into()),
+            Some("Home project".into()),
             Some(temp.path().to_path_buf()),
         );
         let app = router(state);
         for (peer, origin, expected) in [
             ("127.0.0.1:9", "http://127.0.0.1:5174", StatusCode::OK),
-            ("100.64.0.9:9", "http://127.0.0.1:5174", StatusCode::FORBIDDEN),
-            ("127.0.0.1:9", "http://127.0.0.1:8080", StatusCode::FORBIDDEN),
+            (
+                "100.64.0.9:9",
+                "http://127.0.0.1:5174",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "127.0.0.1:9",
+                "http://127.0.0.1:8080",
+                StatusCode::FORBIDDEN,
+            ),
         ] {
             let mut request = axum::http::Request::post("/agent-gui/workspaces")
-                .header(header::ORIGIN, origin).body(axum::body::Body::empty()).unwrap();
-            request.extensions_mut().insert(ConnectInfo(peer.parse::<std::net::SocketAddr>().unwrap()));
+                .header(header::ORIGIN, origin)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(peer.parse::<std::net::SocketAddr>().unwrap()));
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), expected);
             if expected == StatusCode::OK {
-                assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], origin);
+                assert_eq!(
+                    response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                    origin
+                );
                 assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-                let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+                let body = axum::body::to_bytes(response.into_body(), 65536)
+                    .await
+                    .unwrap();
                 let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(value["workspaces"][0]["id"], "home-workspace");
-                assert_eq!(value["workspaces"][0]["directory"], temp.path().to_string_lossy().as_ref());
+                assert_eq!(
+                    value["workspaces"][0]["directory"],
+                    temp.path().to_string_lossy().as_ref()
+                );
                 assert_eq!(value["workspaces"][0]["shared"], false);
             }
         }
@@ -777,7 +849,9 @@ mod agent_proxy_auth_tests {
         let mut foreign = axum::http::Request::post("/agent-gui/share")
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ORIGIN, "http://127.0.0.1:8080")
-            .body(axum::body::Body::from(r#"{"workspace_id":"ws-1","share_workspace":true}"#))
+            .body(axum::body::Body::from(
+                r#"{"workspace_id":"ws-1","share_workspace":true}"#,
+            ))
             .unwrap();
         foreign.extensions_mut().insert(ConnectInfo(
             "127.0.0.1:9".parse::<std::net::SocketAddr>().unwrap(),
@@ -786,7 +860,9 @@ mod agent_proxy_auth_tests {
         assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
         let mut missing_origin = axum::http::Request::post("/agent-gui/share")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(axum::body::Body::from(r#"{"workspace_id":"ws-1","share_workspace":true}"#))
+            .body(axum::body::Body::from(
+                r#"{"workspace_id":"ws-1","share_workspace":true}"#,
+            ))
             .unwrap();
         missing_origin.extensions_mut().insert(ConnectInfo(
             "127.0.0.1:9".parse::<std::net::SocketAddr>().unwrap(),
@@ -805,10 +881,15 @@ mod agent_proxy_auth_tests {
         ));
         let shared = app.clone().oneshot(local).await.unwrap();
         assert_eq!(shared.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(shared.into_body(), 65536).await.unwrap();
+        let bytes = axum::body::to_bytes(shared.into_body(), 65536)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["status"], "ready");
-        assert_eq!(crate::agent_hosting::namespace("ws-1", &temp.path().join("ws")).as_deref(), Some("phone-test-namespace"));
+        assert_eq!(
+            crate::agent_hosting::namespace("ws-1", &temp.path().join("ws")).as_deref(),
+            Some("phone-test-namespace")
+        );
         let url = body["url"].as_str().unwrap();
         assert!(url.contains("/agent-gui/?"));
         assert!(url.contains("pair="));
@@ -832,7 +913,9 @@ mod agent_proxy_auth_tests {
                 .to_vec(),
         )
         .unwrap();
-        assert!(html.contains("./assets/app.js") || html.contains("src=\"./assets/app.js\""));
+        assert!(
+            html.contains("./assets/app.js") || html.contains("src=\"./assets/app.js\"")
+        );
         assert!(html.contains("__NEOISM_PAIR__"));
         assert!(!html.contains("src=\"/assets/app.js\""));
         assert!(!html.contains("/agent-gui/assets/app.js"));
@@ -841,8 +924,14 @@ mod agent_proxy_auth_tests {
             None => std::env::remove_var("NEOISM_AGENT_GUI_ROOT"),
         }
         upstream.abort();
-        for (key, previous) in [("NEOISM_AGENT_SERVER", previous_agent), ("NEOISM_SERVER", previous_server)] {
-            match previous { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
+        for (key, previous) in [
+            ("NEOISM_AGENT_SERVER", previous_agent),
+            ("NEOISM_SERVER", previous_server),
+        ] {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
         match previous_host {
             Some(value) => std::env::set_var("NEOISM_HOST_URL", value),
@@ -919,7 +1008,8 @@ mod agent_proxy_auth_tests {
             "Bearer daemon-test-key".parse().unwrap(),
         );
         let local =
-            agent_proxy_credential(&auth, &local_headers, "workspace-a", root, false).unwrap();
+            agent_proxy_credential(&auth, &local_headers, "workspace-a", root, false)
+                .unwrap();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let local = neoism_agent_service_api::daemon_credential::verify(
             &local,
@@ -939,7 +1029,8 @@ mod agent_proxy_auth_tests {
             format!("Bearer {}", issued.raw_token).parse().unwrap(),
         );
         let paired =
-            agent_proxy_credential(&auth, &paired_headers, "workspace-a", root, false).unwrap();
+            agent_proxy_credential(&auth, &paired_headers, "workspace-a", root, false)
+                .unwrap();
         let paired = neoism_agent_service_api::daemon_credential::verify(
             &paired,
             b"daemon-test-key",
@@ -961,7 +1052,8 @@ mod agent_proxy_auth_tests {
             format!("Bearer {}", second.raw_token).parse().unwrap(),
         );
         let second =
-            agent_proxy_credential(&auth, &second_headers, "workspace-a", root, false).unwrap();
+            agent_proxy_credential(&auth, &second_headers, "workspace-a", root, false)
+                .unwrap();
         let second = neoism_agent_service_api::daemon_credential::verify(
             &second,
             b"daemon-test-key",
@@ -972,7 +1064,8 @@ mod agent_proxy_auth_tests {
         assert_ne!(second.subject, paired.subject);
 
         let other =
-            agent_proxy_credential(&auth, &local_headers, "workspace-b", root, false).unwrap();
+            agent_proxy_credential(&auth, &local_headers, "workspace-b", root, false)
+                .unwrap();
         let other = neoism_agent_service_api::daemon_credential::verify(
             &other,
             b"daemon-test-key",
@@ -995,11 +1088,13 @@ mod agent_proxy_auth_tests {
             format!("Bearer {}", phone.raw_token).parse().unwrap(),
         );
         agent_proxy_credential(&auth, &phone_headers, "workspace-a", root, true).unwrap();
-        let denied = agent_proxy_credential(&auth, &phone_headers, "workspace-b", root, true)
-            .unwrap_err();
+        let denied =
+            agent_proxy_credential(&auth, &phone_headers, "workspace-b", root, true)
+                .unwrap_err();
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-        let private = agent_proxy_credential(&auth, &phone_headers, "workspace-a", root, false)
-            .unwrap_err();
+        let private =
+            agent_proxy_credential(&auth, &phone_headers, "workspace-a", root, false)
+                .unwrap_err();
         assert_eq!(private.status(), StatusCode::FORBIDDEN);
     }
 }

@@ -7,15 +7,28 @@ impl Screen<'_> {
             self.open_documentation_notebook(path);
             return;
         }
-        if self.follow_documentation_notebook_link(&path, None) { return; }
-        let source = neoism_ui::services::FileOpenSource::workspace(self.context_manager.current_workspace_is_remote_joined());
+        if self.follow_documentation_notebook_link(&path, None) {
+            return;
+        }
+        let source = neoism_ui::services::FileOpenSource::workspace(
+            self.context_manager.current_workspace_is_remote_joined(),
+        );
         self.open_path_in_markdown_with_source(path, source);
     }
 
-    pub(crate) fn open_path_in_markdown_with_source(&mut self, path: std::path::PathBuf, source: neoism_ui::services::FileOpenSource) {
+    pub(crate) fn open_path_in_markdown_with_source(
+        &mut self,
+        path: std::path::PathBuf,
+        source: neoism_ui::services::FileOpenSource,
+    ) {
         if self.context_manager.markdown_node_by_path(&path).is_some()
-            && self.context_manager.markdown_pane_mut_by_path(&path)
-                .is_some_and(|pane| source.conflicts_with(pane.remote_source, pane.local_only)) {
+            && self
+                .context_manager
+                .markdown_pane_mut_by_path(&path)
+                .is_some_and(|pane| {
+                    source.conflicts_with(pane.remote_source, pane.local_only)
+                })
+        {
             self.file_tree_notify("That path is already open from another source; preserve its edits and close it before opening the other source", neoism_ui::panels::notifications::NotificationLevel::Warn);
             return;
         }
@@ -109,11 +122,19 @@ impl Screen<'_> {
             );
             return;
         }
-        let local_only = self.context_manager.current().markdown.as_ref().is_some_and(|pane| pane.local_only);
+        let local_only = self
+            .context_manager
+            .current()
+            .markdown
+            .as_ref()
+            .is_some_and(|pane| pane.local_only);
         let remote = self.renderer.file_tree.is_remote() && !local_only;
         if local_only {
             if let Err(error) = std::fs::rename(&old_path, &new_path) {
-                self.file_tree_notify(format!("Rename failed: {error}"), NotificationLevel::Error);
+                self.file_tree_notify(
+                    format!("Rename failed: {error}"),
+                    NotificationLevel::Error,
+                );
                 return;
             }
         } else {
@@ -174,7 +195,9 @@ impl Screen<'_> {
             return;
         };
         if neoism_protocol::host_path::HostPath::new(remote.root().to_string_lossy())
-            .relative(&path.to_string_lossy()).is_none() {
+            .relative(&path.to_string_lossy())
+            .is_none()
+        {
             return;
         }
         let pane_needs_fetch = self
@@ -201,11 +224,17 @@ impl Screen<'_> {
     }
 
     pub(crate) fn activate_markdown_path(&mut self, path: std::path::PathBuf) {
-        let source = neoism_ui::services::FileOpenSource::workspace(self.context_manager.current_workspace_is_remote_joined());
+        let source = neoism_ui::services::FileOpenSource::workspace(
+            self.context_manager.current_workspace_is_remote_joined(),
+        );
         self.activate_markdown_path_with_source(path, source);
     }
 
-    fn activate_markdown_path_with_source(&mut self, path: std::path::PathBuf, source: neoism_ui::services::FileOpenSource) {
+    fn activate_markdown_path_with_source(
+        &mut self,
+        path: std::path::PathBuf,
+        source: neoism_ui::services::FileOpenSource,
+    ) {
         if crate::editor::neodraw::is_neodraw_path(&path) {
             self.activate_draw_path(path);
             return;
@@ -251,9 +280,17 @@ impl Screen<'_> {
     }
 
     pub(crate) fn sync_markdown_tab_modified(&mut self, path: &Path, modified: bool) {
-        let notebook = self.context_manager.markdown_pane_mut_by_path(path)
-            .and_then(|pane| pane.documentation_notebook.as_ref().map(|book| book.path.clone()));
-        if let Some(notebook) = notebook { self.sync_documentation_notebook_modified(&notebook); }
+        let notebook = self
+            .context_manager
+            .markdown_pane_mut_by_path(path)
+            .and_then(|pane| {
+                pane.documentation_notebook
+                    .as_ref()
+                    .map(|book| book.path.clone())
+            });
+        if let Some(notebook) = notebook {
+            self.sync_documentation_notebook_modified(&notebook);
+        }
         self.renderer.buffer_tabs.set_modified(path, modified);
         for tabs in self.renderer.pane_tabs.values_mut() {
             tabs.set_modified(path, modified);

@@ -3,13 +3,19 @@ use std::path::{Path, PathBuf};
 
 fn host_join(root: &Path, relative: &str) -> PathBuf {
     neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
-        .join(relative).as_str().into()
+        .join(relative)
+        .as_str()
+        .into()
 }
 
 impl Screen<'_> {
     /// Complete just the correlated read. Never turn failed/placeholder bytes
     /// into an authoritative CRDT seed, or discard an existing dirty buffer.
-    pub(crate) fn fail_remote_editor_read(&mut self, request_id: u64, message: &str) -> bool {
+    pub(crate) fn fail_remote_editor_read(
+        &mut self,
+        request_id: u64,
+        message: &str,
+    ) -> bool {
         let mut handled = false;
         if let Some(path) = self.pending_remote_code_opens.remove(&request_id) {
             if let Some(pane) = self.context_manager.code_pane_mut_by_path(&path) {
@@ -24,8 +30,10 @@ impl Screen<'_> {
             handled = true;
         }
         if handled {
-            self.file_tree_notify(format!("Could not read host file: {message}"),
-                neoism_ui::panels::notifications::NotificationLevel::Error);
+            self.file_tree_notify(
+                format!("Could not read host file: {message}"),
+                neoism_ui::panels::notifications::NotificationLevel::Error,
+            );
             self.mark_dirty();
         }
         handled
@@ -208,9 +216,11 @@ impl Screen<'_> {
     /// tolerates).
     pub(crate) fn remote_tree_rel(&self, path: &Path) -> Option<String> {
         let root = self.renderer.file_tree.remote_root()?;
-        Some(neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
-            .relative(&path.to_string_lossy())
-            .unwrap_or_else(|| path.to_string_lossy().into_owned()))
+        Some(
+            neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
+                .relative(&path.to_string_lossy())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+        )
     }
 
     /// Fire a files-plane MUTATION at the remote tree's root and track
@@ -338,17 +348,23 @@ impl Screen<'_> {
         else {
             return false;
         };
-        let Some(relative) = neoism_protocol::host_path::HostPath::new(vault_root.to_string_lossy())
-            .relative(&path.to_string_lossy()) else {
+        let Some(relative) =
+            neoism_protocol::host_path::HostPath::new(vault_root.to_string_lossy())
+                .relative(&path.to_string_lossy())
+        else {
             return false;
         };
         if markdown {
             if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(&path) {
-                if pane.local_only || pane.remote_content_pending || pane.is_dirty() { return true; }
+                if pane.local_only || pane.remote_content_pending || pane.is_dirty() {
+                    return true;
+                }
                 pane.mark_remote_loading();
             }
         } else if let Some(pane) = self.context_manager.code_pane_mut_by_path(&path) {
-            if pane.local_only || pane.remote_content_pending || pane.is_dirty() { return true; }
+            if pane.local_only || pane.remote_content_pending || pane.is_dirty() {
+                return true;
+            }
             pane.mark_remote_loading();
         }
         let request_id = handle.allocate_request_id();
@@ -364,7 +380,8 @@ impl Screen<'_> {
         runtime.spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             event_proxy.send_event(
-                neoism_backend::event::RioEvent::RemoteEditorReadTimeout(request_id).into(),
+                neoism_backend::event::RioEvent::RemoteEditorReadTimeout(request_id)
+                    .into(),
                 window_id,
             );
         });
@@ -517,7 +534,9 @@ impl Screen<'_> {
     /// host linked no vault there is nothing to list — the panel shows the
     /// "no linked vault" empty state instead.
     pub(crate) fn request_remote_notes_listing(&mut self) {
-        if !self.notes_sidebar_shows_shared_vault() { return; }
+        if !self.notes_sidebar_shows_shared_vault() {
+            return;
+        }
         let Some(vault_root) = self.served_notes_vault_root() else {
             return;
         };
@@ -606,7 +625,8 @@ impl Screen<'_> {
                         let Ok(suffix) = dir.strip_prefix("~") else {
                             return true;
                         };
-                        let path = host_join(Path::new(&home.path), &suffix.to_string_lossy());
+                        let path =
+                            host_join(Path::new(&home.path), &suffix.to_string_lossy());
                         let request_id = handle.allocate_request_id();
                         self.pending_remote_terminal_completions.insert(
                             request_id,
@@ -710,7 +730,8 @@ impl Screen<'_> {
             }
             FilesServerMessage::TreeListing { entries, .. } if notes_listing => {
                 if self.context_manager.current_workspace_is_remote_joined()
-                    && !self.renderer.notes_sidebar.is_remote_workspace() {
+                    && !self.renderer.notes_sidebar.is_remote_workspace()
+                {
                     // A local-vault selection made while this request was in
                     // flight must not be rehomed by the late host reply.
                     return false;
@@ -724,7 +745,9 @@ impl Screen<'_> {
                     .map(|entry| (host_join(&notes_root, &entry.path), entry.is_dir))
                     .collect();
                 if self.context_manager.current_workspace_is_remote_joined() {
-                    self.renderer.notes_sidebar.set_remote_entries_from_host(list);
+                    self.renderer
+                        .notes_sidebar
+                        .set_remote_entries_from_host(list);
                 } else {
                     self.renderer.notes_sidebar.set_entries_from_host(list);
                 }
@@ -736,10 +759,16 @@ impl Screen<'_> {
             // an error toast; the first create makes the folder.
             FilesServerMessage::Error { .. } if notes_listing => {
                 if self.context_manager.current_workspace_is_remote_joined() {
-                    if !self.renderer.notes_sidebar.is_remote_workspace() { return false; }
-                    self.renderer.notes_sidebar.set_remote_entries_from_host(Vec::new());
+                    if !self.renderer.notes_sidebar.is_remote_workspace() {
+                        return false;
+                    }
+                    self.renderer
+                        .notes_sidebar
+                        .set_remote_entries_from_host(Vec::new());
                 } else {
-                    self.renderer.notes_sidebar.set_entries_from_host(Vec::new());
+                    self.renderer
+                        .notes_sidebar
+                        .set_entries_from_host(Vec::new());
                 }
                 self.mark_dirty();
                 true

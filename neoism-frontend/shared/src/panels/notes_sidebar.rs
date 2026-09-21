@@ -51,6 +51,10 @@ pub struct NotesSidebar {
     width: f32,
     workspace_name: String,
     workspace_path: Option<PathBuf>,
+    /// GitBook-style takeover root. While set, Alt+N shows only this
+    /// notebook's hierarchy and a back control instead of the vault list.
+    notebook_root: Option<PathBuf>,
+    notebook_back_rect: Option<[f32; 4]>,
     remote_workspace: bool,
     all_entries: Vec<NoteSidebarEntry>,
     rows: Vec<NoteSidebarRow>,
@@ -73,6 +77,7 @@ pub struct NotesSidebar {
     icon_overrides: HashMap<PathBuf, Option<String>>,
     selected_index: usize,
     selector_selected: bool,
+    notebook_back_selected: bool,
     scroll_top: usize,
     // Scroll/cursor springs + wheel accumulator mirror `file_tree`'s
     // proven model so trackpad pixel scrolling, Ctrl+D/U half-page jumps
@@ -191,6 +196,7 @@ struct NoteSidebarRow {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotesSidebarHit {
+    NotebookBack,
     WorkspacePicker,
     /// Pencil-note action directly below the Notes title.
     NewNote,
@@ -218,6 +224,8 @@ impl Default for NotesSidebar {
             width: FILE_TREE_WIDTH,
             workspace_name: "Default".to_string(),
             workspace_path: None,
+            notebook_root: None,
+            notebook_back_rect: None,
             remote_workspace: false,
             all_entries: Vec::new(),
             rows: Vec::new(),
@@ -229,6 +237,7 @@ impl Default for NotesSidebar {
             icon_overrides: HashMap::new(),
             selected_index: 0,
             selector_selected: false,
+            notebook_back_selected: false,
             scroll_top: 0,
             scroll: CriticallyDampedSpring::new(),
             cursor_spring: CriticallyDampedSpring::new(),
@@ -334,13 +343,22 @@ impl NotesSidebar {
         self.set_workspace_inner(name, path, source_changed);
     }
 
-    pub fn set_remote_workspace(&mut self, name: impl Into<String>, path: Option<PathBuf>) {
+    pub fn set_remote_workspace(
+        &mut self,
+        name: impl Into<String>,
+        path: Option<PathBuf>,
+    ) {
         let source_changed = !self.remote_workspace;
         self.remote_workspace = true;
         self.set_workspace_inner(name, path, source_changed);
     }
 
-    fn set_workspace_inner(&mut self, name: impl Into<String>, path: Option<PathBuf>, source_changed: bool) {
+    fn set_workspace_inner(
+        &mut self,
+        name: impl Into<String>,
+        path: Option<PathBuf>,
+        source_changed: bool,
+    ) {
         // Only wipe the expanded-folder set when the vault actually
         // changes. The Alt+N toggle re-calls `set_workspace` with the
         // SAME path on every open; clearing unconditionally was what
@@ -349,6 +367,7 @@ impl NotesSidebar {
         self.workspace_name = name.into();
         self.workspace_path = path;
         if vault_changed {
+            self.notebook_root = None;
             self.all_entries.clear();
             self.rows.clear();
             self.open_dirs.clear();
@@ -480,8 +499,10 @@ impl NotesSidebar {
             let Some(icon) = icon.filter(|icon| !icon.is_empty()) else {
                 continue;
             };
-            if let Some(entry) =
-                self.all_entries.iter_mut().find(|entry| entry.path.as_os_str() == path.as_os_str())
+            if let Some(entry) = self
+                .all_entries
+                .iter_mut()
+                .find(|entry| entry.path.as_os_str() == path.as_os_str())
             {
                 entry.icon = Some(icon);
             }
@@ -509,12 +530,21 @@ impl NotesSidebar {
         self.all_entries.clear();
         self.open_dirs.insert(root.clone());
         for (path, is_dir) in entries {
-            let host_root = neoism_protocol::host_path::HostPath::new(root.to_string_lossy());
-            let Some(relative) = host_root.relative(&path.to_string_lossy()) else { continue; };
-            if relative.is_empty() { continue; }
-            let (parent_relative, name) = relative.rsplit_once('/').unwrap_or(("", &relative));
-            if name.starts_with('.') || matches!(name, "target" | "node_modules")
-                || (parent_relative.is_empty() && matches!(name, "project.toml" | "project.json")) {
+            let host_root =
+                neoism_protocol::host_path::HostPath::new(root.to_string_lossy());
+            let Some(relative) = host_root.relative(&path.to_string_lossy()) else {
+                continue;
+            };
+            if relative.is_empty() {
+                continue;
+            }
+            let (parent_relative, name) =
+                relative.rsplit_once('/').unwrap_or(("", &relative));
+            if name.starts_with('.')
+                || matches!(name, "target" | "node_modules")
+                || (parent_relative.is_empty()
+                    && matches!(name, "project.toml" | "project.json"))
+            {
                 continue;
             }
             let label = name.to_string();
@@ -546,7 +576,11 @@ impl NotesSidebar {
         // Live buffer overrides first, then the explicit `.neoism-icons.json`
         // map LAST (highest priority) — same ordering as `refresh_notes`.
         self.apply_icon_overrides();
-        let icons = if local { load_notes_icons(&root) } else { HashMap::new() };
+        let icons = if local {
+            load_notes_icons(&root)
+        } else {
+            HashMap::new()
+        };
         if !icons.is_empty() {
             for entry in &mut self.all_entries {
                 if let Some(icon) = entry
@@ -634,17 +668,77 @@ impl NotesSidebar {
     }
 
     pub fn select_path(&mut self, path: &Path) {
-        if let Some(index) = (0..self.rows.len()).find(|&index| self.row_entry(index).is_some_and(|entry| entry.path == path)) {
+        if let Some(index) = (0..self.rows.len()).find(|&index| {
+            self.row_entry(index)
+                .is_some_and(|entry| entry.path == path)
+        }) {
             self.set_selected(index);
         }
     }
 
     pub fn selected_note_path(&self) -> Option<PathBuf> {
-        if self.selector_selected {
+        if self.selector_selected || self.notebook_back_selected {
             return None;
         }
         self.row_entry(self.selected_index)
             .map(|entry| entry.path.clone())
+    }
+
+    pub fn in_notebook(&self) -> bool {
+        self.notebook_root.is_some()
+    }
+
+    pub fn notebook_root(&self) -> Option<&Path> {
+        self.notebook_root.as_deref()
+    }
+
+    pub fn selected_is_notebook(&self) -> bool {
+        self.selected_note_path()
+            .is_some_and(|path| self.is_notebook_dir(&path))
+    }
+
+    /// Replace the vault list with the selected notebook's page hierarchy.
+    /// Notebook identity comes from the daemon/local listing, so this works
+    /// for joined workspaces without reading host paths on the guest.
+    pub fn enter_selected_notebook(&mut self) -> bool {
+        let Some(root) = self
+            .selected_note_path()
+            .filter(|path| self.is_notebook_dir(path))
+        else {
+            return false;
+        };
+        self.notebook_root = Some(root.clone());
+        self.open_dirs.insert(root);
+        self.selected_index = 0;
+        self.scroll_top = 0;
+        self.selector_selected = false;
+        self.notebook_back_selected = false;
+        self.rebuild_rows();
+        self.clamp_selection_and_scroll();
+        true
+    }
+
+    pub fn leave_notebook(&mut self) -> bool {
+        let Some(root) = self.notebook_root.take() else {
+            return false;
+        };
+        self.rebuild_rows();
+        if let Some(row) = self.row_index_for_path(&root) {
+            self.selected_index = row;
+        }
+        self.scroll_top = 0;
+        self.selector_selected = false;
+        self.notebook_back_selected = false;
+        self.clamp_selection_and_scroll();
+        true
+    }
+
+    fn is_notebook_dir(&self, path: &Path) -> bool {
+        self.all_entries.iter().any(|entry| {
+            !entry.is_dir
+                && entry.parent == path
+                && entry.label == crate::editor::documentation_notebook::MANIFEST_NAME
+        })
     }
 
     pub fn selected_index(&self) -> usize {
@@ -655,7 +749,12 @@ impl NotesSidebar {
         self.selector_selected
     }
 
+    pub fn is_notebook_back_selected(&self) -> bool {
+        self.notebook_back_selected
+    }
+
     pub fn select_selector(&mut self) {
+        self.notebook_back_selected = false;
         self.selector_selected = true;
     }
 
@@ -675,12 +774,16 @@ impl NotesSidebar {
     }
 
     pub fn contains_path(&self, path: &Path) -> bool {
-        self.all_entries.iter().any(|entry| entry.path.as_os_str() == path.as_os_str())
+        self.all_entries
+            .iter()
+            .any(|entry| entry.path.as_os_str() == path.as_os_str())
     }
 
     pub fn note_icon_for_path(&self, path: &Path) -> Option<String> {
         let saved = || {
-            if self.remote_workspace { return None; }
+            if self.remote_workspace {
+                return None;
+            }
             let root = self.workspace_path.as_ref()?;
             let relative = path.strip_prefix(root).ok()?.to_string_lossy();
             load_notes_icons(root).get(relative.as_ref()).cloned()
@@ -693,7 +796,11 @@ impl NotesSidebar {
                     .find(|entry| entry.path.as_os_str() == path.as_os_str())
                     .and_then(|entry| entry.icon.clone())
             })
-            .or_else(|| (!self.remote_workspace).then(|| note_frontmatter_icon(path)).flatten())
+            .or_else(|| {
+                (!self.remote_workspace)
+                    .then(|| note_frontmatter_icon(path))
+                    .flatten()
+            })
     }
 
     pub fn animate_workspace_selector_press(&mut self) {
@@ -712,8 +819,18 @@ impl NotesSidebar {
         self.row_entry(index).is_some_and(|entry| entry.is_dir)
     }
 
+    pub fn path_is_dir(&self, path: &Path) -> bool {
+        self.notebook_root.as_deref() == Some(path)
+            || self.workspace_path.as_deref() == Some(path)
+            || self
+                .all_entries
+                .iter()
+                .any(|entry| entry.path == path && entry.is_dir)
+    }
+
     pub fn set_selected(&mut self, index: usize) {
         self.selector_selected = false;
+        self.notebook_back_selected = false;
         if !self.rows.is_empty() {
             self.move_selection_to(index.min(self.rows.len().saturating_sub(1)));
         }
@@ -741,6 +858,13 @@ impl NotesSidebar {
     }
 
     pub fn select_next(&mut self) {
+        if self.notebook_back_selected {
+            self.notebook_back_selected = false;
+            if !self.rows.is_empty() {
+                self.selected_index = 0;
+            }
+            return;
+        }
         if self.selector_selected {
             return;
         }
@@ -761,7 +885,9 @@ impl NotesSidebar {
                 self.clamp_scroll(self.last_panel_height_rows);
             }
         } else if self.selected_index == 0 || self.rows.is_empty() {
-            // Already at the top — the wordmark header is decorative.
+            if self.notebook_root.is_some() {
+                self.notebook_back_selected = true;
+            }
         } else {
             self.set_selected(self.selected_index.saturating_sub(1));
         }
@@ -1054,10 +1180,19 @@ impl NotesSidebar {
     }
 
     pub fn contains_point(&self, x: f32, y: f32) -> bool {
-        self.visible && self.panel_rect.is_some_and(|rect| rect_contains(rect, x, y))
+        self.visible
+            && self
+                .panel_rect
+                .is_some_and(|rect| rect_contains(rect, x, y))
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NotesSidebarHit> {
+        if self
+            .notebook_back_rect
+            .is_some_and(|rect| rect_contains(rect, x, y))
+        {
+            return Some(NotesSidebarHit::NotebookBack);
+        }
         for (rect, index) in &self.icon_rects {
             if rect_contains(*rect, x, y) {
                 return Some(NotesSidebarHit::NoteIcon(*index));
@@ -1116,6 +1251,7 @@ impl NotesSidebar {
             return;
         }
         self.workspace_rect = None;
+        self.notebook_back_rect = None;
         self.new_note_rect = None;
         self.new_folder_rect = None;
         self.empty_create_rect = None;
@@ -1167,13 +1303,19 @@ impl NotesSidebar {
         // the shimmer advances smoothly instead of quantizing to a still.
         let shimmer_seconds = crate::cursor_style::rainbow_now_seconds();
         let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
+        let notebook_title = self
+            .notebook_root
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned());
+        let splash = if notebook_title.is_some() { "" } else { SPLASH };
         let target_w = (content_w - row_pad_x * 2.0).max(1.0);
         let probe_opts = DrawOpts {
             font_size: 10.0,
             font_id: pixel_font,
             ..DrawOpts::default()
         };
-        let probe_w = sugarloaf.text_mut().measure(SPLASH, &probe_opts).max(1.0);
+        let probe_w = sugarloaf.text_mut().measure(splash, &probe_opts).max(1.0);
         let splash_size = (16.0 * self.scale).min((10.0 * target_w / probe_w).max(10.0));
         let wordmark_h = splash_size * 1.15;
         let letter_opts = DrawOpts {
@@ -1185,7 +1327,7 @@ impl NotesSidebar {
             ..DrawOpts::default()
         };
         let mut letter_x = content_x + row_pad_x;
-        for (index, ch) in SPLASH.chars().enumerate() {
+        for (index, ch) in splash.chars().enumerate() {
             let letter = ch.to_string();
             let letter_width =
                 sugarloaf.text_mut().measure(&letter, &letter_opts).max(1.0);
@@ -1232,8 +1374,10 @@ impl NotesSidebar {
             create_size,
         ];
         let new_note_rect = [new_note_x, create_y, create_size, create_size];
-        self.new_note_rect = Some(new_note_rect);
-        self.new_folder_rect = Some(new_folder_rect);
+        if notebook_title.is_none() {
+            self.new_note_rect = Some(new_note_rect);
+            self.new_folder_rect = Some(new_folder_rect);
+        }
         let create_opts = DrawOpts {
             font_size: icon_size * 1.08,
             color: theme.u8_alpha(theme.fg, 0.72),
@@ -1241,6 +1385,8 @@ impl NotesSidebar {
             ..DrawOpts::default()
         };
         for (rect, glyph) in [(new_note_rect, "\u{f044}"), (new_folder_rect, "\u{f07b}")]
+            .into_iter()
+            .filter(|_| notebook_title.is_none())
         {
             if mouse.is_some_and(|(mx, my)| rect_contains(rect, mx, my)) {
                 sugarloaf.quad(
@@ -1266,6 +1412,73 @@ impl NotesSidebar {
             );
         }
 
+        if let Some(title) = notebook_title.as_deref() {
+            let back_rect = [content_x + 6.0 * self.scale, header_y, content_w - 12.0 * self.scale, row_h];
+            self.notebook_back_rect = Some(back_rect);
+            if self.notebook_back_selected {
+                sugarloaf.quad(
+                    None,
+                    back_rect[0],
+                    back_rect[1],
+                    back_rect[2],
+                    back_rect[3],
+                    theme.f32(theme.surface),
+                    [5.0 * self.scale; 4],
+                    DEPTH,
+                    ORDER + 1,
+                );
+                let cursor_w = (font_size * 0.6).max(2.0);
+                let cursor_x = content_x + (row_pad_x - cursor_w).max(0.0);
+                let cursor_h = (row_h - 6.0 * self.scale).max(font_size).min(row_h);
+                let cursor_y = back_rect[1] + (row_h - cursor_h) / 2.0;
+                self.selected_cursor_rect = Some([cursor_x, cursor_y, cursor_w, cursor_h]);
+            }
+            let back_opts = DrawOpts {
+                font_size: icon_size,
+                color: theme.u8(theme.muted),
+                clip_rect: Some(panel_clip),
+                ..DrawOpts::default()
+            };
+            draw_icon_centered_with_occlusion(
+                sugarloaf,
+                back_rect[0],
+                [back_rect[0], back_rect[1], row_h, row_h],
+                "\u{f053}",
+                &back_opts,
+                occlusion,
+                true,
+            );
+            let divider_y = header_y + row_h + 4.0 * self.scale;
+            sugarloaf.rect(
+                None,
+                content_x + 6.0 * self.scale,
+                divider_y,
+                (content_w - 12.0 * self.scale).max(0.0),
+                self.scale.max(1.0),
+                theme.f32_alpha(theme.border, 0.72),
+                DEPTH,
+                ORDER + 1,
+            );
+            let title_opts = DrawOpts {
+                font_size,
+                color: theme.u8(theme.fg),
+                bold: true,
+                clip_rect: Some(panel_clip),
+                ..DrawOpts::default()
+            };
+            let title_x = content_x + row_pad_x;
+            let budget = (content_x + content_w - row_pad_x - title_x).max(0.0);
+            let title = truncate_label(title, budget, sugarloaf, &title_opts);
+            draw_text_with_occlusion(
+                sugarloaf,
+                title_x,
+                divider_y + 8.0 * self.scale + (row_h - font_size) * 0.5,
+                &title,
+                &title_opts,
+                occlusion,
+            );
+        }
+
         let footer_y = content_y + content_h - row_h - 6.0 * self.scale;
         // Footer: the vault selector owns the full row.
         let footer_divider_y = footer_y - 6.0 * self.scale;
@@ -1286,7 +1499,11 @@ impl NotesSidebar {
             row_h,
         ];
         self.workspace_rect = Some(workspace_rect);
-        let header_bottom = (header_y + wordmark_h).max(create_y + create_size);
+        let header_bottom = if notebook_title.is_some() {
+            header_y + row_h * 2.0 + 12.0 * self.scale
+        } else {
+            (header_y + wordmark_h).max(create_y + create_size)
+        };
         let list_y = header_bottom + 8.0 * self.scale;
         let list_h = (footer_y - list_y - 8.0 * self.scale).max(0.0);
         // GPU glyph clipping preserves partial rows while the scroll spring
@@ -1305,6 +1522,7 @@ impl NotesSidebar {
         let cursor_offset = self.tick_cursor();
 
         if !self.selector_selected
+            && !self.notebook_back_selected
             && !self.rows.is_empty()
             && self.selected_index < self.rows.len()
         {
@@ -1331,7 +1549,7 @@ impl NotesSidebar {
                     DEPTH,
                     ORDER + 2,
                 );
-                if self.focused {
+                if self.focused || self.notebook_root.is_some() {
                     let cursor_w = (font_size * 0.6).max(2.0);
                     let cursor_x = content_x + (row_pad_x - cursor_w).max(0.0);
                     let cursor_h = (row_h - 6.0 * self.scale)
@@ -1342,7 +1560,8 @@ impl NotesSidebar {
                     let top = cursor_y.max(list_y);
                     let bottom = (cursor_y + cursor_h).min(list_y + list_h);
                     if bottom > top {
-                        self.selected_cursor_rect = Some([cursor_x, top, cursor_w, bottom - top]);
+                        self.selected_cursor_rect =
+                            Some([cursor_x, top, cursor_w, bottom - top]);
                     }
                 }
             }
@@ -1395,6 +1614,10 @@ impl NotesSidebar {
                 )
             };
             let entry = drag_source_row.and_then(|ix| self.row_entry(ix)).cloned();
+            let source_display_label = entry
+                .as_ref()
+                .map(|entry| note_display_label(&entry.path, entry.is_dir, &entry.label))
+                .unwrap_or_else(|| source_label.clone());
             let is_open = entry
                 .as_ref()
                 .map(|e| self.open_dirs.contains(&e.path))
@@ -1444,8 +1667,12 @@ impl NotesSidebar {
                 font_size: icon_size,
                 ..DrawOpts::default()
             };
-            let label =
-                truncate_label(&source_label, 240.0 * self.scale, sugarloaf, &text_opts);
+            let label = truncate_label(
+                &source_display_label,
+                240.0 * self.scale,
+                sugarloaf,
+                &text_opts,
+            );
             let label_w = sugarloaf.text_mut().measure(&label, &text_opts);
             let icon_w = sugarloaf.text_mut().measure(&icon, &glyph_opts);
             let chevron_w = chevron
@@ -1593,10 +1820,14 @@ impl NotesSidebar {
                 if visible_row_h <= 0.0 {
                     continue;
                 }
-                self.note_rects
-                    .push(([content_x, visible_row_y, content_w, visible_row_h], absolute_ix));
+                self.note_rects.push((
+                    [content_x, visible_row_y, content_w, visible_row_h],
+                    absolute_ix,
+                ));
 
                 let is_selected = absolute_ix == self.selected_index;
+                let is_notebook = self.is_notebook_dir(&entry.path);
+                let book_view = self.notebook_root.is_some();
                 // Spring-loaded drop target: accent-tinted band so it
                 // reads as "release here". The source row dims to a
                 // placeholder while it rides the cursor. Mirrors file_tree.
@@ -1625,7 +1856,7 @@ impl NotesSidebar {
                 } else {
                     1.0
                 };
-                let chevron = if entry.is_dir {
+                let chevron = if entry.is_dir && !is_notebook && !book_view {
                     Some(if self.open_dirs.contains(&entry.path) {
                         "\u{f078}"
                     } else {
@@ -1647,7 +1878,9 @@ impl NotesSidebar {
                                 || ext.eq_ignore_ascii_case("markdown")
                                 || ext.eq_ignore_ascii_case("mdx")
                         });
-                let icon = if entry.is_dir {
+                let icon = if is_notebook {
+                    "\u{f02d}"
+                } else if entry.is_dir {
                     if self.open_dirs.contains(&entry.path) {
                         FOLDER_OPEN_ICON
                     } else {
@@ -1663,7 +1896,9 @@ impl NotesSidebar {
                 } else {
                     icon_for_file(&entry.label).0
                 };
-                let icon_color = if entry.is_dir {
+                let icon_color = if is_notebook {
+                    theme.u8(theme.fg)
+                } else if entry.is_dir {
                     theme.u8(theme.folder)
                 } else if is_markdown_note {
                     theme.u8_alpha(theme.fg, 0.72)
@@ -1693,10 +1928,18 @@ impl NotesSidebar {
                     clip_rect: Some(list_clip),
                     ..DrawOpts::default()
                 };
+                // Notebook entries are indented relative to the book, not
+                // relative to the surrounding vault hierarchy.
+                let display_depth = self
+                    .notebook_root
+                    .as_ref()
+                    .and_then(|root| entry.path.strip_prefix(root).ok())
+                    .map(|relative| relative.components().count().saturating_sub(1))
+                    .unwrap_or(entry.depth);
                 // The drop-target folder wiggles under the drag.
                 let base_x = content_x
                     + row_pad_x
-                    + entry.depth as f32 * indent_px
+                    + display_depth as f32 * indent_px
                     + if is_drop_target { drag_wiggle_dx } else { 0.0 };
                 let text_y = row_y + (row_h - font_size) / 2.0;
                 let mut cursor_x = base_x;
@@ -1704,56 +1947,82 @@ impl NotesSidebar {
                     draw_icon_centered_with_occlusion(
                         sugarloaf,
                         cursor_x,
-                        [cursor_x, row_y, (indent_px - 4.0 * self.scale).max(1.0), row_h],
+                        [
+                            cursor_x,
+                            row_y,
+                            (indent_px - 4.0 * self.scale).max(1.0),
+                            row_h,
+                        ],
                         chevron,
                         &chevron_opts,
                         occlusion,
                         true,
                     );
                 }
-                cursor_x += indent_px;
+                cursor_x += if chevron.is_some() { indent_px } else { 0.0 };
                 // The icon is a click target: a tap on it opens the
                 // Notion-style icon/emoji picker for this entry.
-                self.icon_rects
-                    .push(([cursor_x - 2.0, visible_row_y, icon_size + 4.0, visible_row_h], absolute_ix));
+                let show_icon = !book_view;
+                if show_icon && !is_notebook {
+                    self.icon_rects.push((
+                        [
+                            cursor_x - 2.0,
+                            visible_row_y,
+                            icon_size + 4.0,
+                            visible_row_h,
+                        ],
+                        absolute_ix,
+                    ));
+                }
                 // A blank/whitespace-only custom icon is treated as "no
                 // custom icon" so it falls back to the default glyph instead
                 // of rendering an empty box (belt-and-suspenders: the icon
                 // map already drops empty values in `load_notes_icons`).
-                if let Some(custom) = entry
-                    .icon
-                    .as_deref()
-                    .filter(|glyph| !glyph.trim().is_empty())
-                {
-                    let custom_opts = DrawOpts {
-                        font_size: icon_size,
-                        color: fade_u8(theme.u8(theme.fg), row_dim),
-                        clip_rect: Some(list_clip),
-                        ..DrawOpts::default()
-                    };
-                    draw_icon_centered_with_occlusion(
-                        sugarloaf,
-                        cursor_x,
-                        [cursor_x, row_y, icon_size, row_h],
-                        custom,
-                        &custom_opts,
-                        occlusion,
-                        true,
-                    );
-                } else {
-                    draw_icon_centered_with_occlusion(
-                        sugarloaf,
-                        cursor_x,
-                        [cursor_x, row_y, icon_size, row_h],
-                        icon,
-                        &icon_opts,
-                        occlusion,
-                        true,
-                    );
+                if show_icon {
+                    if let Some(custom) = entry
+                        .icon
+                        .as_deref()
+                        .filter(|_| !is_notebook)
+                        .filter(|glyph| !glyph.trim().is_empty())
+                    {
+                        let custom_opts = DrawOpts {
+                            font_size: icon_size,
+                            color: fade_u8(theme.u8(theme.fg), row_dim),
+                            clip_rect: Some(list_clip),
+                            ..DrawOpts::default()
+                        };
+                        draw_icon_centered_with_occlusion(
+                            sugarloaf,
+                            cursor_x,
+                            [cursor_x, row_y, icon_size, row_h],
+                            custom,
+                            &custom_opts,
+                            occlusion,
+                            true,
+                        );
+                    } else {
+                        draw_icon_centered_with_occlusion(
+                            sugarloaf,
+                            cursor_x,
+                            [cursor_x, row_y, icon_size, row_h],
+                            icon,
+                            &icon_opts,
+                            occlusion,
+                            true,
+                        );
+                    }
+                    cursor_x += icon_size + icon_gap;
                 }
-                cursor_x += icon_size + icon_gap;
-                let budget = (content_x + content_w - cursor_x - row_pad_x).max(0.0);
-                let label = truncate_label(&entry.label, budget, sugarloaf, &label_opts);
+                let trailing_chevron = book_view && entry.is_dir;
+                let trailing_budget = if trailing_chevron {
+                    icon_size + icon_gap
+                } else {
+                    0.0
+                };
+                let budget =
+                    (content_x + content_w - cursor_x - row_pad_x - trailing_budget).max(0.0);
+                let display_label = note_display_label(&entry.path, entry.is_dir, &entry.label);
+                let label = truncate_label(&display_label, budget, sugarloaf, &label_opts);
                 draw_text_with_occlusion(
                     sugarloaf,
                     cursor_x,
@@ -1762,6 +2031,22 @@ impl NotesSidebar {
                     &label_opts,
                     occlusion,
                 );
+                if trailing_chevron {
+                    let trailing_x = content_x + content_w - row_pad_x - icon_size;
+                    draw_icon_centered_with_occlusion(
+                        sugarloaf,
+                        trailing_x,
+                        [trailing_x, row_y, icon_size, row_h],
+                        if self.open_dirs.contains(&entry.path) {
+                            "\u{f078}"
+                        } else {
+                            "\u{f054}"
+                        },
+                        &chevron_opts,
+                        occlusion,
+                        true,
+                    );
+                }
             }
         }
 
@@ -1950,7 +2235,11 @@ impl NotesSidebar {
     fn rebuild_rows(&mut self) {
         self.rows.clear();
         let by_parent = children_by_parent(&self.all_entries);
-        let Some(root) = self.workspace_path.clone() else {
+        let Some(root) = self
+            .notebook_root
+            .clone()
+            .or_else(|| self.workspace_path.clone())
+        else {
             return;
         };
         push_visible_children(
@@ -1958,6 +2247,7 @@ impl NotesSidebar {
             &by_parent,
             &self.open_dirs,
             &root,
+            self.notebook_root.is_none(),
             &mut self.rows,
         );
     }
@@ -1988,12 +2278,16 @@ impl NotesSidebar {
             return;
         }
         let rows_visible = rows_visible.max(1);
-        let margin = if rows_visible <= 2 { 0 } else {
+        let margin = if rows_visible <= 2 {
+            0
+        } else {
             crate::panels::file_tree::SCROLL_OFF_ROWS.min((rows_visible - 1) / 2)
         };
         if self.selected_index < self.scroll_top.saturating_add(margin) {
             self.set_scroll_top(self.selected_index.saturating_sub(margin));
-        } else if self.selected_index.saturating_add(margin) >= self.scroll_top.saturating_add(rows_visible) {
+        } else if self.selected_index.saturating_add(margin)
+            >= self.scroll_top.saturating_add(rows_visible)
+        {
             self.set_scroll_top(self.selected_index + margin + 1 - rows_visible);
         }
         let max_top = self.max_scroll_top_for(rows_visible);
@@ -2287,6 +2581,23 @@ fn note_frontmatter_icon(path: &Path) -> Option<String> {
     None
 }
 
+fn note_display_label(path: &Path, is_dir: bool, fallback: &str) -> String {
+    if !is_dir
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdx")
+            })
+    {
+        return path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| fallback.to_string());
+    }
+    fallback.to_string()
+}
+
 fn collect_note_entries(
     root: &Path,
     path: &Path,
@@ -2380,7 +2691,9 @@ fn should_skip_note_entry(root: &Path, path: &Path) -> bool {
     name.starts_with('.') || matches!(name, "target" | "node_modules")
 }
 
-fn children_by_parent(entries: &[NoteSidebarEntry]) -> HashMap<std::ffi::OsString, Vec<usize>> {
+fn children_by_parent(
+    entries: &[NoteSidebarEntry],
+) -> HashMap<std::ffi::OsString, Vec<usize>> {
     let mut by_parent: HashMap<std::ffi::OsString, Vec<usize>> = HashMap::new();
     for (index, entry) in entries.iter().enumerate() {
         by_parent
@@ -2396,6 +2709,7 @@ fn push_visible_children(
     by_parent: &HashMap<std::ffi::OsString, Vec<usize>>,
     open_dirs: &HashSet<PathBuf>,
     parent: &Path,
+    stop_at_notebooks: bool,
     rows: &mut Vec<NoteSidebarRow>,
 ) {
     let Some(children) = by_parent.get(parent.as_os_str()) else {
@@ -2405,9 +2719,27 @@ fn push_visible_children(
         let Some(entry) = entries.get(entry_index) else {
             continue;
         };
+        if entry.label == crate::editor::documentation_notebook::MANIFEST_NAME {
+            continue;
+        }
         rows.push(NoteSidebarRow { entry_index });
-        if entry.is_dir && open_dirs.contains(&entry.path) {
-            push_visible_children(entries, by_parent, open_dirs, &entry.path, rows);
+        let notebook = entries.iter().any(|candidate| {
+            !candidate.is_dir
+                && candidate.parent == entry.path
+                && candidate.label == crate::editor::documentation_notebook::MANIFEST_NAME
+        });
+        if entry.is_dir
+            && open_dirs.contains(&entry.path)
+            && !(stop_at_notebooks && notebook)
+        {
+            push_visible_children(
+                entries,
+                by_parent,
+                open_dirs,
+                &entry.path,
+                stop_at_notebooks,
+                rows,
+            );
         }
     }
 }
@@ -2472,7 +2804,9 @@ mod tests {
     #[test]
     fn keyboard_navigation_keeps_the_file_tree_scrolloff_band() {
         let mut sidebar = super::NotesSidebar::default();
-        sidebar.rows = (0..100).map(|entry_index| super::NoteSidebarRow { entry_index }).collect();
+        sidebar.rows = (0..100)
+            .map(|entry_index| super::NoteSidebarRow { entry_index })
+            .collect();
         sidebar.last_panel_height_rows = 12;
         let margin = crate::panels::file_tree::SCROLL_OFF_ROWS.min(5);
         for selected in 15..80 {
@@ -2529,6 +2863,78 @@ mod tests {
         entries.push((root.join("folder").join("child.md"), false));
         sidebar.set_entries_from_host(entries);
         sidebar
+    }
+
+    #[test]
+    fn notebook_replaces_vault_rows_and_back_restores_them() {
+        let root = PathBuf::from(VAULT);
+        let book = root.join("TypeScript Deep Dive");
+        let mut sidebar = NotesSidebar::default();
+        sidebar.set_workspace("Test", Some(root.clone()));
+        sidebar.set_entries_from_host(vec![
+            (root.join("loose.md"), false),
+            (book.clone(), true),
+            (book.join("notebook.json"), false),
+            (book.join("overview.md"), false),
+            (book.join("Types"), true),
+            (book.join("Types/generics.md"), false),
+        ]);
+
+        assert_eq!(sidebar.rows.len(), 2);
+        let notebook_row = sidebar.row_index_for_path(&book).unwrap();
+        sidebar.set_selected(notebook_row);
+        assert!(sidebar.selected_is_notebook());
+        assert!(sidebar.enter_selected_notebook());
+        assert!(sidebar.in_notebook());
+        assert!(sidebar.path_is_dir(&book));
+        assert!(sidebar.path_is_dir(&book.join("Types")));
+        assert!(!sidebar.path_is_dir(&book.join("overview.md")));
+        assert!(sidebar
+            .row_index_for_path(&book.join("notebook.json"))
+            .is_none());
+        assert!(sidebar
+            .row_index_for_path(&book.join("overview.md"))
+            .is_some());
+        assert_eq!(sidebar.rows.len(), 2);
+        let first_notebook_row = sidebar.selected_note_path();
+        sidebar.select_prev();
+        assert!(sidebar.is_notebook_back_selected());
+        assert!(sidebar.selected_note_path().is_none());
+        sidebar.select_next();
+        assert!(!sidebar.is_notebook_back_selected());
+        assert_eq!(sidebar.selected_note_path(), first_notebook_row);
+
+        assert!(sidebar.leave_notebook());
+        assert!(!sidebar.in_notebook());
+        assert_eq!(
+            sidebar.selected_note_path().as_deref(),
+            Some(book.as_path())
+        );
+        assert_eq!(sidebar.rows.len(), 2);
+    }
+
+    #[test]
+    fn markdown_note_labels_hide_only_markdown_extensions() {
+        assert_eq!(
+            note_display_label(Path::new("Guide.md"), false, "Guide.md"),
+            "Guide"
+        );
+        assert_eq!(
+            note_display_label(Path::new("Guide.MARKDOWN"), false, "Guide.MARKDOWN"),
+            "Guide"
+        );
+        assert_eq!(
+            note_display_label(Path::new("Guide.mdx"), false, "Guide.mdx"),
+            "Guide"
+        );
+        assert_eq!(
+            note_display_label(Path::new("diagram.neodraw"), false, "diagram.neodraw"),
+            "diagram.neodraw"
+        );
+        assert_eq!(
+            note_display_label(Path::new("folder.md"), true, "folder.md"),
+            "folder.md"
+        );
     }
 
     #[test]

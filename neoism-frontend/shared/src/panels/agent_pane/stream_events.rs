@@ -375,23 +375,21 @@ pub fn classify_session_event(
     }
 
     match event_type {
-        event_type::SESSION_MOVED if !is_child_event => {
-            properties
-                .get("directory")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|directory| !directory.is_empty())
-                .map(|directory| {
-                    vec![SessionEventUpdate::SessionMoved {
-                        directory: directory.to_string(),
-                        switch_workspace: properties
-                            .get("switchWorkspace")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                    }]
-                })
-                .unwrap_or_default()
-        }
+        event_type::SESSION_MOVED if !is_child_event => properties
+            .get("directory")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|directory| !directory.is_empty())
+            .map(|directory| {
+                vec![SessionEventUpdate::SessionMoved {
+                    directory: directory.to_string(),
+                    switch_workspace: properties
+                        .get("switchWorkspace")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                }]
+            })
+            .unwrap_or_default(),
         event_type::SESSION_CREATED | event_type::SESSION_UPDATED => {
             let mut out = Vec::new();
             if is_child_event {

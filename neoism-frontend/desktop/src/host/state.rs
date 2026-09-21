@@ -216,7 +216,9 @@ impl Renderer {
         if self.pane_tabs.values().any(|tabs| tabs.is_animating()) {
             return Some("pane_tabs");
         }
-        if self.context_menu.is_animating() { return Some("context_menu"); }
+        if self.context_menu.is_animating() {
+            return Some("context_menu");
+        }
         if self.file_tree.is_animating() {
             return Some("file_tree");
         }

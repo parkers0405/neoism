@@ -188,7 +188,8 @@ impl ChromeBridge {
         let Some(tree) = self.chrome.file_tree.as_mut() else {
             return;
         };
-        let mut index: HashMap<std::ffi::OsString, Vec<PresenceAvatarPeer>> = HashMap::new();
+        let mut index: HashMap<std::ffi::OsString, Vec<PresenceAvatarPeer>> =
+            HashMap::new();
         for buffer in wire {
             let Some(path) = buffer.buffer_id.strip_prefix("file://") else {
                 continue;

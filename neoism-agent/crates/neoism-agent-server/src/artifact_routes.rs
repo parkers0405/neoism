@@ -87,7 +87,6 @@ pub(crate) async fn artifact_create(
     }
     let id = Id::ascending(IdKind::Artifact).to_string();
     let sha256 = format_hash(Sha256::digest(&body));
-    let path = state.inner.artifact_root.join(&id);
     let temporary = state.inner.artifact_root.join(format!(".{id}.upload"));
     tokio::fs::write(&temporary, &body)
         .await
@@ -96,9 +95,11 @@ pub(crate) async fn artifact_create(
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(error);
     }
-    tokio::fs::rename(&temporary, &path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Err(error) = state.put_artifact_blob(&tenant_id, &id, &body).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(ApiError::internal(error.to_string()));
+    }
+    let _ = tokio::fs::remove_file(&temporary).await;
     let artifact = ArtifactInfo {
         id: id.clone(),
         filename,
@@ -115,7 +116,7 @@ pub(crate) async fn artifact_create(
         .insert_artifact(&artifact, &tenant_id)
         .await
     {
-        let _ = tokio::fs::remove_file(path).await;
+        let _ = state.delete_artifact_blob(&tenant_id, &id).await;
         return Err(error.into());
     }
     Ok((StatusCode::CREATED, Json(artifact)))
@@ -133,7 +134,6 @@ pub(crate) async fn artifact_list(
             query.session_id.as_deref(),
             claims
                 .as_ref()
-                .filter(|_| query.session_id.is_none())
                 .map(|Extension(claims)| claims.tenant_id.as_str()),
         )
         .await?;
@@ -154,12 +154,16 @@ pub(crate) async fn artifact_get(
     Path(id): Path<String>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Json<ArtifactInfo>, ApiError> {
-    authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims))
-        .await?;
+    let tenant_id = authorize_artifact(
+        &state,
+        &id,
+        claims.as_ref().map(|Extension(claims)| claims),
+    )
+    .await?;
     let mut artifact = state
         .inner
         .store
-        .get_artifact(&id)
+        .get_artifact(crate::state::TenantQueryScope::Tenant(&tenant_id), &id)
         .await?
         .ok_or_else(|| ApiError::not_found("Artifact not found"))?;
     artifact.download_url = format!("/v2/artifacts/{id}/content");
@@ -171,17 +175,23 @@ pub(crate) async fn artifact_content(
     Path(id): Path<String>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Response, ApiError> {
-    authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims))
-        .await?;
+    let tenant_id = authorize_artifact(
+        &state,
+        &id,
+        claims.as_ref().map(|Extension(claims)| claims),
+    )
+    .await?;
     let artifact = state
         .inner
         .store
-        .get_artifact(&id)
+        .get_artifact(crate::state::TenantQueryScope::Tenant(&tenant_id), &id)
         .await?
         .ok_or_else(|| ApiError::not_found("Artifact not found"))?;
-    let bytes = tokio::fs::read(state.inner.artifact_root.join(&id))
+    let bytes = state
+        .get_artifact_blob(&tenant_id, &id)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Artifact content not found"))?;
     let mut response = bytes.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -206,17 +216,30 @@ pub(crate) async fn artifact_delete(
     Path(id): Path<String>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<StatusCode, ApiError> {
-    authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims))
-        .await?;
-    if state.inner.store.get_artifact(&id).await?.is_none() {
+    let tenant_id = authorize_artifact(
+        &state,
+        &id,
+        claims.as_ref().map(|Extension(claims)| claims),
+    )
+    .await?;
+    if state
+        .inner
+        .store
+        .get_artifact(crate::state::TenantQueryScope::Tenant(&tenant_id), &id)
+        .await?
+        .is_none()
+    {
         return Err(ApiError::not_found("Artifact not found"));
     }
-    match tokio::fs::remove_file(state.inner.artifact_root.join(&id)).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(ApiError::internal(error.to_string())),
-    }
-    state.inner.store.delete_artifact(&id).await?;
+    state
+        .delete_artifact_blob(&tenant_id, &id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    state
+        .inner
+        .store
+        .delete_artifact(crate::state::TenantQueryScope::Tenant(&tenant_id), &id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -224,21 +247,21 @@ async fn authorize_artifact(
     state: &AppState,
     id: &str,
     claims: Option<&crate::caller::CallerClaims>,
-) -> Result<(), ApiError> {
-    let Some(claims) = claims else {
-        return Ok(());
-    };
+) -> Result<String, ApiError> {
     let tenant = state
         .inner
         .store
         .artifact_tenant(id)
         .await?
         .ok_or_else(|| ApiError::not_found("Artifact not found"))?;
+    let Some(claims) = claims else {
+        return Ok(tenant);
+    };
     if tenant != claims.tenant_id {
         let artifact = state
             .inner
             .store
-            .get_artifact(id)
+            .get_artifact(crate::state::TenantQueryScope::Tenant(&tenant), id)
             .await?
             .ok_or_else(|| ApiError::not_found("Artifact not found"))?;
         let session = match artifact.session_id.as_deref() {
@@ -264,7 +287,7 @@ async fn authorize_artifact(
         let artifact = state
             .inner
             .store
-            .get_artifact(id)
+            .get_artifact(crate::state::TenantQueryScope::Tenant(&tenant), id)
             .await?
             .ok_or_else(|| ApiError::not_found("Artifact not found"))?;
         let retention_ms = days.saturating_mul(24 * 60 * 60 * 1000);
@@ -272,7 +295,7 @@ async fn authorize_artifact(
             return Err(ApiError::not_found("Artifact has expired"));
         }
     }
-    Ok(())
+    Ok(tenant)
 }
 
 async fn scan_artifact(

@@ -97,7 +97,9 @@ impl CommandPalette {
                         // TODO(wave6-cutover): native commits via
                         // ex/search/font/buffer/action paths. Bridge
                         // resolves the selection; until then, close.
-                        if !(self.workspace_directory_target().is_some() && self.is_cd_query()) {
+                        if !(self.workspace_directory_target().is_some()
+                            && self.is_cd_query())
+                        {
                             self.set_enabled(false);
                         }
                     }
@@ -117,10 +119,16 @@ impl CommandPalette {
                             self.insert_query_text(text);
                         }
                     }
-                    LogicalKey::Named(NamedKey::ArrowLeft) => self.move_query_cursor_left(),
-                    LogicalKey::Named(NamedKey::ArrowRight) => self.move_query_cursor_right(),
+                    LogicalKey::Named(NamedKey::ArrowLeft) => {
+                        self.move_query_cursor_left()
+                    }
+                    LogicalKey::Named(NamedKey::ArrowRight) => {
+                        self.move_query_cursor_right()
+                    }
                     LogicalKey::Named(NamedKey::Home) => self.set_query_cursor(0),
-                    LogicalKey::Named(NamedKey::End) => self.set_query_cursor(self.query.len()),
+                    LogicalKey::Named(NamedKey::End) => {
+                        self.set_query_cursor(self.query.len())
+                    }
                     _ => {}
                 }
             }

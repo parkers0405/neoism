@@ -39,8 +39,8 @@ use crate::state::AppState;
 use crate::tool_routes::tool_list;
 use crate::v2_routes::{
     v2_capabilities, v2_compact, v2_context, v2_events, v2_message_list, v2_meta,
-    v2_plugin, v2_plugins, v2_prompt, v2_prompt_async, v2_session_children,
-    v2_session_list, v2_session_runtime, v2_wait,
+    v2_plugin, v2_plugins, v2_prompt, v2_prompt_async, v2_session_catalog_events,
+    v2_session_children, v2_session_list, v2_session_runtime, v2_wait,
 };
 
 pub fn app(state: AppState) -> Router {
@@ -60,9 +60,16 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/capabilities", get(v2_capabilities))
         .route("/v2/plugins", get(v2_plugins))
         .route("/v2/plugins/:plugin_id/manifest", get(v2_plugin))
-        .route("/v2/execution-activity", get(crate::execution_activity::aggregate_snapshot))
-        .route("/v2/execution-activity/events", get(crate::execution_activity::aggregate_events))
+        .route(
+            "/v2/execution-activity",
+            get(crate::execution_activity::aggregate_snapshot),
+        )
+        .route(
+            "/v2/execution-activity/events",
+            get(crate::execution_activity::aggregate_events),
+        )
         .route("/v2/events", get(v2_events))
+        .route("/v2/session-catalog/events", get(v2_session_catalog_events))
         .route("/v2/artifacts", get(artifact_list).post(artifact_create))
         .route(
             "/v2/artifacts/:artifact_id",
@@ -108,6 +115,16 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             get(v2_session_children),
         )
         .route("/v2/sessions/:session_id/runtime", get(v2_session_runtime))
+        .route(
+            "/v2/sessions/:session_id/control",
+            get(crate::session_control::get_control)
+                .post(crate::session_control::claim_control)
+                .delete(crate::session_control::release_control),
+        )
+        .route(
+            "/v2/sessions/:session_id/participants",
+            get(crate::session_control::list_participants),
+        )
         .route(
             "/v2/sessions/:session_id/directory-options",
             get(session_directory_options),
@@ -268,14 +285,30 @@ async fn plugin_route_dispatch(
             Err(error) => return error.into_response(),
         };
         if let Some(claims) = request.extensions().get::<crate::caller::CallerClaims>() {
-            if claims.hosted { return auth_error(StatusCode::FORBIDDEN, "management.hosted_unsupported", "Global resources are not available to hosted callers"); }
-            let root = context.strip_prefix(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX).expect("installation context");
-            if let Err(error) = crate::management::authorize_root(claims, std::path::Path::new(root)) { return error.into_response(); }
+            if claims.hosted {
+                return auth_error(
+                    StatusCode::FORBIDDEN,
+                    "management.hosted_unsupported",
+                    "Global resources are not available to hosted callers",
+                );
+            }
+            let root = context
+                .strip_prefix(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX)
+                .expect("installation context");
+            if let Err(error) =
+                crate::management::authorize_root(claims, std::path::Path::new(root))
+            {
+                return error.into_response();
+            }
         }
         context
     } else if let Some(directory) = request_directory(&request) {
         if directory.starts_with(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX) {
-            return auth_error(StatusCode::BAD_REQUEST, "request.invalid_directory", "Use scope=installation for global resources");
+            return auth_error(
+                StatusCode::BAD_REQUEST,
+                "request.invalid_directory",
+                "Use scope=installation for global resources",
+            );
         }
         directory
     } else if let Some(matched) = request.extensions().get::<MatchedPluginSession>() {
@@ -884,7 +917,12 @@ async fn authenticate_request(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let claims = match state.inner.caller_policy.authenticate(supplied) {
+    let claims = match state
+        .inner
+        .caller_policy
+        .authenticate_request(supplied)
+        .await
+    {
         Ok(claims) => claims,
         Err(message) => {
             return auth_error(StatusCode::UNAUTHORIZED, "auth.invalid_token", &message)
@@ -910,7 +948,9 @@ async fn authenticate_request(
         // an optional project directory used by older clients for config lookup.
         let requested_directory = if installation_resource_request(&request) {
             match crate::workflow::installation_context(state.services()) {
-                Ok(context) => context.strip_prefix(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX).map(str::to_owned),
+                Ok(context) => context
+                    .strip_prefix(neoism_agent_service_api::INSTALLATION_CONTEXT_PREFIX)
+                    .map(str::to_owned),
                 Err(error) => return error.into_response(),
             }
         } else {
@@ -951,16 +991,6 @@ async fn authenticate_request(
             );
         }
         let query_session_id = request_session_id(request.uri());
-        if claims.hosted
-            && request.uri().path() == "/v2/events"
-            && query_session_id.is_none()
-        {
-            return auth_error(
-                StatusCode::BAD_REQUEST,
-                "auth.session_scope_required",
-                "Hosted event streams require sessionId",
-            );
-        }
         let plugin_path = request.uri().path().starts_with("/v2/plugins/");
         let matched_plugin_session = if plugin_path {
             match resolve_scoped_plugin_session(
@@ -1004,9 +1034,23 @@ async fn authenticate_request(
         }
         let mut authorized_session = false;
         if let Some(session_id) = owned_session.as_deref() {
-            match state.inner.store.get_session(session_id).await {
+            let session = if claims.hosted || claims.tenant_id != "local" {
+                state
+                    .inner
+                    .store
+                    .get_session_for_tenant(&claims.tenant_id, session_id)
+                    .await
+            } else {
+                state.inner.store.get_session(session_id).await
+            };
+            match session {
                 Ok(Some(session)) => {
-                    match allows_session_or_ancestor(&state, &claims, &session).await {
+                    let allowed = if claims.hosted || claims.tenant_id != "local" {
+                        Ok(crate::caller::allows_session(&claims, &session))
+                    } else {
+                        allows_session_or_ancestor(&state, &claims, &session).await
+                    };
+                    match allowed {
                         Ok(true) => authorized_session = true,
                         Ok(false) => {
                             return auth_error(
@@ -1034,6 +1078,56 @@ async fn authenticate_request(
                     );
                 }
                 _ => {}
+            }
+        }
+        if authorized_session && mutation_requires_session_control(&request) {
+            if let Some(session_id) = owned_session.as_deref() {
+                match state
+                    .inner
+                    .store
+                    .session_control(&claims.tenant_id, session_id)
+                    .await
+                {
+                    Ok(Some(control))
+                        if control.lease_expires_at > crate::now_millis()
+                            && control.controller_subject != claims.subject =>
+                    {
+                        return auth_error(
+                            StatusCode::CONFLICT,
+                            "session.controlled",
+                            "Another actor currently controls this session",
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to authorize session control");
+                        return auth_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "auth.lookup_failed",
+                            "Failed to authorize session control",
+                        );
+                    }
+                }
+            }
+        }
+        if claims.hosted
+            && authorized_session
+            && !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        {
+            if let Some(session_id) = owned_session.as_deref() {
+                if let Err(error) = state
+                    .inner
+                    .store
+                    .record_session_participant(
+                        &claims.tenant_id,
+                        session_id,
+                        &claims.subject,
+                        claims.actor_type_label(),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "failed to record session participant");
+                }
             }
         }
         if claims.hosted
@@ -1072,6 +1166,17 @@ async fn authenticate_request(
     }
     drop(request_guard);
     response
+}
+
+fn mutation_requires_session_control(request: &Request<Body>) -> bool {
+    if matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return false;
+    }
+    let path = request.uri().path();
+    !path.ends_with("/control")
+        && (path.contains("/sessions/")
+            || path.starts_with("/session/")
+            || interaction_id_from_path(path).is_some())
 }
 
 fn is_mcp_oauth_callback_get(request: &Request<Body>) -> bool {
@@ -1157,11 +1262,20 @@ fn auth_error(status: StatusCode, code: &str, message: &str) -> Response {
 
 fn installation_resource_request(request: &Request<Body>) -> bool {
     let path = request.uri().path();
-    let supported = matches!(path, "/v2/capabilities" | "/v2/agents" | "/v2/skills" | "/v2/providers/configured"
-        | "/v2/management/skills" | "/v2/plugins/dev.neoism.workflows")
-        || path.starts_with("/v2/management/skills/")
+    let supported = matches!(
+        path,
+        "/v2/capabilities"
+            | "/v2/agents"
+            | "/v2/skills"
+            | "/v2/providers/configured"
+            | "/v2/management/skills"
+            | "/v2/plugins/dev.neoism.workflows"
+    ) || path.starts_with("/v2/management/skills/")
         || path.starts_with("/v2/plugins/dev.neoism.workflows/");
-    supported && url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+    supported
+        && url::form_urlencoded::parse(
+            request.uri().query().unwrap_or_default().as_bytes(),
+        )
         .any(|(key, value)| key == "scope" && value == "installation")
 }
 
@@ -1218,7 +1332,9 @@ fn interaction_id_from_path(path: &str) -> Option<&str> {
 }
 
 fn allows_global_execution_observation(claims: &crate::caller::CallerClaims) -> bool {
-    !claims.hosted && claims.workspace_id.is_none() && claims.directory_prefixes.is_empty()
+    !claims.hosted
+        && claims.workspace_id.is_none()
+        && claims.directory_prefixes.is_empty()
 }
 
 fn hosted_restricted_path(path: &str) -> bool {
@@ -1237,18 +1353,10 @@ enum OperationClass {
 
 fn operation_class(request: &Request<Body>) -> OperationClass {
     let path = request.uri().path();
-    if (path == "/v2/plugins/dev.neoism.workflows" && request.method() == Method::POST)
-        || (path.starts_with("/v2/plugins/dev.neoism.workflows/")
-            && !path.ends_with("/activate")
-            && !path.ends_with("/pause")
-            && !path.ends_with("/run")
-            && !path.contains("/runs/")
-            && matches!(
-                *request.method(),
-                Method::PUT | Method::PATCH | Method::DELETE
-            ))
-    {
-        return OperationClass::ManagementMutation;
+    // Workflow activations are process-global and directory-keyed today. Keep
+    // them local-only until activation and run records carry tenant ownership.
+    if path.starts_with("/v2/plugins/dev.neoism.workflows") {
+        return OperationClass::HostedUnsupported;
     }
     if path.starts_with("/v2/management/") {
         return if matches!(
@@ -1393,6 +1501,7 @@ mod hosted_plugin_authorization_tests {
             artifact_retention_days: None,
             requests_per_minute: None,
             max_in_flight: None,
+            resolved: None,
         }
     }
 

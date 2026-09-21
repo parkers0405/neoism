@@ -16,11 +16,13 @@ use neoism_ui::panels::agent_pane::stream_events::{
 };
 
 use super::api::{
-    fetch_session_messages_page, open_event_stream, part_block, EventStreamConnection,
+    fetch_session_messages_page, open_event_stream, open_session_catalog_stream,
+    part_block, session_entry, EventStreamConnection,
 };
 use super::pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentPendingPermission,
 };
+use super::side_panel::NeoismAgentSessionEntry;
 use super::side_panel::SessionGoal;
 
 const CONNECT_HEADER_TIMEOUT: Duration = Duration::from_secs(3);
@@ -365,6 +367,168 @@ impl AgentSessionEventStream {
 impl Drop for AgentSessionEventStream {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+pub(super) enum AgentSessionCatalogUpdate {
+    Reconnected,
+    Upsert(NeoismAgentSessionEntry),
+    Delete(String),
+}
+
+pub(crate) struct AgentSessionCatalogStream {
+    server: String,
+    directory: String,
+    rx: Receiver<AgentSessionCatalogUpdate>,
+    stop: Arc<AtomicBool>,
+    wake: Arc<Mutex<Option<AgentEventWake>>>,
+}
+
+impl AgentSessionCatalogStream {
+    pub(super) fn matches(&self, server: &str, directory: &str) -> bool {
+        self.server == server && self.directory == directory
+    }
+
+    pub(super) fn drain(&mut self, limit: usize) -> Vec<AgentSessionCatalogUpdate> {
+        if let Ok(wake) = self.wake.lock() {
+            if let Some(wake) = wake.as_ref() {
+                wake.begin_drain();
+            }
+        }
+        let mut updates = Vec::new();
+        while updates.len() < limit.max(1) {
+            match self.rx.try_recv() {
+                Ok(update) => updates.push(update),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        updates
+    }
+
+    pub(crate) fn set_wake(&mut self, wake: AgentEventWake) {
+        if let Ok(mut current) = self.wake.lock() {
+            *current = Some(wake);
+        }
+    }
+}
+
+impl Drop for AgentSessionCatalogStream {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+pub(super) fn start_session_catalog_stream(
+    server: String,
+    directory: String,
+) -> AgentSessionCatalogStream {
+    let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stream_stop = stop.clone();
+    let wake = Arc::new(Mutex::new(None));
+    let stream_wake = wake.clone();
+    let thread_server = server.clone();
+    let thread_directory = directory.clone();
+    let _ = thread::Builder::new()
+        .name("neoism-agent-session-catalog".into())
+        .spawn(move || {
+            while !stream_stop.load(Ordering::Relaxed) {
+                match open_session_catalog_stream(&thread_server, &thread_directory) {
+                    Ok(connection) => {
+                        if tx.send(AgentSessionCatalogUpdate::Reconnected).is_err() {
+                            return;
+                        }
+                        wake_event_loop(&stream_wake);
+                        read_session_catalog_stream(
+                            connection,
+                            &tx,
+                            &stream_stop,
+                            &stream_wake,
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "session catalogue stream connect failed")
+                    }
+                }
+                if !sleep_until_reconnect(&stream_stop) {
+                    return;
+                }
+            }
+        });
+    AgentSessionCatalogStream {
+        server,
+        directory,
+        rx,
+        stop,
+        wake,
+    }
+}
+
+fn read_session_catalog_stream(
+    mut connection: EventStreamConnection,
+    tx: &Sender<AgentSessionCatalogUpdate>,
+    stop: &AtomicBool,
+    wake: &Arc<Mutex<Option<AgentEventWake>>>,
+) {
+    let mut chunked = ChunkedDecoder::new(connection.chunked);
+    let mut sse = SseDecoder::default();
+    let mut process = |bytes: &[u8]| -> bool {
+        for event in sse.feed(bytes) {
+            let kind = event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let properties = event.get("properties").unwrap_or(&Value::Null);
+            let update = if kind == neoism_agent_core::event_type::SESSION_DELETED {
+                properties
+                    .get("sessionID")
+                    .and_then(Value::as_str)
+                    .map(|id| AgentSessionCatalogUpdate::Delete(id.to_string()))
+            } else {
+                properties
+                    .get("info")
+                    .and_then(|info| session_entry(info, &HashMap::new()))
+                    .map(AgentSessionCatalogUpdate::Upsert)
+            };
+            if let Some(update) = update {
+                if tx.send(update).is_err() {
+                    return false;
+                }
+                wake_event_loop(wake);
+            }
+        }
+        true
+    };
+    for data in chunked.feed(&connection.initial_body) {
+        if !process(&data) {
+            return;
+        }
+    }
+    let mut buf = [0u8; 8192];
+    let mut last_bytes_at = Instant::now();
+    while !stop.load(Ordering::Relaxed) {
+        match connection.stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                last_bytes_at = Instant::now();
+                for data in chunked.feed(&buf[..n]) {
+                    if !process(&data) {
+                        return;
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if last_bytes_at.elapsed() >= EVENT_STREAM_STALE_AFTER {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
     }
 }
 

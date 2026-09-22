@@ -453,6 +453,7 @@ impl ChromeBridge {
                     BlockStatusKind::Running => "running".to_string(),
                     BlockStatusKind::Ok => "ok".to_string(),
                     BlockStatusKind::Error(code) => format!("error:{code}"),
+                    BlockStatusKind::Interrupted => "interrupted".to_string(),
                 },
                 output_start_row: block.output_start_row,
                 duration_ms: block.duration_ms,

@@ -299,6 +299,7 @@ async fn recv_pty_output_containing(
             PtyServerMessage::PtyOutput {
                 session_id: got_id,
                 bytes,
+                ..
             } if got_id == session_id => {
                 accumulated.extend_from_slice(&bytes);
                 if accumulated

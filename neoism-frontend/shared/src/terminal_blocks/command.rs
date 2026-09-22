@@ -14,7 +14,12 @@ pub struct TerminalCommandBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalCommandBlockStatus {
     Running,
-    Finished { exit_code: Option<i32> },
+    Finished {
+        exit_code: Option<i32>,
+    },
+    /// Input delivery was not acknowledged. The command may or may not have
+    /// reached the remote shell, so this must never be rendered as success.
+    Interrupted,
 }
 
 /// Public snapshot of one command block — what the renderer overlay
@@ -38,6 +43,7 @@ pub enum BlockStatusKind {
     Running,
     Ok,
     Error(i32),
+    Interrupted,
 }
 
 // Reserved for the block-snapshot consumer (`command_block_snapshots`

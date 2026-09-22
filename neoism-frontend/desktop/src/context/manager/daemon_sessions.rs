@@ -113,6 +113,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             if let Some(link) = self.daemon.link.as_ref() {
                 let request_id = link.send_pty(PtyClientMessage::AttachPty {
                     session_id: session_id.clone(),
+                    cursor: crate::context::remote_pty::output_cursor(&binding),
                 });
                 self.daemon
                     .cache
@@ -160,7 +161,12 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 Some((*route_id, session_id, binding.clone()))
             })
             .collect::<Vec<_>>();
-        for (_route_id, session_id, binding) in routes {
+        for (route_id, session_id, binding) in routes {
+            // Connection generations belong to one endpoint. Returning HOME
+            // must not gate a parked peer pane with HOME's transport.
+            if !self.route_uses_attached_daemon(route_id) {
+                continue;
+            }
             crate::context::remote_pty::await_attach_for_generation(
                 &binding,
                 &session_id,
@@ -438,6 +444,20 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             }
             return;
         }
+        self.create_remote_context_on_attached_daemon(context, cwd);
+    }
+
+    // Adoption creates its root before installing the new grid. Its owner is
+    // the attached daemon, not the still-current outgoing workspace.
+    fn create_remote_context_on_attached_daemon(
+        &mut self,
+        context: &Context<T>,
+        cwd: Option<String>,
+    ) {
+        let Some(binding) = context.remote_pty.as_ref() else {
+            return;
+        };
+        self.daemon.cache.remote_routes.insert(context.route_id, binding.clone());
         let Some(link) = self.daemon.link.as_ref() else {
             return;
         };
@@ -583,6 +603,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // exact session; stale persisted IDs must not become writable routes.
         let request_id = link.send_pty(PtyClientMessage::AttachPty {
             session_id: session_id.to_string(),
+            cursor: crate::context::remote_pty::output_cursor(binding),
         });
         self.daemon
             .cache
@@ -930,7 +951,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         };
         match root_session.as_deref() {
             Some(session_id) => self.register_adopted_context(&root_context, session_id),
-            None if terminal_uses_remote_pty => self.register_remote_context_with_cwd(
+            None if terminal_uses_remote_pty => self.create_remote_context_on_attached_daemon(
                 &root_context,
                 cloned_config.working_dir.clone(),
             ),

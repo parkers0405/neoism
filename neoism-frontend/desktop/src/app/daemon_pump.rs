@@ -253,6 +253,7 @@ mod tests {
             message: PtyServerMessage::PtyOutput {
                 session_id: "parked-shell".into(),
                 bytes: vec![b'x'; 32 * 1024],
+                offset: Some(0),
             },
         };
         let editor = DaemonServerMessage::Editor {

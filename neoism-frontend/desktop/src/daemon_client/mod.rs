@@ -169,8 +169,19 @@ pub struct DaemonClientOptions {
 /// failures must never invalidate session identity or replay PTY input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PtyFailureClass {
+    NotDelivered,
     Transport,
     Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyFailureOperation {
+    Input,
+    CommandInput,
+    Resize,
+    Create,
+    Attach,
+    Close,
 }
 
 impl DaemonClientOptions {
@@ -375,7 +386,10 @@ impl DaemonClientHandle {
             request_id,
             message,
         };
-        if let Some(failure) = pty_delivery_failure(&outbound, reason) {
+        if let Some(mut failure) = pty_delivery_failure(&outbound, reason) {
+            if let DaemonServerMessage::PtyFailure { class, .. } = &mut failure {
+                *class = PtyFailureClass::NotDelivered;
+            }
             let _ = self.failures.send(failure).await;
         }
     }
@@ -692,6 +706,7 @@ pub enum DaemonServerMessage {
         session_id: Option<String>,
         message: String,
         class: PtyFailureClass,
+        operation: PtyFailureOperation,
     },
     Workspace {
         request_id: u64,
@@ -816,12 +831,13 @@ impl ClientRunner {
             .run_socket_inner(&mut ws, pending, &mut pty_inflight)
             .await;
         let _ = self.status_tx.send(DaemonClientStatus::BackingOff);
-        for (request_id, session_id) in pty_inflight {
+        for (request_id, (session_id, operation)) in pty_inflight {
             let _ = self
                 .in_tx
                 .send(pty_transport_failure(
                     request_id,
                     session_id,
+                    operation,
                     "connection lost before PTY acknowledgment; execution unknown; input was not replayed",
                 ))
                 .await;
@@ -844,7 +860,7 @@ impl ClientRunner {
         &mut self,
         ws: &mut WebSocketStream<S>,
         pending: &mut VecDeque<OutboundServiceMessage>,
-        pty_inflight: &mut HashMap<u64, Option<String>>,
+        pty_inflight: &mut HashMap<u64, (Option<String>, PtyFailureOperation)>,
     ) -> Result<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -875,8 +891,8 @@ impl ClientRunner {
                     if outbound_is_replayable(&outbound) {
                         pending.push_back(outbound.clone());
                     }
-                    if let Some((request_id, session_id)) = pty_request_target(&outbound) {
-                        pty_inflight.insert(request_id, session_id);
+                    if let Some((request_id, session_id, operation)) = pty_request_target(&outbound) {
+                        pty_inflight.insert(request_id, (session_id, operation));
                     }
                     send_workspace_envelope(ws, &outbound).await?;
                 }
@@ -933,7 +949,7 @@ impl ClientRunner {
         &mut self,
         ws: &mut WebSocketStream<S>,
         pending: &mut VecDeque<OutboundServiceMessage>,
-        pty_inflight: &mut HashMap<u64, Option<String>>,
+        pty_inflight: &mut HashMap<u64, (Option<String>, PtyFailureOperation)>,
         generation: u64,
     ) -> Result<bool>
     where
@@ -999,7 +1015,7 @@ impl ClientRunner {
         &mut self,
         _ws: &mut WebSocketStream<S>,
         pending: &mut VecDeque<OutboundServiceMessage>,
-        pty_inflight: &mut HashMap<u64, Option<String>>,
+        pty_inflight: &mut HashMap<u64, (Option<String>, PtyFailureOperation)>,
         frame: Option<
             std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
         >,
@@ -1037,8 +1053,8 @@ impl ClientRunner {
                 request_id,
                 message: PtyServerMessage::Error { message },
             } => {
-                if let Some(session_id) = target {
-                    pty_terminal_failure(request_id, session_id, message)
+                if let Some((session_id, operation)) = target {
+                    pty_terminal_failure(request_id, session_id, operation, message)
                 } else {
                     tracing::warn!(
                         target: "neoism::remote_pty",
@@ -1302,8 +1318,26 @@ async fn send_workspace_envelope<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    send_workspace_envelope_with_timeout(ws, message, Duration::from_secs(5)).await
+}
+
+async fn send_workspace_envelope_with_timeout<S>(
+    ws: &mut WebSocketStream<S>,
+    message: &OutboundServiceMessage,
+    timeout: Duration,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let payload = serialize_outbound_service_message(message)?;
-    ws.send(Message::Text(payload)).await?;
+    tokio::time::timeout(timeout, ws.send(Message::Text(payload)))
+        .await
+        .map_err(|_| {
+            DaemonClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "workspace websocket send timed out",
+            ))
+        })??;
     Ok(())
 }
 
@@ -1387,7 +1421,9 @@ fn pty_requires_open_connection(
     }
 }
 
-fn pty_request_target(message: &OutboundServiceMessage) -> Option<(u64, Option<String>)> {
+fn pty_request_target(
+    message: &OutboundServiceMessage,
+) -> Option<(u64, Option<String>, PtyFailureOperation)> {
     let OutboundServiceMessage::Pty {
         request_id,
         message,
@@ -1395,20 +1431,33 @@ fn pty_request_target(message: &OutboundServiceMessage) -> Option<(u64, Option<S
     else {
         return None;
     };
-    let session_id = match message {
+    let (session_id, operation) = match message {
         // Create/attach are resolved by their exact pending route request in
         // the manager, never by a session fallback that could hit a newer view.
-        PtyClientMessage::CreatePty { .. } | PtyClientMessage::AttachPty { .. } => None,
-        PtyClientMessage::PtyInput { session_id, .. }
-        | PtyClientMessage::Resize { session_id, .. }
-        | PtyClientMessage::ClosePty { session_id } => Some(session_id.clone()),
+        PtyClientMessage::CreatePty { .. } => (None, PtyFailureOperation::Create),
+        PtyClientMessage::AttachPty { .. } => (None, PtyFailureOperation::Attach),
+        PtyClientMessage::PtyInput { session_id, bytes } => (
+            Some(session_id.clone()),
+            if bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+                PtyFailureOperation::CommandInput
+            } else {
+                PtyFailureOperation::Input
+            },
+        ),
+        PtyClientMessage::Resize { session_id, .. } => {
+            (Some(session_id.clone()), PtyFailureOperation::Resize)
+        }
+        PtyClientMessage::ClosePty { session_id } => {
+            (Some(session_id.clone()), PtyFailureOperation::Close)
+        }
     };
-    Some((*request_id, session_id))
+    Some((*request_id, session_id, operation))
 }
 
 fn pty_transport_failure(
     request_id: u64,
     session_id: Option<String>,
+    operation: PtyFailureOperation,
     reason: &str,
 ) -> DaemonServerMessage {
     tracing::warn!(
@@ -1423,6 +1472,7 @@ fn pty_transport_failure(
         session_id,
         message: reason.into(),
         class: PtyFailureClass::Transport,
+        operation,
     }
 }
 
@@ -1430,13 +1480,16 @@ fn pty_delivery_failure(
     outbound: &OutboundServiceMessage,
     reason: &str,
 ) -> Option<DaemonServerMessage> {
-    let (request_id, session_id) = pty_request_target(outbound)?;
-    Some(pty_transport_failure(request_id, session_id, reason))
+    let (request_id, session_id, operation) = pty_request_target(outbound)?;
+    Some(pty_transport_failure(
+        request_id, session_id, operation, reason,
+    ))
 }
 
 fn pty_terminal_failure(
     request_id: u64,
     session_id: Option<String>,
+    operation: PtyFailureOperation,
     message: String,
 ) -> DaemonServerMessage {
     tracing::warn!(
@@ -1451,6 +1504,7 @@ fn pty_terminal_failure(
         session_id,
         message,
         class: PtyFailureClass::Terminal,
+        operation,
     }
 }
 
@@ -1576,7 +1630,7 @@ fn parse_server_frame(frame: Message) -> Result<Option<DaemonServerMessage>> {
                 message: parsed.message,
             }))
         }
-        "PtyCreated" | "PtyOutput" | "PtyClosed" | "Error" => {
+        "PtyCreated" | "PtyOutput" | "PtyClosed" | "SessionCwd" | "Error" => {
             let message: PtyServerMessage = serde_json::from_value(raw.clone())?;
             Ok(Some(DaemonServerMessage::Pty {
                 request_id: 0,
@@ -1607,9 +1661,82 @@ fn ack_pending(pending: &mut VecDeque<OutboundServiceMessage>, request_id: u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
     use std::sync::Mutex;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct StalledIo;
+
+    impl AsyncRead for StalledIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for StalledIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Pending
+        }
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_socket_send_is_bounded() {
+        let mut ws = WebSocketStream::from_raw_socket(
+            StalledIo,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let message = OutboundServiceMessage::Workspace {
+            request_id: 0,
+            message: WorkspaceClientMessage::Ping { nonce: "n".into() },
+        };
+        let err = send_workspace_envelope_with_timeout(
+            &mut ws,
+            &message,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect_err("stalled write must time out");
+        assert!(err.to_string().contains("send timed out"));
+    }
+
+    #[test]
+    fn parses_bare_session_cwd_push() {
+        let frame = Message::Text(
+            serde_json::json!({"SessionCwd":{"session_id":"s","cwd":"/tmp"}}).to_string(),
+        );
+        assert!(matches!(
+            parse_server_frame(frame).unwrap(),
+            Some(DaemonServerMessage::Pty {
+                request_id: 0,
+                message: PtyServerMessage::SessionCwd { session_id, cwd }
+            }) if session_id == "s" && cwd == "/tmp"
+        ));
+    }
 
     struct EnvGuard<'a> {
         _guard: std::sync::MutexGuard<'a, ()>,
@@ -1981,11 +2108,29 @@ mod tests {
     }
 
     #[test]
+    fn submitted_input_failure_is_marked_as_command_delivery_unknown() {
+        let outbound = OutboundServiceMessage::Pty {
+            request_id: 91,
+            message: test_input(),
+        };
+        assert!(matches!(
+            pty_delivery_failure(&outbound, "connection lost"),
+            Some(DaemonServerMessage::PtyFailure {
+                request_id: 91,
+                operation: PtyFailureOperation::CommandInput,
+                class: PtyFailureClass::Transport,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn attach_failure_never_falls_back_to_a_newer_session_binding() {
         let attach = OutboundServiceMessage::Pty {
             request_id: 42,
             message: PtyClientMessage::AttachPty {
                 session_id: "old".into(),
+                cursor: None,
             },
         };
         assert!(matches!(
@@ -2007,6 +2152,7 @@ mod tests {
         handle
             .send_pty(PtyClientMessage::AttachPty {
                 session_id: "existing".into(),
+                cursor: None,
             })
             .await
             .unwrap();
@@ -2321,7 +2467,7 @@ mod tests {
             }
             assert!(
                 matches!(failure.as_ref(), Some(DaemonServerMessage::PtyFailure {
-                request_id: id, session_id: Some(session), message, class,
+                request_id: id, session_id: Some(session), message, class, ..
             }) if *id == request_id && session == "shell-1"
                 && message.contains(if server_error { "unknown session" } else { "execution unknown" })
                 && *class == if server_error { PtyFailureClass::Terminal } else { PtyFailureClass::Transport }),
@@ -2477,7 +2623,12 @@ mod tests {
 
     #[test]
     fn transport_pty_failure_is_not_terminal_death() {
-        let failure = pty_transport_failure(9, Some("shell-1".into()), "connection lost");
+        let failure = pty_transport_failure(
+            9,
+            Some("shell-1".into()),
+            PtyFailureOperation::CommandInput,
+            "connection lost",
+        );
         assert!(matches!(
             failure,
             DaemonServerMessage::PtyFailure {
@@ -2489,6 +2640,7 @@ mod tests {
         let terminal = pty_terminal_failure(
             9,
             Some("shell-1".into()),
+            PtyFailureOperation::Attach,
             "unknown session shell-1".into(),
         );
         assert!(matches!(

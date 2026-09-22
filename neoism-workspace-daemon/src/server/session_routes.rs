@@ -263,7 +263,7 @@ pub(crate) async fn clipboard_image_serve(Path(filename): Path<String>) -> Respo
 ///
 /// Discovery surface for the web `WorkplaceSwitcher`. Runs
 /// `tailscale status --json` on a blocking task and returns the
-/// parsed peer list as `{ peers: [{ hostname, ip, online }] }`.
+/// parsed peer list with any matching, host-advertised daemon endpoints.
 ///
 /// Auth: intentionally unauthenticated. The route only exposes data
 /// the operator could read by running `tailscale status` themselves
@@ -271,10 +271,38 @@ pub(crate) async fn clipboard_image_serve(Path(filename): Path<String>) -> Respo
 /// A missing or failing `tailscale` binary degrades to an empty list
 /// (HTTP 200) so the frontend never has to special-case error
 /// responses — the switcher just shows zero discovered peers.
-pub(crate) async fn tailnet_peers() -> Response {
-    let resp = tokio::task::spawn_blocking(crate::tailnet::discover_peers_blocking)
+/// Discovery exposes only live locally hosted ports, never credentials or paths.
+pub(crate) async fn hosted_server_ports() -> Response {
+    use neoism_agent_service_api::server_registry::{registry_directory, ServerRegistry};
+    let ports = tokio::task::spawn_blocking(|| {
+        ServerRegistry::load(registry_directory())
+            .map(|registry| registry.servers().iter()
+                .filter_map(|server| server.hosted.as_ref().map(|spec| spec.port))
+                .collect::<std::collections::BTreeSet<_>>())
+            .unwrap_or_default()
+    }).await.unwrap_or_default();
+    let mut live = Vec::new();
+    for port in ports {
+        if matches!(tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+        ).await, Ok(Ok(_))) {
+            live.push(port);
+        }
+    }
+    (StatusCode::OK, Json(live)).into_response()
+}
+
+pub(crate) async fn tailnet_peers(State(state): State<AppState>) -> Response {
+    let mut resp = tokio::task::spawn_blocking(crate::tailnet::discover_peers_blocking)
         .await
         .unwrap_or_default();
+    crate::tailnet::discover_hosted_endpoints(&mut resp).await;
+    let hosts = state.workspaces.list_hosts();
+    crate::tailnet::attach_advertised_daemon_urls(
+        &mut resp,
+        hosts.iter().filter_map(|host| host.daemon_url.as_deref()),
+    );
     (StatusCode::OK, Json(resp)).into_response()
 }
 

@@ -5,7 +5,7 @@
 //! the operator has a tailnet (laptop, desktop, phone, dev VM, …); this
 //! module exposes a tiny `GET /tailnet-peers` HTTP endpoint that shells
 //! out to `tailscale status --json` and returns the parsed list as
-//! `{ peers: [{ hostname, ip, online }] }`.
+//! `{ peers: [{ hostname, ip, online, daemon_urls }] }`.
 //!
 //! Design choices:
 //!
@@ -51,6 +51,12 @@ pub struct TailnetPeer {
     /// returned (operator may want to wake them) but rendered as
     /// dimmed in the switcher.
     pub online: bool,
+    /// Authoritative daemon endpoints already advertised by this peer through
+    /// the workspace host tree. There may be more than one daemon on a single
+    /// tailnet node, so discovery must preserve the complete endpoint (port and
+    /// path included) rather than manufacturing `:7878` from the node IP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub daemon_urls: Vec<String>,
 }
 
 /// CLI candidates, most specific last: the bare PATH lookup covers
@@ -166,12 +172,76 @@ pub fn parse_tailscale_status_json(body: &str) -> Option<TailnetPeersResponse> {
             hostname,
             ip,
             online,
+            daemon_urls: Vec::new(),
         });
     }
     // Stable order so the web switcher's list doesn't reshuffle between
     // refreshes (tailscale's JSON map iteration order is undefined).
     peers.sort_by(|a, b| a.hostname.cmp(&b.hostname));
     Some(TailnetPeersResponse { peers })
+}
+
+/// The embedded daemon is a discovery contact, not an assumed hosted endpoint.
+/// Only advertised ports are dialed; constrain their host to the Tailscale peer.
+pub async fn discover_hosted_endpoints(response: &mut TailnetPeersResponse) {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build() else { return; };
+    futures::future::join_all(response.peers.iter_mut().filter(|peer| peer.online).map(|peer| {
+        let client = &client;
+        async move {
+            let Ok(ip) = peer.ip.parse::<std::net::IpAddr>() else { return; };
+            let contact = std::net::SocketAddr::new(ip, 7878);
+            let Ok(reply) = client.get(format!("http://{contact}/hosted-server-ports"))
+                .send().await else { return; };
+            if !reply.status().is_success() { return; }
+            let Ok(ports) = reply.json::<Vec<u16>>().await else { return; };
+            for port in ports.into_iter().filter(|port| *port != 0).take(128) {
+                let endpoint = format!("ws://{}/session", std::net::SocketAddr::new(ip, port));
+                if !peer.daemon_urls.contains(&endpoint) {
+                    peer.daemon_urls.push(endpoint);
+                }
+            }
+        }
+    })).await;
+}
+
+/// Attach daemon endpoints from the authoritative host registry to matching
+/// Tailscale nodes. Exact endpoint strings are retained and sorted; matching is
+/// by the endpoint URL's host, never by an assumed port. This deliberately
+/// yields no endpoint for a bare Tailscale device: lack of metadata is more
+/// honest than advertising a listener that may not exist.
+pub fn attach_advertised_daemon_urls<'a>(
+    response: &mut TailnetPeersResponse,
+    daemon_urls: impl IntoIterator<Item = &'a str>,
+) {
+    for daemon_url in daemon_urls {
+        let Ok(url) = url::Url::parse(daemon_url.trim()) else {
+            continue;
+        };
+        let Some(host) = url.host_str() else {
+            continue;
+        };
+        for peer in &mut response.peers {
+            if host.eq_ignore_ascii_case(&peer.ip)
+                || host.eq_ignore_ascii_case(&peer.hostname)
+                || host
+                    .strip_suffix(".ts.net")
+                    .and_then(|name| name.split('.').next())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&peer.hostname))
+            {
+                let endpoint = daemon_url.trim().to_string();
+                if !peer.daemon_urls.contains(&endpoint) {
+                    peer.daemon_urls.push(endpoint);
+                }
+            }
+        }
+    }
+    for peer in &mut response.peers {
+        peer.daemon_urls.sort();
+    }
 }
 
 /// Choose the address we hand back to the web client. Prefer IPv4 so
@@ -286,6 +356,7 @@ mod tests {
                 hostname: "laptop-a".into(),
                 ip: "100.64.0.2".into(),
                 online: true,
+                daemon_urls: Vec::new(),
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -293,5 +364,29 @@ mod tests {
         assert!(json.contains("\"hostname\":\"laptop-a\""));
         assert!(json.contains("\"ip\":\"100.64.0.2\""));
         assert!(json.contains("\"online\":true"));
+        assert!(!json.contains("daemon_urls"));
+    }
+
+    #[test]
+    fn advertised_endpoints_preserve_multiple_ports_per_tailnet_node() {
+        let mut response = parse_tailscale_status_json(
+            r#"{"Peer":{"node-a":{"HostName":"desktop","TailscaleIPs":["100.64.0.7"],"Online":true}}}"#,
+        )
+        .unwrap();
+        attach_advertised_daemon_urls(
+            &mut response,
+            [
+                "ws://100.64.0.7:9879/session",
+                "ws://100.64.0.7:7878/session",
+                "ws://100.64.0.8:9999/session",
+            ],
+        );
+        assert_eq!(
+            response.peers[0].daemon_urls,
+            [
+                "ws://100.64.0.7:7878/session",
+                "ws://100.64.0.7:9879/session",
+            ]
+        );
     }
 }

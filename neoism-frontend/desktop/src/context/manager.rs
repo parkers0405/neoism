@@ -299,7 +299,13 @@ impl ContextManagerDaemonLink {
             let trees = futures::future::join_all(
                 peers
                     .iter()
-                    .map(crate::daemon_client::tailnet_peers::fetch_peer_workspace_tree),
+                    .flat_map(|peer| {
+                        peer.daemon_urls.iter().map(move |endpoint| {
+                            crate::daemon_client::tailnet_peers::fetch_peer_workspace_tree(
+                                peer, endpoint,
+                            )
+                        })
+                    }),
             )
             .await;
             let mut merged = PeerWorkspaceTree::default();

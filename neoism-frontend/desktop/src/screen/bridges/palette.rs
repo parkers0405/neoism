@@ -1605,26 +1605,17 @@ impl Screen<'_> {
         // their machine name, which is also the tailnet hostname) and by
         // the host part of any advertised daemon_url (catches a host
         // whose label was customised but whose URL dials the peer's IP).
-        use crate::daemon_client::tailnet_peers::{
-            daemon_url_host, tailnet_peer_palette_hosts,
-        };
-        let mut existing_labels: std::collections::HashSet<String> = entries
-            .iter()
-            .map(|e| e.host_label.to_lowercase())
-            .collect();
-        existing_labels.insert(local_host_label.to_lowercase());
-        let mut existing_url_hosts: std::collections::HashSet<String> =
+        use crate::daemon_client::tailnet_peers::tailnet_peer_palette_hosts;
+        let mut existing_urls: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for host in hosts.iter() {
-            existing_labels.insert(host.label.to_lowercase());
-            if let Some(url_host) = host.daemon_url.as_deref().and_then(daemon_url_host) {
-                existing_url_hosts.insert(url_host);
+            if let Some(url) = host.daemon_url.as_deref() {
+                existing_urls.insert(url.trim().trim_end_matches('/').to_lowercase());
             }
         }
         for entry in entries.iter() {
-            if let Some(url_host) = entry.daemon_url.as_deref().and_then(daemon_url_host)
-            {
-                existing_url_hosts.insert(url_host);
+            if let Some(url) = entry.daemon_url.as_deref() {
+                existing_urls.insert(url.trim().trim_end_matches('/').to_lowercase());
             }
         }
         // Daemon-tree hosts that own no workspaces still get a
@@ -1652,8 +1643,7 @@ impl Screen<'_> {
         let peers = self.context_manager.tailnet_peers();
         peer_hosts.extend(tailnet_peer_palette_hosts(
             &peers,
-            &existing_labels,
-            &existing_url_hosts,
+            &existing_urls,
         ));
 
         (entries, peer_hosts)

@@ -297,8 +297,8 @@ test("refreshTailscalePeers hits /tailnet-peers and surfaces discovered peers", 
   const { service } = buildService();
   const { calls, restore } = stubFetch({
     peers: [
-      { hostname: "laptop-b", ip: "100.64.0.2", online: true },
-      { hostname: "home-server", ip: "100.64.0.3", online: false },
+      { hostname: "laptop-b", ip: "100.64.0.2", online: true, daemon_urls: ["ws://100.64.0.2:9879/session"] },
+      { hostname: "home-server", ip: "100.64.0.3", online: false, daemon_urls: ["ws://100.64.0.3:9900/session"] },
     ],
   });
   try {
@@ -313,12 +313,12 @@ test("refreshTailscalePeers hits /tailnet-peers and surfaces discovered peers", 
     const discovered = service.listDiscovered();
     assert.equal(discovered.length, 2);
     const byLabel = new Map(discovered.map((d) => [d.label, d]));
-    const peerB = byLabel.get("laptop-b")!;
-    assert.equal(peerB.id, "tailscale:laptop-b@100.64.0.2");
-    assert.equal(peerB.url, "ws://100.64.0.2:7878/session");
+    const peerB = byLabel.get("laptop-b :9879")!;
+    assert.equal(peerB.id, "tailscale:laptop-b@ws://100.64.0.2:9879/session");
+    assert.equal(peerB.url, "ws://100.64.0.2:9879/session");
     assert.equal(peerB.transport, "tailscale");
     assert.equal(peerB.peer.online, true);
-    assert.equal(byLabel.get("home-server")!.peer.online, false);
+    assert.equal(byLabel.get("home-server :9900")!.peer.online, false);
   } finally {
     restore();
   }
@@ -328,7 +328,7 @@ test("refreshTailscalePeers de-dupes and refreshes online state on re-discovery"
   const { service } = buildService();
 
   const first = stubFetch({
-    peers: [{ hostname: "laptop-b", ip: "100.64.0.2", online: false }],
+    peers: [{ hostname: "laptop-b", ip: "100.64.0.2", online: false, daemon_urls: ["ws://100.64.0.2:9879/session"] }],
   });
   try {
     const r1 = await service.refreshTailscalePeers("ws://laptop-a:7878/session");
@@ -341,7 +341,7 @@ test("refreshTailscalePeers de-dupes and refreshes online state on re-discovery"
   // Same peer comes back online — no new "added" entry, but the cached
   // online flag flips so the switcher can un-dim the row.
   const second = stubFetch({
-    peers: [{ hostname: "laptop-b", ip: "100.64.0.2", online: true }],
+    peers: [{ hostname: "laptop-b", ip: "100.64.0.2", online: true, daemon_urls: ["ws://100.64.0.2:9879/session"] }],
   });
   try {
     const r2 = await service.refreshTailscalePeers("ws://laptop-a:7878/session");
@@ -381,7 +381,7 @@ test("discover -> promote -> connect opens a ProtocolClient at the peer's ws URL
 
   // (1) Discover a peer off the focused daemon's tailnet.
   const { restore } = stubFetch({
-    peers: [{ hostname: "laptop-b", ip: "100.64.0.2", online: true }],
+    peers: [{ hostname: "laptop-b", ip: "100.64.0.2", online: true, daemon_urls: ["ws://100.64.0.2:9879/session"] }],
   });
   let discovered: DiscoveredWorkplace;
   try {
@@ -419,7 +419,7 @@ test("discover -> promote -> connect opens a ProtocolClient at the peer's ws URL
   //     the legacy `?token` and the `Hello { token }` channels.
   const client = service.connect(discovered.id, HANDLERS);
   assert.equal(built.length, 1, "exactly one client built");
-  assert.equal(built[0].options.url, "ws://100.64.0.2:7878/session");
+  assert.equal(built[0].options.url, "ws://100.64.0.2:9879/session");
   assert.equal(built[0].options.authToken, "pair-secret-b");
   assert.equal(built[0].options.pairingToken, "pair-secret-b");
   assert.equal(built[0].options.clientName, "neoism-web");
@@ -437,7 +437,7 @@ test("discover -> promote -> connect opens a ProtocolClient at the peer's ws URL
   const parsed = JSON.parse(raw!) as { entries: Array<Record<string, unknown>> };
   const persisted = parsed.entries.find((e) => e.id === discovered.id);
   assert.ok(persisted, "promoted entry persisted");
-  assert.equal(persisted!.url, "ws://100.64.0.2:7878/session");
+  assert.equal(persisted!.url, "ws://100.64.0.2:9879/session");
   assert.equal(persisted!.transport, "tailscale");
 });
 
@@ -583,7 +583,7 @@ test("re-home: move resolvable via a discovered tailnet peer auto-registers and 
   // Discover the cloud node off laptop-a's tailnet (so it's a candidate
   // but NOT yet in the registry).
   const { restore } = stubFetch({
-    peers: [{ hostname: "cloud-burst", ip: "100.64.0.9", online: true }],
+    peers: [{ hostname: "cloud-burst", ip: "100.64.0.9", online: true, daemon_urls: ["ws://100.64.0.9:7878/session"] }],
   });
   try {
     await service.refreshTailscalePeers("ws://100.64.0.1:7878/session");
@@ -591,7 +591,7 @@ test("re-home: move resolvable via a discovered tailnet peer auto-registers and 
     restore();
   }
   assert.equal(
-    service.listWorkplaces().some((e) => e.id === "tailscale:cloud-burst@100.64.0.9"),
+    service.listWorkplaces().some((e) => e.id === "tailscale:cloud-burst@ws://100.64.0.9:7878/session"),
     false,
     "cloud-burst is only discovered, not registered yet",
   );
@@ -601,7 +601,7 @@ test("re-home: move resolvable via a discovered tailnet peer auto-registers and 
 
   // The discovered peer was promoted into the registry and dialled.
   assert.equal(
-    service.listWorkplaces().some((e) => e.id === "tailscale:cloud-burst@100.64.0.9"),
+    service.listWorkplaces().some((e) => e.id === "tailscale:cloud-burst@ws://100.64.0.9:7878/session"),
     true,
     "discovered peer was auto-registered on re-home",
   );

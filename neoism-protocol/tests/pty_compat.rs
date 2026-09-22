@@ -72,6 +72,7 @@ fn legacy_pty_created_without_workspace_root_still_decodes() {
 fn attach_and_session_cwd_keep_their_wire_shape() {
     let attach = serde_json::to_string(&ClientMessage::AttachPty {
         session_id: "session-2".into(),
+        cursor: None,
     })
     .expect("serialize AttachPty");
     assert_eq!(attach, r#"{"AttachPty":{"session_id":"session-2"}}"#);

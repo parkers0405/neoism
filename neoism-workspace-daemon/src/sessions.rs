@@ -30,7 +30,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,10 +55,27 @@ const CWD_POLL_INTERVAL: Duration = Duration::from_millis(400);
 /// How many bytes the reader task pulls per read syscall.
 const READ_BUFFER_SIZE: usize = 4096;
 const BACKLOG_LIMIT_BYTES: usize = 1024 * 1024;
+const SUBSCRIBER_QUEUE_MESSAGES: usize = 256;
+
+#[derive(Default)]
+struct OutputBacklog {
+    bytes: Vec<u8>,
+    start_offset: u64,
+    next_offset: u64,
+}
+
+impl OutputBacklog {
+    fn replay_from(&self, cursor: Option<u64>) -> (u64, Vec<u8>) {
+        let requested = cursor.unwrap_or(self.start_offset);
+        let offset = requested.max(self.start_offset).min(self.next_offset);
+        let index = (offset - self.start_offset) as usize;
+        (offset, self.bytes[index..].to_vec())
+    }
+}
 
 struct SessionEntry {
     pty: Arc<Mutex<PtySession>>,
-    backlog: Arc<Mutex<Vec<u8>>>,
+    backlog: Arc<Mutex<OutputBacklog>>,
     workspace_root: Option<String>,
     shell: Option<String>,
     /// Workspace-registry tab id this live PTY backs, once bridged. See
@@ -80,14 +97,15 @@ pub struct SessionRegistry {
 struct SessionSubscriber {
     all_sessions: bool,
     sessions: RwLock<HashSet<String>>,
-    tx: mpsc::UnboundedSender<ServerMessage>,
+    tx: mpsc::Sender<ServerMessage>,
+    overflowed: AtomicBool,
 }
 
 pub struct SessionOutputSubscription {
     id: u64,
     subscribers: Arc<DashMap<u64, Arc<SessionSubscriber>>>,
     subscriber: Arc<SessionSubscriber>,
-    rx: mpsc::UnboundedReceiver<ServerMessage>,
+    rx: mpsc::Receiver<ServerMessage>,
 }
 
 impl SessionOutputSubscription {
@@ -96,6 +114,9 @@ impl SessionOutputSubscription {
     }
 
     pub async fn recv(&mut self) -> Result<ServerMessage, broadcast::error::RecvError> {
+        if self.subscriber.overflowed.load(Ordering::Acquire) {
+            return Err(broadcast::error::RecvError::Lagged(1));
+        }
         self.rx
             .recv()
             .await
@@ -142,11 +163,12 @@ impl SessionRegistry {
 
     fn new_subscription(&self, all_sessions: bool) -> SessionOutputSubscription {
         let id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(SUBSCRIBER_QUEUE_MESSAGES);
         let subscriber = Arc::new(SessionSubscriber {
             all_sessions,
             sessions: RwLock::new(HashSet::new()),
             tx,
+            overflowed: AtomicBool::new(false),
         });
         self.subscribers.insert(id, subscriber.clone());
         SessionOutputSubscription {
@@ -162,10 +184,22 @@ impl SessionRegistry {
             return;
         };
         self.subscribers.retain(|_, subscriber| {
-            if !subscriber.all_sessions && !subscriber.sessions.read().contains(session_id) {
+            if !subscriber.all_sessions
+                && !subscriber.sessions.read().contains(session_id)
+            {
                 return true;
             }
-            subscriber.tx.send(message.clone()).is_ok()
+            match subscriber.tx.try_send(message.clone()) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // Never silently drop terminal bytes. Retire this socket's
+                    // subscription; recv() reports Lagged and the socket is
+                    // forced through cursor-based attach recovery.
+                    subscriber.overflowed.store(true, Ordering::Release);
+                    false
+                }
+            }
         });
     }
 
@@ -253,7 +287,9 @@ impl SessionRegistry {
                 rows,
             } => self.resize(session_id, cols, rows),
             ClientMessage::ClosePty { session_id } => self.close(session_id),
-            ClientMessage::AttachPty { session_id } => self.attach(session_id),
+            ClientMessage::AttachPty { session_id, cursor } => {
+                self.attach(session_id, cursor)
+            }
         }
     }
 
@@ -263,7 +299,7 @@ impl SessionRegistry {
     /// unaffected. A racing live chunk can, worst case, appear once
     /// out of order around the snapshot — cosmetic, self-corrects on
     /// the next output.
-    fn attach(&self, session_id: String) -> Vec<ServerMessage> {
+    fn attach(&self, session_id: String, cursor: Option<u64>) -> Vec<ServerMessage> {
         let Some(entry) = self.inner.get(&session_id) else {
             return vec![ServerMessage::Error {
                 message: format!("unknown session {session_id}"),
@@ -274,9 +310,14 @@ impl SessionRegistry {
             workspace_root: entry.workspace_root.clone(),
             shell: entry.shell.clone(),
         }];
-        let bytes = entry.backlog.lock().clone();
+        let backlog = entry.backlog.lock();
+        let (offset, bytes) = backlog.replay_from(cursor);
         if !bytes.is_empty() {
-            messages.push(ServerMessage::PtyOutput { session_id, bytes });
+            messages.push(ServerMessage::PtyOutput {
+                session_id,
+                bytes,
+                offset: Some(offset),
+            });
         }
         messages
     }
@@ -326,7 +367,7 @@ impl SessionRegistry {
         if let Some(subscription) = subscription {
             subscription.subscribe(session_id.clone());
         }
-        let backlog = Arc::new(Mutex::new(Vec::new()));
+        let backlog = Arc::new(Mutex::new(OutputBacklog::default()));
         let workspace_root = Some(workspace_root_label());
         let entry = SessionEntry {
             pty: Arc::new(Mutex::new(pty)),
@@ -438,22 +479,60 @@ mod pty_env_tests {
             registry.publish(ServerMessage::PtyOutput {
                 session_id: "second".into(),
                 bytes: vec![b'x'; 4_096],
+                offset: None,
             });
         }
         registry.publish(ServerMessage::PtyOutput {
             session_id: "first".into(),
             bytes: b"ls\r\n\x1b]133;D;0\x07".to_vec(),
+            offset: None,
         });
 
-        let message = tokio::time::timeout(std::time::Duration::from_millis(100), first.recv())
-            .await
-            .expect("first socket must receive its completion")
-            .expect("first socket subscription remains open");
+        let message =
+            tokio::time::timeout(std::time::Duration::from_millis(100), first.recv())
+                .await
+                .expect("first socket must receive its completion")
+                .expect("first socket subscription remains open");
         assert!(matches!(
             message,
-            ServerMessage::PtyOutput { session_id, bytes }
+            ServerMessage::PtyOutput { session_id, bytes, .. }
                 if session_id == "first" && bytes.ends_with(b"\x1b]133;D;0\x07")
         ));
+    }
+
+    #[tokio::test]
+    async fn slow_subscriber_is_disconnected_instead_of_losing_output() {
+        let registry = super::SessionRegistry::shared();
+        let mut slow = registry.subscribe();
+        slow.subscribe("shell");
+        for offset in 0..=super::SUBSCRIBER_QUEUE_MESSAGES {
+            registry.publish(ServerMessage::PtyOutput {
+                session_id: "shell".into(),
+                bytes: vec![b'x'],
+                offset: Some(offset as u64),
+            });
+        }
+        assert!(matches!(
+            slow.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+        ));
+    }
+
+    #[test]
+    fn cursor_replay_is_exactly_once_and_reports_retention_start() {
+        let backlog = parking_lot::Mutex::new(super::OutputBacklog::default());
+        assert_eq!(super::append_backlog(&backlog, b"abc"), 0);
+        assert_eq!(super::append_backlog(&backlog, b"def"), 3);
+        let backlog = backlog.lock();
+        assert_eq!(backlog.replay_from(Some(3)), (3, b"def".to_vec()));
+        assert_eq!(backlog.replay_from(Some(6)), (6, Vec::new()));
+
+        let retained = super::OutputBacklog {
+            bytes: b"tail".to_vec(),
+            start_offset: 10,
+            next_offset: 14,
+        };
+        assert_eq!(retained.replay_from(Some(2)), (10, b"tail".to_vec()));
     }
 
     #[cfg(windows)]
@@ -731,7 +810,7 @@ zsh() {{
 fn reader_loop(
     session_id: String,
     pty: Arc<Mutex<PtySession>>,
-    backlog: Arc<Mutex<Vec<u8>>>,
+    backlog: Arc<Mutex<OutputBacklog>>,
     registry: SessionRegistry,
 ) {
     let mut buf = vec![0u8; READ_BUFFER_SIZE];
@@ -788,11 +867,12 @@ fn reader_loop(
             }
             Ok(n) => {
                 let bytes = buf[..n].to_vec();
-                append_backlog(&backlog, &bytes);
+                let offset = append_backlog(&backlog, &bytes);
                 tracing::trace!(%session_id, byte_count = n, "forwarded pty output");
                 registry.publish(ServerMessage::PtyOutput {
                     session_id: session_id.clone(),
                     bytes,
+                    offset: Some(offset),
                 });
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -821,13 +901,17 @@ fn server_message_session_id(message: &ServerMessage) -> Option<&str> {
     }
 }
 
-fn append_backlog(backlog: &Mutex<Vec<u8>>, bytes: &[u8]) {
+fn append_backlog(backlog: &Mutex<OutputBacklog>, bytes: &[u8]) -> u64 {
     let mut backlog = backlog.lock();
-    backlog.extend_from_slice(bytes);
-    if backlog.len() > BACKLOG_LIMIT_BYTES {
-        let extra = backlog.len() - BACKLOG_LIMIT_BYTES;
-        backlog.drain(..extra);
+    let offset = backlog.next_offset;
+    backlog.next_offset = backlog.next_offset.saturating_add(bytes.len() as u64);
+    backlog.bytes.extend_from_slice(bytes);
+    if backlog.bytes.len() > BACKLOG_LIMIT_BYTES {
+        let extra = backlog.bytes.len() - BACKLOG_LIMIT_BYTES;
+        backlog.bytes.drain(..extra);
+        backlog.start_offset = backlog.start_offset.saturating_add(extra as u64);
     }
+    offset
 }
 
 #[cfg(test)]
@@ -964,7 +1048,7 @@ neoism cd - >/dev/null
 
         // Identity precedes replay bytes on explicit attach, including an
         // empty backlog. Fresh sockets no longer receive a global snapshot.
-        for messages in [&created, &reg.attach(pty_id.clone())] {
+        for messages in [&created, &reg.attach(pty_id.clone(), None)] {
             assert!(matches!(messages.first(), Some(ServerMessage::PtyCreated {
                 session_id, shell: Some(shell), ..
             }) if session_id.as_str() == pty_id.as_str() && shell == "/bin/sh"));
@@ -988,11 +1072,12 @@ neoism cd - >/dev/null
 
     #[test]
     fn append_backlog_trims_oldest_bytes() {
-        let backlog = Mutex::new(Vec::new());
+        let backlog = Mutex::new(OutputBacklog::default());
         append_backlog(&backlog, &vec![b'a'; BACKLOG_LIMIT_BYTES + 16]);
 
         let retained = backlog.lock();
-        assert_eq!(retained.len(), BACKLOG_LIMIT_BYTES);
-        assert!(retained.iter().all(|b| *b == b'a'));
+        assert_eq!(retained.bytes.len(), BACKLOG_LIMIT_BYTES);
+        assert_eq!(retained.start_offset, 16);
+        assert!(retained.bytes.iter().all(|b| *b == b'a'));
     }
 }

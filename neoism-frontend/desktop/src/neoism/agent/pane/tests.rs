@@ -2638,12 +2638,8 @@ fn proactive_preload_queue_is_concurrency_and_memory_bounded() {
 
     pane.pending_session_switch = Some("child-19".to_string());
     pane.ensure_session_preloaded("child-19".to_string(), false);
-    assert_eq!(
-        pane.session_preload_queue
-            .front()
-            .map(|(id, _)| id.as_str()),
-        Some("child-19")
-    );
+    assert!(pane.session_preloads_in_flight.contains("child-19"));
+    assert_eq!(pane.session_preloads_in_flight.len(), 3);
 }
 
 #[test]
@@ -3324,15 +3320,9 @@ fn explicit_hosting_handoff_preserves_selection_but_not_local_cached_history() {
     let mut joined =
         NeoismAgentPane::with_directory(Some(root.to_string_lossy().into_owned()));
     joined.switch_server("http://127.0.0.1:9898/agent/workspaces/hosted".into());
-    assert_eq!(
-        joined.pending_session_switch.as_deref(),
-        Some("ses_host_continuity")
-    );
+    assert!(joined.pending_session_switch.is_none());
     assert!(joined.messages.is_empty());
-    assert!(
-        joined.session_id.is_none(),
-        "selection waits for authorized hosted hydration"
-    );
+    assert_eq!(joined.session_id.as_deref(), Some("ses_host_continuity"));
     let mut unrelated =
         NeoismAgentPane::with_directory(Some(root.to_string_lossy().into_owned()));
     unrelated.switch_server("http://127.0.0.1:9899/agent/workspaces/other".into());

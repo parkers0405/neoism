@@ -186,6 +186,27 @@ mod tests {
         ExecutionScope, NetworkPolicy, ProcessClass, ResourceLimits, WorkspaceMaterialization,
     };
 
+    #[test]
+    fn listener_restores_native_execution_only_for_local_services() {
+        let local = neoism_agent_service_api::AgentServices::new(
+            Arc::new(neoism_agent_service_api::StandardExecutableService),
+            crate::standard_workspace_search(),
+        );
+        assert!(!local.execution.available());
+        let local = crate::ensure_local_execution(local);
+        assert!(local.execution.available());
+        assert_eq!(local.execution.backend_name(), "local-native");
+
+        let hosted = neoism_agent_service_api::AgentServices::new(
+            Arc::new(neoism_agent_service_api::StandardExecutableService),
+            crate::standard_workspace_search(),
+        )
+        .for_hosted_control_plane();
+        let hosted = crate::ensure_local_execution(hosted);
+        assert!(!hosted.execution.available());
+        assert_eq!(hosted.execution.backend_name(), "disabled");
+    }
+
     #[tokio::test]
     async fn local_provider_executes_only_local_native_requests() {
         let root = std::env::temp_dir().join(format!(

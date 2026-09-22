@@ -291,3 +291,4 @@
 - [feature_notes_gitbook_sidebar](feature_notes_gitbook_sidebar.md) - Implemented GitBook Alt+N takeover, notebook page breadcrumbs, search, and heading outline.
 - [Compaction estimator vs provider usage](bug_compaction_estimator_vs_provider_usage.md) - Premature auto-compaction at UI 53% caused by whole-request estimate overriding authoritative provider usage; fixed with OpenCode v2 usage-first trigger.
 - [Rust agent sidebar missing new chats — FIXED](bug_rust_agent_sidebar_missing_new_chats.md) - Rust GUI sidebar catalogue stayed Ready and active-family SSE excluded new root chats; fixed with authorized directory-scoped catalogue SSE and in-place deltas
+- [Joined ls spinner: adoption skips CreatePty](bug_join_adoption_skips_pty_create.md) - Actual UI join silently skipped CreatePty because adoption checked outgoing grid ownership; reproduced and fixed with direct known-owner creation

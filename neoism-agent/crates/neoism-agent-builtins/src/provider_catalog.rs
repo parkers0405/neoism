@@ -19,7 +19,9 @@ use crate::provider::provider_api_supported;
 
 const DEFAULT_SOURCE: &str = "https://models.dev";
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
-const CODEX_OPENAI_CONTEXT_LIMIT: u64 = 400_000;
+// OpenAI Codex's bundled models-manager/models.json declares a 272k
+// default context for GPT-6; the larger max_context_window is opt-in.
+const CODEX_OPENAI_CONTEXT_LIMIT: u64 = 272_000;
 const CODEX_OPENAI_INPUT_LIMIT: u64 = 272_000;
 const CODEX_OPENAI_OUTPUT_LIMIT: u64 = 128_000;
 
@@ -370,6 +372,13 @@ fn claude_code_provider() -> ProviderInfo {
         .unwrap_or_else(|_| "http://127.0.0.1:3456/v1".to_string());
     let mut models = BTreeMap::new();
     for (id, name, context, output, reasoning) in [
+        (
+            "claude-sonnet-5",
+            "Claude Sonnet 5 (Claude Code)",
+            200_000,
+            64_000,
+            true,
+        ),
         (
             "claude-sonnet-4-6",
             "Claude Sonnet 4.6 (Claude Code)",
@@ -915,7 +924,7 @@ pub fn generation_metadata(
 /// `OpenAiRuntime::stream` sends every request over the OAuth Responses path
 /// whenever the stored auth is OAuth, regardless of any API key. Codex enforces
 /// far smaller context windows than the platform API for the same model ids
-/// (gpt-5.6-sol: ~372k vs 1.05M), so limit resolution must follow the same
+/// (GPT-6 defaults to 272k vs 1.05M), so limit resolution must follow the same
 /// dispatch rule the runtime uses.
 pub async fn openai_codex_oauth(auth_store: &crate::auth_store::AuthStore) -> bool {
     matches!(
@@ -938,13 +947,9 @@ fn apply_codex_openai_effective_metadata(
     {
         return;
     }
-    // models.dev advertises the platform-API window (1.05M context / 922k
-    // input) for the gpt-5.6 family under `github-copilot` too, but the codex
-    // service enforces a far smaller, product-side cap (~372k for gpt-5.6-sol,
-    // and OpenAI has cut it further since — openai/codex#31860, #32806). A
-    // session that grew past it had every request rejected with a context-
-    // overflow error while auto-compaction, keyed off this limit, never fired.
-    // The catalog entry may lower the codex ceiling, never raise it.
+    // The public catalog describes API limits, not the Codex product's
+    // default window. Use the explicit Codex ceiling; Copilot metadata may
+    // lower it, but must never raise it to an opt-in/API-sized window.
     let catalog_limit = codex_catalog_limit(providers, model_id);
     let catalog = catalog_limit.as_ref();
     limit.context = catalog
@@ -1258,7 +1263,7 @@ mod tests {
         let limit = metadata.limit.expect("limit");
         let cost = metadata.cost.expect("cost");
 
-        assert_eq!(limit.context, 400_000);
+        assert_eq!(limit.context, 272_000);
         assert_eq!(limit.input, Some(272_000));
         assert_eq!(limit.output, 128_000);
         assert_eq!(cost.input, 0.0);
@@ -1276,7 +1281,7 @@ mod tests {
             .expect("openai provider");
         let model = openai.models.get("gpt-5.5").expect("gpt-5.5 model");
 
-        assert_eq!(model.limit.context, 400_000);
+        assert_eq!(model.limit.context, 272_000);
         assert_eq!(model.limit.input, Some(272_000));
         assert_eq!(model.limit.output, 128_000);
         assert_eq!(model.cost.input, 0.0);
@@ -1293,7 +1298,7 @@ mod tests {
 
         for model_id in ["gpt-5.6", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"] {
             let model = openai.models.get(model_id).expect("gpt-5.6 family model");
-            assert_eq!(model.limit.context, 400_000, "{model_id}");
+            assert_eq!(model.limit.context, 272_000, "{model_id}");
             assert_eq!(model.limit.input, Some(272_000), "{model_id}");
             assert_eq!(model.limit.output, 128_000, "{model_id}");
             assert_eq!(model.cost.input, 0.0, "{model_id}");
@@ -1308,13 +1313,13 @@ mod tests {
             .iter_mut()
             .find(|provider| provider.id == "openai")
             .unwrap();
-        for id in ["gpt-6", "gpt-6-astra"] {
+        for id in ["gpt-6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
             let mut model = openai.models["gpt-5.6-sol"].clone();
             model.id = id.into();
             model.name = id.into();
             openai.models.insert(id.into(), model);
         }
-        for id in ["gpt-5.6-sol", "gpt-6", "gpt-6-astra"] {
+        for id in ["gpt-5.6-sol", "gpt-6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
             for oauth in [true, false] {
                 let model = UserModel {
                     provider_id: "openai".into(),
@@ -1331,15 +1336,16 @@ mod tests {
                     .unwrap()
                     .models[id];
                 assert_eq!(visible.limit.context, limit.context, "{id}, oauth={oauth}");
-                assert_eq!(limit.context, if oauth { 400_000 } else { 1_050_000 });
+                assert_eq!(limit.context, if oauth { 272_000 } else { 1_050_000 });
                 assert_eq!(limit.input, Some(if oauth { 272_000 } else { 922_000 }));
                 assert_eq!(metadata.cost.unwrap().input == 0.0, oauth);
                 let trigger = neoism_agent_core::CompactionConfig::default().threshold(
                     limit.context,
                     limit.input.unwrap().saturating_sub(20_000),
                 );
-                // The subscription input safety ceiling wins over 65% of 400k.
-                assert_eq!(trigger, if oauth { 252_000 } else { 682_500 });
+                // Default 65% compaction follows Codex's 272k context,
+                // never the API's million-token context.
+                assert_eq!(trigger, if oauth { 176_800 } else { 682_500 });
             }
         }
     }

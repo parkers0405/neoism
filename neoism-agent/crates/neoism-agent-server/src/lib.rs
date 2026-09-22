@@ -209,6 +209,18 @@ pub fn standard_services() -> neoism_agent_service_api::AgentServices {
     services_with_workspace_search(standard_workspace_search())
 }
 
+fn ensure_local_execution(
+    services: neoism_agent_service_api::AgentServices,
+) -> neoism_agent_service_api::AgentServices {
+    if !services.hosted && !services.execution.available() {
+        services.with_execution(std::sync::Arc::new(
+            execution_provider::LocalExecutionProvider,
+        ))
+    } else {
+        services
+    }
+}
+
 struct UnavailableWorkspaceSearch;
 
 impl neoism_agent_service_api::WorkspaceSearchService for UnavailableWorkspaceSearch {
@@ -303,6 +315,7 @@ pub async fn listen_with_gui(
     services: neoism_agent_service_api::AgentServices,
     gui: Option<gui::GuiRoot>,
 ) -> anyhow::Result<SocketAddr> {
+    let services = ensure_local_execution(services);
     services
         .validate()
         .map_err(anyhow::Error::msg)

@@ -1727,6 +1727,19 @@ impl NeoismAgentPane {
                     timeline_history.oldest_loaded_cursor = oldest_cursor;
                     if active {
                         self.session_title = state.title;
+                        self.parent_session_id = state.parent_id;
+                        if let Some(directory) = state.directory {
+                            self.directory = Some(directory);
+                            self.invalidate_skill_options();
+                        }
+                        if let Some(agent) = state.agent {
+                            self.agent = Some(agent);
+                        }
+                        if let Some(model) = state.model {
+                            self.model = model;
+                        }
+                        self.connection_id = state.connection_id;
+                        self.thinking = state.thinking;
                         self.messages = merged;
                         self.timeline_history = timeline_history;
                         self.rebase_current_turn_trace();
@@ -1757,6 +1770,7 @@ impl NeoismAgentPane {
                     self.session_preloads_in_flight.remove(&session_id);
                     self.session_preloads_force_pending.remove(&session_id);
                     if self.pending_session_switch.as_deref() == Some(session_id.as_str())
+                        || self.session_id.as_deref() == Some(session_id.as_str())
                     {
                         self.pending_session_switch = None;
                         self.system_message("Session", error);

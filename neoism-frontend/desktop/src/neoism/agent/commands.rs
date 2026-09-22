@@ -540,11 +540,26 @@ impl NeoismAgentPane {
             self.activate_cached_session(&session_id);
             return;
         }
-        // Keep the current transcript painted while the target hydrates off
-        // the UI thread. A live child cache may already contain streamed
-        // deltas; the preload result merges with them before activation.
+        // Navigation must never wait behind remote preloads. Joined clients
+        // cross the host proxy and a cold state+message pair can take seconds;
+        // activate the target immediately, then merge its authorized snapshot
+        // when the background request lands.
         self.pending_session_switch = Some(session_id.clone());
-        self.ensure_session_preloaded(session_id, false);
+        let title = self
+            .side_panel
+            .sessions()
+            .iter()
+            .find(|entry| entry.id == session_id && !entry.is_header)
+            .map(|entry| entry.title.clone());
+        let cached = self
+            .session_cache
+            .entry(session_id.clone())
+            .or_insert_with(CachedAgentSession::live_only);
+        if cached.state.title.is_none() {
+            cached.state.title = title;
+        }
+        self.ensure_session_preloaded(session_id.clone(), false);
+        self.activate_cached_session(&session_id);
     }
 
     pub(crate) fn ensure_session_preloaded(&mut self, session_id: String, force: bool) {
@@ -586,11 +601,11 @@ impl NeoismAgentPane {
             }
             return;
         }
-        if self.session_preloads_in_flight.len() >= MAX_CONCURRENT_PRELOADS {
+        let selected_navigation = self.pending_session_switch.as_deref()
+            == Some(session_id.as_str());
+        if self.session_preloads_in_flight.len() >= MAX_CONCURRENT_PRELOADS && !selected_navigation {
             let request = (session_id.clone(), force);
-            if self.pending_session_switch.as_deref() == Some(session_id.as_str())
-                || force
-            {
+            if force {
                 if self.session_preload_queue.len() >= MAX_QUEUED_PRELOADS {
                     self.session_preload_queue.pop_back();
                 }

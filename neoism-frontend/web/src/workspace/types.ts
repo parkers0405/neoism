@@ -42,6 +42,7 @@ export interface ClosePtyArgs {
 
 export interface AttachPtyArgs {
   session_id: string;
+  cursor?: number | null;
 }
 
 export type ClientMessage =
@@ -70,6 +71,7 @@ export interface PtyCreatedArgs {
 export interface PtyOutputArgs {
   session_id: string;
   bytes: number[];
+  offset?: number | null;
 }
 
 export interface PtyClosedArgs {

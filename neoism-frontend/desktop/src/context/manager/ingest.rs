@@ -252,9 +252,26 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         session_id: Option<&str>,
         message: &str,
         class: crate::daemon_client::PtyFailureClass,
+        operation: crate::daemon_client::PtyFailureOperation,
     ) -> bool {
+        if class == crate::daemon_client::PtyFailureClass::NotDelivered {
+            // This is a delayed local rejection, not a new disconnect. An
+            // AttachPty reply may already have made the binding writable.
+            if operation != crate::daemon_client::PtyFailureOperation::CommandInput {
+                return false;
+            }
+            let Some(route_id) = session_id
+                .and_then(|id| self.daemon.cache.session_routes.get(id).copied())
+                .filter(|route| self.route_uses_attached_daemon(*route))
+            else { return false; };
+            return self.get_by_route_id(route_id).is_some_and(|item| {
+                item.context_mut().terminal_input.interrupt_running_command()
+            });
+        }
         if class == crate::daemon_client::PtyFailureClass::Transport {
-            return self.gate_remote_pty_transport_loss(request_id, session_id, message);
+            return self.gate_remote_pty_transport_loss(
+                request_id, session_id, message, operation,
+            );
         }
         let attached = self
             .daemon
@@ -288,6 +305,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         if !self.route_uses_attached_daemon(route_id) {
             tracing::warn!(target: "neoism::remote_pty", request_id, route_id, ?session_id, %message, "ignoring remote PTY error from non-owning endpoint");
             return false;
+        }
+        if matches!(
+            operation,
+            crate::daemon_client::PtyFailureOperation::CommandInput
+                | crate::daemon_client::PtyFailureOperation::Create
+        ) {
+            if let Some(item) = self.get_by_route_id(route_id) {
+                item.context_mut()
+                    .terminal_input
+                    .interrupt_running_command();
+            }
         }
         self.daemon.cache.pending_pty_attaches.remove(&request_id);
         self.daemon.cache.pending_pty_routes.remove(&request_id);
@@ -327,7 +355,21 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         request_id: u64,
         session_id: Option<&str>,
         message: &str,
+        operation: crate::daemon_client::PtyFailureOperation,
     ) -> bool {
+        let request_route = self
+            .daemon
+            .cache
+            .pending_pty_routes
+            .get(&request_id)
+            .copied()
+            .or_else(|| {
+                self.daemon
+                    .cache
+                    .pending_pty_attaches
+                    .get(&request_id)
+                    .map(|(route, _)| *route)
+            });
         self.daemon.cache.pending_pty_attaches.remove(&request_id);
         self.daemon.cache.pending_pty_routes.remove(&request_id);
         let Some((handle, runtime)) = self
@@ -345,6 +387,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .remote_routes
             .iter()
             .filter_map(|(route_id, binding)| {
+                if request_route.is_some_and(|wanted| wanted != *route_id) {
+                    return None;
+                }
                 if !self.route_uses_attached_daemon(*route_id) {
                     return None;
                 }
@@ -368,7 +413,20 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 Some((*route_id, session, binding.clone()))
             })
             .collect::<Vec<_>>();
-        for (_route_id, session, binding) in routes {
+        let mut interrupted = false;
+        for (route_id, session, binding) in routes {
+            if matches!(
+                operation,
+                crate::daemon_client::PtyFailureOperation::CommandInput
+                    | crate::daemon_client::PtyFailureOperation::Create
+            ) {
+                if let Some(item) = self.get_by_route_id(route_id) {
+                    interrupted |= item
+                        .context_mut()
+                        .terminal_input
+                        .interrupt_running_command();
+                }
+            }
             let generation = self.daemon.link.as_ref().and_then(|link| link.generation());
             crate::context::remote_pty::await_attach_for_generation(
                 &binding,
@@ -388,7 +446,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 "gating remote PTY input after transport loss; session identity preserved"
             );
         }
-        false
+        interrupted
     }
 
     pub fn apply_pty_server_message(
@@ -500,7 +558,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             // 8A: daemon shell output → the owning pane's parser. The
             // feed lands on the same corcovado channel a local PTY
             // reader fills, so the Machine consumes it unchanged.
-            PtyServerMessage::PtyOutput { session_id, bytes } => {
+            PtyServerMessage::PtyOutput {
+                session_id,
+                bytes,
+                offset,
+            } => {
                 let Some(route_id) =
                     self.daemon.cache.session_routes.get(&session_id).copied()
                 else {
@@ -512,6 +574,16 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 let Some(binding) = self.daemon.cache.remote_routes.get(&route_id) else {
                     return false;
                 };
+                let (bytes, gap) =
+                    crate::context::remote_pty::accept_output(binding, offset, bytes);
+                if gap {
+                    let _ = binding.feed.push_output(
+                        b"\r\n[Neoism: some terminal output was unavailable while disconnected]\r\n".to_vec(),
+                    );
+                }
+                if bytes.is_empty() {
+                    return gap;
+                }
                 if !binding.feed.push_output(bytes) {
                     // Consumer gone (tab closed) — drop the binding.
                     self.daemon.cache.remote_routes.remove(&route_id);
@@ -543,6 +615,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 None,
                 &message,
                 crate::daemon_client::PtyFailureClass::Terminal,
+                crate::daemon_client::PtyFailureOperation::CommandInput,
             ),
         }
     }

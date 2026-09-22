@@ -1,3 +1,20 @@
+#[test]
+fn delivery_unknown_interrupts_running_block_without_inventing_success() {
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("ls");
+    input.submit();
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+    assert!(input.interrupt_running_command());
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Interrupted
+    );
+    assert!(!input.interrupt_running_command());
+}
+
 use super::super::chrome::{
     compose_block_chrome, compose_block_chrome_window, COMMAND_BLOCK_CHROME_ROWS,
 };

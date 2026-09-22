@@ -601,9 +601,11 @@ impl NeoismAgentPane {
             }
             return;
         }
-        let selected_navigation = self.pending_session_switch.as_deref()
-            == Some(session_id.as_str());
-        if self.session_preloads_in_flight.len() >= MAX_CONCURRENT_PRELOADS && !selected_navigation {
+        let selected_navigation =
+            self.pending_session_switch.as_deref() == Some(session_id.as_str());
+        if self.session_preloads_in_flight.len() >= MAX_CONCURRENT_PRELOADS
+            && !selected_navigation
+        {
             let request = (session_id.clone(), force);
             if force {
                 if self.session_preload_queue.len() >= MAX_QUEUED_PRELOADS {
@@ -631,23 +633,33 @@ impl NeoismAgentPane {
         let spawn = thread::Builder::new()
             .name(format!("neoism-agent-preload-{thread_session_id}"))
             .spawn(move || {
-                let update = fetch_session_state(&server, &thread_session_id)
-                    .and_then(|state| {
+                // Metadata and history are independent. Fetch them concurrently
+                // so a joined client pays one host-proxy round trip rather than
+                // waiting for two sequential remote responses.
+                let preload = thread::scope(|scope| {
+                    let messages = scope.spawn(|| {
                         fetch_session_messages_page(
                             &server,
                             &thread_session_id,
                             None,
                             100,
                         )
-                        .map(|page| {
-                            NeoismAgentBackgroundUpdate::SessionPreloaded {
-                                session_id: thread_session_id.clone(),
-                                state,
-                                messages: page.blocks,
-                                oldest_cursor: page.oldest_cursor,
-                            }
-                        })
-                    })
+                    });
+                    let state = fetch_session_state(&server, &thread_session_id);
+                    let messages = messages
+                        .join()
+                        .map_err(|_| "Session history worker failed".to_string())?;
+                    state.and_then(|state| messages.map(|page| (state, page)))
+                });
+                let update = preload
+                    .map(
+                        |(state, page)| NeoismAgentBackgroundUpdate::SessionPreloaded {
+                            session_id: thread_session_id.clone(),
+                            state,
+                            messages: page.blocks,
+                            oldest_cursor: page.oldest_cursor,
+                        },
+                    )
                     .unwrap_or_else(|error| {
                         NeoismAgentBackgroundUpdate::SessionPreloadFailed {
                             session_id: thread_session_id,

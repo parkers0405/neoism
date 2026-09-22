@@ -181,7 +181,7 @@ fn home_daemon_does_not_own_joined_workspace_routes() {
 #[test]
 fn wrong_endpoint_unknown_session_cannot_close_joined_terminal() {
     use crate::context::remote_pty;
-    use crate::daemon_client::PtyFailureClass;
+    use crate::daemon_client::{PtyFailureClass, PtyFailureOperation};
 
     let mut manager =
         ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
@@ -233,6 +233,7 @@ fn wrong_endpoint_unknown_session_cannot_close_joined_terminal() {
         Some("peer-session"),
         "unknown session peer-session",
         PtyFailureClass::Terminal,
+        PtyFailureOperation::Attach,
     ));
     assert!(manager.daemon.cache.remote_routes.contains_key(&route_id));
     assert_eq!(
@@ -848,7 +849,7 @@ fn remote_attach_error_invalidates_binding_and_late_success_cannot_revive_it() {
 #[test]
 fn transport_loss_gates_input_without_killing_session_identity() {
     use crate::context::remote_pty;
-    use crate::daemon_client::PtyFailureClass;
+    use crate::daemon_client::{PtyFailureClass, PtyFailureOperation};
     let mut manager =
         ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
             .unwrap();
@@ -888,6 +889,7 @@ fn transport_loss_gates_input_without_killing_session_identity() {
         Some("live-shell"),
         "connection lost before PTY acknowledgment",
         PtyFailureClass::Transport,
+        PtyFailureOperation::Resize,
     ));
     assert_eq!(
         manager
@@ -922,6 +924,33 @@ fn transport_loss_gates_input_without_killing_session_identity() {
         ) || manager.daemon.cache.pending_pty_attaches.is_empty()
     );
     pty.close();
+}
+
+#[test]
+fn delayed_local_rejection_does_not_gate_validated_attach() {
+    use crate::context::remote_pty;
+    use crate::daemon_client::{PtyFailureClass, PtyFailureOperation};
+    let mut manager = ContextManager::start_with_capacity(
+        5, VoidListener {}, WindowId::from(0),
+    ).unwrap();
+    let runtime = attach_unconnected_daemon(&mut manager);
+    let (handle, _) = manager.daemon.link.as_ref().unwrap()
+        .handle_and_runtime().unwrap();
+    let prepared = remote_pty::prepare(handle.clone(), runtime.handle().clone());
+    let (_pty, feed) = neoism_terminal_pty::PtySession::remote(prepared.sink);
+    let binding = remote_pty::RemotePtyBinding { feed, shared: prepared.shared };
+    remote_pty::bind_session(&binding, "validated-shell", handle, runtime.handle().clone());
+    manager.daemon.cache.remote_routes.insert(42, binding.clone());
+    manager.daemon.cache.route_sessions.insert(42, "validated-shell".into());
+    manager.daemon.cache.session_routes.insert("validated-shell".into(), 42);
+    manager.apply_remote_pty_failure(
+        7, Some("validated-shell"),
+        "not delivered: remote session is awaiting attach validation",
+        PtyFailureClass::NotDelivered, PtyFailureOperation::CommandInput,
+    );
+    let shared = binding.shared.lock().unwrap();
+    assert_eq!(shared.session_id.as_deref(), Some("validated-shell"));
+    assert!(shared.awaiting_attach.is_none());
 }
 
 #[test]

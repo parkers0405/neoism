@@ -399,7 +399,7 @@ impl Application<'_> {
                                 .window
                                 .screen
                                 .context_manager
-                                .begin_daemon_generation_gate(generation);
+                                .resync_after_daemon_reconnect(generation);
                         } else {
                             route
                                 .window
@@ -500,6 +500,7 @@ impl Application<'_> {
                         session_id,
                         message,
                         class,
+                        operation,
                     } => {
                         if let Some(route) = self.router.routes.get_mut(&window_id) {
                             if route.window.screen.context_manager.daemon_endpoint()
@@ -515,8 +516,8 @@ impl Application<'_> {
                                 );
                                 continue;
                             }
-                            if class == PtyFailureClass::Transport {
-                                route
+                            if matches!(class, PtyFailureClass::Transport | PtyFailureClass::NotDelivered) {
+                                let interrupted = route
                                     .window
                                     .screen
                                     .context_manager
@@ -525,7 +526,19 @@ impl Application<'_> {
                                         session_id.as_deref(),
                                         &message,
                                         class,
+                                        operation,
                                     );
+                                if interrupted {
+                                    route.window.screen.renderer.notifications.push(
+                                        if class == PtyFailureClass::NotDelivered {
+                                            format!("Command not sent: {message}. Wait for the terminal to reconnect, then retry.")
+                                        } else {
+                                            format!("Remote command interrupted: {message}. Delivery/execution is unknown; nothing was replayed.")
+                                        },
+                                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                                    );
+                                }
+                                route.request_redraw();
                             } else if route
                                 .window
                                 .screen
@@ -535,6 +548,7 @@ impl Application<'_> {
                                     session_id.as_deref(),
                                     &message,
                                     class,
+                                    operation,
                                 )
                             {
                                 route.window.screen.renderer.notifications.push(

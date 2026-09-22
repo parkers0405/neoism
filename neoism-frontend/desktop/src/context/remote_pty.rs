@@ -40,6 +40,10 @@ pub struct RemoteRouteShared {
     /// Ops issued before initial creation, or safe geometry changes while
     /// awaiting attach. Reattach never retains queued input.
     pub queued: Vec<RemotePtyOp>,
+    /// Next absolute daemon output byte expected by this populated terminal.
+    /// Preserved across transport reconnects so attach can replay only the
+    /// missing suffix and live/replay races can be deduplicated.
+    pub output_cursor: Option<u64>,
     /// Transport currently serving this route. Quick SSH can recreate its
     /// local forward without recreating the pane or the daemon-owned shell;
     /// keeping the transport here lets that existing pane atomically move to
@@ -88,6 +92,7 @@ pub fn prepare(
         awaiting_attach: None,
         attach_generation: None,
         queued: Vec::new(),
+        output_cursor: None,
         transport: Some(RemotePtyTransport { handle, runtime }),
     }));
     let sink_shared = shared.clone();
@@ -173,6 +178,39 @@ pub fn prepare(
         }
     });
     PreparedRemotePty { sink, shared }
+}
+
+pub fn output_cursor(binding: &RemotePtyBinding) -> Option<u64> {
+    binding
+        .shared
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .output_cursor
+}
+
+/// Deduplicate cursor-addressed output. Returns bytes to feed and whether a
+/// retention gap preceded them. Offset-less output is from a legacy daemon and
+/// is passed through without pretending it participates in cursor recovery.
+pub fn accept_output(
+    binding: &RemotePtyBinding,
+    offset: Option<u64>,
+    mut bytes: Vec<u8>,
+) -> (Vec<u8>, bool) {
+    let Some(offset) = offset else {
+        return (bytes, false);
+    };
+    let mut guard = binding.shared.lock().unwrap_or_else(|e| e.into_inner());
+    let expected = guard.output_cursor.unwrap_or(offset);
+    let end = offset.saturating_add(bytes.len() as u64);
+    if end <= expected {
+        return (Vec::new(), false);
+    }
+    let gap = offset > expected;
+    if offset < expected {
+        bytes.drain(..(expected - offset) as usize);
+    }
+    guard.output_cursor = Some(end);
+    (bytes, gap)
 }
 
 /// Called when the daemon's `PtyCreated` lands for this route: record

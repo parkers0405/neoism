@@ -96,6 +96,7 @@ export interface TailnetPeer {
   hostname: string;
   ip: string;
   online: boolean;
+  daemon_urls?: string[];
 }
 
 /** One candidate workplace surfaced by Tailscale discovery. The host
@@ -184,11 +185,6 @@ export type WorkplaceListener = (
  *  preferred-default hint. */
 const STORAGE_KEY = "neoism.workplaces.v1";
 
-/** Default daemon WebSocket port — matches `crate::main` in
- *  `neoism-workspace-daemon`. The web side builds candidate URLs from
- *  `{ip, port: DAEMON_WS_PORT, path: "/session"}` because the
- *  `/tailnet-peers` endpoint only returns hostnames + IPs. */
-const DAEMON_WS_PORT = 7878;
 
 /**
  * Tailscale discovery surface. Pure-data: holds the most recent
@@ -1004,24 +1000,23 @@ export class WorkplaceService {
     }
     const added: DiscoveredWorkplace[] = [];
     for (const peer of peers) {
-      const id = `tailscale:${peer.hostname}@${peer.ip}`;
-      if (this.discovered.has(id)) {
-        // Refresh the cached entry's "online" flag without changing
-        // the identity — the switcher can re-render to dim offline
-        // peers without losing click-to-add affordances.
-        const existing = this.discovered.get(id)!;
-        existing.peer = peer;
-        continue;
+      for (const url of peer.daemon_urls ?? []) {
+        const id = `tailscale:${peer.hostname}@${url}`;
+        const existing = this.discovered.get(id);
+        if (existing) {
+          existing.peer = peer;
+          continue;
+        }
+        const entry: DiscoveredWorkplace = {
+          id,
+          label: `${peer.hostname} :${new URL(url).port}`,
+          url,
+          transport: "tailscale",
+          peer,
+        };
+        this.discovered.set(id, entry);
+        added.push(entry);
       }
-      const entry: DiscoveredWorkplace = {
-        id,
-        label: peer.hostname,
-        url: peerToDaemonUrl(peer),
-        transport: "tailscale",
-        peer,
-      };
-      this.discovered.set(id, entry);
-      added.push(entry);
     }
     this.emit({ kind: "discovered", entries: this.listDiscovered() });
     return { added, total: peers.length };
@@ -1441,10 +1436,7 @@ export function tailnetPeersUrlFromDaemonUrl(
  * whereas the tailnet IP is always reachable on a routable tailnet.
  */
 export function peerToDaemonUrl(peer: TailnetPeer): string {
-  // Wrap IPv6 in brackets so the URL parser doesn't mistake the
-  // colons for a port separator.
-  const host = peer.ip.includes(":") ? `[${peer.ip}]` : peer.ip;
-  return `ws://${host}:${DAEMON_WS_PORT}/session`;
+  return peer.daemon_urls?.[0] ?? "";
 }
 
 /** Derive a stable id for a manually-typed workplace. We don't have a
@@ -1590,6 +1582,15 @@ function coerceTailnetPeers(body: unknown): TailnetPeer[] {
       hostname: rec.hostname,
       ip: rec.ip,
       online: typeof rec.online === "boolean" ? rec.online : false,
+      daemon_urls: Array.isArray(rec.daemon_urls) ? rec.daemon_urls.filter(
+        (value): value is string => {
+          if (typeof value !== "string") return false;
+          try {
+            const url = new URL(value);
+            return (url.protocol === "ws:" || url.protocol === "wss:") && !url.username && !url.password;
+          } catch { return false; }
+        },
+      ) : [],
     });
   }
   return out;

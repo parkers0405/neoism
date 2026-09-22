@@ -394,8 +394,9 @@ pub(crate) async fn handle_socket(
                             return;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        unreachable!("targeted PTY subscriptions do not drop messages")
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "PTY subscriber overflow; disconnecting for cursor replay");
+                        return;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return;
@@ -768,7 +769,8 @@ pub(crate) async fn handle_socket(
                         pty_subscriptions.insert(session_id.clone());
                         output_rx.subscribe(session_id.clone());
                     }
-                    let mut replies = registry.handle_subscribed(message, Some(&output_rx));
+                    let mut replies =
+                        registry.handle_subscribed(message, Some(&output_rx));
                     if replies.is_empty() {
                         replies.push(ServerMessage::Ack);
                     }
@@ -1765,7 +1767,7 @@ fn pty_client_session_id(message: &ClientMessage) -> Option<&str> {
         ClientMessage::PtyInput { session_id, .. }
         | ClientMessage::Resize { session_id, .. }
         | ClientMessage::ClosePty { session_id }
-        | ClientMessage::AttachPty { session_id } => Some(session_id),
+        | ClientMessage::AttachPty { session_id, .. } => Some(session_id),
         ClientMessage::CreatePty { .. } => None,
     }
 }
@@ -1813,10 +1815,12 @@ mod pty_subscription_tests {
         let owned = ServerMessage::PtyOutput {
             session_id: "owned".into(),
             bytes: b"ok".to_vec(),
+            offset: Some(0),
         };
         let noisy_other = ServerMessage::PtyOutput {
             session_id: "other".into(),
             bytes: vec![b'x'; 4096],
+            offset: Some(0),
         };
         assert!(subscriptions.contains(pty_message_session_id(&owned).unwrap()));
         assert!(!subscriptions.contains(pty_message_session_id(&noisy_other).unwrap()));
@@ -1929,7 +1933,17 @@ where
     let payload = serde_json::to_string(msg).map_err(|e| {
         axum::Error::new(std::io::Error::new(std::io::ErrorKind::Other, e))
     })?;
-    sink.send(Message::Text(payload)).await
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        sink.send(Message::Text(payload)),
+    )
+    .await
+    .map_err(|_| {
+        axum::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "websocket send timed out",
+        ))
+    })?
 }
 
 /// Run the compiled-in tree-sitter grammars over `text` and map the

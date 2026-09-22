@@ -3,7 +3,7 @@
 //! The workspace daemon exposes `GET /tailnet-peers` (see
 //! `neoism_workspace_daemon::tailnet`), which shells out to
 //! `tailscale status --json` on the daemon's machine and returns
-//! `{ peers: [{ hostname, ip, online }] }`. This module:
+//! `{ peers: [{ hostname, ip, online, daemon_urls }] }`. This module:
 //!
 //!   1. fetches that endpoint over whichever transport the desktop's
 //!      daemon connection already uses (unix socket for the embedded
@@ -16,8 +16,7 @@
 //!
 //! Dragging a workspace onto one of these peer headers emits the same
 //! `MoveWorkspaceToHost` intent as a drop on a known remote host; the
-//! peer's candidate daemon URL (`ws://<ip>:7878/session`, mirroring the
-//! web frontend's `peerToDaemonUrl`) feeds 5D-wire's
+//! peer's host-advertised daemon URL feeds 5D-wire's
 //! `POST /workspace/promote` as-is.
 
 use std::collections::HashSet;
@@ -40,11 +39,6 @@ pub use neoism_workspace_daemon::tailnet::TailnetPeer;
 use neoism_workspace_daemon::tailnet::TailnetPeersResponse;
 
 use super::{DaemonClientError, DaemonEndpoint, Result};
-
-/// Default daemon websocket port — matches `neoism-workspace-daemon`'s
-/// CLI default and the web frontend's `DAEMON_WS_PORT`. `/tailnet-peers`
-/// only reports hostnames + IPs, so candidate URLs assume this port.
-pub const DAEMON_WS_PORT: u16 = 7878;
 
 /// Minimum spacing between two `/tailnet-peers` fetches. Each request
 /// makes the daemon shell out to `tailscale status`, so palette
@@ -79,18 +73,6 @@ impl TailnetPeersCache {
     }
 }
 
-/// Candidate daemon URL for a discovered peer: `ws://<ip>:7878/session`
-/// (IPv6 addresses get bracketed). Mirrors the web frontend's
-/// `peerToDaemonUrl` so both clients dial peers identically.
-pub fn peer_daemon_url(ip: &str) -> String {
-    let ip = ip.trim();
-    if ip.contains(':') {
-        format!("ws://[{ip}]:{DAEMON_WS_PORT}/session")
-    } else {
-        format!("ws://{ip}:{DAEMON_WS_PORT}/session")
-    }
-}
-
 /// Host part of a dialable daemon URL (`ws://100.64.0.2:7878/session`
 /// → `100.64.0.2`), lowercased for set membership. `None` for
 /// unparseable URLs.
@@ -119,21 +101,29 @@ pub fn daemon_url_host(daemon_url: &str) -> Option<String> {
 /// switcher).
 pub fn tailnet_peer_palette_hosts(
     peers: &[TailnetPeer],
-    existing_labels: &HashSet<String>,
-    existing_url_hosts: &HashSet<String>,
+    existing_urls: &HashSet<String>,
 ) -> Vec<PaletteHostEntry> {
     peers
         .iter()
-        .filter(|peer| !existing_labels.contains(&peer.hostname.to_lowercase()))
-        .filter(|peer| !existing_url_hosts.contains(&peer.ip.to_lowercase()))
-        .map(|peer| PaletteHostEntry {
-            // `tailnet:`-prefixed so a peer id can never collide with a
-            // daemon host id in the tree.
-            host_id: format!("tailnet:{}", peer.hostname),
-            label: peer.hostname.clone(),
-            kind: HostKind::Remote,
-            daemon_url: Some(peer_daemon_url(&peer.ip)),
-            online: peer.online,
+        .flat_map(|peer| {
+            peer.daemon_urls.iter().filter_map(move |daemon_url| {
+                let normalized = daemon_url.trim().trim_end_matches('/').to_lowercase();
+                if existing_urls.contains(&normalized) {
+                    return None;
+                }
+                let label = url::Url::parse(daemon_url)
+                    .ok()
+                    .and_then(|url| url.port().map(|port| format!("{} :{port}", peer.hostname)))
+                    .unwrap_or_else(|| peer.hostname.clone());
+                Some(PaletteHostEntry {
+                    // Include the endpoint: one machine can host multiple servers.
+                    host_id: format!("tailnet:{}@{}", peer.hostname, daemon_url),
+                    label,
+                    kind: HostKind::Remote,
+                    daemon_url: Some(daemon_url.clone()),
+                    online: peer.online,
+                })
+            })
         })
         .collect()
 }
@@ -178,10 +168,26 @@ pub async fn probe_daemon_peers(peers: Vec<TailnetPeer>) -> Vec<TailnetPeer> {
         if !peer.online {
             return None;
         }
-        let connect = TcpStream::connect((peer.ip.as_str(), DAEMON_WS_PORT));
-        match tokio::time::timeout(DAEMON_PROBE_TIMEOUT, connect).await {
-            Ok(Ok(_stream)) => Some(peer),
-            _ => None,
+        let endpoint_probes = peer.daemon_urls.clone().into_iter().map(|endpoint| async move {
+            let url = url::Url::parse(&endpoint).ok()?;
+            let host = url.host_str()?.to_string();
+            let port = url.port_or_known_default()?;
+            let connect = TcpStream::connect((host.as_str(), port));
+            match tokio::time::timeout(DAEMON_PROBE_TIMEOUT, connect).await {
+                Ok(Ok(_stream)) => Some(endpoint),
+                _ => None,
+            }
+        });
+        let mut peer = peer;
+        peer.daemon_urls = futures::future::join_all(endpoint_probes)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        if peer.daemon_urls.is_empty() {
+            None
+        } else {
+            Some(peer)
         }
     });
     futures::future::join_all(probes)
@@ -191,8 +197,11 @@ pub async fn probe_daemon_peers(peers: Vec<TailnetPeer>) -> Vec<TailnetPeer> {
         .collect()
 }
 
-pub async fn fetch_peer_workspace_tree(peer: &TailnetPeer) -> Result<PeerWorkspaceTree> {
-    let url = peer_daemon_url(&peer.ip);
+pub async fn fetch_peer_workspace_tree(
+    peer: &TailnetPeer,
+    endpoint: &str,
+) -> Result<PeerWorkspaceTree> {
+    let url = endpoint.to_string();
     let fetch = async move {
         let (mut ws, _) = connect_async(&url).await.map_err(|error| {
             DaemonClientError::InvalidEndpoint {
@@ -237,7 +246,7 @@ pub async fn fetch_peer_workspace_tree(peer: &TailnetPeer) -> Result<PeerWorkspa
                         .into_iter()
                         .map(|mut host| {
                             if host.daemon_url.is_none() {
-                                host.daemon_url = Some(peer_daemon_url(&peer.ip));
+                                host.daemon_url = Some(url.clone());
                             }
                             host
                         })
@@ -258,7 +267,7 @@ pub async fn fetch_peer_workspace_tree(peer: &TailnetPeer) -> Result<PeerWorkspa
     tokio::time::timeout(PEER_TREE_TIMEOUT, fetch)
         .await
         .map_err(|_| DaemonClientError::InvalidEndpoint {
-            input: peer_daemon_url(&peer.ip),
+            input: endpoint.to_string(),
             reason: "peer workspace tree request timed out".to_string(),
         })?
 }
@@ -421,19 +430,8 @@ mod tests {
             hostname: hostname.to_string(),
             ip: ip.to_string(),
             online,
+            daemon_urls: Vec::new(),
         }
-    }
-
-    #[test]
-    fn peer_daemon_url_handles_v4_and_v6() {
-        assert_eq!(
-            peer_daemon_url("100.64.0.7"),
-            "ws://100.64.0.7:7878/session"
-        );
-        assert_eq!(
-            peer_daemon_url("fd7a::abc"),
-            "ws://[fd7a::abc]:7878/session"
-        );
     }
 
     #[test]
@@ -451,47 +449,43 @@ mod tests {
 
     #[test]
     fn peers_become_remote_drop_target_hosts() {
+        let mut pi = peer("pi", "100.64.0.7", true);
+        pi.daemon_urls = vec![
+            "ws://100.64.0.7:7878/session".into(),
+            "ws://100.64.0.7:9879/session".into(),
+        ];
+        let mut nas = peer("nas", "100.64.0.9", false);
+        nas.daemon_urls = vec!["ws://100.64.0.9:9910/session".into()];
         let hosts = tailnet_peer_palette_hosts(
-            &[
-                peer("pi", "100.64.0.7", true),
-                peer("nas", "100.64.0.9", false),
-            ],
-            &HashSet::new(),
+            &[pi, nas],
             &HashSet::new(),
         );
-        assert_eq!(hosts.len(), 2);
-        assert_eq!(hosts[0].host_id, "tailnet:pi");
-        assert_eq!(hosts[0].label, "pi");
+        assert_eq!(hosts.len(), 3);
+        assert_eq!(hosts[0].label, "pi :7878");
         assert_eq!(hosts[0].kind, HostKind::Remote);
         assert_eq!(
             hosts[0].daemon_url.as_deref(),
             Some("ws://100.64.0.7:7878/session")
         );
         assert!(hosts[0].online);
-        // Offline peers stay listed (dimmed + non-droppable downstream).
-        assert!(!hosts[1].online);
+        assert_eq!(hosts[1].daemon_url.as_deref(), Some("ws://100.64.0.7:9879/session"));
+        // Offline advertised endpoints stay listed (dimmed downstream).
+        assert!(!hosts[2].online);
     }
 
     #[test]
-    fn peers_matching_known_labels_or_urls_are_deduped() {
-        let labels: HashSet<String> = ["mac".to_string()].into_iter().collect();
-        let url_hosts: HashSet<String> = ["100.64.0.9".to_string()].into_iter().collect();
-        let hosts = tailnet_peer_palette_hosts(
-            &[
-                // Same machine as the registered `mac` host (label match,
-                // case-insensitive).
-                peer("Mac", "100.64.0.2", true),
-                // Same machine as a host whose daemon_url already dials
-                // this IP.
-                peer("nas", "100.64.0.9", true),
-                // Genuinely new.
-                peer("pi", "100.64.0.7", true),
-            ],
-            &labels,
-            &url_hosts,
-        );
+    fn peers_dedupe_exact_endpoints_not_whole_machines() {
+        let mut pi = peer("pi", "100.64.0.7", true);
+        pi.daemon_urls = vec![
+            "ws://100.64.0.7:7878/session".into(),
+            "ws://100.64.0.7:9879/session".into(),
+        ];
+        let existing = ["ws://100.64.0.7:7878/session".to_string()]
+            .into_iter()
+            .collect();
+        let hosts = tailnet_peer_palette_hosts(&[pi], &existing);
         assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].label, "pi");
+        assert_eq!(hosts[0].daemon_url.as_deref(), Some("ws://100.64.0.7:9879/session"));
     }
 
     #[test]
@@ -522,12 +516,13 @@ mod tests {
     fn daemon_wire_shape_round_trips() {
         // Guard against drift between the daemon's `TailnetPeersResponse`
         // and what this client expects to deserialize.
-        let raw = r#"{"peers":[{"hostname":"pi","ip":"100.64.0.7","online":true}]}"#;
+        let raw = r#"{"peers":[{"hostname":"pi","ip":"100.64.0.7","online":true,"daemon_urls":["ws://100.64.0.7:9879/session"]}]}"#;
         let parsed: TailnetPeersResponse = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.peers.len(), 1);
         assert_eq!(parsed.peers[0].hostname, "pi");
         assert_eq!(parsed.peers[0].ip, "100.64.0.7");
         assert!(parsed.peers[0].online);
+        assert_eq!(parsed.peers[0].daemon_urls, ["ws://100.64.0.7:9879/session"]);
     }
 
     /// End-to-end over a real unix socket: spin up the embedded daemon

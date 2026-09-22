@@ -790,6 +790,14 @@ mod subagent_runtime_snapshot_tests {
     }
 
     #[test]
+    fn authenticated_joined_endpoint_skips_redundant_readiness_probe() {
+        let server = "http://127.0.0.1:1/agent/workspaces/readiness-test";
+        register_agent_server_credential(server, Some("pair-secret"));
+        assert!(ensure_request_server_ready(server).is_ok());
+        register_agent_server_credential(server, None);
+    }
+
+    #[test]
     fn final_runtime_snapshot_promotes_new_tree_child_to_running() {
         // Tree discovery initially has no matching status. The status
         // snapshot captured after discovery must promote the child before the
@@ -1254,39 +1262,18 @@ fn message_blocks_from_response(
 }
 
 /// Worker-thread readiness. The startup owner handles uncredentialed/local
-/// endpoints. A joined host's health route is authenticated just like its API:
-/// use the same transport and registered bearer credential as the real request,
-/// rather than rejecting a healthy host with an anonymous health probe.
+/// endpoints. Joined endpoints are already reached through an authenticated
+/// reverse proxy, and the real request is the authoritative readiness and
+/// access check. A separate health request adds a full proxy round trip and can
+/// time out while the authorized history request would succeed.
 fn ensure_request_server_ready(server: &str) -> Result<(), String> {
-    if agent_server_credential(server).is_none() {
-        crate::agent_server::ensure_started_for_request(server)?;
-        #[cfg(target_os = "linux")]
-        crate::app::agent_tray::register_ready_local_endpoint(server);
+    if agent_server_credential(server).is_some() {
         return Ok(());
     }
-    let response = http_request(
-        server,
-        "GET",
-        "/v2/health",
-        None,
-        Duration::from_millis(500),
-    )
-    .map_err(|_| {
-        "The selected authenticated agent endpoint is not ready or access was denied"
-            .to_string()
-    })?;
-    let value = response_json(response)?.unwrap_or(Value::Null);
-    if value["healthy"] == true
-        && value["version"]
-            .as_str()
-            .is_some_and(|version| !version.is_empty())
-        && (value["providerCredentialStore"].is_string()
-            || value["provider_credential_store"].is_string())
-    {
-        Ok(())
-    } else {
-        Err("The selected endpoint did not return a valid agent health response".into())
-    }
+    crate::agent_server::ensure_started_for_request(server)?;
+    #[cfg(target_os = "linux")]
+    crate::app::agent_tray::register_ready_local_endpoint(server);
+    Ok(())
 }
 
 pub(super) fn api_request_json(

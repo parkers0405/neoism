@@ -526,6 +526,9 @@ impl TerminalInputBuffer {
                     TerminalCommandBlockStatus::Finished {
                         exit_code: Some(code),
                     } => BlockStatusKind::Error(code),
+                    TerminalCommandBlockStatus::Interrupted => {
+                        BlockStatusKind::Interrupted
+                    }
                 },
                 favorite: favorites.contains(&block.command),
                 output_start_row: block.output_start_row,
@@ -539,6 +542,20 @@ impl TerminalInputBuffer {
             .last()
             .filter(|block| matches!(block.status, TerminalCommandBlockStatus::Running))
             .is_some_and(|block| command_prefers_hidden_cursor(&block.command))
+    }
+
+    /// Stop the active timer without claiming an exit status. Used only when
+    /// transport delivery of submitted remote input is unknown or rejected.
+    pub fn interrupt_running_command(&mut self) -> bool {
+        let Some(block) = self.command_blocks.last_mut() else {
+            return false;
+        };
+        if !matches!(block.status, TerminalCommandBlockStatus::Running) {
+            return false;
+        }
+        block.status = TerminalCommandBlockStatus::Interrupted;
+        block.finished_at = Some(Instant::now());
+        true
     }
 
     /// Burst-animation phase for the chevron lock-in effect, in

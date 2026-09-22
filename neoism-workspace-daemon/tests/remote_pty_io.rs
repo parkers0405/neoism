@@ -269,6 +269,7 @@ async fn recv_marker_for_session(
             PtyServerMessage::PtyOutput {
                 session_id: got_id,
                 bytes,
+                ..
             } => {
                 assert_eq!(
                     got_id, session_id,
@@ -476,6 +477,84 @@ async fn correlated_create_is_acknowledged_only_to_requester() {
     close(client_b).await;
 }
 
+/// Verify execution, not PTY echo, and replay the disconnected suffix only.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn multiplayer_ls_reconnect_replays_only_missing_output() {
+    let _g = EnvGuard::new(&[
+        ("NEOISM_REQUIRE_AUTH", None),
+        ("NEOISM_DAEMON_TOKEN", None),
+        ("SHELL", Some("/bin/sh")),
+    ]);
+    let directory = tempfile::tempdir().unwrap();
+    let filename = "multiplayer_actual_ls_file_73ac";
+    std::fs::write(directory.path().join(filename), b"fixture").unwrap();
+    let daemon = Daemon::spawn().await;
+    let mut host = connect_client(daemon.addr).await;
+    send_pty(&mut host, &PtyClientMessage::CreatePty {
+        cwd: Some(directory.path().to_string_lossy().into_owned()),
+        cols: 100,
+        rows: 24,
+        shell: Some("/bin/sh".into()),
+    }).await;
+    let session_id = recv_pty_created(&mut host, Duration::from_secs(5)).await.unwrap();
+    let mut guest = connect_client(daemon.addr).await;
+    send_pty(&mut guest, &PtyClientMessage::AttachPty {
+        session_id: session_id.clone(), cursor: None,
+    }).await;
+    // Neither the filename nor the literal OSC completion appears in input.
+    send_pty(&mut host, &PtyClientMessage::PtyInput {
+        session_id: session_id.clone(),
+        bytes: b"stty -echo; ls; printf '\\033]133;D;0\\007'\n".to_vec(),
+    }).await;
+    let host_output = recv_marker_for_session(
+        &mut host, &session_id, b"\x1b]133;D;0\x07", Duration::from_secs(8),
+    ).await.expect("host receives command completion");
+    assert!(host_output.windows(filename.len()).any(|w| w == filename.as_bytes()));
+    let mut cursor = 0;
+    let mut guest_output = Vec::new();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if let Some(PtyServerMessage::PtyOutput { session_id: received, bytes, offset }) =
+                recv_pty_timeout(&mut guest, Duration::from_secs(5)).await
+            {
+                assert_eq!(received, session_id);
+                let offset = offset.expect("new daemon supplies output cursor");
+                cursor = offset + bytes.len() as u64;
+                guest_output.extend(bytes);
+                if guest_output.windows(10).any(|w| w == b"\x1b]133;D;0\x07") { break; }
+            }
+        }
+    }).await.expect("guest receives same execution completion");
+    assert!(guest_output.windows(filename.len()).any(|w| w == filename.as_bytes()));
+    close(guest).await;
+    send_pty(&mut host, &PtyClientMessage::PtyInput {
+        session_id: session_id.clone(),
+        bytes: b"printf x >> execution-count; ls; printf '\\033]133;D;0\\007'\n".to_vec(),
+    }).await;
+    recv_marker_for_session(&mut host, &session_id, b"\x1b]133;D;0\x07", Duration::from_secs(8))
+        .await.expect("host continues while guest disconnected");
+    let mut guest = connect_client(daemon.addr).await;
+    send_pty(&mut guest, &PtyClientMessage::AttachPty {
+        session_id: session_id.clone(), cursor: Some(cursor),
+    }).await;
+    let replay = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if let Some(PtyServerMessage::PtyOutput { bytes, offset, .. }) =
+                recv_pty_timeout(&mut guest, Duration::from_secs(5)).await
+            {
+                assert_eq!(offset, Some(cursor), "reconnect must not replay old bytes");
+                break bytes;
+            }
+        }
+    }).await.expect("guest receives missing suffix");
+    assert!(replay.windows(filename.len()).any(|w| w == filename.as_bytes()));
+    assert_eq!(std::fs::read(directory.path().join("execution-count")).unwrap(), b"x");
+    send_pty(&mut host, &PtyClientMessage::ClosePty { session_id }).await;
+    close(host).await;
+    close(guest).await;
+}
+
 /// Two independent websocket clients, one daemon, one live PTY.
 ///
 /// Flow (each step is a separate assertion the architecture must
@@ -485,8 +564,8 @@ async fn correlated_create_is_acknowledged_only_to_requester() {
 ///       the daemon-minted `session_id`.
 ///   A2. Client A writes input that deterministically echoes a marker;
 ///       A sees `PtyOutput` for `session_id` containing it.
-///   B1. Client B connects *afterwards* and — without ever creating a
-///       PTY — receives the retained backlog for A's session
+///   B1. Client B connects afterwards and explicitly attaches to A's PTY,
+///       receiving only that session's retained backlog
 ///       (`session_id`), proving the session is daemon-owned and shared.
 ///   B2. Client B writes input addressed to A's `session_id`; client A
 ///       sees the resulting output (B -> A live fan-out).
@@ -548,11 +627,18 @@ async fn two_clients_share_one_live_pty_bidirectional() {
 
     // --- B1: late-joining client B inherits the shared session --------
     // B connects only NOW, after output already exists. A per-socket
-    // registry would hand B an empty world; the daemon-owned registry
-    // replays the backlog for A's session. B never sends `CreatePty`,
-    // so the only way it can know `session_id` is if the session is
-    // genuinely shared.
+    // registry would hand B an empty world; explicit attach to the
+    // daemon-owned session replays its retained output without subscribing B
+    // to unrelated terminal traffic.
     let mut client_b = connect_client(daemon.addr).await;
+    send_pty(
+        &mut client_b,
+        &PtyClientMessage::AttachPty {
+            session_id: session_id.clone(),
+            cursor: None,
+        },
+    )
+    .await;
     recv_marker_for_session(
         &mut client_b,
         &session_id,

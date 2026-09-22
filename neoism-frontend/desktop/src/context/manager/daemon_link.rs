@@ -293,7 +293,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             self.daemon.cache.remote_routes.insert(route_id, binding);
             // Subscribe this websocket and request a one-shot retained replay
             // now that output has a route on the active grid.
-            link.send_pty(neoism_protocol::pty::ClientMessage::AttachPty { session_id });
+            link.send_pty(neoism_protocol::pty::ClientMessage::AttachPty {
+                session_id,
+                cursor: None,
+            });
         }
     }
 

@@ -162,6 +162,7 @@ pub fn router(state: AppState) -> Router {
         // `tailscale status --json`, or an empty list when the
         // binary is missing / errors. See `crate::tailnet`.
         .route("/tailnet-peers", get(tailnet_peers))
+        .route("/hosted-server-ports", get(hosted_server_ports))
         // Reverse proxy to this host's local Neoism Agent server
         // (127.0.0.1:4096). The agent-server binds loopback only, but
         // a GUEST in a shared workspace needs the HOST's chats/threads

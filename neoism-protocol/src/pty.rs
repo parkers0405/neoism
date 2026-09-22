@@ -31,6 +31,10 @@ pub enum ClientMessage {
     /// reconnect so the terminal need not wait for fresh output.
     AttachPty {
         session_id: String,
+        /// Next absolute output byte the client needs. `None` requests all
+        /// retained history (initial adoption / legacy clients).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<u64>,
     },
 }
 
@@ -54,6 +58,10 @@ pub enum ServerMessage {
     PtyOutput {
         session_id: String,
         bytes: Vec<u8>,
+        /// Absolute offset of `bytes[0]`. Missing only when talking to an
+        /// older daemon, in which case clients must retain legacy behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
     },
     PtyClosed {
         session_id: String,
@@ -169,6 +177,7 @@ mod tests {
         roundtrip_server(&ServerMessage::PtyOutput {
             session_id: "s-1".into(),
             bytes: vec![0, 1, 2, 255],
+            offset: Some(42),
         });
     }
 

@@ -226,6 +226,7 @@ interface PendingRequest {
 }
 
 export class ProtocolClient {
+  private readonly ptyOutputCursors = new Map<string, number>();
   private socket: WebSocket | null = null;
   private status: ProtocolStatus = "idle";
   /**
@@ -554,7 +555,12 @@ export class ProtocolClient {
   }
 
   attachPty(sessionId: string): boolean {
-    return this.send({ AttachPty: { session_id: sessionId } });
+    return this.send({
+      AttachPty: {
+        session_id: sessionId,
+        cursor: this.ptyOutputCursors.get(sessionId) ?? null,
+      },
+    });
   }
 
   sendInput(sessionId: string, bytes: Uint8Array): boolean {
@@ -907,6 +913,7 @@ export class ProtocolClient {
       case "PtyCreated":
       case "PtyOutput":
       case "PtyClosed":
+      case "SessionCwd":
       case "Error":
       case "FilesReply":
       case "GitReply":
@@ -934,12 +941,28 @@ export class ProtocolClient {
       return;
     }
     if (isPtyOutput(msg)) {
-      const { session_id, bytes } = msg.PtyOutput;
-      this.handlers.onPtyOutput?.(session_id, Uint8Array.from(bytes));
+      const { session_id, bytes, offset } = msg.PtyOutput;
+      if (typeof offset !== "number") {
+        this.handlers.onPtyOutput?.(session_id, Uint8Array.from(bytes));
+        return;
+      }
+      const expected = this.ptyOutputCursors.get(session_id) ?? offset;
+      const end = offset + bytes.length;
+      if (end <= expected) return;
+      if (offset > expected) {
+        this.handlers.onPtyOutput?.(
+          session_id,
+          new TextEncoder().encode("\r\n[Neoism: some terminal output was unavailable while disconnected]\r\n"),
+        );
+      }
+      const trim = Math.max(0, expected - offset);
+      this.ptyOutputCursors.set(session_id, end);
+      this.handlers.onPtyOutput?.(session_id, Uint8Array.from(bytes.slice(trim)));
       return;
     }
     if (isPtyClosed(msg)) {
       const { session_id, exit_code } = msg.PtyClosed;
+      this.ptyOutputCursors.delete(session_id);
       this.handlers.onPtyClosed?.(session_id, exit_code);
       return;
     }

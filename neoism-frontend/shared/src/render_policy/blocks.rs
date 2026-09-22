@@ -244,6 +244,7 @@ pub fn block_status_color_token(
         BlockStatusKind::Running => BlockStatusColorToken::Yellow,
         BlockStatusKind::Ok => BlockStatusColorToken::Green,
         BlockStatusKind::Error(_) => BlockStatusColorToken::Red,
+        BlockStatusKind::Interrupted => BlockStatusColorToken::Red,
     }
 }
 
@@ -257,6 +258,7 @@ pub fn block_status_glyph(
         BlockStatusKind::Running => None,
         BlockStatusKind::Ok => Some("\u{2022}"),
         BlockStatusKind::Error(_) => Some("\u{2022}"),
+        BlockStatusKind::Interrupted => Some("\u{00d7}"),
     }
 }
 

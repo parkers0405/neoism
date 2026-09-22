@@ -1,9 +1,9 @@
 //! Session registry backed by real PTYs (via `neoism-terminal-pty`).
 //!
-//! Each session owns a `PtySession` plus a reader task that pumps PTY
-//! output into a registry-wide broadcast channel. Every WebSocket
-//! connection subscribes to the same registry so PTY sessions survive
-//! client reconnects and can be viewed by multiple clients.
+//! Each session owns a `PtySession` plus a reader task that pumps PTY output
+//! only to connections subscribed to that session. PTYs still survive client
+//! reconnects and can be viewed by multiple clients, while unrelated noisy
+//! sessions cannot overflow a connection's output queue.
 //!
 //! ## Workspace-session vs PTY-session id
 //!
@@ -27,16 +27,18 @@
 //! respawn is just another `create` followed by a re-`link`. Agents
 //! resume from serialized state.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
 use neoism_protocol::pty::{ClientMessage, ServerMessage};
 use neoism_terminal_pty::{PtySession, PtySessionConfig};
-use parking_lot::Mutex;
-use tokio::sync::broadcast;
+use parking_lot::{Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 /// How long the reader task sleeps between empty (`Ok(0)`) reads. Small
@@ -52,7 +54,6 @@ const CWD_POLL_INTERVAL: Duration = Duration::from_millis(400);
 
 /// How many bytes the reader task pulls per read syscall.
 const READ_BUFFER_SIZE: usize = 4096;
-const OUTPUT_BROADCAST_CAPACITY: usize = 1024;
 const BACKLOG_LIMIT_BYTES: usize = 1024 * 1024;
 
 struct SessionEntry {
@@ -72,16 +73,54 @@ struct SessionEntry {
 #[derive(Clone)]
 pub struct SessionRegistry {
     inner: Arc<DashMap<String, SessionEntry>>,
-    output_tx: broadcast::Sender<ServerMessage>,
+    subscribers: Arc<DashMap<u64, Arc<SessionSubscriber>>>,
+    next_subscriber_id: Arc<AtomicU64>,
+}
+
+struct SessionSubscriber {
+    all_sessions: bool,
+    sessions: RwLock<HashSet<String>>,
+    tx: mpsc::UnboundedSender<ServerMessage>,
+}
+
+pub struct SessionOutputSubscription {
+    id: u64,
+    subscribers: Arc<DashMap<u64, Arc<SessionSubscriber>>>,
+    subscriber: Arc<SessionSubscriber>,
+    rx: mpsc::UnboundedReceiver<ServerMessage>,
+}
+
+impl SessionOutputSubscription {
+    pub fn subscribe(&self, session_id: impl Into<String>) {
+        self.subscriber.sessions.write().insert(session_id.into());
+    }
+
+    pub async fn recv(&mut self) -> Result<ServerMessage, broadcast::error::RecvError> {
+        self.rx
+            .recv()
+            .await
+            .ok_or(broadcast::error::RecvError::Closed)
+    }
+}
+
+impl Drop for SessionOutputSubscription {
+    fn drop(&mut self) {
+        self.subscribers.remove(&self.id);
+    }
 }
 
 impl SessionRegistry {
     /// Construct a registry plus an initial output receiver. Additional
     /// websocket clients should call [`Self::subscribe`] on the shared
     /// registry stored in daemon state.
-    pub fn new() -> (Self, broadcast::Receiver<ServerMessage>) {
-        let (tx, rx) = broadcast::channel(OUTPUT_BROADCAST_CAPACITY);
-        (Self::from_sender(tx), rx)
+    pub fn new() -> (Self, SessionOutputSubscription) {
+        let registry = Self {
+            inner: Arc::new(DashMap::new()),
+            subscribers: Arc::new(DashMap::new()),
+            next_subscriber_id: Arc::new(AtomicU64::new(1)),
+        };
+        let subscription = registry.subscribe_all();
+        (registry, subscription)
     }
 
     /// Construct a shared registry when the caller does not need the
@@ -90,16 +129,44 @@ impl SessionRegistry {
         Self::new().0
     }
 
-    fn from_sender(output_tx: broadcast::Sender<ServerMessage>) -> Self {
-        Self {
-            inner: Arc::new(DashMap::new()),
-            output_tx,
+    /// Create an initially empty per-connection subscription. A socket adds a
+    /// session before Create/Attach/Input so unrelated PTYs never enter its
+    /// queue and cannot make it lose its own output or OSC completion marks.
+    pub fn subscribe(&self) -> SessionOutputSubscription {
+        self.new_subscription(false)
+    }
+
+    fn subscribe_all(&self) -> SessionOutputSubscription {
+        self.new_subscription(true)
+    }
+
+    fn new_subscription(&self, all_sessions: bool) -> SessionOutputSubscription {
+        let id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let subscriber = Arc::new(SessionSubscriber {
+            all_sessions,
+            sessions: RwLock::new(HashSet::new()),
+            tx,
+        });
+        self.subscribers.insert(id, subscriber.clone());
+        SessionOutputSubscription {
+            id,
+            subscribers: self.subscribers.clone(),
+            subscriber,
+            rx,
         }
     }
 
-    /// Subscribe to all future PTY lifecycle and output messages.
-    pub fn subscribe(&self) -> broadcast::Receiver<ServerMessage> {
-        self.output_tx.subscribe()
+    fn publish(&self, message: ServerMessage) {
+        let Some(session_id) = server_message_session_id(&message) else {
+            return;
+        };
+        self.subscribers.retain(|_, subscriber| {
+            if !subscriber.all_sessions && !subscriber.sessions.read().contains(session_id) {
+                return true;
+            }
+            subscriber.tx.send(message.clone()).is_ok()
+        });
     }
 
     /// Bridge a live PTY to the workspace tab it backs. Returns `false`
@@ -162,13 +229,21 @@ impl SessionRegistry {
     /// Error) are returned synchronously; PtyOutput flows through the
     /// registry's output channel as bytes arrive from the shell.
     pub fn handle(&self, msg: ClientMessage) -> Vec<ServerMessage> {
+        self.handle_subscribed(msg, None)
+    }
+
+    pub fn handle_subscribed(
+        &self,
+        msg: ClientMessage,
+        subscription: Option<&SessionOutputSubscription>,
+    ) -> Vec<ServerMessage> {
         match msg {
             ClientMessage::CreatePty {
                 cwd,
                 cols,
                 rows,
                 shell,
-            } => self.create(cwd, cols, rows, shell),
+            } => self.create(cwd, cols, rows, shell, subscription),
             ClientMessage::PtyInput { session_id, bytes } => {
                 self.input(session_id, bytes)
             }
@@ -212,6 +287,7 @@ impl SessionRegistry {
         cols: u16,
         rows: u16,
         explicit_shell: Option<String>,
+        subscription: Option<&SessionOutputSubscription>,
     ) -> Vec<ServerMessage> {
         let (shell, args) = shell_for_create(explicit_shell);
         let mut env: Vec<(String, String)> = std::env::vars().collect();
@@ -247,6 +323,9 @@ impl SessionRegistry {
         };
 
         let session_id = Uuid::new_v4().to_string();
+        if let Some(subscription) = subscription {
+            subscription.subscribe(session_id.clone());
+        }
         let backlog = Arc::new(Mutex::new(Vec::new()));
         let workspace_root = Some(workspace_root_label());
         let entry = SessionEntry {
@@ -262,17 +341,10 @@ impl SessionRegistry {
         self.inner.insert(session_id.clone(), entry);
         tracing::info!(%session_id, cols, rows, "spawned pty session");
 
-        let output_tx = self.output_tx.clone();
         let id_for_task = session_id.clone();
-        let registry_for_cleanup = self.inner.clone();
+        let registry = self.clone();
         tokio::task::spawn_blocking(move || {
-            reader_loop(
-                id_for_task,
-                pty_arc,
-                backlog,
-                output_tx,
-                registry_for_cleanup,
-            );
+            reader_loop(id_for_task, pty_arc, backlog, registry);
         });
 
         // Creation belongs only to the requesting client. Broadcasting this
@@ -326,7 +398,7 @@ impl SessionRegistry {
         match removed {
             Some((_, _)) => {
                 tracing::info!(%session_id, "closed pty session");
-                let _ = self.output_tx.send(ServerMessage::PtyClosed {
+                self.publish(ServerMessage::PtyClosed {
                     session_id: session_id.clone(),
                     exit_code: None,
                 });
@@ -352,6 +424,38 @@ fn ensure_neoism_pty_env(env: &mut Vec<(String, String)>) {
 
 #[cfg(test)]
 mod pty_env_tests {
+    use neoism_protocol::pty::ServerMessage;
+
+    #[tokio::test]
+    async fn per_connection_output_ignores_unrelated_pty_floods() {
+        let registry = super::SessionRegistry::shared();
+        let mut first = registry.subscribe();
+        let second = registry.subscribe();
+        first.subscribe("first");
+        second.subscribe("second");
+
+        for _ in 0..2_000 {
+            registry.publish(ServerMessage::PtyOutput {
+                session_id: "second".into(),
+                bytes: vec![b'x'; 4_096],
+            });
+        }
+        registry.publish(ServerMessage::PtyOutput {
+            session_id: "first".into(),
+            bytes: b"ls\r\n\x1b]133;D;0\x07".to_vec(),
+        });
+
+        let message = tokio::time::timeout(std::time::Duration::from_millis(100), first.recv())
+            .await
+            .expect("first socket must receive its completion")
+            .expect("first socket subscription remains open");
+        assert!(matches!(
+            message,
+            ServerMessage::PtyOutput { session_id, bytes }
+                if session_id == "first" && bytes.ends_with(b"\x1b]133;D;0\x07")
+        ));
+    }
+
     #[cfg(windows)]
     #[test]
     fn daemon_windows_shell_selection_installs_the_shared_hook() {
@@ -628,8 +732,7 @@ fn reader_loop(
     session_id: String,
     pty: Arc<Mutex<PtySession>>,
     backlog: Arc<Mutex<Vec<u8>>>,
-    output_tx: broadcast::Sender<ServerMessage>,
-    registry: Arc<DashMap<String, SessionEntry>>,
+    registry: SessionRegistry,
 ) {
     let mut buf = vec![0u8; READ_BUFFER_SIZE];
     // Foreground-cwd tracking state. The fd/pid are stable for the
@@ -648,7 +751,7 @@ fn reader_loop(
         .checked_sub(CWD_POLL_INTERVAL)
         .unwrap_or_else(std::time::Instant::now);
     loop {
-        if !registry.contains_key(&session_id) {
+        if !registry.inner.contains_key(&session_id) {
             break;
         }
         #[cfg(unix)]
@@ -662,7 +765,7 @@ fn reader_loop(
                 // idle shell stays silent.
                 if last_cwd.as_deref() != Some(cwd.as_str()) {
                     last_cwd = Some(cwd.clone());
-                    let _ = output_tx.send(ServerMessage::SessionCwd {
+                    registry.publish(ServerMessage::SessionCwd {
                         session_id: session_id.clone(),
                         cwd,
                     });
@@ -674,11 +777,11 @@ fn reader_loop(
             Ok(0) => {
                 let exited = pty.lock().exit_code();
                 if let Some(code) = exited {
-                    let _ = output_tx.send(ServerMessage::PtyClosed {
+                    registry.publish(ServerMessage::PtyClosed {
                         session_id: session_id.clone(),
                         exit_code: Some(code),
                     });
-                    registry.remove(&session_id);
+                    registry.inner.remove(&session_id);
                     break;
                 }
                 std::thread::sleep(READER_IDLE_SLEEP);
@@ -687,7 +790,7 @@ fn reader_loop(
                 let bytes = buf[..n].to_vec();
                 append_backlog(&backlog, &bytes);
                 tracing::trace!(%session_id, byte_count = n, "forwarded pty output");
-                let _ = output_tx.send(ServerMessage::PtyOutput {
+                registry.publish(ServerMessage::PtyOutput {
                     session_id: session_id.clone(),
                     bytes,
                 });
@@ -697,14 +800,24 @@ fn reader_loop(
             }
             Err(err) => {
                 tracing::warn!(%session_id, error = %err, "pty read error");
-                let _ = output_tx.send(ServerMessage::PtyClosed {
+                registry.publish(ServerMessage::PtyClosed {
                     session_id: session_id.clone(),
                     exit_code: None,
                 });
-                registry.remove(&session_id);
+                registry.inner.remove(&session_id);
                 break;
             }
         }
+    }
+}
+
+fn server_message_session_id(message: &ServerMessage) -> Option<&str> {
+    match message {
+        ServerMessage::PtyCreated { session_id, .. }
+        | ServerMessage::PtyOutput { session_id, .. }
+        | ServerMessage::PtyClosed { session_id, .. }
+        | ServerMessage::SessionCwd { session_id, .. } => Some(session_id),
+        ServerMessage::Ack | ServerMessage::Error { .. } => None,
     }
 }
 
@@ -849,16 +962,12 @@ neoism cd - >/dev/null
             other => panic!("expected PtyCreated, got {other:?}"),
         };
 
-        // Identity precedes replay bytes both on explicit attach (including
-        // an empty backlog) and on reconnect's registry snapshot.
-        for messages in [
-            &created,
-            &reg.attach(pty_id.clone()),
-            &reg.backlog_messages(),
-        ] {
+        // Identity precedes replay bytes on explicit attach, including an
+        // empty backlog. Fresh sockets no longer receive a global snapshot.
+        for messages in [&created, &reg.attach(pty_id.clone())] {
             assert!(matches!(messages.first(), Some(ServerMessage::PtyCreated {
                 session_id, shell: Some(shell), ..
-            }) if session_id == &pty_id && shell == "/bin/sh"));
+            }) if session_id.as_str() == pty_id.as_str() && shell == "/bin/sh"));
         }
 
         // Bridge it to a workspace tab and resolve both directions.

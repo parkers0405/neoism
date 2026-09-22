@@ -231,7 +231,7 @@ impl Drop for SocketPresenceGuard {
 pub(crate) async fn handle_socket(
     socket: WebSocket,
     registry: SessionRegistry,
-    mut output_rx: tokio::sync::broadcast::Receiver<ServerMessage>,
+    mut output_rx: crate::sessions::SessionOutputSubscription,
     device: Option<crate::auth::DeviceRecord>,
     upgrade_auth_reason: Option<&'static str>,
     peer_ip: Option<String>,
@@ -394,8 +394,8 @@ pub(crate) async fn handle_socket(
                             return;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "pty output broadcast lagged; client should reconnect for retained backlog");
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        unreachable!("targeted PTY subscriptions do not drop messages")
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return;
@@ -721,8 +721,9 @@ pub(crate) async fn handle_socket(
             // the Ack. Installing interest afterward loses that first burst.
             if let Some(session_id) = addressed_session.as_ref() {
                 pty_subscriptions.insert(session_id.clone());
+                output_rx.subscribe(session_id.clone());
             }
-            let responses = registry.handle(msg);
+            let responses = registry.handle_subscribed(msg, Some(&output_rx));
             for resp in responses {
                 remember_pty_subscription(
                     &mut pty_subscriptions,
@@ -765,8 +766,9 @@ pub(crate) async fn handle_socket(
                         pty_client_session_id(&message).map(str::to_owned);
                     if let Some(session_id) = addressed_session.as_ref() {
                         pty_subscriptions.insert(session_id.clone());
+                        output_rx.subscribe(session_id.clone());
                     }
-                    let mut replies = registry.handle(message);
+                    let mut replies = registry.handle_subscribed(message, Some(&output_rx));
                     if replies.is_empty() {
                         replies.push(ServerMessage::Ack);
                     }

@@ -323,18 +323,25 @@ impl CallerClaims {
 pub(crate) fn session_execution_policy(
     session: &neoism_agent_core::SessionInfo,
 ) -> neoism_agent_service_api::ExecutionPolicy {
+    let tenant = session_tenant(session);
+    // A workspace:<id> session is minted by this machine's workspace daemon
+    // and executes against that daemon's native workspace. Early nightly
+    // builds persisted Disabled before binding workspace identity; do not let
+    // that stale value permanently brick bash/background_task for the host.
+    if session
+        .workspace_id
+        .as_ref()
+        .is_some_and(|workspace_id| tenant == format!("workspace:{workspace_id}"))
+    {
+        return neoism_agent_service_api::ExecutionPolicy::NativeLocal;
+    }
     session
         .extra
         .get(EXECUTION_POLICY_EXTRA_KEY)
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_else(|| {
-            let tenant = session_tenant(session);
-            if tenant == "local"
-                || session.workspace_id.as_ref().is_some_and(|workspace_id| {
-                    tenant == format!("workspace:{workspace_id}")
-                })
-            {
+            if tenant == "local" {
                 neoism_agent_service_api::ExecutionPolicy::NativeLocal
             } else {
                 neoism_agent_service_api::ExecutionPolicy::Disabled
@@ -513,6 +520,27 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_disabled_policy_cannot_brick_machine_owned_workspace_session() {
+        let session: neoism_agent_core::SessionInfo = serde_json::from_value(serde_json::json!({
+            "id": "ses_test",
+            "slug": "test",
+            "projectId": "project",
+            "workspaceId": "workspace-a",
+            "directory": "/tmp",
+            "title": "test",
+            "version": "test",
+            "time": { "created": 1, "updated": 1 },
+            "neoismTenantId": "workspace:workspace-a",
+            "neoismExecutionPolicy": "disabled"
+        }))
+        .unwrap();
+        assert_eq!(
+            session_execution_policy(&session),
+            neoism_agent_service_api::ExecutionPolicy::NativeLocal
+        );
+    }
 
     #[test]
     fn signature_mismatch_falls_back_to_canonical_token_file() {

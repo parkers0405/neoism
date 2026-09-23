@@ -69,7 +69,7 @@ async fn execute_tool_call_with_env_and_cancel(
     };
     let execution = session
         .as_ref()
-        .map(crate::caller::session_execution_policy)
+        .map(|session| crate::caller::session_execution_policy(services.hosted, session))
         .unwrap_or(neoism_agent_service_api::ExecutionPolicy::NativeLocal);
     let mcp_auth = match session.as_ref() {
         Some(session) => crate::mcp_auth::McpAuthStore::for_session(&services, session)
@@ -152,8 +152,9 @@ async fn execute_tool_call_with_env_and_cancel(
             .unwrap_or("*");
         ensure_tool_permission(&permissions, &permission.permission, target)?;
     }
-    let result = runtime
-        .execute(neoism_agent_plugin_api::PluginToolInvocation {
+    let result = crate::workspace_runtime::scope_generation(
+        snapshot.clone(),
+        runtime.execute(neoism_agent_plugin_api::PluginToolInvocation {
             tenant_id: session
                 .as_ref()
                 .map(|session| crate::caller::session_tenant(session).to_string())
@@ -187,9 +188,10 @@ async fn execute_tool_call_with_env_and_cancel(
             cancel,
             formatter,
             generation: Some(snapshot.generation),
-        })
-        .await
-        .map_err(|error| error.to_string())?;
+        }),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let result = tool::ToolExecutionResult {
         title: result.title,
         output: result.output,
@@ -222,7 +224,12 @@ async fn ensure_native_process_tool(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("session {session_id} not found"))?;
-    let policy = crate::caller::session_execution_policy(&session);
+    if !crate::caller::local_collaboration_session(state.services().hosted, &session) {
+        return Err(format!(
+            "native process tool {tool_name} is unavailable for tenant-scoped sessions; use sandbox_exec"
+        ));
+    }
+    let policy = crate::caller::session_execution_policy(state.services().hosted, &session);
     if crate::caller::native_execution_allowed(&policy) {
         return Ok(());
     }
@@ -246,7 +253,7 @@ async fn ensure_sandbox_process_tool(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "session not found".to_string())?;
     if matches!(
-        crate::caller::session_execution_policy(&session),
+        crate::caller::session_execution_policy(state.services().hosted, &session),
         neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }
     ) {
         Ok(())
@@ -343,6 +350,17 @@ async fn execute_stateful_tool_call(
                         return Err("A new project must use a child path inside the current workspace"
                             .to_string());
                     }
+                    let candidate = std::path::Path::new(&info.directory).join(requested);
+                    let ancestor = candidate
+                        .ancestors()
+                        .find(|path| path.exists())
+                        .ok_or_else(|| "new project has no accessible ancestor".to_string())?;
+                    let ancestor = crate::windows_process::canonicalize_path(ancestor)
+                        .map_err(|error| error.to_string())?;
+                    if !ancestor.starts_with(std::path::Path::new(&info.directory)) {
+                        return Err("A new project must use a child path inside the current workspace"
+                            .to_string());
+                    }
                     crate::session_routes::resolve_session_directory(
                         state.services(),
                         &info.directory,
@@ -354,12 +372,17 @@ async fn execute_stateful_tool_call(
                 Err(error) => return Err(error.to_string()),
             };
             let destination = project_context.directory;
+            if !crate::caller::allows_session_path(state.services().hosted, &info, std::path::Path::new(&destination)) {
+                return Err("move_chat destination is outside this tenant's authorized directories".to_string());
+            }
             if !std::path::Path::new(&destination)
                 .starts_with(std::path::Path::new(&info.directory))
             {
-                return Err(
-                    "move_chat cannot leave the current workspace scope".to_string()
-                );
+                ensure_tool_permission(
+                    permissions,
+                    "external_directory",
+                    &format!("{destination}/*"),
+                )?;
             }
             state.inner.pending_session_moves.lock().await.insert(
                 session_id.to_string(),
@@ -531,6 +554,7 @@ async fn execute_stateful_tool_call(
             }))
         }
         "background_task" => {
+            ensure_native_process_tool(state, Some(session_id), tool_name).await?;
             let result = crate::background_job::start_background_task_tool(
                 state,
                 snapshot.clone(),
@@ -1212,7 +1236,7 @@ pub(crate) async fn execute_tool_call_in_generation(
                 .unwrap_or_default(),
         );
         effective.extend(one_time_rules.clone());
-        if let Some(result) = execute_stateful_tool_call(
+        let execution = match execute_stateful_tool_call(
             state,
             session_id,
             message_id,
@@ -1224,41 +1248,26 @@ pub(crate) async fn execute_tool_call_in_generation(
             cancel.clone(),
             &snapshot,
         )
-        .await?
-        {
-            let mut result = result;
-            plugin::tool_execute_after(&snapshot, &ctx, &mut result)
-                .map_err(|error| error.to_string())?;
-            apply_central_output_truncation(&mut result)?;
-            publish_lsp_updated_if_needed(state, &result);
-            tracing::info!(
-                target: "neoism_agent::perf",
-                session_id = %session_id,
-                message_id = %message_id,
-                call_id,
-                tool = tool_name,
-                directory,
-                input_bytes,
-                output_bytes = result.output.len(),
-                metadata_bytes = result.metadata.as_ref().map(|value| value.to_string().len()),
-                elapsed_ms = crate::perf::elapsed_ms(started),
-                "stateful tool execution completed"
-            );
-            return Ok(result);
-        }
-        match execute_tool_call_with_env_and_cancel(
-            state,
-            Some(session_id),
-            directory,
-            effective,
-            tool_name,
-            hooked_input.clone(),
-            env.clone(),
-            cancel.clone(),
-            &snapshot,
-        )
         .await
         {
+            Ok(Some(result)) => Ok(result),
+            Ok(None) => {
+                execute_tool_call_with_env_and_cancel(
+                    state,
+                    Some(session_id),
+                    directory,
+                    effective,
+                    tool_name,
+                    hooked_input.clone(),
+                    env.clone(),
+                    cancel.clone(),
+                    &snapshot,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        match execution {
             Ok(mut result) => {
                 plugin::tool_execute_after(&snapshot, &ctx, &mut result)
                     .map_err(|error| error.to_string())?;

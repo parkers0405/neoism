@@ -458,6 +458,7 @@ impl EpubPane {
         let source = format!("# Could not open {title}\n\n{error}");
         let mut markdown = MarkdownPane::from_source(path.clone(), &source);
         markdown.read_only = true;
+        markdown.spellcheck_enabled = false;
         Self {
             book: EpubBook {
                 id: String::new(),
@@ -1540,6 +1541,7 @@ fn prepare_chapter_page(
         page_ranges.len().max(1)
     ));
     markdown.read_only = true;
+    markdown.spellcheck_enabled = false;
     markdown.enter_normal();
     let local_line = state
         .location

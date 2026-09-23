@@ -953,7 +953,7 @@ impl NeoismAgentPane {
             None => Some(0),
             // Optimistic prompts carry empty ids until the server echo lands;
             // an empty anchor is unfindable by design and falls through to
-            // the re-anchor branch below, which picks up the durable id.
+            // the re-anchor branch below.
             Some("") => None,
             Some(anchor) => self
                 .messages
@@ -963,12 +963,15 @@ impl NeoismAgentPane {
         };
         let index = match derived {
             Some(index) => index,
-            // An OPTIMISTIC anchor (empty id) is unfindable by design: the
-            // prompt has no durable id until the server echo lands. Re-anchor
-            // at the latest turn to pick that id up.
+            // Until the optimistic prompt receives its durable id, keep the
+            // current live window. A newer User in the snapshot must not
+            // archive tool cards that were already visible this visit.
             None if self.timeline_live_trace_anchor.as_deref() == Some("") => {
-                let last_user = self
-                    .messages
+                let end = self
+                    .timeline_live_trace_start
+                    .unwrap_or(0)
+                    .min(self.messages.len());
+                let last_user = self.messages[..end]
                     .iter()
                     .rposition(|message| message.kind == NeoismAgentMessageKind::User);
                 self.timeline_live_trace_anchor =
@@ -990,7 +993,10 @@ impl NeoismAgentPane {
             // underneath a visit.
             None => 0,
         };
-        self.timeline_live_trace_start = Some(index);
+        if self.timeline_live_trace_start != Some(index) {
+            self.timeline_live_trace_start = Some(index);
+            self.invalidate_timeline_layout();
+        }
     }
 
     pub(in crate::panels::agent_pane) fn timeline_live_trace_start(

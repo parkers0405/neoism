@@ -68,7 +68,8 @@ impl NeoismAgentPane {
                             &mut cached.pending_user_prompts,
                             &cached.prompt_echo_aliases,
                         );
-                        cached.messages = merge_session_snapshot(messages, live);
+                        cached.messages =
+                            merge_session_snapshot(messages, live, cached.hydrated);
                         cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
                         cached.hydrated = true;
                         cached.invalidate_timeline_layout();
@@ -80,7 +81,7 @@ impl NeoismAgentPane {
                     let mut messages = self.preserve_streamed_response_text(messages);
                     if self.timeline_history.oldest_loaded_cursor.is_some() {
                         messages =
-                            merge_session_snapshot(messages, self.messages.clone());
+                            merge_session_snapshot(messages, self.messages.clone(), true);
                     }
                     // Landed background-task completion cards survive the
                     // snapshot replacement (runs last so the dedupe check
@@ -96,8 +97,25 @@ impl NeoismAgentPane {
                     // mark only the rows that actually differ dirty so the layout
                     // patches just those; fall back to a full invalidation only
                     // on a structural change (count differs / reorder).
+                    let previous_trace_start = self.timeline_live_trace_start;
                     let previous_len = self.messages.len();
                     let structural = previous_len != messages.len();
+                    let optimistic_trace = (self.timeline_live_trace_anchor.as_deref()
+                        == Some(""))
+                    .then(|| {
+                        let start = self.timeline_live_trace_start?;
+                        let prompt = self.messages.get(start.checked_sub(1)?)?;
+                        (prompt.kind == NeoismAgentMessageKind::User).then(|| {
+                            let first_live_id = self
+                                .messages
+                                .iter()
+                                .skip(start)
+                                .find(|message| !message.id.is_empty())
+                                .map(|message| message.id.clone());
+                            (prompt.text.clone(), first_live_id)
+                        })
+                    })
+                    .flatten();
                     let stable_prefix = previous_len <= messages.len()
                         && stable_timeline_source_prefix(&self.messages, &messages);
                     let dirty_indices: Vec<usize> = if structural {
@@ -113,7 +131,41 @@ impl NeoismAgentPane {
                     };
                     if structural || !dirty_indices.is_empty() {
                         self.messages = messages;
+                        if let Some((prompt, first_live_id)) = optimistic_trace {
+                            let end = first_live_id
+                                .as_deref()
+                                .and_then(|id| {
+                                    self.messages
+                                        .iter()
+                                        .position(|message| message.id == id)
+                                })
+                                .unwrap_or(self.messages.len());
+                            let anchor =
+                                self.messages[..end].iter().rposition(|message| {
+                                    message.kind == NeoismAgentMessageKind::User
+                                        && message.text == prompt
+                                });
+                            let anchor = if end < self.messages.len() {
+                                anchor.or_else(|| {
+                                    self.messages[..end].iter().rposition(|message| {
+                                        message.kind == NeoismAgentMessageKind::User
+                                    })
+                                })
+                            } else {
+                                anchor
+                            };
+                            if let Some(index) = anchor {
+                                self.timeline_live_trace_anchor =
+                                    Some(self.messages[index].id.clone());
+                                self.timeline_live_trace_start = Some(index + 1);
+                            } else if end < self.messages.len() {
+                                self.timeline_live_trace_anchor = None;
+                            }
+                        }
                         self.rebase_current_turn_trace();
+                        if previous_trace_start != self.timeline_live_trace_start {
+                            self.invalidate_timeline_layout();
+                        }
                         if structural
                             && !stable_prefix
                             && self.pending_timeline_prepend_count.is_none()
@@ -155,6 +207,7 @@ impl NeoismAgentPane {
                         self.messages = merge_session_snapshot(
                             messages,
                             std::mem::take(&mut self.messages),
+                            self.timeline_history.oldest_loaded_cursor.is_some(),
                         );
                         if self.timeline_history.oldest_loaded_cursor.is_none() {
                             self.timeline_history.oldest_loaded_cursor = oldest_cursor;
@@ -173,7 +226,8 @@ impl NeoismAgentPane {
                             &mut cached.pending_user_prompts,
                             &cached.prompt_echo_aliases,
                         );
-                        cached.messages = merge_session_snapshot(messages, live);
+                        cached.messages =
+                            merge_session_snapshot(messages, live, cached.hydrated);
                         cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
                         cached.hydrated = true;
                         cached.invalidate_timeline_layout();
@@ -927,12 +981,18 @@ impl NeoismAgentPane {
                 }
             }
         }
+        // A closed receiver must reconcile now, even when the chrome already
+        // says idle and no further live events will wake this pane.
         if self
             .event_stream
             .as_ref()
             .is_some_and(AgentSessionEventStream::is_disconnected)
         {
-            self.event_stream = None;
+            self.tick_stream_liveness();
+            changed |= self
+                .event_stream
+                .as_ref()
+                .is_some_and(|stream| !stream.is_disconnected());
         }
         if crate::neoism::agent::perf::enabled() && drained_updates > 0 {
             tracing::info!(
@@ -1506,14 +1566,24 @@ impl NeoismAgentPane {
                         .as_mut()
                         .filter(|picker| picker.kind == NeoismAgentPickerKind::Agent)
                     {
-                        picker.replace_options(result.unwrap_or_else(|error| {
+                        let active_agent = self.agent.as_deref().unwrap_or("build");
+                        let options = result.unwrap_or_else(|error| {
                             vec![NeoismAgentPickerOption::new(
                                 "Couldn't load agents",
                                 &error,
                                 "retry",
                                 "",
                             )]
-                        }));
+                        });
+                        let selected = options
+                            .iter()
+                            .position(|option| option.value == active_agent);
+                        picker.replace_options(options);
+                        if picker.query.is_empty() {
+                            if let Some(selected) = selected {
+                                picker.selected = selected;
+                            }
+                        }
                         changed = true;
                     }
                 }
@@ -1716,12 +1786,12 @@ impl NeoismAgentPane {
                         if cached_live.is_empty() {
                             active_messages
                         } else {
-                            merge_session_snapshot(active_messages, cached_live)
+                            merge_session_snapshot(active_messages, cached_live, false)
                         }
                     } else {
                         cached_live
                     };
-                    let merged = merge_session_snapshot(messages, live);
+                    let merged = merge_session_snapshot(messages, live, cached.hydrated);
                     let mut timeline_history =
                         std::mem::take(&mut cached.timeline_history);
                     timeline_history.oldest_loaded_cursor = oldest_cursor;
@@ -2050,12 +2120,15 @@ impl NeoismAgentPane {
         };
         let index = match derived {
             Some(index) => index,
-            // An OPTIMISTIC anchor (empty id) is unfindable by design: the
-            // prompt has no durable id until the server echo lands. Re-anchor
-            // at the latest turn to pick that id up.
+            // Until the optimistic prompt receives its durable id, keep the
+            // current live window. A newer User in the snapshot must not
+            // archive tool cards that were already visible this visit.
             None if self.timeline_live_trace_anchor.as_deref() == Some("") => {
-                let last_user = self
-                    .messages
+                let end = self
+                    .timeline_live_trace_start
+                    .unwrap_or(0)
+                    .min(self.messages.len());
+                let last_user = self.messages[..end]
                     .iter()
                     .rposition(|message| message.kind == NeoismAgentMessageKind::User);
                 self.timeline_live_trace_anchor =
@@ -2077,7 +2150,10 @@ impl NeoismAgentPane {
             // underneath a visit.
             None => 0,
         };
-        self.timeline_live_trace_start = Some(index);
+        if self.timeline_live_trace_start != Some(index) {
+            self.timeline_live_trace_start = Some(index);
+            self.invalidate_timeline_layout();
+        }
     }
 
     pub(crate) fn mark_timeline_message_dirty_at(&mut self, index: usize) {
@@ -2126,12 +2202,33 @@ impl NeoismAgentPane {
             std::time::Duration::from_secs(40);
         const RESUBSCRIBE_MIN_INTERVAL: std::time::Duration =
             std::time::Duration::from_secs(60);
-        if self.streaming_state == NeoismAgentStreamingState::Idle {
-            return;
-        }
         let Some(session_id) = self.session_id.clone() else {
             return;
         };
+        if self
+            .event_stream
+            .as_ref()
+            .is_some_and(AgentSessionEventStream::is_disconnected)
+        {
+            if self
+                .last_stream_resubscribe_at
+                .is_some_and(|at| at.elapsed() < RESUBSCRIBE_MIN_INTERVAL)
+            {
+                return;
+            }
+            let root = self
+                .event_stream
+                .as_ref()
+                .map(|stream| stream.session_id().to_string())
+                .unwrap_or(session_id);
+            self.last_stream_resubscribe_at = Some(Instant::now());
+            tracing::warn!(session_id = %root, "agent event stream disconnected; resubscribing");
+            self.force_resubscribe_session_updates(&root);
+            return;
+        }
+        if self.streaming_state == NeoismAgentStreamingState::Idle {
+            return;
+        }
         if self.event_stream.is_none() {
             return;
         }

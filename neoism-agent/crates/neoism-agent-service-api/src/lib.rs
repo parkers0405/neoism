@@ -946,9 +946,10 @@ impl AgentServices {
                 "hosted control planes require tenant-scoped MCP credentials",
             ));
         }
-        if !self.execution.available() || self.execution.backend_name() == "local-native" {
+        if self.execution.backend_name() == "local-native"
+            || (!self.execution.available() && self.execution.backend_name() != "disabled") {
             return Err(ServiceError::new(
-                "hosted control planes require a non-native execution provider",
+                "hosted control planes require a non-native execution provider or explicitly disabled execution",
             ));
         }
         if !self.artifacts.as_ref().is_some_and(|store| store.shared()) {

@@ -100,12 +100,25 @@ pub(crate) async fn session_create(
             }
         }
         extra.insert(
+            crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY.to_string(),
+            serde_json::json!(claims
+                .directory_prefixes
+                .iter()
+                .filter_map(|prefix| std::fs::canonicalize(prefix).ok())
+                .map(|prefix| prefix.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()),
+        );
+        extra.insert(
             crate::caller::TENANT_EXTRA_KEY.to_string(),
             Value::String(claims.tenant_id.clone()),
         );
         extra.insert(
             crate::caller::EXECUTION_POLICY_EXTRA_KEY.to_string(),
-            serde_json::to_value(claims.execution_policy())
+            serde_json::to_value(if !state.services().hosted && claims.workspace_id.is_some() {
+                neoism_agent_service_api::ExecutionPolicy::NativeLocal
+            } else {
+                claims.execution_policy()
+            })
                 .map_err(|error| ApiError::internal(error.to_string()))?,
         );
         extra.insert(
@@ -218,6 +231,9 @@ pub(crate) async fn create_session_in_directory(
                 crate::caller::TENANT_EXTRA_KEY.into(),
                 Value::String(parent_tenant.into()),
             );
+            if let Some(prefixes) = parent.extra.get(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY) {
+                extra.insert(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY.into(), prefixes.clone());
+            }
         }
         if let Some(tenant) = extra
             .get(crate::caller::TENANT_EXTRA_KEY)
@@ -236,6 +252,7 @@ pub(crate) async fn create_session_in_directory(
         }
         for key in [
             crate::caller::EXECUTION_POLICY_EXTRA_KEY,
+            crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY,
             crate::caller::CREATED_BY_EXTRA_KEY,
             crate::caller::QUOTAS_EXTRA_KEY,
         ] {
@@ -386,6 +403,19 @@ pub(crate) async fn session_update(
             return Err(ApiError::forbidden(
                 "The caller is not authorized for this directory",
             ));
+        }
+        if let Some(Extension(claims)) = claims.as_ref().filter(|Extension(claims)| {
+            claims.hosted && claims.tenant_id == crate::caller::session_tenant(&info)
+        }) {
+            info.extra.insert(
+                crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY.to_string(),
+                serde_json::json!(claims
+                    .directory_prefixes
+                    .iter()
+                    .filter_map(|prefix| std::fs::canonicalize(prefix).ok())
+                    .map(|prefix| prefix.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()),
+            );
         }
         info.directory = project_context.directory;
         info.project_id = project_context.info.id;

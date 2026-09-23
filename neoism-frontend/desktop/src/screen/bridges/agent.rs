@@ -7,20 +7,35 @@ use neoism_window::event::ElementState;
 use neoism_window::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use std::path::{Path, PathBuf};
 
-/// Agent surfaces own their complete pane body and should meet the tab chrome
-/// directly. The grid's top margin includes a small terminal-only breathing
-/// strip; remove it for top-aligned Agent panes without letting lower split
-/// panes grow upward into their pane-local tab strip.
-fn attach_agent_surface_to_tab_chrome(
-    mut rect: [f32; 4],
-    top_aligned: bool,
-    terminal_top_padding: f32,
-) -> [f32; 4] {
-    if top_aligned {
-        let extension = terminal_top_padding.max(0.0).min(rect[1].max(0.0));
-        rect[1] -= extension;
-        rect[3] += extension;
+fn joined_agent_link_path(root: &str, raw: &str) -> Option<PathBuf> {
+    let root = neoism_protocol::host_path::HostPath::new(root);
+    let relative = if let Some(relative) = root.relative(raw) {
+        relative
+    } else {
+        // Reject absolute paths outside the host root without guest-local I/O.
+        if raw.starts_with(['/', '\\'])
+            || neoism_protocol::host_path::HostPath::new(raw).is_windows()
+            || raw.as_bytes().get(1) == Some(&b':')
+        {
+            return None;
+        }
+        raw.to_owned()
+    };
+    if relative
+        .split(|c| c == '/' || (root.is_windows() && c == '\\'))
+        .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return None;
     }
+    Some(PathBuf::from(root.join(&relative).as_str()))
+}
+
+/// Keep the Agent's viewport inside its own chrome while retaining the
+/// content area's existing bottom edge (and therefore its composer layout).
+fn agent_surface_content_rect(mut rect: [f32; 4], chrome_bottom: f32) -> [f32; 4] {
+    let bottom = rect[1] + rect[3];
+    rect[1] = chrome_bottom.max(0.0).min(bottom);
+    rect[3] = (bottom - rect[1]).max(0.0);
     rect
 }
 
@@ -646,6 +661,7 @@ impl Screen<'_> {
         )
         .1;
 
+        let workspace_margins = self.workspace_chrome_margins();
         let mut agent_animating = false;
         let mut agent_animating_reason = None;
         let mut agent_ui_events = Vec::new();
@@ -654,6 +670,22 @@ impl Screen<'_> {
             self.context_manager.event_proxy(),
             self.context_manager.window_id(),
         );
+        let current_grid_index = self.context_manager.current_index();
+        for (grid_index, grid) in
+            self.context_manager.all_grids_mut().iter_mut().enumerate()
+        {
+            if grid_index == current_grid_index {
+                continue;
+            }
+            for item in grid.contexts_mut().values_mut() {
+                if let Some(agent) = item.val.neoism_agent.as_mut() {
+                    agent.set_event_wake(agent_event_wake.clone());
+                    // An inactive workspace still owns a live subscription. Consume
+                    // its bounded batch so reopening it cannot replay a long queue.
+                    agent_animating |= agent.drain_live_session_updates();
+                }
+            }
+        }
         for (key, item) in self
             .context_manager
             .current_grid_mut()
@@ -708,11 +740,37 @@ impl Screen<'_> {
                 item.slot_rect[1],
                 min_slot_top,
             );
-            rect = attach_agent_surface_to_tab_chrome(
-                rect,
-                top_aligned,
-                terminal_top_padding_for_chrome_scale(chrome_scale),
-            );
+            // The timeline clips to this rect. Derive its top from the same
+            // slot/chrome geometry that positions the pane tabs, not from the
+            // terminal content inset (which can include workspace breadcrumbs).
+            let chrome_bottom = if top_aligned {
+                let shows_crumbs = self
+                    .renderer
+                    .pane_tabs
+                    .get(&route_id)
+                    .is_some_and(|tabs| tabs.active_shows_breadcrumbs());
+                let local_top = if shows_crumbs {
+                    workspace_margins.editor_top
+                } else {
+                    workspace_margins.terminal_top
+                        - terminal_top_padding_for_chrome_scale(chrome_scale)
+                };
+                item.slot_rect[1] / scale + local_top
+            } else if let Some(tabs) = self.renderer.pane_tabs.get(&route_id) {
+                let crumbs_h = if tabs.active_shows_breadcrumbs() {
+                    self.renderer
+                        .pane_breadcrumbs
+                        .get(&route_id)
+                        .map(|crumbs| crumbs.height())
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                (scaled_margin.top + item.slot_rect[1]) / scale + tabs.height() + crumbs_h
+            } else {
+                rect[1]
+            };
+            rect = agent_surface_content_rect(rect, chrome_bottom);
             rect[3] = rect[3].min((logical_window_bottom - rect[1]).max(0.0));
             let is_active_pane = route_id == active_route;
             crate::neoism::view::render(
@@ -797,7 +855,46 @@ impl Screen<'_> {
                     directory,
                 } => {
                     if route_id == active_route {
-                        self.set_active_workspace_root(PathBuf::from(directory), true);
+                        let destination = PathBuf::from(directory);
+                        let source_index = self.context_manager.current_index();
+                        let source_count = self.context_manager.len();
+                        // A chat move changes workspace ownership, not the
+                        // source workspace's root. Give it a fresh root shell.
+                        self.create_tab_inner_with_root(Some(destination));
+                        if self.context_manager.len() == source_count {
+                            self.renderer.notifications.push(
+                                "Chat moved, but a destination workspace could not be created.",
+                                neoism_ui::panels::notifications::NotificationLevel::Warn,
+                            );
+                            continue;
+                        }
+                        let destination_index = self.context_manager.current_index();
+                        self.select_top_level_workspace_at(source_index);
+                        let context =
+                            self.context_manager.take_current_grid_context_by_route(
+                                route_id,
+                                &mut self.sugarloaf,
+                            );
+                        if let Some(context) = context {
+                            if let Some(tab) =
+                                self.renderer.buffer_tabs.tabs().iter().position(|tab| {
+                                    tab.neoism_agent_route_id == Some(route_id)
+                                })
+                            {
+                                let _ = self.renderer.buffer_tabs.close_at(tab);
+                            }
+                            self.select_top_level_workspace_at(destination_index);
+                            if self.context_manager.add_stacked_context_to_current(
+                                context,
+                                &mut self.sugarloaf,
+                            ) {
+                                self.renderer.buffer_tabs.open_neoism_agent(route_id);
+                                self.context_manager.select_route_from_current_grid();
+                                self.reapply_chrome_layout();
+                            }
+                        } else {
+                            self.select_top_level_workspace_at(destination_index);
+                        }
                         self.mark_dirty();
                     }
                 }
@@ -1670,7 +1767,7 @@ impl Screen<'_> {
         let Some(path) = self.resolve_neoism_agent_link_path(target) else {
             return;
         };
-        if path.is_dir() {
+        if !self.context_manager.current_workspace_is_remote_joined() && path.is_dir() {
             self.open_directory_link_in_file_tree(path);
         } else if crate::editor::markdown::state::is_markdown_path(&path) {
             self.open_path_in_markdown(path);
@@ -1685,6 +1782,18 @@ impl Screen<'_> {
             .strip_prefix("file://")
             .map(neoism_ui::panels::agent_pane::input_controller::decode_percent_path)
             .unwrap_or_else(|| target.to_string());
+        if self.context_manager.current_workspace_is_remote_joined() {
+            let root = self
+                .renderer
+                .file_tree
+                .remote_files()
+                .map(|remote| remote.root().to_string_lossy().into_owned())
+                .or_else(|| {
+                    self.active_pane_workspace_root()
+                        .map(|root| root.to_string_lossy().into_owned())
+                })?;
+            return joined_agent_link_path(&root, &raw);
+        }
         let path = PathBuf::from(&raw);
         if path.is_absolute() {
             return path.exists().then_some(path);
@@ -2186,21 +2295,51 @@ impl Screen<'_> {
 
 #[cfg(test)]
 mod agent_surface_geometry_tests {
-    use super::attach_agent_surface_to_tab_chrome;
+    use super::{agent_surface_content_rect, joined_agent_link_path};
 
     #[test]
-    fn top_agent_surface_consumes_terminal_only_breathing_strip() {
+    fn top_agent_viewport_starts_below_its_workspace_tab_strip() {
+        // The workspace reserves 82px for editor chrome, but this Agent
+        // needs only the 50px tab/island band (no breadcrumbs or pad).
         assert_eq!(
-            attach_agent_surface_to_tab_chrome([20.0, 56.0, 800.0, 500.0], true, 6.0,),
+            agent_surface_content_rect([20.0, 82.0, 800.0, 474.0], 50.0),
             [20.0, 50.0, 800.0, 506.0]
         );
     }
 
     #[test]
-    fn lower_agent_surface_preserves_its_local_tab_boundary() {
+    fn lower_agent_viewport_reserves_local_tabs_and_crumbs() {
         assert_eq!(
-            attach_agent_surface_to_tab_chrome([20.0, 356.0, 800.0, 200.0], false, 6.0,),
+            agent_surface_content_rect([20.0, 340.0, 800.0, 216.0], 356.0),
             [20.0, 356.0, 800.0, 200.0]
+        );
+    }
+    #[test]
+    fn joined_diff_link_resolves_host_only_relative_and_absolute_files() {
+        let root = "/__neoism_host_only_workspace__";
+        let file = "/__neoism_host_only_workspace__/src/main.rs";
+        assert_eq!(
+            joined_agent_link_path(root, "src/main.rs"),
+            Some(file.into())
+        );
+        assert_eq!(joined_agent_link_path(root, file), Some(file.into()));
+        assert!(!std::path::Path::new(file).exists());
+    }
+
+    #[test]
+    fn joined_diff_link_rejects_paths_outside_host_root() {
+        let root = "/__neoism_host_only_workspace__";
+        for target in [
+            "../other.rs",
+            "src/../../other.rs",
+            "/other.rs",
+            "/__neoism_host_only_workspace_extra/a.rs",
+        ] {
+            assert!(joined_agent_link_path(root, target).is_none(), "{target}");
+        }
+        assert_eq!(
+            joined_agent_link_path("C:\\Work", "src/main.rs"),
+            Some("C:\\Work\\src\\main.rs".into()),
         );
     }
 }

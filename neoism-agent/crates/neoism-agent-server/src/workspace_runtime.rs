@@ -200,6 +200,10 @@ impl WorkspaceRuntime {
             root: self.root.clone(),
         }
     }
+
+    pub(crate) fn owns_generation(&self, lease: &PluginGenerationLease) -> bool {
+        self.generation.contains(lease)
+    }
 }
 
 pub(crate) struct PluginGeneration {
@@ -659,6 +663,16 @@ impl PluginGenerationSlot {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    fn contains(&self, lease: &PluginGenerationLease) -> bool {
+        Arc::ptr_eq(&self.load(), &lease.inner)
+            || self
+                .retired
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|candidate| candidate.ptr_eq(&Arc::downgrade(&lease.inner)))
     }
 
     fn lease(&self, generation: u64) -> Option<PluginGenerationLease> {
@@ -1354,7 +1368,8 @@ impl WorkspaceRuntimeRegistry {
             drop(entries);
             if refresh {
                 if let Err(error) = refresh_plugins(&runtime, state).await {
-                    if self.closed.load(Ordering::Acquire)
+                    if services.hosted
+                        || self.closed.load(Ordering::Acquire)
                         || runtime.closed.load(Ordering::Acquire)
                     {
                         return Err(error);
@@ -1371,21 +1386,27 @@ impl WorkspaceRuntimeRegistry {
         }
         drop(entries);
 
-        let signature = config_signature(services, &root).unwrap_or_default();
-        let build = crate::plugins::build_host(state, &root.to_string_lossy()).await
-            .or_else(|error| {
-                tracing::error!(%error, root = %root.display(), "initial workspace configuration rejected; using safe defaults");
-                Err(error)
-            });
+        let signature = if services.hosted {
+            config_signature(services, &root)?
+        } else {
+            config_signature(services, &root).unwrap_or_default()
+        };
+        let build = crate::plugins::build_host(state, &root.to_string_lossy()).await;
         let build = match build {
             Ok(build) => build,
-            Err(_) => crate::plugins::build_default_host(state, &root.to_string_lossy())
-                .await
-                .map_err(|error| {
-                    format!(
-                        "default built-in workspace plugin registration failed: {error}"
-                    )
-                })?,
+            Err(error) if services.hosted => {
+                return Err(format!("hosted workspace configuration rejected: {error}"));
+            }
+            Err(error) => {
+                tracing::error!(%error, root = %root.display(), "initial workspace configuration rejected; using safe defaults");
+                crate::plugins::build_default_host(state, &root.to_string_lossy())
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "default built-in workspace plugin registration failed: {error}"
+                        )
+                    })?
+            }
         };
         let generation = PluginGeneration::workspace(
             build.installed,
@@ -2145,6 +2166,38 @@ mod tests {
         assert_eq!(alpha.tenant_id, "alpha");
         assert_eq!(beta.tenant_id, "beta");
         assert_eq!(registry.runtimes().await.len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn hosted_config_failure_never_installs_default_plugins() {
+        use neoism_agent_service_api::{
+            ConfigSnapshot, ConfigSnapshotRequest, ConfigSourceService, ConfigUpdateRequest,
+            ServiceError, ServiceFuture,
+        };
+        struct DeniedConfig;
+        impl ConfigSourceService for DeniedConfig {
+            fn snapshot(&self, _: &ConfigSnapshotRequest) -> Result<ConfigSnapshot, ServiceError> {
+                Err(ServiceError::new("hosted profile unavailable"))
+            }
+            fn update<'a>(&'a self, _: &'a ConfigUpdateRequest) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+                Box::pin(async { Err(ServiceError::new("hosted profile unavailable")) })
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "neoism-hosted-config-denied-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let services = crate::standard_services()
+            .with_config(Arc::new(DeniedConfig))
+            .for_hosted_control_plane();
+        let state = crate::state::AppState::open_database_with_services(
+            root.join("state.sqlite3"), services,
+        ).await.unwrap();
+        let registry = WorkspaceRuntimeRegistry::default();
+        assert!(registry.acquire_for_tenant("tenant-a", &root.to_string_lossy(), &state).await.is_err());
+        assert!(registry.runtimes().await.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -214,6 +214,13 @@ impl NeoismAgentPane {
             .is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
     }
 
+    pub fn status_chip_activation_ms(&self, index: usize) -> Option<f32> {
+        let (active, started) = self.status_chip_activated?;
+        (active == index)
+            .then(|| started.elapsed().as_secs_f32() * 1000.0)
+            .filter(|elapsed| *elapsed < 280.0)
+    }
+
     pub fn clear_status_chip_rects(&mut self) {
         self.status_chip_rects = [None; 3];
     }

@@ -45,6 +45,88 @@ async fn wait_for_queued_prompt(
 }
 
 #[tokio::test]
+async fn pinned_session_tools_survive_plugin_generation_refresh() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-pinned-skill-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let skill_dir = root.join(".agent/skills/refresh-check");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: refresh-check\ndescription: Refresh check\n---\nPinned instructions.\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("target.txt"), "before\n").unwrap();
+    let state = AppState::open_database(root.join("agent.sqlite3"))
+        .await
+        .unwrap();
+    let session: SessionInfo = response_json(
+        app(state.clone())
+            .oneshot(request(
+                Method::POST,
+                &format!("/v2/sessions?directory={}", root.display()),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let runtime = state.workspace_runtime(&session.directory).await.unwrap();
+    let pinned = runtime.snapshot();
+    std::fs::write(
+        root.join(".agent/agent.json"),
+        r#"{"dangerouslySkipPermissions":true}"#,
+    )
+    .unwrap();
+    assert!(crate::workspace_runtime::refresh_plugins(&runtime, &state)
+        .await
+        .unwrap());
+    assert_ne!(runtime.published_snapshot().generation, pinned.generation);
+
+    let skill = crate::tool_runtime::execute_tool_call_in_generation(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "skill".into(),
+            pattern: "*".into(),
+            action: PermissionAction::Allow,
+        }],
+        "call-pinned-skill",
+        "skill",
+        json!({ "name": "refresh-check" }),
+        pinned.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(skill.output.contains("Pinned instructions."));
+
+    let edited = crate::tool_runtime::execute_tool_call_in_generation(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "edit".into(),
+            pattern: "*".into(),
+            action: PermissionAction::Allow,
+        }],
+        "call-pinned-edit",
+        "edit",
+        json!({ "filePath": "target.txt", "oldString": "before", "newString": "after" }),
+        pinned,
+    )
+    .await
+    .unwrap();
+    assert!(!edited.output.contains("tool plugin generation was not provided"));
+    assert_eq!(std::fs::read_to_string(root.join("target.txt")).unwrap(), "after\n");
+    state.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn subtask_command_creates_linked_child_session() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-subtask-{}",
@@ -494,6 +576,554 @@ async fn skip_permissions_applies_multi_file_patch_without_a_permission_request(
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn hosted_session_and_subagent_keep_host_directory_scope() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-hosted-scope-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let allowed = root.with_extension("allowed");
+    let outside = root.with_extension("outside");
+    for path in [&root, &allowed, &outside] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let claims = crate::caller::CallerClaims {
+        subject: "hosted:tenant-fixture".into(),
+        workspace_id: Some("tenant-fixture".into()),
+        tenant_id: "workspace:tenant-fixture".into(),
+        directory_prefixes: vec![
+            root.to_string_lossy().into_owned(),
+            allowed.to_string_lossy().into_owned(),
+        ],
+        hosted: true,
+        max_sessions: None,
+        max_artifacts: None,
+        max_artifact_bytes: None,
+        artifact_retention_days: None,
+        requests_per_minute: None,
+        max_in_flight: None,
+        resolved: None,
+    };
+    let axum::Json(parent) = crate::session_routes::session_create(
+        axum::extract::State(state.clone()),
+        axum::extract::Query(crate::InstanceQuery {
+            directory: Some(root.to_string_lossy().into_owned()),
+        }),
+        axum::http::HeaderMap::new(),
+        Some(axum::Extension(claims)),
+        None,
+    )
+    .await
+    .unwrap();
+    // The credential's hosted flag identifies the daemon transport, not an
+    // external hosted deployment. Guests in a local workspace get native tools.
+    assert_eq!(
+        crate::caller::session_execution_policy(state.services().hosted, &parent),
+        neoism_agent_service_api::ExecutionPolicy::NativeLocal
+    );
+    assert!(crate::caller::allows_session_path(false, &parent, &outside));
+    let execution = crate::tool::ToolContext::new(&root)
+        .with_state(Some(state.clone()))
+        .with_session_id(Some(parent.id.to_string()))
+        .execution_request(neoism_agent_service_api::ProcessClass::Command, None)
+        .await
+        .unwrap();
+    assert!(execution.provider.is_none());
+    assert_eq!(execution.workspace.local_path.as_deref(), Some(root.as_path()));
+    assert!(crate::caller::allows_session_path(true, &parent, &allowed));
+    assert!(!crate::caller::allows_session_path(true, &parent, &outside));
+    let child = crate::session_actions::create_subtask_session(
+        &state,
+        &parent,
+        "check",
+        "Inspect authorized roots",
+        "explore",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(crate::caller::allows_session_path(true, &child, &allowed));
+    assert!(!crate::caller::allows_session_path(true, &child, &outside));
+    assert_eq!(
+        child.extra.get(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY),
+        parent.extra.get(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY)
+    );
+    assert_eq!(
+        child.extra.get(crate::caller::EXECUTION_POLICY_EXTRA_KEY),
+        parent.extra.get(crate::caller::EXECUTION_POLICY_EXTRA_KEY)
+    );
+    cleanup_sqlite_files(&db_path);
+    for path in [root, allowed, outside] {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+#[tokio::test]
+async fn background_task_external_directory_asks_then_resumes() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-background-permission-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let external = root.with_extension("external");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/v2/sessions?directory={}", root.display()),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let tool_state = state.clone();
+    let session_id = session.id.clone();
+    let directory = session.directory.clone();
+    let handle = tokio::spawn(async move {
+        execute_tool_call_with_permission_wait(
+            &tool_state,
+            &session_id,
+            &Id::ascending(IdKind::Message),
+            &directory,
+            vec![
+                PermissionRule {
+                    permission: "external_directory".to_string(),
+                    pattern: "*".to_string(),
+                    action: PermissionAction::Ask,
+                },
+                PermissionRule {
+                    permission: "bash".to_string(),
+                    pattern: "*".to_string(),
+                    action: PermissionAction::Allow,
+                },
+            ],
+            "call-background-external-ask",
+            "background_task",
+            json!({ "command": "pwd", "cwd": external.clone() }),
+        )
+        .await
+    });
+    let permission = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(request) = state.inner.permissions.read().await.values().next().cloned() {
+                break request;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background task should ask for external directory permission");
+    assert_eq!(permission.permission, "external_directory");
+    let allowed: bool = response_json(
+        app.oneshot(request(
+            Method::POST,
+            &format!("/v2/interactions/permissions/{}/reply", permission.id),
+            Some(json!({ "reply": "once" })),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(allowed);
+    let result = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("approved background task should resume")
+        .unwrap()
+        .unwrap();
+    assert!(result.output.contains("job_id:"));
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root.with_extension("external"));
+}
+
+#[tokio::test]
+async fn skip_permissions_allows_background_task_in_external_directory() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-background-skip-permissions-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let external = root.with_extension("external");
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(
+        root.join(".agent/agent.json"),
+        r#"{"dangerouslySkipPermissions":true}"#,
+    )
+    .unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let session: SessionInfo = response_json(
+        app(state.clone())
+            .oneshot(request(
+                Method::POST,
+                &format!("/v2/sessions?directory={}", root.display()),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let result = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![
+            PermissionRule {
+                permission: "external_directory".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionAction::Ask,
+            },
+            PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionAction::Allow,
+            },
+        ],
+        "call-background-skip-permissions",
+        "background_task",
+        json!({ "command": "pwd", "cwd": external }),
+    )
+    .await
+    .unwrap();
+
+    assert!(result.output.contains("job_id:"), "{}", result.output);
+    assert!(state.inner.permissions.read().await.is_empty());
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(external);
+}
+
+#[tokio::test]
+async fn skip_permissions_allows_move_chat_to_external_project() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-move-skip-permissions-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let external = root.with_extension("external");
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(
+        root.join(".agent/agent.json"),
+        r#"{"dangerouslySkipPermissions":true}"#,
+    )
+    .unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let session: SessionInfo = response_json(
+        app(state.clone())
+            .oneshot(request(
+                Method::POST,
+                &format!("/v2/sessions?directory={}", root.display()),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let permissions = vec![PermissionRule {
+        permission: "external_directory".to_string(),
+        pattern: "*".to_string(),
+        action: PermissionAction::Ask,
+    }];
+    let result = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        permissions.clone(),
+        "call-move-external-skip",
+        "move_chat",
+        json!({ "directory": external }),
+    )
+    .await
+    .unwrap();
+    assert!(result.output.contains("This chat will move to"));
+    assert!(state.inner.permissions.read().await.is_empty());
+    assert_eq!(
+        state
+            .inner
+            .pending_session_moves
+            .lock()
+            .await
+            .get(&session.id.to_string())
+            .unwrap()
+            .directory,
+        external.to_string_lossy()
+    );
+
+    let denied = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            action: PermissionAction::Deny,
+            ..permissions[0].clone()
+        }],
+        "call-move-external-denied",
+        "move_chat",
+        json!({ "directory": external }),
+    )
+    .await
+    .unwrap_err();
+    assert!(denied.contains("tool permission external_directory"));
+
+    let allowed = root.with_extension("allowed");
+    std::fs::create_dir_all(&allowed).unwrap();
+    std::fs::write(allowed.join("shared.txt"), "within tenant scope").unwrap();
+    let mut tenant_session = session.clone();
+    tenant_session.workspace_id = Some("tenant-fixture".to_string());
+    tenant_session.extra.insert(
+        crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY.to_string(),
+        json!([root, allowed]),
+    );
+    tenant_session.extra.insert(
+        crate::caller::TENANT_EXTRA_KEY.to_string(),
+        json!("workspace:tenant-fixture"),
+    );
+    state.inner.store.update_session(&tenant_session).await.unwrap();
+    let scoped_read = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "external_directory".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionAction::Ask,
+        }],
+        "call-tenant-allowed-read",
+        "read",
+        json!({ "filePath": allowed.join("shared.txt") }),
+    )
+    .await
+    .unwrap();
+    assert!(scoped_read.output.contains("within tenant scope"));
+    let scoped_write = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "external_directory".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionAction::Ask,
+        }],
+        "call-tenant-allowed-write",
+        "write",
+        json!({ "filePath": allowed.join("created.txt"), "content": "tenant file" }),
+    )
+    .await
+    .unwrap();
+    assert!(scoped_write.output.contains("created.txt"));
+    assert_eq!(std::fs::read_to_string(allowed.join("created.txt")).unwrap(), "tenant file");
+    let tenant_runtime = state
+        .workspace_runtime_for_tenant("workspace:tenant-fixture", &session.directory)
+        .await
+        .unwrap();
+    let local_runtime = state
+        .workspace_runtime_for_tenant("local", &session.directory)
+        .await
+        .unwrap();
+    let tenant_snapshot = tenant_runtime.snapshot();
+    let local_snapshot = local_runtime.snapshot();
+    assert_eq!(tenant_snapshot.generation, local_snapshot.generation);
+    let tenant_context = crate::workspace_runtime::scope_generation(local_snapshot.clone(), async {
+        crate::tool::ToolContext::new(&session.directory)
+            .with_state(Some(state.clone()))
+            .with_session_id(Some(session.id.to_string()))
+            .with_generation(Some(tenant_snapshot.generation))
+            .await
+    })
+    .await;
+    assert!(tenant_context.plugin_snapshot().unwrap().ptr_eq(&tenant_snapshot));
+    assert!(!tenant_context.plugin_snapshot().unwrap().ptr_eq(&local_snapshot));
+    let scoped_edit = crate::tool_runtime::execute_tool_call_in_generation(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![
+            PermissionRule {
+                permission: "external_directory".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "edit".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionAction::Allow,
+            },
+        ],
+        "call-tenant-edit-with-lsp",
+        "edit",
+        json!({
+            "filePath": allowed.join("created.txt"),
+            "oldString": "tenant file",
+            "newString": "tenant edit"
+        }),
+        tenant_runtime.snapshot(),
+    )
+    .await
+    .unwrap();
+    assert!(scoped_edit.output.contains("Replaced 1 occurrence"));
+    assert_eq!(std::fs::read_to_string(allowed.join("created.txt")).unwrap(), "tenant edit");
+    let edit_metadata = scoped_edit.metadata.unwrap();
+    assert!(edit_metadata.get("lspTouch").is_some());
+    assert!(edit_metadata.get("lspUnavailable").is_none(), "{edit_metadata}");
+    let scoped_move = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "external_directory".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionAction::Ask,
+        }],
+        "call-tenant-allowed-move",
+        "move_chat",
+        json!({ "directory": allowed }),
+    )
+    .await
+    .unwrap();
+    assert!(scoped_move.output.contains("This chat will move to"));
+    let local_move = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "external_directory".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionAction::Allow,
+        }],
+        "call-move-local-guest",
+        "move_chat",
+        json!({ "directory": external }),
+    )
+    .await
+    .unwrap();
+    assert!(local_move.output.contains("This chat will move to"));
+    let secret = external.join("other-tenant.txt");
+    std::fs::write(&secret, "local collaboration file").unwrap();
+    let local_read = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "external_directory".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionAction::Allow,
+        }],
+        "call-local-guest-read",
+        "read",
+        json!({ "filePath": secret }),
+    )
+    .await
+    .unwrap();
+    assert!(local_read.output.contains("local collaboration file"));
+    let local_bash = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![PermissionRule {
+            permission: "*".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionAction::Allow,
+        }],
+        "call-local-guest-bash",
+        "bash",
+        json!({ "command": "printf local-guest-bash" }),
+    )
+    .await
+    .unwrap();
+    assert!(local_bash.output.contains("local-guest-bash"));
+    let external_bash = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![
+            PermissionRule {
+                permission: "external_directory".to_string(),
+                pattern: format!("{}/*", external.display()),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionAction::Allow,
+            },
+        ],
+        "call-local-guest-external-bash",
+        "bash",
+        json!({ "command": "pwd", "workdir": external }),
+    )
+    .await
+    .unwrap();
+    assert!(external_bash.output.contains(&external.to_string_lossy().to_string()));
+    let denied_external_bash = execute_tool_call_with_permission_wait(
+        &state,
+        &session.id,
+        &Id::ascending(IdKind::Message),
+        &session.directory,
+        vec![
+            PermissionRule {
+                permission: "external_directory".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionAction::Deny,
+            },
+            PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionAction::Allow,
+            },
+        ],
+        "call-local-guest-external-bash-denied",
+        "bash",
+        json!({ "command": "pwd", "workdir": external }),
+    )
+    .await
+    .unwrap_err();
+    assert!(denied_external_bash.contains("external_directory"));
+
+    let moved = crate::session_move::move_session(
+        &state,
+        session.id.as_str(),
+        &allowed.to_string_lossy(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(moved.directory, allowed.to_string_lossy());
+    let moved_again = crate::session_move::move_session(
+        &state,
+        session.id.as_str(),
+        &external.to_string_lossy(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(moved_again.directory, external.to_string_lossy());
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(external);
+    let _ = std::fs::remove_dir_all(allowed);
 }
 
 #[tokio::test]

@@ -25,10 +25,7 @@ impl McpAuthStore {
         session: &neoism_agent_core::SessionInfo,
     ) -> anyhow::Result<Self> {
         let tenant_id = crate::caller::session_tenant(session);
-        let host_workspace = session.workspace_id.as_ref().is_some_and(|workspace_id| {
-            tenant_id == format!("workspace:{workspace_id}")
-        });
-        if tenant_id == "local" || host_workspace {
+        if crate::caller::local_collaboration_session(services.hosted, session) {
             return Ok(Self::local(services));
         }
         Self::from_services(

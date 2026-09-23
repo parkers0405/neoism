@@ -1271,6 +1271,43 @@ fn typing_skill_mention_keeps_query_visible_in_input() {
 }
 
 #[test]
+fn status_chips_animate_on_open_and_selection() {
+    let mut pane = NeoismAgentPane::default();
+    pane.open_agent_picker();
+    assert!(pane.status_chip_activation_ms(0).is_some());
+    pane.open_model_picker();
+    assert!(pane.status_chip_activation_ms(0).is_none());
+    assert!(pane.status_chip_activation_ms(1).is_some());
+    pane.apply_thinking("medium".to_string());
+    assert!(pane.status_chip_activation_ms(2).is_some());
+    assert_eq!(pane.animation_reason(), Some("status_chip_activation"));
+}
+
+#[test]
+fn agents_picker_selects_active_agent_before_and_after_refresh() {
+    let mut pane = NeoismAgentPane::default();
+    let options = || {
+        vec![
+            NeoismAgentPickerOption::new("plan", "Planning agent", "agent", "plan"),
+            NeoismAgentPickerOption::new("build", "Engineering agent", "agent", "build"),
+        ]
+    };
+    pane.set_agent_options(options());
+    pane.open_agent_picker();
+    assert_eq!(
+        pane.picker().unwrap().selected_option().unwrap().value,
+        "build"
+    );
+
+    pane.set_agent_local("plan".to_string());
+    pane.set_agent_options(options());
+    assert_eq!(
+        pane.picker().unwrap().selected_option().unwrap().value,
+        "plan"
+    );
+}
+
+#[test]
 fn sessions_picker_requests_refresh_and_shows_loading_until_catalog_arrives() {
     let mut pane = NeoismAgentPane::default();
     let _ = pane.drain_pending_outbound();
@@ -4604,6 +4641,75 @@ fn updated_final_part_does_not_reorder_past_later_tool() {
 }
 
 #[test]
+fn optimistic_prompt_echo_keeps_edit_preview_live() {
+    let mut pane = NeoismAgentPane::default();
+    let mut edit = NeoismAgentMessage::tool(
+        "Edit(src/lib.rs)",
+        "changed file",
+        "completed",
+        "edit",
+        NeoismAgentOutputKind::Text,
+        "rust",
+        Vec::new(),
+    )
+    .with_id("edit-1");
+    edit.detail = r#"{"neoismToolDetail":"edit","input":{"filePath":"src/lib.rs","oldString":"old","newString":"new"},"metadata":null}"#.to_string();
+    pane.messages = vec![NeoismAgentMessage::user("fix this"), edit.clone()];
+    pane.timeline_live_trace_anchor = Some(String::new());
+    pane.timeline_live_trace_start = Some(1);
+
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("fix this"),
+        edit.clone(),
+        NeoismAgentMessage::user("next task").with_id("user-2"),
+    ]);
+    assert_eq!(pane.timeline_live_trace_start, Some(1));
+    assert!(!pane.tool_archived("edit-1"));
+
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("fix this").with_id("user-1"),
+        edit,
+        NeoismAgentMessage::user("next task").with_id("user-2"),
+    ]);
+
+    assert_eq!(pane.timeline_live_trace_anchor.as_deref(), Some("user-1"));
+    assert_eq!(pane.timeline_live_trace_start, Some(1));
+    assert!(!pane.tool_archived("edit-1"));
+    assert!(
+        crate::panels::agent_pane::view::tool_message::cached_edit_diff_sections(
+            &pane.messages[1]
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn optimistic_live_trace_survives_older_page_prepend() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("fix this"),
+        NeoismAgentMessage::tool(
+            "Edit(src/lib.rs)",
+            "changed file",
+            "completed",
+            "edit",
+            NeoismAgentOutputKind::Text,
+            "rust",
+            Vec::new(),
+        )
+        .with_id("edit-1"),
+    ];
+    pane.timeline_live_trace_anchor = Some(String::new());
+    pane.timeline_live_trace_start = Some(1);
+    pane.timeline_history.loading_older = true;
+
+    pane.apply_history_page(vec![NeoismAgentMessage::user("older")], None);
+
+    assert_eq!(pane.timeline_live_trace_start, Some(2));
+    assert!(!pane.tool_archived("edit-1"));
+}
+
+#[test]
 fn history_refresh_keeps_live_trace_anchored_to_its_turn() {
     let mut pane = NeoismAgentPane::default();
     pane.messages = vec![
@@ -4813,6 +4919,15 @@ fn identical_pending_prompts_consume_server_occurrences_one_to_one() {
     assert_eq!(merged.len(), 2);
     assert_eq!(pane.pending_user_prompts, vec!["same"]);
     assert!(merged.iter().any(|message| message.id == "local-2"));
+}
+
+#[test]
+fn timeline_without_scroll_range_does_not_claim_trackpad_or_wheel() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 120.0, 300.0);
+    assert!(!pane.scroll_timeline_pixels(30.0));
+    assert!(!pane.scroll_timeline_wheel_pixels(-60.0));
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
 }
 
 #[test]
@@ -5653,8 +5768,6 @@ fn session_cache_park_restore_roundtrip_is_instant() {
     {
         let parked = pane.session_cache.get("sess-a").expect("parked entry");
         assert_eq!(parked.messages.len(), 2);
-        assert!((parked.timeline_scroll_px - 123.5).abs() < f32::EPSILON);
-        assert!(!parked.timeline_follow_bottom);
         assert!(parked.runtime.is_streaming(), "runtime UI parked too");
     }
     assert!(
@@ -5665,16 +5778,15 @@ fn session_cache_park_restore_roundtrip_is_instant() {
     // Hydrate B so it parks as a distinct conversation.
     pane.apply_history(vec![NeoismAgentMessage::user("question b").with_id("ub-1")]);
 
-    // Switching back restores INSTANTLY — messages/scroll/runtime are
-    // present the moment `switch_session` returns, before any
-    // HistoryChunk lands.
+    // Switching back restores messages/runtime instantly and opens at the
+    // latest reply rather than an old reading position.
     pane.switch_session("sess-a".to_string());
     assert_eq!(pane.session_id.as_deref(), Some("sess-a"));
     assert_eq!(pane.messages.len(), 2);
     assert_eq!(pane.messages[0].text, "question a");
     assert_eq!(pane.messages[1].text, "answer a");
-    assert!((pane.timeline_scroll_px - 123.5).abs() < f32::EPSILON);
-    assert!(!pane.timeline_follow_bottom);
+    assert_eq!(pane.timeline_scroll_px, 0.0);
+    assert!(pane.timeline_follow_bottom);
     assert!(pane.is_streaming(), "restored runtime keeps streaming UI");
     // …and B is parked in A's place.
     assert!(pane.cached_session_is_hydrated("sess-b"));
@@ -5776,6 +5888,66 @@ fn history_chunk_for_cached_session_merges_like_desktop() {
         cached.messages[1].text, "hello wor",
         "stale snapshot must not truncate streamed text"
     );
+}
+
+#[test]
+fn stale_pending_snapshot_cannot_regress_completed_edit() {
+    let completed = NeoismAgentMessage::tool(
+        "Edit(src/lib.rs)",
+        "final diff",
+        "completed",
+        "edit",
+        NeoismAgentOutputKind::Text,
+        "rust",
+        Vec::new(),
+    )
+    .with_id("edit-part");
+    let pending = NeoismAgentMessage::tool(
+        "Edit(src/lib.rs)",
+        "partial diff",
+        "pending",
+        "edit",
+        NeoismAgentOutputKind::Text,
+        "rust",
+        Vec::new(),
+    )
+    .with_id("edit-part");
+
+    let merged = super::session_cache::merge_session_snapshot(
+        vec![pending],
+        vec![completed],
+        false,
+    );
+    assert_eq!(merged[0].status, "completed");
+    assert_eq!(merged[0].text, "final diff");
+}
+
+#[test]
+fn cached_latest_page_without_overlap_keeps_latest_answer_last() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("other".to_string()));
+    pane.cache_upsert_part_message(
+        "returned",
+        NeoismAgentMessage::user("old task").with_id("old-user"),
+    );
+    pane.cache_upsert_part_message(
+        "returned",
+        NeoismAgentMessage::assistant("old answer").with_id("old-answer"),
+    );
+    pane.session_cache.get_mut("returned").unwrap().hydrated = true;
+
+    pane.apply_history_to_cache(
+        "returned",
+        vec![
+            NeoismAgentMessage::user("new task").with_id("new-user"),
+            NeoismAgentMessage::assistant("latest answer").with_id("new-answer"),
+        ],
+        None,
+    );
+    pane.switch_session("returned".to_string());
+
+    assert_eq!(pane.messages[0].id, "old-user");
+    assert_eq!(pane.messages.last().unwrap().id, "new-answer");
 }
 
 #[test]

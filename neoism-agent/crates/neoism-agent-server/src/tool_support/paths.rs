@@ -22,6 +22,7 @@ pub(super) fn existing_project_path(
     };
     let path = crate::windows_process::canonicalize_path(&candidate)
         .with_context(|| format!("failed to resolve path {}", candidate.display()))?;
+    context.authorize_path(&path)?;
     if !path.starts_with(&base) {
         context.ensure_explicit_allowed(
             "external_directory",
@@ -78,6 +79,7 @@ pub(super) fn project_path_for_write(
     } else {
         ancestor.join(suffix)
     };
+    context.authorize_path(&resolved)?;
     if !resolved.starts_with(&base) {
         context.ensure_explicit_allowed(
             "external_directory",

@@ -62,22 +62,24 @@ pub(super) async fn sandbox_tool(
             commit.base_revision
         );
     }
-    if let Some(revision) = commit.revision.as_deref() {
-        let state = context
-            .state()
-            .ok_or_else(|| anyhow::anyhow!("sandbox execution requires session state"))?;
-        if !state
-            .inner
-            .store
-            .commit_workspace_revision(
-                &tenant_id,
-                &root_id,
-                expected_revision.as_deref(),
-                revision,
-            )
-            .await?
-        {
-            anyhow::bail!("sandbox workspace revision conflict; retry from the latest revision");
+    if !services.execution.external_workspace_revisions() {
+        if let Some(revision) = commit.revision.as_deref() {
+            let state = context
+                .state()
+                .ok_or_else(|| anyhow::anyhow!("sandbox execution requires session state"))?;
+            if !state
+                .inner
+                .store
+                .commit_workspace_revision(
+                    &tenant_id,
+                    &root_id,
+                    expected_revision.as_deref(),
+                    revision,
+                )
+                .await?
+            {
+                anyhow::bail!("sandbox workspace revision conflict; retry from the latest revision");
+            }
         }
     }
     let mut output = result.stdout;

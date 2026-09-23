@@ -2455,17 +2455,26 @@ async fn run_assistant_step(
     run_system: Option<&str>,
     goals_enabled: bool,
 ) -> Result<MessageWithParts, ApiError> {
-    let provider_tools = provider_tools_for_agent(
+    let mut provider_tools = provider_tools_for_agent(
         state,
         &info.directory,
         plugin_snapshot,
         &tool_permissions,
         &reply_model.model_id,
-        &crate::caller::session_execution_policy(info),
+        &crate::caller::session_execution_policy(state.services().hosted, info),
         &crate::mcp_auth::McpAuthStore::for_session(state.services(), info)
             .map_err(|error| ApiError::forbidden(error.to_string()))?,
     )
     .await?;
+    if !crate::caller::local_collaboration_session(state.services().hosted, info) {
+        provider_tools.retain(|tool| {
+            !matches!(tool.id.as_str(), "bash" | "background_task")
+                && !crate::agent_tool_registry::tool_contribution(plugin_snapshot, &tool.id)
+                    .is_some_and(|item| {
+                        item.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID
+                    })
+        });
+    }
     let provider_tool_map = provider_tool_map(&provider_tools);
     let chat_hook_ctx = plugin::ChatHookContext {
         session_id: session_id.to_string(),

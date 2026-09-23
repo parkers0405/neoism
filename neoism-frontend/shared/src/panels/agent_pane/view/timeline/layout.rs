@@ -223,6 +223,10 @@ where
                 && cache.gap_bucket == gap_bucket
                 && cache.source_len + delta <= source_len
                 && !cache.rows.is_empty()
+                // A lazy cache may contain estimated tool rows with no diff
+                // preparation. The prepend fold reuses its suffix and marks the
+                // result exact, so only fold when every reused row is measured.
+                && prepend_cache_is_exact(cache)
         });
         if let Some(mut cache) = reusable {
             let previous_content_height = cache.content_height;
@@ -305,6 +309,10 @@ where
         ),
         true,
     )
+}
+
+pub(super) fn prepend_cache_is_exact<M>(cache: &TimelineLayoutCache<M>) -> bool {
+    cache.estimated_prefix_rows == 0 && cache.estimated_suffix_start == cache.rows.len()
 }
 
 /// Whether the exact-measured window of a lazy cache still comfortably covers

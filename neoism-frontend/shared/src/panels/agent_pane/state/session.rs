@@ -564,6 +564,7 @@ impl NeoismAgentPane {
     }
 
     pub fn apply_agent(&mut self, value: String) {
+        self.status_chip_activated = Some((0, Instant::now()));
         let trimmed = self.set_agent_local(value);
         if let Some(session_id) = self.session_id.clone() {
             self.push_outbound(OutboundAgentCommand::ApplyAgent {
@@ -1015,6 +1016,7 @@ impl NeoismAgentPane {
         value: String,
         connection_id: Option<String>,
     ) {
+        self.status_chip_activated = Some((1, Instant::now()));
         self.remember_model_value(&value);
         self.remember_provider_connection(&value, connection_id.as_deref());
         self.connection_id = connection_id;
@@ -1101,6 +1103,7 @@ impl NeoismAgentPane {
     }
 
     pub fn apply_thinking(&mut self, value: String) {
+        self.status_chip_activated = Some((2, Instant::now()));
         let thinking = self.set_thinking_local(value);
         if thinking.is_some() {
             self.push_outbound(OutboundAgentCommand::PersistConfigChoice {

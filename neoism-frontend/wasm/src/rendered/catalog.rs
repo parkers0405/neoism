@@ -1313,30 +1313,18 @@ pub(crate) fn agent_options_from_catalog(
 ) -> Vec<neoism_ui::panels::agent_pane::state::picker::NeoismAgentPickerOption> {
     use neoism_ui::panels::agent_pane::state::picker::NeoismAgentPickerOption;
 
-    let mut out = vec![NeoismAgentPickerOption::new(
-        "session default",
-        "Use Neoism default",
-        "default",
-        "",
-    )];
-    // Subagent-only definitions (mode == "subagent", e.g.
-    // explore/general) are Task-tool targets, not top-level
-    // agents — the picker shows primaries (build/plan) plus
-    // whatever the user's config adds.
-    out.extend(
-        agents
-            .iter()
-            .filter(|agent| agent.mode.as_deref() != Some("subagent"))
-            .map(|agent| {
-                NeoismAgentPickerOption::new(
-                    &agent.name,
-                    &agent.description,
-                    agent.mode.as_deref().unwrap_or("agent"),
-                    &agent.name,
-                )
-            }),
-    );
-    out
+    agents
+        .iter()
+        .filter(|agent| agent.mode.as_deref() != Some("subagent"))
+        .map(|agent| {
+            NeoismAgentPickerOption::new(
+                &agent.name,
+                &agent.description,
+                agent.mode.as_deref().unwrap_or("agent"),
+                &agent.name,
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn skill_options_from_catalog(

@@ -146,7 +146,7 @@ impl ProviderRegistry {
                 return match adapter.kind {
                     ProviderAdapterKind::OpenAiCompatible => {
                         let runtime = OpenAiRuntime {
-                            client: OpenAiClient::with_base_url(adapter.base_url),
+                             client: OpenAiClient::with_base_url(adapter.base_url)?,
                             auth,
                             auth_store: scoped_auth,
                             use_oauth_responses: false,

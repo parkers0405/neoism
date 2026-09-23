@@ -1077,6 +1077,13 @@ async fn authenticate_request(
                         "Failed to authorize the session",
                     );
                 }
+                Ok(None) if claims.hosted || claims.tenant_id != "local" => {
+                    return auth_error(
+                        StatusCode::NOT_FOUND,
+                        "auth.session_not_found",
+                        "Session not found",
+                    );
+                }
                 _ => {}
             }
         }

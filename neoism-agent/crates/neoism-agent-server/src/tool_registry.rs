@@ -345,7 +345,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                 "properties": {
                     "directory": {
                         "type": "string",
-                        "description": "Destination project directory inside the chat's current workspace. Relative paths resolve from the current directory."
+                        "description": "Existing directories may be outside the current workspace with external_directory permission, but must remain inside the host-assigned scope for tenant sessions. Relative paths resolve from the current directory; new directories must be children of it."
                     },
                     "create_directory": {
                         "type": "boolean",

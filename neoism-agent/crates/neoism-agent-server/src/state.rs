@@ -725,9 +725,13 @@ impl AppState {
             Arc::new(neoism_agent_builtins::ProviderPlatform::new(
                 services.provider_credentials.clone(),
             ));
-        let caller_policy = crate::caller::CallerPolicy::from_env_with_resolver(
-            services.tenant_resolver.clone(),
-        );
+        let caller_policy = if services.hosted {
+            crate::caller::CallerPolicy::for_hosted(
+                services.tenant_resolver.clone().expect("validated hosted resolver"),
+            )
+        } else {
+            crate::caller::CallerPolicy::from_env_with_resolver(services.tenant_resolver.clone())
+        };
         let utilities = crate::utility_runtime::UtilityRuntime::new(&services);
         let recovery_started = crate::perf::now();
         let phase_started = crate::perf::now();

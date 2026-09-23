@@ -611,6 +611,29 @@ fn lazy_cache(
 }
 
 #[test]
+fn prepend_rejects_estimated_edit_rows_in_reused_cache() {
+    let mut rows = vec![
+        layout_row(0, 0.0, 48.0),
+        layout_row(1, 60.0, 48.0),
+        layout_row(2, 120.0, 48.0),
+    ];
+    rows[2].is_edit_tool = true;
+    assert!(!super::layout::prepend_cache_is_exact(&lazy_cache(
+        rows.clone(),
+        0,
+        2
+    )));
+    assert!(!super::layout::prepend_cache_is_exact(&lazy_cache(
+        rows.clone(),
+        1,
+        3
+    )));
+    assert!(super::layout::prepend_cache_is_exact(&lazy_cache(
+        rows, 0, 3
+    )));
+}
+
+#[test]
 fn lazy_cache_covers_a_mid_history_exact_window() {
     let rows = vec![
         layout_row(0, 0.0, 100.0),

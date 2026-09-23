@@ -69,6 +69,7 @@ pub(crate) struct ToolContext {
     formatter: Option<Value>,
     state: Option<AppState>,
     session_id: Option<String>,
+    session_scope: Option<neoism_agent_core::SessionInfo>,
     utilities: Arc<crate::utility_runtime::UtilityRuntime>,
     plugin_snapshot: Option<crate::workspace_runtime::PluginGenerationLease>,
 }
@@ -103,6 +104,7 @@ impl ToolContext {
             formatter: None,
             state: None,
             session_id: None,
+            session_scope: None,
             utilities: crate::utility_runtime::UtilityRuntime::new(&services),
             plugin_snapshot: None,
         }
@@ -141,29 +143,25 @@ impl ToolContext {
 
     pub(crate) async fn with_generation(mut self, generation: Option<u64>) -> Self {
         if let (Some(state), Some(generation)) = (self.state.as_ref(), generation) {
-            self.plugin_snapshot =
-                crate::workspace_runtime::active_generation(&self.cwd.to_string_lossy())
-                    .filter(|active| active.generation == generation);
-            if self.plugin_snapshot.is_none() {
-                let tenant_id = if let Some(session_id) = self.session_id.as_deref() {
-                    state
+            let directory = self.cwd.to_string_lossy();
+            if let Some(session_id) = self.session_id.as_deref() {
+                if let Some(session) = state.inner.store.get_session(session_id).await.ok().flatten() {
+                    self.plugin_snapshot = state
                         .inner
-                        .store
-                        .get_session(session_id)
+                        .workspace_runtimes
+                        .loaded_for_tenant(crate::caller::session_tenant(&session), &directory)
                         .await
-                        .ok()
-                        .flatten()
-                        .map(|session| crate::caller::session_tenant(&session).to_string())
-                        .unwrap_or_else(|| "local".to_string())
-                } else {
-                    "local".to_string()
-                };
-                self.plugin_snapshot = state
-                    .inner
-                    .workspace_runtimes
-                    .loaded_for_tenant(&tenant_id, &self.cwd.to_string_lossy())
-                    .await
-                    .and_then(|runtime| runtime.lease_generation(generation));
+                        .and_then(|runtime| {
+                            crate::workspace_runtime::active_generation(&directory)
+                                .filter(|active| {
+                                    active.generation == generation && runtime.owns_generation(active)
+                                })
+                                .or_else(|| runtime.lease_generation(generation))
+                        });
+                }
+            } else {
+                self.plugin_snapshot = crate::workspace_runtime::active_generation(&directory)
+                    .filter(|active| active.generation == generation);
             }
         }
         self
@@ -172,6 +170,32 @@ impl ToolContext {
     pub(crate) fn with_session_id(mut self, session_id: Option<String>) -> Self {
         self.session_id = session_id;
         self
+    }
+
+    pub(crate) async fn with_session_scope(mut self) -> anyhow::Result<Self> {
+        if let (Some(state), Some(session_id)) = (&self.state, &self.session_id) {
+            let session = state
+                .inner
+                .store
+                .get_session(session_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("session {session_id} not found"))?;
+            let cwd = crate::windows_process::canonicalize_path(&self.cwd)?;
+            if !crate::caller::allows_session_path(state.services().hosted, &session, &cwd) {
+                anyhow::bail!("session directory is outside this tenant's authorized directories");
+            }
+            self.session_scope = Some(session);
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn authorize_path(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if self.session_scope.as_ref().is_some_and(|session| {
+            !crate::caller::allows_session_path(self.services().hosted, session, path)
+        }) {
+            anyhow::bail!("path {} is outside this tenant's authorized directories", path.display());
+        }
+        Ok(())
     }
 
     pub(crate) fn state(&self) -> Option<&AppState> {
@@ -229,7 +253,7 @@ impl ToolContext {
                         .to_string(),
                     root_id,
                     session_id.clone(),
-                    crate::caller::session_execution_policy(&session),
+                    crate::caller::session_execution_policy(state.services().hosted, &session),
                 )
             } else {
                 (
@@ -245,11 +269,15 @@ impl ToolContext {
             neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }
         ) {
             if let Some(state) = self.state.as_ref() {
-                state
-                    .inner
-                    .store
-                    .workspace_revision(&tenant_id, &root_id)
-                    .await?
+                if state.services().execution.external_workspace_revisions() {
+                    state
+                        .services()
+                        .execution
+                        .workspace_revision(&tenant_id, &root_id)
+                        .await?
+                } else {
+                    state.inner.store.workspace_revision(&tenant_id, &root_id).await?
+                }
             } else {
                 None
             }
@@ -456,13 +484,16 @@ impl neoism_agent_plugin_api::RuntimeTool for BuiltinTool {
                         .and_then(Weak::upgrade)
                         .map(|inner| AppState { inner }),
                 )
+                .with_session_id(invocation.session_id)
                 .with_generation(invocation.generation)
                 .await
-                .with_session_id(invocation.session_id)
                 .with_permission_rules(invocation.permission_rules)
                 .with_env(invocation.env)
                 .with_cancel(invocation.cancel)
-                .with_formatter(invocation.formatter);
+                .with_formatter(invocation.formatter)
+                .with_session_scope()
+                .await
+                .map_err(|error| neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string()))?;
             self.execute_builtin(context, invocation.arguments)
                 .await
                 .map(|result| neoism_agent_plugin_api::PluginToolResult {

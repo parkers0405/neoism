@@ -428,7 +428,14 @@ fn render_agent_pane_with_responsive<P, D, I>(
                     // the first call.
                     pane.fire_fx_prompt();
                 }
-                fx::render(kind, sugarloaf, main_rect, elapsed, chrome_scale, theme);
+                fx::render(
+                    kind,
+                    sugarloaf,
+                    fx::scene_rect(main_rect, input_rect, chrome_scale),
+                    elapsed,
+                    chrome_scale,
+                    theme,
+                );
             } else {
                 pane.fire_fx_prompt();
                 pane.set_fx_started(None);

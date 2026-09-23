@@ -246,6 +246,10 @@ pub(crate) async fn create_subtask_session(
             crate::execution_activity::EXECUTION_ID_KEY,
             crate::execution_activity::EXECUTION_ROOT_KEY,
             crate::caller::TENANT_EXTRA_KEY,
+            crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY,
+            crate::caller::EXECUTION_POLICY_EXTRA_KEY,
+            crate::caller::CREATED_BY_EXTRA_KEY,
+            crate::caller::QUOTAS_EXTRA_KEY,
         ]
         .into_iter()
         .filter_map(|key| {

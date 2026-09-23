@@ -79,6 +79,8 @@ impl NeoismAgentPane {
             return false;
         };
         if Some(entry.id.as_str()) == self.session_id.as_deref() {
+            self.timeline_scroll_px = 0.0;
+            self.timeline_follow_bottom = true;
             return false;
         }
         self.switch_session(entry.id);

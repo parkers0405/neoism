@@ -157,6 +157,23 @@ pub trait ExecutionLease: Send + Sync {
 }
 
 pub trait ExecutionProvider: Send + Sync {
+    /// An external workspace store owns both revision reads and commit CAS.
+    /// Hosted adapters must opt in explicitly; existing local providers retain
+    /// the Agent store's revision handling.
+    fn external_workspace_revisions(&self) -> bool {
+        false
+    }
+    fn workspace_revision<'a>(
+        &'a self,
+        _tenant: &'a str,
+        _root: &'a str,
+    ) -> ServiceFuture<'a, Result<Option<String>, ServiceError>> {
+        Box::pin(async {
+            Err(ServiceError::new(
+                "external workspace revision store was not injected",
+            ))
+        })
+    }
     fn backend_name(&self) -> &'static str;
     fn available(&self) -> bool;
     fn acquire<'a>(

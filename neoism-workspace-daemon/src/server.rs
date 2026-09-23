@@ -342,24 +342,6 @@ async fn agent_proxy_inner(
         match agent_proxy_credential(&state.auth, &headers, &workspace_id, &root, shared)
         {
             Ok(identity) => identity,
-            Err(_)
-                if headers.get(header::AUTHORIZATION).is_none()
-                    && !handshake::require_auth_enabled()
-                    && !cloud_auth::provision_token_configured()
-                    && shared =>
-            {
-                // Password-free sharing authorizes only an explicitly Shared
-                // workspace, never the daemon's private/project namespaces.
-                let namespace = crate::agent_hosting::namespace(&workspace_id, &root);
-                match mint_agent_credential(
-                    "trust-local".into(),
-                    namespace.as_deref().unwrap_or(&workspace_id),
-                    &root,
-                ) {
-                    Ok(credential) => credential,
-                    Err(response) => return response,
-                }
-            }
             Err(response) => return response,
         };
     crate::agent::ensure_agent_server_started(state.workspaces.clone());
@@ -456,14 +438,12 @@ fn agent_proxy_principal(
     scoped: Option<(&str, bool)>,
 ) -> Result<String, Response> {
     let bearer = cloud_auth::extract_bearer(headers);
-    // Preserve the daemon's global auth policy here. Password-free access to
-    // an explicitly Shared workspace is handled separately by agent_proxy_inner;
-    // it must not authorize private/project namespaces or operator adoption.
+    // Match the WebSocket Hello gate: the internal daemon signing token does
+    // not turn a password-free local server into a password-required one.
     if bearer.is_none()
         && headers.get(header::AUTHORIZATION).is_none()
         && !handshake::require_auth_enabled()
         && !cloud_auth::provision_token_configured()
-        && !cloud_auth::legacy_daemon_token_configured()
     {
         return Ok("trust-local".to_string());
     }
@@ -685,6 +665,22 @@ mod agent_proxy_auth_tests {
             crdt: CrdtSyncHub::default(),
             paired_hosts: PairedHostStore::in_memory(),
         }
+    }
+
+    #[test]
+    fn internal_daemon_token_does_not_require_password_for_joined_agent() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _token = DaemonTokenGuard::set("internal-signing-key");
+        let temp = tempfile::tempdir().unwrap();
+        let auth = AuthService::bootstrap(temp.path()).unwrap();
+        let headers = HeaderMap::new();
+        assert_eq!(
+            agent_proxy_principal(&auth, &headers, Some(("joined-workspace", false))).unwrap(),
+            "trust-local"
+        );
+        let mut invalid = HeaderMap::new();
+        invalid.insert(header::AUTHORIZATION, "Bearer invalid".parse().unwrap());
+        assert!(agent_proxy_principal(&auth, &invalid, Some(("joined-workspace", false))).is_err());
     }
 
     #[tokio::test]

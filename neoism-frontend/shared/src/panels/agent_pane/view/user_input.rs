@@ -413,6 +413,7 @@ pub trait AgentUserInputPane {
     fn usage_summary_label(&self) -> Option<String>;
     fn agent_label(&self) -> &str;
     fn agent_label_changed_elapsed_ms(&self) -> Option<f32>;
+    fn status_chip_activation_ms(&self, index: usize) -> Option<f32>;
     fn model(&self) -> &str;
     fn thinking_label(&self) -> &str;
     fn streaming_label(&self) -> String;
@@ -552,6 +553,10 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn agent_label_changed_elapsed_ms(&self) -> Option<f32> {
                 <$pane>::agent_label_changed_elapsed_ms(self)
+            }
+
+            fn status_chip_activation_ms(&self, index: usize) -> Option<f32> {
+                <$pane>::status_chip_activation_ms(self, index)
             }
 
             fn model(&self) -> &str {
@@ -783,6 +788,10 @@ impl AgentUserInputPane for NeoismAgentPane {
 
     fn agent_label_changed_elapsed_ms(&self) -> Option<f32> {
         NeoismAgentPane::agent_label_changed_elapsed_ms(self)
+    }
+
+    fn status_chip_activation_ms(&self, index: usize) -> Option<f32> {
+        NeoismAgentPane::status_chip_activation_ms(self, index)
     }
 
     fn model(&self) -> &str {
@@ -2181,25 +2190,58 @@ pub fn render_status_chips(
         if x + chip_w > start_x + max_w {
             break;
         }
+        let activation = pane.status_chip_activation_ms(index);
+        let lift = activation.map_or(0.0, |ms| {
+            let progress = (ms / 280.0).clamp(0.0, 1.0);
+            -2.5 * s * (1.0 - progress).powi(2)
+        });
         if index == 0 {
             if let Some(elapsed_ms) = agent_transition {
                 super::side_panel::draw::render_scramble_text(
-                    sugarloaf, x, y, &label, &opts, elapsed_ms,
+                    sugarloaf,
+                    x,
+                    y + lift,
+                    &label,
+                    &opts,
+                    elapsed_ms,
                 );
             } else {
-                draw_text_clipped(sugarloaf, x, y, &label, &opts, occlusion_rects);
+                draw_text_clipped(sugarloaf, x, y + lift, &label, &opts, occlusion_rects);
             }
         } else {
-            draw_text_clipped(sugarloaf, x, y, &label, &opts, occlusion_rects);
+            draw_text_clipped(sugarloaf, x, y + lift, &label, &opts, occlusion_rects);
         }
         draw_text_clipped(
             sugarloaf,
             x + label_w + 6.0 * s,
-            y + 3.5 * s,
+            y + 3.5 * s + lift,
             caret,
             &caret_opts,
             occlusion_rects,
         );
+        if let Some(ms) = activation {
+            let fade = 1.0 - ms / 280.0;
+            let accent = theme.u8(theme.readable_accent(color));
+            let width = label_w * (1.0 - fade.powi(3));
+            let line = [x, y + 17.0 * s, width, 1.5 * s];
+            if !occlusion_rects
+                .iter()
+                .any(|rect| super::draw::intersect_rect(line, *rect).is_some())
+            {
+                draw_rect_clipped(
+                    sugarloaf,
+                    line,
+                    [
+                        accent[0] as f32 / 255.0,
+                        accent[1] as f32 / 255.0,
+                        accent[2] as f32 / 255.0,
+                        fade * 0.65,
+                    ],
+                    ORDER_TEXT,
+                    [x, y - 5.0 * s, chip_w, STATUS_CHIP_HIT_H * s],
+                );
+            }
+        }
         pane.register_status_chip_rect(
             index,
             [

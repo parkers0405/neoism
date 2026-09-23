@@ -59,9 +59,25 @@ pub fn measure_tool_message_height(
     // transcript shows what ran without replaying every byte. A click
     // (tool_expanded) restores the full card.
     let minimal = tool_archived && !tool_expanded;
+    let title_opts = DrawOpts {
+        font_size: 15.5 * s,
+        bold: true,
+        ..DrawOpts::default()
+    };
+    let title_extra = wrap_text(
+        sugarloaf,
+        &message.title_text(),
+        (width - 46.0 * s).max(40.0 * s),
+        &title_opts,
+        4,
+    )
+    .len()
+    .saturating_sub(1) as f32
+        * 20.0
+        * s;
     if let Some(sections) = cached_edit_diff_sections(message) {
         let card_w = tool_diff_card_width(width, s);
-        let mut height = 30.0 * s;
+        let mut height = 30.0 * s + title_extra;
         for (section_index, section) in sections.iter().enumerate() {
             let card_key = format!("{}:{section_index}", message.id());
             let card_expanded = !minimal && pane.tool_expanded(&card_key);
@@ -82,22 +98,6 @@ pub fn measure_tool_message_height(
         return Some(height.max(58.0 * s));
     }
 
-    let title_opts = DrawOpts {
-        font_size: 15.5 * s,
-        bold: true,
-        ..DrawOpts::default()
-    };
-    let title_extra = wrap_text(
-        sugarloaf,
-        &message.title_text(),
-        (width - 46.0 * s).max(40.0 * s),
-        &title_opts,
-        4,
-    )
-    .len()
-    .saturating_sub(1) as f32
-        * 20.0
-        * s;
     if minimal {
         return Some(minimal_tool_header_height(s) + title_extra);
     }

@@ -360,6 +360,7 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn apply_agent(&mut self, value: String) {
+        self.status_chip_activated = Some((0, Instant::now()));
         let previous_label = self.agent_label().to_string();
         self.agent = (!value.is_empty()).then_some(value.clone());
         match value.as_str() {
@@ -428,6 +429,7 @@ impl NeoismAgentPane {
         value: String,
         connection_id: Option<String>,
     ) {
+        self.status_chip_activated = Some((1, Instant::now()));
         self.remember_model_value(&value);
         self.model = value;
         self.connection_id = connection_id;
@@ -471,6 +473,7 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn apply_thinking(&mut self, value: String) {
+        self.status_chip_activated = Some((2, Instant::now()));
         self.thinking = (!value.is_empty()).then_some(value);
         if self.thinking.is_some() {
             self.push_outbound(OutboundAgentCommand::PersistConfigChoice {
@@ -538,6 +541,9 @@ impl NeoismAgentPane {
             .is_some_and(|cached| cached.hydrated)
         {
             self.activate_cached_session(&session_id);
+            // Tail-only SSE cannot replay parts completed while this pane was
+            // parked. Show the cache immediately, then reconcile newest history.
+            self.ensure_session_preloaded(session_id, true);
             return;
         }
         // Navigation must never wait behind remote preloads. Joined clients
@@ -721,7 +727,7 @@ impl NeoismAgentPane {
         let messages = if cached_live.is_empty() {
             messages
         } else {
-            merge_session_snapshot(messages, cached_live)
+            merge_session_snapshot(messages, cached_live, false)
         };
         let timeline_history = std::mem::take(&mut self.timeline_history);
         let timeline_layout_cache = self.timeline_layout_cache.replace(None);
@@ -736,8 +742,6 @@ impl NeoismAgentPane {
                 pending_user_prompts: std::mem::take(&mut self.pending_user_prompts),
                 prompt_echo_aliases: std::mem::take(&mut self.prompt_echo_aliases),
                 timeline_history,
-                timeline_scroll_px: self.timeline_scroll_px,
-                timeline_follow_bottom: self.timeline_follow_bottom,
                 timeline_content_height_px: self.timeline_content_height_px,
                 timeline_live_trace_start,
                 timeline_live_trace_anchor,
@@ -831,8 +835,8 @@ impl NeoismAgentPane {
         // contains tool rows would paint leftover titles until the next click.
         self.reset_transient_timeline_interactions();
         self.timeline_history = cached.timeline_history;
-        self.timeline_scroll_px = cached.timeline_scroll_px;
-        self.timeline_follow_bottom = cached.timeline_follow_bottom;
+        self.timeline_scroll_px = 0.0;
+        self.timeline_follow_bottom = true;
         self.timeline_content_height_px = cached.timeline_content_height_px;
         self.side_panel.set_show_home_override(false);
         if !stays_in_family {

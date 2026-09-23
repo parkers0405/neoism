@@ -393,6 +393,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_agent_picker(&mut self) {
+        self.status_chip_activated = Some((0, Instant::now()));
         self.close_connect();
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Agent,
@@ -419,6 +420,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_model_picker(&mut self) {
+        self.status_chip_activated = Some((1, Instant::now()));
         self.close_connect();
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Model,
@@ -538,6 +540,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_thinking_picker(&mut self) {
+        self.status_chip_activated = Some((2, Instant::now()));
         self.close_connect();
         let mut options = vec![
             NeoismAgentPickerOption::new(

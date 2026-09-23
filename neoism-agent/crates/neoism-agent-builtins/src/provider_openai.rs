@@ -54,11 +54,20 @@ impl OpenAiClient {
         }
     }
 
-    pub(super) fn with_base_url(base_url: impl Into<String>) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+    pub(super) fn with_base_url(base_url: impl Into<String>) -> anyhow::Result<Self> {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let mut builder = reqwest::Client::builder();
+        if std::env::var("NEOISM_AGENT_HOSTED_GATEWAY_URLS").ok()
+            .is_some_and(|urls| urls.split(',').any(|url| url == base_url))
+        {
+            let path = std::env::var("NEOISM_AGENT_HOSTED_GATEWAY_CA_PEM")
+                .context("hosted gateway CA is required")?;
+            let certificate = reqwest::Certificate::from_pem(&std::fs::read(path)?)?;
+            builder = builder.tls_built_in_root_certs(false)
+                .add_root_certificate(certificate)
+                .redirect(reqwest::redirect::Policy::none());
         }
+        Ok(Self { client: builder.build()?, base_url })
     }
 }
 

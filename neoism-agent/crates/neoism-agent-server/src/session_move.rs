@@ -29,6 +29,15 @@ pub(crate) async fn move_session(
         false,
     )?;
     let previous_directory = info.directory.clone();
+    if !crate::caller::allows_session_path(
+        state.services().hosted,
+        &info,
+        std::path::Path::new(&project_context.directory),
+    ) {
+        return Err(ApiError::forbidden(
+            "A tenant-scoped chat cannot move outside its workspace",
+        ));
+    }
     let changed = previous_directory != project_context.directory;
     if changed {
         info.directory = project_context.directory;

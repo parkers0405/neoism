@@ -140,8 +140,6 @@ pub(in crate::panels::agent_pane::state) struct CachedAgentSession {
     pub pending_user_prompts: Vec<String>,
     pub prompt_echo_aliases: Vec<(String, String)>,
     pub timeline_history: AgentTimelineHistoryState,
-    pub timeline_scroll_px: f32,
-    pub timeline_follow_bottom: bool,
     pub timeline_content_height_px: f32,
     pub timeline_layout_epoch: u64,
     pub timeline_layout_cache: Option<TimelineLayoutCache>,
@@ -165,8 +163,6 @@ impl CachedAgentSession {
             pending_user_prompts: Vec::new(),
             prompt_echo_aliases: Vec::new(),
             timeline_history: AgentTimelineHistoryState::default(),
-            timeline_scroll_px: 0.0,
-            timeline_follow_bottom: true,
             timeline_content_height_px: 0.0,
             timeline_layout_epoch: 0,
             timeline_layout_cache: None,
@@ -190,11 +186,13 @@ impl CachedAgentSession {
 
 /// Merge a stored transcript snapshot with parts that arrived live
 /// while the snapshot request was in flight. Live text wins when the
-/// stored part is empty or an older prefix. Desktop:
+/// stored part is empty or an older prefix. A hydrated cached history goes
+/// before a disjoint newest page; live-only streamed parts go after it. Desktop:
 /// `pane.rs::merge_session_snapshot`.
 pub(in crate::panels::agent_pane::state) fn merge_session_snapshot(
     snapshot: Vec<NeoismAgentMessage>,
     live: Vec<NeoismAgentMessage>,
+    live_is_prior_history: bool,
 ) -> Vec<NeoismAgentMessage> {
     use std::collections::HashSet;
 
@@ -235,7 +233,12 @@ pub(in crate::panels::agent_pane::state) fn merge_session_snapshot(
 
     let mut live_slots = vec![Vec::new(); snapshot.len() + 1];
     if anchors.is_empty() {
-        live_slots[snapshot.len()].extend(live.iter_mut().filter_map(Option::take));
+        let slot = if live_is_prior_history {
+            0
+        } else {
+            snapshot.len()
+        };
+        live_slots[slot].extend(live.iter_mut().filter_map(Option::take));
     } else {
         let first_live_index = anchors[0].0;
         for message in live[..first_live_index].iter_mut().filter_map(Option::take) {
@@ -437,7 +440,7 @@ impl NeoismAgentPane {
         let messages = if cached_live.is_empty() {
             messages
         } else {
-            merge_session_snapshot(messages, cached_live)
+            merge_session_snapshot(messages, cached_live, false)
         };
         let timeline_history = std::mem::take(&mut self.timeline_history);
         let timeline_layout_cache = self.timeline_layout_cache.replace(None);
@@ -450,8 +453,6 @@ impl NeoismAgentPane {
                 pending_user_prompts: std::mem::take(&mut self.pending_user_prompts),
                 prompt_echo_aliases: std::mem::take(&mut self.prompt_echo_aliases),
                 timeline_history,
-                timeline_scroll_px: self.timeline_scroll_px,
-                timeline_follow_bottom: self.timeline_follow_bottom,
                 timeline_content_height_px: self.timeline_content_height_px,
                 timeline_layout_epoch: self.timeline_layout_epoch,
                 timeline_layout_cache,
@@ -546,8 +547,8 @@ impl NeoismAgentPane {
         // contains tool rows would paint leftover titles until the next click.
         self.reset_transient_timeline_interactions();
         self.timeline_history = cached.timeline_history;
-        self.timeline_scroll_px = cached.timeline_scroll_px;
-        self.timeline_follow_bottom = cached.timeline_follow_bottom;
+        self.timeline_scroll_px = 0.0;
+        self.timeline_follow_bottom = true;
         self.timeline_content_height_px = cached.timeline_content_height_px;
         self.side_panel.set_show_home_override(false);
         if !stays_in_family {
@@ -730,7 +731,7 @@ impl NeoismAgentPane {
             &mut cached.pending_user_prompts,
             &cached.prompt_echo_aliases,
         );
-        cached.messages = merge_session_snapshot(messages, live);
+        cached.messages = merge_session_snapshot(messages, live, cached.hydrated);
         cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
         cached.hydrated = true;
         cached.invalidate_timeline_layout();

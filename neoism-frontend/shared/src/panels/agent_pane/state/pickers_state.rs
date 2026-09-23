@@ -2,6 +2,7 @@ use super::*;
 
 impl NeoismAgentPane {
     pub fn open_agent_picker(&mut self) {
+        self.status_chip_activated = Some((0, Instant::now()));
         self.push_outbound(OutboundAgentCommand::RefreshAgents {
             directory: self.directory.clone(),
         });
@@ -9,11 +10,17 @@ impl NeoismAgentPane {
             NeoismAgentPickerKind::Agent,
             "Agents",
             self.agent_options.clone(),
-            0,
+            self.agent_options
+                .iter()
+                .position(|option| {
+                    option.value == self.agent.as_deref().unwrap_or("build")
+                })
+                .unwrap_or(0),
         ));
     }
 
     pub fn open_model_picker(&mut self) {
+        self.status_chip_activated = Some((1, Instant::now()));
         self.push_outbound(OutboundAgentCommand::RefreshModels);
         let options = self.model_picker_options();
         let selected = options
@@ -99,6 +106,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_thinking_picker(&mut self) {
+        self.status_chip_activated = Some((2, Instant::now()));
         let mut options = vec![
             NeoismAgentPickerOption::new(
                 "none",
@@ -220,12 +228,20 @@ impl NeoismAgentPane {
     pub fn set_agent_options(&mut self, options: Vec<NeoismAgentPickerOption>) {
         self.agent_options = options;
         let options = self.agent_options.clone();
+        let selected = options
+            .iter()
+            .position(|option| option.value == self.agent.as_deref().unwrap_or("build"));
         if let Some(picker) = self
             .picker
             .as_mut()
             .filter(|picker| picker.kind == NeoismAgentPickerKind::Agent)
         {
             picker.replace_options(options);
+            if picker.query.is_empty() {
+                if let Some(selected) = selected {
+                    picker.selected = selected;
+                }
+            }
         }
     }
 
@@ -502,6 +518,12 @@ impl NeoismAgentPane {
         }
         if self.code_copy_feedback_is_animating() {
             return Some("code_copy_feedback");
+        }
+        if self
+            .status_chip_activated
+            .is_some_and(|(_, at)| at.elapsed().as_millis() < 280)
+        {
+            return Some("status_chip_activation");
         }
         if self.agent_label_changed_elapsed_ms().is_some() {
             return Some("agent_label_transition");

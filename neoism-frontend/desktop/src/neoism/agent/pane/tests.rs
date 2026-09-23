@@ -3374,10 +3374,111 @@ fn child_hydration_merges_snapshot_without_losing_streamed_prefix() {
     let live =
         vec![NeoismAgentMessage::assistant("the streamed prefix").with_id("part-answer")];
 
-    let merged = merge_session_snapshot(snapshot, live);
+    let merged = merge_session_snapshot(snapshot, live, false);
 
     assert_eq!(merged.len(), 2);
     assert_eq!(merged[1].text, "the streamed prefix");
+}
+
+#[test]
+fn stale_pending_snapshot_cannot_regress_completed_edit() {
+    let completed = NeoismAgentMessage::tool(
+        "Edit(src/lib.rs)",
+        "final diff",
+        "completed",
+        "edit",
+        NeoismAgentOutputKind::Text,
+        "rust",
+        Vec::new(),
+    )
+    .with_id("edit-part");
+    let pending = NeoismAgentMessage::tool(
+        "Edit(src/lib.rs)",
+        "partial diff",
+        "pending",
+        "edit",
+        NeoismAgentOutputKind::Text,
+        "rust",
+        Vec::new(),
+    )
+    .with_id("edit-part");
+
+    let merged = merge_session_snapshot(vec![pending], vec![completed], false);
+    assert_eq!(merged[0].status, "completed");
+    assert_eq!(merged[0].text, "final diff");
+}
+
+#[test]
+fn disjoint_latest_page_does_not_put_old_cached_edits_after_latest_answer() {
+    let cached = vec![
+        NeoismAgentMessage::user("old task").with_id("old-user"),
+        NeoismAgentMessage::tool(
+            "Edit(old.rs)",
+            "old edit",
+            "completed",
+            "edit",
+            NeoismAgentOutputKind::Text,
+            "rust",
+            Vec::new(),
+        )
+        .with_id("old-edit"),
+    ];
+    let latest = vec![
+        NeoismAgentMessage::user("new task").with_id("new-user"),
+        NeoismAgentMessage::assistant("latest answer").with_id("new-answer"),
+    ];
+
+    let merged = merge_session_snapshot(latest.clone(), cached.clone(), true);
+    assert_eq!(merged[0].id, "old-user");
+    assert_eq!(merged[1].id, "old-edit");
+    assert_eq!(merged.last().unwrap().id, "new-answer");
+
+    let live_only = merge_session_snapshot(latest, cached, false);
+    assert_eq!(live_only.last().unwrap().id, "old-edit");
+}
+
+#[test]
+fn returning_to_warm_cache_refreshes_history_without_delaying_display() {
+    let mut pane = NeoismAgentPane::default();
+    pane.server = "http://127.0.0.1:0".to_string();
+    pane.session_id = Some("other".to_string());
+    let mut cached = CachedAgentSession::live_only();
+    cached.hydrated = true;
+    cached.messages = vec![NeoismAgentMessage::assistant("old reply")];
+    pane.session_cache.insert("returned".to_string(), cached);
+
+    pane.switch_session("returned".to_string());
+
+    assert_eq!(pane.session_id.as_deref(), Some("returned"));
+    assert_eq!(pane.messages[0].text, "old reply");
+    assert!(pane.session_preloads_in_flight.contains("returned"));
+    assert!(pane.timeline_follow_bottom);
+}
+
+#[test]
+fn preloaded_disjoint_page_keeps_newest_reply_after_parked_history() {
+    let mut pane = NeoismAgentPane::default();
+    let mut cached = CachedAgentSession::live_only();
+    cached.hydrated = true;
+    cached.messages = vec![NeoismAgentMessage::assistant("old edit").with_id("old-edit")];
+    pane.session_cache.insert("returned".to_string(), cached);
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::SessionPreloaded {
+            session_id: "returned".to_string(),
+            state: Default::default(),
+            messages: vec![
+                NeoismAgentMessage::user("new task").with_id("new-user"),
+                NeoismAgentMessage::assistant("latest reply").with_id("new-answer"),
+            ],
+            oldest_cursor: None,
+        })
+        .unwrap();
+
+    pane.drain_background_updates();
+
+    let messages = &pane.session_cache.get("returned").unwrap().messages;
+    assert_eq!(messages[0].id, "old-edit");
+    assert_eq!(messages.last().unwrap().id, "new-answer");
 }
 
 #[test]
@@ -3400,7 +3501,7 @@ fn partial_snapshot_keeps_cached_history_and_subagent_notice_in_order() {
         NeoismAgentMessage::assistant("newest").with_id("a-2"),
     ];
 
-    let merged = merge_session_snapshot(snapshot, live);
+    let merged = merge_session_snapshot(snapshot, live, false);
     let ids = merged
         .iter()
         .map(|message| message.id.as_str())
@@ -3450,7 +3551,7 @@ fn runtime_completion_rehydrate_does_not_append_cached_part_at_bottom() {
     .map(NeoismAgentMessage::from)
     .collect::<Vec<_>>();
 
-    let merged = merge_session_snapshot(snapshot, vec![live]);
+    let merged = merge_session_snapshot(snapshot, vec![live], false);
 
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].id, "background-task-job_123");
@@ -3481,18 +3582,37 @@ fn child_live_cache_accumulates_deltas_before_navigation() {
 }
 
 #[test]
-fn session_cache_preserves_each_transcripts_scroll_state() {
+fn disconnected_idle_stream_resubscribes_and_reconciles() {
     let mut pane = NeoismAgentPane::default();
-    pane.session_id = Some("ses-root".to_string());
-    pane.messages = vec![NeoismAgentMessage::user("root")];
+    pane.session_id = Some("session".to_string());
+    pane.server = "http://127.0.0.1:0".to_string();
+    let mut stream = AgentSessionEventStream::connected_for_test("session");
+    stream.disconnect_for_test();
+    pane.event_stream = Some(stream);
+
+    pane.drain_server_updates();
+
+    assert_eq!(pane.event_stream.as_ref().unwrap().session_id(), "session");
+    assert!(!pane.event_stream.as_ref().unwrap().is_disconnected());
+    assert!(pane.last_stream_resubscribe_at.is_some());
+}
+
+#[test]
+fn returning_to_cached_session_opens_at_latest_reply() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("old".to_string());
+    pane.messages = vec![NeoismAgentMessage::assistant("old reply")];
     pane.timeline_scroll_px = 240.0;
     pane.timeline_follow_bottom = false;
-
     pane.cache_current_session(false);
+    pane.session_id = Some("other".to_string());
+    pane.messages = vec![NeoismAgentMessage::user("other")];
 
-    let cached = pane.session_cache.get("ses-root").expect("root cache");
-    assert_eq!(cached.timeline_scroll_px, 240.0);
-    assert!(!cached.timeline_follow_bottom);
+    pane.activate_cached_session("old");
+
+    assert_eq!(pane.messages.last().unwrap().text, "old reply");
+    assert_eq!(pane.timeline_scroll_px, 0.0);
+    assert!(pane.timeline_follow_bottom);
 }
 
 #[test]
@@ -3506,6 +3626,70 @@ fn inactive_session_cache_is_bounded() {
     pane.trim_session_cache();
 
     assert_eq!(pane.session_cache.len(), 40);
+}
+
+#[test]
+fn optimistic_prompt_echo_does_not_archive_streaming_edit_cards() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("session".to_string());
+    let mut edit = NeoismAgentMessage::tool(
+        "Edit(src/lib.rs)",
+        "changed file",
+        "completed",
+        "edit",
+        NeoismAgentOutputKind::Text,
+        "rust",
+        Vec::new(),
+    )
+    .with_id("edit-1");
+    edit.detail = r#"{"neoismToolDetail":"edit","input":{"filePath":"src/lib.rs","oldString":"old","newString":"new"},"metadata":null}"#.to_string();
+    pane.messages = vec![NeoismAgentMessage::user("fix this"), edit.clone()];
+    pane.timeline_live_trace_anchor = Some(String::new());
+    pane.timeline_live_trace_start = Some(1);
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "session",
+        [AgentSessionUpdate::Messages {
+            messages: vec![
+                NeoismAgentMessage::user("fix this").with_id("user-1"),
+                edit,
+                NeoismAgentMessage::user("next task").with_id("user-2"),
+            ],
+            oldest_cursor: None,
+        }],
+    ));
+
+    pane.drain_server_updates();
+
+    assert_eq!(pane.timeline_live_trace_anchor.as_deref(), Some("user-1"));
+    assert_eq!(pane.timeline_live_trace_start, Some(1));
+    assert!(!pane.tool_archived("edit-1"));
+}
+
+#[test]
+fn trace_boundary_change_invalidates_cached_edit_layout() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("old").with_id("user-1"),
+        NeoismAgentMessage::tool(
+            "Edit(src/lib.rs)",
+            "changed file",
+            "completed",
+            "edit",
+            NeoismAgentOutputKind::Text,
+            "rust",
+            Vec::new(),
+        )
+        .with_id("edit-1"),
+        NeoismAgentMessage::user("new").with_id("user-2"),
+    ];
+    pane.timeline_live_trace_start = Some(1);
+    pane.timeline_live_trace_anchor = Some("user-2".to_string());
+    let epoch = pane.timeline_layout_epoch;
+
+    pane.rebase_current_turn_trace();
+
+    assert_eq!(pane.timeline_live_trace_start, Some(3));
+    assert_eq!(pane.timeline_layout_epoch, epoch.wrapping_add(1));
 }
 
 #[test]
@@ -3544,12 +3728,12 @@ fn transcript_refresh_keeps_live_trace_anchored_to_its_turn() {
     pane.rebase_current_turn_trace();
     assert_eq!(pane.timeline_live_trace_start, Some(3));
 
-    // An unfindable (optimistic, empty-id) anchor falls back to the latest
-    // turn and re-anchors on its durable id.
+    // An unresolved optimistic anchor must not jump past previously live
+    // rows just because a newer user prompt has arrived.
     pane.timeline_live_trace_anchor = Some(String::new());
     pane.rebase_current_turn_trace();
-    assert_eq!(pane.timeline_live_trace_start, Some(5));
-    assert_eq!(pane.timeline_live_trace_anchor.as_deref(), Some("newer"));
+    assert_eq!(pane.timeline_live_trace_start, Some(3));
+    assert_eq!(pane.timeline_live_trace_anchor.as_deref(), Some("latest"));
 }
 
 #[test]
@@ -4353,6 +4537,15 @@ fn duplicate_id_structural_snapshot_is_not_a_stable_source_prefix() {
     assert!(!super::ingest::stable_timeline_source_prefix(
         &previous, &incoming
     ));
+}
+
+#[test]
+fn timeline_without_scroll_range_does_not_claim_trackpad_or_wheel() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 120.0, 300.0);
+    assert!(!pane.scroll_timeline_pixels(30.0));
+    assert!(!pane.scroll_timeline_wheel_pixels(-60.0));
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
 }
 
 #[test]

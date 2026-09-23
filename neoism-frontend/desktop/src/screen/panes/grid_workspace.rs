@@ -591,11 +591,12 @@ impl Screen<'_> {
         // the buffer-tab strip and the trailing "+" new-tab button are
         // always reachable, even when the saved snapshot was empty.
         self.renderer.buffer_tabs.ensure_terminal_tab();
-        self.active_workspace_root = self
-            .workspace_roots
-            .get(&id)
-            .cloned()
-            .or_else(|| self.active_pane_workspace_root());
+        // The previous workspace's root must not be used as a fallback for
+        // a workspace whose chrome has not been cached yet.
+        let saved_root = self.workspace_roots.get(&id).cloned();
+        self.active_workspace_root = None;
+        self.active_workspace_root =
+            saved_root.or_else(|| self.active_pane_workspace_root());
         if self.renderer.file_tree.is_visible() {
             if let Some(root) = self.active_workspace_root.clone() {
                 if self.renderer.file_tree.root() != Some(root.as_path()) {

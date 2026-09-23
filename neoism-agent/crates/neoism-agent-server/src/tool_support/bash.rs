@@ -179,12 +179,16 @@ pub(super) async fn bash_tool(
     env.extend(context.env.clone());
     env.insert("TERM".into(), "xterm-256color".into());
     env.insert("NEOISM_TERMINAL".into(), "1".into());
-    let request = context
+    let mut request = context
         .execution_request(
             neoism_agent_service_api::ProcessClass::Command,
             Some(timeout_ms),
         )
         .await?;
+    if request.provider.is_none() {
+        // The local lease must cover the workdir already approved by path and permission checks.
+        request.workspace.local_path = Some(cwd.clone());
+    }
     let services = context.services();
     let lease = services.execution.acquire(request).await?;
     let spec = neoism_agent_service_api::ProcessSpec {

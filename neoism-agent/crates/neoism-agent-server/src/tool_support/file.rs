@@ -356,8 +356,11 @@ fn write_tool_metadata(
         context.formatter(),
         [path.clone()],
     );
-    let lsp_runtime = context.lsp_runtime()?;
-    let lsp_touch = diagnostics::touch_paths(&lsp_runtime, &context.cwd, [path.clone()]);
+    let lsp_runtime = context.lsp_runtime();
+    let lsp_touch = lsp_runtime
+        .as_ref()
+        .ok()
+        .map(|runtime| diagnostics::touch_paths(runtime, &context.cwd, [path.clone()]));
 
     let mut metadata = json!({
         "path": mutation.display,
@@ -365,18 +368,23 @@ fn write_tool_metadata(
         "previousBytes": mutation.previous_len,
         "lspTouch": lsp_touch,
     });
-    if let Some(snapshot) =
-        crate::snapshot::file_change(&context.cwd, &path, mutation.snapshot_before)?
-    {
-        crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot]);
+    if let Err(error) = &lsp_runtime {
+        metadata["lspUnavailable"] = json!(error.to_string());
+    }
+    match crate::snapshot::file_change(&context.cwd, &path, mutation.snapshot_before) {
+        Ok(Some(snapshot)) => crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot]),
+        Ok(None) => {},
+        Err(error) => metadata["snapshotError"] = json!(error.to_string()),
     }
     format::attach_formatted(&mut metadata, &formatted);
-    let report = diagnostics::attach_lsp_diagnostics(
-        &lsp_runtime,
-        &context.cwd,
-        [path.clone()],
-        &mut metadata,
-    );
+    let report = lsp_runtime.as_ref().ok().and_then(|runtime| {
+        diagnostics::attach_lsp_diagnostics(
+            runtime,
+            &context.cwd,
+            [path.clone()],
+            &mut metadata,
+        )
+    });
 
     let mut output = format!(
         "Wrote {} bytes to {} (previously {} bytes)",
@@ -486,8 +494,11 @@ fn edit_tool_metadata(
         context.formatter(),
         [path.clone()],
     );
-    let lsp_runtime = context.lsp_runtime()?;
-    let lsp_touch = diagnostics::touch_paths(&lsp_runtime, &context.cwd, [path.clone()]);
+    let lsp_runtime = context.lsp_runtime();
+    let lsp_touch = lsp_runtime
+        .as_ref()
+        .ok()
+        .map(|runtime| diagnostics::touch_paths(runtime, &context.cwd, [path.clone()]));
 
     let mut metadata = json!({
         "path": mutation.display,
@@ -495,18 +506,23 @@ fn edit_tool_metadata(
         "remainingMatches": mutation.remaining_matches,
         "lspTouch": lsp_touch,
     });
-    if let Some(snapshot) =
-        crate::snapshot::file_change(&context.cwd, &path, mutation.snapshot_before)?
-    {
-        crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot]);
+    if let Err(error) = &lsp_runtime {
+        metadata["lspUnavailable"] = json!(error.to_string());
+    }
+    match crate::snapshot::file_change(&context.cwd, &path, mutation.snapshot_before) {
+        Ok(Some(snapshot)) => crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot]),
+        Ok(None) => {},
+        Err(error) => metadata["snapshotError"] = json!(error.to_string()),
     }
     format::attach_formatted(&mut metadata, &formatted);
-    let report = diagnostics::attach_lsp_diagnostics(
-        &lsp_runtime,
-        &context.cwd,
-        [path.clone()],
-        &mut metadata,
-    );
+    let report = lsp_runtime.as_ref().ok().and_then(|runtime| {
+        diagnostics::attach_lsp_diagnostics(
+            runtime,
+            &context.cwd,
+            [path.clone()],
+            &mut metadata,
+        )
+    });
 
     let mut output = format!(
         "Replaced {} occurrence(s) in {}",

@@ -436,17 +436,23 @@ pub fn render(
             .text_mut()
             .draw(hx, header_text_y, path_fit.as_str(), &path_opts);
         if spec.link_target.is_some() && spec.link_hovered && path_w > 0.0 {
-            sugarloaf.quad(
-                None,
-                hx,
-                header_text_y + HEADER_FONT_SIZE * scale + 2.0 * scale,
-                path_w,
-                (1.0 * scale).max(1.0),
-                theme.f32(theme.blue),
-                [0.0, 0.0, 0.0, 0.0],
-                depth,
-                base_order + 3,
-            );
+            let underline_y = header_text_y + HEADER_FONT_SIZE * scale + 2.0 * scale;
+            let underline_bottom =
+                (underline_y + (1.0 * scale).max(1.0)).min(clip_bottom);
+            let visible_y = underline_y.max(clip_top);
+            if underline_bottom > visible_y {
+                sugarloaf.quad(
+                    None,
+                    hx,
+                    visible_y,
+                    path_w,
+                    underline_bottom - visible_y,
+                    theme.f32(theme.blue),
+                    [0.0, 0.0, 0.0, 0.0],
+                    depth,
+                    base_order + 3,
+                );
+            }
         }
 
         let badge_y =
@@ -618,15 +624,25 @@ pub fn render(
             let fragment_x =
                 body_inner_x + fragment.indent_cols as f32 * FONT_SIZE * scale * 0.58;
             if fragment_ix > 0 {
-                sugarloaf.rect(
-                    None,
-                    body_inner_x + 1.5 * scale,
-                    row_y + 3.0 * scale,
-                    (1.0 * scale).max(1.0),
-                    line_h - 6.0 * scale,
-                    theme.f32(theme.muted),
-                    depth,
-                    base_order.saturating_add(4),
+                let marker_clip = clip_to_viewport(
+                    x,
+                    row_y,
+                    width,
+                    line_h,
+                    row_top_bound,
+                    row_bot_bound,
+                );
+                let marker_opts = DrawOpts {
+                    font_size: GUTTER_FONT_SIZE * scale,
+                    color: theme.u8_alpha(theme.muted, 0.85),
+                    clip_rect: Some(marker_clip),
+                    ..DrawOpts::default()
+                };
+                sugarloaf.text_mut().draw(
+                    body_inner_x + 1.0 * scale,
+                    snap_text_y(row_y + (line_h - GUTTER_FONT_SIZE * scale) / 2.0),
+                    "↪",
+                    &marker_opts,
                 );
             }
             match line.kind {
@@ -949,6 +965,18 @@ fn clip_to_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_marker_clip_stays_within_visible_row() {
+        assert_eq!(
+            clip_to_viewport(10.0, 40.0, 180.0, LINE_HEIGHT, 50.0, 90.0),
+            [10.0, 50.0, 180.0, 8.0]
+        );
+        assert_eq!(
+            clip_to_viewport(10.0, 40.0, 180.0, LINE_HEIGHT, 60.0, 90.0)[3],
+            0.0
+        );
+    }
 
     #[test]
     fn code_wrap_prefers_breakpoints_and_hanging_indent() {

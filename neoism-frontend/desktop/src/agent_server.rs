@@ -105,7 +105,7 @@ fn health_url(server: &str) -> Result<url::Url, String> {
     Ok(url)
 }
 
-fn is_owned_local_endpoint(server: &str) -> bool {
+pub(crate) fn is_owned_local_endpoint(server: &str) -> bool {
     matches_owned_local_endpoint(server, &configured_server())
 }
 

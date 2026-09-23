@@ -755,6 +755,46 @@ async fn write_and_edit_tools_modify_project_files() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn file_mutations_report_success_when_lsp_generation_is_unavailable() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-mutation-no-lsp-{}",
+        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let context = ToolContext::new(&root).with_permission_rules(permission_rules(BTreeMap::from([
+        ("*".to_string(), json!("allow")),
+    ])));
+    let written = super::file::write_tool(
+        context.clone(),
+        json!({ "filePath": "notes.txt", "content": "hello world" }),
+    )
+    .await
+    .unwrap();
+    assert!(written.output.contains("Wrote"));
+    assert!(written.metadata.unwrap().get("lspUnavailable").is_some());
+
+    let edited = super::file::edit_tool(
+        context.clone(),
+        json!({ "filePath": "notes.txt", "oldString": "world", "newString": "neoism" }),
+    )
+    .await
+    .unwrap();
+    assert!(edited.output.contains("Replaced 1 occurrence"));
+    assert!(edited.metadata.unwrap().get("lspUnavailable").is_some());
+
+    let patched = super::patch_tool::apply_patch_tool(
+        context,
+        json!({ "patchText": "*** Begin Patch\n*** Update File: notes.txt\n@@\n-hello neoism\n+hello again\n*** End Patch" }),
+    )
+    .await
+    .unwrap();
+    assert!(patched.output.contains("Applied patch to"));
+    assert!(patched.metadata.unwrap().get("lspUnavailable").is_some());
+    assert_eq!(std::fs::read_to_string(root.join("notes.txt")).unwrap(), "hello again");
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_tools_serialize_same_file_changes() {
     let root = std::env::temp_dir().join(format!(

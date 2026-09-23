@@ -149,47 +149,38 @@ pub(super) fn fetch_agent_options(
         .as_array()
         .ok_or_else(|| "Neoism Agent returned malformed agents".to_string())?;
 
-    let mut out = vec![NeoismAgentPickerOption::new(
-        "session default",
-        "Use Neoism Agent default",
-        "default",
-        "",
-    )];
-    out.extend(
-        agents
-            .iter()
-            .filter(|agent| {
-                !agent
-                    .get("hidden")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-            })
-            // Subagent-only definitions (mode == "subagent", e.g.
-            // explore/general) are Task-tool targets, not top-level
-            // agents — the picker shows primaries (build/plan) plus
-            // whatever the user's config adds.
-            .filter(|agent| {
-                agent
-                    .get("mode")
-                    .and_then(Value::as_str)
-                    .is_none_or(|mode| mode != "subagent")
-            })
-            .filter_map(|agent| {
-                let name = agent.get("name").and_then(Value::as_str)?.to_string();
-                let description = agent
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .or_else(|| agent.get("mode").and_then(Value::as_str))
-                    .unwrap_or("agent")
-                    .to_string();
-                Some(NeoismAgentPickerOption::new(
-                    &name,
-                    &description,
-                    "agent",
-                    &name,
-                ))
-            }),
-    );
+    let out = agents
+        .iter()
+        .filter(|agent| {
+            !agent
+                .get("hidden")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        // Subagent-only definitions (mode == "subagent", e.g.
+        // explore/general) are Task-tool targets, not top-level agents.
+        .filter(|agent| {
+            agent
+                .get("mode")
+                .and_then(Value::as_str)
+                .is_none_or(|mode| mode != "subagent")
+        })
+        .filter_map(|agent| {
+            let name = agent.get("name").and_then(Value::as_str)?.to_string();
+            let description = agent
+                .get("description")
+                .and_then(Value::as_str)
+                .or_else(|| agent.get("mode").and_then(Value::as_str))
+                .unwrap_or("agent")
+                .to_string();
+            Some(NeoismAgentPickerOption::new(
+                &name,
+                &description,
+                "agent",
+                &name,
+            ))
+        })
+        .collect();
     Ok(out)
 }
 
@@ -798,6 +789,14 @@ mod subagent_runtime_snapshot_tests {
     }
 
     #[test]
+    fn password_free_joined_endpoint_skips_uncredentialed_readiness_probe() {
+        let server = "http://127.0.0.1:1/agent/workspaces/readiness-test-no-token";
+        register_agent_server_credential(server, None);
+        assert!(ensure_request_server_ready(server).is_ok());
+        assert!(ensure_request_server_ready("http://127.0.0.1:1/custom-agent").is_ok());
+    }
+
+    #[test]
     fn final_runtime_snapshot_promotes_new_tree_child_to_running() {
         // Tree discovery initially has no matching status. The status
         // snapshot captured after discovery must promote the child before the
@@ -1261,13 +1260,12 @@ fn message_blocks_from_response(
     .collect()
 }
 
-/// Worker-thread readiness. The startup owner handles uncredentialed/local
-/// endpoints. Joined endpoints are already reached through an authenticated
-/// reverse proxy, and the real request is the authoritative readiness and
-/// access check. A separate health request adds a full proxy round trip and can
-/// time out while the authorized history request would succeed.
+/// Only the owned local endpoint needs a startup probe. A selected remote or
+/// joined endpoint is checked by the actual request, with normal server auth.
 fn ensure_request_server_ready(server: &str) -> Result<(), String> {
-    if agent_server_credential(server).is_some() {
+    if agent_server_credential(server).is_some()
+        || !crate::agent_server::is_owned_local_endpoint(server)
+    {
         return Ok(());
     }
     crate::agent_server::ensure_started_for_request(server)?;

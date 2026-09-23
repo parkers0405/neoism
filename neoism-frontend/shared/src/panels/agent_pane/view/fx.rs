@@ -414,6 +414,34 @@ fn hash01(seed: u32) -> f32 {
     (x & 0xFFFF) as f32 / 65535.0
 }
 
+fn sprite_floor(rect: [f32; 4], scale: f32) -> f32 {
+    rect[1] + rect[3] - 36.0 * scale
+}
+
+pub(super) fn scene_rect(main: [f32; 4], input: [f32; 4], scale: f32) -> [f32; 4] {
+    [
+        main[0],
+        main[1],
+        main[2],
+        (input[1] - main[1] - 8.0 * scale).max(0.0),
+    ]
+}
+
+#[cfg(test)]
+mod scene_tests {
+    use super::{scene_rect, sprite_floor};
+
+    #[test]
+    fn scene_floor_stays_above_composer_at_any_input_height() {
+        let main = [10.0, 40.0, 800.0, 600.0];
+        for input_y in [440.0, 510.0, 580.0] {
+            let scene = scene_rect(main, [50.0, input_y, 700.0, 100.0], 1.0);
+            assert_eq!(scene[1] + scene[3], input_y - 8.0);
+            assert_eq!(sprite_floor(scene, 1.0), input_y - 44.0);
+        }
+    }
+}
+
 /// Draw one frame of the skit at `elapsed` seconds. Callers gate on
 /// `0.0..=total_seconds(kind)`; anything outside is their cue to clear
 /// the timer (also covers the wrap of the 10k-second animation clock).
@@ -425,6 +453,9 @@ pub fn render(
     scale: f32,
     theme: &IdeTheme,
 ) {
+    if rect[3] < 96.0 * scale.clamp(0.5, 3.0) {
+        return;
+    }
     match kind {
         AgentFxKind::Piss => render_piss(sugarloaf, rect, elapsed, scale, theme),
         AgentFxKind::Cuss => render_cuss(sugarloaf, rect, elapsed, scale, theme),
@@ -451,7 +482,7 @@ fn render_praise(
     let px = 3.0 * s;
     let guy_w = SPRITE_W as f32 * px;
     let guy_h = SPRITE_H as f32 * px;
-    let floor_y = rect[1] + rect[3] - 36.0 * s;
+    let floor_y = sprite_floor(rect, s);
     let cx = rect[0] + rect[2] * 0.5;
 
     // Dais + throne: two gold steps, tall back, seat and armrests.
@@ -646,7 +677,7 @@ fn render_glitch(
     let px = 3.0 * s;
     let guy_w = SPRITE_W as f32 * px;
     let guy_h = SPRITE_H as f32 * px;
-    let floor_y = rect[1] + rect[3] - 36.0 * s;
+    let floor_y = sprite_floor(rect, s);
     let guy_y = floor_y - guy_h;
     let stop_x = rect[0] + rect[2] * 0.30;
     let shirt = theme.f32(theme.accent);
@@ -715,14 +746,16 @@ fn render_glitch(
         for i in 0..7u32 {
             let seed = tick.wrapping_mul(7).wrapping_add(i);
             let band_y = rect[1] + hash01(seed) * rect[3];
-            let band_h = (2.0 + hash01(seed.wrapping_add(31)) * 9.0) * s;
+            let band_h = ((2.0 + hash01(seed.wrapping_add(31)) * 9.0) * s)
+                .min(rect[1] + rect[3] - band_y);
             let color = band_colors[(seed % 4) as usize];
             sugarloaf.rect(None, rect[0], band_y, rect[2], band_h, color, DEPTH, ORDER);
         }
         for i in 0..3u32 {
             let seed = tick.wrapping_mul(13).wrapping_add(i).wrapping_add(100);
             let band_y = rect[1] + hash01(seed) * rect[3];
-            let band_h = (3.0 + hash01(seed.wrapping_add(7)) * 6.0) * s;
+            let band_h = ((3.0 + hash01(seed.wrapping_add(7)) * 6.0) * s)
+                .min(rect[1] + rect[3] - band_y);
             let shift = (hash01(seed.wrapping_add(53)) - 0.5) * 30.0 * s;
             sugarloaf.rect(
                 None,
@@ -752,7 +785,7 @@ fn render_disco(
     let px = 3.0 * s;
     let guy_w = SPRITE_W as f32 * px;
     let guy_h = SPRITE_H as f32 * px;
-    let floor_y = rect[1] + rect[3] - 36.0 * s;
+    let floor_y = sprite_floor(rect, s);
     let guy_y = floor_y - guy_h;
     let cx = rect[0] + rect[2] * 0.5;
     let shirt = theme.f32(theme.accent);
@@ -994,7 +1027,7 @@ fn render_gang_fight(
     let px = 3.0 * s;
     let guy_w = SPRITE_W as f32 * px;
     let guy_h = SPRITE_H as f32 * px;
-    let floor_y = rect[1] + rect[3] - 36.0 * s;
+    let floor_y = sprite_floor(rect, s);
     let guy_y = floor_y - guy_h;
     let fallen_y = floor_y - SPRITE_W as f32 * px;
     let total = total_seconds(AgentFxKind::GangFight);
@@ -1222,7 +1255,7 @@ fn render_piss(
     let px = 3.0 * s;
     let guy_w = SPRITE_W as f32 * px;
     let guy_h = SPRITE_H as f32 * px;
-    let floor_y = rect[1] + rect[3] - 36.0 * s;
+    let floor_y = sprite_floor(rect, s);
     let guy_y = floor_y - guy_h;
     let stop_x = rect[0] + rect[2] * 0.58;
     let shirt = theme.f32(theme.accent);
@@ -1335,7 +1368,7 @@ fn render_cuss(
     let px = 3.0 * s;
     let guy_w = SPRITE_W as f32 * px;
     let guy_h = SPRITE_H as f32 * px;
-    let floor_y = rect[1] + rect[3] - 36.0 * s;
+    let floor_y = sprite_floor(rect, s);
     let guy_y = floor_y - guy_h;
     let stop_x = rect[0] + rect[2] * 0.55;
     let shirt = theme.f32(theme.accent);

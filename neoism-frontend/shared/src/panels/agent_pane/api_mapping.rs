@@ -1071,6 +1071,24 @@ mod tests {
     }
 
     #[test]
+    fn failed_edit_shows_error_instead_of_a_requested_diff() {
+        let part = json!({
+            "id": "prt-edit",
+            "type": "tool",
+            "tool": "edit",
+            "state": {
+                "status": "error",
+                "input": { "filePath": "src/lib.rs", "oldString": "old", "newString": "new" },
+                "error": "file changed after it was read"
+            }
+        });
+        let message = part_block(&part).expect("tool part");
+        assert_eq!(message.status, "error");
+        assert!(message.detail.contains("file changed after it was read"));
+        assert!(!message.detail.contains("neoismToolDetail"));
+    }
+
+    #[test]
     fn completed_apply_patch_embeds_edit_detail() {
         let part = json!({
             "id": "prt-patch",
@@ -2054,7 +2072,9 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
             .unwrap_or_else(|| infer_lang_from_title(&tool_title(tool, state))),
         todos,
     );
-    message.detail = if is_unsettled_edit_tool(tool, display_status) {
+    message.detail = if status == "error" {
+        output.content
+    } else if is_unsettled_edit_tool(tool, display_status) {
         String::new()
     } else {
         edit_tool_detail(tool, state).unwrap_or(output.content)

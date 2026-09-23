@@ -931,6 +931,11 @@ impl Text {
             .clip_rect
             .map(|rect| snap_clip_rect(rect, scale))
             .unwrap_or([0.0; 4]);
+        // Zero dimensions are the GPU/CPU sentinel for *no* clip. A provided
+        // subpixel clip can round to zero; emitting it would draw unbounded.
+        if opts.clip_rect.is_some() && (clip_rect[2] <= 0.0 || clip_rect[3] <= 0.0) {
+            return;
+        }
 
         for glyph in &run.glyphs {
             let Some((slot_x, slot_y, slot_w, slot_h, bearing_x, bearing_y, is_color)) =
@@ -2646,11 +2651,20 @@ fn cpu_clip_bounds(clip_rect: [f32; 4], buf_w: i32, buf_h: i32) -> (i32, i32, i3
 #[cfg(test)]
 mod tests {
     use super::{
-        centered_line_box_baseline_px, instances_ink_bounds_px, DrawOpts, Text,
-        TextInstance, PREFIX_MEASURE_CACHE_ENTRIES, PREFIX_MEASURE_MAX_BYTES,
+        centered_line_box_baseline_px, instances_ink_bounds_px, snap_clip_rect, DrawOpts,
+        Text, TextInstance, PREFIX_MEASURE_CACHE_ENTRIES, PREFIX_MEASURE_MAX_BYTES,
     };
     use crate::font::{fonts::SugarloafFonts, FontLibrary};
     use std::sync::Arc;
+
+    #[test]
+    fn subpixel_text_clip_snaps_to_empty_instead_of_becoming_unclipped() {
+        for scale in [1.0, 1.25, 2.0] {
+            let clip = snap_clip_rect([5.0, 20.0, 10.0, 0.1 / scale], scale);
+            assert_eq!(clip[3], 0.0);
+            assert!(snap_clip_rect([5.0, 20.0, 10.0, 1.0 / scale], scale)[3] > 0.0);
+        }
+    }
 
     #[test]
     fn centered_line_box_uses_font_metrics_without_changing_nominal_height() {

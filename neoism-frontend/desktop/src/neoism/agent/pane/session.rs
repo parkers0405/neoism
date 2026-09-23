@@ -97,6 +97,12 @@ impl NeoismAgentPane {
         if self.code_copy_feedback_is_animating() {
             return Some("code_copy_feedback");
         }
+        if self
+            .status_chip_activated
+            .is_some_and(|(_, at)| at.elapsed().as_millis() < 280)
+        {
+            return Some("status_chip_activation");
+        }
         if self.agent_label_changed_elapsed_ms().is_some() {
             return Some("agent_label_transition");
         }
@@ -358,6 +364,8 @@ impl NeoismAgentPane {
             return false;
         };
         if Some(entry.id.as_str()) == self.session_id.as_deref() {
+            self.timeline_scroll_px = 0.0;
+            self.timeline_follow_bottom = true;
             return self.pending_session_switch.take().is_some();
         }
         self.switch_session(entry.id);

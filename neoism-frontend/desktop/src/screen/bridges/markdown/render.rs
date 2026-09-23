@@ -190,7 +190,7 @@ impl Screen<'_> {
                         item.layout_rect[2] / scale,
                         item.layout_rect[3] / scale,
                     ];
-                    epub.markdown.spellcheck_enabled = spellcheck_enabled;
+                    epub.markdown.spellcheck_enabled = false;
                     crate::editor::markdown::render::render(
                         &mut self.sugarloaf,
                         &mut epub.markdown,

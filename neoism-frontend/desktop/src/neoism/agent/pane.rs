@@ -241,8 +241,6 @@ pub(super) struct CachedAgentSession {
     pub pending_user_prompts: Vec<String>,
     pub prompt_echo_aliases: Vec<(String, String)>,
     pub timeline_history: AgentTimelineHistoryState,
-    pub timeline_scroll_px: f32,
-    pub timeline_follow_bottom: bool,
     pub timeline_content_height_px: f32,
     pub timeline_live_trace_start: Option<usize>,
     pub timeline_live_trace_anchor: Option<String>,
@@ -264,8 +262,6 @@ impl CachedAgentSession {
             pending_user_prompts: Vec::new(),
             prompt_echo_aliases: Vec::new(),
             timeline_history: AgentTimelineHistoryState::default(),
-            timeline_scroll_px: 0.0,
-            timeline_follow_bottom: true,
             timeline_content_height_px: 0.0,
             timeline_live_trace_start: None,
             timeline_live_trace_anchor: None,
@@ -953,6 +949,7 @@ pub struct NeoismAgentPane {
     usage_chip_rect: Option<[f32; 4]>,
     composer_control_rect: Option<[f32; 4]>,
     status_chip_rects: [Option<[f32; 4]>; 3],
+    pub(super) status_chip_activated: Option<(usize, Instant)>,
     background_status_rect: Option<[f32; 4]>,
     background_task_details_expanded: bool,
     hover_link_target: Option<String>,
@@ -1213,6 +1210,7 @@ impl Default for NeoismAgentPane {
             usage_chip_rect: None,
             composer_control_rect: None,
             status_chip_rects: [None; 3],
+            status_chip_activated: None,
             background_status_rect: None,
             background_task_details_expanded: false,
             hover_link_target: None,
@@ -1496,10 +1494,16 @@ fn merge_part_message(
     existing: NeoismAgentMessage,
     mut incoming: NeoismAgentMessage,
 ) -> NeoismAgentMessage {
-    let preserve_terminal_task_status = same_task_message_id(&existing, &incoming)
+    let preserve_terminal_tool_status = existing.kind == NeoismAgentMessageKind::Tool
+        && incoming.kind == NeoismAgentMessageKind::Tool
+        && (same_nonempty_id(&existing, &incoming)
+            || same_task_message_id(&existing, &incoming))
         && is_terminal_task_status(&existing.status)
-        && incoming.status == "running";
-    let terminal_task_status = existing.status.clone();
+        && matches!(incoming.status.as_str(), "pending" | "running");
+    let terminal_tool_status = existing.status.clone();
+    let terminal_tool_text = preserve_terminal_tool_status.then(|| existing.text.clone());
+    let terminal_tool_detail =
+        preserve_terminal_tool_status.then(|| existing.detail.clone());
     if incoming.usage.is_none() {
         incoming.usage = existing.usage;
     }
@@ -1551,10 +1555,19 @@ fn merge_part_message(
         if incoming.line_offset.is_none() {
             incoming.line_offset = existing.line_offset;
         }
-        if preserve_terminal_task_status {
-            incoming.status = terminal_task_status;
-            rewrite_task_status_markers(&mut incoming.text, &incoming.status);
-            rewrite_task_status_markers(&mut incoming.detail, &incoming.status);
+        if preserve_terminal_tool_status {
+            incoming.status = terminal_tool_status;
+            if let Some(text) = terminal_tool_text.filter(|text| !text.is_empty()) {
+                incoming.text = text;
+            }
+            if let Some(detail) = terminal_tool_detail.filter(|detail| !detail.is_empty())
+            {
+                incoming.detail = detail;
+            }
+            if incoming.tool == "task" {
+                rewrite_task_status_markers(&mut incoming.text, &incoming.status);
+                rewrite_task_status_markers(&mut incoming.detail, &incoming.status);
+            }
         }
     }
     incoming
@@ -1562,10 +1575,13 @@ fn merge_part_message(
 
 /// Merge a stored transcript snapshot with parts that arrived live while the
 /// snapshot request was in flight. Live text wins when the stored part is
-/// empty or an older prefix, preserving monotonic hydration.
+/// empty or an older prefix, preserving monotonic hydration. When there is no
+/// shared ID, a hydrated cached history predates the fetched newest page;
+/// live-only streamed parts instead follow it.
 pub(super) fn merge_session_snapshot(
     snapshot: Vec<NeoismAgentMessage>,
     live: Vec<NeoismAgentMessage>,
+    live_is_prior_history: bool,
 ) -> Vec<NeoismAgentMessage> {
     if snapshot.is_empty() || live.is_empty() {
         return if snapshot.is_empty() { live } else { snapshot };
@@ -1604,7 +1620,12 @@ pub(super) fn merge_session_snapshot(
 
     let mut live_slots = vec![Vec::new(); snapshot.len() + 1];
     if anchors.is_empty() {
-        live_slots[snapshot.len()].extend(live.iter_mut().filter_map(Option::take));
+        let slot = if live_is_prior_history {
+            0
+        } else {
+            snapshot.len()
+        };
+        live_slots[slot].extend(live.iter_mut().filter_map(Option::take));
     } else {
         let first_live_index = anchors[0].0;
         for message in live[..first_live_index].iter_mut().filter_map(Option::take) {

@@ -28,7 +28,8 @@ impl Screen<'_> {
 
     pub fn open_path_in_editor(&mut self, path: std::path::PathBuf) {
         if neoism_ui::editor::documentation_notebook::is_manifest(&path)
-            || (path.is_dir()
+            || (!self.context_manager.current_workspace_is_remote_joined()
+                && path.is_dir()
                 && path
                     .join(neoism_ui::editor::documentation_notebook::MANIFEST_NAME)
                     .is_file())
@@ -243,6 +244,10 @@ impl Screen<'_> {
     }
 
     pub(crate) fn create_tab_inner(&mut self) {
+        self.create_tab_inner_with_root(None);
+    }
+
+    pub(crate) fn create_tab_inner_with_root(&mut self, requested_root: Option<PathBuf>) {
         // Context creation redirects immediately. Save the outgoing chrome
         // before its workspace identity changes.
         self.save_current_workspace_chrome();
@@ -250,22 +255,24 @@ impl Screen<'_> {
         // A new top-level workspace is LOCAL even when the current workspace
         // is adopted from a peer. Never feed the host's remote root into a
         // local shell spawn: that path may not exist on this machine.
-        let new_workspace_root = if self.context_manager.daemon_link_is_peer() {
-            self.context_manager
-                .config
-                .working_dir
-                .as_ref()
-                .map(PathBuf::from)
-                .and_then(Self::normalize_workspace_dir)
-                .or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .and_then(Self::normalize_workspace_dir)
-                })
-                .or_else(|| dirs::home_dir().and_then(Self::normalize_workspace_dir))
-        } else {
-            self.workspace_root_for_new_shell()
-        };
+        let new_workspace_root = requested_root.or_else(|| {
+            if self.context_manager.daemon_link_is_peer() {
+                self.context_manager
+                    .config
+                    .working_dir
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .and_then(Self::normalize_workspace_dir)
+                    .or_else(|| {
+                        std::env::current_dir()
+                            .ok()
+                            .and_then(Self::normalize_workspace_dir)
+                    })
+                    .or_else(|| dirs::home_dir().and_then(Self::normalize_workspace_dir))
+            } else {
+                self.workspace_root_for_new_shell()
+            }
+        });
 
         // We resize the current tab ahead to prepare the
         // dimensions to be copied to next tab.

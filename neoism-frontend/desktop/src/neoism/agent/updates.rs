@@ -222,6 +222,8 @@ pub(crate) struct AgentSessionEventStream {
     stop: Arc<AtomicBool>,
     disconnected: bool,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
+    #[cfg(test)]
+    _test_tx: Option<Sender<AgentSessionUpdate>>,
 }
 
 #[derive(Clone)]
@@ -264,7 +266,7 @@ impl AgentEventWake {
 impl AgentSessionEventStream {
     #[cfg(test)]
     pub(super) fn connected_for_test(session_id: &str) -> Self {
-        let (_tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         Self {
             session_id: session_id.to_string(),
             rx,
@@ -273,6 +275,7 @@ impl AgentSessionEventStream {
             stop: Arc::new(AtomicBool::new(false)),
             disconnected: false,
             wake: Arc::new(Mutex::new(None)),
+            _test_tx: Some(tx),
         }
     }
 
@@ -293,7 +296,13 @@ impl AgentSessionEventStream {
             stop: Arc::new(AtomicBool::new(false)),
             disconnected: false,
             wake: Arc::new(Mutex::new(None)),
+            _test_tx: Some(tx),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn disconnect_for_test(&mut self) {
+        self._test_tx = None;
     }
 
     pub(super) fn session_id(&self) -> &str {
@@ -587,6 +596,8 @@ pub(super) fn start_session_event_stream_with_reconcile(
         stop,
         disconnected: false,
         wake,
+        #[cfg(test)]
+        _test_tx: None,
     }
 }
 
@@ -1314,9 +1325,28 @@ fn spawn_message_refreshes(
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            let Ok(page) =
-                fetch_session_messages_page(&server, &owner_session_id, None, 80)
-            else {
+            let mut page = None;
+            for attempt in 0..3 {
+                if stop.load(Ordering::Relaxed)
+                    || message_refresh_epochs.current(&owner_session_id) != expected_epoch
+                {
+                    break;
+                }
+                match fetch_session_messages_page(&server, &owner_session_id, None, 80) {
+                    Ok(fetched) => {
+                        page = Some(fetched);
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(session_id = %owner_session_id, attempt = attempt + 1, %error,
+                            "agent transcript refresh failed");
+                        if attempt < 2 {
+                            thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
+                        }
+                    }
+                }
+            }
+            let Some(page) = page else {
                 continue;
             };
             if stop.load(Ordering::Relaxed)

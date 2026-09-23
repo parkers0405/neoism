@@ -8,6 +8,7 @@ pub(crate) const TENANT_EXTRA_KEY: &str = "neoismTenantId";
 pub(crate) const EXECUTION_POLICY_EXTRA_KEY: &str = "neoismExecutionPolicy";
 pub(crate) const CREATED_BY_EXTRA_KEY: &str = "neoismCreatedBy";
 pub(crate) const QUOTAS_EXTRA_KEY: &str = "neoismTenantQuotas";
+pub(crate) const DIRECTORY_PREFIXES_EXTRA_KEY: &str = "neoismDirectoryPrefixes";
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallerClaims {
@@ -61,6 +62,7 @@ pub(crate) struct CallerPolicy {
     local_token: Option<String>,
     usage: Arc<UsageTracker>,
     tenant_resolver: Option<Arc<dyn neoism_agent_service_api::TenantResolver>>,
+    strict_hosted: bool,
 }
 
 /// The canonical daemon-token file shared by every Neoism process on this
@@ -110,6 +112,14 @@ impl CallerPolicy {
         Self::from_env_with_resolver(None)
     }
 
+    pub(crate) fn for_hosted(
+        tenant_resolver: Arc<dyn neoism_agent_service_api::TenantResolver>,
+    ) -> Self {
+        let mut policy = Self::from_env_with_resolver(Some(tenant_resolver));
+        policy.strict_hosted = true;
+        policy
+    }
+
     pub(crate) fn from_env_with_resolver(
         tenant_resolver: Option<Arc<dyn neoism_agent_service_api::TenantResolver>>,
     ) -> Self {
@@ -129,6 +139,7 @@ impl CallerPolicy {
             local_token: std::env::var("NEOISM_AGENT_TOKEN").ok(),
             usage: Arc::new(UsageTracker::default()),
             tenant_resolver,
+            strict_hosted: false,
         }
     }
 
@@ -136,7 +147,7 @@ impl CallerPolicy {
         &self,
         supplied: Option<&str>,
     ) -> Result<Option<CallerClaims>, String> {
-        if supplied.is_some_and(|token| {
+        if !self.strict_hosted && supplied.is_some_and(|token| {
             token.starts_with(neoism_agent_service_api::daemon_credential::PREFIX)
         }) {
             return self.authenticate(supplied);
@@ -166,6 +177,9 @@ impl CallerPolicy {
                     resolved: Some(resolved),
                 }));
             }
+        }
+        if self.strict_hosted {
+            return Err("invalid hosted bearer token".to_string());
         }
         self.authenticate(supplied)
     }
@@ -293,7 +307,7 @@ impl CallerClaims {
             .as_ref()
             .map(|resolved| resolved.execution.clone())
             .unwrap_or_else(|| {
-                if self.hosted && self.workspace_id.is_none() {
+                if self.hosted {
                     neoism_agent_service_api::ExecutionPolicy::Disabled
                 } else {
                     neoism_agent_service_api::ExecutionPolicy::NativeLocal
@@ -320,33 +334,69 @@ impl CallerClaims {
     }
 }
 
+/// Native tools belong to the deployment, not the session creator. A local
+/// daemon-bound workspace (including guests) shares the host's capabilities;
+/// a hosted control plane never derives trust from a tenant name.
+pub(crate) fn local_collaboration_session(
+    hosted: bool,
+    session: &neoism_agent_core::SessionInfo,
+) -> bool {
+    if hosted {
+        return false;
+    }
+    let tenant = session_tenant(session);
+    tenant == "local"
+        || session.workspace_id.as_ref().is_some_and(|workspace_id| {
+            tenant == format!("workspace:{workspace_id}")
+        })
+}
+
+pub(crate) fn allows_session_path(
+    hosted: bool,
+    session: &neoism_agent_core::SessionInfo,
+    path: &std::path::Path,
+) -> bool {
+    if local_collaboration_session(hosted, session) {
+        return true;
+    }
+    let prefixes = session
+        .extra
+        .get(DIRECTORY_PREFIXES_EXTRA_KEY)
+        .and_then(serde_json::Value::as_array);
+    if let Some(prefixes) = prefixes.filter(|prefixes| !prefixes.is_empty()) {
+        return prefixes.iter().any(|prefix| {
+            prefix
+                .as_str()
+                .map(std::path::Path::new)
+                .is_some_and(|prefix| prefix.is_absolute() && path.starts_with(prefix))
+        });
+    }
+    path.starts_with(std::path::Path::new(&session.directory))
+}
+
 pub(crate) fn session_execution_policy(
+    hosted: bool,
     session: &neoism_agent_core::SessionInfo,
 ) -> neoism_agent_service_api::ExecutionPolicy {
-    let tenant = session_tenant(session);
-    // A workspace:<id> session is minted by this machine's workspace daemon
-    // and executes against that daemon's native workspace. Early nightly
-    // builds persisted Disabled before binding workspace identity; do not let
-    // that stale value permanently brick bash/background_task for the host.
-    if session
-        .workspace_id
-        .as_ref()
-        .is_some_and(|workspace_id| tenant == format!("workspace:{workspace_id}"))
-    {
-        return neoism_agent_service_api::ExecutionPolicy::NativeLocal;
+    use neoism_agent_service_api::ExecutionPolicy;
+    // Historical joined sessions persisted Disabled from daemon credentials
+    // marked hosted; their local workspace binding is the source of truth.
+    if local_collaboration_session(hosted, session) {
+        return ExecutionPolicy::NativeLocal;
     }
-    session
+    let policy = session
         .extra
         .get(EXECUTION_POLICY_EXTRA_KEY)
         .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_else(|| {
-            if tenant == "local" {
-                neoism_agent_service_api::ExecutionPolicy::NativeLocal
-            } else {
-                neoism_agent_service_api::ExecutionPolicy::Disabled
-            }
-        })
+        .and_then(|value| serde_json::from_value(value).ok());
+    // A hosted tenant name or stale native-local policy must never grant
+    // native tools. Only an explicitly selected isolating sandbox can run.
+    match policy {
+        Some(ExecutionPolicy::Sandboxed { provider, idle_ttl_seconds, max_lifetime_seconds }) if hosted => {
+            ExecutionPolicy::Sandboxed { provider, idle_ttl_seconds, max_lifetime_seconds }
+        }
+        _ => ExecutionPolicy::Disabled,
+    }
 }
 
 pub(crate) fn native_execution_allowed(
@@ -522,7 +572,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stale_disabled_policy_cannot_brick_machine_owned_workspace_session() {
+    fn workspace_name_cannot_elevate_a_disabled_session() {
         let session: neoism_agent_core::SessionInfo = serde_json::from_value(serde_json::json!({
             "id": "ses_test",
             "slug": "test",
@@ -537,9 +587,61 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            session_execution_policy(&session),
-            neoism_agent_service_api::ExecutionPolicy::NativeLocal
+            session_execution_policy(true, &session),
+            neoism_agent_service_api::ExecutionPolicy::Disabled
         );
+    }
+
+    #[test]
+    fn hosted_workspace_name_cannot_override_sandbox_policy() {
+        let mut session: neoism_agent_core::SessionInfo = serde_json::from_value(serde_json::json!({
+            "id": "ses_guest",
+            "slug": "guest",
+            "projectId": "project",
+            "workspaceId": "workspace-a",
+            "directory": "/tmp",
+            "title": "guest",
+            "version": "test",
+            "time": { "created": 1, "updated": 1 },
+            "neoismTenantId": "workspace:workspace-a",
+            "neoismCreatedBy": "device:guest",
+            "neoismExecutionPolicy": "native-local"
+        }))
+        .unwrap();
+        assert!(!local_collaboration_session(true, &session));
+        let sandbox = neoism_agent_service_api::ExecutionPolicy::Sandboxed {
+            provider: "tenant-sandbox".into(),
+            idle_ttl_seconds: 60,
+            max_lifetime_seconds: 300,
+        };
+        session.extra.insert(
+            EXECUTION_POLICY_EXTRA_KEY.into(),
+            serde_json::to_value(&sandbox).unwrap(),
+        );
+        assert_eq!(session_execution_policy(true, &session), sandbox);
+        // A hosted workspace name cannot grant native capabilities even with
+        // the same tenant/binding as a local daemon workspace.
+        assert!(!allows_session_path(true, &session, std::path::Path::new("/elsewhere")));
+        session.extra.insert(EXECUTION_POLICY_EXTRA_KEY.into(), serde_json::json!("native-local"));
+        assert_eq!(session_execution_policy(true, &session), neoism_agent_service_api::ExecutionPolicy::Disabled);
+    }
+
+    #[test]
+    fn joined_guest_in_local_deployment_has_native_tools_and_external_paths() {
+        let session: neoism_agent_core::SessionInfo = serde_json::from_value(serde_json::json!({
+            "id": "ses_guest", "slug": "guest", "projectId": "project",
+            "workspaceId": "workspace-a", "directory": "/tmp", "title": "guest",
+            "version": "test", "time": { "created": 1, "updated": 1 },
+            "neoismTenantId": "workspace:workspace-a",
+            "neoismCreatedBy": "device:guest", "neoismExecutionPolicy": "disabled",
+            "neoismDirectoryPrefixes": ["/tmp"]
+        })).unwrap();
+        assert!(local_collaboration_session(false, &session));
+        assert_eq!(session_execution_policy(false, &session), neoism_agent_service_api::ExecutionPolicy::NativeLocal);
+        assert!(allows_session_path(false, &session, std::path::Path::new("/external")));
+        assert!(!local_collaboration_session(true, &session));
+        assert_eq!(session_execution_policy(true, &session), neoism_agent_service_api::ExecutionPolicy::Disabled);
+        assert!(!allows_session_path(true, &session, std::path::Path::new("/external")));
     }
 
     #[test]
@@ -577,6 +679,7 @@ mod tests {
             local_token: None,
             usage: Arc::new(UsageTracker::default()),
             tenant_resolver: None,
+            strict_hosted: false,
         };
         std::env::set_var("XDG_RUNTIME_DIR", &runtime);
         let verified = policy.authenticate(Some(&credential));
@@ -628,6 +731,13 @@ mod tests {
             max_in_flight: None,
             resolved: None,
         }
+    }
+
+    #[test]
+    fn hosted_workspace_without_isolating_provider_has_execution_disabled() {
+        let mut guest = claims("workspace:workspace-a".into());
+        guest.workspace_id = Some("workspace-a".into());
+        assert_eq!(guest.execution_policy(), neoism_agent_service_api::ExecutionPolicy::Disabled);
     }
 
     struct TestTenantResolver;
@@ -684,6 +794,18 @@ mod tests {
             neoism_agent_service_api::ExecutionPolicy::Sandboxed { ref provider, .. }
                 if provider == "vercel"
         ));
+    }
+
+    #[tokio::test]
+    async fn hosted_requests_never_fall_back_to_local_or_daemon_auth() {
+        let mut policy = CallerPolicy::for_hosted(Arc::new(TestTenantResolver));
+        policy.local_token = Some("local-secret".into());
+        assert!(policy.authenticate_request(None).await.is_err());
+        assert!(policy.authenticate_request(Some("local-secret")).await.is_err());
+        assert!(policy.authenticate_request(Some("invalid-hosted-token")).await.is_err());
+        let resolved = policy.authenticate_request(Some("synapse-token")).await.unwrap().unwrap();
+        assert_eq!(resolved.tenant_id, "company-a");
+        assert!(resolved.resolved.is_some());
     }
 
     #[test]

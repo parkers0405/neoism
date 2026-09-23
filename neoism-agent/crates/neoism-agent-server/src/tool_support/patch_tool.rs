@@ -231,29 +231,35 @@ fn apply_v4a_patch_metadata(
         context.formatter(),
         mutation.diagnostic_paths.clone(),
     );
-    let lsp_runtime = context.lsp_runtime()?;
-    let lsp_touch = diagnostics::touch_paths(
-        &lsp_runtime,
-        &context.cwd,
-        mutation.diagnostic_paths.clone(),
-    );
+    let lsp_runtime = context.lsp_runtime();
+    let lsp_touch = lsp_runtime.as_ref().ok().map(|runtime| {
+        diagnostics::touch_paths(runtime, &context.cwd, mutation.diagnostic_paths.clone())
+    });
     let mut metadata = json!({ "paths": mutation.touched });
-    metadata["lspTouch"] = lsp_touch;
+    metadata["lspTouch"] = json!(lsp_touch);
+    if let Err(error) = &lsp_runtime {
+        metadata["lspUnavailable"] = json!(error.to_string());
+    }
     let mut snapshots = Vec::new();
     for (path, before) in mutation.before_states {
-        if let Some(snapshot) = crate::snapshot::file_change(&context.cwd, &path, before)?
-        {
-            snapshots.push(snapshot);
+        match crate::snapshot::file_change(&context.cwd, &path, before) {
+            Ok(Some(snapshot)) => snapshots.push(snapshot),
+            Ok(None) => {},
+            Err(error) => {
+                metadata["snapshotError"] = json!(error.to_string());
+            }
         }
     }
     crate::snapshot::add_metadata_snapshots(&mut metadata, snapshots);
     format::attach_formatted(&mut metadata, &formatted);
-    let report = diagnostics::attach_lsp_diagnostics(
-        &lsp_runtime,
-        &context.cwd,
-        mutation.diagnostic_paths,
-        &mut metadata,
-    );
+    let report = lsp_runtime.as_ref().ok().and_then(|runtime| {
+        diagnostics::attach_lsp_diagnostics(
+            runtime,
+            &context.cwd,
+            mutation.diagnostic_paths,
+            &mut metadata,
+        )
+    });
 
     let mut output = format!("Applied patch to:\n{}", mutation.touched.join("\n"));
     if let Some(report) = report {

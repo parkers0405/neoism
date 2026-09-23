@@ -625,6 +625,7 @@ pub struct NeoismAgentPane {
     usage_chip_rect: Option<[f32; 4]>,
     composer_control_rect: Option<[f32; 4]>,
     status_chip_rects: [Option<[f32; 4]>; 3],
+    status_chip_activated: Option<(usize, Instant)>,
     background_status_rect: Option<[f32; 4]>,
     background_task_details_expanded: bool,
     hover_link_target: Option<String>,
@@ -994,6 +995,7 @@ impl Default for NeoismAgentPane {
             usage_chip_rect: None,
             composer_control_rect: None,
             status_chip_rects: [None; 3],
+            status_chip_activated: None,
             background_status_rect: None,
             background_task_details_expanded: false,
             hover_link_target: None,
@@ -1864,11 +1866,50 @@ impl NeoismAgentPane {
         if messages.is_empty() && !self.messages.is_empty() {
             return;
         }
+        let optimistic_trace = (self.timeline_live_trace_anchor.as_deref() == Some(""))
+            .then(|| {
+                let start = self.timeline_live_trace_start?;
+                let prompt = self.messages.get(start.checked_sub(1)?)?;
+                (prompt.kind == NeoismAgentMessageKind::User).then(|| {
+                    let first_live_id = self
+                        .messages
+                        .iter()
+                        .skip(start)
+                        .find(|message| !message.id.is_empty())
+                        .map(|message| message.id.clone());
+                    (prompt.text.clone(), first_live_id)
+                })
+            })
+            .flatten();
         let messages = self.compact_inbound_user_texts(messages);
         let messages = self.merge_pending_user_prompts(messages);
         let messages = self.preserve_streamed_response_text(messages);
         let messages = self.preserve_background_completion_cards(messages);
         self.messages = messages;
+        if let Some((prompt, first_live_id)) = optimistic_trace {
+            let end = first_live_id
+                .as_deref()
+                .and_then(|id| self.messages.iter().position(|message| message.id == id))
+                .unwrap_or(self.messages.len());
+            let anchor = self.messages[..end].iter().rposition(|message| {
+                message.kind == NeoismAgentMessageKind::User && message.text == prompt
+            });
+            let anchor = if end < self.messages.len() {
+                anchor.or_else(|| {
+                    self.messages[..end]
+                        .iter()
+                        .rposition(|message| message.kind == NeoismAgentMessageKind::User)
+                })
+            } else {
+                anchor
+            };
+            if let Some(index) = anchor {
+                self.timeline_live_trace_anchor = Some(self.messages[index].id.clone());
+                self.timeline_live_trace_start = Some(index + 1);
+            } else if end < self.messages.len() {
+                self.timeline_live_trace_anchor = None;
+            }
+        }
         if self.background_tasks_started_at.is_some()
             || self.running_background_task_count > 0
         {
@@ -1911,7 +1952,13 @@ impl NeoismAgentPane {
             return;
         }
         let previous_height = self.timeline_content_height_px;
+        let prepended = messages.len();
         self.messages.splice(0..0, messages);
+        if self.timeline_live_trace_anchor.as_deref() == Some("") {
+            if let Some(start) = &mut self.timeline_live_trace_start {
+                *start = start.saturating_add(prepended);
+            }
+        }
         self.rebase_current_turn_trace();
         self.invalidate_timeline_layout();
         self.pending_timeline_prepend_height_px = Some(previous_height);
@@ -2107,10 +2154,16 @@ fn merge_part_message(
     existing: NeoismAgentMessage,
     mut incoming: NeoismAgentMessage,
 ) -> NeoismAgentMessage {
-    let preserve_terminal_task_status = same_task_message_id(&existing, &incoming)
+    let preserve_terminal_tool_status = existing.kind == NeoismAgentMessageKind::Tool
+        && incoming.kind == NeoismAgentMessageKind::Tool
+        && (same_nonempty_id(&existing, &incoming)
+            || same_task_message_id(&existing, &incoming))
         && is_terminal_task_status(&existing.status)
-        && incoming.status == "running";
-    let terminal_task_status = existing.status.clone();
+        && matches!(incoming.status.as_str(), "pending" | "running");
+    let terminal_tool_status = existing.status.clone();
+    let terminal_tool_text = preserve_terminal_tool_status.then(|| existing.text.clone());
+    let terminal_tool_detail =
+        preserve_terminal_tool_status.then(|| existing.detail.clone());
     if incoming.usage.is_none() {
         incoming.usage = existing.usage;
     }
@@ -2162,10 +2215,19 @@ fn merge_part_message(
         if incoming.line_offset.is_none() {
             incoming.line_offset = existing.line_offset;
         }
-        if preserve_terminal_task_status {
-            incoming.status = terminal_task_status;
-            rewrite_task_status_markers(&mut incoming.text, &incoming.status);
-            rewrite_task_status_markers(&mut incoming.detail, &incoming.status);
+        if preserve_terminal_tool_status {
+            incoming.status = terminal_tool_status;
+            if let Some(text) = terminal_tool_text.filter(|text| !text.is_empty()) {
+                incoming.text = text;
+            }
+            if let Some(detail) = terminal_tool_detail.filter(|detail| !detail.is_empty())
+            {
+                incoming.detail = detail;
+            }
+            if incoming.tool == "task" {
+                rewrite_task_status_markers(&mut incoming.text, &incoming.status);
+                rewrite_task_status_markers(&mut incoming.detail, &incoming.status);
+            }
         }
     }
     incoming

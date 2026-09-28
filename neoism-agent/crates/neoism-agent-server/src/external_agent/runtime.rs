@@ -58,7 +58,7 @@ impl ExternalRuntime {
                 services,
                 "codex",
                 "Codex",
-                "@zed-industries/codex-acp@latest",
+                "@agentclientprotocol/codex-acp@1.13.1",
                 cwd,
             )?,
             Self::Claude => {
@@ -66,7 +66,7 @@ impl ExternalRuntime {
                     services,
                     "claude",
                     "Claude",
-                    "@agentclientprotocol/claude-agent-acp@latest",
+                    "@agentclientprotocol/claude-agent-acp@0.81.1",
                     cwd,
                 )?;
                 if std::env::var_os("CLAUDE_CODE_EXECUTABLE").is_none() {
@@ -126,4 +126,21 @@ fn resolve_runtime_path(
         .resolve(&request)
         .ok()
         .map(|result| result.path.to_string_lossy().into_owned())
+}
+
+/// Only root sessions explicitly created as ACP chats are routed here.
+pub(crate) fn root_runtime(session: &SessionInfo) -> Option<ExternalRuntime> {
+    if session.parent_id.is_some() {
+        return None;
+    }
+    let extra = session.extra.get("externalAgent")?;
+    if extra.get("runtime")?.as_str()? != "acp" {
+        return None;
+    }
+    match extra.get("provider")?.as_str()? {
+        "opencode" => Some(ExternalRuntime::OpenCode),
+        "claude" => Some(ExternalRuntime::Claude),
+        "codex" => Some(ExternalRuntime::Codex),
+        _ => None,
+    }
 }

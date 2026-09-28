@@ -933,6 +933,20 @@ pub fn platform_key_bindings_unix<H>(
             Action::<H>::MoveActiveBufferTabToNext,
         );
         add(
+            named_key(ArrowLeft),
+            ActionModifiersState::CONTROL | ActionModifiersState::ALT | ActionModifiersState::SHIFT,
+            empty.clone(),
+            empty.clone(),
+            Action::<H>::MoveWorkspaceTabToPrev,
+        );
+        add(
+            named_key(ArrowRight),
+            ActionModifiersState::CONTROL | ActionModifiersState::ALT | ActionModifiersState::SHIFT,
+            empty.clone(),
+            empty.clone(),
+            Action::<H>::MoveWorkspaceTabToNext,
+        );
+        add(
             char_key("["),
             ActionModifiersState::CONTROL | ActionModifiersState::SHIFT,
             empty.clone(),
@@ -1002,24 +1016,6 @@ pub fn platform_key_bindings_unix<H>(
             empty.clone(),
             split_notmode.clone(),
             Action::<H>::MoveDividerDown,
-        );
-        add(
-            named_key(ArrowLeft),
-            ActionModifiersState::CONTROL
-                | ActionModifiersState::SHIFT
-                | ActionModifiersState::ALT,
-            empty.clone(),
-            split_notmode.clone(),
-            Action::<H>::MoveDividerLeft,
-        );
-        add(
-            named_key(ArrowRight),
-            ActionModifiersState::CONTROL
-                | ActionModifiersState::SHIFT
-                | ActionModifiersState::ALT,
-            empty.clone(),
-            split_notmode,
-            Action::<H>::MoveDividerRight,
         );
     }
 

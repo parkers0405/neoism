@@ -217,6 +217,15 @@ fn anthropic_user_content(message: &ProviderMessage) -> Value {
         blocks.push(json!({ "type": "text", "text": text }));
     }
     for attachment in &message.attachments {
+        if attachment.mime == "application/pdf" {
+            if let Some(data) = attachment.url.strip_prefix("data:application/pdf;base64,") {
+                blocks.push(json!({
+                    "type": "document",
+                    "source": { "type": "base64", "media_type": "application/pdf", "data": data },
+                }));
+                continue;
+            }
+        }
         if !attachment.mime.starts_with("image/") {
             blocks.push(json!({
                 "type": "text",
@@ -647,6 +656,11 @@ mod tests {
             url: "data:image/png;base64,abc".to_string(),
             filename: None,
         });
+        user.attachments.push(ProviderAttachment {
+            mime: "application/pdf".to_string(),
+            url: "data:application/pdf;base64,cGRm".to_string(),
+            filename: Some("scan.pdf".to_string()),
+        });
         let request = ProviderGenerationRequest {
             session_id: None,
             connection_id: None,
@@ -685,6 +699,8 @@ mod tests {
 
         assert_eq!(body["system"], "sys");
         assert_eq!(body["messages"][0]["content"][1]["type"], "image");
+        assert_eq!(body["messages"][0]["content"][2]["type"], "document");
+        assert_eq!(body["messages"][0]["content"][2]["source"]["data"], "cGRm");
         assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
         assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
         assert_eq!(body["tools"][0]["name"], "read");

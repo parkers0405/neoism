@@ -51,6 +51,14 @@ impl NeoismAgentPane {
                 self.input.clear();
                 self.execute_slash_text(&option.value);
             }
+            NeoismAgentPickerKind::ConversationSource => {
+                if !self.has_conversation() {
+                    if let Some(source) = super::side_panel::ConversationSource::CHOICES
+                        .into_iter().find(|source| source.label() == option.value) {
+                        self.new_chat_source = source;
+                    }
+                }
+            }
             NeoismAgentPickerKind::Agent => self.apply_agent(option.value),
             NeoismAgentPickerKind::Model => {
                 self.remember_model_option(&option);
@@ -145,7 +153,9 @@ impl NeoismAgentPane {
                 }
             }
             // Handled above (no selectable row).
-            NeoismAgentPickerKind::ConnectSecret
+            NeoismAgentPickerKind::ExternalOption
+            | NeoismAgentPickerKind::ExternalOptionMenu
+            | NeoismAgentPickerKind::ConnectSecret
             | NeoismAgentPickerKind::ConnectLabel => {}
         }
         true
@@ -167,7 +177,7 @@ impl NeoismAgentPane {
         self.cursor_byte = 0;
         self.history_index = None;
         self.file_mention_anchor = None;
-        if text.starts_with('/') {
+        if text.starts_with('/') && self.new_chat_source.provider().is_none() {
             self.input_attachments.clear();
             self.execute_slash_text(&text);
             return true;
@@ -206,6 +216,10 @@ impl NeoismAgentPane {
     }
 
     pub(in crate::panels::agent_pane::state) fn sync_input_pickers(&mut self) {
+        if self.new_chat_source.provider().is_some() {
+            self.close_picker();
+            return;
+        }
         self.sync_slash_picker();
         if self
             .picker
@@ -596,11 +610,29 @@ impl NeoismAgentPane {
         trimmed
     }
 
+    pub fn remember_session_source(&mut self, id: &str, source: super::side_panel::ConversationSource) {
+        self.session_sources.insert(id.to_string(), source);
+        if self.session_id.as_deref() == Some(id) {
+            self.new_chat_source = source;
+        }
+    }
+
+    pub fn new_chat_source(&self) -> super::side_panel::ConversationSource {
+        self.new_chat_source
+    }
+
+    pub fn start_new_chat_from(&mut self, source: super::side_panel::ConversationSource) {
+        self.start_new_conversation();
+        self.new_chat_source = source;
+        self.push_outbound(OutboundAgentCommand::EnsureSession);
+    }
+
     /// Reset to a fresh conversation — the `/new` slash behaviour.
     /// Hosts also call this when the user explicitly re-invokes
     /// "Neoism" while a conversation is already showing.
     pub fn start_new_conversation(&mut self) {
         self.remember_current_provider_connection();
+        self.new_chat_source = super::side_panel::ConversationSource::Neoism;
         self.session_id = None;
         self.parent_session_id = None;
         self.side_panel.set_viewed_session_id(None);
@@ -650,6 +682,12 @@ impl NeoismAgentPane {
         if self.session_id.as_deref() == Some(trimmed.as_str()) {
             return;
         }
+        self.new_chat_source = self.side_panel.sessions().iter()
+            .find(|entry| entry.id == trimmed && !entry.is_header)
+            .map(|entry| entry.source)
+            .or_else(|| self.session_sources.get(&trimmed).copied())
+            .unwrap_or_default();
+        self.session_sources.insert(trimmed.clone(), self.new_chat_source);
         if self.activate_cached_session(&trimmed) {
             // Instant restore from the session cache. The outbound
             // SwitchSession below still runs: the host re-binds the
@@ -707,7 +745,6 @@ impl NeoismAgentPane {
         self.reset_transient_timeline_interactions();
         // Any session switch returns the panel to chat view — the "← Back"
         // home-override peek shouldn't linger onto the newly opened session.
-        self.side_panel.set_show_home_override(false);
         self.reset_session_runtime_ui();
         self.reset_timeline_navigation_for_session_switch();
         if let Some(live_only) = live_only {
@@ -801,9 +838,7 @@ impl NeoismAgentPane {
                 self.toggle_input_help();
             }
             SlashCommandAction::ToggleSidebar => {
-                self.side_panel.toggle_visibility();
-                let visible = !self.side_panel.user_hidden();
-                self.push_outbound(OutboundAgentCommand::SetSidebarVisible { visible });
+                self.toggle_side_panel();
             }
             SlashCommandAction::PissOnScreen => {
                 self.start_fx_easter_egg(AgentFxKind::Piss);

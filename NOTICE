@@ -50,6 +50,8 @@ MIT / public domain, Copyright (c) 2016 Mattias Gustavsson, adapted by hunterk.
 hlchunk.nvim runtime (`neoism-backend/src/performer/nvim_runtime/lua/hlchunk`) —
 MIT, Copyright (c) 2023 shellRaining.
 
+OpenCode provider artwork (`neoism-agent/sdk/typescript/packages/gui/src/components/providers/icons.svg`) — MIT, Copyright (c) 2025 opencode. See `neoism-agent/sdk/typescript/packages/gui/src/components/providers/LICENSE.opencode`.
+
 
 Fonts
 -----

@@ -15,7 +15,7 @@ fn provider(id: &str, name: &str, env: Vec<&str>) -> ProviderInfo {
 }
 
 #[test]
-fn openai_methods_match_opencode_chatgpt_oauth_order() {
+fn openai_methods_offer_chatgpt_oauth_before_api_key() {
     let methods = provider_methods(&provider("openai", "OpenAI", vec!["OPENAI_API_KEY"]));
 
     assert_eq!(

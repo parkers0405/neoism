@@ -731,6 +731,7 @@ export class App {
         }
       },
       onWorkspaceIslandIntent: (intent) => this.handleWorkspaceIslandIntent(intent),
+      onMoveWorkspaceTab: (delta) => this.moveWorkspaceTab(delta),
       onCreateWorkspace: () => this.createWorkspaceOnConnectedHost(),
       onBufferTabsChanged: (tabs) => {
         if (this.suppressWorkspaceTabSync) return;
@@ -1218,6 +1219,17 @@ export class App {
       }),
       active_id: this.activeHostWorkspaceId,
     }));
+  }
+
+  private moveWorkspaceTab(delta: -1 | 1): void {
+    this.renderWorkspaceChrome();
+    const from = this.workspaceSubscriptionOrder.indexOf(this.activeHostWorkspaceId ?? "");
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= this.workspaceSubscriptionOrder.length) return;
+    [this.workspaceSubscriptionOrder[from], this.workspaceSubscriptionOrder[to]] =
+      [this.workspaceSubscriptionOrder[to], this.workspaceSubscriptionOrder[from]];
+    this.persistWorkspaceSubscriptions();
+    this.renderWorkspaceChrome();
   }
 
   private handleWorkspaceIslandIntent(intent: {

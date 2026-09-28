@@ -240,3 +240,55 @@ fn permission_replied_removes_request_by_permission_id() {
         AgentServerMessage::PermissionRemoved { request_id, .. } if request_id == "per-1"
     ));
 }
+
+#[test]
+fn thread_summary_serializes_only_persisted_acp_root_provider() {
+    let base = json!({
+        "id": "ses_1", "title": "Plan", "time": {"updated": 12},
+        "externalAgent": {"runtime": "acp", "provider": "codex"}
+    });
+    let root = super::thread_summary_from_session(&base).unwrap();
+    assert_eq!(root.external_provider.as_deref(), Some("codex"));
+    let encoded = serde_json::to_value(&root).unwrap();
+    assert_eq!(encoded["external_provider"], "codex");
+    assert_eq!(
+        serde_json::from_value::<neoism_protocol::agent::ThreadSummary>(encoded).unwrap(),
+        root
+    );
+
+    let mut child = base.clone();
+    child["parentId"] = json!("ses_parent");
+    assert_eq!(
+        super::thread_summary_from_session(&child)
+            .unwrap()
+            .external_provider,
+        None
+    );
+    let mut native = base.clone();
+    native.as_object_mut().unwrap().remove("externalAgent");
+    let native = super::thread_summary_from_session(&native).unwrap();
+    assert_eq!(native.external_provider, None);
+    assert!(serde_json::to_value(native)
+        .unwrap()
+        .get("external_provider")
+        .is_none());
+    let mut untrusted = base;
+    untrusted["externalAgent"]["provider"] = json!("unknown");
+    assert_eq!(
+        super::thread_summary_from_session(&untrusted)
+            .unwrap()
+            .external_provider,
+        None
+    );
+}
+
+#[test]
+fn todo_snapshot_maps_persisted_acp_plan_for_web_reconnect() {
+    let todos = super::todo_items_from_response(&json!([
+        {"content": "first", "status": "completed", "priority": "high"},
+        {"content": "second", "status": "in_progress", "priority": "medium"}
+    ]));
+    assert_eq!(todos.len(), 2);
+    assert_eq!(todos[0].status, "completed");
+    assert_eq!(todos[1].content, "second");
+}

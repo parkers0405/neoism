@@ -329,8 +329,8 @@ async fn unrevert_session(
 /// the desktop/daemon clients POST with no JSON body, which would otherwise be
 /// rejected by axum's `Json` extractor with `415 Unsupported Media Type`.
 ///
-/// Mirrors opencode's TUI `undo`: with no explicit `messageID`, step back to the
-/// most recent user message *before* the current revert marker (so repeated
+/// With no explicit `messageID`, step back to the most recent user message
+/// *before* the current revert marker (so repeated
 /// undos walk backward through the conversation).
 pub(crate) async fn session_undo(
     State(state): State<AppState>,
@@ -364,8 +364,8 @@ pub(crate) async fn session_undo(
 /// `/redo` slash command: restore one step. Tolerates an empty request body for
 /// the same reason as [`session_undo`].
 ///
-/// Mirrors opencode's TUI `redo`: step forward to the next user message *after*
-/// the current revert marker, or fully unrevert when there is none left.
+/// Step forward to the next user message *after* the current revert marker,
+/// or fully unrevert when there is none left.
 pub(crate) async fn session_redo(
     State(state): State<AppState>,
     Path(session_id): Path<String>,

@@ -55,6 +55,12 @@ pub enum GitClientMessage {
     Checkout {
         branch: String,
     },
+    /// `git fetch`. Replies with refreshed `ChangedFiles`, including failure text.
+    Fetch,
+    /// `git pull --ff-only`. Replies with refreshed `ChangedFiles`.
+    Pull,
+    /// `git push`. Replies with refreshed `ChangedFiles`.
+    Push,
     /// Per-file patch text with desktop `load_diff` parity: `git diff
     /// HEAD --no-color -- <path>` for tracked files, `git diff
     /// --no-index /dev/null <path>` for untracked ones — so a staged
@@ -76,6 +82,9 @@ impl GitClientMessage {
                 | GitClientMessage::Unstage { .. }
                 | GitClientMessage::Commit { .. }
                 | GitClientMessage::Checkout { .. }
+                | GitClientMessage::Fetch
+                | GitClientMessage::Pull
+                | GitClientMessage::Push
         )
     }
 }

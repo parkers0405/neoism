@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -85,6 +85,14 @@ pub enum NeoismAgentOutputKind {
 pub struct NeoismAgentTodo {
     pub status: String,
     pub content: String,
+}
+
+pub(super) fn plan_from_shared(todos: &[neoism_ui::panels::agent_pane::state::NeoismAgentTodo]) -> Vec<NeoismAgentTodo> {
+    todos.iter().map(|todo| NeoismAgentTodo { status: todo.status.clone(), content: todo.content.clone() }).collect()
+}
+
+pub(super) fn plan_to_shared(todos: &[NeoismAgentTodo]) -> Vec<neoism_ui::panels::agent_pane::state::NeoismAgentTodo> {
+    todos.iter().map(|todo| neoism_ui::panels::agent_pane::state::NeoismAgentTodo { status: todo.status.clone(), content: todo.content.clone() }).collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -607,6 +615,32 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         directory: Option<String>,
         result: Result<Vec<NeoismAgentPickerOption>, String>,
     },
+    ExternalOptionsFetched {
+        server: String,
+        session_id: String,
+        generation: u64,
+        result: Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String>,
+    },
+    ExternalOptionSet {
+        server: String,
+        session_id: String,
+        generation: u64,
+        result: Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String>,
+    },
+    ExternalCatalogRefreshed {
+        server: String,
+        directory: Option<String>,
+        generation: u64,
+        source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+        result: Result<Vec<NeoismAgentSessionEntry>, String>,
+    },
+    ExternalImportCompleted {
+        server: String,
+        directory: Option<String>,
+        source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+        source_key: String,
+        result: Result<String, String>,
+    },
     SidePanelSessionsRefreshed {
         generation: u64,
         requested_cursor: Option<String>,
@@ -744,6 +778,8 @@ impl AgentBackgroundSender {
 pub(crate) struct PendingPromptDispatch {
     pub(crate) origin_session_id: Option<String>,
     pub(crate) origin_draft_id: u64,
+    pub(crate) source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    pub(crate) draft_external_selections: HashMap<String, String>,
     pub(crate) server: String,
     pub(crate) directory: Option<String>,
     pub(crate) message_id: String,
@@ -816,6 +852,28 @@ pub struct NeoismAgentPane {
     pub(super) pending_account_model: Option<String>,
     pub(super) thinking: Option<String>,
     pub(super) session_id: Option<String>,
+    pub(super) new_chat_source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    pub(super) default_chat_source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    pub(super) draft_source_explicit: bool,
+    pub(super) session_sources: HashMap<String, neoism_ui::panels::agent_pane::state::side_panel::ConversationSource>,
+    pub(super) session_histories: HashMap<String, neoism_ui::panels::agent_pane::api_mapping::ImportedHistory>,
+    /// Live todo events override possibly older HTTP preload snapshots, keyed by session.
+    plan_todo_events: HashMap<String, Vec<NeoismAgentTodo>>,
+    pub(super) current_plan_todos: Option<Vec<NeoismAgentTodo>>,
+    live_usage_by_session: HashMap<String, (String, NeoismAgentUsage)>,
+    external_options: Option<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions>,
+    pub(super) draft_external_selections: HashMap<String, String>,
+    external_options_generation: u64,
+    external_options_request: Option<u64>,
+    external_options_pending: Option<(String, String)>,
+    external_options_post_request: Option<u64>,
+    external_options_refresh_after_request: bool,
+    external_options_next_refresh: Option<Instant>,
+    external_options_dirty: bool,
+    pub(super) pending_external_model_picker: bool,
+    external_options_error: Option<String>,
+    external_root_bound_refresh: bool,
+    external_picker_option_id: Option<String>,
     pub(super) session_title: Option<String>,
     pub(super) parent_session_id: Option<String>,
     pub(super) directory: Option<String>,
@@ -841,6 +899,13 @@ pub struct NeoismAgentPane {
     >,
     event_stream: Option<AgentSessionEventStream>,
     session_catalog_stream: Option<AgentSessionCatalogStream>,
+    external_catalog_enabled: bool,
+    external_catalog_generation: u64,
+    external_catalog_last_refresh: Option<Instant>,
+    external_catalog_remaining: usize,
+    external_import_in_flight: Option<String>,
+    pending_external_open: Option<(String, neoism_ui::panels::agent_pane::state::side_panel::ConversationSource)>,
+    pending_external_error: Option<String>,
     event_wake: Option<AgentEventWake>,
     /// When the most recent update was drained from the event stream.
     /// Feeds the liveness watchdog: a session that claims active work but
@@ -948,7 +1013,7 @@ pub struct NeoismAgentPane {
     mermaid_raw_blocks: BTreeSet<u64>,
     usage_chip_rect: Option<[f32; 4]>,
     composer_control_rect: Option<[f32; 4]>,
-    status_chip_rects: [Option<[f32; 4]>; 3],
+    status_chip_rects: Vec<Option<[f32; 4]>>,
     pub(super) status_chip_activated: Option<(usize, Instant)>,
     background_status_rect: Option<[f32; 4]>,
     background_task_details_expanded: bool,
@@ -959,6 +1024,7 @@ pub struct NeoismAgentPane {
     /// so the per-frame "clear" is just resetting this to 0 — no per-line
     /// alloc/free churn, which in debug was costing ~1.5ms/frame.
     selectable_lines_len: usize,
+    selection_history: BTreeMap<(i64, i64), SelectableLine>,
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
     pub(super) timeline_scroll_px: f32,
@@ -1053,6 +1119,8 @@ pub struct NeoismAgentPane {
     pub(super) model_context_limit: Option<u64>,
     pub wordmark: NeoismWordmarkState,
     pub(super) side_panel: NeoismAgentSidePanel,
+    pub(super) catalog_toggle_requested: bool,
+    detail_panel: NeoismAgentSidePanel,
     perf_frame: AgentPanePerfFrame,
     /// The local peer's presence display name (the same seed the editor
     /// caret / top-chrome orb use). Pushed by the screen each frame; the
@@ -1130,6 +1198,27 @@ impl Default for NeoismAgentPane {
             pending_account_model: None,
             thinking: None,
             session_id: None,
+            new_chat_source: Default::default(),
+            default_chat_source: Default::default(),
+            draft_source_explicit: false,
+            session_sources: HashMap::new(),
+            session_histories: HashMap::new(),
+            plan_todo_events: HashMap::new(),
+            current_plan_todos: None,
+            live_usage_by_session: HashMap::new(),
+            external_options: None,
+            draft_external_selections: HashMap::new(),
+            external_options_generation: 0,
+            external_options_request: None,
+            external_options_pending: None,
+            external_options_post_request: None,
+            external_options_refresh_after_request: false,
+            external_options_next_refresh: None,
+            external_options_dirty: false,
+            pending_external_model_picker: false,
+            external_options_error: None,
+            external_root_bound_refresh: false,
+            external_picker_option_id: None,
             session_title: None,
             parent_session_id: None,
             directory: None,
@@ -1148,6 +1237,13 @@ impl Default for NeoismAgentPane {
             file_mention_root_pin: Mutex::new(None),
             event_stream: None,
             session_catalog_stream: None,
+            external_catalog_enabled: false,
+            external_catalog_generation: 0,
+            external_catalog_last_refresh: None,
+            external_catalog_remaining: 0,
+            external_import_in_flight: None,
+            pending_external_open: None,
+            pending_external_error: None,
             event_wake: None,
             last_stream_update_at: None,
             last_stream_resubscribe_at: None,
@@ -1209,13 +1305,14 @@ impl Default for NeoismAgentPane {
             mermaid_raw_blocks: BTreeSet::new(),
             usage_chip_rect: None,
             composer_control_rect: None,
-            status_chip_rects: [None; 3],
+            status_chip_rects: vec![None; 3],
             status_chip_activated: None,
             background_status_rect: None,
             background_task_details_expanded: false,
             hover_link_target: None,
             selectable_lines: Vec::new(),
             selectable_lines_len: 0,
+            selection_history: BTreeMap::new(),
             selection_anchor: None,
             selection_focus: None,
             timeline_scroll_px: 0.0,
@@ -1276,6 +1373,8 @@ impl Default for NeoismAgentPane {
             model_context_limit: None,
             wordmark: NeoismWordmarkState::default(),
             side_panel: NeoismAgentSidePanel::default(),
+            catalog_toggle_requested: false,
+            detail_panel: NeoismAgentSidePanel::default(),
             perf_frame: AgentPanePerfFrame::default(),
             local_presence_name: None,
             visible_user_orb_active: false,
@@ -1284,6 +1383,7 @@ impl Default for NeoismAgentPane {
 }
 
 pub(super) mod connect;
+mod external_options;
 mod ingest;
 mod input;
 mod permissions;

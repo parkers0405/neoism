@@ -147,7 +147,7 @@ export function Composer({ busy, commands, send, abort, model, agent, thinking, 
                         else if (e.key === "Tab" && !e.shiftKey && onCycleAgent) { e.preventDefault(); onCycleAgent(); }
                     }} />
                 <div className="native-composer-input-band">
-                    <input ref={fileInput} type="file" multiple hidden aria-label="Attach files" onChange={e => {
+                    <input ref={fileInput} type="file" multiple className="native-composer-file-input" tabIndex={-1} aria-label="Attach files" onClick={() => setFilePickerOpen(true)} onChange={e => {
                         setFilePickerOpen(false);
                         const added = Array.from(e.target.files ?? []);
                         setFiles([...files, ...added]); state.error = ""; e.target.value = "";

@@ -2,6 +2,7 @@ use super::*;
 
 impl NeoismAgentPane {
     pub fn open_agent_picker(&mut self) {
+        if self.new_chat_source.provider().is_some() { return; }
         self.status_chip_activated = Some((0, Instant::now()));
         self.push_outbound(OutboundAgentCommand::RefreshAgents {
             directory: self.directory.clone(),
@@ -20,6 +21,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_model_picker(&mut self) {
+        if self.new_chat_source.provider().is_some() { return; }
         self.status_chip_activated = Some((1, Instant::now()));
         self.push_outbound(OutboundAgentCommand::RefreshModels);
         let options = self.model_picker_options();
@@ -106,6 +108,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_thinking_picker(&mut self) {
+        if self.new_chat_source.provider().is_some() { return; }
         self.status_chip_activated = Some((2, Instant::now()));
         let mut options = vec![
             NeoismAgentPickerOption::new(
@@ -362,16 +365,6 @@ impl NeoismAgentPane {
         true
     }
 
-    pub fn toggle_side_panel(&mut self) {
-        self.side_panel.toggle_visibility();
-        if !self.side_panel.user_hidden() {
-            self.push_outbound(OutboundAgentCommand::RefreshSessions {
-                directory: self.directory.clone(),
-                cursor: None,
-            });
-        }
-    }
-
     pub(in crate::panels::agent_pane::state) fn model_picker_options(
         &self,
     ) -> Vec<NeoismAgentPickerOption> {
@@ -594,6 +587,31 @@ impl NeoismAgentPane {
         self.wordmark.click_started.is_some_and(|started| {
             Instant::now().saturating_duration_since(started) <= WORDMARK_CLICK_ANIMATION
         })
+    }
+
+    pub fn swap_detail_panel(&mut self) {
+        std::mem::swap(&mut self.side_panel, &mut self.detail_panel);
+    }
+
+    pub fn prepare_detail_panel(&mut self) {
+        self.detail_panel
+            .sync_conversation_details_from(&self.side_panel);
+    }
+
+    pub fn take_catalog_toggle_request(&mut self) -> bool {
+        std::mem::take(&mut self.catalog_toggle_requested)
+    }
+
+    pub fn toggle_side_panel(&mut self) {
+        self.catalog_toggle_requested = true;
+    }
+
+    pub fn detail_panel(&self) -> &NeoismAgentSidePanel {
+        &self.detail_panel
+    }
+
+    pub fn detail_panel_mut(&mut self) -> &mut NeoismAgentSidePanel {
+        &mut self.detail_panel
     }
 
     pub fn side_panel(&self) -> &NeoismAgentSidePanel {

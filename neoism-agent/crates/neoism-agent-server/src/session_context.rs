@@ -930,10 +930,9 @@ fn publish_compaction_text_delta(
     assistant_text_part_id: &str,
     delta: &str,
 ) {
-    // Match normal assistant streaming and OpenCode: deltas are transient UI
-    // progress, while the complete summary is persisted once at the semantic
-    // boundary. Persisting both events plus the growing message for every token
-    // made compaction itself increasingly slow.
+    // Streaming deltas are transient UI progress, while the complete summary
+    // is persisted once at the semantic boundary. Persisting both events plus
+    // the growing message for every token made compaction increasingly slow.
     state.publish_live(EventPayload::new(
         event_type::MESSAGE_PART_DELTA,
         json!({
@@ -1564,7 +1563,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_prompt_template_uses_opencode_sections() {
+    fn compaction_prompt_template_has_required_sections() {
         assert!(COMPACTION_PROMPT_TEMPLATE.contains("## Goal"));
         assert!(COMPACTION_PROMPT_TEMPLATE.contains("## Constraints & Preferences"));
         assert!(COMPACTION_PROMPT_TEMPLATE.contains("## Relevant Files"));

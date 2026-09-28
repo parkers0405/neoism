@@ -857,6 +857,15 @@ impl Screen<'_> {
                         self.move_active_buffer_tab(false);
                         return true;
                     }
+                    Act::MoveWorkspaceTabToPrev | Act::MoveWorkspaceTabToNext => {
+                        self.cancel_search(clipboard);
+                        self.clear_selection();
+                        self.move_active_workspace_tab(matches!(
+                            action,
+                            Act::MoveWorkspaceTabToPrev
+                        ));
+                        return true;
+                    }
                     Act::MoveCurrentTabToPrev => {
                         self.cancel_search(clipboard);
                         self.clear_selection();

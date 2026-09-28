@@ -749,39 +749,69 @@ impl Screen<'_> {
             return true;
         }
 
-        // Per-pane agent side panel slot. Sits between the agent body
-        // (timeline / input) and the global git_diff_panel on the right.
-        // Alt+Right from the agent body → focus the panel. Alt+Left
-        // from the panel → unfocus, returning to the agent body.
+        if self.renderer.conversations_visible && self.renderer.conversations_pane.side_panel().is_focused() {
+            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+            if !right {
+                if self.renderer.notes_sidebar.is_visible() {
+                    self.renderer.notes_sidebar.set_focused(true);
+                } else if self.renderer.file_tree.is_visible() {
+                    self.renderer.file_tree.set_focused(true);
+                } else {
+                    self.focus_main_workspace();
+                }
+            } else {
+                self.focus_main_workspace();
+            }
+            self.mark_dirty();
+            return true;
+        }
+        if right && self.renderer.conversations_visible
+            && (self.renderer.notes_sidebar.is_focused()
+                || (self.renderer.file_tree.is_focused() && !self.renderer.notes_sidebar.is_visible())) {
+            self.renderer.file_tree.set_focused(false);
+            self.renderer.notes_sidebar.set_focused(false);
+            self.renderer.conversations_pane.side_panel_mut().set_focused(true);
+            self.mark_dirty();
+            return true;
+        }
+        if !right && self.renderer.conversations_visible
+            && !self.renderer.file_tree.is_focused() && !self.renderer.notes_sidebar.is_focused()
+            && self.renderer.conversations_pane.side_panel().last_panel_rect().is_some()
+            && !self.context_manager.current().neoism_agent.as_ref().is_some_and(|agent| agent.detail_panel().is_focused() || agent.side_panel().is_focused()) {
+            self.renderer.conversations_pane.side_panel_mut().set_focused(true);
+            self.mark_dirty();
+            return true;
+        }
+        // Spatial order: catalog ← agent body → conversation detail.
         if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
-            if agent.side_panel().is_focused() {
+            if agent.detail_panel().is_focused() {
                 if !right {
+                    agent.detail_panel_mut().set_focused(false);
+                    self.mark_dirty();
+                    return true;
+                }
+            } else if agent.side_panel().is_focused() {
+                if right {
                     agent.side_panel_mut().set_focused(false);
                     self.mark_dirty();
                     return true;
                 }
-                // right falls through so the chain continues outward
-                // toward git_diff_panel / next split.
             } else if right
+                && agent.detail_panel().last_panel_rect().is_some()
+                && agent.detail_panel().focusable()
+                && !self.renderer.file_tree.is_focused()
+                && !self.renderer.notes_sidebar.is_focused()
+            {
+                agent.detail_panel_mut().set_focused(true);
+                self.mark_dirty();
+                return true;
+            } else if !right
                 && agent.side_panel().last_panel_rect().is_some()
                 && agent.side_panel().focusable()
-                // Only grab into the side panel when focus is already on the
-                // agent body — otherwise Alt+Right from the file tree would
-                // teleport past the agent input/composer straight into the
-                // panel. From the tree, this arm is skipped so the chain
-                // falls through to the file_tree block → focus_main_workspace
-                // (the agent composer), and the *next* Alt+Right enters here.
                 && !self.renderer.file_tree.is_focused()
                 && !self.renderer.notes_sidebar.is_focused()
             {
                 agent.side_panel_mut().set_focused(true);
-                // With no list rows worth a cursor (a chat with no branch
-                // rows), land straight on the "← Back" affordance so the
-                // caret has somewhere to sit.
-                if agent.side_panel().only_back_focusable() {
-                    agent.side_panel_mut().focus_back();
-                }
-                self.renderer.file_tree.set_focused(false);
                 self.mark_dirty();
                 return true;
             }

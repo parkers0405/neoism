@@ -32,6 +32,10 @@ pub(crate) struct InnerState {
     pub(crate) caller_policy: crate::caller::CallerPolicy,
     pub(crate) management_policy: crate::management::ManagementPolicy,
     pub(crate) management_lock: Mutex<()>,
+    /// Serializes provider-native identity reconciliation without blocking management.
+    pub(crate) external_catalog_import_lock: Mutex<()>,
+    /// Per-root gate shared by provider-option discovery/mutation and ACP prompts.
+    pub(crate) external_session_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) utilities: Arc<crate::utility_runtime::UtilityRuntime>,
     pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
     pub(crate) workspace_plugin_generations: Mutex<
@@ -257,6 +261,25 @@ fn session_list_index_statement(
         if let Some(value) = info.extra.get(key) {
             extra.insert(key.to_string(), value.clone());
         }
+    }
+    if let Some(external) = info.extra.get("externalAgent") {
+        // The compact root catalog needs the import state for visibility and
+        // native UI labeling, but must not expose opaque provider session IDs.
+        let mut summary = serde_json::Map::new();
+        for key in [
+            "provider",
+            "runtime",
+            "agent",
+            "status",
+            "historyState",
+            "historyToolEvents",
+            "historyIncompleteContent",
+        ] {
+            if let Some(value) = external.get(key) {
+                summary.insert(key.into(), value.clone());
+            }
+        }
+        extra.insert("externalAgent".into(), Value::Object(summary));
     }
     let summary = SessionInfo {
         id: info.id.clone(),
@@ -797,6 +820,8 @@ impl AppState {
                 caller_policy,
                 management_policy,
                 management_lock: Mutex::new(()),
+                external_catalog_import_lock: Mutex::new(()),
+                external_session_locks: Mutex::new(HashMap::new()),
                 utilities,
                 workspace_runtimes: Default::default(),
                 workspace_plugin_generations: Mutex::new(HashMap::new()),
@@ -914,6 +939,9 @@ impl AppState {
         let resume_started = crate::perf::now();
         let phase_started = crate::perf::now();
         crate::session_queue::resume_prompt_queues(state.clone()).await?;
+        if let Err(error) = crate::external_agent::reconcile_interrupted_nested_sessions(&state).await {
+            tracing::warn!(%error, "failed to reconcile interrupted ACP nested tasks");
+        }
         tracing::info!(
             target: "neoism_agent::perf",
             phase_ms = crate::perf::elapsed_ms(phase_started),
@@ -1241,8 +1269,8 @@ impl AppState {
     }
 
     pub(crate) fn publish(&self, event: EventPayload) {
-        // Opencode-model bus: broadcast in PUBLISH order, persist alongside.
-        // Routing delivery through the durable writer made committed events
+        // Broadcast in publish order while persisting alongside. Routing
+        // delivery through the durable writer made committed events
         // (reasoning/tool part snapshots) lag behind live token deltas
         // published after them, so subscribers saw parts out of order.
         let mut event = event;

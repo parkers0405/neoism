@@ -642,6 +642,22 @@ where
     base + lines as f32 * line_h
 }
 
+pub(super) fn patch_start_row<M>(
+    cache: &TimelineLayoutCache<M>,
+    start_source: usize,
+) -> Option<usize> {
+    let start_pos = cache
+        .rows
+        .iter()
+        .position(|row| {
+            row.source_index >= start_source || row.source_end_index >= start_source
+        })
+        .unwrap_or(cache.rows.len());
+    // Patching beyond an estimated suffix would strand estimated rows between
+    // two exact regions, which this cache cannot represent. Rebuild lazily.
+    (start_pos <= cache.estimated_suffix_start).then_some(start_pos)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn patch_timeline_layout<P, D>(
     sugarloaf: &mut Sugarloaf,
@@ -661,13 +677,9 @@ where
     let Some(start_source) = dirty_start_source(pane, cache, &dirty) else {
         return cache.source_len == source_len;
     };
-    let start_pos = cache
-        .rows
-        .iter()
-        .position(|row| {
-            row.source_index >= start_source || row.source_end_index >= start_source
-        })
-        .unwrap_or(cache.rows.len());
+    let Some(start_pos) = patch_start_row(cache, start_source) else {
+        return false;
+    };
     let (scan_start, content_y, previous_visible_was_edit_tool) = if let Some(previous) =
         start_pos
             .checked_sub(1)

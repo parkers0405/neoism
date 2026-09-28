@@ -61,7 +61,7 @@ pub(crate) async fn auth_start(
     let config = neoism_agent_builtins::plugin::config::load(services, directory)?
         .0
         .mcp;
-    auth_start_with_config(&config, directory, name, auth_store).await
+    auth_start_with_config(&config, directory, name, auth_store, None).await
 }
 
 pub(crate) async fn auth_start_with_config(
@@ -69,6 +69,7 @@ pub(crate) async fn auth_start_with_config(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
+    peer_redirect_uri: Option<&str>,
 ) -> anyhow::Result<McpAuthStartResponse> {
     let remote = config
         .get(name)
@@ -78,10 +79,51 @@ pub(crate) async fn auth_start_with_config(
     };
     let oauth = usable_oauth_config(oauth)
         .ok_or_else(|| anyhow!("MCP server {name} does not support OAuth"))?;
-    let redirect_uri = redirect_uri(name, oauth);
+    let default_redirect_uri = redirect_uri(name, oauth);
+    let redirect_uri = if oauth.redirect_uri.is_some() {
+        default_redirect_uri.clone()
+    } else if let Some(uri) = peer_redirect_uri {
+        let parsed =
+            reqwest::Url::parse(uri).context("invalid peer MCP OAuth redirect URI")?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !parsed
+                .path()
+                .ends_with(&format!("/v2/plugins/dev.neoism.mcp/{name}/auth/callback"))
+        {
+            return Err(anyhow!("invalid peer MCP OAuth callback route"));
+        }
+        uri.to_string()
+    } else {
+        default_redirect_uri.clone()
+    };
+    let existing = stored_client_info(name, url, auth_store).await?;
+    // Registrations are bound to their redirect URI. Re-register only when
+    // switching between a host callback and a previous loopback/host route.
+    // Older stored registrations had no URI field and used the default.
     let needs_registration = configured_client_id(oauth).is_none()
-        && stored_client_info(name, url, auth_store).await?.is_none();
+        && !existing.as_ref().is_some_and(|client| {
+            client
+                .redirect_uri
+                .as_deref()
+                .unwrap_or(&default_redirect_uri)
+                == redirect_uri
+        });
     let endpoints = oauth_endpoints(url, oauth, true, false, needs_registration).await;
+    if needs_registration {
+        let registration_url = endpoints.registration_url.as_deref()
+            .ok_or_else(|| anyhow!("MCP OAuth redirect requires dynamic client registration or a configured client ID"))?;
+        register_oauth_client(
+            name,
+            url,
+            oauth,
+            registration_url,
+            auth_store,
+            &redirect_uri,
+        )
+        .await?;
+    }
     let client =
         oauth_client_credentials(name, url, oauth, &endpoints, auth_store, true).await?;
     let authorization_url = endpoints.authorization_url;
@@ -403,9 +445,15 @@ async fn oauth_client_credentials(
 
     if allow_registration {
         if let Some(registration_url) = endpoints.registration_url.as_deref() {
-            let client_info =
-                register_oauth_client(name, url, oauth, registration_url, auth_store)
-                    .await?;
+            let client_info = register_oauth_client(
+                name,
+                url,
+                oauth,
+                registration_url,
+                auth_store,
+                &redirect_uri(name, oauth),
+            )
+            .await?;
             return Ok(OAuthClientCredentials {
                 client_id: client_info.client_id.clone(),
                 client_secret: client_info.client_secret.clone(),
@@ -425,8 +473,8 @@ async fn register_oauth_client(
     oauth: &McpOAuthConfig,
     registration_url: &str,
     auth_store: &McpAuthStore,
+    redirect_uri: &str,
 ) -> anyhow::Result<McpAuthClientInfo> {
-    let redirect_uri = redirect_uri(name, oauth);
     let mut body = json!({
         "redirect_uris": [redirect_uri],
         "client_name": "neoism-agent",
@@ -462,6 +510,7 @@ async fn register_oauth_client(
     let client_info = McpAuthClientInfo {
         client_id: registered.client_id,
         client_secret: registered.client_secret,
+        redirect_uri: Some(redirect_uri.to_string()),
         client_id_issued_at: registered.client_id_issued_at,
         client_secret_expires_at: registered.client_secret_expires_at,
     };

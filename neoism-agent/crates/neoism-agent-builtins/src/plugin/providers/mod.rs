@@ -156,7 +156,7 @@ struct ProviderRoute {
 }
 
 fn provider_request_scope(
-    action: ProviderRouteAction,
+    _action: ProviderRouteAction,
     tenant_id: Option<String>,
     workspace_id: Option<String>,
     hosted: bool,
@@ -164,15 +164,10 @@ fn provider_request_scope(
     let peer_workspace = workspace_id.as_deref().is_some_and(|workspace_id| {
         tenant_id.as_deref() == Some(format!("workspace:{workspace_id}").as_str())
     });
-    let host_read = matches!(
-        action,
-        ProviderRouteAction::List
-            | ProviderRouteAction::Configured
-            | ProviderRouteAction::AuthMethods
-            | ProviderRouteAction::AuthGet
-            | ProviderRouteAction::ConnectionsList
-    );
-    if peer_workspace && host_read {
+    // Workspace-daemon peer credentials are minted for the joined workspace,
+    // not for a hosted tenant. /connect writes into the host's local store;
+    // direct hosted callers still require a tenant-isolated store.
+    if peer_workspace {
         (Some("local".to_string()), None, false)
     } else {
         (tenant_id, workspace_id, hosted)
@@ -241,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_daemon_guests_cannot_edit_host_credentials() {
+    fn workspace_daemon_guests_can_manage_host_credentials() {
         assert_eq!(
             provider_request_scope(
                 ProviderRouteAction::ConnectionsDelete,
@@ -249,11 +244,7 @@ mod tests {
                 Some("workspace-a".into()),
                 true,
             ),
-            (
-                Some("workspace:workspace-a".into()),
-                Some("workspace-a".into()),
-                true,
-            ),
+            (Some("local".into()), None, false),
         );
     }
 }

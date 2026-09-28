@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn shell_command_renderer_colors_commands_flags_and_numbers() {
         let rendered =
-            render_shell_command("git -C opencode show HEAD:path | sed -n '1,260p'");
+            render_shell_command("git -C workspace show HEAD:path | sed -n '1,260p'");
 
         assert!(rendered.contains(&format!("{SHELL_COMMAND_BLUE}git{RESET}")));
         assert!(rendered.contains(&format!("{RED}-C{RESET}")));

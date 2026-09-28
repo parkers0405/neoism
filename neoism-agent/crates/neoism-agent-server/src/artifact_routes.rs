@@ -3,14 +3,15 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use neoism_agent_core::{ArtifactInfo, Id, IdKind};
+use base64::Engine;
+use neoism_agent_core::{ArtifactInfo, Id, IdKind, ProviderMessage};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
-const MAX_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
+pub(crate) const MAX_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,6 +121,81 @@ pub(crate) async fn artifact_create(
         return Err(error.into());
     }
     Ok((StatusCode::CREATED, Json(artifact)))
+}
+
+/// Resolve only our own session-bound uploads before a model request. Persisted
+/// message parts stay small and never contain the base64 payload.
+pub(crate) async fn hydrate_provider_attachments(
+    state: &AppState,
+    session_id: &str,
+    messages: &mut [ProviderMessage],
+) -> Result<(), ApiError> {
+    for message in messages {
+        for attachment in &mut message.attachments {
+            let Some(id) = attachment
+                .url
+                .strip_prefix("/v2/artifacts/")
+                .and_then(|path| path.strip_suffix("/content"))
+            else {
+                continue;
+            };
+            if id.is_empty() || id.contains('/') || id.contains('?') || id.contains('#') {
+                return Err(ApiError::bad_request("Invalid artifact reference"));
+            }
+            let tenant = state
+                .inner
+                .store
+                .artifact_tenant(id)
+                .await?
+                .ok_or_else(|| ApiError::bad_request("Attached artifact no longer exists"))?;
+            let artifact = state
+                .inner
+                .store
+                .get_artifact(crate::state::TenantQueryScope::Tenant(&tenant), id)
+                .await?
+                .ok_or_else(|| ApiError::bad_request("Attached artifact no longer exists"))?;
+            if artifact.session_id.as_deref() != Some(session_id)
+                || artifact.media_type != attachment.mime
+                || artifact.size > MAX_ARTIFACT_BYTES as u64
+            {
+                return Err(ApiError::bad_request(
+                    "Attached artifact does not match this session",
+                ));
+            }
+            let bytes = state
+                .get_artifact_blob(&tenant, id)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?
+                .ok_or_else(|| ApiError::bad_request("Attached artifact content is missing"))?;
+            if bytes.is_empty()
+                || bytes.len() > MAX_ARTIFACT_BYTES
+                || bytes.len() as u64 != artifact.size
+            {
+                return Err(ApiError::bad_request("Attached artifact has invalid content"));
+            }
+            let valid = match artifact.media_type.as_str() {
+                "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+                "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+                "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+                "application/pdf" => bytes.starts_with(b"%PDF-"),
+                _ => return Err(ApiError::bad_request(format!(
+                    "Unsupported attachment type: {}",
+                    artifact.media_type
+                ))),
+            };
+            if !valid {
+                return Err(ApiError::bad_request("Attached file does not match its media type"));
+            }
+            attachment.filename = Some(artifact.filename);
+            attachment.url = format!(
+                "data:{};base64,{}",
+                artifact.media_type,
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn artifact_list(

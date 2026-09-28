@@ -224,6 +224,11 @@ pub fn default_ime_cursor_positioning() -> bool {
     true
 }
 
+#[inline]
+pub fn default_chat_source() -> crate::config::DefaultChatSource {
+    crate::config::DefaultChatSource::Neoism
+}
+
 pub fn default_config_file_content() -> String {
     // Written to a fresh `config.json`. The loader accepts JSONC, so the
     // `//` comments and trailing commas below are legal. Every key is
@@ -290,6 +295,7 @@ pub fn default_config_file_content() -> String {
 
     // ── [agent] — the coding agent (its own block, same file) ─────
     // "agent": {
+    //     "default-chat-source": "neoism", // neoism | opencode | claude-code | codex; new chat source, not agent persona
     //     "model": "anthropic/claude-opus-5",
     //     "smallModel": "anthropic/claude-haiku-4-5",
     //     "variant": "high",       // low | medium | high | xhigh | max

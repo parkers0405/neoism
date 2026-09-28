@@ -27,6 +27,13 @@ impl NeoismAgentPane {
             self.selectable_lines.push(line);
         }
         self.selectable_lines_len += 1;
+        if self.selection_anchor.is_some() {
+            let line = &self.selectable_lines[index];
+            self.selection_history.insert(
+                crate::panels::agent_pane::selection_model::selection_line_key(line),
+                line.clone(),
+            );
+        }
         index
     }
 
@@ -68,6 +75,21 @@ impl NeoismAgentPane {
         (right > left).then_some((left, right))
     }
 
+    fn start_selection_history(&mut self) {
+        self.selection_history.clear();
+        self.selection_history.extend(
+            self.selectable_lines[..self.selectable_lines_len]
+                .iter()
+                .cloned()
+                .map(|line| {
+                    (
+                        crate::panels::agent_pane::selection_model::selection_line_key(&line),
+                        line,
+                    )
+                }),
+        );
+    }
+
     pub fn begin_selection_at(&mut self, x: f32, y: f32) -> bool {
         // Grab-anywhere: a press inside the timeline viewport that isn't
         // pixel-perfect on a glyph anchors to the NEAREST text line, so
@@ -82,6 +104,7 @@ impl NeoismAgentPane {
         let Some(index) = index else {
             self.selection_anchor = None;
             self.selection_focus = None;
+            self.selection_history.clear();
             return false;
         };
         let line = &self.selectable_lines[index];
@@ -94,6 +117,7 @@ impl NeoismAgentPane {
         };
         self.selection_anchor = Some(anchor);
         self.selection_focus = Some(anchor);
+        self.start_selection_history();
         true
     }
 
@@ -111,6 +135,7 @@ impl NeoismAgentPane {
         };
         self.selection_anchor = Some(anchor);
         self.selection_focus = Some(anchor);
+        self.start_selection_history();
         true
     }
 
@@ -146,6 +171,7 @@ impl NeoismAgentPane {
             x: end_caret.x,
         });
         self.touch_word_edges = self.selection_anchor.zip(self.selection_focus);
+        self.start_selection_history();
         true
     }
 
@@ -290,20 +316,15 @@ impl NeoismAgentPane {
     pub fn end_selection(&mut self) -> Option<String> {
         let anchor = self.selection_anchor.take()?;
         let focus = self.selection_focus.take()?;
+        let history = std::mem::take(&mut self.selection_history);
         let (start, end) = order_endpoints(anchor, focus);
         let single_row = same_selection_row(start, end);
         if single_row && (start.x - end.x).abs() < 1.0 {
             return None;
         }
-        // Walk every currently-registered line; pick the ones whose
-        // content_y falls inside the [start, end] band. Off-screen lines
-        // outside the registration window won't be included — that's an
-        // unavoidable trade for not rendering the whole conversation,
-        // but the auto-scroll + the wide registration margin handle the
-        // common cases.
-        let mut rows: Vec<&SelectableLine> = self.selectable_lines
-            [..self.selectable_lines_len]
-            .iter()
+        // Include rows that scrolled out of the render window during the drag.
+        let mut rows: Vec<&SelectableLine> = history
+            .values()
             .filter(|line| selection_contains_line(start, end, line))
             .collect();
         rows.sort_by(|a, b| compare_line_order(a, b));

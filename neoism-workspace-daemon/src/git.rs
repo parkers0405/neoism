@@ -222,15 +222,15 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
             with_workdir(&repo, |wd| vec![changed_files_reply(wd, None)])
         }
         GitClientMessage::Stage { path } => with_workdir(&repo, |wd| {
-            if let Err(e) = resolve_path(wd, &path) {
-                return err(e);
+            if let Err(e) = validate_git_path(wd, &path) {
+                return vec![changed_files_reply(wd, Some(e))];
             }
             let result = run_git(wd, &["add", "--", &path]);
             vec![changed_files_reply(wd, result.err())]
         }),
         GitClientMessage::Unstage { path } => with_workdir(&repo, |wd| {
-            if let Err(e) = resolve_path(wd, &path) {
-                return err(e);
+            if let Err(e) = validate_git_path(wd, &path) {
+                return vec![changed_files_reply(wd, Some(e))];
             }
             // Desktop parity: `git restore --staged`, falling back to
             // the older `git reset` for git builds without `restore`.
@@ -258,6 +258,18 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
                 .or_else(|_| run_git(wd, &["checkout", &branch]));
             vec![changed_files_reply(wd, result.err())]
         }),
+        GitClientMessage::Fetch => with_workdir(&repo, |wd| {
+            vec![changed_files_reply(wd, run_git(wd, &["fetch"]).err())]
+        }),
+        GitClientMessage::Pull => with_workdir(&repo, |wd| {
+            vec![changed_files_reply(
+                wd,
+                run_git(wd, &["pull", "--ff-only"]).err(),
+            )]
+        }),
+        GitClientMessage::Push => with_workdir(&repo, |wd| {
+            vec![changed_files_reply(wd, run_git(wd, &["push"]).err())]
+        }),
         GitClientMessage::DiffFiles { paths } => with_workdir(&repo, |wd| {
             let mut diffs = Vec::with_capacity(paths.len());
             for path in paths {
@@ -284,6 +296,41 @@ where
         Some(wd) => f(wd),
         None => err("bare repository has no working tree"),
     }
+}
+
+/// A single literal directory pathspec stages/unstages all descendants in one
+/// git invocation (including deletions), rather than issuing per-file writes.
+/// Reject whole-repo and escaping paths before handing them to git. Deleted
+/// paths need not exist, so check the nearest existing ancestor for symlinks.
+fn validate_git_path(workdir: &Path, path: &str) -> Result<(), String> {
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .all(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "expected a repo-relative file or folder path: {path}"
+        ));
+    }
+    let resolved = resolve_path(workdir, path)?;
+    let canonical_root = workdir.canonicalize().map_err(|e| e.to_string())?;
+    let mut ancestor = resolved.as_path();
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| format!("invalid git path: {path}"))?;
+    }
+    if !ancestor
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+        .starts_with(&canonical_root)
+    {
+        return Err(format!(
+            "git path escapes repository through a symlink: {path}"
+        ));
+    }
+    Ok(())
 }
 
 /// `ChangedFiles` reply: refreshed file list + current branch, with an
@@ -519,6 +566,7 @@ fn git_command(workdir: &Path) -> std::process::Command {
     let mut cmd = crate::process::background_command("git");
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .args(["-c", "core.fsmonitor=false"])
         .arg("-C")
         .arg(workdir);
@@ -913,6 +961,81 @@ mod tests {
     }
 
     #[test]
+    fn directory_pathspec_stages_and_unstages_as_one_operation() {
+        let tmp = std::env::temp_dir()
+            .join(format!("neoism-git-folder-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(tmp.join("nested")).unwrap();
+        let _repo = Repository::init(&tmp).unwrap();
+        std::fs::write(tmp.join("nested/a.txt"), "a\n").unwrap();
+        std::fs::write(tmp.join("nested/b.txt"), "b\n").unwrap();
+        std::fs::write(tmp.join("other.txt"), "other\n").unwrap();
+        for (request, staged) in [
+            (
+                GitClientMessage::Stage {
+                    path: "nested".into(),
+                },
+                true,
+            ),
+            (
+                GitClientMessage::Unstage {
+                    path: "nested".into(),
+                },
+                false,
+            ),
+        ] {
+            let result = handle_blocking(&tmp, request);
+            let Some(GitServerMessage::ChangedFiles { files, error, .. }) =
+                result.first()
+            else {
+                panic!("expected ChangedFiles: {result:?}");
+            };
+            assert!(error.is_none(), "{error:?}");
+            assert_eq!(
+                files.iter().filter(|f| f.staged).count(),
+                if staged { 2 } else { 0 }
+            );
+            assert!(!files.iter().find(|f| f.path == "other.txt").unwrap().staged);
+        }
+        for path in [".", "", "../outside"] {
+            let result =
+                handle_blocking(&tmp, GitClientMessage::Stage { path: path.into() });
+            assert!(matches!(
+                result.first(),
+                Some(GitServerMessage::ChangedFiles { error: Some(_), .. })
+            ));
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn network_verbs_report_errors_with_refreshed_files() {
+        let tmp = std::env::temp_dir()
+            .join(format!("neoism-git-network-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        Repository::init(&tmp).unwrap();
+        std::fs::write(tmp.join("pending.txt"), "pending\n").unwrap();
+        for request in [
+            GitClientMessage::Fetch,
+            GitClientMessage::Pull,
+            GitClientMessage::Push,
+        ] {
+            let must_fail = !matches!(request, GitClientMessage::Fetch);
+            let result = handle_blocking(&tmp, request);
+            let Some(GitServerMessage::ChangedFiles { files, error, .. }) =
+                result.first()
+            else {
+                panic!("expected ChangedFiles: {result:?}");
+            };
+            // Fetch without a configured remote may succeed; pull and push cannot.
+            assert_eq!(files[0].path, "pending.txt");
+            if must_fail {
+                assert!(error.as_ref().is_some_and(|e| !e.is_empty()));
+            }
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
     fn late_old_subscription_cannot_override_new_workspace_watch() {
         let mut high_water = 0;
         assert!(super::accept_watch_request(&mut high_water, 101));
@@ -938,6 +1061,16 @@ mod tests {
             required_permission(&GitClientMessage::Checkout { branch: "b".into() }),
             Permission::WriteFiles
         ));
+        for request in [
+            GitClientMessage::Fetch,
+            GitClientMessage::Pull,
+            GitClientMessage::Push,
+        ] {
+            assert!(matches!(
+                required_permission(&request),
+                Permission::WriteFiles
+            ));
+        }
         assert!(matches!(
             required_permission(&GitClientMessage::ChangedFiles),
             Permission::ReadFiles

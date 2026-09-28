@@ -166,6 +166,7 @@ pub(crate) async fn execute_external_task(
         &prompt,
         runtime,
         cancel,
+        None,
     )
     .await;
     match result {
@@ -192,7 +193,7 @@ pub(crate) async fn execute_external_task(
     }
 }
 
-async fn create_external_subtask_session(
+pub(super) async fn create_external_subtask_session(
     state: &AppState,
     parent: &SessionInfo,
     command: &str,
@@ -322,9 +323,146 @@ async fn run_external_subtask_prompt(
     runtime: ExternalRuntime,
 ) -> Result<MessageWithParts, ApiError> {
     run_external_subtask_prompt_with_cancel(
-        state, child_id, generation, prompt, runtime, None,
+        state, child_id, generation, prompt, runtime, None, None,
     )
     .await
+}
+
+/// Execute a persisted ACP root through the same run, stream, permission and
+/// cancellation pipeline as external task children. The provider is read only
+/// from the immutable creation metadata, never from prompt overrides.
+pub(crate) async fn append_external_root_prompt(
+    state: &AppState,
+    session: &SessionInfo,
+    request: neoism_agent_core::PromptRequest,
+    create_reply: bool,
+) -> Result<MessageWithParts, ApiError> {
+    let runtime = super::root_runtime(session)
+        .ok_or_else(|| ApiError::bad_request("Invalid external root"))?;
+    if matches!(
+        session
+            .extra
+            .get("externalAgent")
+            .and_then(|value| value.get("historyState"))
+            .and_then(Value::as_str),
+        Some("importing" | "not_loaded")
+    ) {
+        return Err(ApiError::conflict(
+            "Native chat history is not loaded; cannot continue an incomplete import",
+        ));
+    }
+    if let Some(source_host) = session
+        .extra
+        .get("externalAgent")
+        .and_then(|value| value.get("sourceHost"))
+    {
+        if source_host.as_str() != Some(super::catalog::native_host_id().as_str()) {
+            return Err(ApiError::conflict(
+                "Native ACP history belongs to another host; cannot resume with local credentials",
+            ));
+        }
+    }
+    // The web composer may submit stale mode/model defaults. Ignore them:
+    // the persisted root is authoritative for every turn.
+    if request.tools.is_some() || request.system.is_some() {
+        return Err(ApiError::bad_request(
+            "ACP chats do not accept system or tool overrides",
+        ));
+    }
+    let mut text = String::new();
+    for part in &request.parts {
+        match part {
+            neoism_agent_core::PromptPart::Text { text: chunk } => text.push_str(chunk),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "ACP chats currently accept text parts only",
+                ))
+            }
+        }
+    }
+    let message_id = request
+        .message_id
+        .unwrap_or_else(|| Id::ascending(IdKind::Message));
+    if let Some(existing) = state
+        .inner
+        .store
+        .get_message(session.id.as_str(), message_id.as_str())
+        .await?
+    {
+        // Match the persisted user turn, not merely its concatenated text:
+        // assistant IDs, changed authors and added/removed parts are conflicts.
+        let author = request
+            .author
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        let matches = matches!(&existing.info, MessageInfo::User(user)
+            if user.agent == runtime.agent_name()
+                && user.model.provider_id == external_model(runtime).provider_id
+                && user.model.model_id == external_model(runtime).model_id
+                && user.author.as_deref().map(str::trim).filter(|name| !name.is_empty()) == author)
+            && matches!(existing.parts.as_slice(), [Part::Text(part)] if part.text == text);
+        if !matches {
+            return Err(ApiError::conflict(
+                "message ID already exists with different prompt content",
+            ));
+        }
+        if create_reply {
+            let replies = state.inner.store.list_messages(session.id.as_str()).await?;
+            let reply = replies.iter().find_map(|message| match &message.info {
+                MessageInfo::Assistant(assistant)
+                    if assistant.parent_id == message_id =>
+                {
+                    Some(assistant)
+                }
+                _ => None,
+            });
+            match reply {
+                Some(assistant)
+                    if assistant.error.is_none()
+                        && assistant.time.completed.is_some() => {}
+                Some(_) => return Err(ApiError::conflict(
+                    "Previous ACP turn failed or is incomplete; submit a new message ID",
+                )),
+                None => {
+                    return Err(ApiError::conflict(
+                        "ACP turn has no completed reply; submit a new message ID",
+                    ))
+                }
+            }
+        }
+        return Ok(existing);
+    }
+    if create_reply {
+        run_external_subtask_prompt_with_cancel(
+            state,
+            session.id.as_str(),
+            message_id.clone(),
+            &text,
+            runtime,
+            None,
+            request.author,
+        )
+        .await?;
+        // append_prompt's HTTP contract returns the submitted user message.
+        state
+            .inner
+            .store
+            .get_message(session.id.as_str(), message_id.as_str())
+            .await?
+            .ok_or_else(|| ApiError::internal("ACP user message disappeared"))
+    } else {
+        append_external_user_message(
+            state,
+            session,
+            message_id,
+            &text,
+            runtime,
+            &external_model(runtime),
+            request.author,
+        )
+        .await
+    }
 }
 
 async fn run_external_subtask_prompt_with_cancel(
@@ -334,6 +472,7 @@ async fn run_external_subtask_prompt_with_cancel(
     prompt: &str,
     runtime: ExternalRuntime,
     cancel: Option<Arc<AtomicBool>>,
+    author: Option<String>,
 ) -> Result<MessageWithParts, ApiError> {
     let child = state
         .inner
@@ -353,7 +492,7 @@ async fn run_external_subtask_prompt_with_cancel(
         let cancellation = cancel.unwrap_or_else(|| run.cancel.clone());
         let model = external_model(runtime);
         let user_message = append_external_user_message(
-            state, &child, generation, prompt, runtime, &model,
+            state, &child, generation, prompt, runtime, &model, author,
         )
         .await?;
         let user_id = match &user_message.info {
@@ -454,6 +593,7 @@ pub(crate) async fn append_external_user_message(
     prompt: &str,
     runtime: ExternalRuntime,
     model: &UserModel,
+    author: Option<String>,
 ) -> Result<MessageWithParts, ApiError> {
     touch_session(state, child.id.as_str()).await?;
     let part = Part::Text(TextPart {
@@ -464,6 +604,12 @@ pub(crate) async fn append_external_user_message(
         synthetic: None,
         time: None,
     });
+    let mut broadcast_part = serde_json::to_value(&part)
+        .map_err(|error| ApiError::internal(format!("ACP prompt part serialization failed: {error}")))?;
+    broadcast_part["role"] = json!("user");
+    if let Some(name) = &author {
+        broadcast_part["author"] = json!(name);
+    }
     let message = MessageWithParts {
         info: MessageInfo::User(UserMessage {
             id: message_id.clone(),
@@ -475,7 +621,7 @@ pub(crate) async fn append_external_user_message(
             model: model.clone(),
             system: None,
             tools: None,
-            author: None,
+            author,
         }),
         parts: vec![part.clone()],
     };
@@ -490,7 +636,7 @@ pub(crate) async fn append_external_user_message(
     ));
     state.publish(EventPayload::new(
         event_type::MESSAGE_PART_UPDATED,
-        json!({ "sessionID": child.id, "part": part, "time": now_millis() }),
+        json!({ "sessionID": child.id, "part": broadcast_part, "time": now_millis() }),
     ));
     Ok(message)
 }

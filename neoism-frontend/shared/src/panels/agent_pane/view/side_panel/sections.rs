@@ -1,7 +1,7 @@
 use super::super::draw::draw_rect_clipped;
 use super::draw::{
     draw_subagent_spinner, intersect_rect, push_provider_icon_clipped,
-    render_back_button, render_scramble_text, set_back_cursor_if_focused,
+    render_scramble_text,
 };
 use super::*;
 
@@ -44,8 +44,8 @@ mod task_height_tests {
 pub(super) fn context_fill_fraction(total: u64, limit: Option<u64>) -> f32 {
     match limit.filter(|limit| *limit > 0) {
         Some(limit) => total as f32 / limit as f32,
-        // A missing provider limit still gets a readable level indicator.
-        None => 0.35,
+        // Unknown capacity has no meaningful fraction; only show its token count.
+        None => 0.0,
     }
     .clamp(0.0, 1.0)
 }
@@ -280,9 +280,8 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     let viewed_session_id = pane.session_id_str().map(str::to_owned);
     pane.side_panel_mut()
         .set_viewed_session_id(viewed_session_id);
-    // Hydrate the branch list once when the session changes. Live
-    // branch status/tool changes arrive through the session SSE stream.
-    pane.maybe_refresh_side_panel_subagents();
+    // The owner refreshes branch data before entering this view. This panel is
+    // a separate presentation state from the conversation catalog.
     // Auto-hide sub-agents that finished more than a few seconds ago
     // (Claude-style). Respawned children report active status again and
     // are kept. Pruning here — not just on refresh — means the row
@@ -290,29 +289,12 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     pane.side_panel_mut().prune_expired_completed_subagents();
 
     let [cx, cy_full, cw, ch_full] = content_rect;
+    let _ = mouse;
     let pad_x = ROW_PADDING_X * s;
     let text_x = cx + pad_x;
     let text_w = (cw - pad_x * 2.0).max(0.0);
-    let full_clip = [cx, cy_full, cw, ch_full];
-
-    // Sticky "← Back" affordance at the very top — reveals the recent
-    // sessions list without ending this chat. Drawn against the full
-    // content rect so it never scrolls; the session body below is carved
-    // out under it and clips there.
-    let back_bottom = render_back_button(
-        sugarloaf,
-        pane,
-        content_rect,
-        theme,
-        s,
-        mouse,
-        full_clip,
-        occlusion_rects,
-        inner_radius,
-        false,
-    );
-    let cy = back_bottom;
-    let ch = (ch_full - (back_bottom - cy_full)).max(0.0);
+    let cy = cy_full;
+    let ch = ch_full;
     let clip = [cx, cy, cw, ch];
 
     // The whole chat-mode content column scrolls as one viewport so
@@ -350,42 +332,49 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
         clip,
         occlusion_rects,
     );
-    y = render_kv_row(
-        sugarloaf,
-        "Agent",
-        pane.agent_label(),
-        text_x,
-        y,
-        text_w,
-        theme,
-        s,
-        clip,
-        occlusion_rects,
-    );
-    y = render_kv_row(
-        sugarloaf,
-        "Model",
-        pane.model(),
-        text_x,
-        y,
-        text_w,
-        theme,
-        s,
-        clip,
-        occlusion_rects,
-    );
-    y = render_kv_row(
-        sugarloaf,
-        "Reasoning",
-        pane.thinking_label(),
-        text_x,
-        y,
-        text_w,
-        theme,
-        s,
-        clip,
-        occlusion_rects,
-    );
+    if pane.conversation_source().provider().is_some() {
+        y = render_kv_row(
+            sugarloaf, "Source", pane.conversation_source().label(),
+            text_x, y, text_w, theme, s, clip, occlusion_rects,
+        );
+    } else {
+        y = render_kv_row(
+            sugarloaf,
+            "Agent",
+            pane.agent_label(),
+            text_x,
+            y,
+            text_w,
+            theme,
+            s,
+            clip,
+            occlusion_rects,
+        );
+        y = render_kv_row(
+            sugarloaf,
+            "Model",
+            pane.model(),
+            text_x,
+            y,
+            text_w,
+            theme,
+            s,
+            clip,
+            occlusion_rects,
+        );
+        y = render_kv_row(
+            sugarloaf,
+            "Reasoning",
+            pane.thinking_label(),
+            text_x,
+            y,
+            text_w,
+            theme,
+            s,
+            clip,
+            occlusion_rects,
+        );
+    }
 
     // --- Usage ---
     // Compact System 7-style context meter. Its square, two-step bevel and
@@ -403,57 +392,62 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
             clip,
             occlusion_rects,
         );
+        let meter_y = y;
         pane.side_panel_mut()
             .update_usage_meter(context_total, limit);
-        let stroke = (1.0 * s).max(1.0);
-        let bar_h = (11.0 * s).max(9.0);
-        let bar_y = y + 2.0 * s;
-        let track_w = text_w;
+        if limit.is_some_and(|limit| limit > 0) {
+            let stroke = (1.0 * s).max(1.0);
+            let bar_h = (11.0 * s).max(9.0);
+            let bar_y = y + 2.0 * s;
+            let track_w = text_w;
 
-        // Black keyline, pale top/left highlight, then a recessed cool-gray
-        // well. The unrounded corners and exact one-pixel steps are the
-        // characteristic Platinum control-strip silhouette.
-        draw_rect_clipped(
-            sugarloaf,
-            [text_x, bar_y, track_w, bar_h],
-            [0.18, 0.19, 0.19, 1.0],
-            ORDER_PANEL + 2,
-            clip,
-        );
-        draw_rect_clipped(
-            sugarloaf,
-            [
-                text_x + stroke,
-                bar_y + stroke,
-                (track_w - stroke * 2.0).max(0.0),
-                (bar_h - stroke * 2.0).max(0.0),
-            ],
-            [0.86, 0.85, 0.81, 1.0],
-            ORDER_PANEL + 3,
-            clip,
-        );
-        let well_x = text_x + stroke * 2.0;
-        let well_y = bar_y + stroke * 2.0;
-        let well_w = (track_w - stroke * 3.0).max(0.0);
-        let well_h = (bar_h - stroke * 3.0).max(0.0);
-        draw_rect_clipped(
-            sugarloaf,
-            [well_x, well_y, well_w, well_h],
-            [0.42, 0.43, 0.42, 1.0],
-            ORDER_PANEL + 4,
-            clip,
-        );
-        let fill_w = well_w * context_fill_fraction(context_total, limit);
-        if fill_w > 0.0 {
+            // Black keyline, pale top/left highlight, then a recessed cool-gray
+            // well. The unrounded corners and exact one-pixel steps are the
+            // characteristic Platinum control-strip silhouette.
             draw_rect_clipped(
                 sugarloaf,
-                [well_x, well_y, fill_w, well_h],
-                [0.69, 0.69, 0.65, 1.0],
-                ORDER_PANEL + 5,
+                [text_x, bar_y, track_w, bar_h],
+                [0.18, 0.19, 0.19, 1.0],
+                ORDER_PANEL + 2,
                 clip,
             );
+            draw_rect_clipped(
+                sugarloaf,
+                [
+                    text_x + stroke,
+                    bar_y + stroke,
+                    (track_w - stroke * 2.0).max(0.0),
+                    (bar_h - stroke * 2.0).max(0.0),
+                ],
+                [0.86, 0.85, 0.81, 1.0],
+                ORDER_PANEL + 3,
+                clip,
+            );
+            let well_x = text_x + stroke * 2.0;
+            let well_y = bar_y + stroke * 2.0;
+            let well_w = (track_w - stroke * 3.0).max(0.0);
+            let well_h = (bar_h - stroke * 3.0).max(0.0);
+            draw_rect_clipped(
+                sugarloaf,
+                [well_x, well_y, well_w, well_h],
+                [0.42, 0.43, 0.42, 1.0],
+                ORDER_PANEL + 4,
+                clip,
+            );
+            let fill_w = well_w * context_fill_fraction(context_total, limit);
+            if fill_w > 0.0 {
+                draw_rect_clipped(
+                    sugarloaf,
+                    [well_x, well_y, fill_w, well_h],
+                    [0.69, 0.69, 0.65, 1.0],
+                    ORDER_PANEL + 5,
+                    clip,
+                );
+            }
+            y = bar_y + bar_h + 6.0 * s;
+        } else {
+            y += 4.0 * s;
         }
-        y = bar_y + bar_h + 6.0 * s;
         let label = context_count_label(context_total, limit);
         if let Some(elapsed_ms) = pane.side_panel().usage_scramble_elapsed_ms() {
             let opts = DrawOpts {
@@ -478,7 +472,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
                 occlusion_rects,
             );
         }
-        let usage_rect = [text_x, bar_y, track_w, (y - bar_y).max(bar_h)];
+        let usage_rect = [text_x, meter_y, text_w, (y - meter_y).max(FONT_SIZE * s * 1.5)];
         if let Some(visible_rect) = intersect_rect(usage_rect, clip) {
             pane.side_panel_mut().set_usage_rect(visible_rect);
         }
@@ -578,10 +572,27 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     let content_height = (y + scroll) - content_top + 14.0 * s;
     let overflow = (content_height - ch).max(0.0);
     pane.side_panel_mut().set_content_scroll_max(overflow);
+}
 
-    // Park the trail cursor on the Back affordance last, so it wins over
-    // the branch-row cursor the section above may have set.
-    set_back_cursor_if_focused(pane, s);
+#[cfg(test)]
+mod authoritative_todo_tests {
+    use super::*;
+
+    struct Row { todos: Vec<crate::panels::agent_pane::state::NeoismAgentTodo> }
+    impl AgentSidePanelMessage for Row {
+        type Todo = crate::panels::agent_pane::state::NeoismAgentTodo;
+        fn is_todos_output(&self) -> bool { true }
+        fn todos(&self) -> &[Self::Todo] { &self.todos }
+    }
+
+    #[test]
+    fn explicit_empty_snapshot_masks_older_todowrite() {
+        let rows = [
+            Row { todos: vec![crate::panels::agent_pane::state::NeoismAgentTodo { status: "pending".into(), content: "Old".into() }] },
+            Row { todos: vec![] },
+        ];
+        assert!(latest_todos(&rows).is_empty());
+    }
 }
 
 /// Render the Goal section: a "Goal - Status" header, the goal text wrapped
@@ -648,14 +659,11 @@ fn render_goal_section(
     y
 }
 
-/// Find the most recent message containing a non-empty todo list. The
-/// chat already coalesces partial updates of the same tool-message id
-/// (see `pane.rs` — `incoming.todos = existing.todos` carry-over), so
-/// this walks history backward until it hits something with real
-/// entries and returns that slice.
+/// Find the most recent authoritative todo output, including an explicit empty
+/// snapshot. An empty provider plan must mask older historical TodoWrite cards.
 fn latest_todos<M: AgentSidePanelMessage>(messages: &[M]) -> &[M::Todo] {
     for message in messages.iter().rev() {
-        if message.is_todos_output() && !message.todos().is_empty() {
+        if message.is_todos_output() {
             return message.todos();
         }
     }
@@ -814,8 +822,7 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
     // how file_tree keeps its cursor visible. The branch row's offset
     // from the content top is fixed; we only need the scroll to land it
     // between the viewport edges.
-    let back_focused = pane.side_panel().back_focused();
-    if focused && !back_focused && selected < rows_len {
+    if focused && selected < rows_len {
         let row_offset_in_list = selected as f32 * row_h;
         // Row top/bottom in *unscrolled* content space, relative to the
         // list's scrolled origin: convert back to absolute by adding the
@@ -835,7 +842,7 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
         }
     }
 
-    if selected < rows_len && !back_focused {
+    if selected < rows_len {
         let row_ix = selected as isize;
         let row_y = list_rect[1] + row_ix as f32 * row_h + cursor_offset;
         let row_bottom = row_y + row_h;

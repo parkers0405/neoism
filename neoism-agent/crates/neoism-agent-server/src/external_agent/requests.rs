@@ -234,16 +234,23 @@ async fn ensure_external_permission(
 async fn external_effective_permissions(
     ctx: &AcpEventContext,
 ) -> Result<Vec<PermissionRule>, AcpRpcError> {
-    let Some(session) = ctx
-        .state
-        .inner
-        .store
-        .get_session(&ctx.child_id)
-        .await
-        .map_err(|err| AcpRpcError {
-            code: -32000,
-            message: format!("Could not load external session permissions: {err}"),
-        })?
+    external_effective_permissions_for_session(&ctx.state, &ctx.child_id).await
+}
+
+pub(super) async fn external_effective_permissions_for_session(
+    state: &AppState,
+    session_id: &str,
+) -> Result<Vec<PermissionRule>, AcpRpcError> {
+    let Some(session) =
+        state
+            .inner
+            .store
+            .get_session(session_id)
+            .await
+            .map_err(|err| AcpRpcError {
+                code: -32000,
+                message: format!("Could not load external session permissions: {err}"),
+            })?
     else {
         return Ok(Vec::new());
     };
@@ -252,8 +259,7 @@ async fn external_effective_permissions(
         session.project_id.clone(),
     );
     let mut rules = session.permission.unwrap_or_default();
-    if let Some(extra) = ctx
-        .state
+    if let Some(extra) = state
         .inner
         .permission_approvals
         .read()

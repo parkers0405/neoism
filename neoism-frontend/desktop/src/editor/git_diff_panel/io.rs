@@ -7,6 +7,8 @@ use super::{FileChange, FileStatus};
 pub(super) fn collect_files(repo_root: &Path) -> Vec<FileChange> {
     let status = match crate::background_process::command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .arg("-C")
         .arg(repo_root)
         .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
@@ -18,6 +20,8 @@ pub(super) fn collect_files(repo_root: &Path) -> Vec<FileChange> {
 
     let numstat = crate::background_process::command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .arg("-C")
         .arg(repo_root)
         .args(["diff", "HEAD", "--numstat", "-z", "--no-color"])
@@ -113,6 +117,8 @@ pub(super) fn commit(repo_root: &Path, message: &str) -> Result<(), String> {
 pub(super) fn list_branches(repo_root: &Path) -> Vec<String> {
     let output = crate::background_process::command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .arg("-C")
         .arg(repo_root)
         .args([
@@ -139,11 +145,28 @@ pub(super) fn checkout(repo_root: &Path, branch: &str) -> Result<(), String> {
         .or_else(|_| run_git(repo_root, &["checkout", branch]))
 }
 
+/// Fetch remote refs without touching the worktree.
+pub(super) fn fetch(repo_root: &Path) -> Result<(), String> {
+    run_git(repo_root, &["fetch"])
+}
+
+/// Pull only when the upstream can be fast-forwarded (never merge interactively).
+pub(super) fn pull(repo_root: &Path) -> Result<(), String> {
+    run_git(repo_root, &["pull", "--ff-only"])
+}
+
+/// Push the current branch to its configured upstream.
+pub(super) fn push(repo_root: &Path) -> Result<(), String> {
+    run_git(repo_root, &["push"])
+}
+
 /// Run a git subcommand in `repo_root`, mapping a non-zero exit to the
 /// trimmed stderr (or stdout) so the panel can surface it.
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<(), String> {
     let output = crate::background_process::command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .arg("-C")
         .arg(repo_root)
         .args(args)

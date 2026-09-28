@@ -1,0 +1,12 @@
+---
+name: "ACP provider session options and echo triage"
+description: "ACP provider controls contract, persistence, serialization and narrow prompt-echo handling"
+type: "feature"
+scope: "project"
+origin: "backend provider controls 2026"
+created: "2026-09-24"
+updated: "2026-09-24"
+---
+
+Backend ACP v1 provider session controls shipped for OpenCode/Codex/Claude in `neoism-agent/crates/neoism-agent-server/src/external_agent/options.rs` and router. Contract documented at `neoism-agent/crates/neoism-agent-server/ACP_OPTIONS_API.md`: GET/POST `/v2/sessions/{id}/external/options`, POST `{configId,value}`, response `{provider,configOptions:[complete provider ordered options],modeFallback,selectedOptions}`. Only advertised select values; grouped values supported; no boolean capability negotiated; config mode preferred, synthesize legacy mode only if absent and set via session/set_mode; regular set_config_option requires full confirmed response. Local operator, session rights, sourceHost, non-importing guards; per-root lock shared across options and whole ACP prompt run, queued/active requests conflict; first GET session/new saves externalSessionId, subsequent load/resume. Selected IDs persisted in extra.externalAgent and reapplied before each prompt in provider order, checking each dependent full response; config_option_update replaces snapshot and emits SESSION_UPDATED; no Neoism model sent to ACP. Hermetic fake subprocess tests for three providers, set failure/no persisted selection, grouped/model_config/dependent state, load+reapply, legacy mode, active-run conflict and hosted/scoped/foreign-host claims; 26 external_agent tests and cargo check passed, no release build.
+Echo follow-up: `events.rs` tracks bounded provider user_message_chunk stable messageId/text for current run; suppresses only a mislabeled agent_message_chunk with identical *messageId and text* before assistant starts. Same text with different ID is still a valid assistant answer. Fake ACP lifecycle integration injects both kinds and validates no assistant echo; unit test covers equal text different ID. Pinned Codex/OpenCode adapters use distinct user/assistant stable IDs; screenshot without IDs cannot prove whether observed echo meets narrow suppression. Opt-in `NEOISM_ACP_EVENT_KIND_LOG=1` logs only whitelisted kind, has_message_id, repeats_user_id, chunk byte length, has_phase, no text/IDs. No GUI files touched.

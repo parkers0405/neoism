@@ -31,12 +31,18 @@ use crate::{ask_permission_for_tool, now_millis, permission, slug, tool};
 
 #[path = "external_agent/acp_run.rs"]
 mod acp_run;
+#[path = "external_agent/catalog.rs"]
+pub(crate) mod catalog;
+pub(crate) use catalog::{external_catalog, external_import};
 #[path = "external_agent/events.rs"]
 mod events;
 #[path = "external_agent/helpers.rs"]
 mod helpers;
 #[path = "external_agent/lifecycle.rs"]
 mod lifecycle;
+#[path = "external_agent/options.rs"]
+pub(crate) mod options;
+pub(crate) use options::{external_options_get, external_options_set};
 #[path = "external_agent/requests.rs"]
 mod requests;
 #[path = "external_agent/runtime.rs"]
@@ -48,6 +54,10 @@ pub(crate) use helpers::*;
 pub(crate) use lifecycle::*;
 pub(crate) use requests::*;
 pub(crate) use runtime::*;
+
+#[cfg(all(test, unix))]
+#[path = "external_agent/tests_lifecycle.rs"]
+mod tests_lifecycle;
 
 #[cfg(test)]
 #[path = "external_agent/tests.rs"]

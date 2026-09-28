@@ -70,6 +70,15 @@ pub(crate) async fn append_prompt(
         .get_session(session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
+    if crate::external_agent::root_runtime(&info).is_some() {
+        return crate::external_agent::append_external_root_prompt(
+            state,
+            &info,
+            request,
+            create_stub_reply,
+        )
+        .await;
+    }
     let now = now_millis();
     info.time.updated = now;
     info.extra.remove("revert");
@@ -78,12 +87,13 @@ pub(crate) async fn append_prompt(
     let session_id = Id::parse(IdKind::Session, session_id.to_string())
         .map_err(|_| ApiError::not_found("Session not found"))?;
     let session_id_text = session_id.to_string();
-    let workspace = crate::agent_tool_registry::acquire_workspace_plugin_snapshot_for_tenant(
-        state,
-        crate::caller::session_tenant(&info),
-        &info.directory,
-    )
-    .await?;
+    let workspace =
+        crate::agent_tool_registry::acquire_workspace_plugin_snapshot_for_tenant(
+            state,
+            crate::caller::session_tenant(&info),
+            &info.directory,
+        )
+        .await?;
     let goals_enabled = crate::agent_tool_registry::plugin_present(
         &workspace.snapshot,
         neoism_agent_builtins::plugin::goals::ID,
@@ -529,8 +539,8 @@ pub(crate) async fn append_prompt(
         info = ensure_session(state, &session_id_text).await?;
         let mut history = state.inner.store.list_messages(&session_id_text).await?;
         // A Neoism run can stay alive across queued user steering and active-goal
-        // continuations. Waiting until the entire run exits means the OpenCode
-        // style tool-output pruner may never run, allowing every old read/grep
+        // continuations. Waiting until the entire run exits means the
+        // tool-output pruner may never run, allowing every old read/grep
         // result to be replayed on every subsequent provider step. Prune the
         // freshly loaded transcript before building each follow-up request.
         if let Err(error) =
@@ -1322,9 +1332,10 @@ pub(crate) async fn compaction_request_token_budget(
     directory: &str,
     model: &UserModel,
 ) -> u64 {
-    let usable = auto_compaction_threshold_for_user_model(state, tenant_id, directory, model)
-        .await
-        .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD);
+    let usable =
+        auto_compaction_threshold_for_user_model(state, tenant_id, directory, model)
+            .await
+            .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD);
     estimated_prompt_compaction_threshold(usable)
 }
 
@@ -1420,9 +1431,9 @@ fn summary_covers_all_messages(
 }
 
 fn token_usage_total(tokens: &TokenUsage) -> u64 {
-    // Exact opencode v2 overflow formula. Provider total wins when non-zero;
-    // otherwise its fallback uses normalized input/output/cache buckets and
-    // intentionally does not add the separately reported reasoning bucket.
+    // Use the provider-reported total when non-zero; otherwise use normalized
+    // input/output/cache buckets without adding the separately reported
+    // reasoning bucket.
     tokens.total.filter(|total| *total > 0).unwrap_or_else(|| {
         tokens
             .input
@@ -1531,15 +1542,15 @@ async fn generate_model_title(
     fallback_title: String,
     activity_segment: Option<crate::execution_activity::ProviderSegmentGuard>,
 ) {
-    let session =
-        if let Ok(Some(info)) = state.inner.store.get_session(&session_id).await {
-            if info.title != fallback_title && !is_default_session_title(&info.title) {
-                return;
-            }
-            Some(info)
-        } else {
-            None
-        };
+    let session = if let Ok(Some(info)) = state.inner.store.get_session(&session_id).await
+    {
+        if info.title != fallback_title && !is_default_session_title(&info.title) {
+            return;
+        }
+        Some(info)
+    } else {
+        None
+    };
     let directory = session.as_ref().map(|info| info.directory.as_str());
     let tenant_id = session
         .as_ref()
@@ -2033,7 +2044,7 @@ mod tests {
     }
 
     #[test]
-    fn usable_context_matches_opencode_overflow_formula() {
+    fn usable_context_respects_input_and_output_limits() {
         let split_limit = ModelLimit {
             context: 200_000,
             input: Some(128_000),
@@ -2066,7 +2077,7 @@ mod tests {
     }
 
     #[test]
-    fn overflow_token_count_matches_opencode_fallback() {
+    fn overflow_token_count_uses_normalized_buckets_without_total() {
         let without_total = TokenUsage {
             total: None,
             input: 100,
@@ -2469,10 +2480,13 @@ async fn run_assistant_step(
     if !crate::caller::local_collaboration_session(state.services().hosted, info) {
         provider_tools.retain(|tool| {
             !matches!(tool.id.as_str(), "bash" | "background_task")
-                && !crate::agent_tool_registry::tool_contribution(plugin_snapshot, &tool.id)
-                    .is_some_and(|item| {
-                        item.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID
-                    })
+                && !crate::agent_tool_registry::tool_contribution(
+                    plugin_snapshot,
+                    &tool.id,
+                )
+                .is_some_and(|item| {
+                    item.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID
+                })
         });
     }
     let provider_tool_map = provider_tool_map(&provider_tools);
@@ -2537,6 +2551,12 @@ async fn run_assistant_step(
         }
     }
     loop {
+        crate::artifact_routes::hydrate_provider_attachments(
+            state,
+            session_id_text,
+            &mut request.messages,
+        )
+        .await?;
         if cancellation.load(Ordering::SeqCst) {
             finish_session_run(state, session_id_text, run_id).await;
             let _ = state

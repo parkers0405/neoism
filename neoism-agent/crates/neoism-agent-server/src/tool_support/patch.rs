@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_chunks_matches_opencode_whitespace_and_unicode_tolerance() {
+    fn apply_chunks_tolerates_whitespace_and_unicode_variants() {
         let chunk = V4AChunk {
             old_lines: vec!["// \"smart\" - value".to_string()],
             new_lines: vec!["// normalized".to_string()],

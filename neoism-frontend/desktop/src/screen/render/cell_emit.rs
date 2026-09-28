@@ -585,14 +585,10 @@ impl Screen<'_> {
             // Reflect which panels are open so the toggle buttons
             // paint in their active accent style.
             let tree_open = self.renderer.file_tree.is_visible();
-            let agent_panel_open = self
-                .context_manager
-                .current()
-                .neoism_agent
-                .as_ref()
-                .is_some_and(|agent| !agent.side_panel().user_hidden());
             self.renderer.top_bar.set_panel_open(tree_open);
-            self.renderer.top_bar.set_right_panel_open(agent_panel_open);
+            self.renderer
+                .top_bar
+                .set_right_panel_open(self.renderer.conversations_visible);
             // Connected-peer presence orbs beside the server selector — ONLY
             // for a shared workspace (`in_shared_workspace`, computed above).
             // The presence store is global to the window and is NOT cleared on

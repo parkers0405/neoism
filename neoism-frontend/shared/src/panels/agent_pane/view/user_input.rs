@@ -397,6 +397,9 @@ pub trait AgentPendingPermission: Clone {
 pub trait AgentUserInputPane {
     type PendingPermission: AgentPendingPermission;
 
+    fn conversation_source(&self) -> crate::panels::agent_pane::state::side_panel::ConversationSource;
+    fn external_options(&self) -> Option<&crate::panels::agent_pane::state::external_options::ExternalOptions> { None }
+    fn external_options_error(&self) -> Option<&str> { None }
     fn input(&self) -> &str;
     fn input_help_visible(&self) -> bool;
     fn input_images(&self) -> Vec<NeoismAgentImage>;
@@ -485,6 +488,18 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
         impl $crate::panels::agent_pane::view::user_input::AgentUserInputPane for $pane {
             type PendingPermission = $pending;
+
+            fn conversation_source(&self) -> $crate::panels::agent_pane::state::side_panel::ConversationSource {
+                <$pane>::conversation_source(self)
+            }
+
+            fn external_options(&self) -> Option<&$crate::panels::agent_pane::state::external_options::ExternalOptions> {
+                <$pane>::external_options(self)
+            }
+
+            fn external_options_error(&self) -> Option<&str> {
+                <$pane>::external_options_error(self)
+            }
 
             fn input(&self) -> &str {
                 <$pane>::input(self)
@@ -725,6 +740,10 @@ impl AgentPendingPermission for NeoismAgentPendingPermission {
 
 impl AgentUserInputPane for NeoismAgentPane {
     type PendingPermission = NeoismAgentPendingPermission;
+
+    fn conversation_source(&self) -> crate::panels::agent_pane::state::side_panel::ConversationSource {
+        self.new_chat_source()
+    }
 
     fn input(&self) -> &str {
         NeoismAgentPane::input(self)
@@ -1188,6 +1207,7 @@ pub fn render_input(
     mouse: Option<(f32, f32)>,
     s: f32,
     show_status: bool,
+    home_source: bool,
     now_seconds: f32,
     occlusion_rects: &[[f32; 4]],
     prepared_wrap_rows: Option<&[InputWrapRow]>,
@@ -1285,7 +1305,7 @@ pub fn render_input(
         );
     }
 
-    let composer_policy = composer_visual_policy(
+    let mut composer_policy = composer_visual_policy(
         responsive_width,
         s,
         show_status,
@@ -1293,6 +1313,10 @@ pub fn render_input(
         !matches!(pane.streaming_state(), AgentStreamingStatus::Idle),
         pane.interruptible_run_active(),
     );
+    if pane.conversation_source().provider().is_some() {
+        composer_policy.show_tab_hint = false;
+        composer_policy.show_command_hint = false;
+    }
     // The painted square retains its original size. Narrow panes register a
     // separate 44 logical-pixel touch target without affecting layout.
     let send_inset = 9.0 * s;
@@ -1308,6 +1332,7 @@ pub fn render_input(
         box_bottom + ((y + h - box_bottom) - 13.5 * s) * 0.5,
         (w - 28.0 * s).max(0.0),
         composer_policy.narrow,
+        home_source,
         theme,
         s,
         occlusion_rects,
@@ -1427,42 +1452,44 @@ pub fn render_input(
     // retained as the authoritative ABI-level file-browser action slot while
     // old percentage-meter consumers migrate. Its independent invisible hit
     // target is at least 44 logical pixels without changing composer layout.
-    let attachment_geometry = attachment_control_geometry(
-        box_x,
-        box_w,
-        send_inset,
-        control_geometry.visual_rect,
-        s,
-    );
-    debug_assert!(!ATTACHMENT_ACTION_DRAW_POLICY.paint_background);
-    let attachment_hovered =
-        mouse.is_some_and(|point| point_in_rect(attachment_geometry.hit_rect, point));
-    let mut attach_color = theme.u8(theme.fg);
-    let attach_alpha = if attachment_hovered {
-        1.0
-    } else if active {
-        0.88
-    } else {
-        0.68
-    };
-    attach_color[3] = (attach_color[3] as f32 * attach_alpha).round() as u8;
-    let attach_opts = DrawOpts {
-        font_size: send_side * COMPOSER_ATTACH_FONT_RATIO,
-        color: attach_color,
-        bold: true,
-        clip_rect: Some(attachment_geometry.visual_rect),
-        ..DrawOpts::default()
-    };
-    draw_icon_centered_with_occlusion(
-        sugarloaf,
-        attachment_geometry.visual_rect[0],
-        attachment_geometry.visual_rect,
-        "+",
-        &attach_opts,
-        occlusion_rects,
-        true,
-    );
-    pane.register_usage_chip_rect(attachment_geometry.hit_rect);
+    if pane.conversation_source().provider().is_none() {
+        let attachment_geometry = attachment_control_geometry(
+            box_x,
+            box_w,
+            send_inset,
+            control_geometry.visual_rect,
+            s,
+        );
+        debug_assert!(!ATTACHMENT_ACTION_DRAW_POLICY.paint_background);
+        let attachment_hovered =
+            mouse.is_some_and(|point| point_in_rect(attachment_geometry.hit_rect, point));
+        let mut attach_color = theme.u8(theme.fg);
+        let attach_alpha = if attachment_hovered {
+            1.0
+        } else if active {
+            0.88
+        } else {
+            0.68
+        };
+        attach_color[3] = (attach_color[3] as f32 * attach_alpha).round() as u8;
+        let attach_opts = DrawOpts {
+            font_size: send_side * COMPOSER_ATTACH_FONT_RATIO,
+            color: attach_color,
+            bold: true,
+            clip_rect: Some(attachment_geometry.visual_rect),
+            ..DrawOpts::default()
+        };
+        draw_icon_centered_with_occlusion(
+            sugarloaf,
+            attachment_geometry.visual_rect[0],
+            attachment_geometry.visual_rect,
+            "+",
+            &attach_opts,
+            occlusion_rects,
+            true,
+        );
+        pane.register_usage_chip_rect(attachment_geometry.hit_rect);
+    }
     // Square send button: filled rounded square, bottom-right. While the
     // model responds it becomes a quiet static stop-square; avoid layering
     // another activity animation here because the status row already owns
@@ -1681,12 +1708,8 @@ fn render_input_help_strip(
     );
 }
 
-/// Paint the exact eight-cell block scanner used by OpenCode's TUI.
-///
-/// OpenCode renders each cell as terminal text, so using the same `■` /
-/// `⬝` glyphs here matters: rounded quads or an orbit read differently.
-/// Returns the occupied width so callers can place their label one cell
-/// after the scanner just like the TUI's `gap={1}`.
+/// Paint the eight-cell activity scanner with font-independent rectangles.
+/// Returns its width so callers can place the label one cell after it.
 #[allow(clippy::too_many_arguments)]
 fn draw_opencode_activity_scanner(
     sugarloaf: &mut Sugarloaf,
@@ -2146,10 +2169,133 @@ pub fn render_status_chips(
     y: f32,
     max_w: f32,
     narrow: bool,
+    home_source: bool,
     theme: &IdeTheme,
     s: f32,
     occlusion_rects: &[[f32; 4]],
 ) {
+    let mut remaining_w = max_w;
+    let offset = usize::from(home_source);
+    if home_source {
+        let font_size = status_chip_font_size(max_w, s);
+        let label = if narrow && pane.conversation_source() == crate::panels::agent_pane::state::side_panel::ConversationSource::Neoism {
+            "Neoism"
+        } else {
+            pane.conversation_source().label()
+        };
+        let opts = DrawOpts { font_size, color: theme.u8(theme.readable_accent(theme.cyan)), bold: true, extrude: true, ..DrawOpts::default() };
+        let caret = "\u{f078}";
+        let caret_opts = DrawOpts { font_size: font_size * 0.66, color: theme.u8(theme.muted), ..DrawOpts::default() };
+        let label_w = sugarloaf.text_mut().measure(label, &opts);
+        let caret_w = sugarloaf.text_mut().measure(caret, &caret_opts);
+        let width = (label_w + caret_w + 19.0 * s).min(max_w);
+        let clip_rect = Some([x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]);
+        draw_text_clipped(sugarloaf, x, y, label, &DrawOpts { clip_rect, ..opts }, occlusion_rects);
+        if width >= label_w + caret_w + 10.0 * s {
+            draw_text_clipped(sugarloaf, x + label_w + 6.0 * s, y + 3.5 * s, caret, &caret_opts, occlusion_rects);
+        }
+        pane.register_status_chip_rect(0, [x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]);
+        x += width + 5.0 * s;
+        remaining_w = (max_w - width - 5.0 * s).max(0.0);
+    }
+    // External controls are offered only from a provider-confirmed snapshot.
+    // Web/shared panes without one retain the recognizable read-only source.
+    let source = pane.conversation_source();
+    if source.provider().is_some() {
+        let font_size = status_chip_font_size(max_w, s);
+        let mut start_x = x;
+        let order = pane.external_options().map(|snapshot| snapshot.display_order()).unwrap_or_default();
+        let options = pane.external_options().map(|snapshot| snapshot.options.clone());
+        let caret = "\u{f078}";
+        let caret_opts = DrawOpts { font_size: font_size * 0.66, color: theme.u8(theme.muted), ..DrawOpts::default() };
+        let caret_w = sugarloaf.text_mut().measure(caret, &caret_opts);
+        let retry_label = if pane.external_options_error().is_some_and(crate::panels::agent_pane::state::external_options::auth_required) {
+            if source.provider() == Some("codex") { "codex login / Retry".to_string() }
+            else { format!("{} sign-in / Retry", source.label()) }
+        } else {
+            "Retry options".to_string()
+        };
+        if options.is_none() {
+            let (label, enabled) = if pane.external_options_error().is_some() {
+                (retry_label.as_str(), true)
+            } else {
+                ("Loading models", false)
+            };
+            let opts = DrawOpts { font_size, color: theme.u8(if enabled { theme.readable_accent(theme.cyan) } else { theme.muted }), bold: enabled, ..DrawOpts::default() };
+            let width = sugarloaf.text_mut().measure(label, &opts).min(remaining_w);
+            let opts = DrawOpts { clip_rect: Some([x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]), ..opts };
+            draw_text_clipped(sugarloaf, x, y, label, &opts, occlusion_rects);
+            if enabled && width > 0.0 {
+                pane.register_status_chip_rect(offset, [x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]);
+            }
+            return;
+        }
+        if pane.external_options_error().is_some() {
+            let label = retry_label.as_str();
+            let opts = DrawOpts { font_size, color: theme.u8(theme.readable_accent(theme.cyan)), bold: true, ..DrawOpts::default() };
+            let width = sugarloaf.text_mut().measure(label, &opts).min(remaining_w);
+            let opts = DrawOpts { clip_rect: Some([x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]), ..opts };
+            draw_text_clipped(sugarloaf, x, y, label, &opts, occlusion_rects);
+            if width > 0.0 { pane.register_status_chip_rect(offset, [x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]); }
+            x += width + 5.0 * s;
+            remaining_w = (remaining_w - width - 5.0 * s).max(0.0);
+            start_x = x;
+        }
+        let replay_failed = pane.external_options().is_some_and(|snapshot| snapshot.replay_error.is_some());
+        let overflow_opts = DrawOpts { font_size, color: theme.u8(theme.readable_accent(if replay_failed { theme.yellow } else { theme.cyan })), bold: true, ..DrawOpts::default() };
+        let overflow_name = if replay_failed { "Review options" } else { "Options" };
+        let overflow_label = if sugarloaf.text_mut().measure(overflow_name, &overflow_opts) + caret_w + 22.0 * s > remaining_w { "\u{2026}" } else { overflow_name };
+        let overflow_w = sugarloaf.text_mut().measure(overflow_label, &overflow_opts) + caret_w + 22.0 * s;
+        let gap = 4.0 * s;
+        let option_label = |option: &crate::panels::agent_pane::state::external_options::ExternalOption| {
+            if replay_failed {
+                return if option.category == "model" { "Choose model".to_string() } else { format!("Review {}", option.name) };
+            }
+            match option.category.as_str() {
+                "mode" | "thought_level" => option.selected_label().to_string(),
+                "model" => model_chip_label(option.selected_label(), narrow).to_string(),
+                _ => format!("{}: {}", option.name, option.selected_label()),
+            }
+        };
+        let options = options.unwrap();
+        if order.is_empty() {
+            let label = "No model options";
+            let opts = DrawOpts { font_size, color: theme.u8(theme.muted), ..DrawOpts::default() };
+            draw_text_clipped(sugarloaf, x, y, label, &opts, occlusion_rects);
+            return;
+        }
+        let widths: Vec<f32> = order.iter().map(|&index| {
+            let label = option_label(&options[index]);
+            sugarloaf.text_mut().measure(&label, &overflow_opts) + caret_w + 22.0 * s
+        }).collect();
+        let (visible, overflow) = crate::panels::agent_pane::state::external_options::visible_chip_count(&widths, remaining_w, overflow_w, gap);
+        for (display_index, &option_index) in order.iter().take(visible).enumerate() {
+            let option = &options[option_index];
+            let label = option_label(option);
+            let color = if replay_failed { theme.yellow } else { match option.category.as_str() {
+                "mode" => theme.yellow,
+                "model" => theme.blue,
+                "thought_level" => theme.magenta,
+                _ => theme.cyan,
+            }};
+            let opts = DrawOpts { font_size, color: theme.u8(theme.readable_accent(color)), bold: true, extrude: true, ..DrawOpts::default() };
+            let width = widths[display_index];
+            draw_text_clipped(sugarloaf, x, y, &label, &opts, occlusion_rects);
+            draw_text_clipped(sugarloaf, x + width - caret_w - 13.0 * s, y + 2.0 * s, caret, &caret_opts, occlusion_rects);
+            pane.register_status_chip_rect(option_index + 1 + offset, [x - 3.0 * s, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]);
+            x += width + gap;
+        }
+        if overflow {
+            let hit_w = overflow_w.min((start_x + remaining_w - x).max(0.0));
+            let clip_rect = Some([x, y - 5.0 * s, hit_w, STATUS_CHIP_HIT_H * s]);
+            draw_text_clipped(sugarloaf, x, y, overflow_label, &DrawOpts { clip_rect, ..overflow_opts }, occlusion_rects);
+            draw_text_clipped(sugarloaf, x + overflow_w - caret_w - 13.0 * s, y + 2.0 * s, caret, &DrawOpts { clip_rect, ..caret_opts }, occlusion_rects);
+            if hit_w > 0.0 {
+                pane.register_status_chip_rect(options.len() + 1 + offset, [x - 3.0 * s, y - 5.0 * s, hit_w, STATUS_CHIP_HIT_H * s]);
+            }
+        }
+        return;
+    }
     // Dropdown-look chips: label ˅ — each registers a hit rect so a
     // click opens the matching "/" picker (agent / model / thinking).
     // Build and Plan have explicit, distinct identities; custom agents retain
@@ -2187,7 +2333,7 @@ pub fn render_status_chips(
         };
         let label_w = sugarloaf.text_mut().measure(&label, &opts);
         let chip_w = label_w + 6.0 * s + caret_w + 18.0 * s;
-        if x + chip_w > start_x + max_w {
+        if x + chip_w > start_x + remaining_w {
             break;
         }
         let activation = pane.status_chip_activation_ms(index);
@@ -2243,7 +2389,7 @@ pub fn render_status_chips(
             }
         }
         pane.register_status_chip_rect(
-            index,
+            index + offset,
             [
                 x - 4.0 * s,
                 y - 5.0 * s,

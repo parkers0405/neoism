@@ -77,6 +77,12 @@ pub struct CreateSessionRequest {
     pub permission: Option<Vec<PermissionRule>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<WorkspaceId>,
+    /// Select an ACP-backed root conversation. Immutable after creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_provider: Option<String>,
+    /// Draft ACP select choices, validated against the provider before creating a root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_options: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

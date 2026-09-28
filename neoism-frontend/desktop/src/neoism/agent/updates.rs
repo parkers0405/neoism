@@ -69,6 +69,8 @@ impl MessageRefreshEpochs {
 }
 
 pub(super) enum AgentSessionUpdate {
+    TodosUpdated(Vec<super::pane::NeoismAgentTodo>),
+    UsageUpdated { message_id: String, usage: super::pane::NeoismAgentUsage },
     Messages {
         messages: Vec<NeoismAgentMessage>,
         oldest_cursor: Option<String>,
@@ -1018,6 +1020,19 @@ fn send_event_updates(
     let updates = classify_session_event(event, session_id, state);
     for update in updates {
         match update {
+            SessionEventUpdate::TodosUpdated(todos) => {
+                tx.send(AgentSessionUpdate::TodosUpdated(todos.into_iter().map(|todo| super::pane::NeoismAgentTodo {
+                    status: todo.status,
+                    content: todo.content,
+                }).collect()))?;
+            }
+            SessionEventUpdate::UsageUpdated { message_id, usage } => {
+                tx.send(AgentSessionUpdate::UsageUpdated { message_id, usage: super::pane::NeoismAgentUsage {
+                    input: usage.input, output: usage.output, reasoning: usage.reasoning,
+                    cache_read: usage.cache_read, cache_write: usage.cache_write, total: usage.total,
+                    cost_micros: usage.cost_micros, context_limit: usage.context_limit,
+                } })?;
+            }
             SessionEventUpdate::SessionIdle { refresh_messages } => {
                 // Settle the activity chrome immediately, then refresh the
                 // completed transcript away from the SSE reader. A slow REST

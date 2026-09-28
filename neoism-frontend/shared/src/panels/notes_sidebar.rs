@@ -1351,9 +1351,9 @@ impl NotesSidebar {
             letter_x += letter_width;
         }
 
-        // Quick-create actions share the title row while there is room. On a
-        // narrow sidebar they move together to a second row instead of
-        // colliding with or clipping the Notes wordmark.
+        // Quick-create actions share the Notes title row when there is room
+        // and wrap below it when narrow; notebook mode places them to the
+        // right of Back instead.
         let create_size = (row_h * 0.86).max(22.0 * self.scale);
         let create_gap = 4.0 * self.scale;
         let create_right = content_x + content_w - row_pad_x;
@@ -1361,12 +1361,13 @@ impl NotesSidebar {
         // Sugarloaf normalizes the Nerd Font run to the same centered
         // primary-font line box as the title, so the button and hit target
         // can use the row's geometric center without a family-specific lift.
-        let create_y =
-            if notes_header_actions_wrap(letter_x, new_note_x, 8.0 * self.scale) {
-                header_y + wordmark_h + 6.0 * self.scale
-            } else {
-                header_y + (wordmark_h - create_size) * 0.5
-            };
+        let create_y = if notebook_title.is_some() {
+            header_y + (row_h - create_size) * 0.5
+        } else if notes_header_actions_wrap(letter_x, new_note_x, 8.0 * self.scale) {
+            header_y + wordmark_h + 6.0 * self.scale
+        } else {
+            header_y + (wordmark_h - create_size) * 0.5
+        };
         let new_folder_rect = [
             create_right - create_size,
             create_y,
@@ -1374,10 +1375,8 @@ impl NotesSidebar {
             create_size,
         ];
         let new_note_rect = [new_note_x, create_y, create_size, create_size];
-        if notebook_title.is_none() {
-            self.new_note_rect = Some(new_note_rect);
-            self.new_folder_rect = Some(new_folder_rect);
-        }
+        self.new_note_rect = Some(new_note_rect);
+        self.new_folder_rect = Some(new_folder_rect);
         let create_opts = DrawOpts {
             font_size: icon_size * 1.08,
             color: theme.u8_alpha(theme.fg, 0.72),
@@ -1385,8 +1384,6 @@ impl NotesSidebar {
             ..DrawOpts::default()
         };
         for (rect, glyph) in [(new_note_rect, "\u{f044}"), (new_folder_rect, "\u{f07b}")]
-            .into_iter()
-            .filter(|_| notebook_title.is_none())
         {
             if mouse.is_some_and(|(mx, my)| rect_contains(rect, mx, my)) {
                 sugarloaf.quad(
@@ -1413,7 +1410,13 @@ impl NotesSidebar {
         }
 
         if let Some(title) = notebook_title.as_deref() {
-            let back_rect = [content_x + 6.0 * self.scale, header_y, content_w - 12.0 * self.scale, row_h];
+            let back_x = content_x + 6.0 * self.scale;
+            let back_rect = [
+                back_x,
+                header_y,
+                (new_note_x - create_gap - back_x).max(0.0),
+                row_h,
+            ];
             self.notebook_back_rect = Some(back_rect);
             if self.notebook_back_selected {
                 sugarloaf.quad(

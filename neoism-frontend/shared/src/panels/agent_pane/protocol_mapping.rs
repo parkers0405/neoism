@@ -257,6 +257,7 @@ pub fn map_outbound_command(
             Mapping::Messages(vec![Msg::McpOauthAuthorize {
                 name,
                 directory: directory.or_else(|| context.default_directory.clone()),
+                redirect_uri: None,
             }])
         }
         Cmd::McpSetEnabled {
@@ -271,6 +272,7 @@ pub fn map_outbound_command(
         Cmd::McpConnect { name, directory } => Mapping::Messages(vec![Msg::McpConnect {
             name,
             directory: directory.or_else(|| context.default_directory.clone()),
+            redirect_uri: None,
         }]),
         Cmd::McpDisconnect { name, directory } => {
             Mapping::Messages(vec![Msg::McpDisconnect {

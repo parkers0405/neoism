@@ -1,7 +1,312 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConversationTabLocation {
+    Workspace(usize),
+    Pane { owner_route: usize, tab_index: usize },
+}
+
+#[derive(Clone, Debug)]
+struct ConversationTabCandidate {
+    route_id: usize,
+    session_id: String,
+    root_id: Option<String>,
+    server: String,
+    directory: Option<String>,
+    location: ConversationTabLocation,
+}
+
+fn matching_conversation_tab(
+    candidates: &[ConversationTabCandidate],
+    session_id: &str,
+    server: &str,
+    directory: Option<&str>,
+    active_route: usize,
+) -> Option<ConversationTabLocation> {
+    candidates.iter()
+        .filter(|candidate| (candidate.session_id == session_id || candidate.root_id.as_deref() == Some(session_id))
+            && candidate.server.trim_end_matches('/') == server.trim_end_matches('/')
+            && candidate.directory.as_deref() == directory)
+        .min_by_key(|candidate| (candidate.route_id != active_route, candidate.route_id))
+        .map(|candidate| candidate.location)
+}
+
+#[cfg(test)]
+mod conversation_tab_tests {
+    use super::{matching_conversation_tab, ConversationTabCandidate, ConversationTabLocation};
+
+    #[test]
+    fn reuse_matches_session_server_and_directory_including_secondary_pane() {
+        let candidate = |route_id, server: &str, directory: &str, location| ConversationTabCandidate {
+            route_id,
+            session_id: "same-id".into(),
+            root_id: None,
+            server: server.into(),
+            directory: Some(directory.into()),
+            location,
+        };
+        let tabs = vec![
+            candidate(10, "http://host-a", "/other", ConversationTabLocation::Workspace(1)),
+            candidate(11, "http://host-b", "/project", ConversationTabLocation::Workspace(2)),
+            candidate(12, "http://host-a/", "/project", ConversationTabLocation::Pane { owner_route: 99, tab_index: 3 }),
+        ];
+        assert_eq!(matching_conversation_tab(&tabs, "same-id", "http://host-a", Some("/project"), 9),
+            Some(ConversationTabLocation::Pane { owner_route: 99, tab_index: 3 }));
+        assert_eq!(matching_conversation_tab(&tabs, "same-id", "http://host-a", Some("/missing"), 9), None);
+        assert_eq!(matching_conversation_tab(&tabs, "same-id", "http://host-a", None, 9), None);
+        assert_eq!(matching_conversation_tab(&tabs, "another-id", "http://host-a", Some("/project"), 9), None);
+        let mut tabs = tabs;
+        tabs.push(candidate(13, "http://host-a", "/project", ConversationTabLocation::Workspace(4)));
+        assert_eq!(matching_conversation_tab(&tabs, "same-id", "http://host-a", Some("/project"), 13),
+            Some(ConversationTabLocation::Workspace(4)), "prefer the currently active route");
+        tabs[2].session_id = "child-id".into();
+        tabs[2].root_id = Some("same-id".into());
+        assert_eq!(matching_conversation_tab(&tabs[..3], "same-id", "http://host-a", Some("/project"), 9),
+            Some(ConversationTabLocation::Pane { owner_route: 99, tab_index: 3 }), "a child view reuses its root tab");
+    }
+}
+
 impl Screen<'_> {
+    pub(crate) fn handle_conversations_key(
+        &mut self,
+        key: &neoism_window::event::KeyEvent,
+    ) -> bool {
+        use neoism_window::event::ElementState;
+        use neoism_window::keyboard::{Key, NamedKey};
+        if key.state != ElementState::Pressed {
+            return false;
+        }
+        let mods = self.modifiers.state();
+        if mods.alt_key()
+            && !mods.control_key()
+            && !mods.super_key()
+            && matches!(key.logical_key.as_ref(), Key::Character(c) if c.eq_ignore_ascii_case("c"))
+        {
+            self.toggle_conversations_sidebar();
+            return true;
+        }
+        if !self.renderer.conversations_visible
+            || !self.renderer.conversations_pane.side_panel().is_focused()
+        {
+            return false;
+        }
+        let panel = &mut self.renderer.conversations_pane;
+        match key.logical_key.as_ref() {
+            Key::Named(NamedKey::ArrowDown) => {
+                panel.side_panel_mut().select_next();
+                panel.maybe_request_side_panel_session_page();
+            }
+            Key::Named(NamedKey::ArrowUp) => panel.side_panel_mut().select_prev(),
+            Key::Named(NamedKey::Escape) => panel.side_panel_mut().set_focused(false),
+            Key::Named(NamedKey::Enter) => {
+                let selected = panel.side_panel().selected_session().cloned();
+                if let Some(entry) = selected {
+                    self.activate_catalog_entry(entry);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn activate_catalog_entry(&mut self, entry: neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry) {
+        let opened = self.renderer.conversations_pane.activate_external_preview(&entry);
+        if let Some((id, source)) = opened {
+            self.focus_or_open_conversation(id, source);
+        } else if let Some(preview) = entry.external_preview.as_ref().filter(|preview| !preview.import_supported) {
+            let message = preview.import_unavailable_reason.as_deref().unwrap_or("History import is unavailable");
+            self.renderer.notifications.push(
+                format!("{} history is preview-only: {message}", entry.source.label()),
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+        }
+    }
+
+    /// Focus the already-open conversation in this grid, including secondary
+    /// pane tab strips. A session ID alone is not an identity across servers.
+    pub(crate) fn focus_or_open_conversation(
+        &mut self,
+        id: String,
+        source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    ) {
+        let server = self.renderer.conversations_pane.server_address().to_string();
+        let directory = self.renderer.conversations_pane.session_directory().map(str::to_owned);
+        let expected_server = self.context_manager.agent_server_override_for_current()
+            .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
+        let expected_directory = self.workspace_root_for_new_shell()
+            .map(|root| root.to_string_lossy().into_owned());
+        if server.trim_end_matches('/') != expected_server.trim_end_matches('/')
+            || directory != expected_directory
+        {
+            self.renderer.notifications.push(
+                "This conversation belongs to another workspace; reopen Conversations there",
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+            return;
+        }
+        let candidates: Vec<_> = self.context_manager.current_grid().contexts().values()
+            .filter_map(|item| {
+                let agent = item.val.neoism_agent.as_ref()?;
+                let route_id = item.val.route_id;
+                let location = self.renderer.buffer_tabs.tabs().iter()
+                    .position(|tab| tab.neoism_agent_route_id == Some(route_id))
+                    .map(ConversationTabLocation::Workspace)
+                    .or_else(|| self.renderer.pane_tabs.iter().find_map(|(owner_route, tabs)| {
+                        tabs.tabs().iter()
+                            .position(|tab| tab.neoism_agent_route_id == Some(route_id))
+                            .map(|tab_index| ConversationTabLocation::Pane { owner_route: *owner_route, tab_index })
+                    }))?;
+                Some(ConversationTabCandidate {
+                    route_id,
+                    session_id: agent.session_id_str()?.to_owned(),
+                    root_id: agent.conversation_root_id().map(str::to_owned),
+                    server: agent.server_address().to_owned(),
+                    directory: agent.session_directory().map(str::to_owned),
+                    location,
+                })
+            }).collect();
+        if let Some(location) = matching_conversation_tab(
+            &candidates, &id, &server, directory.as_deref(), self.context_manager.current_route(),
+        ) {
+            let expected_route = candidates.iter().find(|candidate| candidate.location == location).map(|candidate| candidate.route_id);
+            let activated = match location {
+                ConversationTabLocation::Workspace(index) => self.activate_workspace_buffer_tab(index),
+                ConversationTabLocation::Pane { owner_route, tab_index } => {
+                    self.pane_tab_activate(owner_route, tab_index);
+                    expected_route == Some(self.context_manager.current_route())
+                }
+            };
+            if !activated || expected_route != Some(self.context_manager.current_route()) {
+                self.renderer.notifications.push(
+                    "Could not focus the existing Agent tab",
+                    neoism_ui::panels::notifications::NotificationLevel::Warn,
+                );
+                return;
+            }
+            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                if agent.session_id_str() != Some(id.as_str()) {
+                    agent.switch_session(id);
+                    agent.set_conversation_source(source);
+                }
+            }
+            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+            self.mark_dirty();
+            return;
+        }
+        if self.open_neoism_agent_tab().is_some() {
+            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                agent.switch_session(id);
+                agent.set_conversation_source(source);
+            }
+            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+        }
+    }
+
+    pub(crate) fn toggle_conversations_sidebar(&mut self) {
+        if self.renderer.conversations_visible {
+            self.renderer.conversations_visible = false;
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(false);
+        } else {
+            let directory = self
+                .workspace_root_for_new_shell()
+                .map(|path| path.to_string_lossy().into_owned());
+            if self.renderer.conversations_directory != directory {
+                self.renderer.conversations_pane =
+                    crate::neoism::agent::NeoismAgentPane::with_directory(
+                        directory.clone(),
+                    );
+                self.renderer.conversations_directory = directory;
+            }
+            let server = self
+                .context_manager
+                .agent_server_override_for_current()
+                .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
+            self.renderer.conversations_pane.switch_server(server);
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_user_hidden(false);
+            self.renderer.conversations_pane.side_panel_mut().hide_catalog_controls();
+            self.renderer.conversations_pane.side_panel_mut().clear_session_query();
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(true);
+            self.renderer.conversations_pane.enable_external_catalog();
+            self.renderer
+                .conversations_pane
+                .maybe_refresh_side_panel_sessions();
+            self.renderer.conversations_visible = true;
+            self.renderer.file_tree.set_focused(false);
+            self.renderer.notes_sidebar.set_focused(false);
+        }
+        self.reapply_chrome_layout();
+        self.mark_dirty();
+    }
+
+    pub(crate) fn conversations_sidebar_left(&self) -> f32 {
+        let files = if self.renderer.file_tree.is_visible() { self.renderer.file_tree.width() } else { 0.0 };
+        let notes = if self.renderer.notes_sidebar.is_visible() { self.renderer.notes_sidebar.width() } else { 0.0 };
+        files + notes
+    }
+
+    pub(crate) fn handle_conversations_click(&mut self) -> bool {
+        if !self.renderer.conversations_visible {
+            return false;
+        }
+        let (x, y) = self.mouse_logical_for_hit_test();
+        let (top, bottom) = self.side_panel_band();
+        let panel_left = self.conversations_sidebar_left();
+        let panel = &mut self.renderer.conversations_pane;
+        if y < top || y > bottom || x < panel_left || x >= panel_left + panel.side_panel().width() {
+            panel.side_panel_mut().set_focused(false);
+            return false;
+        }
+        panel.side_panel_mut().set_focused(true);
+        if let Some(rect) = panel.side_panel().last_panel_rect() {
+            if let Some(row) = panel.side_panel().hit_test_row(x, y, rect) {
+                if !panel
+                    .side_panel()
+                    .sessions()
+                    .get(row)
+                    .is_some_and(|entry| entry.is_header)
+                {
+                    panel.side_panel_mut().set_selected(row);
+                    let selected = panel.side_panel().selected_session().cloned();
+                    if let Some(entry) = selected { self.activate_catalog_entry(entry); }
+                }
+            }
+        }
+        self.mark_dirty();
+        true
+    }
+
+    pub(crate) fn handle_conversations_wheel(
+        &mut self,
+        delta: &neoism_window::event::MouseScrollDelta,
+    ) -> bool {
+        if !self.renderer.conversations_visible {
+            return false;
+        }
+        let (x, y) = self.mouse_logical_for_hit_test();
+        let (top, bottom) = self.side_panel_band();
+        let panel_left = self.conversations_sidebar_left();
+        let panel = &mut self.renderer.conversations_pane;
+        if y < top || y > bottom || x < panel_left || x >= panel_left + panel.side_panel().width() {
+            return false;
+        }
+        let row_h = panel.side_panel().row_height().max(1.0);
+        let pixels = Self::vertical_overlay_scroll_pixels(delta, row_h);
+        let rows = panel.side_panel().last_panel_height_rows();
+        panel.scroll_side_panel_pixels(pixels, rows);
+        self.mark_dirty();
+        true
+    }
+
     pub(crate) fn notes_sidebar_bounds(&self) -> Option<(f32, f32, f32, f32)> {
         if !self.renderer.notes_sidebar.is_visible() {
             return None;
@@ -758,11 +1063,15 @@ impl Screen<'_> {
         );
         let markdown = crate::editor::markdown::state::is_markdown_path(&path);
         let epub = crate::screen::bridges::epub::is_epub_path(&path);
-        let notebook_root = self.renderer.notes_sidebar.notebook_root().map(Path::to_path_buf);
+        let notebook_root = self
+            .renderer
+            .notes_sidebar
+            .notebook_root()
+            .map(Path::to_path_buf);
         if markdown
-            && notebook_root.as_deref().is_some_and(|root| {
-                self.open_documentation_notebook_page(root, &path)
-            })
+            && notebook_root
+                .as_deref()
+                .is_some_and(|root| self.open_documentation_notebook_page(root, &path))
         {
             return;
         }

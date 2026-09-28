@@ -35,7 +35,7 @@ mod session_undo_tests;
 mod tool_part_tests;
 
 #[test]
-fn gpt_models_get_opencode_patch_toolset() {
+fn gpt_models_get_apply_patch_toolset() {
     assert!(use_apply_patch_for_model("gpt-5.5"));
     assert!(use_apply_patch_for_model("openai/gpt-5.4-codex"));
     assert!(use_apply_patch_for_model("codex-mini-latest"));
@@ -4802,6 +4802,58 @@ async fn v2_artifacts_round_trip_binary_content() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn session_artifacts_reach_provider_as_media_bytes() {
+    use base64::Engine;
+    use neoism_agent_core::{ProviderAttachment, ProviderMessage, ProviderRole};
+
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-media-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let session = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+    let router = app(state.clone());
+
+    for (mime, filename, bytes) in [
+        ("image/png", "phone.png", [b"\x89PNG\r\n\x1a\n".as_slice(), &vec![7; 3 * 1024 * 1024]].concat()),
+        ("application/pdf", "scan.pdf", b"%PDF-1.7\nphone document".to_vec()),
+    ] {
+        let response = router.clone().oneshot(
+            Request::post("/v2/artifacts")
+                .header("content-type", mime)
+                .header("x-neoism-filename", filename)
+                .header("x-neoism-session-id", session.id.to_string())
+                .body(Body::from(bytes.clone())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let artifact: neoism_agent_core::ArtifactInfo = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        ).unwrap();
+        assert_eq!(artifact.session_id.as_deref(), Some(session.id.to_string().as_str()));
+        assert_eq!(artifact.filename, filename);
+        let mut messages = vec![ProviderMessage::text(ProviderRole::User, "inspect")];
+        messages[0].attachments.push(ProviderAttachment {
+            mime: mime.to_string(),
+            url: artifact.download_url.clone(),
+            filename: Some(filename.to_string()),
+        });
+        crate::artifact_routes::hydrate_provider_attachments(&state, &session.id.to_string(), &mut messages).await.unwrap();
+        let encoded = messages[0].attachments[0].url.strip_prefix(&format!("data:{mime};base64,")).unwrap();
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(encoded).unwrap(), bytes);
+        assert!(crate::artifact_routes::hydrate_provider_attachments(&state, "other-session", &mut [ProviderMessage {
+            attachments: vec![ProviderAttachment { mime: mime.to_string(), url: artifact.download_url, filename: None }],
+            ..ProviderMessage::text(ProviderRole::User, "inspect")
+        }]).await.is_err());
+    }
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);

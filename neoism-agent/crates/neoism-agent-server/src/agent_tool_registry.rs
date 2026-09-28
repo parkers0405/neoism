@@ -186,6 +186,30 @@ async fn available_tools_for_snapshot(
     Ok(tools)
 }
 
+fn require_hosted_mcp_catalogs(
+    config: &BTreeMap<String, neoism_agent_core::McpConfig>,
+    permissions: &[PermissionRule],
+    tools: &[ToolListItem],
+) -> Result<(), ApiError> {
+    if permission::disabled(&[MCP_GATEWAY_TOOL.to_string()], permissions).contains(MCP_GATEWAY_TOOL) {
+        return Ok(());
+    }
+    for (name, entry) in config {
+        let probe = format!("mcp__{name}__catalog");
+        if !matches!(entry, neoism_agent_core::McpConfig::Remote { .. })
+            || !mcp::is_enabled(entry)
+            || permission::disabled(&[probe.clone()], permissions).contains(&probe)
+            || permission::evaluate("mcp", &probe, permissions).action != PermissionAction::Allow
+        {
+            continue;
+        }
+        if !tools.iter().any(|tool| tool.id.starts_with(&format!("mcp__{name}__"))) {
+            return Err(ApiError::service_unavailable("hosted MCP tool discovery unavailable"));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn provider_tools_for_agent(
     state: &AppState,
     directory: &str,
@@ -203,6 +227,12 @@ pub(crate) async fn provider_tools_for_agent(
         auth_store,
     )
     .await?;
+    // Hosted gateways cannot invent a tool the native turn did not advertise.
+    // If an authorized, configured remote MCP catalog is unavailable, do not
+    // spend a model request with an empty map and then reject its tool call.
+    if state.services().hosted && tool_contribution(snapshot, MCP_GATEWAY_TOOL).is_some() {
+        require_hosted_mcp_catalogs(&snapshot.config().mcp, permissions, &tools)?;
+    }
     if tools
         .iter()
         .any(|tool| matches!(tool.id.as_str(), "grep" | "glob"))
@@ -848,6 +878,28 @@ fn search_score(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosted_discovery_fails_closed_only_for_enabled_authorized_remote_tools() {
+        let config = BTreeMap::from([("synapse".to_string(), neoism_agent_core::McpConfig::Remote {
+            url: "https://gateway.test/mcp".into(), enabled: Some(true), headers: None, oauth: None, timeout: None,
+        })]);
+        let allow = vec![PermissionRule { permission: "mcp".into(), pattern: "mcp__synapse__*".into(), action: PermissionAction::Allow }];
+        assert!(require_hosted_mcp_catalogs(&config, &allow, &[]).is_err());
+        let discovered = vec![mcp_tool_list_item(mcp_tool("synapse", "company_get_current", "Company"))];
+        assert!(require_hosted_mcp_catalogs(&config, &allow, &discovered).is_ok());
+        let denied = vec![PermissionRule { permission: "mcp".into(), pattern: "*".into(), action: PermissionAction::Deny }];
+        assert!(require_hosted_mcp_catalogs(&config, &denied, &[]).is_ok());
+        assert!(require_hosted_mcp_catalogs(&config, &[], &[]).is_ok(), "implicit ask must not force MCP discovery");
+        let disabled_execute = vec![allow[0].clone(), PermissionRule { permission: "execute".into(), pattern: "*".into(), action: PermissionAction::Deny }];
+        assert!(require_hosted_mcp_catalogs(&config, &disabled_execute, &[]).is_ok());
+        let disabled_namespace = vec![allow[0].clone(), PermissionRule { permission: "mcp__synapse__*".into(), pattern: "*".into(), action: PermissionAction::Deny }];
+        assert!(require_hosted_mcp_catalogs(&config, &disabled_namespace, &[]).is_ok());
+        let disabled = BTreeMap::from([("synapse".into(), neoism_agent_core::McpConfig::Remote {
+            url: "https://gateway.test/mcp".into(), enabled: Some(false), headers: None, oauth: None, timeout: None,
+        })]);
+        assert!(require_hosted_mcp_catalogs(&disabled, &allow, &[]).is_ok());
+    }
 
     #[tokio::test]
     async fn execution_snapshot_uses_canonical_workspace_identity() {

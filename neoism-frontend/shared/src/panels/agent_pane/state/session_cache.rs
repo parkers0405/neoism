@@ -428,6 +428,9 @@ impl NeoismAgentPane {
             thinking: self.thinking.clone(),
             parent_id: self.parent_session_id.clone(),
             directory: self.directory.clone(),
+            source: self.new_chat_source,
+            imported_history: None,
+            plan_todos: None,
         };
         // Merge with whatever streamed into this session's cache slot
         // while a stale entry lingered (defensive — normally empty).
@@ -550,7 +553,6 @@ impl NeoismAgentPane {
         self.timeline_scroll_px = 0.0;
         self.timeline_follow_bottom = true;
         self.timeline_content_height_px = cached.timeline_content_height_px;
-        self.side_panel.set_show_home_override(false);
         if !stays_in_family {
             self.side_panel.invalidate_subagent_refresh();
             self.active_subagent_ids.clear();
@@ -702,6 +704,7 @@ impl NeoismAgentPane {
         self.scrollbar_drag = None;
         self.selection_anchor = None;
         self.selection_focus = None;
+        self.selection_history.clear();
         self.timeline_live_trace_start = None;
         self.timeline_live_trace_anchor = None;
     }

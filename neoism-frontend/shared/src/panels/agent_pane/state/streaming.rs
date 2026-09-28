@@ -123,6 +123,20 @@ impl NeoismAgentPane {
         true
     }
 
+    /// Navigate from the independent detail rail without swapping the
+    /// catalog state: session switching invalidates catalog IO and must act
+    /// on the pane's real (not presentation-swapped) side panel.
+    pub fn activate_detail_panel_subagent(&mut self) -> bool {
+        let Some(entry) = self.detail_panel.selected_row().cloned() else {
+            return false;
+        };
+        if Some(entry.id.as_str()) == self.session_id.as_deref() {
+            return false;
+        }
+        self.switch_session(entry.id);
+        true
+    }
+
     /// Activate the selected session/subagent through the normal authoritative
     /// switch path, then optionally dismiss the side panel as part of the same
     /// navigation outcome. Narrow mobile takeover passes `true`; desktop and
@@ -136,24 +150,17 @@ impl NeoismAgentPane {
         showing_sessions: bool,
         dismiss_after_navigation: bool,
     ) -> bool {
-        let mut navigated = if showing_sessions {
+        let navigated = if showing_sessions {
             self.activate_side_panel_selection()
+                || self.selected_side_panel_session_is_current()
         } else {
             self.activate_side_panel_subagent()
         };
-        if !navigated
-            && showing_sessions
-            && self.side_panel.show_home_override()
-            && self.selected_side_panel_session_is_current()
-        {
-            navigated = true;
-        }
         if navigated {
-            self.side_panel.set_show_home_override(false);
             self.side_panel.set_focused(false);
-            if dismiss_after_navigation {
-                self.side_panel.set_user_hidden(true);
-            }
+            // The workspace chrome owner, not this pane, decides whether a
+            // narrow takeover closes after navigation.
+            let _ = dismiss_after_navigation;
         }
         navigated
     }

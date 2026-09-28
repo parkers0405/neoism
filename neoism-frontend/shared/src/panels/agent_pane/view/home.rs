@@ -88,6 +88,7 @@ pub fn render_home_with<P: AgentHomePane>(
         mouse,
         s,
         true,
+        true,
         now_seconds,
         occlusion_rects,
         prepared_input_rows,

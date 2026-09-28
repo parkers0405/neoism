@@ -1,18 +1,58 @@
 use super::*;
 
 #[test]
-fn narrow_takeover_uses_full_content_rect_and_removes_main_surface() {
-    let pane = TestPane {
-        side_panel: NeoismAgentSidePanel::default(),
-        messages: Vec::new(),
-    };
-    let rect = [0.0, 70.0, 390.0, 740.0];
-    let (main, panel) = carve_panel_rect_responsive(&pane, rect, 1.0, true).unwrap();
-    assert_eq!(main, [0.0, 70.0, 0.0, 740.0]);
-    assert_eq!(panel, rect);
+fn provider_chooser_and_persisted_root_sources() {
+    use crate::panels::agent_pane::state::side_panel::ConversationSource;
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_new_chat_rect([0.0, 20.0, 200.0, 28.0]);
+    assert_eq!(panel.new_chat_hit(12.0, 30.0), Some(None));
+    panel.toggle_provider_menu();
+    panel.move_provider_selection(true);
+    assert_eq!(panel.provider_selection(), 1);
+    panel.move_provider_selection(false);
+    assert_eq!(panel.provider_selection(), 0);
+    panel.move_provider_selection(false);
+    assert_eq!(panel.provider_selection(), 3);
+    panel.move_provider_selection(true);
+    assert_eq!(panel.provider_selection(), 0);
+    panel.move_provider_selection(true);
+    assert_eq!(panel.provider_selection(), 1);
+    assert_eq!(panel.new_chat_hit(12.0, 20.0 + 28.0 * 2.5), Some(Some(1)));
+    assert_eq!(panel.choose_provider(1), Some(ConversationSource::OpenCode));
+    assert!(!panel.provider_menu_open());
+    assert_eq!(ConversationSource::Neoism.provider(), None);
+    assert_eq!(ConversationSource::Neoism.tab_title(Some("Fix tests")), "Fix tests");
+    assert_eq!(ConversationSource::Codex.tab_title(Some("Fix tests")), "Codex · Fix tests");
+    assert_eq!(ConversationSource::ClaudeCode.tab_title(None), "Claude Code");
+    assert_eq!(ConversationSource::ClaudeCode.provider(), Some("claude"));
+    let root = serde_json::json!({"extra": {"externalAgent": {"provider": "codex"}}});
+    assert_eq!(ConversationSource::from_session_json(&root), ConversationSource::Codex);
+    let child = serde_json::json!({"parentID": "root", "extra": {"externalAgent": {"provider": "codex"}}});
+    assert_eq!(ConversationSource::from_session_json(&child), ConversationSource::Neoism);
 }
+
+#[test]
+fn catalog_entry_source_is_neoism_not_subagent_kind() {
+    assert_eq!(
+        NeoismAgentSessionEntry::new("s", "Title", "now").source,
+        crate::panels::agent_pane::state::side_panel::ConversationSource::Neoism,
+    );
+}
+
+#[test]
+fn detail_rail_drops_old_branches_when_conversation_changes() {
+    let mut detail = NeoismAgentSidePanel::default();
+    detail.set_viewed_session_id(Some("old".into()));
+    detail.set_subagents(vec![NeoismAgentSessionEntry::new("old", "Old", "")]);
+    let mut catalog = NeoismAgentSidePanel::default();
+    catalog.set_viewed_session_id(Some("new".into()));
+    catalog.set_subagents(vec![NeoismAgentSessionEntry::new("new", "New", "")]);
+    detail.sync_conversation_details_from(&catalog);
+    assert_eq!(detail.subagents()[0].id, "new");
+}
+
 use crate::panels::agent_pane::state::side_panel::{
-    GoalStatus, NeoismAgentSemanticMatch, SidePanelMode,
+    GoalStatus, NeoismAgentSemanticMatch,
 };
 
 struct TestPane {
@@ -23,6 +63,10 @@ struct TestPane {
 impl AgentSidePanelPane for TestPane {
     type Message = NeoismAgentMessage;
 
+    fn session_rename_buffer(&self) -> Option<String> {
+        None
+    }
+
     fn side_panel(&self) -> &NeoismAgentSidePanel {
         &self.side_panel
     }
@@ -30,6 +74,10 @@ impl AgentSidePanelPane for TestPane {
     fn side_panel_mut(&mut self) -> &mut NeoismAgentSidePanel {
         &mut self.side_panel
     }
+
+    fn swap_detail_panel(&mut self) {}
+
+    fn prepare_detail_panel(&mut self) {}
 
     fn has_conversation(&self) -> bool {
         true
@@ -41,6 +89,10 @@ impl AgentSidePanelPane for TestPane {
 
     fn directory_label(&self) -> String {
         String::new()
+    }
+
+    fn conversation_source(&self) -> crate::panels::agent_pane::state::side_panel::ConversationSource {
+        crate::panels::agent_pane::state::side_panel::ConversationSource::Neoism
     }
 
     fn agent_label(&self) -> &str {
@@ -76,8 +128,8 @@ impl AgentSidePanelPane for TestPane {
 fn context_meter_fraction_preserves_usage_policy_edges() {
     assert_eq!(sections::context_fill_fraction(100, Some(400)), 0.25);
     assert_eq!(sections::context_fill_fraction(500, Some(400)), 1.0);
-    assert_eq!(sections::context_fill_fraction(100, Some(0)), 0.35);
-    assert_eq!(sections::context_fill_fraction(100, None), 0.35);
+    assert_eq!(sections::context_fill_fraction(100, Some(0)), 0.0);
+    assert_eq!(sections::context_fill_fraction(100, None), 0.0);
 }
 
 #[test]
@@ -592,20 +644,6 @@ fn unversioned_poll_none_never_clears_a_live_goal() {
 }
 
 #[test]
-fn home_override_toggles_without_ending_chat() {
-    // The "← Back" affordance flips the sessions view on/off; it never
-    // touches the conversation, so this is pure view-state.
-    let mut panel = NeoismAgentSidePanel::default();
-    assert!(!panel.show_home_override());
-    panel.toggle_home_override();
-    assert!(panel.show_home_override());
-    panel.toggle_home_override();
-    assert!(!panel.show_home_override());
-    panel.set_show_home_override(true);
-    assert!(panel.show_home_override());
-}
-
-#[test]
 fn running_dot_predicate_only_lights_active_sessions() {
     let running = NeoismAgentSessionEntry::new("a", "a", "")
         .with_runtime_status(Some("running".to_string()));
@@ -625,58 +663,6 @@ fn running_dot_predicate_only_lights_active_sessions() {
 
     let idle = NeoismAgentSessionEntry::new("e", "e", "");
     assert!(!session_entry_is_running(&idle));
-}
-
-#[test]
-fn back_affordance_joins_the_focus_chain() {
-    // Arrow-up walks to the "← Back" affordance at the top of the panel,
-    // and arrow-down walks back off it — mirroring the search-row hop.
-    let mut panel = NeoismAgentSidePanel::default();
-    panel.set_mode(SidePanelMode::Subagents);
-    panel.set_subagents(vec![
-        NeoismAgentSessionEntry::new("main", "main session", "return"),
-        NeoismAgentSessionEntry::new("child", "child", "explore")
-            .with_runtime_status(Some("running".to_string())),
-    ]);
-    // Not focusable / not back-reachable until the button is actually drawn.
-    assert!(!panel.back_focused());
-    panel.set_back_button_rect([0.0, 0.0, 100.0, 20.0]);
-    assert!(panel.focusable());
-
-    // Cursor starts on the main row; arrow-up reaches Back.
-    panel.select_prev();
-    assert!(panel.back_focused());
-
-    // Arrow-down drops back onto the first branch row.
-    panel.select_next();
-    assert!(!panel.back_focused());
-    assert_eq!(panel.selected_index(), 0);
-
-    // Dropping focus clears the Back cursor, and clearing the button rect
-    // makes it un-reachable again.
-    panel.focus_back();
-    assert!(panel.back_focused());
-    panel.set_focused(false);
-    assert!(!panel.back_focused());
-    panel.clear_back_button_rect();
-    panel.focus_back();
-    assert!(!panel.back_focused());
-}
-
-#[test]
-fn only_back_focusable_when_no_list_rows() {
-    // A chat with no real branches (just the main session) is focusable
-    // solely via the Back affordance.
-    let mut panel = NeoismAgentSidePanel::default();
-    panel.set_mode(SidePanelMode::Subagents);
-    panel.set_subagents(vec![NeoismAgentSessionEntry::new(
-        "main",
-        "main session",
-        "return",
-    )]);
-    panel.set_back_button_rect([0.0, 0.0, 100.0, 20.0]);
-    assert!(panel.only_back_focusable());
-    assert!(panel.focusable());
 }
 
 #[test]
@@ -914,4 +900,136 @@ fn excerpt_wrap_follows_the_measured_column_budget() {
         wide,
         vec!["alpha beta gamma delta epsilon zeta".to_string()]
     );
+}
+
+#[test]
+fn two_line_catalog_stride_aligns_header_session_and_search_excerpt_hits() {
+    use crate::panels::agent_pane::state::side_panel::ROW_HEIGHT;
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![
+        NeoismAgentSessionEntry::new("a", "Parser", "")
+            .with_updated_ms(1_800_000_000_000),
+        NeoismAgentSessionEntry::new("b", "Other", "").with_updated_ms(1_800_000_000_001),
+    ]);
+    panel.set_session_query("parser".into());
+    panel.set_semantic_results(
+        "parser".into(),
+        vec![NeoismAgentSemanticMatch {
+            session_id: "a".into(),
+            excerpt: "Parser tokens in transcript".into(),
+            distance: 0.1,
+        }],
+    );
+    assert_eq!(panel.row_height(), ROW_HEIGHT);
+    let rows = panel.sessions().to_vec();
+    assert!(rows.iter().any(|entry| entry.is_header));
+    assert!(rows.iter().any(|entry| entry.is_excerpt));
+    let list = [0.0, 100.0, 210.0, ROW_HEIGHT * rows.len() as f32];
+    panel.set_row_hit_rect(list, ROW_HEIGHT);
+    for (index, entry) in rows.iter().enumerate() {
+        let y = list[1] + (index as f32 + 0.5) * ROW_HEIGHT;
+        assert_eq!(panel.hit_test_row(10.0, y, list), Some(index));
+        panel.set_selected(index);
+        if !entry.is_header {
+            assert_eq!(
+                panel
+                    .selected_session()
+                    .map(|selected| selected.id.as_str()),
+                Some(entry.id.as_str())
+            );
+        } else {
+            assert!(!panel.sessions()[panel.selected_index()].is_header);
+        }
+    }
+    assert_eq!(panel.hit_test_row(10.0, list[1] + list[3], list), None);
+    assert_eq!(panel.hit_test_row(220.0, list[1], list), None);
+}
+
+#[test]
+fn catalog_touch_scroll_keeps_mixed_row_hit_stride() {
+    use crate::panels::agent_pane::state::side_panel::ROW_HEIGHT;
+    let mut panel = NeoismAgentSidePanel::default();
+    panel
+        .set_sessions(vec![NeoismAgentSessionEntry::new("a", "Title", "")
+            .with_updated_ms(1_800_000_000_000)]);
+    panel.set_session_query("Title".into());
+    panel.set_semantic_results(
+        "Title".into(),
+        vec![NeoismAgentSemanticMatch {
+            session_id: "a".into(),
+            excerpt: "Title in transcript".into(),
+            distance: 0.0,
+        }],
+    );
+    assert!(panel.sessions()[0].is_header);
+    assert!(panel.sessions()[2].is_excerpt);
+    let rect = [0.0, 100.0, 220.0, ROW_HEIGHT * 2.0];
+    panel.set_row_hit_rect(rect, ROW_HEIGHT);
+    panel.scroll_touch_pixels(-ROW_HEIGHT, 2);
+    assert_eq!(panel.hit_test_row(10.0, 105.0, rect), Some(1));
+    assert_eq!(panel.hit_test_row(10.0, 105.0 + ROW_HEIGHT, rect), Some(2));
+}
+
+#[test]
+fn catalog_only_mode_clears_invisible_controls_and_arrow_navigation_skips_search() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_session_page(vec![NeoismAgentSessionEntry::new("one", "One", "")], None, None);
+    panel.set_new_chat_rect([0.0, 0.0, 200.0, 32.0]);
+    panel.set_session_search_rect([0.0, 32.0, 200.0, 32.0]);
+    panel.focus_search();
+    panel.toggle_provider_menu();
+    panel.hide_catalog_controls();
+    assert_eq!(panel.new_chat_hit(12.0, 12.0), None);
+    assert!(!panel.session_search_contains(12.0, 42.0));
+    assert!(!panel.provider_menu_open());
+    assert!(!panel.search_focused());
+    panel.select_prev();
+    assert!(!panel.search_focused());
+    assert_eq!(panel.selected_session().map(|row| row.id.as_str()), Some("one"));
+}
+
+#[test]
+fn external_catalog_merges_by_native_id_and_source_key_across_pages() {
+    use crate::panels::agent_pane::state::side_panel::{ConversationSource, ExternalSessionPreview};
+    fn preview(key: &str, imported: Option<&str>) -> NeoismAgentSessionEntry {
+        let mut row = NeoismAgentSessionEntry::new(
+            imported.map(str::to_owned).unwrap_or_else(|| format!("external:{key}")),
+            "Claude preview", "Preview · import to read",
+        ).with_source(ConversationSource::ClaudeCode).with_source_key(Some(key.into())).with_updated_ms(1_800_000_000_000);
+        row.external_preview = Some(ExternalSessionPreview {
+            source_key: key.into(), external_session_id: key.into(),
+            history_state: "not_loaded".into(), import_supported: true,
+            import_unavailable_reason: None,
+            neoism_session_id: imported.map(str::to_owned),
+        });
+        row
+    }
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_session_page(vec![NeoismAgentSessionEntry::new("native", "Native", "")], None, Some("page2".into()));
+    panel.set_external_provider_rows(ConversationSource::ClaudeCode, vec![preview("one", Some("native")), preview("two", None), preview("three", None)]);
+    assert_eq!(panel.sessions().iter().filter(|row| row.id == "native").count(), 1);
+    assert_eq!(panel.sessions().iter().filter(|row| row.id == "external:two").count(), 1);
+    let index = panel.sessions().iter().position(|row| row.id == "external:three").unwrap();
+    panel.set_selected(index);
+    panel.set_session_page(vec![NeoismAgentSessionEntry::new("later", "Later", "").with_source(ConversationSource::ClaudeCode).with_source_key(Some("two".into()))], Some("page2"), None);
+    assert_eq!(panel.selected_session().map(|row| row.id.as_str()), Some("external:three"));
+    assert_eq!(panel.sessions().iter().filter(|row| row.source_key.as_deref() == Some("two")).count(), 1);
+    assert_eq!(panel.sessions().iter().find(|row| row.source_key.as_deref() == Some("two")).map(|row| row.source), Some(ConversationSource::ClaudeCode));
+    panel.set_session_query("claude".into());
+    assert!(panel.sessions().iter().any(|row| row.title == "Claude preview"));
+    panel.set_session_query(String::new());
+    panel.set_external_provider_error(ConversationSource::Codex, "adapter unavailable".into());
+    assert!(panel.sessions().iter().any(|row| row.id == "native"));
+    assert!(panel.external_errors().iter().any(|(source, _)| *source == ConversationSource::Codex));
+    panel.set_session_page(vec![NeoismAgentSessionEntry::new("native", "Native", "")], None, None);
+    assert!(panel.sessions().iter().any(|row| row.id == "external:two"));
+    panel.set_external_importing(Some("two".into()));
+    assert!(!panel.sessions().iter().any(|row| row.id == "external:two"));
+    assert!(panel.sessions().iter().any(|row| row.id == "native"));
+    panel.set_external_importing(None);
+    assert!(panel.sessions().iter().any(|row| row.id == "external:two"));
+    panel.mark_external_imported("two", "imported");
+    assert!(panel.sessions().iter().any(|row| row.id == "imported"));
+    panel.set_session_page(vec![NeoismAgentSessionEntry::new("imported", "Imported", "")], None, None);
+    assert_eq!(panel.sessions().iter().filter(|row| row.id == "imported").count(), 1);
 }

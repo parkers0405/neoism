@@ -39,9 +39,10 @@ pub const SIDE_PANEL_WIDTH: f32 = 260.0;
 /// otherwise a narrow split would shove the chat content into nothing.
 pub const SIDE_PANEL_MIN_PANE_WIDTH: f32 = 640.0;
 
-/// Row height matches the file tree at 1.0 scale so the two side panels
-/// read as the same family.
-pub const ROW_HEIGHT: f32 = 26.0;
+/// Session rows carry a title and a subdued relative-time line. Headers and
+/// transcript excerpts share this stride so scrolling, hit-testing and search
+/// results remain aligned even when the list mixes row kinds.
+pub const ROW_HEIGHT: f32 = 42.0;
 pub const FONT_SIZE: f32 = 13.0;
 pub const ROW_PADDING_X: f32 = 12.0;
 pub const FRAME_RADIUS: f32 = 14.0;
@@ -54,6 +55,80 @@ pub const SCROLL_ANIMATION_LENGTH: f32 = 0.12;
 pub const CURSOR_ANIMATION_LENGTH: f32 = 0.12;
 pub const SCROLL_OFF_ROWS: usize = 3;
 
+/// Root conversation source. Child tasks are identified by their own kind,
+/// never by a parent's external provider.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConversationSource {
+    #[default]
+    Neoism,
+    OpenCode,
+    ClaudeCode,
+    Codex,
+}
+
+impl ConversationSource {
+    pub const CHOICES: [Self; 4] = [Self::Neoism, Self::OpenCode, Self::ClaudeCode, Self::Codex];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Neoism => "Neoism Agent",
+            Self::OpenCode => "OpenCode",
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
+    pub fn tab_title(self, title: Option<&str>) -> String {
+        let title = title.map(str::trim).filter(|title| !title.is_empty());
+        match (self.provider(), title) {
+            (None, Some(title)) => title.to_owned(),
+            (None, None) => "Neoism".to_owned(),
+            (Some(_), Some(title)) if title != self.label() => format!("{} · {title}", self.label()),
+            (Some(_), _) => self.label().to_owned(),
+        }
+    }
+
+    pub fn provider(self) -> Option<&'static str> {
+        match self {
+            Self::Neoism => None,
+            Self::OpenCode => Some("opencode"),
+            Self::ClaudeCode => Some("claude"),
+            Self::Codex => Some("codex"),
+        }
+    }
+
+    pub fn from_session_json(session: &serde_json::Value) -> Self {
+        // Catalogues are root-only. Do not infer a child's identity from a
+        // task's externalAgent status or a model provider.
+        if session.get("parentID").and_then(serde_json::Value::as_str).is_some()
+            || session.get("parentId").and_then(serde_json::Value::as_str).is_some()
+        {
+            return Self::Neoism;
+        }
+        match session.pointer("/extra/externalAgent/provider")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| session.pointer("/externalAgent/provider").and_then(serde_json::Value::as_str))
+            .or_else(|| session.get("external_provider").and_then(serde_json::Value::as_str))
+            .or_else(|| session.get("externalProvider").and_then(serde_json::Value::as_str))
+        {
+            Some("opencode") => Self::OpenCode,
+            Some("claude") => Self::ClaudeCode,
+            Some("codex") => Self::Codex,
+            _ => Self::Neoism,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalSessionPreview {
+    pub source_key: String,
+    pub external_session_id: String,
+    pub history_state: String,
+    pub import_supported: bool,
+    pub import_unavailable_reason: Option<String>,
+    pub neoism_session_id: Option<String>,
+}
+
 /// One entry in the sessions / sub-agents list. `time_label` doubles
 /// as the right-aligned footer text — "5 minutes ago" for sessions,
 /// agent name ("build" / "plan" / "main session") for sub-agents.
@@ -63,6 +138,10 @@ pub struct NeoismAgentSessionEntry {
     pub title: String,
     pub time_label: String,
     pub depth: usize,
+    pub source: ConversationSource,
+    pub source_key: Option<String>,
+    /// Present only for provider-native previews, never for stored roots.
+    pub external_preview: Option<ExternalSessionPreview>,
     pub agent_kind: Option<AgentKind>,
     pub runtime_status: Option<String>,
     /// Raw `time.updated` unix-ms — buckets the entry under a date-group
@@ -104,6 +183,9 @@ impl NeoismAgentSessionEntry {
             title: title.into(),
             time_label: time_label.into(),
             depth: 0,
+            source: ConversationSource::Neoism,
+            source_key: None,
+            external_preview: None,
             agent_kind: None,
             runtime_status: None,
             updated_ms: 0,
@@ -121,6 +203,9 @@ impl NeoismAgentSessionEntry {
             title: label.into(),
             time_label: String::new(),
             depth: 0,
+            source: ConversationSource::Neoism,
+            source_key: None,
+            external_preview: None,
             agent_kind: None,
             runtime_status: None,
             updated_ms: 0,
@@ -139,6 +224,9 @@ impl NeoismAgentSessionEntry {
             title: excerpt.into(),
             time_label: String::new(),
             depth: 0,
+            source: ConversationSource::Neoism,
+            source_key: None,
+            external_preview: None,
             agent_kind: None,
             runtime_status: None,
             updated_ms: 0,
@@ -147,6 +235,16 @@ impl NeoismAgentSessionEntry {
             is_excerpt: true,
             highlights: Vec::new(),
         }
+    }
+
+    pub fn with_source(mut self, source: ConversationSource) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub fn with_source_key(mut self, source_key: Option<String>) -> Self {
+        self.source_key = source_key;
+        self
     }
 
     pub fn with_updated_ms(mut self, updated_ms: u64) -> Self {
@@ -374,7 +472,7 @@ impl BranchStatus {
                 Some(Self::WaitingPermission)
             }
             "completed" | "complete" | "idle" | "done" => Some(Self::Completed),
-            "failed" | "error" | "errored" | "stopped" | "aborted" => Some(Self::Stopped),
+            "failed" | "error" | "errored" | "stopped" | "aborted" | "interrupted" | "cancelled" | "canceled" => Some(Self::Stopped),
             _ => None,
         }
     }
@@ -662,6 +760,10 @@ pub struct NeoismAgentSidePanel {
     /// pinned-first / newest-day-first, filtered by `session_query`, with
     /// cyan date-group header rows injected.
     all_sessions: Vec<NeoismAgentSessionEntry>,
+    external_sessions: Vec<NeoismAgentSessionEntry>,
+    external_importing_key: Option<String>,
+    external_errors: Vec<(ConversationSource, String)>,
+    external_scanning: bool,
     /// Live search filter for the home-mode session list. Typed while the
     /// panel owns focus; matches session titles case-insensitively.
     session_query: String,
@@ -753,25 +855,13 @@ pub struct NeoismAgentSidePanel {
     /// reach. Clamped against `content_scroll_max` each frame.
     content_scroll_px: f32,
     content_scroll_max: f32,
-    /// When a live conversation is open, the "← Back" affordance flips the
-    /// panel to the home/recent-sessions view *without* ending the chat.
-    /// The renderer shows the sessions list whenever this is set (or there
-    /// is no conversation at all); activating a session clears it.
-    show_home_override: bool,
-    /// True when the selection cursor sits on the "← Back" affordance at the
-    /// top of the panel (reached by arrow-up past the first row / search).
-    /// Mirrors `search_focused`: while set, no row is highlighted and the
-    /// trail cursor parks on the Back button.
-    back_focused: bool,
-    /// Screen rect of the "← Back" button, cached each frame it is drawn so
-    /// the click handler can hit-test it and the focus model knows it is
-    /// present. `None` when no Back button was drawn (genuine home view).
-    back_button_rect: Option<[f32; 4]>,
+    new_chat_rect: Option<[f32; 4]>,
+    provider_menu_open: bool,
+    provider_selection: usize,
     hovered_session: Option<usize>,
     session_hover_target: bool,
     session_hover_scale: f32,
     last_hover_frame: Instant,
-    back_scramble_started: Option<Instant>,
     /// Hit target spanning the compact Usage meter and numeric label.
     usage_rect: Option<[f32; 4]>,
     /// Last values actually presented by the compact Usage surface.
@@ -807,6 +897,10 @@ impl Default for NeoismAgentSidePanel {
             last_row_origin_y: 0.0,
             selected_cursor_rect: None,
             all_sessions: Vec::new(),
+            external_sessions: Vec::new(),
+            external_importing_key: None,
+            external_errors: Vec::new(),
+            external_scanning: false,
             session_query: String::new(),
             semantic_query: String::new(),
             semantic_results: Vec::new(),
@@ -837,14 +931,13 @@ impl Default for NeoismAgentSidePanel {
             goal_version: 0,
             content_scroll_px: 0.0,
             content_scroll_max: 0.0,
-            show_home_override: false,
-            back_focused: false,
-            back_button_rect: None,
+            new_chat_rect: None,
+            provider_menu_open: false,
+            provider_selection: 0,
             hovered_session: None,
             session_hover_target: false,
             session_hover_scale: 0.0,
             last_hover_frame: Instant::now(),
-            back_scramble_started: None,
             usage_rect: None,
             usage_snapshot: None,
             usage_scramble_started: None,
@@ -855,6 +948,71 @@ impl Default for NeoismAgentSidePanel {
 }
 
 impl NeoismAgentSidePanel {
+    /// Catalog-only presentation: disable controls owned by other surfaces
+    /// even when an old render frame left hit rectangles or focus behind.
+    pub fn hide_catalog_controls(&mut self) {
+        self.new_chat_rect = None;
+        self.session_search_rect = None;
+        self.provider_menu_open = false;
+        self.search_focused = false;
+    }
+
+    pub fn provider_menu_open(&self) -> bool { self.provider_menu_open }
+
+    pub fn toggle_provider_menu(&mut self) {
+        self.provider_menu_open = !self.provider_menu_open;
+        self.provider_selection = 0;
+        self.search_focused = false;
+    }
+
+    pub fn close_provider_menu(&mut self) { self.provider_menu_open = false; }
+
+    pub fn provider_selection(&self) -> usize { self.provider_selection }
+
+    pub fn move_provider_selection(&mut self, down: bool) {
+        self.provider_selection = if down {
+            (self.provider_selection + 1) % ConversationSource::CHOICES.len()
+        } else {
+            (self.provider_selection + ConversationSource::CHOICES.len() - 1) % ConversationSource::CHOICES.len()
+        };
+    }
+
+    pub fn choose_provider(&mut self, index: usize) -> Option<ConversationSource> {
+        let source = ConversationSource::CHOICES.get(index).copied()?;
+        self.provider_menu_open = false;
+        Some(source)
+    }
+
+    pub fn set_new_chat_rect(&mut self, rect: [f32; 4]) { self.new_chat_rect = Some(rect); }
+
+    pub fn new_chat_hit(&self, x: f32, y: f32) -> Option<Option<usize>> {
+        let [rx, ry, rw, rh] = self.new_chat_rect?;
+        if x < rx || x > rx + rw || y < ry { return None; }
+        if y <= ry + rh { return Some(None); }
+        if self.provider_menu_open && y <= ry + rh * 5.0 {
+            return Some(Some(((y - ry - rh) / rh) as usize));
+        }
+        None
+    }
+
+    pub fn sync_conversation_details_from(&mut self, catalog: &Self) {
+        if self.viewed_session_id != catalog.viewed_session_id {
+            self.subagents.clear();
+            self.branch_activities.clear();
+            self.retained_viewed_subagent_id = None;
+            self.content_scroll_px = 0.0;
+            self.selected = 0;
+        }
+        self.viewed_session_id
+            .clone_from(&catalog.viewed_session_id);
+        self.set_subagents(catalog.subagents.clone());
+        self.branch_activities
+            .clone_from(&catalog.branch_activities);
+        self.session_goal.clone_from(&catalog.session_goal);
+        self.goal_loaded = catalog.goal_loaded;
+        self.goal_version = catalog.goal_version;
+    }
+
     pub fn width(&self) -> f32 {
         self.width
     }
@@ -867,46 +1025,7 @@ impl NeoismAgentSidePanel {
         self.focused = focused;
         if !focused {
             self.search_focused = false;
-            self.back_focused = false;
         }
-    }
-
-    pub fn show_home_override(&self) -> bool {
-        self.show_home_override
-    }
-
-    pub fn set_show_home_override(&mut self, value: bool) {
-        self.show_home_override = value;
-    }
-
-    /// Flip the home-while-chatting view on/off. Non-destructive — the live
-    /// conversation stays open underneath; only which list the panel shows
-    /// changes.
-    pub fn toggle_home_override(&mut self) {
-        self.show_home_override = !self.show_home_override;
-    }
-
-    pub fn back_button_rect(&self) -> Option<[f32; 4]> {
-        self.back_button_rect
-    }
-
-    pub fn set_back_button_rect(&mut self, rect: [f32; 4]) {
-        self.back_button_rect = Some(rect);
-    }
-
-    /// Called when the panel renders a view that carries no Back button
-    /// (the genuine no-conversation home). Drops the cached rect and any
-    /// focus that was on it so the focus model doesn't strand the cursor.
-    pub fn clear_back_button_rect(&mut self) {
-        self.back_button_rect = None;
-        self.back_focused = false;
-    }
-
-    pub fn back_button_contains(&self, x: f32, y: f32) -> bool {
-        let Some([bx, by, bw, bh]) = self.back_button_rect else {
-            return false;
-        };
-        x >= bx && x <= bx + bw && y >= by && y <= by + bh
     }
 
     pub fn tick_pointer_animations(&mut self, hovered_session: Option<usize>) {
@@ -938,12 +1057,6 @@ impl NeoismAgentSidePanel {
         }
     }
 
-    /// Start the Back-label scramble after an actual activation. Hovering and
-    /// view-label changes deliberately do not trigger this effect.
-    pub fn trigger_back_scramble(&mut self) {
-        self.back_scramble_started = Some(Instant::now());
-    }
-
     pub fn hovered_session(&self) -> Option<usize> {
         self.hovered_session
     }
@@ -952,13 +1065,6 @@ impl NeoismAgentSidePanel {
         self.session_hover_scale
     }
 
-    pub fn back_scramble_elapsed_ms(&self) -> Option<f32> {
-        let elapsed = self.back_scramble_started?.elapsed().as_secs_f32() * 1000.0;
-        (elapsed < 320.0).then_some(elapsed)
-    }
-
-    /// Update the compact Usage surface and rearm its scramble only when the
-    /// displayed token tuple actually changes.
     pub fn update_usage_meter(&mut self, used: u64, context_limit: Option<u64>) {
         let snapshot = (used, context_limit);
         if self.usage_snapshot == Some(snapshot) {
@@ -990,34 +1096,6 @@ impl NeoismAgentSidePanel {
         self.usage_rect.is_some_and(|[rx, ry, rw, rh]| {
             x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
         })
-    }
-
-    /// Whether the selection cursor is on the "← Back" affordance. Only
-    /// meaningful while a Back button is actually being drawn.
-    pub fn back_focused(&self) -> bool {
-        self.back_focused && self.back_button_rect.is_some()
-    }
-
-    /// Move the selection cursor onto the "← Back" affordance.
-    pub fn focus_back(&mut self) {
-        self.back_focused = true;
-        self.search_focused = false;
-        self.cursor_spring.reset();
-    }
-
-    fn clear_back_focus(&mut self) {
-        self.back_focused = false;
-    }
-
-    /// True when the Back affordance is the *only* thing worth landing a
-    /// cursor on (chat with no branch rows, or an empty session list). The
-    /// focus-entry drops the cursor straight onto Back in that case.
-    pub fn only_back_focusable(&self) -> bool {
-        self.back_button_rect.is_some()
-            && match self.mode {
-                SidePanelMode::Sessions => self.sessions.is_empty(),
-                SidePanelMode::Subagents => self.subagents.len() <= 1,
-            }
     }
 
     pub fn user_hidden(&self) -> bool {
@@ -1239,6 +1317,10 @@ impl NeoismAgentSidePanel {
 
     pub fn subagents(&self) -> &[NeoismAgentSessionEntry] {
         &self.subagents
+    }
+
+    pub fn viewed_session_id(&self) -> Option<&str> {
+        self.viewed_session_id.as_deref()
     }
 
     pub fn set_viewed_session_id(&mut self, session_id: Option<String>) {
@@ -1466,12 +1548,6 @@ impl NeoismAgentSidePanel {
         if self.user_hidden {
             return false;
         }
-        // The "← Back" affordance (drawn whenever a live conversation is
-        // open) is always reachable, so the panel is focusable even in a
-        // chat with no sub-agent branches to land a row cursor on.
-        if self.back_button_rect.is_some() {
-            return true;
-        }
         match self.mode {
             SidePanelMode::Sessions => !self.sessions.is_empty(),
             SidePanelMode::Subagents => self.subagents.len() > 1,
@@ -1552,8 +1628,6 @@ impl NeoismAgentSidePanel {
     pub fn clear_last_panel_rect(&mut self) {
         self.last_panel_rect = None;
         self.last_row_hit_rect = None;
-        self.back_button_rect = None;
-        self.back_focused = false;
         self.focused = false;
         self.selected_cursor_rect = None;
         self.usage_rect = None;
@@ -1670,6 +1744,49 @@ impl NeoismAgentSidePanel {
         }
     }
 
+    pub fn external_errors(&self) -> &[(ConversationSource, String)] { &self.external_errors }
+    pub fn external_scanning(&self) -> bool { self.external_scanning }
+    pub fn set_external_scanning(&mut self, scanning: bool) { self.external_scanning = scanning; }
+
+    pub fn set_external_importing(&mut self, key: Option<String>) {
+        self.external_importing_key = key;
+        self.rebuild_session_display();
+    }
+
+    pub fn set_external_notice(&mut self, source: ConversationSource, message: String) {
+        self.external_errors.retain(|(provider, _)| *provider != source);
+        self.external_errors.push((source, message));
+    }
+
+    pub fn set_external_provider_error(&mut self, source: ConversationSource, error: String) {
+        self.external_errors.retain(|(provider, _)| *provider != source);
+        self.external_errors.push((source, error));
+        // Retain the last good previews when a refresh or adapter fails.
+        // Server/directory switches create a fresh pane rather than reusing these rows.
+    }
+
+    /// Provider previews are independent of the paged Neoism catalog. A
+    /// first-page refresh must never discard them or reset the scroll.
+    pub fn set_external_provider_rows(&mut self, source: ConversationSource, rows: Vec<NeoismAgentSessionEntry>) {
+        let selected_id = self.selected_session().map(|entry| entry.id.clone());
+        self.external_errors.retain(|(provider, _)| *provider != source);
+        self.external_sessions.retain(|entry| entry.source != source);
+        self.external_sessions.extend(rows.into_iter().filter(|entry| entry.external_preview.is_some()));
+        self.rebuild_session_display();
+        self.restore_selected_session(selected_id.as_deref());
+    }
+
+    pub fn mark_external_imported(&mut self, source_key: &str, id: &str) {
+        if let Some(entry) = self.external_sessions.iter_mut().find(|entry| entry.source_key.as_deref() == Some(source_key)) {
+            entry.id = id.to_string();
+            if let Some(preview) = entry.external_preview.as_mut() {
+                preview.neoism_session_id = Some(id.to_string());
+                preview.history_state = "text_only".into();
+            }
+        }
+        self.rebuild_session_display();
+    }
+
     /// Apply a catalogue page. First pages replace and reset the home list;
     /// continuation pages append by id while preserving the viewport.
     pub fn set_session_page(
@@ -1679,6 +1796,8 @@ impl NeoismAgentSidePanel {
         next_cursor: Option<String>,
     ) {
         let was_home = matches!(self.mode, SidePanelMode::Sessions);
+        let selected_id = self.selected_session().map(|entry| entry.id.clone());
+        let selected_preview = self.selected_session().is_some_and(|entry| entry.external_preview.is_some());
         if requested_cursor.is_some() {
             let mut known = self
                 .all_sessions
@@ -1699,7 +1818,8 @@ impl NeoismAgentSidePanel {
         self.session_refresh_attempts = 0;
         self.session_catalog_state = SessionCatalogState::Ready;
         self.rebuild_session_display();
-        if was_home && requested_cursor.is_none() {
+        self.restore_selected_session(selected_id.as_deref());
+        if was_home && requested_cursor.is_none() && !selected_preview {
             self.scroll_px = 0.0;
             self.scroll.reset();
             self.cursor_spring.reset();
@@ -1886,9 +2006,17 @@ impl NeoismAgentSidePanel {
         let mut visible: Vec<NeoismAgentSessionEntry> = self
             .all_sessions
             .iter()
+            .chain(self.external_sessions.iter().filter(|entry| {
+                if entry.source_key == self.external_importing_key && self.external_importing_key.is_some() { return false; }
+                !self.all_sessions.iter().any(|stored| {
+                    entry.external_preview.as_ref().and_then(|preview| preview.neoism_session_id.as_deref()) == Some(stored.id.as_str())
+                        || (entry.source_key.is_some() && entry.source_key == stored.source_key)
+                })
+            }))
             .filter(|entry| {
                 needle.is_empty()
                     || entry.title.to_lowercase().contains(&needle)
+                    || (entry.external_preview.is_some() && entry.source.label().to_lowercase().contains(&needle))
                     || semantic.contains_key(entry.id.as_str())
             })
             .cloned()
@@ -2560,7 +2688,7 @@ impl NeoismAgentSidePanel {
     pub fn row_height(&self) -> f32 {
         match self.mode {
             SidePanelMode::Sessions => ROW_HEIGHT,
-            SidePanelMode::Subagents => ROW_HEIGHT * 2.0,
+            SidePanelMode::Subagents => 52.0,
         }
     }
 
@@ -2623,7 +2751,6 @@ impl NeoismAgentSidePanel {
     /// Move the selection cursor onto the search row.
     pub fn focus_search(&mut self) {
         self.search_focused = true;
-        self.back_focused = false;
         self.cursor_spring.reset();
     }
 
@@ -2632,33 +2759,14 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_next(&mut self) {
-        // Leaving the Back affordance drops onto the element directly below
-        // it: the search row in home mode, the first branch in chat mode.
-        if self.back_focused() {
-            self.clear_back_focus();
-            if matches!(self.mode, SidePanelMode::Sessions) {
-                self.focus_search();
-            } else if let Some(first) = self.nearest_selectable(0) {
-                self.selected = first;
-                self.scroll_top = 0;
-                self.scroll_px = 0.0;
-                self.scroll.set_target(0.0);
-                self.cursor_spring.reset();
-            }
-            return;
-        }
         let len = self.active_len();
         if len == 0 {
             return;
         }
-        // Leaving the search row lands on the first session.
         if self.search_focused() {
             self.clear_search_focus();
             if let Some(first) = self.nearest_selectable(0) {
-                self.selected = first;
-                self.scroll_top = 0;
-                self.scroll_px = 0.0;
-                self.scroll.set_target(0.0);
+                self.move_selection_to(first);
             }
             return;
         }
@@ -2668,36 +2776,13 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_prev(&mut self) {
-        if self.back_focused() {
-            return; // already at the top of the panel
-        }
-        // Arrow-up from the search row lands on the Back affordance above it.
-        if self.search_focused() {
-            if self.back_button_rect.is_some() {
-                self.focus_back();
-            }
+        if self.search_focused() || self.active_len() == 0 {
             return;
         }
-        if self.active_len() == 0 {
-            // No selectable rows, but a Back affordance may still be reachable
-            // (e.g. a chat with no sub-agent branches).
-            if self.back_button_rect.is_some() {
-                self.focus_back();
-            }
-            return;
-        }
-        // Arrow-up past the first row lands on the search row (home mode) or
-        // the Back affordance (chat mode).
         match self.step_selectable(self.selected, false) {
             Some(prev) => self.move_selection_to(prev),
-            None if matches!(self.mode, SidePanelMode::Sessions) => {
-                self.focus_search();
-            }
-            None => {
-                if self.back_button_rect.is_some() {
-                    self.focus_back();
-                }
-            }
+            None if matches!(self.mode, SidePanelMode::Sessions) && self.session_search_rect.is_some() => self.focus_search(),
+            None => {}
         }
     }
 
@@ -2709,7 +2794,6 @@ impl NeoismAgentSidePanel {
         // A click selects a real row, so it also leaves the search field and
         // the Back affordance.
         self.search_focused = false;
-        self.back_focused = false;
         // A click may land on a header row; snap to the nearest session.
         let row = self.nearest_selectable(row.min(len - 1)).unwrap_or(0);
         self.move_selection_to(row);
@@ -2909,8 +2993,7 @@ impl NeoismAgentSidePanel {
                 || self.has_active_subagents()
                 || (self.session_hover_target && self.session_hover_scale < 0.998)
                 || (!self.session_hover_target && self.session_hover_scale > 0.002)
-                || self.back_scramble_elapsed_ms().is_some()
-                || self.usage_scramble_elapsed_ms().is_some()
+                        || self.usage_scramble_elapsed_ms().is_some()
     }
 
     /// Map a window-space click to a row index. Returns `None` when
@@ -2932,7 +3015,7 @@ impl NeoismAgentSidePanel {
         // Bounds-check against the visible (clamped) rect, but anchor
         // the row math to the full list's origin so a scrolled list
         // still maps clicks to the right index.
-        if mouse_y < content_y || mouse_y > content_y + content_h {
+        if mouse_y < content_y || mouse_y >= content_y + content_h {
             return None;
         }
         // Home mode scrolls by continuous rows: convert the spring's

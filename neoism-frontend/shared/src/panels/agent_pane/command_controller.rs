@@ -13,7 +13,7 @@ pub enum SlashCommandAction {
     ApplyModel(String),
     OpenModelPicker,
     /// Open the "Connect a provider" flow (provider list → auth method →
-    /// OAuth / API-key entry). Mirrors opencode's `auth login`, but in the GUI.
+    /// OAuth / API-key entry).
     OpenConnectPicker,
     ApplyThinking(String),
     OpenThinkingPicker,

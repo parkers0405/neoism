@@ -707,7 +707,7 @@ fn binding_stage(
     if alt_shift && matches!(named, Some(N::ArrowLeft | N::ArrowRight)) {
         return consumed();
     }
-    // Ctrl+Shift+Alt+arrows → MoveDivider*.
+    // Ctrl+Shift+Alt+Left/Right move workspace tabs; Up/Down resize dividers.
     if ctrl_shift_alt && is_arrow {
         return consumed();
     }

@@ -1,13 +1,6 @@
-//! Right-attached side panel for the agent pane.
-//!
-//! Visual sibling of `editor/file_tree::render` but scoped to the agent
-//! pane's own rect — `view::render` carves a right strip off the pane
-//! and hands it here. Two modes selected by whether the conversation
-//! has started:
-//!
-//! - Home (`!pane.has_conversation()`): list of previous sessions.
-//! - Chat: live session info — agent, model, thinking, streaming
-//!   state, queued prompts, pending permission, usage.
+//! Shared painter for the workspace Conversations chrome panel and the
+//! active Agent chat's optional right-hand detail rail. The catalog is
+//! hosted by Chrome/Renderer and never carved from an Agent tab.
 
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
@@ -15,7 +8,7 @@ use sugarloaf::Sugarloaf;
 use crate::panels::agent_pane::icon::{self as agent_icon, SIDE_PANEL_ICON_PANEL_ID};
 use crate::panels::agent_pane::state::side_panel::{
     BranchActivity, BranchStatus, SessionGoal, FONT_SIZE, FRAME_RADIUS, FRAME_STROKE,
-    ROW_HEIGHT, ROW_PADDING_X, SIDE_PANEL_MIN_PANE_WIDTH,
+    ROW_HEIGHT, ROW_PADDING_X,
 };
 use crate::panels::agent_pane::state::side_panel::{
     NeoismAgentSessionEntry, NeoismAgentSidePanel,
@@ -53,12 +46,19 @@ pub trait AgentSidePanelMessage {
 pub trait AgentSidePanelPane {
     type Message: AgentSidePanelMessage;
 
+    fn session_rename_buffer(&self) -> Option<String>;
     fn side_panel(&self) -> &NeoismAgentSidePanel;
     fn side_panel_mut(&mut self) -> &mut NeoismAgentSidePanel;
+    /// Swap the catalog's navigation state with the independent detail panel.
+    /// Called in pairs around right-side rendering; catalog IO remains on the
+    /// original pane state and is never redirected to the detail panel.
+    fn swap_detail_panel(&mut self);
+    fn prepare_detail_panel(&mut self);
     fn has_conversation(&self) -> bool;
     fn maybe_refresh_side_panel_sessions(&mut self);
     fn maybe_refresh_side_panel_subagents(&mut self);
     fn directory_label(&self) -> String;
+    fn conversation_source(&self) -> crate::panels::agent_pane::state::side_panel::ConversationSource;
     fn agent_label(&self) -> &str;
     fn model(&self) -> &str;
     fn thinking_label(&self) -> &str;
@@ -122,6 +122,10 @@ macro_rules! neoism_ui_impl_agent_side_panel {
         impl $crate::panels::agent_pane::view::side_panel::AgentSidePanelPane for $pane {
             type Message = $message;
 
+            fn session_rename_buffer(&self) -> Option<String> {
+                <$pane>::session_rename_buffer(self)
+            }
+
             fn side_panel(
                 &self,
             ) -> &$crate::panels::agent_pane::state::side_panel::NeoismAgentSidePanel
@@ -134,6 +138,14 @@ macro_rules! neoism_ui_impl_agent_side_panel {
             ) -> &mut $crate::panels::agent_pane::state::side_panel::NeoismAgentSidePanel
             {
                 <$pane>::side_panel_mut(self)
+            }
+
+            fn swap_detail_panel(&mut self) {
+                <$pane>::swap_detail_panel(self);
+            }
+
+            fn prepare_detail_panel(&mut self) {
+                <$pane>::prepare_detail_panel(self);
             }
 
             fn has_conversation(&self) -> bool {
@@ -150,6 +162,10 @@ macro_rules! neoism_ui_impl_agent_side_panel {
 
             fn directory_label(&self) -> String {
                 <$pane>::directory_label(self)
+            }
+
+            fn conversation_source(&self) -> $crate::panels::agent_pane::state::side_panel::ConversationSource {
+                <$pane>::conversation_source(self)
             }
 
             fn agent_label(&self) -> &str {
@@ -219,12 +235,24 @@ impl AgentSidePanelMessage for NeoismAgentMessage {
 impl AgentSidePanelPane for NeoismAgentPane {
     type Message = NeoismAgentMessage;
 
+    fn session_rename_buffer(&self) -> Option<String> {
+        NeoismAgentPane::session_rename_buffer(self)
+    }
+
     fn side_panel(&self) -> &NeoismAgentSidePanel {
         NeoismAgentPane::side_panel(self)
     }
 
     fn side_panel_mut(&mut self) -> &mut NeoismAgentSidePanel {
         NeoismAgentPane::side_panel_mut(self)
+    }
+
+    fn swap_detail_panel(&mut self) {
+        NeoismAgentPane::swap_detail_panel(self);
+    }
+
+    fn prepare_detail_panel(&mut self) {
+        NeoismAgentPane::prepare_detail_panel(self);
     }
 
     fn has_conversation(&self) -> bool {
@@ -241,6 +269,10 @@ impl AgentSidePanelPane for NeoismAgentPane {
 
     fn directory_label(&self) -> String {
         NeoismAgentPane::directory_label(self)
+    }
+
+    fn conversation_source(&self) -> crate::panels::agent_pane::state::side_panel::ConversationSource {
+        self.new_chat_source()
     }
 
     fn agent_label(&self) -> &str {
@@ -273,59 +305,22 @@ impl AgentSidePanelPane for NeoismAgentPane {
     }
 }
 
-/// Used when the agent pane is wider than [`SIDE_PANEL_MIN_PANE_WIDTH`].
-/// Returns the carved-off right strip, or `None` when the pane is too
-/// narrow to host the panel. The remaining width is what the chat /
-/// home views should lay out against.
-pub fn carve_panel_rect<P: AgentSidePanelPane>(
-    pane: &P,
-    rect: [f32; 4],
-    s: f32,
-) -> Option<([f32; 4], [f32; 4])> {
-    if pane.side_panel().user_hidden() {
-        return None;
-    }
-    let [x, y, w, h] = rect;
-    let min_pane = SIDE_PANEL_MIN_PANE_WIDTH * s;
-    if w < min_pane {
-        return None;
-    }
-    let panel_w = pane.side_panel().width() * s;
-    // Don't allow the panel to consume more than ~40% of the pane —
-    // protects the conversation column when the user tugs the window
-    // narrow before we add a manual resize handle.
-    let panel_w = panel_w.min(w * 0.4);
-    let gap = 6.0 * s;
-    let main_w = w - panel_w - gap;
-    if main_w < 220.0 * s {
-        return None;
-    }
-    let main = [x, y, main_w, h];
-    let panel = [x + main[2] + gap, y, panel_w, h];
-    Some((main, panel))
+/// Leave room for a readable chat and a usable detail rail after workspace chrome is laid out.
+const DETAIL_MIN_CHAT_WIDTH: f32 = 520.0;
+const DETAIL_MIN_RAIL_WIDTH: f32 = 200.0;
+const DETAIL_GAP: f32 = 6.0;
+
+pub fn state_detail_min_width(s: f32) -> f32 {
+    (DETAIL_MIN_CHAT_WIDTH + DETAIL_MIN_RAIL_WIDTH + DETAIL_GAP) * s
+}
+
+pub fn detail_rail_width(available_width: f32, preferred_width: f32, s: f32) -> f32 {
+    preferred_width.min((available_width / s - DETAIL_MIN_CHAT_WIDTH - DETAIL_GAP).max(0.0)) * s
 }
 
 /// Web/mobile responsive variant. In narrow takeover mode the panel owns the
 /// full Agent content rect; the returned zero-width main rect is an explicit
 /// signal that timeline/composer paint must be skipped.
-pub fn carve_panel_rect_responsive<P: AgentSidePanelPane>(
-    pane: &P,
-    rect: [f32; 4],
-    s: f32,
-    narrow_takeover: bool,
-) -> Option<([f32; 4], [f32; 4])> {
-    if pane.side_panel().user_hidden() {
-        return None;
-    }
-    if narrow_takeover {
-        return Some(([rect[0], rect[1], 0.0, rect[3]], rect));
-    }
-    carve_panel_rect(pane, rect, s)
-}
-
-// The side-panel open/close control remains pane-local; the top-bar Agent
-// icon is reserved for opening a new Agent tab.
-
 #[allow(clippy::too_many_arguments)]
 pub fn render_side_panel<P: AgentSidePanelPane>(
     sugarloaf: &mut Sugarloaf,
@@ -363,8 +358,9 @@ pub fn render_side_panel_with_icons<P, I>(
     P: AgentSidePanelPane,
     I: AgentSidePanelIconHost,
 {
-    // Every frame starts with no Usage target. Chat-mode rendering registers
-    // it again only when real usage is present; home/narrow views stay clear.
+    let _icons_ready = I::register_agent_icons(sugarloaf);
+    // The catalog has no Usage target. The independent detail rail registers
+    // one only while usage is present.
     pane.side_panel_mut().clear_usage_rect();
     pane.side_panel_mut().clear_session_search_rect();
     let [px, py, pw, ph] = panel_rect;
@@ -404,51 +400,81 @@ pub fn render_side_panel_with_icons<P, I>(
     let content_w = (pw - frame_stroke * 2.0).max(0.0);
     let content_h = (frame_h - frame_stroke).max(0.0);
 
-    // The home/recent-sessions view shows whenever there's no conversation
-    // yet OR the user tapped "← Back" to peek at recent chats while keeping
-    // the live one open (`show_home_override`). Chat mode (session info) is
-    // shown otherwise.
-    let conversation_exists = pane.has_conversation();
-    let show_home = !conversation_exists || pane.side_panel().show_home_override();
-    let mode = if show_home {
-        crate::panels::agent_pane::state::side_panel::SidePanelMode::Sessions
-    } else {
-        crate::panels::agent_pane::state::side_panel::SidePanelMode::Subagents
-    };
-    pane.side_panel_mut().set_mode(mode);
-    let hovered_session = mouse.and_then(|(mx, my)| {
-        show_home
-            .then(|| pane.side_panel().hit_test_row(mx, my, panel_rect))
-            .flatten()
-    });
+    pane.side_panel_mut()
+        .set_mode(crate::panels::agent_pane::state::side_panel::SidePanelMode::Sessions);
+    let hovered_session =
+        mouse.and_then(|(mx, my)| pane.side_panel().hit_test_row(mx, my, panel_rect));
     pane.side_panel_mut()
         .tick_pointer_animations(hovered_session);
 
-    if show_home {
-        render_sessions_list(
-            sugarloaf,
-            pane,
-            [content_x, content_y, content_w, content_h],
-            theme,
-            s,
-            now_seconds,
-            mouse,
-            occlusion_rects,
-            frame_radius - frame_stroke,
-        );
-    } else {
-        render_session_info::<I>(
-            sugarloaf,
-            pane,
-            [content_x, content_y, content_w, content_h],
-            theme,
-            s,
-            now_seconds,
-            mouse,
-            occlusion_rects,
-            frame_radius - frame_stroke,
-        );
-    }
+    render_sessions_list(
+        sugarloaf,
+        pane,
+        [content_x, content_y, content_w, content_h],
+        theme,
+        s,
+        now_seconds,
+        mouse,
+        occlusion_rects,
+        frame_radius - frame_stroke,
+    );
+}
+
+/// Right-hand detail rail. Only called for an active conversation with enough
+/// room after the left catalog and the composer have been laid out.
+#[allow(clippy::too_many_arguments)]
+pub fn render_detail_panel<P: AgentSidePanelPane, I: AgentSidePanelIconHost>(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
+    rect: [f32; 4],
+    theme: &IdeTheme,
+    s: f32,
+    now_seconds: f32,
+    mouse: Option<(f32, f32)>,
+    occlusion_rects: &[[f32; 4]],
+) {
+    pane.maybe_refresh_side_panel_subagents();
+    pane.prepare_detail_panel();
+    pane.swap_detail_panel();
+    let [x, y, w, h] = rect;
+    pane.side_panel_mut()
+        .set_mode(crate::panels::agent_pane::state::side_panel::SidePanelMode::Subagents);
+    pane.side_panel_mut().set_last_panel_rect(rect);
+    pane.side_panel_mut().clear_session_search_rect();
+    pane.side_panel_mut().clear_usage_rect();
+    let stroke = (FRAME_STROKE * s).max(2.0);
+    let radius = FRAME_RADIUS * s;
+    draw_frame(
+        sugarloaf,
+        rect,
+        &FrameConfig {
+            outer_color: theme.f32(theme.surface),
+            inner_color: theme.f32(theme.bg),
+            radius,
+            border_thickness: stroke,
+            rounded_corners: FrameCorners::Top,
+        },
+        DEPTH,
+        ORDER_PANEL,
+        ORDER_PANEL + 1,
+    );
+    render_session_info::<I>(
+        sugarloaf,
+        pane,
+        [
+            x + stroke,
+            y + stroke,
+            (w - 2.0 * stroke).max(0.0),
+            (h - stroke).max(0.0),
+        ],
+        theme,
+        s,
+        now_seconds,
+        mouse,
+        occlusion_rects,
+        radius - stroke,
+    );
+    pane.swap_detail_panel();
 }
 
 pub(crate) mod draw;

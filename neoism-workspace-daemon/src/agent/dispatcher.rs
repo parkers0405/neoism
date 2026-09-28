@@ -28,6 +28,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             model,
             connection_id,
             thinking,
+            external_provider,
         } => {
             tokio::spawn(async move {
                 handle_create_thread(
@@ -38,6 +39,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                     model,
                     connection_id,
                     thinking,
+                    external_provider,
                 )
                 .await;
             });
@@ -82,6 +84,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 // indicator instead of looking idle.
                 push_session_running_state(inner.clone(), session_id.clone()).await;
                 push_runtime_snapshot(inner.clone(), session_id.clone()).await;
+                push_todo_snapshot(inner.clone(), session_id.clone()).await;
                 push_pending_questions(inner.clone(), session_id.clone()).await;
                 push_pending_permissions(inner, session_id).await;
             });
@@ -290,9 +293,9 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_list_mcp(inner, directory).await;
             });
         }
-        AgentClientMessage::McpOauthAuthorize { name, directory } => {
+        AgentClientMessage::McpOauthAuthorize { name, directory, redirect_uri } => {
             tokio::spawn(async move {
-                handle_mcp_oauth_authorize(inner, name, directory).await;
+                handle_mcp_oauth_authorize(inner, name, directory, redirect_uri).await;
             });
         }
         AgentClientMessage::McpSetEnabled {
@@ -304,14 +307,14 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_mcp_set_enabled(inner, name, enabled, directory).await;
             });
         }
-        AgentClientMessage::McpConnect { name, directory } => {
+        AgentClientMessage::McpConnect { name, directory, redirect_uri } => {
             tokio::spawn(async move {
-                handle_mcp_simple_action(inner, name, directory, "connect").await;
+                handle_mcp_simple_action(inner, name, directory, "connect", redirect_uri).await;
             });
         }
         AgentClientMessage::McpDisconnect { name, directory } => {
             tokio::spawn(async move {
-                handle_mcp_simple_action(inner, name, directory, "disconnect").await;
+                handle_mcp_simple_action(inner, name, directory, "disconnect", None).await;
             });
         }
         AgentClientMessage::McpRemoveAuth { name, directory } => {

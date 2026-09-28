@@ -693,6 +693,12 @@ export class ProtocolClient {
     return request_id;
   }
 
+  httpOrigin(): string {
+    const endpoint = new URL(this.options.url, window.location.href);
+    endpoint.protocol = endpoint.protocol === "wss:" ? "https:" : "http:";
+    return endpoint.origin;
+  }
+
   /**
    * Ship a pre-built `AgentClientMessage` envelope. `requestId` is the
    * value the wasm bridge allocated alongside its `agent_send_message`

@@ -10,17 +10,36 @@ pub(crate) async fn update_external_session_metadata(
     let Some(mut child) = state.inner.store.get_session(child_id).await? else {
         return Ok(());
     };
-    child.time.updated = now_millis();
-    child.extra.insert(
-        "externalAgent".to_string(),
-        json!({
-            "runtime": "acp",
-            "provider": runtime.provider_id(),
-            "agent": runtime.agent_name(),
-            "externalSessionId": external_session_id,
-            "status": status,
-        }),
-    );
+    let mut external = child
+        .extra
+        .get("externalAgent")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    external["runtime"] = json!("acp");
+    external["provider"] = json!(runtime.provider_id());
+    external["agent"] = json!(runtime.agent_name());
+    external["externalSessionId"] = json!(external_session_id);
+    external["status"] = json!(status);
+    if child.parent_id.is_none()
+        && external["sourceHost"].is_null()
+        && external["sourceKey"].is_null()
+    {
+        let cwd = crate::windows_process::canonicalize_path(std::path::Path::new(&child.directory))
+            .map_err(|error| ApiError::bad_request(format!("ACP workspace path is unavailable: {error}")))?;
+        let key = super::catalog::source_key_for(
+            runtime,
+            crate::caller::session_tenant(&child),
+            &cwd,
+            external_session_id,
+        )
+        .ok_or_else(|| ApiError::bad_request("ACP workspace path is not UTF-8"))?;
+        external["sourceHost"] = json!(super::catalog::native_host_id());
+        external["sourceKey"] = json!(key);
+    }
+    if child.extra.get("externalAgent") == Some(&external) {
+        return Ok(());
+    }
+    child.extra.insert("externalAgent".to_string(), external);
     state.inner.store.update_session(&child).await?;
     state.publish(EventPayload::new(
         event_type::SESSION_UPDATED,

@@ -85,6 +85,7 @@ Agent settings are nested under `agent`:
 ```jsonc
 {
   "agent": {
+    "default-chat-source": "neoism", // neoism | opencode | claude-code | codex
     "variant": "high",
     "textVerbosity": "low",
     "input-hints": true,
@@ -96,6 +97,8 @@ Agent settings are nested under `agent`:
   },
 }
 ```
+
+`agent.default-chat-source` selects the starting source for new chats (default `neoism`); accepted values are `neoism`, `opencode`, `claude-code`, and `codex`. It does not change `agent.default-agent`, which selects the Neoism agent-server persona (such as `build` or `plan`). The Alt+A blank-chat composer also lets you override the source for that draft without changing this default.
 
 Choose a model through the agent model picker before hard-coding `agent.model`; available identifiers depend on configured providers. A workspace can override the same domain-based schema in `.neoism/config.json`.
 

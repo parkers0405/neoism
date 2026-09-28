@@ -103,6 +103,18 @@ impl GitDiffIo for HostGitIo {
         });
         Ok(())
     }
+    fn fetch(&self, _: &Path) -> Result<(), String> {
+        self.send(Request::Fetch);
+        Ok(())
+    }
+    fn pull(&self, _: &Path) -> Result<(), String> {
+        self.send(Request::Pull);
+        Ok(())
+    }
+    fn push(&self, _: &Path) -> Result<(), String> {
+        self.send(Request::Push);
+        Ok(())
+    }
 }
 
 impl Screen<'_> {

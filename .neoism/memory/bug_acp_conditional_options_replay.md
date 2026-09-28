@@ -1,0 +1,11 @@
+---
+name: "ACP conditional options replay failure"
+description: "OpenCode conditional effort replay and unavailable saved model; live debug app not restarted"
+type: "bug"
+scope: "project"
+origin: "User screenshot plus current debug daemon read-only inspection and real OpenCode ACP temporary session"
+created: "2026-09-24"
+updated: "2026-09-24"
+---
+
+On 2026-09-24 screenshot showed two 400 notices `ACP session no longer advertises a selected config option` after changing model. Read-only GET of the CURRENT debug daemon at 127.0.0.1:34635 (NOT unrelated installed :4096) showed OpenCode root saved `selectedOptions={model:"openrouter/openai/gpt-5.6-sol",effort:"medium"}`, `optionsValid:false`, but snapshot only model `opencode/big-pickle` plus mode. Real `opencode acp` fresh temp session/load exposes model+mode first; after setting configured `openai/gpt-5.6-sol`, effort appears and can be set/replayed to medium. `openrouter/openai/gpt-5.6-sol` was advertised in ACP picker but rejected by real adapter with `Invalid params: model not found`; `opencode models openrouter` reports Provider not found, so cannot claim that chosen ID will work without configuring OpenRouter. Do not silently substitute OpenAI variant. Backend `external_agent/options.rs`: replay must apply saved model before conditional selectors; explicit POST model override must recover from stale saved model and prune no-longer-advertised dependent selections. On failed GET replay return prior confirmed snapshot with `replayError` so native can still open recovery picker, mark values as unverified. Native `pane/external_options.rs` must not discard stale-current-value selection and must not reconcile pending POST against unverified GET. GUI footer in shared `view/user_input.rs` labels stale chips `Choose model`/`Review ...` and prevents false applied-label. Tests use fake ACP with hidden thought until model, invalid model recovery, native stale-picker path; real OpenCode ACP manually exercised with temp provider session, no prompt. Critical: running debug app process was not rebuilt/restarted; code tests/checks passing are NOT live GUI verification. Ask before disrupting user's running app; do not say 'fixed' without exercising new binary.

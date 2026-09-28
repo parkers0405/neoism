@@ -2494,6 +2494,8 @@ async fn execute_run_inner(
             model: projection.definition.model.clone(),
             permission: projection.definition.effective_permission_rules(),
             workspace_id: None,
+            external_provider: None,
+            external_options: None,
         },
         extra,
     )

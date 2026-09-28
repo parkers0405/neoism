@@ -98,6 +98,20 @@ fn file(path: &str) -> BufferTab<()> {
 }
 
 #[test]
+fn agent_tab_source_mark_tracks_route_without_replacing_session_title() {
+    let mut tabs = BufferTabs::<u8>::new();
+    let first = tabs.open_neoism_agent(41);
+    let other = tabs.open_neoism_agent(42);
+    tabs.set_neoism_agent_title(41, "Review changes");
+    assert!(tabs.set_neoism_agent_kind(41, Some(3)));
+    assert_eq!(tabs.tabs()[first].agent_kind, Some(3));
+    assert_eq!(tabs.tabs()[first].title, "Review changes");
+    assert_eq!(tabs.tabs()[other].agent_kind, None);
+    assert!(!tabs.set_neoism_agent_kind(41, Some(3)));
+    assert!(!tabs.set_neoism_agent_kind(999, Some(2)));
+}
+
+#[test]
 fn neoism_agent_tabs_use_short_product_title() {
     let mut tabs = BufferTabs::<()>::new();
 

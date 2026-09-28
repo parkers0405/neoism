@@ -43,6 +43,7 @@ const CHROME_PEER_CAP: usize = 4;
 
 const HAMBURGER_GLYPH: &str = "\u{f0c9}"; // FA bars
 const SEARCH_GLYPH: &str = "\u{f002}"; // FA magnifying-glass — opens the finder
+const CONVERSATIONS_GLYPH: &str = "\u{f0e6}"; // conversations
 const NOTES_GLYPH: &str = "\u{f15c}"; // Same glyph as Markdown files in the tree
 const NEOISM_AGENT_GLYPH: &str = "n"; // Same mark used by Agent buffer tabs.
 const AGENT_PANEL_GLYPH: &str = "\u{eb56}"; // codicon split-horizontal / side panel
@@ -96,6 +97,7 @@ pub enum TopBarAction {
     /// `set_right_button_visible(true)`.
     OpenAgent,
     OpenNotes,
+    ToggleConversations,
     OpenServers,
     OpenSettings,
     OpenWorkspaces,
@@ -227,6 +229,7 @@ pub struct ChromeTopBar {
     panel_btn_rect: Rect,
     menu_btn_rect: Rect,
     notes_btn_rect: Rect,
+    conversations_btn_rect: Rect,
     search_btn_rect: Rect,
     server_btn_rect: Rect,
     right_btn_rect: Rect,
@@ -236,6 +239,7 @@ pub struct ChromeTopBar {
     hover_panel_btn: bool,
     hover_menu_btn: bool,
     hover_notes_btn: bool,
+    hover_conversations_btn: bool,
     hover_search_btn: bool,
     hover_server_btn: bool,
     hover_right_btn: bool,
@@ -271,6 +275,7 @@ impl ChromeTopBar {
             panel_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             notes_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            conversations_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             search_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             server_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             right_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -280,6 +285,7 @@ impl ChromeTopBar {
             hover_panel_btn: false,
             hover_menu_btn: false,
             hover_notes_btn: false,
+            hover_conversations_btn: false,
             hover_search_btn: false,
             hover_server_btn: false,
             hover_right_btn: false,
@@ -475,7 +481,8 @@ impl ChromeTopBar {
         self.menu_btn_rect = Rect::new(left_x, cy, btn, btn);
         self.panel_btn_rect = Rect::new(left_x + btn + gap, cy, btn, btn);
         self.notes_btn_rect = Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn);
-        self.search_btn_rect = Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn);
+        self.conversations_btn_rect = Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn);
+        self.search_btn_rect = Rect::new(left_x + (btn + gap) * 4.0, cy, btn, btn);
         self.server_btn_rect = Rect::new(
             strip.x + strip.w - edge - self.right_safe_inset * scale - btn,
             cy,
@@ -563,6 +570,7 @@ impl ChromeTopBar {
             || self.menu_btn_rect.contains(x, y)
             || self.search_btn_rect.contains(x, y)
             || self.notes_btn_rect.contains(x, y)
+            || self.conversations_btn_rect.contains(x, y)
             || self.server_btn_rect.contains(x, y)
             || (self.right_button_visible && self.right_btn_rect.contains(x, y))
             || (self.mobile_agent_panel_button_visible
@@ -579,6 +587,7 @@ impl ChromeTopBar {
         self.hover_menu_btn = self.menu_btn_rect.contains(x, y);
         self.hover_search_btn = self.search_btn_rect.contains(x, y);
         self.hover_notes_btn = self.notes_btn_rect.contains(x, y);
+        self.hover_conversations_btn = self.conversations_btn_rect.contains(x, y);
         self.hover_server_btn = self.server_btn_rect.contains(x, y);
         self.hover_right_btn =
             self.right_button_visible && self.right_btn_rect.contains(x, y);
@@ -607,6 +616,11 @@ impl ChromeTopBar {
         }
         if self.search_btn_rect.contains(x, y) {
             self.pending_action = Some(TopBarAction::OpenSearch);
+            self.menu_open = false;
+            return true;
+        }
+        if self.conversations_btn_rect.contains(x, y) {
+            self.pending_action = Some(TopBarAction::ToggleConversations);
             self.menu_open = false;
             return true;
         }
@@ -715,6 +729,14 @@ impl ChromeTopBar {
             self.notes_btn_rect,
             NOTES_GLYPH,
             self.hover_notes_btn,
+            None,
+            theme,
+        );
+        self.draw_icon_button(
+            sugarloaf,
+            self.conversations_btn_rect,
+            CONVERSATIONS_GLYPH,
+            self.hover_conversations_btn,
             None,
             theme,
         );
@@ -1273,8 +1295,18 @@ mod tests {
         paint_strip(&mut bar, strip);
         assert_eq!(
             bar.notes_btn_rect.x + bar.notes_btn_rect.w + BTN_GAP,
-            bar.search_btn_rect.x
+            bar.conversations_btn_rect.x,
         );
+        assert_eq!(
+            bar.conversations_btn_rect.x + bar.conversations_btn_rect.w + BTN_GAP,
+            bar.search_btn_rect.x,
+        );
+        let conversations = bar.conversations_btn_rect;
+        bar.handle_pointer_down(
+            conversations.x + conversations.w * 0.5,
+            conversations.y + conversations.h * 0.5,
+        );
+        assert_eq!(bar.take_action(), Some(TopBarAction::ToggleConversations));
         let btn = bar.notes_btn_rect;
         bar.handle_pointer_down(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5);
         assert_eq!(bar.take_action(), Some(TopBarAction::OpenNotes));

@@ -54,8 +54,10 @@ impl AcpServerConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum AcpEvent {
+    /// Ordered fence: all updates queued before this have been applied.
+    Barrier(oneshot::Sender<()>),
     Started {
         server_id: String,
         name: String,
@@ -101,6 +103,20 @@ pub(crate) struct AcpClient {
     write_tx: mpsc::UnboundedSender<Value>,
     pending: PendingMap,
     next_request_id: Arc<AtomicU64>,
+    // Last client clone disappearing terminates the adapter even on abort.
+    _lifetime: Arc<AcpLifetime>,
+    event_tx: mpsc::UnboundedSender<AcpEvent>,
+}
+
+struct AcpLifetime(Mutex<Option<oneshot::Sender<()>>>);
+impl Drop for AcpLifetime {
+    fn drop(&mut self) {
+        if let Ok(slot) = self.0.get_mut() {
+            if let Some(tx) = slot.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
 }
 
 impl AcpClient {
@@ -139,11 +155,14 @@ impl AcpClient {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let pending = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let client = Self {
             server_id: config.id.clone(),
             write_tx,
             pending: pending.clone(),
             next_request_id: Arc::new(AtomicU64::new(1)),
+            _lifetime: Arc::new(AcpLifetime(Mutex::new(Some(shutdown_tx)))),
+            event_tx: event_tx.clone(),
         };
 
         let _ = event_tx.send(AcpEvent::Started {
@@ -154,7 +173,7 @@ impl AcpClient {
         spawn_writer(config.id.clone(), stdin, write_rx, event_tx.clone());
         spawn_reader(config.id.clone(), stdout, pending.clone(), event_tx.clone());
         spawn_stderr(config.id.clone(), stderr, event_tx.clone());
-        spawn_waiter(config.id, child, pending, event_tx);
+        spawn_waiter(config.id, child, pending, event_tx, shutdown_rx);
 
         Ok((client, event_rx))
     }
@@ -257,6 +276,13 @@ impl AcpClient {
         self.write_tx
             .send(message)
             .map_err(|err| format!("ACP write queue closed: {err}"))
+    }
+
+    pub(crate) async fn drain_events(&self) {
+        let (tx, rx) = oneshot::channel();
+        if self.event_tx.send(AcpEvent::Barrier(tx)).is_ok() {
+            let _ = rx.await;
+        }
     }
 
     pub(crate) fn server_id(&self) -> &str {
@@ -426,14 +452,22 @@ fn spawn_waiter(
     mut child: tokio::process::Child,
     pending: PendingMap,
     event_tx: mpsc::UnboundedSender<AcpEvent>,
+    shutdown: oneshot::Receiver<()>,
 ) {
     tokio::spawn(async move {
-        let status = child.wait().await.ok().and_then(|status| status.code());
+        let status = tokio::select! {
+            result = child.wait() => result.ok().and_then(|status| status.code()),
+            _ = shutdown => {
+                crate::tool::process::kill_process_group(child.id());
+                let _ = child.kill().await;
+                child.wait().await.ok().and_then(|status| status.code())
+            }
+        };
         let mut pending = pending.lock().await;
         for (_, tx) in pending.drain() {
             let _ = tx.send(Err(AcpRpcError {
                 code: -32000,
-                message: "ACP server exited".to_string(),
+                message: format!("ACP server exited (status {status:?}); check adapter installation and runtime requirements"),
             }));
         }
         drop(pending);
@@ -915,5 +949,75 @@ fn normalize_terminal_cwd(workspace: &Path, cwd: &Path) -> Result<PathBuf, AcpRp
                 cwd.display()
             ),
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lifetime_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn event_barrier_drains_updates_before_success_response() {
+        let update = json!({"jsonrpc":"2.0", "method":"session/update", "params":{
+            "sessionId":"sess", "update":{"sessionUpdate":"agent_message_chunk", "content":{"text":"final"}}
+        }}).to_string();
+        let response =
+            json!({"jsonrpc":"2.0", "id":1, "result":{"stopReason":"end_turn"}})
+                .to_string();
+        let script =
+            format!("read line; printf '%s\\n' '{update}' '{response}'; read line");
+        let config =
+            AcpServerConfig::new("mock", "Mock", "/bin/sh", std::env::temp_dir())
+                .args(["-c", &script]);
+        let (client, mut events) = AcpClient::spawn(config).unwrap();
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let seen = updates.clone();
+        let handler = tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                match event {
+                    AcpEvent::SessionUpdate { update, .. } => {
+                        seen.lock().unwrap().push(update)
+                    }
+                    AcpEvent::Barrier(reply) => {
+                        let _ = reply.send(());
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let response = client
+            .request("session/prompt", json!({}), Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(response["stopReason"], "end_turn");
+        tokio::time::timeout(Duration::from_secs(2), client.drain_events())
+            .await
+            .unwrap();
+        assert_eq!(updates.lock().unwrap()[0]["content"]["text"], "final");
+        handler.abort();
+    }
+
+    #[tokio::test]
+    async fn dropping_last_client_terminates_adapter_process() {
+        let config =
+            AcpServerConfig::new("test", "Test", "/bin/sh", std::env::temp_dir())
+                .args(["-c", "sleep 30"]);
+        let (client, mut events) = AcpClient::spawn(config).unwrap();
+        let pid = match events.recv().await.unwrap() {
+            AcpEvent::Started { pid: Some(pid), .. } => pid,
+            _ => panic!("expected ACP process"),
+        };
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, AcpEvent::Exited { .. }) {
+                    return;
+                }
+            }
+            panic!("no exit event");
+        })
+        .await
+        .expect("client drop must stop process");
+        assert_ne!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
     }
 }

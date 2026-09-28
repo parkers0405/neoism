@@ -116,6 +116,10 @@ impl NeoismAgentPane {
                 return;
             }
         }
+        if self.new_chat_source.provider().is_some() {
+            self.insert_text(&text);
+            return;
+        }
         if let Some(path) = self.pasted_attachment_path(&text) {
             if self.attach_path(&path) {
                 return;
@@ -135,7 +139,7 @@ impl NeoismAgentPane {
     /// [`Self::attach_file_bytes`] / [`Self::attach_clipboard_image`]
     /// instead.
     pub fn attach_path(&mut self, path: &std::path::Path) -> bool {
-        if self.is_subagent_session() {
+        if self.new_chat_source.provider().is_some() || self.is_subagent_session() {
             return false;
         }
         if path.is_dir() {
@@ -207,7 +211,7 @@ impl NeoismAgentPane {
     ) -> bool {
         use base64::Engine as _;
 
-        if self.is_subagent_session() || bytes.is_empty() {
+        if self.new_chat_source.provider().is_some() || self.is_subagent_session() || bytes.is_empty() {
             return false;
         }
         if bytes.len() as u64 > MAX_INLINE_ATTACHMENT_BYTES {
@@ -420,6 +424,7 @@ impl NeoismAgentPane {
     }
 
     pub fn toggle_mode(&mut self) {
+        if self.new_chat_source.provider().is_some() { return; }
         let next = match self.mode {
             NeoismAgentMode::Build => "plan",
             NeoismAgentMode::Plan => "build",

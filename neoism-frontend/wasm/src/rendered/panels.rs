@@ -88,6 +88,21 @@ impl GitDiffIo for DaemonGitDiffIo {
         });
         Ok(())
     }
+
+    fn fetch(&self, _repo_root: &Path) -> Result<(), String> {
+        self.fire(&GitClientMessage::Fetch);
+        Ok(())
+    }
+
+    fn pull(&self, _repo_root: &Path) -> Result<(), String> {
+        self.fire(&GitClientMessage::Pull);
+        Ok(())
+    }
+
+    fn push(&self, _repo_root: &Path) -> Result<(), String> {
+        self.fire(&GitClientMessage::Push);
+        Ok(())
+    }
 }
 
 /// Map a wire status tag (either the legacy `GitFileStatus` spelling

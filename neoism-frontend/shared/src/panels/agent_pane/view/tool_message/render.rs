@@ -803,9 +803,8 @@ mod tests {
     }
 }
 
-/// Render the LSP diagnostics footer beneath a diff card (opencode's
-/// diff-then-diagnostics layout): errors in red, warnings/info muted. Returns the
-/// vertical space consumed so the caller can advance past it.
+/// Render the LSP diagnostics footer beneath a diff card: errors in red,
+/// warnings/info muted. Returns the height consumed for the next element.
 #[allow(clippy::too_many_arguments)]
 fn render_diff_card_diagnostics(
     sugarloaf: &mut Sugarloaf,

@@ -225,6 +225,19 @@ impl<A> BufferTabs<A> {
         }
     }
 
+    /// Keep the tab's route while switching its visual provider mark.
+    pub fn set_neoism_agent_kind(&mut self, route_id: usize, kind: Option<A>) -> bool
+    where A: PartialEq,
+    {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.neoism_agent_route_id == Some(route_id)) else {
+            return false;
+        };
+        if tab.agent_kind == kind { return false; }
+        tab.agent_kind = kind;
+        self.layout.clear();
+        true
+    }
+
     /// Update the session label without changing the route identity.
     pub fn set_neoism_agent_title(&mut self, route_id: usize, title: &str) -> bool {
         let Some(ix) = self

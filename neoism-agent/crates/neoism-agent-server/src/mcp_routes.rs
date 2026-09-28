@@ -141,20 +141,33 @@ pub(crate) async fn mcp_config_patch(
         })
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct McpAuthStartQuery {
+    pub directory: Option<String>,
+    #[serde(rename = "redirectUri")]
+    pub redirect_uri: Option<String>,
+}
+
 pub(crate) async fn mcp_auth_start(
     State(state): State<AppState>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
     Path(name): Path<String>,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<McpAuthStartQuery>,
     headers: HeaderMap,
 ) -> Result<Json<McpAuthStartResponse>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
-        mcp::auth_start_with_config(&plugins.config().mcp, &directory, &name, &store)
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?,
+        mcp::auth_start_with_config(
+            &plugins.config().mcp,
+            &directory,
+            &name,
+            &store,
+            query.redirect_uri.as_deref(),
+        )
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
 }
 

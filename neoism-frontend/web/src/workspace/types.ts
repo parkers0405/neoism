@@ -1070,6 +1070,8 @@ export interface ThreadSummary {
   directory?: string | null;
   model?: string | null;
   agent?: string | null;
+  /** Root-only source copied from extra.externalAgent.provider by the daemon. */
+  external_provider?: "opencode" | "claude" | "codex" | null;
   updated_at?: number;
   message_count?: number;
   busy?: boolean;
@@ -1134,6 +1136,7 @@ export type AgentClientMessage =
         directory?: string | null;
         agent?: string | null;
         model?: string | null;
+        external_provider?: "opencode" | "claude" | "codex" | null;
       };
     }
   | { SwitchThread: { session_id: string } }
@@ -1409,6 +1412,8 @@ export type AgentServerMessage =
         reason?: string | null;
       };
     }
+  | { ConnectOauthUrl: { url: string; auto: boolean; instructions: string; attempt_id?: string | null } }
+  | { McpOauthUrl: { name: string; url: string } }
   | "Pong";
 
 export interface AgentEnvelope {

@@ -148,7 +148,7 @@ const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(2);
 /// return promptly: we pull diagnostics (fast) when the server supports it, and
 /// otherwise wait only briefly for a `publishDiagnostics` push. Slow flycheck
 /// errors (rust-analyzer's `cargo check`) land in the cache and surface on the
-/// next tool call — matching opencode's eventually-consistent diagnostics.
+/// next tool call; diagnostics are eventually consistent.
 const TOUCH_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_millis(600);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const IGNORED_DIRS: &[&str] = &[
@@ -1582,9 +1582,8 @@ pub fn cached_diagnostics(
 }
 
 /// Snapshot of every file the language servers have published diagnostics for,
-/// limited to the given workspace. Mirrors opencode's `lsp.diagnostics()` record
-/// of all known diagnostics (we never spawn a server here — it only reads the
-/// cache that prior touch/diagnostics queries populated).
+/// limited to the given workspace. Only reads the cache populated by prior
+/// touch/diagnostics queries; it never starts a server.
 pub fn cached_project_diagnostics(
     runtime: &LspRuntime,
     directory: impl AsRef<Path>,

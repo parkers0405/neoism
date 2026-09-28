@@ -31,7 +31,7 @@ Mouse clicks focus panels through the same focus model. Modal overlays capture i
 | `Ctrl+Alt+Arrow` | same | Resize split |
 | `Ctrl+Shift+N` | `Cmd+N` | New window |
 
-Use `Alt+Shift+Left/Right` to move the active tab. Platform conventions apply to font zoom, fullscreen, copy, paste, and settings.
+Use `Alt+Shift+Left/Right` to move the active buffer tab, or `Ctrl+Alt+Shift+Left/Right` to move the active top-level workspace tab. Platform conventions apply to font zoom, fullscreen, copy, paste, and settings.
 
 ## Customize bindings
 

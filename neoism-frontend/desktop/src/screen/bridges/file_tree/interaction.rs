@@ -82,6 +82,10 @@ impl Screen<'_> {
             tree.set_visible(decision.visible);
             tree.set_focused(decision.focused);
         }
+        if decision.focused {
+            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+            self.renderer.notes_sidebar.set_focused(false);
+        }
         if decision.refresh_workspace_root {
             // Opening the tree adopts the active workspace root. For a
             // terminal this is OSC 7 cwd; for an editor this is nvim's

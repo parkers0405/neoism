@@ -3,6 +3,7 @@ use super::*;
 pub(crate) struct AcpEventContext {
     pub(crate) state: AppState,
     pub(crate) child_id: String,
+    pub(crate) external_session_id: String,
     pub(crate) assistant_id: Id,
     pub(crate) text_part_id: Id,
     pub(crate) live_message: Arc<tokio::sync::Mutex<MessageWithParts>>,
@@ -18,6 +19,9 @@ pub(crate) struct AcpEventContext {
 pub(crate) async fn handle_acp_events(mut ctx: AcpEventContext) {
     while let Some(event) = ctx.events.recv().await {
         match event {
+            AcpEvent::Barrier(tx) => {
+                let _ = tx.send(());
+            }
             AcpEvent::Started {
                 server_id,
                 name,
@@ -100,14 +104,55 @@ pub(crate) async fn handle_acp_events(mut ctx: AcpEventContext) {
 
 async fn handle_acp_session_update(
     ctx: &AcpEventContext,
-    _external_session_id: &str,
+    external_session_id: &str,
     update: Value,
 ) -> Result<(), ApiError> {
+    if external_session_id != ctx.external_session_id {
+        return Ok(());
+    }
     let kind = update
         .get("sessionUpdate")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if std::env::var_os("NEOISM_ACP_EVENT_KIND_LOG").is_some() {
+        let logged_kind = match kind {
+            "user_message_chunk" => "user_message_chunk",
+            "agent_message_chunk" => "agent_message_chunk",
+            "agent_thought_chunk" => "agent_thought_chunk",
+            "tool_call" => "tool_call",
+            "tool_call_update" => "tool_call_update",
+            "plan" => "plan",
+            "status" => "status",
+            "config_option_update" => "config_option_update",
+            _ => "other",
+        };
+        let has_message_id = update.get("messageId").and_then(|value| value.as_str());
+        let repeats_user_id = if let Some(id) = has_message_id {
+            ctx.collector.lock().await.user_chunks.contains_key(id)
+        } else {
+            false
+        };
+        tracing::info!(target: "neoism_agent::external", provider = ctx.runtime.provider_id(), kind = logged_kind,
+            has_message_id = has_message_id.is_some(), repeats_user_id,
+            chunk_bytes = update["content"]["text"].as_str().map(str::len).unwrap_or(0),
+            has_phase = update["_meta"]["codex"]["phase"].as_str().is_some(),
+            "ACP update shape (text and opaque IDs omitted)");
+    }
     match kind {
+        "user_message_chunk" => {
+            if let (Some(id), Some(text)) = (
+                update["messageId"].as_str(),
+                update["content"]["text"].as_str(),
+            ) {
+                let mut collector = ctx.collector.lock().await;
+                if collector.user_chunks.len() < 32 && text.len() <= 16_384 {
+                    let chunk = collector.user_chunks.entry(id.to_owned()).or_default();
+                    if chunk.len() + text.len() <= 16_384 {
+                        chunk.push_str(text);
+                    }
+                }
+            }
+        }
         "agent_message_chunk" => {
             let delta = update
                 .get("content")
@@ -119,6 +164,13 @@ async fn handle_acp_session_update(
             }
             {
                 let mut collector = ctx.collector.lock().await;
+                // Pinned adapters give user and assistant turns distinct stable
+                // message IDs. Only suppress an exact prompt echo mislabeled
+                // as an assistant chunk with the *same user message ID*.
+                if echo_of_user_chunk(&mut collector, update["messageId"].as_str(), delta)
+                {
+                    return Ok(());
+                }
                 collector.text.push_str(delta);
             }
             let mut message = ctx.live_message.lock().await;
@@ -142,18 +194,192 @@ async fn handle_acp_session_update(
                 .await?;
         }
         "usage_update" => {
-            if let Some(usage) = update.get("usage") {
-                ctx.collector.lock().await.usage.merge_usage(usage);
+            if let Some(usage) = update.get("usage").filter(|value| value.is_object()) {
+                let tokens = {
+                    let mut collector = ctx.collector.lock().await;
+                    collector.usage.merge_usage(usage);
+                    collector.usage_seen = true;
+                    collector.usage.tokens()
+                };
+                project_acp_usage(&ctx.state, &ctx.child_id, &ctx.live_message, tokens)
+                    .await?;
             }
             update_external_activity(&ctx.state, &ctx.child_id, ctx.runtime, update)
                 .await?;
         }
-        "plan" | "status" => {
+        "available_commands_update" => {
+            super::options::apply_commands(
+                &ctx.state,
+                &ctx.child_id,
+                external_session_id,
+                &update,
+            )
+            .await?;
+        }
+        "config_option_update" => {
+            if let Err(error) =
+                super::options::apply_notification(&ctx.state, &ctx.child_id, &update)
+                    .await
+            {
+                ctx.collector.lock().await.config_error = Some(error.to_string());
+                return Err(error);
+            }
+        }
+        "plan" => {
+            // ACP plan entries are a structured snapshot, not a status string.
+            // Persist them before publishing the same todo event Neoism uses.
+            project_external_plan(&ctx.state, &ctx.child_id, &update).await?;
+            update_external_activity(&ctx.state, &ctx.child_id, ctx.runtime, update)
+                .await?;
+        }
+        "status" => {
             update_external_activity(&ctx.state, &ctx.child_id, ctx.runtime, update)
                 .await?;
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// A message.updated snapshot is already understood by the GUI. While the
+/// turn is running its `time.completed` stays null; the tokens are observed
+/// usage, not a claim that the turn has finished.
+pub(crate) async fn project_acp_usage(
+    state: &AppState,
+    session_id: &str,
+    live_message: &Arc<tokio::sync::Mutex<MessageWithParts>>,
+    tokens: TokenUsage,
+) -> Result<(), ApiError> {
+    let mut message = live_message.lock().await;
+    if let MessageInfo::Assistant(info) = &mut message.info {
+        info.tokens = tokens;
+    }
+    state
+        .inner
+        .store
+        .update_message(session_id, &message)
+        .await?;
+    state.publish(EventPayload::new(
+        event_type::MESSAGE_UPDATED,
+        json!({ "sessionID": session_id, "info": message.info }),
+    ));
+    Ok(())
+}
+
+fn echo_of_user_chunk(
+    collector: &mut AcpRunCollector,
+    message_id: Option<&str>,
+    delta: &str,
+) -> bool {
+    let Some(message_id) = message_id else {
+        return false;
+    };
+    if !collector.text.is_empty() {
+        return false;
+    }
+    if collector
+        .user_chunks
+        .get(message_id)
+        .is_some_and(|user| user == delta)
+    {
+        collector.user_chunks.remove(message_id);
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod echo_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_echo_requires_same_stable_id_not_just_identical_text() {
+        let mut collector = AcpRunCollector::default();
+        collector.user_chunks.insert("user-1".into(), "hey".into());
+        assert!(!echo_of_user_chunk(
+            &mut collector,
+            Some("assistant-1"),
+            "hey"
+        ));
+        assert!(!echo_of_user_chunk(&mut collector, None, "hey"));
+        assert!(!echo_of_user_chunk(
+            &mut collector,
+            Some("user-1"),
+            "different response"
+        ));
+        assert!(echo_of_user_chunk(&mut collector, Some("user-1"), "hey"));
+        assert!(!echo_of_user_chunk(&mut collector, Some("user-1"), "hey"));
+        collector.text.push_str("already responding");
+        collector.user_chunks.insert("user-2".into(), "hey".into());
+        assert!(!echo_of_user_chunk(&mut collector, Some("user-2"), "hey"));
+    }
+}
+
+/// ACP `plan` is a replacement snapshot. Reject malformed snapshots in full
+/// instead of silently dropping entries or inventing tasks from status text.
+fn structured_plan_todos(update: &Value) -> Option<Vec<neoism_agent_core::TodoInfo>> {
+    if update.get("sessionUpdate")?.as_str()? != "plan" {
+        return None;
+    }
+    let entries = update.get("entries")?.as_array()?;
+    entries
+        .iter()
+        .map(|entry| {
+            let content = entry.get("content")?.as_str()?;
+            let status = entry.get("status")?.as_str()?;
+            let priority = entry.get("priority")?.as_str()?;
+            if content.trim().is_empty()
+                || !matches!(status, "pending" | "in_progress" | "completed")
+                || !matches!(priority, "high" | "medium" | "low")
+            {
+                return None;
+            }
+            Some(neoism_agent_core::TodoInfo {
+                content: content.to_owned(),
+                status: status.to_owned(),
+                priority: priority.to_owned(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) async fn project_external_plan(
+    state: &AppState,
+    session_id: &str,
+    update: &Value,
+) -> Result<(), ApiError> {
+    let Some(todos) = structured_plan_todos(update) else {
+        return Ok(());
+    };
+    let Some(mut session) = state.inner.store.get_session(session_id).await? else {
+        return Ok(());
+    };
+    // The same projection applies to an ACP root and a child, without
+    // replacing the child's existing externalAgent activity/task metadata.
+    let Some(mut external) = session.extra.get("externalAgent").cloned() else {
+        return Ok(());
+    };
+    if external.get("runtime").and_then(Value::as_str) != Some("acp") {
+        return Ok(());
+    }
+    let value = json!(todos);
+    if external.get("planTodos") == Some(&value) {
+        return Ok(());
+    }
+    external["planTodos"] = value;
+    session.extra.insert("externalAgent".into(), external);
+    session.time.updated = now_millis();
+    state.inner.store.update_session(&session).await?;
+    state
+        .inner
+        .todos
+        .write()
+        .await
+        .insert(session_id.to_owned(), todos.clone());
+    state.publish(EventPayload::new(
+        event_type::TODO_UPDATED,
+        json!({ "sessionID": session_id, "todos": todos }),
+    ));
     Ok(())
 }
 
@@ -193,7 +419,13 @@ async fn update_external_tool_part(
         .cloned();
     let nested_session_id = if existing_nested_session_id.is_some() {
         existing_nested_session_id
-    } else if is_external_nested_agent_tool(&update, &input) {
+    } else if update
+        .get("toolCallId")
+        .or_else(|| update.get("toolCallID"))
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+        && is_external_nested_agent_tool(&update, &input)
+    {
         Some(
             ensure_nested_external_session(ctx, &tool_call_id, &tool_title, &input)
                 .await?,
@@ -327,28 +559,27 @@ async fn update_external_tool_part(
         ctx.state.publish_live(event);
     }
     if let Some((nested_id, status, output)) = finished_nested {
-        finish_nested_external_session(ctx, &nested_id, &status, &output).await?;
+        finish_nested_external_session(
+            &ctx.state,
+            ctx.runtime,
+            &nested_id,
+            &status,
+            &output,
+        )
+        .await?;
     }
     Ok(())
 }
 
 pub(crate) fn is_external_nested_agent_tool(update: &Value, input: &Value) -> bool {
-    let kind = update
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if kind == "think" && input.get("prompt").and_then(Value::as_str).is_some() {
-        return true;
-    }
-    let title = update
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    // A thought/plan or a tool's free-form title is not evidence of a
+    // separate agent. Only explicit task-tool input may create a child.
+    let _ = update;
     input.get("prompt").and_then(Value::as_str).is_some()
-        && (title == "task"
-            || title.contains("agent")
-            || input.get("subagent_type").is_some())
+        && input
+            .get("subagent_type")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
 }
 
 async fn ensure_nested_external_session(
@@ -432,6 +663,7 @@ async fn ensure_nested_external_session(
         prompt,
         ctx.runtime,
         &model,
+        None,
     )
     .await?;
     ctx.collector
@@ -442,94 +674,155 @@ async fn ensure_nested_external_session(
     Ok(child_id.to_string())
 }
 
-async fn finish_nested_external_session(
-    ctx: &AcpEventContext,
+pub(crate) async fn finish_nested_external_session(
+    state: &AppState,
+    runtime: ExternalRuntime,
     nested_id: &str,
     status: &str,
     output: &str,
 ) -> Result<(), ApiError> {
-    let Some(mut child) = ctx.state.inner.store.get_session(nested_id).await? else {
+    let Some(mut child) = state.inner.store.get_session(nested_id).await? else {
         return Ok(());
     };
-    let messages = ctx.state.inner.store.list_messages(nested_id).await?;
-    if messages
-        .iter()
-        .any(|message| matches!(message.info, MessageInfo::Assistant(_)))
+    let messages = state.inner.store.list_messages(nested_id).await?;
+    if child.extra["externalAgent"]["status"]
+        .as_str()
+        .is_some_and(|value| value != "running")
     {
         return Ok(());
     }
-    let parent_id = messages
-        .iter()
-        .rev()
-        .find_map(|message| match &message.info {
-            MessageInfo::User(user) => Some(user.id.clone()),
-            MessageInfo::Assistant(_) => None,
-        });
-    let Some(parent_id) = parent_id else {
-        return Ok(());
-    };
     let now = now_millis();
-    let message_id = Id::ascending(IdKind::Message);
-    let part = Part::Text(TextPart {
-        id: Id::ascending(IdKind::Part),
-        session_id: child.id.clone(),
-        message_id: message_id.clone(),
-        text: output.to_string(),
-        synthetic: None,
-        time: None,
-    });
-    let error = (status == "error").then(|| json!({ "message": output }));
-    let message = MessageWithParts {
-        info: MessageInfo::Assistant(AssistantMessage {
-            id: message_id.clone(),
+    if !messages
+        .iter()
+        .any(|message| matches!(message.info, MessageInfo::Assistant(_)))
+    {
+        let parent_id = messages
+            .iter()
+            .rev()
+            .find_map(|message| match &message.info {
+                MessageInfo::User(user) => Some(user.id.clone()),
+                MessageInfo::Assistant(_) => None,
+            });
+        let Some(parent_id) = parent_id else {
+            return Ok(());
+        };
+        let message_id = Id::ascending(IdKind::Message);
+        let part = Part::Text(TextPart {
+            id: Id::ascending(IdKind::Part),
             session_id: child.id.clone(),
-            time: CompletedTime {
-                created: now,
-                streamed: Some(now),
-                completed: Some(now),
-            },
-            parent_id,
-            mode: "build".to_string(),
-            agent: child
-                .agent
-                .clone()
-                .unwrap_or_else(|| ctx.runtime.agent_name().to_string()),
-            path: AssistantPath {
-                cwd: child.directory.clone(),
-                root: child.directory.clone(),
-            },
-            cost: 0.0,
-            tokens: TokenUsage::default(),
-            model_id: ctx.runtime.provider_id().to_string(),
-            provider_id: "external".to_string(),
-            finish: Some(status.to_string()),
-            error,
-        }),
-        parts: vec![part.clone()],
-    };
-    ctx.state
-        .inner
-        .store
-        .append_message(child.id.as_str(), &message)
-        .await?;
+            message_id: message_id.clone(),
+            text: output.to_string(),
+            synthetic: None,
+            time: None,
+        });
+        let error = (status != "completed").then(
+            || json!({ "message": output, "interrupted": status == "interrupted" }),
+        );
+        let message = MessageWithParts {
+            info: MessageInfo::Assistant(AssistantMessage {
+                id: message_id.clone(),
+                session_id: child.id.clone(),
+                time: CompletedTime {
+                    created: now,
+                    streamed: Some(now),
+                    completed: Some(now),
+                },
+                parent_id,
+                mode: "build".to_string(),
+                agent: child
+                    .agent
+                    .clone()
+                    .unwrap_or_else(|| runtime.agent_name().to_string()),
+                path: AssistantPath {
+                    cwd: child.directory.clone(),
+                    root: child.directory.clone(),
+                },
+                cost: 0.0,
+                tokens: TokenUsage::default(),
+                model_id: runtime.provider_id().to_string(),
+                provider_id: "external".to_string(),
+                finish: Some(status.to_string()),
+                error,
+            }),
+            parts: vec![part.clone()],
+        };
+        state
+            .inner
+            .store
+            .append_message(child.id.as_str(), &message)
+            .await?;
+        state.publish(EventPayload::new(
+            event_type::MESSAGE_UPDATED,
+            json!({ "sessionID": child.id, "info": message.info }),
+        ));
+        state.publish(EventPayload::new(
+            event_type::MESSAGE_PART_UPDATED,
+            json!({ "sessionID": child.id, "part": part, "time": now }),
+        ));
+    }
     child.time.updated = now;
     if let Some(external) = child.extra.get_mut("externalAgent") {
         external["status"] = json!(status);
         external["lastActivityAt"] = json!(now);
     }
-    ctx.state.inner.store.update_session(&child).await?;
-    ctx.state.publish(EventPayload::new(
-        event_type::MESSAGE_UPDATED,
-        json!({ "sessionID": child.id, "info": message.info }),
-    ));
-    ctx.state.publish(EventPayload::new(
-        event_type::MESSAGE_PART_UPDATED,
-        json!({ "sessionID": child.id, "part": part, "time": now }),
-    ));
-    ctx.state.publish(EventPayload::new(
+    state.inner.store.update_session(&child).await?;
+    state.publish(EventPayload::new(
         event_type::SESSION_UPDATED,
         json!({ "sessionID": child.id, "info": child }),
     ));
+    Ok(())
+}
+
+pub(crate) async fn reconcile_interrupted_nested_sessions(
+    state: &AppState,
+) -> Result<(), ApiError> {
+    for child in state.inner.store.list_sessions().await? {
+        let Some(external) = child.extra.get("externalAgent") else {
+            continue;
+        };
+        if external["runtime"] != "acp"
+            || external["nested"] != true
+            || external["status"] != "running"
+        {
+            continue;
+        }
+        let Some(parent_id) = child.parent_id.as_ref() else {
+            continue;
+        };
+        if session_is_running(state, parent_id.as_str()).await {
+            continue;
+        }
+        let Some(runtime) = external["provider"]
+            .as_str()
+            .and_then(ExternalRuntime::resolve)
+        else {
+            continue;
+        };
+        let messages = state.inner.store.list_messages(child.id.as_str()).await?;
+        let status = messages
+            .iter()
+            .find_map(|message| match &message.info {
+                MessageInfo::Assistant(assistant)
+                    if assistant.time.completed.is_some() =>
+                {
+                    Some(if assistant.error.is_some() {
+                        "error"
+                    } else {
+                        "completed"
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or("interrupted");
+        finish_nested_external_session(
+            state,
+            runtime,
+            child.id.as_str(),
+            status,
+            "ACP task was interrupted before completion",
+        )
+        .await?;
+    }
     Ok(())
 }
 

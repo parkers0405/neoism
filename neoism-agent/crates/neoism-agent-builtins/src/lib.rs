@@ -64,7 +64,7 @@ fn now_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn default_cache_dir() -> PathBuf {
+pub fn default_cache_dir() -> PathBuf {
     default_data_dir(
         "NEOISM_AGENT_CACHE_DIR",
         "XDG_CACHE_HOME",

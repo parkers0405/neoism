@@ -2,6 +2,7 @@
 
 mod caches;
 mod connect;
+pub mod external_options;
 mod hit_rects;
 mod ingest;
 mod input_edit;
@@ -549,6 +550,8 @@ pub struct NeoismAgentPane {
     pub(super) pending_account_model: Option<String>,
     pub(super) thinking: Option<String>,
     pub(super) session_id: Option<String>,
+    pub(super) new_chat_source: side_panel::ConversationSource,
+    pub(super) session_sources: HashMap<String, side_panel::ConversationSource>,
     pub(super) parent_session_id: Option<String>,
     pub(super) directory: Option<String>,
     #[allow(dead_code)]
@@ -624,7 +627,7 @@ pub struct NeoismAgentPane {
     mermaid_raw_blocks: BTreeSet<u64>,
     usage_chip_rect: Option<[f32; 4]>,
     composer_control_rect: Option<[f32; 4]>,
-    status_chip_rects: [Option<[f32; 4]>; 3],
+    status_chip_rects: Vec<Option<[f32; 4]>>,
     status_chip_activated: Option<(usize, Instant)>,
     background_status_rect: Option<[f32; 4]>,
     background_task_details_expanded: bool,
@@ -634,6 +637,7 @@ pub struct NeoismAgentPane {
     /// retains its `String` allocations across frames so per-frame "clear"
     /// is O(1) with no alloc/free churn.
     selectable_lines_len: usize,
+    selection_history: BTreeMap<(i64, i64), SelectableLine>,
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
     touch_word_edges: Option<(SelectionPoint, SelectionPoint)>,
@@ -749,6 +753,8 @@ pub struct NeoismAgentPane {
     fx_started: Option<(crate::panels::agent_pane::view::fx::AgentFxKind, f32)>,
     pub wordmark: NeoismWordmarkState,
     pub(super) side_panel: NeoismAgentSidePanel,
+    catalog_toggle_requested: bool,
+    detail_panel: NeoismAgentSidePanel,
     /// The local peer's presence display name (the same seed the editor
     /// caret / top-chrome presence orb use — e.g. `piss-desktop`). Pushed
     /// by the host each frame. Used as the fallback author for user
@@ -949,6 +955,8 @@ impl Default for NeoismAgentPane {
             pending_account_model: None,
             thinking: None,
             session_id: None,
+            new_chat_source: side_panel::ConversationSource::Neoism,
+            session_sources: HashMap::new(),
             parent_session_id: None,
             directory: None,
             server: String::new(),
@@ -994,13 +1002,14 @@ impl Default for NeoismAgentPane {
             mermaid_raw_blocks: BTreeSet::new(),
             usage_chip_rect: None,
             composer_control_rect: None,
-            status_chip_rects: [None; 3],
+            status_chip_rects: vec![None; 4],
             status_chip_activated: None,
             background_status_rect: None,
             background_task_details_expanded: false,
             hover_link_target: None,
             selectable_lines: Vec::new(),
             selectable_lines_len: 0,
+            selection_history: BTreeMap::new(),
             selection_anchor: None,
             selection_focus: None,
             touch_word_edges: None,
@@ -1071,6 +1080,8 @@ impl Default for NeoismAgentPane {
             fx_started: None,
             wordmark: NeoismWordmarkState::default(),
             side_panel: NeoismAgentSidePanel::default(),
+            catalog_toggle_requested: false,
+            detail_panel: NeoismAgentSidePanel::default(),
             local_presence_name: None,
             visible_user_orb_active: false,
         }
@@ -1289,6 +1300,9 @@ impl NeoismAgentPane {
             self.runtime_snapshot_root = None;
             self.runtime_snapshot_revision = 0;
             self.terminal_subagent_revisions.clear();
+        }
+        if let Some(id) = session_id.as_ref() {
+            self.new_chat_source = *self.session_sources.entry(id.clone()).or_insert(self.new_chat_source);
         }
         self.session_id = session_id;
     }

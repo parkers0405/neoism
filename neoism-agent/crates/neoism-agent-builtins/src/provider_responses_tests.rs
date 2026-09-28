@@ -338,7 +338,7 @@ fn parses_reasoning_delta_if_present() {
 }
 
 #[test]
-fn parses_reasoning_summary_events_like_opencode() {
+fn parses_reasoning_summary_events() {
     let mut parser = ResponsesSseParser::default();
     let added = parser
             .push_line(

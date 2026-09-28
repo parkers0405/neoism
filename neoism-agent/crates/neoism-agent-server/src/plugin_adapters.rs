@@ -327,15 +327,16 @@ fn mcp_route_caller_claims(
             | neoism_agent_builtins::plugin::mcp::McpAction::Connect
             | neoism_agent_builtins::plugin::mcp::McpAction::Disconnect
             | neoism_agent_builtins::plugin::mcp::McpAction::Config
+            | neoism_agent_builtins::plugin::mcp::McpAction::AuthStart
+            | neoism_agent_builtins::plugin::mcp::McpAction::AuthCallbackGet
+            | neoism_agent_builtins::plugin::mcp::McpAction::AuthCallbackPost
+            | neoism_agent_builtins::plugin::mcp::McpAction::AuthRemove
+            | neoism_agent_builtins::plugin::mcp::McpAction::Authenticate
     );
     if peer_workspace && host_gui_operation {
-        // A short-lived workspace credential minted by the desktop host is a
-        // peer delegation into that self-hosted process, not a tenant in a
-        // multi-tenant Agent service. GUI status/connect operations therefore
-        // use the host's local MCP store, just as execution on that host does.
-        // The store remains inside the host process and no credential value is
-        // serialized back to the peer. Credential mutations and arbitrary MCP
-        // data/tool routes deliberately retain the hosted scope and fail closed.
+        // The host's local MCP store is shared with trusted workspace peers;
+        // direct hosted tenants and MCP data/tool routes remain isolated.
+        // Credential values never travel back to the peer.
         claims.tenant_id = "local".into();
         claims.workspace_id = None;
         claims.hosted = false;
@@ -357,7 +358,19 @@ impl neoism_agent_builtins::plugin::mcp::McpHost for Mcp {
             use axum::extract::{Path, Query, State};
             use axum::Json;
             use neoism_agent_builtins::plugin::mcp::McpAction;
-            let query = route_query(&request);
+            let mut query = route_query(&request);
+            let peer_workspace =
+                request.workspace_id.as_deref().is_some_and(|workspace_id| {
+                    request.tenant_id.as_deref()
+                        == Some(format!("workspace:{workspace_id}").as_str())
+                });
+            if (request.hosted && !peer_workspace)
+                || !matches!(action, McpAction::AuthStart)
+            {
+                query
+                    .as_object_mut()
+                    .map(|query| query.remove("redirectUri"));
+            }
             let state = State(self.0.clone());
             let headers = axum::http::HeaderMap::new();
             let claims = mcp_route_caller_claims(&request, action);
@@ -606,19 +619,24 @@ mod mcp_peer_scope_tests {
     }
 
     #[test]
-    fn peer_workspace_cannot_mutate_host_mcp_credentials() {
+    fn peer_workspace_can_manage_host_mcp_credentials_but_not_call_tools() {
         let request = request("workspace:workspace-a", Some("workspace-a"), true);
         for action in [
             McpAction::AuthStart,
             McpAction::AuthRemove,
+            McpAction::AuthCallbackPost,
             McpAction::Authenticate,
-            McpAction::ToolCall,
         ] {
             let claims = mcp_route_caller_claims(&request, action).unwrap().0;
-            assert_eq!(claims.tenant_id, "workspace:workspace-a");
-            assert_eq!(claims.workspace_id.as_deref(), Some("workspace-a"));
-            assert!(claims.hosted);
+            assert_eq!(claims.tenant_id, "local");
+            assert_eq!(claims.workspace_id, None);
+            assert!(!claims.hosted);
         }
+        let claims = mcp_route_caller_claims(&request, McpAction::ToolCall)
+            .unwrap()
+            .0;
+        assert_eq!(claims.tenant_id, "workspace:workspace-a");
+        assert!(claims.hosted);
     }
 
     #[test]
@@ -864,9 +882,10 @@ impl neoism_agent_builtins::plugin::semantic::SemanticHost for Semantic {
                 }
                 _ => crate::state::TenantQueryScope::LocalAll,
             };
-            let response = crate::semantic::semantic_search_with_scope(&self.0, query, scope)
-                .await
-                .map_err(api_error)?;
+            let response =
+                crate::semantic::semantic_search_with_scope(&self.0, query, scope)
+                    .await
+                    .map_err(api_error)?;
             let body = serde_json::to_value(response.0).map_err(runtime_error)?;
             Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
         })

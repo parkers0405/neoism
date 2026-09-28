@@ -1,0 +1,11 @@
+---
+name: "Joined workspace OAuth handoff"
+description: "Joined workspace provider/MCP auth host credentials, guest browser, host callback routing"
+type: "feature"
+scope: "project"
+origin: "session joined-workspace /connect /mcp fix"
+created: "2026-09-26"
+updated: "2026-09-26"
+---
+
+Joined desktop /connect and /mcp route through daemon `/agent/workspaces/:id/*path` with a scoped Agent JWT. Provider OAuth was rejected early by app_router hosted_restricted_path and provider platform hosted store; MCP auth actions also fail-closed in hosted store. For workspace-daemon peer identities (tenant=`workspace:<id>` matching workspace_id), middleware now exempts only provider auth paths, provider_request_scope and mcp_route_caller_claims use the host's local credential store for GUI auth actions, preserving direct hosted tenant isolation and MCP data/tool isolation. OpenAI browser fixed localhost:1455 and xAI loopback methods cannot return to host from guest, so joined desktop/web choose corresponding device-code/headless methods; browser URL is opened on guest desktop or attempted in web JS (clickable fallback). MCP OAuth uses a per-request redirectUri pointing at daemon host `/agent/workspaces/<id>/v2/plugins/dev.neoism.mcp/<name>/auth/callback`, public GET forwarding only code+state to Agent which consumes one-time state and stores token locally. Daemon proxy injects redirect for desktop joined POST auth; web outbound bridge derives daemon HTTP origin from WS endpoint and adds optional redirect_uri to McpOauthAuthorize/McpConnect, daemon handler forwards query. MCP client registration now stores optional redirect_uri, re-registers when route changes (old entries without field assumed default). Existing explicit oauth.redirectUri takes precedence. Verification: cargo check desktop/daemon/agent and web npm typecheck; builtins peer tests, agent server MCP scope and middleware tests passed. Daemon test binary currently cannot compile due unrelated existing agent/tests.rs referring to private todo_items_from_response; callback test added but not run. Cross-laptop/provider-specific redirects still need live validation; MCP providers that require HTTPS or pre-registered redirect may need configured redirectUri/compatible client registration.

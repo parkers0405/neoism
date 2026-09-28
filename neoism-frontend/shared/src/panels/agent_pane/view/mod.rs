@@ -227,6 +227,45 @@ pub fn render_agent_pane_with<P, D, I>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn detail_rail_allowed(
+    has_conversation: bool,
+    hidden: bool,
+    narrow_takeover: bool,
+    width: f32,
+    scale: f32,
+) -> bool {
+    has_conversation
+        && !hidden
+        && !narrow_takeover
+        && width >= side_panel::state_detail_min_width(scale)
+}
+
+#[cfg(test)]
+mod detail_rail_tests {
+    use super::detail_rail_allowed;
+
+    #[test]
+    fn alt_h_and_narrow_layout_do_not_reserve_detail_width() {
+        let wide = 2_000.0;
+        assert!(detail_rail_allowed(true, false, false, wide, 1.0));
+        assert!(!detail_rail_allowed(true, true, false, wide, 1.0));
+        assert!(!detail_rail_allowed(true, false, true, wide, 1.0));
+        assert!(!detail_rail_allowed(false, false, false, wide, 1.0));
+        assert!(!detail_rail_allowed(true, false, false, 100.0, 1.0));
+    }
+
+    #[test]
+    fn details_shrink_before_hiding_when_workspace_panels_open() {
+        let scale = 1.0;
+        let minimum = super::side_panel::state_detail_min_width(scale);
+        assert!(detail_rail_allowed(true, false, false, minimum, scale));
+        assert!(!detail_rail_allowed(true, false, false, minimum - 1.0, scale));
+        assert_eq!(super::side_panel::detail_rail_width(minimum, 260.0, scale), 200.0);
+        assert_eq!(super::side_panel::detail_rail_width(800.0, 260.0, scale), 260.0);
+        assert_eq!(super::side_panel::detail_rail_width(2.0 * minimum, 260.0, 2.0), 400.0);
+    }
+}
+
 fn render_agent_pane_with_responsive<P, D, I>(
     sugarloaf: &mut Sugarloaf,
     pane: &mut P,
@@ -254,27 +293,40 @@ fn render_agent_pane_with_responsive<P, D, I>(
     // the inertial motion and the rest of the render in lockstep — no
     // jitter between tick and paint.
     let ticked_scroll = AgentPaneView::tick_timeline_scroll(pane);
-    // The side panel lives in a strip carved off the right of the
-    // agent rect. Subtract it BEFORE computing input / timeline layout
-    // so the chat column never paints under the panel frame.
-    let (main_rect, side_panel_rect) = match side_panel::carve_panel_rect_responsive(
-        pane,
-        rect,
-        chrome_scale,
-        narrow_takeover,
-    ) {
-        // The panel is pane-owned: its geometry may carve the Agent
-        // content, but may never escape into window-level chrome.
-        Some((main, panel)) => (main, Some(panel)),
-        None => {
-            // Pane is too narrow to host the panel — drop the cached
-            // hit-test rect so click/wheel/Alt+arrow don't treat a
-            // stale strip as still live.
-            side_panel::AgentSidePanelPane::side_panel_mut(pane).clear_last_panel_rect();
-            (rect, None)
-        }
-    };
+    // The conversation catalog is workspace chrome, not pane content. Only
+    // the active chat's details may carve this Agent pane, on wide layouts.
+    let main_rect = rect;
     let has_conversation = chat::AgentChatPane::has_conversation(pane);
+    let (main_rect, detail_rect) = if detail_rail_allowed(
+        has_conversation,
+        side_panel::AgentSidePanelPane::side_panel(pane).user_hidden(),
+        narrow_takeover,
+        main_rect[2],
+        chrome_scale,
+    ) {
+        let detail_w = side_panel::detail_rail_width(
+            main_rect[2],
+            side_panel::AgentSidePanelPane::side_panel(pane).width(),
+            chrome_scale,
+        );
+        let gap = 6.0 * chrome_scale;
+        (
+            [
+                main_rect[0],
+                main_rect[1],
+                main_rect[2] - detail_w - gap,
+                main_rect[3],
+            ],
+            Some([
+                main_rect[0] + main_rect[2] - detail_w,
+                main_rect[1],
+                detail_w,
+                main_rect[3],
+            ]),
+        )
+    } else {
+        (main_rect, None)
+    };
     // Height must come from the same real glyph measurements used to draw
     // the prompt. The former char-count estimate could lag one visual row
     // behind a wide font: caret-follow then showed only the new row until
@@ -341,11 +393,7 @@ fn render_agent_pane_with_responsive<P, D, I>(
     // no body skeleton. First-load shimmer belongs on the recent-sessions
     // TREE (date/name rows) in the side panel, handled there by
     // `draw_session_loading_skeleton`, not over this welcome/entry body.
-    if narrow_takeover && side_panel_rect.is_some() {
-        // The side panel is an opaque full-content takeover. Do not merely
-        // cover the timeline/composer: leave their text and hit caches out of
-        // this frame entirely.
-    } else if has_conversation {
+    if has_conversation {
         chat::render_chat_with::<P, D>(
             sugarloaf,
             pane,
@@ -374,37 +422,34 @@ fn render_agent_pane_with_responsive<P, D, I>(
             Some(&prompt_wrap_rows),
         );
     }
-    if let Some(panel_rect) = side_panel_rect {
-        side_panel::render_side_panel_with_icons::<P, I>(
+    if let Some(detail) = detail_rect {
+        side_panel::render_detail_panel::<P, I>(
             sugarloaf,
             pane,
-            panel_rect,
+            detail,
             theme,
             chrome_scale,
             now_seconds,
             mouse,
             &local_occlusions,
         );
+    } else {
+        // Never leave a stale hit target when the window narrows or the chat ends.
+        pane.swap_detail_panel();
+        side_panel::AgentSidePanelPane::side_panel_mut(pane).clear_last_panel_rect();
+        side_panel::AgentSidePanelPane::side_panel_mut(pane).set_focused(false);
+        pane.swap_detail_panel();
     }
-    // Side-panel visibility is controlled by its in-pane affordance and
-    // `/sidebar`; the top-bar Agent icon opens a new Agent tab.
-    // Pending permission / model question takes the picker slot — the
-    // prompt pops out of the input island exactly like the "/" menu.
-    // The regular picker is suppressed while a prompt is pending (the
-    // key bridge closes it anyway on the next keypress).
-    let prompt_rect = (!narrow_takeover || side_panel_rect.is_none())
-        .then(|| {
-            prompt_picker::render_prompt_picker(
-                sugarloaf,
-                pane,
-                input_rect,
-                theme,
-                chrome_scale,
-            )
-        })
-        .flatten();
+    // Prompt questions and slash pickers remain anchored to the Agent input.
+    let prompt_rect = prompt_picker::render_prompt_picker(
+        sugarloaf,
+        pane,
+        input_rect,
+        theme,
+        chrome_scale,
+    );
     pane.set_prompt_picker_rect(prompt_rect);
-    if prompt_rect.is_none() && (!narrow_takeover || side_panel_rect.is_none()) {
+    if prompt_rect.is_none() {
         picker::render_picker(
             sugarloaf,
             pane,
@@ -415,31 +460,26 @@ fn render_agent_pane_with_responsive<P, D, I>(
             picker_min_y,
         );
     }
-    if !narrow_takeover || side_panel_rect.is_none() {
-        if let Some(kind) = pane.take_fx_request() {
-            pane.set_fx_started(Some((kind, now_seconds)));
-        }
-        if let Some((kind, started)) = pane.fx_started() {
-            let elapsed = now_seconds - started;
-            // Negative = the 10k-second animation clock wrapped; clear.
-            if (0.0..=fx::total_seconds(kind)).contains(&elapsed) {
-                if elapsed >= fx::prompt_at(kind) {
-                    // Idempotent: the host consumes its pending prompt on
-                    // the first call.
-                    pane.fire_fx_prompt();
-                }
-                fx::render(
-                    kind,
-                    sugarloaf,
-                    fx::scene_rect(main_rect, input_rect, chrome_scale),
-                    elapsed,
-                    chrome_scale,
-                    theme,
-                );
-            } else {
+    if let Some(kind) = pane.take_fx_request() {
+        pane.set_fx_started(Some((kind, now_seconds)));
+    }
+    if let Some((kind, started)) = pane.fx_started() {
+        let elapsed = now_seconds - started;
+        if (0.0..=fx::total_seconds(kind)).contains(&elapsed) {
+            if elapsed >= fx::prompt_at(kind) {
                 pane.fire_fx_prompt();
-                pane.set_fx_started(None);
             }
+            fx::render(
+                kind,
+                sugarloaf,
+                fx::scene_rect(main_rect, input_rect, chrome_scale),
+                elapsed,
+                chrome_scale,
+                theme,
+            );
+        } else {
+            pane.fire_fx_prompt();
+            pane.set_fx_started(None);
         }
     }
     pane.log_render_perf(

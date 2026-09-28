@@ -284,7 +284,6 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// side-panel takeover/button. A narrow desktop window keeps desktop UI.
     mobile_web_agent_panel_enabled: bool,
     mobile_agent_narrow: bool,
-    desktop_agent_panel_open_before_narrow: Option<bool>,
     /// Host-fed animation phase in seconds modulo the same 10k-second
     /// window desktop uses. Web supplies this from `performance.now()`
     /// because `SystemTime::now()` panics on wasm.
@@ -390,6 +389,11 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// the file tree; entry data comes from local fs on desktop and
     /// from daemon listings (`set_entries_from_host`) on web.
     pub notes_sidebar: NotesSidebar,
+    /// Selects the workspace-level catalog slot; Files/Notes retain their
+    /// state and reappear unchanged when another sidebar is selected.
+    pub conversations_visible: bool,
+    pending_conversation_open: Option<String>,
+    pending_conversation_new: Option<crate::panels::agent_pane::state::side_panel::ConversationSource>,
     pub command_composer: CommandComposer,
     /// Cwd of the terminal owning the visible composer. This remains
     /// terminal-local even though the status-line cwd is workspace-global.

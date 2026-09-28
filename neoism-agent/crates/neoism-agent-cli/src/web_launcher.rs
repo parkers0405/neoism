@@ -191,6 +191,7 @@ pub(crate) async fn run(
             hostname,
             port,
             cors: Vec::new(),
+            hosted_attestation: None,
         },
         crate::standalone_services(),
         Some(root),

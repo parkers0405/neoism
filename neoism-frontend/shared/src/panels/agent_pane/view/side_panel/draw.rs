@@ -217,109 +217,6 @@ fn draw_session_loading_skeleton(
     }
 }
 
-/// Draw the "← Back" affordance at the top of the panel. Present only when
-/// a live conversation is open — from chat mode it reveals the recent list
-/// ("Back"); from the recent list it returns to the live chat ("Back to
-/// chat"). Caches its screen rect for hit-testing and returns the `y` below
-/// the divider. Drawn in the app UI font (the "←" is a glyph in that font),
-/// matching the panel's row chrome.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn render_back_button(
-    sugarloaf: &mut Sugarloaf,
-    pane: &mut impl AgentSidePanelPane,
-    content_rect: [f32; 4],
-    theme: &IdeTheme,
-    s: f32,
-    _mouse: Option<(f32, f32)>,
-    clip: [f32; 4],
-    occlusion_rects: &[[f32; 4]],
-    inner_radius: f32,
-    to_chat: bool,
-) -> f32 {
-    let [cx, cy, cw, _ch] = content_rect;
-    let pad_x = ROW_PADDING_X * s;
-    let text_x = cx + pad_x;
-    let row_h = (FONT_SIZE + 12.0) * s;
-    let row_top = cy + 6.0 * s;
-    let row_rect = [cx, row_top, cw, row_h];
-    pane.side_panel_mut().set_back_button_rect(row_rect);
-    let focused = pane.side_panel().is_focused() && pane.side_panel().back_focused();
-    if focused {
-        sugarloaf.quad(
-            None,
-            cx,
-            row_top,
-            cw,
-            row_h,
-            theme.f32_alpha(theme.surface, 0.55),
-            [inner_radius, inner_radius, inner_radius, inner_radius],
-            DEPTH,
-            ORDER_PANEL + 1,
-        );
-    }
-
-    // The arrow and label scramble as one string, matching the status-line
-    // mode transition instead of leaving a static arrow beside animated text.
-    let text_y = row_top + (row_h - FONT_SIZE * s) / 2.0;
-    let label_opts = DrawOpts {
-        font_size: FONT_SIZE * s,
-        color: theme.u8(theme.fg),
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
-    };
-    let label = if to_chat {
-        "\u{2190} Back to chat"
-    } else {
-        "\u{2190} Back"
-    };
-    if let Some(elapsed) = pane.side_panel().back_scramble_elapsed_ms() {
-        render_scramble_text(sugarloaf, text_x, text_y, label, &label_opts, elapsed);
-    } else {
-        draw_text_with_occlusion(
-            sugarloaf,
-            text_x,
-            text_y,
-            label,
-            &label_opts,
-            occlusion_rects,
-        );
-    }
-
-    // Divider under the affordance, mirroring the home search-row rule.
-    sugarloaf.rect(
-        None,
-        text_x,
-        row_top + row_h,
-        (cw - pad_x * 2.0).max(0.0),
-        (1.0 * s).max(1.0),
-        theme.f32_alpha(theme.border, 0.6),
-        DEPTH,
-        ORDER_PANEL,
-    );
-
-    row_top + row_h + 8.0 * s
-}
-
-/// Park the trail cursor on the Back affordance when it owns focus. Called
-/// once per frame *after* the row/branch cursor logic so it wins cleanly
-/// (the two states are mutually exclusive, but the row code runs a
-/// `clear_selected_cursor_rect` we must land after).
-pub(crate) fn set_back_cursor_if_focused(pane: &mut impl AgentSidePanelPane, s: f32) {
-    if !(pane.side_panel().is_focused() && pane.side_panel().back_focused()) {
-        return;
-    }
-    let Some([bx, by, _bw, bh]) = pane.side_panel().back_button_rect() else {
-        return;
-    };
-    let font_size = FONT_SIZE * s;
-    let cursor_w = (font_size * 0.6).max(2.0);
-    let cursor_x = bx + (ROW_PADDING_X * s - cursor_w).max(0.0);
-    let cursor_h = (bh - 6.0 * s).max(font_size).min(bh);
-    let cursor_y = by + (bh - cursor_h) / 2.0;
-    pane.side_panel_mut()
-        .set_selected_cursor_rect([cursor_x, cursor_y, cursor_w, cursor_h]);
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_sessions_list(
     sugarloaf: &mut Sugarloaf,
@@ -328,7 +225,7 @@ pub(crate) fn render_sessions_list(
     theme: &IdeTheme,
     s: f32,
     now_seconds: f32,
-    mouse: Option<(f32, f32)>,
+    _mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
     inner_radius: f32,
 ) {
@@ -342,30 +239,8 @@ pub(crate) fn render_sessions_list(
     let text_w = (cw - pad_x * 2.0).max(0.0);
     let clip = [cx, cy, cw, ch];
 
-    // "← Back to chat" affordance — drawn only while a live conversation is
-    // open (the home-override peek). A genuine no-conversation home has no
-    // chat to return to, so no button is drawn and the cached rect is
-    // cleared so the focus model doesn't strand a cursor on it.
+    // Catalog is always the left rail, whether a chat is open or not.
     let mut y = cy + 14.0 * s;
-    if pane.has_conversation() {
-        y = render_back_button(
-            sugarloaf,
-            pane,
-            content_rect,
-            theme,
-            s,
-            mouse,
-            clip,
-            occlusion_rects,
-            inner_radius,
-            true,
-        ) + 4.0 * s;
-    } else {
-        pane.side_panel_mut().clear_back_button_rect();
-    }
-    // Park the trail cursor on the Back affordance now (before any early
-    // return below), so it survives paths that skip the row-cursor block.
-    set_back_cursor_if_focused(pane, s);
     y = render_directory_section(
         sugarloaf,
         pane,
@@ -380,7 +255,7 @@ pub(crate) fn render_sessions_list(
     y += SECTION_GAP * s;
     y = render_section_header(
         sugarloaf,
-        "Previous Sessions",
+        "Conversations",
         text_x,
         y,
         theme,
@@ -389,92 +264,10 @@ pub(crate) fn render_sessions_list(
         occlusion_rects,
     );
 
-    // Home-mode search input — mirrors the /sessions modal's search bar.
-    // When focused (arrow-up past the first session, or while typing) the row
-    // gets the same highlight a selected session would, plus a caret that
-    // sits right after the query text and advances as the user types.
-    let search_row_h = (FONT_SIZE + 10.0) * s;
-    let search_top = y;
-    let search_focused = pane.side_panel().search_focused();
-    let search_hl_y = (search_top - 2.0 * s).max(cy);
-    let search_hl_h = search_row_h + 2.0 * s;
-    pane.side_panel_mut()
-        .set_session_search_rect([cx, search_hl_y, cw, search_hl_h]);
-    {
-        let query = pane.side_panel().session_query().to_string();
-        if search_focused {
-            sugarloaf.quad(
-                None,
-                cx,
-                search_hl_y,
-                cw,
-                search_hl_h,
-                theme.f32_alpha(theme.surface, 0.55),
-                [inner_radius, inner_radius, inner_radius, inner_radius],
-                DEPTH,
-                ORDER_PANEL + 1,
-            );
-        }
-        let sy = search_top + 1.0 * s;
-        let text_opts = DrawOpts {
-            font_size: FONT_SIZE * s,
-            color: theme.u8(theme.fg),
-            clip_rect: Some(clip),
-            ..DrawOpts::default()
-        };
-        // Caret Y aligns with the text; X tracks the measured query width so
-        // it moves right on each keystroke and left on backspace.
-        let caret_x = if query.is_empty() {
-            let placeholder = DrawOpts {
-                color: theme.u8(theme.muted),
-                ..text_opts
-            };
-            draw_text_with_occlusion(
-                sugarloaf,
-                text_x + 8.0 * s,
-                sy,
-                "Search sessions",
-                &placeholder,
-                occlusion_rects,
-            );
-            text_x + 2.0 * s
-        } else {
-            draw_text_with_occlusion(
-                sugarloaf,
-                text_x + 2.0 * s,
-                sy,
-                &query,
-                &text_opts,
-                occlusion_rects,
-            );
-            text_x + 2.0 * s + sugarloaf.text_mut().measure(&query, &text_opts)
-        };
-        if search_focused {
-            sugarloaf.rounded_rect(
-                None,
-                caret_x + 1.0 * s,
-                sy,
-                (1.5 * s).max(1.0),
-                FONT_SIZE * s,
-                theme.f32(theme.accent),
-                DEPTH,
-                0.0,
-                ORDER_PANEL + 3,
-            );
-        }
-        sugarloaf.rect(
-            None,
-            text_x,
-            search_top + search_row_h,
-            text_w,
-            (1.0 * s).max(1.0),
-            theme.f32_alpha(theme.border, 0.6),
-            DEPTH,
-            ORDER_PANEL,
-        );
-    }
-    y += search_row_h + 6.0 * s;
-
+    // Conversations is a catalog only. Search, New Chat and provider controls
+    // live in the top bar and command palette; clear stale sidebar hit geometry.
+    pane.side_panel_mut().hide_catalog_controls();
+    y += 6.0 * s;
     let list_top = y;
     let list_h = (cy + ch - list_top).max(0.0);
     let list_rect = [cx, list_top, cw, list_h];
@@ -493,7 +286,7 @@ pub(crate) fn render_sessions_list(
         pane.side_panel().session_catalog_state(),
         crate::panels::agent_pane::state::side_panel::SessionCatalogState::Initial
             | crate::panels::agent_pane::state::side_panel::SessionCatalogState::Loading
-    ) {
+    ) && pane.side_panel().sessions().is_empty() {
         draw_session_loading_skeleton(
             sugarloaf,
             list_rect,
@@ -506,9 +299,11 @@ pub(crate) fn render_sessions_list(
         return;
     }
 
-    if let crate::panels::agent_pane::state::side_panel::SessionCatalogState::Error(message) =
-        pane.side_panel().session_catalog_state()
+    if let crate::panels::agent_pane::state::side_panel::SessionCatalogState::Error(
+        message,
+    ) = pane.side_panel().session_catalog_state()
     {
+        if pane.side_panel().sessions().is_empty() {
         let opts = DrawOpts {
             font_size: FONT_SIZE * s,
             color: theme.u8(theme.dim),
@@ -526,6 +321,7 @@ pub(crate) fn render_sessions_list(
         return;
     }
 
+    }
     if pane.side_panel().sessions().is_empty() {
         // A semantic search may still surface matches for this query — show
         // a shimmering skeleton instead of prematurely declaring "No results".
@@ -595,20 +391,9 @@ pub(crate) fn render_sessions_list(
     let focused = pane.side_panel().is_focused();
     let list_bottom = list_rect[1] + list_rect[3];
 
-    // Selected-row background (the trail cursor handles the focus
-    // signal — same model as file_tree, see screen/render). Skip the
-    // clear when the Back affordance owns the cursor so the rect set right
-    // after the button was drawn survives.
-    let back_focused = pane.side_panel().back_focused();
-    if !back_focused {
-        pane.side_panel_mut().clear_selected_cursor_rect();
-    }
+    pane.side_panel_mut().clear_selected_cursor_rect();
     let sessions_len = pane.side_panel().sessions().len();
-    if search_focused || back_focused {
-        // Cursor is on the search row or the Back affordance — the caret /
-        // back cursor is drawn elsewhere, so skip the session-row highlight
-        // + left-gutter block cursor entirely.
-    } else if selected < sessions_len {
+    if selected < sessions_len {
         let row_ix = selected as isize - render_top as isize;
         let row_y = list_rect[1] + row_ix as f32 * row_h - frac + cursor_offset;
         let row_bottom = row_y + row_h;
@@ -680,11 +465,14 @@ pub(crate) fn render_sessions_list(
     // A small left gutter so the active session can show a colored status
     // dot (mirroring the branch rows). Titles start past the gutter on every
     // row so the list stays aligned whether or not a row carries a dot.
-    let dot_gutter = 16.0 * s;
+    let dot_gutter = 34.0 * s;
     let dot_diameter = 7.0 * s;
     let pin_d = 6.0 * s;
     let title_x = text_x + dot_gutter;
-    let current_id = pane.session_id_str().map(str::to_string);
+    let current_id = pane
+        .session_id_str()
+        .or_else(|| pane.side_panel().viewed_session_id())
+        .map(str::to_string);
 
     // Feed the measured monospace column budget back so excerpt chunks wrap
     // to this exact panel width; a change (resize) rebuilds the display list
@@ -701,6 +489,11 @@ pub(crate) fn render_sessions_list(
             .set_result_wrap_columns((excerpt_w / char_w).floor() as usize);
     }
 
+    let rename_buffer = pane.session_rename_buffer();
+    let now_ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|time| time.as_millis() as u64)
+        .unwrap_or(0);
     let sessions = pane.side_panel().sessions().to_vec();
     for absolute_ix in start..end {
         let entry = &sessions[absolute_ix];
@@ -744,9 +537,9 @@ pub(crate) fn render_sessions_list(
                 sugarloaf.quad(
                     None,
                     list_rect[0],
-                    row_y,
+                    visible_y,
                     list_rect[2],
-                    row_h,
+                    visible_h,
                     theme.f32_alpha(theme.surface, 0.28 * hover),
                     [5.0 * s; 4],
                     DEPTH,
@@ -757,7 +550,8 @@ pub(crate) fn render_sessions_list(
             // One continuous tick per excerpt run: full-height on every row,
             // so wrapped lines read as a single quoted chunk.
             let tick_y = if first_of_run { row_y + 4.0 * s } else { row_y };
-            let tick_h = if first_of_run { row_h - 4.0 * s } else { row_h };
+            let tick_y = tick_y.max(list_rect[1]);
+            let tick_h = (row_bottom.min(list_bottom) - tick_y).max(0.0);
             sugarloaf.rounded_rect(
                 None,
                 title_x + 2.0 * s,
@@ -852,15 +646,13 @@ pub(crate) fn render_sessions_list(
             0.0
         };
         let hover_scale = 1.0 + 0.045 * hover;
-        let hover_inset_x = 5.0 * s * hover;
-        let hover_inset_y = 2.0 * s * hover;
         if hover > 0.002 {
             sugarloaf.quad(
                 None,
-                list_rect[0] - hover_inset_x,
-                row_y - hover_inset_y,
-                list_rect[2] + hover_inset_x * 2.0,
-                row_h + hover_inset_y * 2.0,
+                list_rect[0],
+                visible_y,
+                list_rect[2],
+                visible_h,
                 theme.f32_alpha(theme.surface, 0.28 * hover),
                 [5.0 * s; 4],
                 DEPTH,
@@ -889,6 +681,36 @@ pub(crate) fn render_sessions_list(
             );
         }
 
+        // Identity belongs to the conversation source, never to the
+        // in-thread Build/Plan/subagent kind.
+        let source_icon = match entry.source {
+            super::super::super::state::side_panel::ConversationSource::Neoism => {
+                agent_icon::AgentKind::Neoism
+            }
+            super::super::super::state::side_panel::ConversationSource::OpenCode => {
+                agent_icon::AgentKind::OpenCode
+            }
+            super::super::super::state::side_panel::ConversationSource::ClaudeCode => {
+                agent_icon::AgentKind::Claude
+            }
+            super::super::super::state::side_panel::ConversationSource::Codex => {
+                agent_icon::AgentKind::Codex
+            }
+        };
+        let icon_size = 16.0 * s;
+        push_provider_icon_clipped(
+            sugarloaf,
+            source_icon,
+            [
+                text_x + 12.0 * s,
+                row_y + (row_h - icon_size) / 2.0,
+                icon_size,
+                icon_size,
+            ],
+            list_rect,
+            occlusion_rects,
+        );
+
         // Pinned marker — a small cyan dot in the row's right padding.
         let pin_reserve = if entry.pinned { pin_d + 8.0 * s } else { 0.0 };
         if entry.pinned {
@@ -911,9 +733,14 @@ pub(crate) fn render_sessions_list(
         let title_budget = (text_w - dot_gutter - pin_reserve).max(0.0);
         let mut hovered_title_opts = title_opts;
         hovered_title_opts.font_size *= hover_scale;
+        let display_title = if focused && absolute_ix == selected {
+            rename_buffer.as_deref().unwrap_or(&entry.title)
+        } else {
+            &entry.title
+        };
         let title_text =
-            truncate_to_fit(&entry.title, title_budget, sugarloaf, &hovered_title_opts);
-        let scaled_text_y = row_y + (row_h - FONT_SIZE * s * hover_scale) / 2.0;
+            truncate_to_fit(display_title, title_budget, sugarloaf, &hovered_title_opts);
+        let scaled_text_y = row_y + 5.0 * s;
         draw_text_with_occlusion(
             sugarloaf,
             title_x - 1.5 * s * hover,
@@ -922,6 +749,28 @@ pub(crate) fn render_sessions_list(
             &hovered_title_opts,
             occlusion_rects,
         );
+        let context = if entry.time_label.trim().is_empty() {
+            relative_session_time(entry.updated_ms, now_ms)
+        } else {
+            entry.time_label.clone()
+        };
+        if !context.is_empty() {
+            let context_opts = DrawOpts {
+                font_size: FONT_SIZE * s * 0.82,
+                color: theme.u8(theme.muted),
+                clip_rect: Some(list_rect),
+                ..DrawOpts::default()
+            };
+            let label = truncate_to_fit(&context, title_budget, sugarloaf, &context_opts);
+            draw_text_with_occlusion(
+                sugarloaf,
+                title_x,
+                row_y + 23.0 * s,
+                &label,
+                &context_opts,
+                occlusion_rects,
+            );
+        }
     }
 
     if pane.side_panel().session_page_loading() {
@@ -950,5 +799,37 @@ pub(crate) fn render_sessions_list(
             s,
             ORDER_PANEL + 6,
         );
+    }
+}
+
+fn relative_session_time(updated_ms: u64, now_ms: u64) -> String {
+    if updated_ms == 0 || now_ms == 0 {
+        return String::new();
+    }
+    let minutes = now_ms.saturating_sub(updated_ms) / 60_000;
+    if minutes < 1 {
+        "just now".into()
+    } else if minutes < 60 {
+        format!("{minutes}m ago")
+    } else if minutes < 1_440 {
+        format!("{}h ago", minutes / 60)
+    } else if minutes < 10_080 {
+        format!("{}d ago", minutes / 1_440)
+    } else {
+        format!("{}w ago", minutes / 10_080)
+    }
+}
+
+#[cfg(test)]
+mod row_time_tests {
+    use super::relative_session_time;
+
+    #[test]
+    fn relative_time_uses_real_timestamp_only() {
+        let now = 1_800_000_000_000;
+        assert_eq!(relative_session_time(0, now), "");
+        assert_eq!(relative_session_time(now - 15_000, now), "just now");
+        assert_eq!(relative_session_time(now - 3_600_000, now), "1h ago");
+        assert_eq!(relative_session_time(now - 172_800_000, now), "2d ago");
     }
 }

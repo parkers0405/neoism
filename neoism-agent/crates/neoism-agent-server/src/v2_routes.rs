@@ -75,7 +75,11 @@ pub(crate) async fn v2_capabilities(
     capabilities.push(CapabilityInfo {
         id: "neoism.providers.manage".into(),
         version: "1.0.0".into(),
-        enabled: !claims.as_ref().is_some_and(|Extension(c)| c.hosted),
+        enabled: !claims.as_ref().is_some_and(|Extension(c)| {
+            c.hosted && !c.workspace_id.as_deref().is_some_and(|workspace_id| {
+                c.tenant_id == format!("workspace:{workspace_id}")
+            })
+        }),
         disableable: false,
         source: "server".into(),
         plugin_id: None,
@@ -774,11 +778,24 @@ pub(crate) async fn v2_session_list(
                 "Session catalog is still indexing; retry shortly",
             ));
         }
+        // Older compact sidecars omitted externalAgent entirely. Hydrate only
+        // those native roots so a stranded pre-upgrade import cannot leak as
+        // an apparently complete empty chat.
+        for session in &mut page.items {
+            if session.model.as_ref().is_some_and(|model| model.provider_id == "external")
+                && !session.extra.contains_key("externalAgent")
+            {
+                if let Some(full) = state.inner.store.get_session(session.id.as_str()).await? {
+                    *session = full;
+                }
+            }
+        }
         if let Some(Extension(claims)) = claims {
             page.items.retain(|session| {
                 crate::caller::allows_session(&claims, session)
             });
         }
+        page.items.retain(|session| !crate::external_agent::catalog::is_importing(session));
         return Ok(Json(Page {
             items: page.items,
             cursor: PageCursor {
@@ -788,6 +805,7 @@ pub(crate) async fn v2_session_list(
         }));
     }
     let mut sessions = state.inner.store.list_sessions().await?;
+    sessions.retain(|session| !crate::external_agent::catalog::is_importing(session));
     if let Some(Extension(claims)) = claims {
         sessions.retain(|session| crate::caller::allows_session(&claims, session));
     }

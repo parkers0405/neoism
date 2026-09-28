@@ -596,6 +596,17 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
+            "agent.default-chat-source",
+            "Default chat source",
+            "Source selected for new chats (distinct from the default-agent persona).",
+            Kind::String,
+            json!("neoism"),
+            &["neoism", "opencode", "claude-code", "codex"],
+            false,
+            C::Agent,
+            Control::Select,
+        ),
+        d(
             "agent.default-agent",
             "Default agent",
             "Agent selected for new sessions.",
@@ -1264,6 +1275,16 @@ fn installed_agents() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_chat_source_descriptor_is_closed_enum() {
+        let rows = config_descriptors();
+        let row = rows.iter().find(|row| row.path == "agent.default-chat-source").unwrap();
+        assert_eq!(row.default, json!("neoism"));
+        assert_eq!(row.static_suggestions, ["neoism", "opencode", "claude-code", "codex"]);
+        assert!(!row.extensible);
+        assert_eq!(row.control, Control::Select);
+    }
 
     #[test]
     fn descriptors_are_unique_and_cover_golden_groups() {

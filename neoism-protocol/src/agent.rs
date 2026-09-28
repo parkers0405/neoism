@@ -81,6 +81,9 @@ pub enum AgentClientMessage {
         /// Reasoning effort variant selected with the model.
         #[serde(default)]
         thinking: Option<String>,
+        /// ACP-backed root conversation provider (opencode, claude, codex).
+        #[serde(default)]
+        external_provider: Option<String>,
     },
     /// Resume / focus an existing session by id. The daemon swaps the
     /// active session for this client and starts streaming its event
@@ -272,6 +275,8 @@ pub enum AgentClientMessage {
         name: String,
         #[serde(default)]
         directory: Option<String>,
+        #[serde(default)]
+        redirect_uri: Option<String>,
     },
     McpSetEnabled {
         name: String,
@@ -283,6 +288,8 @@ pub enum AgentClientMessage {
         name: String,
         #[serde(default)]
         directory: Option<String>,
+        #[serde(default)]
+        redirect_uri: Option<String>,
     },
     McpDisconnect {
         name: String,
@@ -955,6 +962,9 @@ pub struct ThreadSummary {
     pub model: Option<String>,
     #[serde(default)]
     pub agent: Option<String>,
+    /// Immutable ACP root provider. Absent for Neoism sessions and task children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_provider: Option<String>,
     /// Unix-ms timestamp of the last activity. `0` if untracked.
     #[serde(default)]
     pub updated_at: u64,

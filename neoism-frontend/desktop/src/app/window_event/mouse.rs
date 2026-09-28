@@ -224,6 +224,12 @@ impl Application<'_> {
                         return;
                     }
 
+                    if route.window.screen.begin_git_diff_section_resize() {
+                        route.window.set_cursor(CursorIcon::RowResize);
+                        route.request_redraw();
+                        return;
+                    }
+
                     if route.window.screen.begin_git_diff_panel_scrollbar_drag() {
                         route.request_redraw();
                         return;
@@ -334,6 +340,10 @@ impl Application<'_> {
                         return;
                     }
 
+                    if route.window.screen.handle_conversations_click() {
+                        route.request_redraw();
+                        return;
+                    }
                     if route.window.screen.handle_file_tree_click() {
                         route.request_redraw();
                         return;
@@ -534,6 +544,14 @@ impl Application<'_> {
 
                 if button == MouseButton::Left
                     && route.window.screen.end_git_diff_panel_resize()
+                {
+                    route.window.set_cursor(CursorIcon::Default);
+                    route.request_redraw();
+                    return;
+                }
+
+                if button == MouseButton::Left
+                    && route.window.screen.end_git_diff_section_resize()
                 {
                     route.window.set_cursor(CursorIcon::Default);
                     route.request_redraw();
@@ -776,6 +794,12 @@ impl Application<'_> {
             return;
         }
 
+        if route.window.screen.drag_git_diff_section_resize() {
+            route.window.set_cursor(CursorIcon::RowResize);
+            route.request_redraw();
+            return;
+        }
+
         if route.window.screen.git_diff_panel_scrollbar_drag_active() {
             route.window.screen.drag_git_diff_panel_scrollbar();
             route.request_redraw();
@@ -853,8 +877,12 @@ impl Application<'_> {
             }
             route.window.set_cursor(
                 match route.window.screen.renderer.modal.pointer_kind() {
-                    neoism_ui::widgets::modal::ModalPointerKind::Default => CursorIcon::Default,
-                    neoism_ui::widgets::modal::ModalPointerKind::Pointer => CursorIcon::Pointer,
+                    neoism_ui::widgets::modal::ModalPointerKind::Default => {
+                        CursorIcon::Default
+                    }
+                    neoism_ui::widgets::modal::ModalPointerKind::Pointer => {
+                        CursorIcon::Pointer
+                    }
                     neoism_ui::widgets::modal::ModalPointerKind::Text => CursorIcon::Text,
                 },
             );
@@ -1251,6 +1279,12 @@ impl Application<'_> {
 
         if route.window.screen.is_hovering_notes_sidebar_resize_edge() {
             route.window.set_cursor(CursorIcon::ColResize);
+            route.window.screen.mouse.on_border = true;
+            return;
+        }
+
+        if route.window.screen.git_diff_section_resize_hover() {
+            route.window.set_cursor(CursorIcon::RowResize);
             route.window.screen.mouse.on_border = true;
             return;
         }

@@ -1,6 +1,184 @@
 use super::*;
 
 #[test]
+fn provider_slash_collision_inserts_draft_and_routes_as_prompt() {
+    use neoism_ui::panels::agent_pane::state::external_options::ExternalOptions;
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.new_chat_source = ConversationSource::ClaudeCode;
+    pane.session_id = Some("root".into());
+    pane.external_options = Some(ExternalOptions::parse(&serde_json::json!({
+        "provider":"claude","externalSessionId":"provider-1","modeFallback":false,
+        "selectedOptions":{},"configOptions":[],"availableCommands":[{"name":"compact","description":"Provider compact","input":{"hint":"args"}}]
+    }), "claude").unwrap());
+    pane.input = "/comp".into();
+    pane.cursor_byte = pane.input.len();
+    pane.sync_input_pickers();
+    let picker = pane.picker.as_ref().expect("provider slash picker");
+    assert_eq!(picker.kind, NeoismAgentPickerKind::Slash);
+    assert_eq!(picker.selected_option().unwrap().description, "Provider compact");
+    assert!(pane.commit_picker());
+    assert_eq!(pane.input, "/compact ");
+    assert!(pane.drain_pending_outbound().is_empty());
+    pane.input.push_str("keep this argument");
+    assert!(pane.submit());
+    assert!(matches!(&pane.drain_pending_outbound()[..], [OutboundAgentCommand::SendPrompt { text, .. }] if text == "/compact keep this argument"));
+    assert_eq!(super::submit::provider_slash_draft("/comp user args", "compact"), "/compact user args");
+}
+
+#[test]
+fn opencode_compact_uses_verified_acp_action_without_duplicating_provider_command() {
+    use neoism_ui::panels::agent_pane::state::external_options::ExternalOptions;
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.new_chat_source = ConversationSource::OpenCode;
+    pane.session_id = Some("root".into());
+    pane.external_options = Some(ExternalOptions::parse(&serde_json::json!({
+        "provider":"opencode","externalSessionId":"provider-1","modeFallback":false,
+        "selectedOptions":{},"configOptions":[],"availableCommands":[]
+    }), "opencode").unwrap());
+    pane.input = "/compact".into();
+    pane.sync_slash_picker();
+    assert_eq!(pane.picker.as_ref().unwrap().selected_option().unwrap().value, "__opencode_compact");
+    assert!(pane.commit_picker());
+    assert_eq!(pane.input, "/compact ");
+    assert!(pane.submit());
+    assert!(matches!(&pane.drain_pending_outbound()[..], [OutboundAgentCommand::SendPrompt { text, .. }] if text == "/compact"));
+    pane.external_options.as_mut().unwrap().available_commands.push(
+        neoism_ui::panels::agent_pane::state::external_options::ExternalCommand {
+            name: "compact".into(), description: "Provider compact".into(), input_hint: None,
+        }
+    );
+    pane.input = "/compact".into();
+    pane.sync_slash_picker();
+    assert_eq!(pane.picker.as_ref().unwrap().selected_option().unwrap().value, "compact");
+    assert_eq!(pane.picker.as_ref().unwrap().options().iter().filter(|row| row.title == "/compact").count(), 1);
+}
+
+#[test]
+fn provider_empty_slash_catalog_never_shows_neoism_commands() {
+    use neoism_ui::panels::agent_pane::state::external_options::ExternalOptions;
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.new_chat_source = ConversationSource::Codex;
+    pane.session_id = Some("root".into());
+    pane.external_options = Some(ExternalOptions::parse(&serde_json::json!({
+        "provider":"codex","externalSessionId":null,"modeFallback":false,
+        "selectedOptions":{},"configOptions":[],"availableCommands":[]
+    }), "codex").unwrap());
+    pane.input = "/compact args".into();
+    pane.sync_input_pickers();
+    assert!(pane.picker.is_none());
+    assert!(pane.submit());
+    assert!(matches!(&pane.drain_pending_outbound()[..], [OutboundAgentCommand::SendPrompt { text, .. }] if text == "/compact args"));
+}
+
+#[test]
+fn external_model_slash_opens_confirmed_provider_choices() {
+    use neoism_ui::panels::agent_pane::state::external_options::ExternalOptions;
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.new_chat_source = ConversationSource::ClaudeCode;
+    pane.external_options = Some(ExternalOptions::parse(&serde_json::json!({
+        "provider":"claude","externalSessionId":"provider-1","modeFallback":false,
+        "selectedOptions":{},"configOptions":[{"id":"provider-model","name":"Model","category":"model","type":"select","currentValue":"a","options":[{"value":"a","name":"A"},{"value":"b","name":"B"}]}],
+        "availableCommands":[]
+    }), "claude").unwrap());
+    pane.input = "/model".into();
+    pane.sync_slash_picker();
+    assert_eq!(pane.picker.as_ref().unwrap().selected_option().unwrap().value, "model");
+    assert!(pane.submit());
+    assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::ExternalOption);
+    assert_eq!(pane.external_picker_option_id.as_deref(), Some("provider-model"));
+    assert_eq!(pane.input, "");
+}
+
+#[test]
+fn exact_model_selects_provider_config_before_colliding_command() {
+    use neoism_ui::panels::agent_pane::state::external_options::ExternalOptions;
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.new_chat_source = ConversationSource::ClaudeCode;
+    pane.external_options = Some(ExternalOptions::parse(&serde_json::json!({
+        "provider":"claude","externalSessionId":"provider-1","modeFallback":false,
+        "selectedOptions":{},"configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"a","options":[{"value":"a","name":"A"}]}],
+        "availableCommands":[{"name":"model","description":"Provider model command"},{"name":"skill","description":"Provider skill command"}]
+    }), "claude").unwrap());
+    pane.input = "/model".into();
+    pane.sync_slash_picker();
+    assert_eq!(pane.picker.as_ref().unwrap().selected_option().unwrap().value, "model");
+    assert!(pane.commit_picker());
+    assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::ExternalOption);
+    assert_eq!(pane.input, "");
+    pane.input = "/model".into();
+    pane.sync_slash_picker();
+    pane.picker.as_mut().unwrap().move_selection(1);
+    assert_eq!(pane.picker.as_ref().unwrap().selected_option().unwrap().value, "__provider_external_model");
+    assert!(pane.commit_picker());
+    assert_eq!(pane.input, "/model ");
+    pane.input = "/skill".into();
+    pane.sync_slash_picker();
+    assert_eq!(pane.picker.as_ref().unwrap().selected_option().unwrap().value, "skill");
+}
+
+#[test]
+fn local_skill_picker_is_immediate_without_provider_commands() {
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.new_chat_source = ConversationSource::ClaudeCode;
+    pane.input = "/skill".into();
+    pane.sync_slash_picker();
+    assert_eq!(pane.picker.as_ref().unwrap().selected_option().unwrap().value, "__local_external_skill");
+    assert!(pane.commit_picker());
+    assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::Skill);
+    assert_eq!(pane.input, "");
+    let option = NeoismAgentPickerOption::new("review", "Review files", "", "review");
+    pane.apply_skill_mention(option);
+    assert_eq!(pane.input.trim(), "$review");
+    assert!(pane.input_attachments.is_empty());
+}
+
+#[test]
+fn external_root_usage_reports_known_tokens_with_and_without_limit() {
+    let mut pane = NeoismAgentPane::default();
+    pane.new_chat_source = neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex;
+    let mut message = NeoismAgentMessage::assistant("answer");
+    message.usage = Some(NeoismAgentUsage { input: 4200, output: 0, reasoning: 0, cache_read: 0, cache_write: 0, total: 4200, cost_micros: 0, context_limit: None });
+    pane.messages.push(message);
+    assert_eq!(pane.context_usage(), Some((4200, None)));
+    pane.model_context_limit = Some(128_000);
+    assert_eq!(pane.context_usage(), Some((4200, Some(128_000))));
+}
+
+#[test]
+fn provider_plan_live_refresh_clear_and_reload_never_revives_old_todowrite() {
+    use neoism_ui::panels::agent_pane::api_mapping::session_state_from_json;
+    let mut pane = NeoismAgentPane::default();
+    let root = "root".to_string();
+    pane.session_id = Some(root.clone());
+    let old = NeoismAgentMessage::tool("Todos", "", "completed", "todowrite", NeoismAgentOutputKind::Todos, "", vec![NeoismAgentTodo { status: "pending".into(), content: "Old".into() }]);
+    let plan = vec![NeoismAgentTodo { status: "in_progress".into(), content: "Live".into() }];
+    pane.plan_todo_events.insert(root.clone(), plan.clone());
+    pane.current_plan_todos = Some(plan.clone());
+    pane.messages = vec![old.clone()];
+    super::ingest::update_todos_message(&mut pane.messages, plan);
+    let mut refreshed = merge_session_snapshot(vec![old.clone()], pane.messages.clone(), false);
+    super::ingest::apply_authoritative_plan(&mut refreshed, pane.current_plan_todos.as_ref(), true);
+    assert_eq!(refreshed.last().unwrap().todos[0].content, "Live");
+
+    pane.plan_todo_events.insert(root.clone(), vec![]);
+    pane.current_plan_todos = Some(vec![]);
+    super::ingest::update_todos_message(&mut pane.messages, vec![]);
+    let persisted = session_state_from_json(&serde_json::json!({"externalAgent":{"provider":"claude","planTodos":[]}}));
+    assert_eq!(persisted.plan_todos, Some(vec![]));
+    let mut reloaded = merge_session_snapshot(vec![old], pane.messages.clone(), false);
+    super::ingest::apply_authoritative_plan(&mut reloaded, pane.current_plan_todos.as_ref(), true);
+    assert_eq!(reloaded.last().unwrap().id, "todos-snapshot");
+    assert_eq!(reloaded.last().unwrap().kind, NeoismAgentMessageKind::System);
+    assert!(reloaded.last().unwrap().todos.is_empty());
+}
+
+#[test]
 fn live_baseline_family_hydration_survives_unrelated_text_tokens() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".into());
@@ -3456,6 +3634,40 @@ fn returning_to_warm_cache_refreshes_history_without_delaying_display() {
 }
 
 #[test]
+fn imported_history_preload_discloses_text_only_without_changing_title_or_source() {
+    use neoism_ui::panels::agent_pane::api_mapping::session_state_from_json;
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("imported".into());
+    let state = session_state_from_json(&serde_json::json!({
+        "id":"imported", "title":"Original provider title", "extra":{"externalAgent":{
+            "provider":"codex", "historyState":"text_only", "historyToolEvents":2,
+            "historyIncompleteContent":true
+        }}
+    }));
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::SessionPreloaded {
+        session_id: "imported".into(), state,
+        messages: vec![NeoismAgentMessage::assistant("actual imported text")],
+        oldest_cursor: None,
+    }).unwrap();
+    pane.drain_background_updates();
+    assert_eq!(pane.session_title(), Some("Original provider title"));
+    assert_eq!(pane.conversation_source(), ConversationSource::Codex);
+    assert_eq!(pane.messages.len(), 1, "disclosure is not a fake transcript card");
+    assert_eq!(pane.imported_history().unwrap().tool_events, 2);
+    pane.cache_current_session(false);
+    pane.session_id = Some("fresh".into());
+    assert!(pane.imported_history().is_none(), "never leak another session's note");
+    assert_eq!(pane.session_sources.get("imported"), Some(&ConversationSource::Codex));
+    pane.new_chat_source = ConversationSource::Neoism;
+    pane.session_cache.get_mut("imported").unwrap().model_context_limit = Some(1024);
+    pane.activate_cached_session("imported");
+    assert_eq!(pane.conversation_source(), ConversationSource::Codex);
+    assert_eq!(pane.session_title(), Some("Original provider title"));
+    assert!(pane.imported_history().is_some());
+}
+
+#[test]
 fn preloaded_disjoint_page_keeps_newest_reply_after_parked_history() {
     let mut pane = NeoismAgentPane::default();
     let mut cached = CachedAgentSession::live_only();
@@ -4891,6 +5103,22 @@ fn transcript_selection_distinguishes_plain_click_from_drag() {
     assert!(pane.drag_selection_to(70.0, 40.0));
     assert!(!pane.selection_is_plain_click());
     assert!(pane.end_selection().is_some());
+}
+
+#[test]
+fn transcript_selection_copies_rows_scrolled_out_of_view() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 40.0], 120.0, 40.0);
+    pane.timeline_scroll_px = 80.0;
+    pane.register_selectable_line("first", [0.0, 10.0, 50.0, 18.0]);
+    pane.register_selectable_line("middle", [0.0, 30.0, 60.0, 18.0]);
+    assert!(pane.begin_selection_at(0.0, 10.0));
+    pane.timeline_scroll_px = 40.0;
+    pane.selectable_lines_len = 0; // The next frame renders only the scrolled viewport.
+    pane.register_selectable_line("last", [0.0, 10.0, 40.0, 18.0]);
+    assert!(pane.drag_selection_to(40.0, 10.0));
+    assert_eq!(pane.end_selection().as_deref(), Some("first\nmiddle\nlast"));
+    assert!(pane.selection_history.is_empty());
 }
 
 #[test]

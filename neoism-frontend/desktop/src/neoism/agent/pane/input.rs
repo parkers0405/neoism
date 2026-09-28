@@ -131,6 +131,10 @@ impl NeoismAgentPane {
                 return;
             }
         }
+        if self.new_chat_source.provider().is_some() {
+            self.insert_text(&text);
+            return;
+        }
         if let Some(path) = self.pasted_attachment_path(&text) {
             if self.attach_path(&path) {
                 return;
@@ -144,6 +148,7 @@ impl NeoismAgentPane {
     }
 
     pub fn attach_path(&mut self, path: &Path) -> bool {
+        if self.new_chat_source.provider().is_some() { return false; }
         if self.is_subagent_session() {
             return false;
         }
@@ -175,6 +180,7 @@ impl NeoismAgentPane {
     }
 
     pub fn attach_clipboard_image(&mut self, image: ClipboardImage) -> bool {
+        if self.new_chat_source.provider().is_some() { return false; }
         if self.is_subagent_session() {
             return false;
         }
@@ -385,6 +391,7 @@ impl NeoismAgentPane {
     }
 
     pub fn toggle_mode(&mut self) {
+        if self.new_chat_source.provider().is_some() { return; }
         let next = match self.mode {
             NeoismAgentMode::Build => "plan",
             NeoismAgentMode::Plan => "build",
@@ -393,6 +400,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_agent_picker(&mut self) {
+        if self.new_chat_source.provider().is_some() { return; }
         self.status_chip_activated = Some((0, Instant::now()));
         self.close_connect();
         self.picker = Some(NeoismAgentPicker::new(
@@ -420,6 +428,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_model_picker(&mut self) {
+        if self.new_chat_source.provider().is_some() { return; }
         self.status_chip_activated = Some((1, Instant::now()));
         self.close_connect();
         self.picker = Some(NeoismAgentPicker::new(
@@ -540,6 +549,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_thinking_picker(&mut self) {
+        if self.new_chat_source.provider().is_some() { return; }
         self.status_chip_activated = Some((2, Instant::now()));
         self.close_connect();
         let mut options = vec![
@@ -784,7 +794,7 @@ impl NeoismAgentPane {
         self.close_connect();
         self.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Skill,
-            "Skills",
+            if self.new_chat_source.provider().is_some() { "Local skill references" } else { "Skills" },
             vec![NeoismAgentPickerOption::new(
                 "Loading skills...",
                 "",

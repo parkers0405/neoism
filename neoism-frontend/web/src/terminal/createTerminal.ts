@@ -78,6 +78,10 @@ export interface TerminalAdapter {
     bufferTabHitTest?(x: number, y: number): number;
     /** Drain Rust-owned chrome requests to open/focus the Neoism Agent tab. */
     drainAgentTabOpens?(): number;
+    drainConversationNew?(): string | null;
+    agentNewChatFrom?(provider: string): void;
+    drainConversationOpen?(): string | null;
+    conversationsVisible?(): boolean;
     /** Drain pending finder "open this hit" intents queued when the
      *  user activates a finder row (Enter / click). Each entry is a
      *  `FinderOpenIntent`; the host turns it into a buffer-tab append
@@ -1360,6 +1364,10 @@ interface ChromeBridgeInstance {
     neoworld_ensure?(storedJson?: string | null): void;
     drain_neoworld_snapshot?(): string | undefined;
     drain_agent_tab_opens(): number;
+    drain_conversation_new?(): string | undefined;
+    agent_new_chat_from?(provider: string): void;
+    drain_conversation_open?(): string | undefined;
+    conversations_visible?(): boolean;
     drain_finder_open_intents(): unknown;
     drain_palette_intents(): unknown;
     set_buffer_tabs(titlesJson: string, active: number): void;
@@ -2433,6 +2441,18 @@ class ChromeAdapter implements TerminalAdapter {
             : [];
         const newTab = rec.new_tab === true;
         return { activate, close, newTab };
+    }
+    conversationsVisible(): boolean {
+        return this.inner.conversations_visible?.() === true;
+    }
+    drainConversationNew(): string | null {
+        return this.inner.drain_conversation_new?.() ?? null;
+    }
+    agentNewChatFrom(provider: string): void {
+        this.inner.agent_new_chat_from?.(provider);
+    }
+    drainConversationOpen(): string | null {
+        return this.inner.drain_conversation_open?.() ?? null;
     }
     drainAgentTabOpens(): number {
         return this.inner.drain_agent_tab_opens();

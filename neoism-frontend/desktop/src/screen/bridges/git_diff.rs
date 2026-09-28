@@ -51,6 +51,29 @@ impl Screen<'_> {
         was_active
     }
 
+    pub fn begin_git_diff_section_resize(&mut self) -> bool {
+        let (x, y) = self.mouse_logical_for_hit_test();
+        self.renderer.git_diff_panel.begin_divider_drag(x, y)
+    }
+
+    pub fn drag_git_diff_section_resize(&mut self) -> bool {
+        let (_, y) = self.mouse_logical_for_hit_test();
+        if self.renderer.git_diff_panel.drag_divider(y) {
+            self.mark_dirty();
+            return true;
+        }
+        false
+    }
+
+    pub fn end_git_diff_section_resize(&mut self) -> bool {
+        self.renderer.git_diff_panel.end_divider_drag()
+    }
+
+    pub fn git_diff_section_resize_hover(&self) -> bool {
+        let (x, y) = self.mouse_logical_for_hit_test();
+        self.renderer.git_diff_panel.is_hovering_divider(x, y)
+    }
+
     pub fn begin_git_diff_panel_scrollbar_drag(&mut self) -> bool {
         if !self.renderer.git_diff_panel.is_visible() {
             return false;
@@ -434,6 +457,21 @@ impl Screen<'_> {
             }
             crate::editor::git_diff_panel::PanelHit::BranchMenuRow(slot) => {
                 self.renderer.git_diff_panel.activate_branch_row(slot);
+                self.mark_dirty();
+                true
+            }
+            crate::editor::git_diff_panel::PanelHit::FolderCheckbox(visual_ix) => {
+                self.renderer.git_diff_panel.toggle_folder_stage(visual_ix);
+                self.mark_dirty();
+                true
+            }
+            crate::editor::git_diff_panel::PanelHit::RemoteButton(slot) => {
+                match slot {
+                    0 => self.renderer.git_diff_panel.fetch(),
+                    1 => self.renderer.git_diff_panel.pull(),
+                    2 => self.renderer.git_diff_panel.push(),
+                    _ => {}
+                }
                 self.mark_dirty();
                 true
             }

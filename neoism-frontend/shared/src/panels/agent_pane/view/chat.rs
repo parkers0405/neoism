@@ -9,6 +9,7 @@ use crate::panels::agent_pane::input_controller::InputWrapRow;
 use crate::primitives::ide_theme::IdeTheme;
 
 pub trait AgentChatPane: AgentTimelinePane + AgentUserInputPane {
+    fn imported_history(&self) -> Option<&crate::panels::agent_pane::api_mapping::ImportedHistory> { None }
     fn has_conversation(&self) -> bool;
     fn maybe_refresh_side_panel_subagents(&mut self);
     fn is_subagent_session(&self) -> bool;
@@ -18,6 +19,10 @@ pub trait AgentChatPane: AgentTimelinePane + AgentUserInputPane {
 macro_rules! neoism_ui_impl_agent_chat_pane {
     ($pane:ty) => {
         impl $crate::panels::agent_pane::view::chat::AgentChatPane for $pane {
+            fn imported_history(&self) -> Option<&$crate::panels::agent_pane::api_mapping::ImportedHistory> {
+                <$pane>::imported_history(self)
+            }
+
             fn has_conversation(&self) -> bool {
                 <$pane>::has_conversation(self)
             }
@@ -100,8 +105,6 @@ pub fn render_chat_with<P, D>(
     // floating input bar would extend past its borders and kill the
     // island illusion.
     let (content_x, content_w) = super::layout::chat_column(rect, s);
-    // Hug the top of the pane; the pane background is already painted by the
-    // caller, so any extra offset shows as unused strip above the timeline.
     let timeline_top = rect[1];
     let composer_visible = !pane.is_subagent_session();
     // Clip the timeline EXACTLY at the island's top border — not at a
@@ -151,6 +154,7 @@ pub fn render_chat_with<P, D>(
             active,
             mouse,
             s,
+            false,
             false,
             now_seconds,
             occlusion_rects,
